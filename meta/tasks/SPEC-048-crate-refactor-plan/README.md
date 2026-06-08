@@ -79,6 +79,33 @@ meta/tasks/SPEC-048-crate-refactor-plan/
 
 [end-to-end-file-flow.md](end-to-end-file-flow.md) 是文件级串联图。它把 29 个 crate 子文档中的 stage-facing 文件、结构体和方法串成 `BuildSession -> BuildPlanBuilder -> BuildRunner -> ModulePipeline -> profile/resource/bundle/ets/abc/package/sign/cache/watch` 的完整调用链，并标出每段对应的 hvigor 上游阶段。
 
+## SPEC-049 当前基线
+
+`SPEC-049` 的 ABC Rust AOT 重构已经合并到当前分支，后续 SPEC-048 计划必须以这条链作为 ABC 基线，而不是回到旧的 `AbcModule -> AbcFile` happy path：
+
+```text
+arkdown-cli::Ts2abcStage
+  -> arkdown-ts2abc::Ts2abcPlan/Ts2abcOptions
+  -> arkdown-abc::aot::AotCompileOptions
+  -> AotRunner
+     -> CompileFileScheduler
+     -> ProgramRegistry
+     -> AbcInputProgramCompiler
+     -> NpmModuleEntryCompiler
+     -> DepsRelationResolver
+     -> ProgramOptimizer
+     -> AotOutputGenerator
+  -> ABC/proto/cache outputs
+  -> PackagePlan
+```
+
+本轮重新审计后的强制结论：
+
+1. `arkdown-abc` 文档必须按当前 `aot/`、`program/`、`ir/`、`emit/` 目录重新描述；旧计划中的 `emit/index_section.rs`、`ir/assignment_targets.rs` 已不是当前基线。
+2. `arkdown-ts2abc` 当前仍是 SDK/es2abc command facade，不是 production typed plan；必须把 `compile_to_abc*`、fileInfo 生成、record/path derivation 迁到 `Ts2abcCompiler`、`Ts2abcPlanBuilder`、`FileInfoManifestWriter` 等命名类型上。
+3. 计划必须显式保留 SPEC-049 的上游对齐点：MurmurHash3、Program key、ABC input merge consistency、dependency BFS、static/dynamic import 收集、npm entries、Program cache、proto output、global optimization gate。
+4. 计划也必须显式列出 SPEC-049 尚未完全等价的点：non-merge filelist 第 4 列 output path、`dumpSymbolTable` cache bypass、dynamic import `IsLabel()`、`AnalysisProgram` 全局分析、annotation records 与 ets2panda 校验、`pandaFileVersion` cache interop。
+
 ## 总体重构建议
 
 1. 先建底座，再迁移行为。`arkdown-core`、`arkdown-path`、`arkdown-ohos-schema`、`arkdown-ohpm`、`arkdown-session` 必须先形成稳定 API，否则 profile、resolver、plugin 会继续反向读取文件。
@@ -90,7 +117,9 @@ meta/tasks/SPEC-048-crate-refactor-plan/
 7. 路径策略必须集中到 `arkdown-path`。artifact slash path、OHM URL、module specifier、filesystem path 不能继续混成 `String`。
 8. cache key 必须来自 `InputFingerprintSet`，包括源码、profile、manifest、SDK、resource、dependency graph、transform options。占位 hash 和局部配置 hash 必须清理。
 9. 删除目标 crate 不能保留兼容壳。最后生产调用方迁移后，同一阶段删除 `arkdown-utils`、`arkdown-loader`、`arkdown-plugin-router-map`、`arkdown-plugin-sensitive-check`。
-10. Rolldown/OXC 迁移不得只覆盖主 happy path。`arkdown` 必须保留 hvigor Rollup lifecycle 语义，`arkdown-ets-transform` 必须保留 TypeScript semantic/checker/Arkoala 分支，`arkdown-ts2abc` 必须覆盖 AOT/legacy ABC fallback，不能用 OXC parser 成功替代这些上游行为。
+10. Rolldown/OXC 迁移不得只覆盖主 happy path。`arkdown` 必须保留 hvigor Rollup lifecycle 语义，`arkdown-ets-transform` 必须保留 TypeScript semantic/checker/Arkoala 分支，`arkdown-ts2abc` 必须覆盖 module ABC、bundle ABC、single-file emit、AOT、legacy ABC fallback，不能用 OXC parser 成功替代这些上游行为。
+11. ABC 迁移必须直接落到 `arkdown-abc::aot::AotRunner` 或 SDK `es2abc` delegate。不得新增 CLI handoff；当前 handoff 数据必须迁入 `Ts2abcPlan`、source map/cache/fileInfo 等正式 owner，不能绕过 `ProgramRegistry`、dependency BFS、Program cache、ABC input consistency 这些 SPEC-049 已经对齐的阶段。
+12. 所有 handoff/bridge/intermediate 类文件都必须改造成最终架构形态。迁移完成后删除原文件，不保留 debug/parity/compat 变体；调试和 parity 所需数据由 typed plan snapshot、stage output 或正式 artifact writer 提供。
 
 ## 目标执行链
 
@@ -124,7 +153,8 @@ arkdown-cli
         -> rolldown bundle
         -> plugin facts merge
         -> obfuscation
-        -> ts2abc/abc
+        -> ts2abc
+           -> arkdown-abc AOT runner or SDK es2abc backend
         -> package
         -> sign
   -> arkdown-watcher invalidation over session inventory
@@ -137,6 +167,7 @@ arkdown-cli
 | Phase | 目标 | 退出条件 |
 | --- | --- | --- |
 | 0 | 文档和 guardrail | crate 文档、禁止边、删除目标清晰 |
+| 0A | SPEC-049 AOT 基线回灌 | ABC/ts2abc/CLI 文档对齐当前 AOT runner，所有剩余上游差异有 owner |
 | 1 | foundation | path/schema/core/OHPM API 固化 |
 | 2 | session | 启动 snapshot 和 read-once 测试可用 |
 | 3 | domain plans | profile/resource/pack/sign/cache 等只吃 plan |

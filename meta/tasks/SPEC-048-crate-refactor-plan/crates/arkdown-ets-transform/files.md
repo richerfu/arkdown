@@ -74,7 +74,7 @@
 | `api_transform/libso.rs` | `LibSoRewriter`, `NativeImport`, `NativeRequireTarget` | `rewrite_import`, `record_use_os_file`, `to_package_native_ref` | current libso handling gaps | SDK `processLibso` |
 | `kit_import.rs` | `KitImportTransform`, `KitImportFacts`, `KeepTsDecision`, `KitModuleComparer` | `process_kit_imports`, `check_has_keep_ts`, `collect_kit_modules`, `compare_kit_modules`, `rewrite_to_kit_imports` | `kit_map.rs`, `api_transform/version_table.rs` | SDK `process_kit_import.js`, `rollup-plugin-system-api.js::compareKitModules/replaceKitModules` |
 | `import_path.rs` | `ImportPathExpander`, `ImportRewrite`, `OhmSpecifier` | `expand_all_import_paths`, `rewrite_imports`, `record_rewrites` | `module_rewrite.rs` | SDK `import_path_expand.js` |
-| `lazy_import.rs` | `LazyImportTransform`, `LazyImportFacts` | `process_lazy_import`, `check_reexport`, `emit_diagnostics` | new from ts2abc handoff | SDK `process_lazy_import.js` |
+| `lazy_import.rs` | `LazyImportTransform`, `LazyImportFacts` | `process_lazy_import`, `check_reexport`, `emit_diagnostics` | new from typed transform facts consumed by ts2abc plan | SDK `process_lazy_import.js` |
 | `resource_transform.rs` | `ResourceTransform`, `ResourceReference`, `ResourceCall`, `RawfileReference` | `rewrite_resource_refs`, `collect_resource_ids`, `rewrite_rawfile_refs` | current `resource_transform.rs` | SDK `processResourceData` behavior |
 | `module_rewrite.rs` | `ModuleRewriter`, `ModuleRewriteFacts` | `rewrite_imports`, `rewrite_exports`, `emit_module_wrapper` | `module_rewrite.rs`, `module_emit.rs` | SDK module rewrite/package helpers |
 | `global_rewrite.rs` | `GlobalRewriter`, `GlobalRewriteFacts` | `rewrite_global_refs`, `inject_helpers` | `global_rewrite.rs` | SDK global helper rewrite |

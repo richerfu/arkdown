@@ -75,7 +75,7 @@ arkdown-cli::main
 | TypeScript Program、Arkoala、const enum invalidation | `arkdown-ets-transform::semantic.rs::SemanticProgramBridge::prepare_program` + `arkoala.rs::ArkoalaTransformGate::*` + `transform_cache.rs::*` | OXC 只替代 AST/codegen；semantic/checker/cache 分支必须保留 |
 | `rollup-plugin-gen-abc.js` | `arkdown-ts2abc::compiler.rs::Ts2abcCompiler::compile` + `module_mode.rs::ModuleAbcGenerator::generate_module_abc` + `bundle_mode.rs::BundleAbcGenerator::generate_bundle_abc` | module/bundle/single-file ABC 与 SDK genAbc 对齐 |
 | `gen_aot.js`、legacy `gen_abc_plugin.js`、`run-ark.js` | `arkdown-ts2abc::aot.rs::AotCompiler::compile_aot` + `legacy_bundle.rs::LegacyAbcCompiler::{compile,delegate_to_legacy_toolchain}` | AOT 和 legacy/fallback path 必须实现或委托上游等价 toolchain |
-| `ark_compiler/transform.js` JS compat/lazy import | `arkdown-ts2abc::module_source.rs::{process_lazy_import,apply_js_api10_compat}` + `js_compat.rs::JsCompatTransform::transform_api10_js` | API <= 10 JS Babel branch、lazy import/reexport checks 完整 |
+| `ark_compiler/transform.js` JS compat/lazy import | `arkdown-ts2abc::module_source.rs::ModuleSourceCollector::process_lazy_import` + `js_compat.rs::JsCompatTransform::transform_api10_js` | API <= 10 JS Babel branch、lazy import/reexport checks 完整 |
 | bytecode obfuscator / terser | `arkdown-obfuscate::Obfuscator::obfuscate` + `arkdown-ts2abc::bytecode_obfuscation.rs::BytecodeObfuscator::run` | name cache、bytecode obfuscation、HAR ability rewrite 输入完整 |
 | `PackageHap`、`PackageHsp`、`PackageHar` | `arkdown-pack::Packager::{package_hap,package_hsp,package_har}` | HAP/HSP/HAR package entry order、pack info、native/debug symbol 完整 |
 | `ProcessHarArtifacts` | `arkdown-pack::{har_artifacts,har_router_startup,har_obfuscation,har_insight_intent,native_preload}` processors | compiled source staging、bundle dep res、router/startup/share、obfuscated ability、insight intent、native preload 完整 |
@@ -117,13 +117,24 @@ ModulePipeline::run
         -> RolldownLifecycleBridge::run_build_end
         -> BundleFacts::merge_plugin_facts
   -> Ts2abcStage::execute
-     -> Ts2abcPlan::from_loader_and_bundle
+     -> Ts2abcPlanBuilder::from_loader_and_bundle
+     -> Ts2abcPlanBuilder::from_transform_facts
+     -> Ts2abcPlanBuilder::build
      -> Ts2abcCompiler::compile
+        -> PreAbcValidation::run
         -> ModuleAbcGenerator::generate_module_abc
         -> BundleAbcGenerator::generate_bundle_abc
         -> AotCompiler::compile_aot
         -> LegacyAbcCompiler::delegate_to_legacy_toolchain
-        -> AbcCompiler::new(plan).compile()
+        -> AotOptionsBuilder::from_plan
+        -> ArkdownAotBackend::compile
+           -> arkdown_abc::aot::AotRunner::run
+              -> CompileFileScheduler::run_all
+              -> ProgramRegistry::check_merge_mode_consistency
+              -> NpmModuleEntryCompiler::compile
+              -> DepsRelationResolver::resolve_relation
+              -> AotOutputGenerator::generate
+        -> SdkEs2abcBackend::compile
   -> PackageStage::execute
      -> Packager::new(plan).package()
      -> HarArtifactProcessor::process
@@ -154,4 +165,3 @@ ModulePipeline::run
 - `watch-cache`: shouldInvalidCache、rollup cache、watch event names、hot/cold reload。
 
 只有这些分组与同一 fixture 的 hvigor 输出、诊断和可观察 side effects 对齐后，才能说实现已经完全一致。
-

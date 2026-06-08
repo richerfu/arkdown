@@ -10,46 +10,104 @@
 
 ## 迁移总则
 
-- SPEC-048 不拆 crate，但要把 production facade plan 化，并继续保留现有 ABC reader/IR/emit/program_cache 逻辑。
-- 对应的是当前 arkdown-abc 既有 ABC 编译实现，不是 hvigor JS。hvigor 侧只通过 SDK `genAbc`/ArkCompile 调用。
-- dense table/order 必须 deterministic，内部 dense IDs 逐步迁到 `oxc_index::IndexVec`。
+- 当前 SPEC-049 AOT chain 是 production 基线：`AotCompileOptions -> AotRunner -> ProgramRegistry -> AotOutputGenerator`。后续 `AbcCompilePlan` 如果存在，只能是构造 `AotCompileOptions` 的 typed wrapper。
+- `compiler.rs` 里的旧 `AbcCompiler` 只作为迁移来源；`arkdown-ts2abc` production path 必须迁到 `AotRunner`。迁完后旧 source-to-final `AbcFile` 入口删除或收窄为 crate-private adapter。
+- 当前 public free function 必须全部进入 owner 类型 associated method；只允许 private helper 留在文件内部。
+- binary output 顺序必须来自 `ProgramRegistry` lexicographic key order、`IndexVec` dense ID order 或显式 sorted order。
+- ABC crate 不读项目配置、SDK 配置、loader json、oh-package、module json；这些输入必须由 `arkdown-ts2abc`/CLI plan 传入。
 
 ## 目标文件 API
 
 | 文件 | 结构体/枚举/类型 | 方法/关联函数 | 当前迁移来源 | 对应上游逻辑 |
 | --- | --- | --- | --- | --- |
-| `lib.rs` | re-export `AbcCompiler`, `AbcCompilePlan`, `AbcArtifact` | `AbcCompiler::new(plan).compile()` | current exports narrowed | SDK `genAbc`/ABC compiler typed facade |
-| `compiler.rs` | `AbcCompiler`, `AbcCompilePlan`, `AbcCompileInput`, `AbcCompileOutput`, `AbcCompileOptions` | `AbcCompiler::new`, `compile`, `compile_source`, `compile_program`, `emit_file` | current `compiler.rs` | SDK genAbc equivalent |
-| `error.rs` | `AbcError`, `AbcDiagnostic` | `AbcError::parse`, `lower`, `emit`, `read` | current `error.rs` | ABC compile diagnostics |
-| `ids.rs` | `RecordId`, `FunctionId`, `LiteralArrayId`, `StringId`, `MethodId`, `ClassId` | `new`, `index`, `from_usize`; implement `Idx` | new from implicit indexes | dense table identity |
-| `names.rs` | `PandasmNameCodec`, `PandasmRecordName`, `PandasmMethodName`, `LiteralArrayName` | `PandasmNameCodec::record_name`, `PandasmNameCodec::class_name_from_record`, `PandasmNameCodec::full_method_name`, `PandasmNameCodec::short_method_name`, `PandasmNameCodec::literal_array_key`, `PandasmNameCodec::literal_array_record_name` | current `names.rs` free helpers migrated to associated methods | ABC/PandaASM naming |
-| `isa.rs` | `InstructionSpec`, `IdKind`, `IdOperand`, internal YAML structs | `pandasm_spec`, `pandasm_opcode_for_bytecode`, `decode_pandasm_instruction`, `instruction_len`, `id_operands`, `encode_pandasm_instruction` | current `isa.rs` | ABC instruction set |
-| `optimizer.rs` | `BytecodeOptimizerOptions` | `optimize_file`, `optimize_records`, `optimize_method`, peephole/cfg/register frame helpers | current `optimizer.rs` | post-lowering optimizer |
-| `abc_reader.rs` | `AbcReader`, `AbcFileRaw` | `read_abc`, `read_sections`, `read_records` | current `abc_reader.rs` | ABC binary reader |
-| `abc2program.rs` | `ProgramRebuilder`, `AbcProgram` | `abc_to_program`, `record_to_program` | current `abc2program.rs` | ABC to internal program |
-| `cache.rs` | `AbcProgramCache`, `CachedRecord` | `load`, `store`, `record`, `insert` | current `cache.rs` | ABC program cache |
-| `dependency.rs` | `AbcDependency`, `DependencyRequest` | `collect_dependencies`, `resolve_record_dependency` | current `dependency.rs` | ABC record deps |
-| `npm_entries.rs` | `NpmEntry`, `NpmEntryTable` | `collect_npm_entries`, `entry_for_package` | current `npm_entries.rs` | package entry metadata |
-| `widget.rs` | `WidgetCompileInput`, `WidgetCompileOutput` | `compile_widget`, `widget_record_names` | current `widget.rs` | widget compile |
-| `program_cache.rs` | `ProgramCacheBuilder`, `RecordMetadata`, many internal lowering cache structs | `build_program_cache`, `record_metadata`, `function_metadata`, annotation/proto helpers | current `program_cache.rs` | ABC proto/program cache |
-| `proto_panda.rs` | generated/handwritten proto structs, `PandaProtoCodec` | `PandaProtoCodec::encode_program`, `PandaProtoCodec::decode_program`, generated message accessors | current `proto_panda.rs` | Panda ABC proto model |
-| `ir/mod.rs` | `AbcFile`, `Record`, `FunctionRecord`, `LiteralArray`, module re-exports | constructors and IR accessors | current IR modules | ABC IR model |
-| `ir/builder.rs` | `LoweringContext`, `BodyCompileResult`, `CodeGen`, many lowering helpers | `build_record`, `build_record_with_debug...`, `annotation_records_from_source`, `compile_function_body`, `compile_class_elements` | current `ir/builder.rs` | OXC AST -> ABC IR lowering |
-| `ir/opcodes.rs` | `PandasmInsn`, `PandasmImm`, `Insn` | opcode encode/map helpers on `Insn` | current `opcodes.rs` | bytecode instruction model |
-| `ir/lowering_context.rs` | `LoweringContext`, `CompileMode` specific state | context constructors/accessors | current file | lowering state |
+| `lib.rs` | re-export `AotRunner`, `AotCompileOptions`, `AotOutputResult` | 窄 re-export only | current exports narrowed；移除旧 `AbcCompiler` compatibility export、`program::dump`、`program::to_abc` free export | crate boundary；SDK `genAbc` facade |
+| `error.rs` | `AbcError`, `AbcDiagnostic` | `AbcError::parse`, `lower`, `emit`, `read`, `unsupported` | current `error.rs` | es2abc diagnostics / compile failure |
+| `compiler.rs` | `AbcCompiler`, `AbcCompileOptions`, `AbcModule`, `AbcInputFile`, `AbcProgramCacheInput`, `AbcArtifactResult`, `AbcCompilerMigrationAdapter` | `AbcCompilerMigrationAdapter::to_aot_options`, `compile_via_aot_runner`; current `AbcCompiler::new/compile_with_program_cache/compile_abc_inputs/compile_program_proto` are migration source only | current `compiler.rs`; `strip_typescript_types_pub`, `non_merge_metadata_records_pub` must become private adapter methods or move into `SourceCompiler` | SDK `load-sdk-functions.js::genAbc` input shape；final execution goes through `AotRunner` |
+| `aot/options.rs` | `AotCompileOptions`, `SourceFile`, `SourceFileId`, `ScriptKind`, `ScriptExtension`, `AotOutput`, `CompileContextInfo`, `PkgInfo`, `FilesInfoError`, `AotOptionsParser`, `AotOutputFile` | `AotCompileOptions::effective_debug_info`, `global_script_kind`, `expected_program_count`; `SourceFile::new_source`, `new_abc_input`, `from_filesinfo_items`, `cache_key`; `ScriptKind::from_filesinfo_column`; `ScriptExtension::from_filename`; `CompileContextInfo::needs_dependency_relation`, `needs_package_version_update`; `AotOptionsParser::parse_filesinfo` | current structs；current `pub fn parse_filesinfo` migrates to `AotOptionsParser::parse_filesinfo`; add `SourceFile.output_file` for non-merge col 4 | `es2panda/aot/options.cpp::Options::Parse`, `CollectInputSourceFile`, `CollectInputAbcFile`, `CollectInputFilesFromFileList`, `NeedCollectDepsRelation` |
+| `aot/runner.rs` | `AotRunner`, `AotRunPlan`, `AotRunState` | `AotRunner::new`, `run`; `AotRunState::compile_sources`, `check_merge_mode`, `compile_npm_entries`, `resolve_deps`, `generate_output` | current `AotRunner`; split internal steps only if needed | `es2panda/aot/main.cpp::Run`, `ResolveAndGenerate`, `GenerateProgram` |
+| `aot/compile_queue.rs` | `CompileFileScheduler`, `CompileFileJob`, `CompileFileOutput`, `CompileFileCacheDecision`, `CompileFileJobFactory` | `CompileFileScheduler::new`, `run_all`; `CompileFileJob::run`, `load_or_compile`, `optimize_and_cache_program`; `CompileFileCacheDecision::from_options` | current `compile_queue.rs` | `compiler/core/compileQueue.cpp::Compiler::CompileFiles`, `CompileFileJob::Run`, `OptimizeAndCacheProgram` |
+| `aot/source_compiler.rs` | `SourceCompiler`, `SourceCompileInput`, `SourceCompileOutput`, `TsSourceNormalizer` | `SourceCompiler::new`, `compile_source_file`, `compile_inline_source`; `TsSourceNormalizer::normalize` | current source path in `compiler.rs`/`compile_queue.rs`; `strip_typescript_types_pub` migrates here | es2panda source parser/lowering；OXC TS parse/codegen adapter |
+| `aot/abc_input.rs` | `AbcInputProgramCompiler`, `AbcInputProgramSet`, `AbcInputMergeMode`, `AbcInputRecordPlan` | `AbcInputProgramCompiler::new`, `compile_file`, `split_records`, `rewrite_ohm_urls`, `insert_into_registry` | current `abc_input.rs`, `abc2program.rs` call sites | `CollectInputAbcFile`, ABC input rebuild, `CheckMergeModeConsistency` |
+| `aot/program_registry.rs` | `ProgramRegistry`, `ProgramKey`, `ProgramId`, `ProgramKeyCodec` | `ProgramRegistry::new`, `add_expected`, `insert_source_program`, `insert_abc_program`, `insert_npm_program`, `get`, `get_mut`, `by_id`, `iter_in_key_order`, `drain_in_key_order`, `collect_in_key_order`, `check_merge_mode_consistency`, `validate_expected_count`, `retain_resolved`; `ProgramKeyCodec::abc_input_key`, `is_abc_input_key`, `split_abc_input_key` | current `ProgramRegistry`; current `abc_input_program_key/is_abc_program_key/split_abc_program_key` migrate to `ProgramKeyCodec` | upstream `programsInfo` `std::map` key semantics and merge consistency |
+| `aot/cache_store.rs` | `ProgramCacheStore`, `ProgramCacheLookup`, `ProgramCacheWritePlan`, `PandaFileVersionPolicy` | `ProgramCacheStore::new`, `lookup_source`, `lookup_abc_input`, `write_source_program`, `write_abc_program`; `PandaFileVersionPolicy::for_sdk_cache`, `for_arkdown_cache` | current `cache_store.rs`; add pandaFileVersion policy | `RetrieveProgramFromCacheFiles`, `EmitProgramCacheJob`, cache hash/version |
+| `aot/deps.rs` | `DepsRelationResolver`, `ResolvedDepsRelation`, `DynamicImportCollector`, `StaticImportCollector`, `DepsDumpWriter` | `DepsRelationResolver::new`, `resolve`, `resolve_relation`; `ResolvedDepsRelation::contains_program`, `retained_keys`, `dump`; `DynamicImportCollector::collect`; `StaticImportCollector::collect` | current `DepsRelationResolver`; current `pub fn resolve_deps_relation` migrates to `DepsRelationResolver::resolve_relation` | `aot/resolveDepsRelation.cpp::DepsRelationResolver::Resolve`, `VisitStaticImports`, `VisitDyanmicImports<true>` |
+| `aot/npm_entries.rs` | `NpmModuleEntryCompiler`, `NpmModuleEntryProgram`, `NpmEntryListReader` | `NpmModuleEntryCompiler::new`, `compile`; `NpmEntryListReader::read`; `NpmModuleEntryProgram::from_entries` | current `NpmModuleEntryCompiler`; current `build_npm_program_from_content` migrates to `NpmModuleEntryProgram::from_entries` | `CompileNpmModuleEntryList` |
+| `aot/optimizer.rs` | `ProgramOptimizer`, `GlobalAnalysisState`, `ProgramAnalysisPass`, `PostAnalysisOptimizationPass` | `ProgramOptimizer::new`, `from_compile_options`, `optimize_source_program`, `analyze_for_global_optimization`, `optimize_after_analysis`; `ProgramAnalysisPass::analyze`; `PostAnalysisOptimizationPass::optimize` | current `ProgramOptimizer`; `analyze_for_global_optimization` is wired stub and must gain state | `CompileFileJob::OptimizeAndCacheProgram`, `util::Helpers::AnalysisProgram`, `OptimizeProgram` |
+| `aot/output.rs` | `AotOutputGenerator`, `AotOutputResult`, `AotOutputPathPolicy`, `AotBytesWriter`, `Base64Encoder`, `DumpSymbolTablePolicy` | `AotOutputGenerator::new`, `generate`, `emit_cache_jobs`, `emit_merged_abc`, `emit_single_abcs`, `emit_base64`, `emit_output_proto`; `AotOutputPathPolicy::path_for_source`; `AotBytesWriter::write_abc_file`; `Base64Encoder::encode`; `DumpSymbolTablePolicy::should_bypass_cache` | current `AotOutputGenerator`; current private helpers `derive_output_path/write_abc_file/base64_encode` migrate to types; add non-merge output column and dump symbol table policy | `aot/main.cpp::GenerateProgram`, `emitFiles.cpp::EmitFileQueue`, `EmitFileJob`, `EmitMergedAbcJob` |
+| `aot/ohmurl.rs` | `OhmUrlRewriter`, `OhmUrlParser`, `PackageVersionUpdater`, `BundleNameUpdater`, `ExternalPackageSet` | `OhmUrlParser::pkg_name_from_import`, `pkg_name_from_ohmurl`, `record_name_from_ohmurl`; `OhmUrlRewriter::update_package_version`, `update_bundle_name`, `update_package_name`; `ExternalPackageSet::contains_ohmurl_pkg` | current public free functions migrate to these types | upstream normalized OHM URL helpers used by dependency BFS and ABC input package rewrite |
+| `program/ids.rs` | `ProgramId`, `SourceFileId`, `RecordId`, `FunctionId`, `LiteralArrayId`, `StringId` | `new`, `index`, `from_usize` via `oxc_index::Idx` | current `program/ids.rs` | typed dense identity for Program/ABC tables |
+| `program/model.rs` | `Program`, `ProgramMetadata`, `ProgramCacheEntry`, `SourceLang`, `ProgramRecordTable`, `ProgramLiteralArrayTable` | `Program::new_ecmascript`, `add_record`, table accessors; `ProgramCacheEntry::new_compiled`, `from_cache`, `mark_requires_post_analysis_opt` | current `program/model.rs` | upstream `pandasm::Program`, `ProgramCache` |
+| `program/to_abc.rs` | `ProgramToAbcConverter`, `RegistryToAbcConverter`, `AbcConversionOptions` | `ProgramToAbcConverter::new`, `convert_program`; `RegistryToAbcConverter::new`, `convert_registry` | current `pub fn program_to_abc_file/registry_to_abc_file` migrate here | Program to final `AbcFile` before `EmitFileJob` |
+| `program/dump.rs` | `ProgramDumper`, `ProgramDumpOptions`, `NormalizedProgramDumper` | `ProgramDumper::dump`, `format`, `format_normalized`; `NormalizedProgramDumper::format` | current `pub fn dump_program/format_program_dump/format_normalized_program_dump` migrate here | `--dump-program` / parity normalized dump |
+| `abc_reader.rs` | `AbcReader`, `AbcFileRaw`, `AbcSectionReader` | `AbcReader::read_abc`, `read_sections`, `read_records` | current `abc_reader.rs` | ABC binary reader for ABC input/cache tests |
+| `abc2program.rs` | `ProgramRebuilder`, `AbcProgramInput`, `AbcRecordRebuilder` | `ProgramRebuilder::from_abc_file`, `rebuild_programs`, `rebuild_record` | current `abc2program.rs` | ABC input to `Program` rebuild |
+| `cache.rs` | `CacheFileMap`, `ProgramCacheFile`, `ProgramProtoFile`, `AbcProgramsCacheFile`, `CacheHashPolicy` | `CacheFileMap::read_manifest`, `get`; `ProgramCacheFile::read/write`; `ProgramProtoFile::read/write`; `CacheHashPolicy::source_hash`, `abc_input_hash` | current `cache.rs`; hash free functions move under `CacheHashPolicy` if exported | es2abc `--cache-file` manifest/protoBin |
+| `dependency.rs` | `AbcDependencyContext`, `AbcDependency`, `DependencyResolver`, `DependencyCompactor` | `DependencyResolver::collect_dependencies`, `resolve_record_dependency`; `DependencyCompactor::compact_to_retained_programs` | current `dependency.rs`; migrate any still-needed behavior into `aot/deps.rs` then delete or crate-private this file | old `AbcCompiler` dependency pruning; final AOT path uses `aot/deps.rs` |
+| `names.rs` | `PandasmNameCodec`, `PandasmRecordName`, `PandasmMethodName`, `LiteralArrayName` | `PandasmNameCodec::record_name`, `class_name_from_record`, `full_method_name`, `short_method_name`, `literal_array_key`, `literal_array_record_name` | current `names.rs` helpers migrate to associated methods if public | PandaASM naming |
+| `isa.rs` | `InstructionSpec`, `IdKind`, `IdOperand`, `IsaTable`, internal YAML structs | `IsaTable::pandasm_spec`, `pandasm_opcode_for_bytecode`, `decode_pandasm_instruction`, `instruction_len`, `id_operands`, `encode_pandasm_instruction` | current `isa.rs` | ABC instruction set mapping |
+| `optimizer.rs` | `BytecodeOptimizerOptions`, `BytecodeOptimizer`, `RecordOptimizer`, `MethodOptimizer` | `BytecodeOptimizerOptions::from_compile_options`; `BytecodeOptimizer::optimize_file`, `optimize_records`; `RecordOptimizer::optimize_record`; `MethodOptimizer::optimize_method` | current `optimizer.rs` free helpers migrate under optimizer types if exported | bytecode local optimizer |
+| `program_cache.rs` | `ProgramCacheBuilder`, `ProgramProtoBuilder`, `RecordMetadata`, `FunctionMetadata`, `AnnotationProtoBuilder` | `ProgramCacheBuilder::build_program_cache`, `record_metadata`, `function_metadata`; `ProgramProtoBuilder::program_for_file`; `AnnotationProtoBuilder::append_annotation_records` | current `program_cache.rs`; `program_for_file/append_program_to_file` migrate to builder types if exported | Panda Program proto/cache generation |
+| `proto_panda.rs` | proto structs, `PandaProtoCodec` | `PandaProtoCodec::encode_program`, `decode_program`, generated message accessors | current `proto_panda.rs` | Panda ABC proto model |
+| `widget.rs` | `WidgetCompileConfig`, `WidgetCompiler`, `WidgetCompileInput`, `WidgetCompileOutput` | `WidgetCompiler::new`, `compile_widget`, `widget_record_names` | current `widget.rs` | hvigor widget compile path through ABC |
+| `ir/builder.rs` | `ProgramBuilder`, `LoweringContext`, `BodyCompileResult`, `CodeGen`, `AnnotationRecordBuilder` | `ProgramBuilder::build_program`, `build_record`, `build_record_with_debug`, `compile_function_body`, `compile_class_elements`; `AnnotationRecordBuilder::annotation_records_from_source` | current `ir/builder.rs`; builder currently returns `Program` per SPEC-049 | OXC AST / es2panda lowering equivalent |
+| `ir/lowering_context.rs` | `LoweringContext`, `CompileMode`, `LexicalScopeState` | context constructors/accessors | current file | lowering state |
+| `ir/opcodes.rs` | `Insn`, `PandasmInsn`, `PandasmImm`, `JumpTargetInfo` | `Insn::opcode`, encode/map helpers; `JumpTargetInfo::mark_target`, `is_label` | current file; add jump target bit/table for dynamic import `IsLabel()` parity | bytecode instruction model, `Insn::IsLabel()` gap |
 | `ir/function_records.rs` | `FunctionRecordBuilder`, `FunctionRecordLayout`, `FunctionRecordTable` | `FunctionRecordBuilder::new`, `build_function_record`, `build_method_record`, `finish_table` | current file | function record layout |
-| `ir/module_record.rs` | module record metadata | module record builders | current file | ESM/CJS module metadata |
-| `ir/record_layout.rs` | record layout types | layout computation | current file | ABC record layout |
-| `ir/class_layout.rs` | class/private field layout | layout computation | current file | class lowering |
-| `ir/debug_lnp.rs` | debug line number program structs | line op builders | current file | debug info |
-| `emit/file.rs` | `AbcFileEmitter`, section emit state | `emit_file`, `write_sections` | current emit file | ABC binary writer |
-| `emit/record.rs` | record emit structs | `emit_record`, `emit_methods`, `emit_fields` | current emit record | record section writer |
-| `emit/bytecode.rs` | bytecode writer state | `emit_bytecode`, `encode_instruction_stream` | current emit bytecode | bytecode section |
-| `emit/debug_info.rs` | debug info writer | `emit_debug_info` | current file | debug section |
-| `emit/index_section.rs` | index section writer | `emit_index_section` | current file | ABC index |
-| `emit/strings.rs` | string table writer | `intern_string`, `emit_strings` | current file | ABC string table |
+| `ir/function_lexical.rs` | `FunctionLexicalBuilder`, `LexicalVariableTable` | `collect`, `bind`, `finish` | current file | lexical env lowering |
+| `ir/module_lexical.rs` | `ModuleLexicalBuilder`, `ModuleBindingTable` | `collect_imports_exports`, `finish` | current file | ESM module lexical lowering |
+| `ir/module_record.rs` | `ModuleRecordBuilder`, `ModuleRequestTable`, `ModuleMetadataRecord` | `build_module_record`, `build_requests`, `build_commonjs_metadata` | current file | `moduleRecordIdx`, ESM/CJS metadata |
+| `ir/record_layout.rs` | `RecordLayout`, `RecordLayoutBuilder` | `compute`, `fields`, `methods`, `literal_arrays` | current file | record layout |
+| `ir/class_layout.rs` | `ClassLayout`, `ClassLayoutBuilder`, `PrivateFieldLayout` | `compute`, `private_fields`, `static_fields` | current file | class/private field lowering |
+| `ir/debug_lnp.rs` | `DebugLineNumberProgram`, `DebugLnpBuilder` | `DebugLnpBuilder::new`, `emit_line`, `emit_column`, `finish` | current file | debug line number program |
+| `ir/ast_analysis.rs` | `AstAnalysis`, `AstAnalysisPass` | `AstAnalysisPass::analyze_program`, `analyze_module`, `analyze_function` | current file | AST pre-analysis for lowering |
+| `emit/file.rs` | `AbcFile`, `AbcFileEmitter`, `AbcSerializeOptions`, section emit state | `AbcFile::serialize_with_version`; `AbcFileEmitter::emit_file`, `write_sections`; `version_for_target_api` should move to `BytecodeVersionPolicy` if exported | current file | ABC binary writer / panda version |
+| `emit/record.rs` | `ClassRecord`, `FieldRecord`, `MethodRecord`, `RecordEmitter` | `RecordEmitter::emit_record`, `emit_methods`, `emit_fields` | current emit record | record section writer |
+| `emit/bytecode.rs` | `BytecodeEmitter`, `InstructionEncoder`, bytecode writer state | `BytecodeEmitter::emit_bytecode`; `InstructionEncoder::encode_instruction_stream` | current emit bytecode | bytecode section |
+| `emit/debug_info.rs` | `DebugInfoEmitter`, `DebugInfoWriter` | `DebugInfoEmitter::emit_debug_info` | current file | debug section |
+| `emit/strings.rs` | `StringTable`, `StringTableWriter`, `StringInterner` | `StringInterner::intern_string`; `StringTableWriter::emit_strings` | current file | ABC string table |
 
-## 必改
+## 已删除或不应继续规划的旧文件
 
-- `compiler.rs` public entry must accept `AbcCompilePlan` from `arkdown-ts2abc` instead of ad hoc paths.
-- Any table iteration affecting binary output must be sorted or dense-ID ordered.
+| 旧计划文件 | 当前状态 | 处理 |
+| --- | --- | --- |
+| `emit/index_section.rs` | 当前代码不存在 | 从计划删除；索引/section 写入由 `emit/file.rs` 和相关 emitter 承担 |
+| `ir/assignment_targets.rs` | 当前代码不存在 | 从计划删除；assignment target 分析归 `ir/ast_analysis.rs`/builder 内部 |
+| `ids.rs` crate root | 当前 typed IDs 在 `program/ids.rs` | 不再规划 root `ids.rs` |
+
+## SPEC-049 未完全对齐项和实现计划
+
+| 上游细节 | 当前状态 | 目标 owner/API | 实现要求 |
+| --- | --- | --- | --- |
+| non-merge filelist 第 4 列 output path | `parse_filesinfo` 测试说明了语义，但 `SourceFile` 未保存，`AotOutputGenerator` 仍从 key 派生 | `SourceFile.output_file`, `AotOutputPathPolicy::path_for_source` | `CollectInputSourceFile` 非 merge 模式读取 column 4；`emit_single_abcs` 必须按 source 对应 output 写出 |
+| `dumpSymbolTable` cache bypass | 未建 flag | `AotCompileOptions.dump_symbol_table`, `DumpSymbolTablePolicy::should_bypass_cache` | cache lookup/emit 行为对齐 upstream dump symbol table 分支 |
+| dynamic import `IsLabel()` | `Insn` 无 jump-target bit；当前只检查前一条 `LdaStr` | `JumpTargetInfo`, `DynamicImportCollector::collect` | instruction lowering 或 decode 时标记 label/jump target；收集时跳过 label DynamicImport |
+| `AnalysisProgram` | `ProgramOptimizer::analyze_for_global_optimization` 是 wired stub | `GlobalAnalysisState`, `ProgramAnalysisPass::analyze`, `PostAnalysisOptimizationPass::optimize` | port bytecode optimizer CFG/liveness/inline profile 后再消费分析结果 |
+| annotation records | 可生成但未做 ets2panda golden 覆盖 | `AnnotationRecordBuilder`, `AnnotationParitySuite` | API 20+ annotation fixture 对比 normalized Program/ABC dump |
+| `pandaFileVersion` cache interop | arkdown cache 与 SDK cache 语义不完全互通 | `PandaFileVersionPolicy` | SDK cache 互操作时用 SDK version；arkdown-only cache 写 incompatible marker |
+| `use_define_semantic` | option 字段存在但 lowering 语义未完整验明 | `SourceCompiler`, `ProgramBuilder` | OXC class field define semantic 必须在 lowering 中等价反映；SDK backend 继续原样传 flag |
+
+## 串联图
+
+```text
+Ts2abcPlan
+  -> AotCompileOptions
+     -> source_files: IndexVec<SourceFileId, SourceFile>
+     -> cache_files / compile_context_info / output / flags
+  -> AotRunner::run()
+     -> ProgramCacheStore::new()
+     -> ProgramRegistry::new(source_count)
+     -> CompileFileScheduler::run_all()
+        -> SourceCompiler::compile_source_file()
+        -> AbcInputProgramCompiler::compile_file()
+        -> ProgramOptimizer::optimize_source_program() or analyze_for_global_optimization()
+     -> ProgramRegistry::check_merge_mode_consistency()
+     -> NpmModuleEntryCompiler::compile()
+     -> DepsRelationResolver::resolve_relation()
+     -> ProgramRegistry::retain_resolved()
+     -> ProgramRegistry::validate_expected_count()
+     -> AotOutputGenerator::generate()
+        -> ProgramToAbcConverter / RegistryToAbcConverter
+        -> ProgramCacheStore::write_source_program()
+        -> AbcFile::serialize_with_version()
+  -> AotOutputResult
+```

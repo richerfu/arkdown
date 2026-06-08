@@ -26,6 +26,41 @@
 - 每个 crate 都有对应子文档。
 - `rolldown-oxc-parity-gap-audit.md` 中的缺口都有 crate owner 和目标文件 API。
 
+## Phase 0A: SPEC-049 ABC AOT 基线回灌
+
+目标：
+
+- 把已合并的 `SPEC-049` ABC AOT 实现写回 crate 文档，作为后续重构不可绕开的基线。
+- 明确 `arkdown-ts2abc` 和 CLI 临时 handoff 必须迁入 typed plan，迁移完成后删除 handoff 文件；最终仍调用 `arkdown-abc::aot::AotRunner` 或 SDK `es2abc` backend。
+- 把已知未完全对齐上游的点列为可执行任务，不能在后续 phase 中以“Rust backend 已有”默认跳过。
+- 把所有 handoff/bridge/intermediate 类旧文件标成删除目标，数据迁入正式 typed plan、stage output、artifact writer 或 cache/package owner。
+
+必须重新对齐的当前实现：
+
+1. `arkdown-abc` 当前拥有 `aot/`、`program/`、`ir/`、`emit/` 四层。文件计划必须描述 `AotCompileOptions -> AotRunner -> CompileFileScheduler -> ProgramRegistry -> AotOutputGenerator`，不得继续只描述旧 `AbcCompiler::compile_with_program_cache`。
+2. `arkdown-ts2abc` 当前文件只有 `args.rs`、`compile_context.rs`、`driver.rs`、`error.rs`、`version.rs`。`plan.rs`、`compiler.rs`、`module_mode.rs`、`bundle_mode.rs` 等仍是目标文件，不是已实现文件。
+3. CLI 当前仍有 `compile_arkts_abc.rs`、`compile_arkts_handoff.rs`、`compile_arkts_output.rs`、`compile_arkts_package_entries.rs`、`compile_arkts_cache.rs` 等跨阶段桥接文件。最终迁移目标是 `BuildPlanBuilder -> typed stage plan -> ModulePipeline stage output`；旧文件必须删除，不保留 debug/parity/compat 变体。
+4. 所有文件级 API 文档必须移除目标 public free function。当前仍存在的 public free function 必须标成迁移来源，并给出目标 owner 类型。
+
+SPEC-049 后续对齐任务：
+
+| 缺口 | 当前影响 | 实现计划 | 所属 phase |
+| --- | --- | --- | --- |
+| non-merge `filesInfo` 第 4 列 output path | `parse_filesinfo` 已识别测试语义，但 `SourceFile`/`AotOutputGenerator` 仍从 program key 派生路径 | 在 `SourceFile` 增加 `output_file`，由 `AotOptionsParser::parse_filesinfo` 填充；`AotOutputPathPolicy::path_for_source` 优先使用该列；`Ts2abcInput.output` 和 CLI fileInfo 写入同一字段 | 0A/3 |
+| `dumpSymbolTable` cache bypass | 上游 dump symbol table 时 cache 命中策略不同；当前未建该 flag | 在 `AotCompileOptions` 增加 `dump_symbol_table`；`ProgramCacheStore::lookup_source` 和 `CompileFileScheduler` 复刻上游 bypass；`AotOutputGenerator` 接入 symbol table dump writer | 0A/3 |
+| dynamic import `Insn::IsLabel()` | 常量字符串 `import()` 位于 jump target 的极小分支可能多收依赖 | 在 `ir::opcodes::Insn` 或 parallel label table 增加 jump-target bit；`DynamicImportCollector::collect` 对齐 `VisitDyanmicImports<true>` 的 `IsLabel()` skip | 0A/3 |
+| `AnalysisProgram` 全局分析 | `requireGlobalOptimization=true` 只跑本地优化，没有跨程序分析收益 | 新增 `GlobalAnalysisState`、`ProgramAnalysisPass`、CFG/liveness profile；`ProgramOptimizer::analyze_for_global_optimization` 写入 state，`optimize_after_analysis` 消费 state | 3/6 |
+| annotation records 未与 ets2panda golden 验证 | 结构已输出，但分支和字段等价性未完全证明 | 建 `AnnotationParitySuite` fixture，对 API 20+ ArkTS annotation、namespace/class/function/member annotation 生成 ABC dump 对比 | 3 |
+| `pandaFileVersion` cache hash | 与 es2abc cache 文件跨工具互操作可能不同 | `ProgramCacheStore` 增加 `PandaFileVersionPolicy`；若目标是读取 SDK cache，hash 必须使用 SDK version；若目标是 arkdown-only cache，manifest 记录 incompatible marker | 3/6 |
+| `use_define_semantic` ownership | SDK backend 接收该 flag；Rust backend当前没有完全实现 class field define semantic | `Ts2abcPlan` 保留该选项；`ArkdownAbcBackend` 转成 `AotCompileOptions.use_define_semantic` 后由 OXC lowering/IR builder 消费；SDK delegate 继续传 `--use-define-semantic` | 3 |
+
+退出条件：
+
+- `crates/arkdown-abc/files.md` 中每个当前 `aot/`、`program/` 文件都有目标类型和上游对应。
+- `crates/arkdown-ts2abc/files.md` 明确哪些文件是现状、哪些是未实现目标、如何从现有 `driver.rs` 迁出。
+- `crates/arkdown-cli/files.md` 明确所有 `compile_arkts_*` handoff/bridge/intermediate 文件只作为迁移来源；迁完最后生产调用方后删除，不保留兼容壳或 debug handoff。
+- 所有 SPEC-049 未对齐项都有目标 owner、方法名和 phase。
+
 ## Phase 1: Foundation crates
 
 目标：

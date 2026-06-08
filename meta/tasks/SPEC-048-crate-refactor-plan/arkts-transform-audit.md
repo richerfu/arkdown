@@ -266,7 +266,7 @@ SourceClassifier
   -> ApiTransformPass(system api + libso)
   -> ObfuscationReservedNamePass
   -> LazyImportPass(for module source / ABC)
-  -> OxcCodegen or TsForAbc handoff
+  -> OxcCodegen or TsForAbc typed source
   -> SourceMapBuilder
 ```
 

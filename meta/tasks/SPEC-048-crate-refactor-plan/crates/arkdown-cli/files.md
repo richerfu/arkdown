@@ -11,7 +11,8 @@
 ## 迁移总则
 
 - CLI 是唯一组合所有 stage/plugin crate 的层。
-- 当前 `src/cmd/build/*` 已经有很多阶段文件，但仍承担 session、artifact layout、package entry、ABC handoff 等 domain policy；需要拆成 `args/session/plan/plugins/runner/pipeline/stages/artifacts/cache`。
+- 当前 `src/cmd/build/*` 已经有很多阶段文件，但仍承担 session、artifact layout、package entry、ABC handoff 等 domain policy；需要拆成 `args/session/plan/plugins/runner/pipeline/stages/artifacts/cache`，并删除 `compile_arkts_handoff.rs` 这类临时桥接文件。
+- 所有 handoff/bridge/intermediate 类文件都只能作为迁移来源。数据迁入 typed plan、stage output、artifact writer、cache owner 或 package plan 后，原文件必须删除，不能以 debug/parity/compat 名义保留。
 - 对应 hvigor `TaskInitializer` 和 `ArkCompile` worker/job 调度，但不复制 task class hierarchy。
 - CLI 是唯一可以读取 `hvigorPluginFile`、`compilePluginPath` 并组合自定义编译插件兼容策略的层；domain crate 和 `arkdown` 都不能直接读这些 JS 配置。
 - `hvigorfile.ts`/`hvigorconfig.ts` 是更上游的项目/模块脚本入口。CLI 必须通过 hvigor-compatible JS/TS runtime bridge 执行这些脚本、hooks 和自定义 tasks，并把 normalized overlay 与 task graph 交给 `BuildSessionBuildInput`；不能把它误认为 ArkTS compile plugin。
@@ -53,18 +54,52 @@
 
 | 当前文件 | 新位置/处理 |
 | --- | --- |
-| `module_plan.rs` | `plan.rs` + session context |
-| `intermediates.rs` | `arkdown-session::artifact_layout`，CLI 只消费 |
-| `custom_config.rs` | `arkdown-config` normalize + `session.rs` |
-| `compile_arkts_modules.rs` | `pipeline.rs::run_bundle` + `arkdown` |
-| `compile_arkts_output.rs` | `arkdown::output` + `artifacts.rs` |
-| `compile_arkts_abc.rs` | `stages.rs::Ts2abcStage` + `arkdown-ts2abc` |
-| `compile_arkts_handoff.rs` | 删除或降为 debug artifact；production 用 typed plan 直接传递 |
-| `compile_arkts_package_entries.rs` | `BuildPlanBuilder::plan_package` + `arkdown-pack::plan` |
-| `compile_arkts_arkdata.rs` | `ResourceStage`/package entry plan，输入来自 resource inventory |
-| `compile_arkts_widget.rs` | `Ts2abcStage` widget plan + `arkdown-abc::widget` |
-| `coverage_instrument.rs` | `EtsTransformPlan` or dedicated coverage stage |
-| `generate_har_declarations.rs` | `arkdown-ets-transform::declaration` + HAR package plan |
-| `task_cache.rs` | `arkdown-cache`，CLI 只做 adapter |
-| native command helpers | `native.rs`，domain crates 只消费 inventory/output |
-| preview/unit/ohosTest/reload helpers | `preview.rs`, `test.rs`, `reload.rs`, `coverage.rs` |
+| `module_plan.rs` | 迁入 `cmd/build/plan.rs` + `arkdown-session` context；删除旧文件 |
+| `intermediates.rs` | 迁入 `arkdown-session::artifact_layout`；CLI 只消费 `ArtifactLayout`，删除旧文件 |
+| `custom_config.rs` | 迁入 `arkdown-config` normalize + `session.rs`；删除旧文件 |
+| `compile_arkts_modules.rs` | 迁入 `pipeline.rs::run_bundle` + `arkdown` `BundlePlan`；删除旧文件 |
+| `compile_arkts_output.rs` | 迁入 `arkdown::output` + `artifacts.rs` 的正式 bundle output/stage output；删除旧文件 |
+| `compile_arkts_abc.rs` | 迁入 `stages.rs::Ts2abcStage` + `arkdown-ts2abc::Ts2abcCompiler`；删除旧文件 |
+| `compile_arkts_handoff.rs` | 删除；所有字段迁入 `Ts2abcPlan`、`AbcSourceMapPlan`、`AbcCachePlan`、`FileInfoManifestWriter` |
+| `compile_arkts_package_entries.rs` | 迁入 `BuildPlanBuilder::plan_package` + `arkdown-pack::PackagePlanBuilder`；删除旧文件 |
+| `compile_arkts_arkdata.rs` | 迁入 `ResourceStage`/package entry plan，输入来自 resource inventory；删除旧文件 |
+| `compile_arkts_widget.rs` | 迁入 `Ts2abcPlanBuilder::with_widget_units` + `arkdown-abc::WidgetCompiler`；删除旧文件 |
+| `compile_arkts_cache.rs` | 迁入 `arkdown-cache::AbcCachePlan` + `arkdown-ts2abc::cache`；删除旧文件 |
+| `coverage_instrument.rs` | 迁入 `EtsTransformPlan` 或 dedicated `CoverageStage`；删除旧文件 |
+| `generate_har_declarations.rs` | 迁入 `arkdown-ets-transform::declaration` + HAR package plan；删除旧文件 |
+| `task_cache.rs` | 迁入 `arkdown-cache`；CLI 只做 stage adapter，删除旧文件 |
+| native command helpers | 迁入 `native.rs` typed stage；domain crates 只消费 inventory/output |
+| preview/unit/ohosTest/reload helpers | 迁入 `preview.rs`, `test.rs`, `reload.rs`, `coverage.rs` typed stages；删除散落 helper |
+
+## SPEC-049 ABC/AOT 串联修正
+
+当前分支已合并 SPEC-049，CLI 的 ArkTS ABC 阶段必须按以下目标迁移：
+
+```text
+BuildPlanBuilder::plan_bundle()
+  -> BundlePlan / Transform facts
+  -> BuildPlanBuilder::plan_ts2abc()
+     -> Ts2abcPlan
+  -> ModulePipeline::run_ts2abc()
+     -> Ts2abcStage::execute()
+        -> arkdown_ts2abc::Ts2abcCompiler::compile()
+           -> ArkdownAotBackend -> arkdown_abc::aot::AotRunner
+           -> or SdkEs2abcBackend
+  -> PackageStage package entries
+```
+
+| 当前文件/函数 | 当前问题 | 目标 owner/API | 对应上游逻辑 |
+| --- | --- | --- | --- |
+| `compile_arkts_abc.rs` | CLI 当前直接组装 ABC 编译输入、cache、package entries，混合 stage policy 和 domain policy | `Ts2abcStage::execute`, `Ts2abcPlanBuilder::from_module_pipeline`, `PackageEntryPlanner::from_ts2abc_output` | hvigor `CompileArkTS` task 调 SDK genAbc / es2abc |
+| `compile_arkts_handoff.rs::write_compile_arkts_abc_handoff` | handoff 文件是当前 Rust 内部桥，不是 hvigor production artifact | 删除；需要调试或 parity 时由 `Ts2abcPlan::to_parity_snapshot` 或正式 artifact owner 输出结构化快照，不能保留 handoff writer | Rust adapter，替代旧全局临时文件桥 |
+| `compile_arkts_handoff.rs::read_compile_arkts_source_maps` | source map 读取在 CLI 中散落，容易绕过 source map policy | `Ts2abcSourceMapInput::from_bundle_output`, `AbcSourceMapPlan::from_bundle_output` | SDK `generate_sourcemap.js`, `preserveSourceMap` |
+| `compile_arkts_widget.rs` | widget ABC 仍在 CLI 阶段直接拼接 | `Ts2abcPlanBuilder::with_widget_units`, `arkdown_abc::WidgetCompiler` | hvigor widget compile path |
+| `compile_arkts_package_entries.rs` | package entries 从 CLI 临时推导 | `PackageEntryPlanner::from_ts2abc_output`, `PackagePlanBuilder::add_abc_outputs` | `MakePackInfo` / HAP-HSP-HAR package staging |
+
+未实现或未对齐项必须进入 CLI 阶段计划：
+
+1. `BuildPlanBuilder::plan_ts2abc` 必须消费 loader json、bundle chunk graph、transform facts、source map policy、bytecode HAR/AOT/cache facts，不能只消费当前 handoff 文件。
+2. `Ts2abcStage` 必须选择 Rust AOT backend 或 SDK backend；Rust backend 必须调用 `arkdown-abc::aot::AotRunner`，不能走旧 source-to-final facade。
+3. `compile_arkts_handoff.rs` 在 typed plan 迁移完成后必须删除；同类 handoff 文件不得以 debug/parity 名义保留。
+4. `compile_arkts_output.rs`、`compile_arkts_package_entries.rs`、`compile_arkts_cache.rs`、`compile_arkts_widget.rs` 这类当前承担跨阶段数据搬运的文件也必须拆成正式 owner 后删除。
+5. package/sign 阶段只能消费 `Ts2abcOutput` 和 `PackagePlan`，不得重新扫描 ABC output 目录猜 entry。
