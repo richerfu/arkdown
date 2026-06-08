@@ -348,6 +348,7 @@ pub struct MethodRecord {
     pub source_lang: Option<u8>,
     /// Module request indices captured for `"use concurrent"` functions.
     pub concurrent_module_requests: Vec<u32>,
+    pub method_pool_entry: bool,
     pub expected_property_count: Option<u32>,
     pub annotations: Vec<AnnotationRecord>,
     /// Upstream generic pandasm metadata attributes.
@@ -746,18 +747,17 @@ pub struct ClassRecord {
     pub methods: Vec<MethodRecord>,
     /// Global [`StringTable`] indices introduced while compiling this record.
     ///
-    /// Panda bytecode string operands are rewritten through the file
-    /// IndexHeader dependency table, not directly through this global string
-    /// id. These ids preserve the pre-rewrite bytecode references so the
-    /// serializer can resolve them to StringItem entries while scanning each
-    /// method's bytecode dependencies.
+    /// Panda bytecode string operands index into the file IndexHeader method
+    /// pool, not directly into a global string table.  Upstream es2abc groups
+    /// method-pool entries by record: this record's strings, method literals,
+    /// then literal arrays.  Keeping the per-record string indices lets the
+    /// serializer rebuild that pool and rewrite bytecode operands accordingly.
     pub string_indices: Vec<u32>,
     /// Global literal-array indices introduced while compiling this record.
     pub literal_indices: Vec<usize>,
     /// Literal arrays used by module metadata fields (`moduleRecordIdx`,
     /// `scopeNames`).  Upstream emits these literal strings with the owning
-    /// program, but bytecode does not reference them through the IndexHeader
-    /// method/string/literal dependency table.
+    /// program, but they are not entries in that record's method index pool.
     pub module_literal_indices: Vec<usize>,
     /// Function source-code strings created while MakeFunctionItems runs.
     pub source_code_strings: Vec<String>,
@@ -1096,6 +1096,19 @@ impl ClassRecord {
 
         buf
     }
+    /// Indices of methods in `self.methods` that have `method_pool_entry` set,
+    /// sorted by method name.  Used when building `method_index` items in the
+    /// ABC file format.
+    pub(crate) fn method_pool_entry_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .methods
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, method)| method.method_pool_entry.then_some(idx))
+            .collect();
+        indices.sort_by(|&a, &b| self.methods[a].name.cmp(&self.methods[b].name));
+        indices
+    }
 }
 
 impl MethodRecord {
@@ -1111,11 +1124,37 @@ impl MethodRecord {
     /// - `INSTANCE` / other → `INSTANCE` (0x008)
     pub(crate) fn access_flags(&self) -> u32 {
         match self.kind {
-            MethodKind::Module | MethodKind::Constructor => method_access::MODULE_OR_CTOR,
+            MethodKind::Module => method_access::MODULE_OR_CTOR,
+            MethodKind::Constructor
+                if self.is_generated_default_base_constructor()
+                    || self.is_generated_default_derived_constructor() =>
+            {
+                method_access::MODULE_OR_CTOR
+            }
             MethodKind::FunctionLiteral => method_access::MODULE_OR_CTOR,
             MethodKind::Anonymous => method_access::ANON,
-            MethodKind::Function => method_access::INSTANCE,
+            MethodKind::Function | MethodKind::Constructor => method_access::INSTANCE,
         }
+    }
+
+    fn is_generated_default_derived_constructor(&self) -> bool {
+        // GENERATED_CONSTRUCTOR follows upstream es2panda's default derived class
+        // path: FunctionEnter, CopyRestArgs, SuperCallSpread, implicit this checks.
+        self.bytecode.starts_with(&[
+            0x44, 0x60, // mov v0, v6
+            0x44, 0x71, // mov v1, v7
+            0x44, 0x82, // mov v2, v8
+            0x44, 0x93, // mov v3, v9
+            0xcf, 0x00, // copyrestargs 0
+        ])
+    }
+
+    fn is_generated_default_base_constructor(&self) -> bool {
+        // Direct es2abc standalone inputs synthesize a default base constructor
+        // as `lda this; return` and mark it with constructor/module flags.
+        self.num_args == 3
+            && (self.bytecode == [0x60, 0x02, 0x64]
+                || self.bytecode == [0x3c, 0x00, 0xfb, 0x06, 0x00, 0x02, 0x60, 0x02, 0x64])
     }
 
     pub(crate) fn method_item_byte_size(&self) -> usize {
@@ -1363,6 +1402,7 @@ mod tests {
                 function_kind: function_kind::FUNCTION,
                 source_lang: None,
                 concurrent_module_requests: Vec::new(),
+                method_pool_entry: false,
                 expected_property_count: None,
                 annotations: Vec::new(),
                 metadata_attrs: Default::default(),
@@ -1425,6 +1465,7 @@ mod tests {
                 function_kind: function_kind::FUNCTION,
                 source_lang: None,
                 concurrent_module_requests: Vec::new(),
+                method_pool_entry: false,
                 expected_property_count: None,
                 annotations: Vec::new(),
                 metadata_attrs: Default::default(),

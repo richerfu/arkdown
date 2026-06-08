@@ -1,138 +1,17 @@
 use oxc_ast::ast::{
-    AccessorProperty, ClassElement, MethodDefinition, MethodDefinitionKind, PropertyDefinition,
-    PropertyKey,
+    ClassElement, MethodDefinition, MethodDefinitionKind, PropertyDefinition, PropertyKey,
 };
-use rustc_hash::FxHashMap;
+use oxc_span::GetSpan;
 
 use crate::emit::file::{LiteralArray, LiteralEntry};
 use crate::ir::function_records::FunctionNameAllocator;
-use crate::ir::lowering_context::LoweringContext;
-
-pub(super) const DEFAULT_USE_DEFINE_SEMANTIC: bool = false;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ClassStaticInitializationMode {
-    ExternalInitializerMethod,
-    InlineInModuleMain,
-}
-
-impl ClassStaticInitializationMode {
-    pub(super) const fn uses_external_initializer_method(self) -> bool {
-        matches!(self, Self::ExternalInitializerMethod)
-    }
-
-    pub(super) const fn inlines_in_module_main(self) -> bool {
-        matches!(self, Self::InlineInModuleMain)
-    }
-}
-
-impl Default for ClassStaticInitializationMode {
-    fn default() -> Self {
-        Self::ExternalInitializerMethod
-    }
-}
-
-pub(super) fn property_needs_instance_initializer(
-    property: &PropertyDefinition<'_>,
-    use_define_semantic: bool,
-) -> bool {
-    if property.r#static {
-        return false;
-    }
-    if matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
-        return true;
-    }
-    use_define_semantic
-}
-
-pub(super) fn property_needs_constructor_assignment(
-    property: &PropertyDefinition<'_>,
-    use_define_semantic: bool,
-) -> bool {
-    !use_define_semantic
-        && !property.r#static
-        && !matches!(property.key, PropertyKey::PrivateIdentifier(_))
-        && property.value.is_some()
-}
-
-pub(super) fn accessor_needs_instance_initializer(accessor: &AccessorProperty<'_>) -> bool {
-    !accessor.r#static
-}
-
-pub(super) fn property_needs_static_initializer(property: &PropertyDefinition<'_>) -> bool {
-    property.r#static
-        && (property.computed
-            || method_key_name(&property.key).is_some()
-            || matches!(property.key, PropertyKey::PrivateIdentifier(_)))
-}
-
-pub(super) fn class_needs_static_initializer(elements: &[ClassElement<'_>]) -> bool {
-    elements.iter().any(|element| match element {
-        ClassElement::PropertyDefinition(property) => property_needs_static_initializer(property),
-        ClassElement::StaticBlock(_) => true,
-        _ => false,
-    })
-}
-
-pub(super) fn method_is_instance_private(method: &MethodDefinition<'_>) -> bool {
-    !method.r#static && matches!(method.key, PropertyKey::PrivateIdentifier(_))
-}
-
-pub(super) fn class_needs_instance_initializer(
-    elements: &[ClassElement<'_>],
-    use_define_semantic: bool,
-) -> bool {
-    elements.iter().any(|element| match element {
-        ClassElement::PropertyDefinition(property) => {
-            property_needs_instance_initializer(property, use_define_semantic)
-        }
-        ClassElement::AccessorProperty(accessor) => accessor_needs_instance_initializer(accessor),
-        ClassElement::MethodDefinition(method) => method_is_instance_private(method),
-        _ => false,
-    })
-}
-
-pub(super) fn class_has_constructor(elements: &[ClassElement<'_>]) -> bool {
-    elements.iter().any(|element| {
-        matches!(
-            element,
-            ClassElement::MethodDefinition(method)
-                if method.kind == MethodDefinitionKind::Constructor
-        )
-    })
-}
-
-pub(super) fn class_requires_external_instance_initializer(
-    elements: &[ClassElement<'_>],
-    has_super_class: bool,
-    standalone_ecmascript_input: bool,
-    use_define_semantic: bool,
-) -> bool {
-    class_needs_instance_initializer(elements, use_define_semantic)
-        && !class_has_constructor(elements)
-        && (has_super_class || standalone_ecmascript_input)
-}
 
 pub(super) fn class_method_record_name(
     method: &MethodDefinition<'_>,
     class_name: &str,
-    class_span_start: u32,
-    class_span_end: u32,
     function_names: &mut FunctionNameAllocator<'_>,
     standalone_ecmascript_input: bool,
 ) -> Option<String> {
-    if let Some(name) =
-        function_names.class_method_name(method.value.span.start, method.value.span.end)
-    {
-        return Some(name.to_string());
-    }
-    if function_names.uses_scope_info_names() {
-        return function_names.bind_class_method(
-            (class_span_start, class_span_end),
-            method,
-            class_name,
-        );
-    }
     if standalone_ecmascript_input {
         return class_method_upstream_name(method, class_name);
     }
@@ -177,6 +56,14 @@ pub(super) fn computed_class_method_record_name(method: &MethodDefinition<'_>) -
     )
 }
 
+pub(super) fn computed_instance_class_field_key_name(property: &PropertyDefinition<'_>) -> String {
+    format!(
+        "#computed_instance_class_field_key_{}_{}#",
+        property.key.span().start,
+        property.key.span().end
+    )
+}
+
 pub(super) fn class_method_num_args(method: &MethodDefinition<'_>) -> u16 {
     method.value.params.items.len() as u16 + 3
 }
@@ -189,92 +76,43 @@ pub(super) fn method_key_name(key: &PropertyKey<'_>) -> Option<String> {
     }
 }
 
-pub(super) struct ClassPublicBuffer {
-    pub literal_array: LiteralArray,
-    compiled_methods: Vec<bool>,
-}
+pub(super) fn class_buffer_literal_array(
+    class_name: &str,
+    elements: &[ClassElement<'_>],
+    standalone_ecmascript_input: bool,
+) -> LiteralArray {
+    let mut entries = Vec::new();
+    let mut instance_method_count = 0u32;
 
-impl ClassPublicBuffer {
-    pub(super) fn build(
-        class_name: &str,
-        elements: &[ClassElement<'_>],
-        standalone_ecmascript_input: bool,
-        lowering: Option<&LoweringContext>,
-    ) -> Self {
-        let mut instance_entries = Vec::new();
-        let mut static_entries = Vec::new();
-        let mut instance_method_count = 0u32;
-        let mut compiled_methods = vec![false; elements.len()];
-        let mut instance_positions = FxHashMap::default();
-        let mut static_positions = FxHashMap::default();
+    for element in elements {
+        let ClassElement::MethodDefinition(method) = element else {
+            continue;
+        };
 
-        for (index, element) in elements.iter().enumerate() {
-            let ClassElement::MethodDefinition(method) = element else {
-                continue;
-            };
-
-            if method.kind == MethodDefinitionKind::Constructor {
-                continue;
-            }
-            if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
-                continue;
-            }
-            if method.computed || method.kind.is_accessor() {
-                break;
-            }
-
-            let Some(public_name) = method_key_name(&method.key) else {
-                continue;
-            };
-            let method_name = if let Some(name) = lowering.and_then(|lowering| {
-                lowering.function_name(method.value.span.start, method.value.span.end)
-            }) {
-                name.to_string()
-            } else if standalone_ecmascript_input {
-                class_method_upstream_name(method, class_name)
-                    .unwrap_or_else(|| public_name.clone())
-            } else {
-                public_name.clone()
-            };
-
-            let (entries, positions) = if method.r#static {
-                (&mut static_entries, &mut static_positions)
-            } else {
-                (&mut instance_entries, &mut instance_positions)
-            };
-            let buffer_pos = if let Some(pos) = positions.get(&public_name).copied() {
-                pos
-            } else {
-                let pos = entries.len();
-                positions.insert(public_name.clone(), pos);
-                if !method.r#static {
-                    instance_method_count += 1;
-                }
-                entries.push(LiteralEntry::TaggedString(public_name));
-                entries.push(LiteralEntry::TaggedNull);
-                entries.push(LiteralEntry::TaggedNull);
-                pos
-            };
-
-            entries[buffer_pos + 1] = LiteralEntry::TaggedMethodName(method_name);
-            entries[buffer_pos + 2] =
-                LiteralEntry::TaggedMethodAffiliate(method.value.params.items.len() as u16);
-            compiled_methods[index] = true;
+        if !is_class_buffer_method(method) {
+            continue;
         }
+        let Some(public_name) = method_key_name(&method.key) else {
+            continue;
+        };
+        let method_name = if standalone_ecmascript_input {
+            class_method_upstream_name(method, class_name).unwrap_or_else(|| public_name.clone())
+        } else {
+            public_name.clone()
+        };
 
-        instance_entries.extend(static_entries);
-        instance_entries.push(LiteralEntry::TaggedInteger(instance_method_count));
-        Self {
-            literal_array: LiteralArray {
-                entries: instance_entries,
-                explicit_key: None,
-            },
-            compiled_methods,
-        }
+        entries.push(LiteralEntry::TaggedString(public_name.clone()));
+        entries.push(LiteralEntry::TaggedMethodName(method_name));
+        entries.push(LiteralEntry::TaggedMethodAffiliate(
+            method.value.params.items.len() as u16,
+        ));
+        instance_method_count += 1;
     }
 
-    pub(super) fn into_parts(self) -> (LiteralArray, Vec<bool>) {
-        (self.literal_array, self.compiled_methods)
+    entries.push(LiteralEntry::TaggedInteger(instance_method_count));
+    LiteralArray {
+        entries,
+        explicit_key: None,
     }
 }
 
@@ -328,25 +166,37 @@ pub(super) fn class_private_methods_literal_array(elements: &[ClassElement<'_>])
 
 pub(super) fn static_initializer_record_name(
     class_name: &str,
-    class_span_start: u32,
-    class_span_end: u32,
     elements: &[ClassElement<'_>],
-    lowering: Option<&LoweringContext>,
 ) -> Option<String> {
-    if !class_needs_static_initializer(elements) {
-        return None;
+    let first_initializer_start = elements
+        .iter()
+        .filter_map(|element| match element {
+            ClassElement::PropertyDefinition(property)
+                if property.r#static
+                    && (property.computed || method_key_name(&property.key).is_some()) =>
+            {
+                Some(property.key.span().start)
+            }
+            ClassElement::StaticBlock(block) => Some(block.span.start),
+            _ => None,
+        })
+        .min()?;
+    Some(format!(
+        "#{class_name}_{first_initializer_start}_static_initializer#"
+    ))
+}
+
+pub(super) fn is_class_buffer_method(method: &MethodDefinition<'_>) -> bool {
+    if method.kind == MethodDefinitionKind::Constructor || method.kind.is_accessor() {
+        return false;
     }
-    if lowering.is_some_and(|lowering| {
-        lowering
-            .static_initialization_mode()
-            .inlines_in_module_main()
-    }) {
-        return None;
+    if method.r#static {
+        return false;
     }
-    lowering
-        .and_then(|lowering| lowering.static_initializer_name(class_span_start, class_span_end))
-        .map(str::to_string)
-        .or_else(|| Some(format!("#~{class_name}>#static_initializer")))
+    let Some(key) = method_key_name(&method.key) else {
+        return false;
+    };
+    !matches!(key.as_str(), "initialRender" | "rerender")
 }
 
 pub(super) fn constructor_required_param_count(elements: &[ClassElement<'_>]) -> u16 {

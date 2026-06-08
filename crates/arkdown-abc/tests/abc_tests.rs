@@ -3,7 +3,6 @@
 //! These tests exercise [`AbcCompiler`] through its public interface only,
 //! without access to crate internals.
 
-use arkdown_abc::abc_reader::AbcLiteralEntry;
 use arkdown_abc::cache::{source_cache_hash, ProgramCacheFile};
 use arkdown_abc::emit::file::version_for_target_api;
 use arkdown_abc::proto_panda::scalar_value;
@@ -24,7 +23,6 @@ fn make_compiler() -> AbcCompiler {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -45,28 +43,8 @@ fn make_debug_compiler() -> AbcCompiler {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: false,
-        module_record_field_name: None,
-        npm_entries: None,
-        dependency_context: None,
-        remove_redundant_file: false,
-        dump_deps_info: false,
-    })
-}
-
-fn make_api20_module_compiler() -> AbcCompiler {
-    AbcCompiler::new(AbcCompileOptions {
-        debug_info: false,
-        opt_level: 0,
-        optimize_try_catch_func: true,
-        target_api_version: 20,
-        target_api_sub_version: None,
-        enable_annotations: false,
-        use_define_semantic: true,
-        merge_abc: true,
-        module: true,
         module_record_field_name: None,
         npm_entries: None,
         dependency_context: None,
@@ -85,19 +63,6 @@ fn iife_module(record_name: &str, source: &str) -> AbcModule {
         is_commonjs: false,
         is_shared_module: false,
         origin_source_lang: String::new(),
-    }
-}
-
-fn ets_module(record_name: &str, source: &str) -> AbcModule {
-    AbcModule {
-        record_name: record_name.to_string(),
-        source: source.to_string(),
-        source_map: None,
-        source_file: Some(format!("{record_name}.ts")),
-        package_name: None,
-        is_commonjs: false,
-        is_shared_module: false,
-        origin_source_lang: "ets".to_string(),
     }
 }
 
@@ -152,30 +117,6 @@ fn lnp_body_end(bytes: &[u8], start: usize) -> usize {
         }
     }
     pos
-}
-
-fn assert_lnp_index_at_file_tail(bytes: &[u8], expected_count: u32) -> Vec<u32> {
-    AbcReader::validate(bytes).expect("ABC reader must accept fixture");
-    let num_lnp = read_u32(bytes, 0x24);
-    let lnp_idx_off = read_u32(bytes, 0x28) as usize;
-    assert_eq!(num_lnp, expected_count, "LNP count");
-    assert!(lnp_idx_off > 0, "LNP index offset must be present");
-    assert_eq!(
-        lnp_idx_off + num_lnp as usize * 4,
-        bytes.len(),
-        "LNP index must be the file tail"
-    );
-    let offsets = (0..num_lnp as usize)
-        .map(|idx| read_u32(bytes, lnp_idx_off + idx * 4))
-        .collect::<Vec<_>>();
-    for &offset in &offsets {
-        let offset = offset as usize;
-        assert!(offset < lnp_idx_off, "LNP body must precede LNP index");
-        let end = lnp_body_end(bytes, offset);
-        assert!(end <= lnp_idx_off, "LNP body must stay before LNP index");
-        assert_eq!(bytes[end - 1], 0x00, "LNP terminates with END_SEQUENCE");
-    }
-    offsets
 }
 
 fn class_offsets(bytes: &[u8]) -> Vec<u32> {
@@ -454,7 +395,7 @@ fn bytecode_insn_len(bytecode: &[u8], pos: usize, opcode: u8) -> usize {
         0x4e | 0x50 | 0x9b => 3,
         0x98 | 0x9a | 0x9c => 5,
         0x3f | 0x40 | 0x42 => 4,
-        0x43 | 0x7a | 0x8e | 0xbc | 0xdb | 0xdc => 5,
+        0x43 | 0x8e | 0xbc | 0xdb | 0xdc => 5,
         0x31 | 0x32 | 0x73 | 0x78 | 0x99 | 0xba => 4,
         0x62 => 5,
         0x79 => 5,
@@ -486,17 +427,6 @@ fn bytecode_contains_opcode(bytecode: &[u8], target: u8) -> bool {
         pos += bytecode_insn_len(bytecode, pos, opcode);
     }
     false
-}
-
-fn bytecode_first_opcode_pos(bytecode: &[u8], target: u8) -> Option<usize> {
-    let mut pos = 0usize;
-    while let Some(&opcode) = bytecode.get(pos) {
-        if opcode == target {
-            return Some(pos);
-        }
-        pos += bytecode_insn_len(bytecode, pos, opcode);
-    }
-    None
 }
 
 fn bytecode_contains_any_opcode(bytecode: &[u8], targets: &[u8]) -> bool {
@@ -532,17 +462,6 @@ fn bytecode_opcode_count(bytecode: &[u8], target: u8) -> usize {
         pos += bytecode_insn_len(bytecode, pos, opcode);
     }
     count
-}
-
-fn bytecode_contains_throw_undefined_if_hole(bytecode: &[u8]) -> bool {
-    let mut pos = 0usize;
-    while let Some(&opcode) = bytecode.get(pos) {
-        if opcode == 0xfe && bytecode.get(pos + 1) == Some(&0x09) {
-            return true;
-        }
-        pos += bytecode_insn_len(bytecode, pos, opcode);
-    }
-    false
 }
 
 fn first_opcode_position(bytecode: &[u8], target: u8) -> Option<usize> {
@@ -751,8 +670,7 @@ export { Index as default };"#,
     let user_off = class_offsets(&bytes)
         .into_iter()
         .find(|off| {
-            (*off as usize) < bytes.len()
-                && class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
         })
         .expect("user record exists") as usize;
     let fields = user_field_values(&bytes, user_off);
@@ -823,80 +741,6 @@ class B { constructor() { this.b = 2; } }"#,
     assert_eq!(
         defineclass_ctor_offsets, constructor_offsets,
         "defineclasswithbuffer must reference the matching constructor MethodItem offsets"
-    );
-}
-
-#[test]
-fn test_iife_class_defineclass_uses_nested_constructor_method_index() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let out = tmp.path().join("iife-defineclass-ctor.abc");
-    AbcCompiler::new(AbcCompileOptions {
-        debug_info: false,
-        opt_level: 0,
-        optimize_try_catch_func: true,
-        target_api_version: 12,
-        target_api_sub_version: None,
-        enable_annotations: false,
-        use_define_semantic: false,
-        merge_abc: true,
-        module: false,
-        module_record_field_name: None,
-        npm_entries: None,
-        dependency_context: None,
-        remove_redundant_file: false,
-        dump_deps_info: false,
-    })
-    .compile(
-        vec![iife_module(
-            "com.example.app/entry/ets/entryability/EntryAbility",
-            "(function(){ var EntryAbility = class {}; })();",
-        )],
-        &out,
-    )
-    .expect("compile must succeed");
-
-    let bytes = std::fs::read(&out).expect("read .abc");
-    let idx_section_off = read_u32(&bytes, 0x38) as usize;
-    let method_index_off = read_u32(&bytes, idx_section_off + 20) as usize;
-    let user_class_off = class_offsets(&bytes)
-        .into_iter()
-        .find(|off| {
-            class_name_at(&bytes, *off as usize)
-                == "Lcom.example.app/entry/ets/entryability/EntryAbility;"
-        })
-        .expect("user class exists") as usize;
-    let methods = class_method_items(&bytes, user_class_off);
-    let method_offsets: Vec<u32> = methods.iter().map(|(off, _, _)| *off as u32).collect();
-    let constructor_off = methods
-        .iter()
-        .find_map(|(off, name, _)| (name == "EntryAbility").then_some(*off as u32))
-        .expect("nested IIFE class constructor MethodItem exists");
-
-    let defineclass_targets: Vec<u32> = methods
-        .iter()
-        .filter_map(|(_, _, code)| code.map(|code| code_item_bytecode(&bytes, code as usize)))
-        .flat_map(|bytecode| {
-            bytecode
-                .windows(9)
-                .filter_map(|window| {
-                    (window[0] == 0x35).then(|| {
-                        let ctor_index = read_u16(window, 2) as usize;
-                        read_u32(&bytes, method_index_off + ctor_index * 4)
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    assert!(
-        defineclass_targets.contains(&constructor_off),
-        "nested IIFE defineclasswithbuffer must reference the generated constructor MethodItem"
-    );
-    assert!(
-        defineclass_targets
-            .iter()
-            .all(|target| method_offsets.contains(target)),
-        "nested IIFE defineclass targets must resolve to MethodItem offsets, got {defineclass_targets:?}"
     );
 }
 
@@ -1223,6 +1067,8 @@ fn test_static_class_method_define_method_uses_method_index() {
         .expect("compile must succeed");
 
     let bytes = std::fs::read(&out).expect("read .abc");
+    let idx_section_off = read_u32(&bytes, 0x38) as usize;
+    let method_index_off = read_u32(&bytes, idx_section_off + 20) as usize;
     let user_class_off = class_offsets(&bytes)
         .into_iter()
         .find(|off| {
@@ -1230,9 +1076,9 @@ fn test_static_class_method_define_method_uses_method_index() {
         })
         .expect("user class exists") as usize;
     let methods = class_method_items(&bytes, user_class_off);
-    let debug_method = methods
+    let debug_method_off = methods
         .iter()
-        .find(|(_, name, _)| name == "debug" || name.ends_with("<#debug"))
+        .find_map(|(off, name, _)| (name == "debug").then_some(*off as u32))
         .expect("static debug method exists");
     let (_, _, func_main_code) = methods
         .iter()
@@ -1242,10 +1088,19 @@ fn test_static_class_method_define_method_uses_method_index() {
         &bytes,
         func_main_code.expect("func_main_0 has code") as usize,
     );
-    assert!(debug_method.2.is_some(), "static debug method has code");
+    let define_method_targets: Vec<u32> = bytecode
+        .windows(5)
+        .filter_map(|window| {
+            (window[0] == 0x34).then(|| {
+                let method_index = read_u16(window, 2) as usize;
+                read_u32(&bytes, method_index_off + method_index * 4)
+            })
+        })
+        .collect();
+
     assert!(
-        !bytecode_contains_opcode(bytecode, 0x34),
-        "public static methods are emitted through defineclasswithbuffer's literal buffer, not missing-properties definemethod"
+        define_method_targets.contains(&debug_method_off),
+        "definemethod must reference the static method's MethodItem offset"
     );
 }
 
@@ -1303,153 +1158,6 @@ export { foo };"#,
 }
 
 #[test]
-fn test_api20_function_declaration_definefunc_uses_scope_info_method_index() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let out = tmp.path().join("api20-function-decl.abc");
-    AbcCompiler::new(AbcCompileOptions {
-        debug_info: true,
-        opt_level: 0,
-        optimize_try_catch_func: true,
-        target_api_version: 20,
-        target_api_sub_version: Some("beta".to_string()),
-        enable_annotations: true,
-        use_define_semantic: false,
-        merge_abc: true,
-        module: true,
-        module_record_field_name: None,
-        npm_entries: None,
-        dependency_context: None,
-        remove_redundant_file: false,
-        dump_deps_info: false,
-    })
-    .compile(
-        vec![module_record(
-            "com.example.app/entry/ets/pages/Index",
-            r#"export function error(code: number): number { return code; }"#,
-        )],
-        &out,
-    )
-    .expect("compile must succeed");
-
-    let bytes = std::fs::read(&out).expect("read .abc");
-    let idx_section_off = read_u32(&bytes, 0x38) as usize;
-    let method_index_off = read_u32(&bytes, idx_section_off + 20) as usize;
-    let user_class_off = class_offsets(&bytes)
-        .into_iter()
-        .find(|off| {
-            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
-        })
-        .expect("user class exists") as usize;
-    let methods = class_method_items(&bytes, user_class_off);
-    let method_offsets: Vec<u32> = methods.iter().map(|(off, _, _)| *off as u32).collect();
-    let error_method_off = methods
-        .iter()
-        .find_map(|(off, name, _)| (name == "#*#error").then_some(*off as u32))
-        .expect("scope-info function declaration method exists");
-    let (_, _, func_main_code) = methods
-        .iter()
-        .find(|(_, name, _)| name == "func_main_0")
-        .expect("func_main_0 exists");
-    let bytecode = code_item_bytecode(
-        &bytes,
-        func_main_code.expect("func_main_0 has code") as usize,
-    );
-    let definefunc_targets: Vec<u32> = bytecode
-        .windows(5)
-        .filter_map(|window| {
-            (window[0] == 0x33).then(|| {
-                let method_index = read_u16(window, 2) as usize;
-                read_u32(&bytes, method_index_off + method_index * 4)
-            })
-        })
-        .collect();
-
-    assert!(
-        definefunc_targets.contains(&error_method_off),
-        "API20 definefunc must reference the scoped function declaration MethodItem offset"
-    );
-    assert!(
-        definefunc_targets
-            .iter()
-            .all(|target| method_offsets.contains(target)),
-        "API20 definefunc targets must resolve to MethodItem offsets, got {definefunc_targets:?}"
-    );
-}
-
-#[test]
-fn test_api20_builder_function_bind_call_uses_scope_info_method_index() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let out = tmp.path().join("api20-builder-bind.abc");
-    module_compiler_for_target(20, None)
-        .compile(
-            vec![module_record_with_source_file(
-                "phone|discover|1.0.0|src/main/ets/components/FeedFlowItem",
-                r#"interface FeedFlowItem_Params {
-    feedItem?: unknown;
-}
-
-export class FeedFlowItem extends ViewPU {
-    initialRender() {
-        ViewsCountLabel.bind(this)(1);
-    }
-}
-
-function ViewsCountLabel(viewsCount: number, parent = null) {
-    return viewsCount;
-}"#,
-                "phone|discover|1.0.0|src/main/ets/components/FeedFlowItem.ts",
-            )],
-            &out,
-        )
-        .expect("API20 transformed @Builder function must compile");
-
-    let bytes = std::fs::read(&out).expect("read .abc");
-    let idx_section_off = read_u32(&bytes, 0x38) as usize;
-    let method_index_off = read_u32(&bytes, idx_section_off + 20) as usize;
-    let user_class_off = class_offsets(&bytes)
-        .into_iter()
-        .find(|off| {
-            class_name_at(&bytes, *off as usize)
-                == "Lphone|discover|1.0.0|src/main/ets/components/FeedFlowItem;"
-        })
-        .expect("user class exists") as usize;
-    let methods = class_method_items(&bytes, user_class_off);
-    let method_offsets: Vec<u32> = methods.iter().map(|(off, _, _)| *off as u32).collect();
-    let builder_method_off = methods
-        .iter()
-        .find_map(|(off, name, _)| (name == "#*#ViewsCountLabel").then_some(*off as u32))
-        .expect("scope-info builder function method exists");
-    let (_, _, func_main_code) = methods
-        .iter()
-        .find(|(_, name, _)| name == "func_main_0")
-        .expect("func_main_0 exists");
-    let bytecode = code_item_bytecode(
-        &bytes,
-        func_main_code.expect("func_main_0 has code") as usize,
-    );
-    let definefunc_targets: Vec<u32> = bytecode
-        .windows(5)
-        .filter_map(|window| {
-            (window[0] == 0x33).then(|| {
-                let method_index = read_u16(window, 2) as usize;
-                read_u32(&bytes, method_index_off + method_index * 4)
-            })
-        })
-        .collect();
-
-    assert!(
-        definefunc_targets.contains(&builder_method_off),
-        "API20 builder function definefunc must reference the scoped MethodItem offset"
-    );
-    assert!(
-        definefunc_targets
-            .iter()
-            .all(|target| method_offsets.contains(target)),
-        "API20 builder function definefunc targets must resolve to MethodItem offsets, got {definefunc_targets:?}"
-    );
-}
-
-#[test]
 fn test_arrow_variable_definefunc_uses_inferred_name_method_index() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("arrow-var.abc");
@@ -1503,43 +1211,6 @@ export { genRanHex };"#,
 }
 
 #[test]
-fn test_exported_arrow_writes_captured_module_lexical_binding() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let out = tmp.path().join("arrow-writes-module-lexical.abc");
-    let record_name = "test/arrow_writes_module_lexical";
-    module_compiler_for_target(18, None)
-        .compile(
-            vec![module_record(
-                record_name,
-                r#"
-let expressionsPlugin = null;
-export const setExpressionsPlugin = (value) => { expressionsPlugin = value; };
-setExpressionsPlugin(1);
-"#,
-            )],
-            &out,
-        )
-        .expect("compile must succeed");
-
-    let bytes = std::fs::read(&out).expect("read .abc");
-    let main = module_func_main_bytecode(&bytes, record_name);
-    assert!(
-        bytecode_contains_opcode(&main, 0x09),
-        "captured top-level lexical write must allocate the module lexenv"
-    );
-    let (_, arrow) = module_method_bytecode_by_suffix(&bytes, record_name, "setExpressionsPlugin")
-        .expect("exported arrow method exists");
-    assert!(
-        bytecode_contains_opcode(&arrow, 0x3d) || bytecode_contains_opcode(&arrow, 0x8b),
-        "arrow assignment to top-level let must store through stlexvar"
-    );
-    assert!(
-        !bytecode_contains_opcode(&arrow, 0x40),
-        "arrow assignment to top-level let must not fall back to trystglobalbyname"
-    );
-}
-
-#[test]
 fn test_user_records_are_marked_arkts_and_npm_entries_have_native_fields() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("records.abc");
@@ -1552,7 +1223,6 @@ fn test_user_records_are_marked_arkts_and_npm_entries_have_native_fields() {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -1700,7 +1370,7 @@ fn test_module_record_scope_names_and_class_buffer_literals_are_linked() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = tmp.path().join("module-record.abc");
     // Uses ESM format — IIFE/CJS unwrapping is removed from the compiler.
-    module_compiler_for_target(20, None)
+    module_compiler()
         .compile(
             vec![module_record(
                 "com.example.app/entry/ets/pages/Index",
@@ -1712,30 +1382,23 @@ export { Index as default };"#,
         )
         .expect("compile must succeed");
     let bytes = std::fs::read(&out).expect("read .abc");
-    let reader = AbcReader::new(&bytes).expect("abc reader");
-    let literal_offsets = reader
-        .literal_array_offsets()
-        .expect("literal array offsets");
+
+    let num_literalarrays = read_u32(&bytes, 0x2c) as usize;
+    let literalarray_idx_off = read_u32(&bytes, 0x30) as usize;
     assert!(
-        literal_offsets.len() >= 3,
+        num_literalarrays >= 3,
         "class buffer, module record, and scopeNames literal arrays are emitted"
     );
+    let literal_offsets: Vec<u32> = (0..num_literalarrays)
+        .map(|idx| read_u32(&bytes, literalarray_idx_off + idx * 4))
+        .collect();
 
     let user_off = class_offsets(&bytes)
         .into_iter()
         .find(|off| {
-            (*off as usize) < bytes.len()
-                && class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
+            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
         })
         .expect("user record exists") as usize;
-    let method_names = class_method_items(&bytes, user_off)
-        .into_iter()
-        .map(|(_, name, _)| name)
-        .collect::<Vec<_>>();
-    assert!(
-        method_names.contains(&"#~@0>#onCreate".to_string()),
-        "API20 module class methods must use upstream scope-info names; got {method_names:?}"
-    );
     let fields = user_field_values(&bytes, user_off);
     let module_record = *fields
         .get("moduleRecordIdx")
@@ -1743,8 +1406,6 @@ export { Index as default };"#,
     let scope_names = *fields
         .get("scopeNames")
         .expect("scopeNames field has a literal-array value");
-    assert!((module_record as usize) < bytes.len());
-    assert!((scope_names as usize) < bytes.len());
     assert!(literal_offsets.contains(&module_record));
     assert!(literal_offsets.contains(&scope_names));
 
@@ -1775,107 +1436,37 @@ export { Index as default };"#,
     assert_eq!(inline_string_at(&bytes, local_name), "UIAbility");
     assert_eq!(inline_string_at(&bytes, import_name), "default");
 
-    let scope_names_item = reader
-        .read_literal_array_item(scope_names)
-        .expect("scopeNames literal array");
-    let scope_values = scope_names_item
-        .entries
-        .iter()
-        .filter_map(|entry| match entry {
-            AbcLiteralEntry::String { value, .. } => Some(value.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        scope_names_item.raw_item_count, 2,
-        "API20 scopeNames stores one tagged string for compressed class scope"
+    let mut scope_pos = scope_names as usize;
+    let scope_item_count = read_u32(&bytes, scope_pos);
+    scope_pos += 4;
+    // hvigor format: scopeNames contains (class_name, method_with_closures)
+    // pairs — two tagged strings per class method that has call-arg arrow
+    // functions.  For a source without any call-arg closures the array is
+    // empty (item_count == 0).  Either way the item count must be even.
+    assert!(
+        scope_item_count % 2 == 0,
+        "scopeNames item count must be even, got {scope_item_count}"
     );
-    assert_eq!(scope_values, vec!["Index"]);
+    if scope_item_count > 0 {
+        assert_eq!(
+            bytes[scope_pos], 0x05,
+            "non-empty scopeNames entries are tagged strings"
+        );
+    }
 
     let has_class_method_buffer = literal_offsets.iter().any(|offset| {
-        reader.read_literal_array_item(*offset).is_ok_and(|item| {
-            let has_public_name = item.entries.iter().any(|entry| {
-                    matches!(entry, AbcLiteralEntry::String { value, .. } if value == "onCreate")
-                });
-            let has_internal_method = item.entries.iter().any(|entry| {
-                matches!(
-                    entry,
-                    AbcLiteralEntry::Method {
-                        name: Some(name),
-                        ..
-                    } if name == "#~@0>#onCreate"
-                )
-            });
-            has_public_name && has_internal_method
-        })
+        let offset = *offset as usize;
+        read_u32(&bytes, offset) == 8
+            && bytes[offset + 4] == 0x05
+            && inline_string_at(&bytes, read_u32(&bytes, offset + 5) as usize) == "onCreate"
+            && bytes[offset + 9] == 0x06
+            && bytes[offset + 14] == 0x09
+            && bytes[offset + 17] == 0x02
+            && read_u32(&bytes, offset + 18) == 1
     });
     assert!(
         has_class_method_buffer,
-        "class buffer literal array links instance methods by upstream internal MethodItem name"
-    );
-}
-
-#[test]
-fn test_api20_scope_info_names_follow_upstream_optimization() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let out = tmp.path().join("scope-info-names.abc");
-    module_compiler_for_target(20, None)
-        .compile(
-            vec![module_record(
-                "com.example.app/entry/ets/pages/Index",
-                r#"
-class A { constructor() {} foo() {} }
-class AA { test() { let cb = () => this.a; return cb; } }
-export { A, AA };"#,
-            )],
-            &out,
-        )
-        .expect("compile must succeed");
-    let bytes = std::fs::read(&out).expect("read .abc");
-    let reader = AbcReader::new(&bytes).expect("abc reader");
-
-    let user_off = class_offsets(&bytes)
-        .into_iter()
-        .find(|off| {
-            class_name_at(&bytes, *off as usize) == "Lcom.example.app/entry/ets/pages/Index;"
-        })
-        .expect("user record exists") as usize;
-    let method_names = class_method_items(&bytes, user_off)
-        .into_iter()
-        .map(|(_, name, _)| name)
-        .collect::<Vec<_>>();
-
-    assert!(
-        method_names.contains(&"#~A=#A".to_string()),
-        "short class names are not index-compressed by upstream OptimizeSelfScopeName; got {method_names:?}"
-    );
-    assert!(method_names.contains(&"#~A>#foo".to_string()));
-    assert!(method_names.contains(&"#~AA>#test".to_string()));
-    assert!(method_names.contains(&"#~AA>@0*#cb".to_string()));
-    assert!(
-        !method_names
-            .iter()
-            .any(|name| name.starts_with("#~@0>#test")),
-        "method record final self name must stay raw; only descendant full scope uses @ index"
-    );
-
-    let scope_names = *user_field_values(&bytes, user_off)
-        .get("scopeNames")
-        .expect("scopeNames field has a literal-array value");
-    let scope_values = reader
-        .read_literal_array_item(scope_names)
-        .expect("scopeNames literal array")
-        .entries
-        .into_iter()
-        .filter_map(|entry| match entry {
-            AbcLiteralEntry::String { value, .. } => Some(value),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        scope_values,
-        vec!["test".to_string()],
-        "scopeNames must contain only names that upstream compressed to @ indexes"
+        "class buffer literal array links instance methods by MethodItem offset"
     );
 }
 
@@ -2465,43 +2056,6 @@ const ready = Status.ready;"#,
 }
 
 #[test]
-fn test_ts_enum_namespace_export_list_initializes_without_module_tdz() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("ts_enum_namespace_export_list.abc");
-    let record_name = "test/ts_enum_namespace_export_list";
-    module_compiler()
-        .compile(
-            vec![module_record(
-                record_name,
-                r#"enum FieldType {
-  Boolean = 1,
-  Unknown = 14
-}
-
-namespace FieldTypeNamespace {
-  export function getFieldType(type: string): FieldType {
-    const fieldType = (FieldType as any)[type];
-    if (!fieldType) {
-      return FieldType.Unknown;
-    }
-    return fieldType;
-  }
-}
-
-export { FieldType, FieldTypeNamespace };"#,
-            )],
-            &out,
-        )
-        .expect("TS enum merged with namespace and export list must compile");
-    let bytes = std::fs::read(&out).unwrap();
-    let bytecode = module_func_main_bytecode(&bytes, record_name);
-    assert!(
-        !bytecode_contains_throw_undefined_if_hole(&bytecode),
-        "upstream TS enum transform initializes the var binding before the enum IIFE and must not hit module TDZ in func_main_0"
-    );
-}
-
-#[test]
 fn test_exported_variable_declaration_writes_module_variable() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("exported_var_bytecode.abc");
@@ -2687,8 +2241,7 @@ fn test_commonjs_ts_export_assignment_lowers_to_module_exports() {
         )
         .expect("CommonJS TS export assignment must lower through TypeScript transform");
     let bytes = std::fs::read(&out).unwrap();
-    let (_, bytecode) = module_method_bytecode_by_suffix(&bytes, record_name, "#*#")
-        .expect("CommonJS wrapper method must contain transformed module.exports store");
+    let bytecode = module_func_main_bytecode(&bytes, record_name);
     assert!(
         bytecode_contains_opcode(&bytecode, 0x43),
         "export = must lower to module.exports property store"
@@ -2696,207 +2249,6 @@ fn test_commonjs_ts_export_assignment_lowers_to_module_exports() {
     assert!(
         bytes_contain_ascii(&bytes, "module") && bytes_contain_ascii(&bytes, "exports"),
         "transformed module.exports names must be present in ABC strings"
-    );
-}
-
-#[test]
-fn test_commonjs_source_uses_upstream_wrapper_entry() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("protobufjs_index_cjs.abc");
-    let record_name = "phone|protobufjs|7.2.4|index.js";
-    module_compiler()
-        .compile(
-            vec![commonjs_module_record(
-                record_name,
-                r#"module.exports = require("./src/index");"#,
-            )],
-            &out,
-        )
-        .expect("CommonJS entry shim must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let class_name = format!("L{record_name};");
-    let class_off = class_offsets(&bytes)
-        .into_iter()
-        .map(|off| off as usize)
-        .find(|&off| class_name_at(&bytes, off) == class_name)
-        .expect("module class must exist");
-    let methods = class_method_items(&bytes, class_off);
-    let main_code = methods
-        .iter()
-        .find(|(_, name, _)| name == "func_main_0")
-        .and_then(|(_, _, code)| *code)
-        .expect("func_main_0 must have code") as usize;
-    let wrapper_code = methods
-        .iter()
-        .find(|(_, name, _)| name == "#*#")
-        .and_then(|(_, _, code)| *code)
-        .expect("CommonJS wrapper must have code") as usize;
-
-    let (_, main_args, _, _) = code_item_header(&bytes, main_code);
-    let (_, wrapper_args, _, _) = code_item_header(&bytes, wrapper_code);
-    assert_eq!(main_args, 8, "CommonJS func_main_0 uses 8 upstream args");
-    assert_eq!(
-        wrapper_args, 8,
-        "CommonJS wrapper has 5 user params + 3 mandatory args"
-    );
-
-    let main = code_item_bytecode(&bytes, main_code);
-    assert!(
-        bytecode_contains_opcode(main, 0x3f)
-            && bytecode_contains_opcode(main, 0x42)
-            && bytecode_contains_opcode(main, 0x33)
-            && bytecode_contains_opcode(main, 0x05)
-            && bytecode_contains_opcode(main, 0x79)
-            && bytecode_contains_opcode(main, 0x30),
-        "func_main_0 must mirror es2panda's Reflect.apply CommonJS entry"
-    );
-
-    let wrapper = code_item_bytecode(&bytes, wrapper_code);
-    assert!(
-        bytecode_contains_opcode(wrapper, 0x2a) && bytecode_contains_opcode(wrapper, 0x43),
-        "require(\"./src/index\") call and module.exports store run inside the CommonJS wrapper"
-    );
-    assert!(
-        !bytecode_contains_opcode(wrapper, 0x3f),
-        "CommonJS require string specifiers must be call arguments, not global lookups"
-    );
-    assert!(
-        bytes_contain_ascii(&bytes, "Reflect")
-            && bytes_contain_ascii(&bytes, "apply")
-            && bytes_contain_ascii(&bytes, "#*#"),
-        "CommonJS wrapper entry names must be emitted"
-    );
-}
-
-#[test]
-fn test_commonjs_module_exports_identifier_stays_runtime_property_store() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("cjs_module_exports_identifier.abc");
-    let record_name = "phone|protobufjs|7.2.4|src/writer.js";
-    module_compiler()
-        .compile(
-            vec![commonjs_module_record(
-                record_name,
-                r#""use strict";
-module.exports = Writer;
-
-var util = require("./util/minimal");
-
-function Writer() {
-  this.util = util;
-}
-"#,
-            )],
-            &out,
-        )
-        .expect("CommonJS module.exports identifier assignment must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let (_, wrapper) = module_method_bytecode_by_suffix(&bytes, record_name, "#*#")
-        .expect("CommonJS wrapper method must exist");
-
-    assert!(
-        bytecode_contains_opcode(&wrapper, 0x2a) && bytecode_contains_opcode(&wrapper, 0x43),
-        "CommonJS require and module.exports must remain runtime calls/property stores"
-    );
-    assert!(
-        !bytecode_contains_opcode(&wrapper, 0x7c)
-            && !bytecode_contains_opcode(&wrapper, 0x7d)
-            && !bytecode_contains_opcode(&wrapper, 0x7e),
-        "CommonJS wrapper must not access ESM module-variable slots"
-    );
-    assert!(
-        bytes_contain_ascii(&bytes, "./util/minimal")
-            && bytes_contain_ascii(&bytes, "module")
-            && bytes_contain_ascii(&bytes, "exports"),
-        "CommonJS runtime names must remain in the bytecode string table"
-    );
-}
-
-#[test]
-fn test_commonjs_wrapper_captures_require_for_nested_functions() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("cjs_nested_require.abc");
-    let record_name = "pkg/cjs_nested_require";
-    module_compiler()
-        .compile(
-            vec![commonjs_module_record(
-                record_name,
-                r#"function load(name) {
-    return require(name);
-}
-module.exports = load;
-"#,
-            )],
-            &out,
-        )
-        .expect("nested CommonJS require capture must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let (_, wrapper) = module_method_bytecode_by_suffix(&bytes, record_name, "#*#")
-        .expect("CommonJS wrapper method must exist");
-    let (_, load) = module_method_bytecode_by_suffix(&bytes, record_name, "load")
-        .expect("nested function method must exist");
-
-    assert!(
-        bytecode_contains_opcode(&wrapper, 0x09) && bytecode_contains_opcode(&wrapper, 0x3d),
-        "captured CommonJS params must be stored in the wrapper lexical env"
-    );
-    assert!(
-        bytecode_contains_opcode(&load, 0x3c),
-        "nested function must load captured require from the wrapper lexical env"
-    );
-    assert!(
-        !bytecode_contains_opcode(&load, 0x3f),
-        "nested CommonJS require must not fall back to global lookup"
-    );
-}
-
-#[test]
-fn test_commonjs_captured_var_binding_loads_without_tdz_throw() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("cjs_captured_var_no_tdz.abc");
-    let record_name = "pkg/cjs_captured_var_no_tdz";
-    module_compiler()
-        .compile(
-            vec![commonjs_module_record(
-                record_name,
-                r#"function clone(configObject) {
-  function BigNumber(value) {
-    if (configObject) {
-      return value > MAX_EXP;
-    }
-    return MAX_EXP;
-  }
-
-  var MAX_EXP = 100;
-  return BigNumber;
-}
-module.exports = clone(true);
-"#,
-            )],
-            &out,
-        )
-        .expect("captured var CommonJS closure must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let (_, clone) = module_method_bytecode_by_suffix(&bytes, record_name, "clone")
-        .expect("clone method must exist");
-    let (_, big_number) = module_method_bytecode_by_suffix(&bytes, record_name, "BigNumber")
-        .expect("nested BigNumber method must exist");
-
-    assert!(
-        bytecode_contains_opcode(&clone, 0x09) && bytecode_contains_opcode(&clone, 0x3d),
-        "captured var bindings must be stored in clone's lexical env"
-    );
-    assert!(
-        bytecode_contains_opcode(&big_number, 0x3c),
-        "nested function must load captured var from clone's lexical env"
-    );
-    assert!(
-        !bytecode_contains_throw_undefined_if_hole(&big_number),
-        "captured var loads are upstream-style non-TDZ lexical reads"
     );
 }
 
@@ -3222,7 +2574,6 @@ fn test_artifact_api_version_propagated() {
         target_api_version: 9,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -3264,7 +2615,6 @@ fn test_artifact_debug_info_true() {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,
@@ -3477,7 +2827,6 @@ fn test_api18_standalone_explicit_constructor_matches_upstream_lnp_layout() {
         target_api_version: 18,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -3506,7 +2855,18 @@ fn test_api18_standalone_explicit_constructor_matches_upstream_lnp_layout() {
         .expect("compile explicit constructor fixture");
 
     let bytes = std::fs::read(&out).expect("read .abc");
-    assert_lnp_index_at_file_tail(&bytes, 3);
+    assert_eq!(bytes.len(), 980, "API18 standalone fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x3c8, "LNP index offset");
+    assert_eq!(
+        &bytes[0x3a4..0x3d4],
+        &[
+            0x0b, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x0b, 0x01, 0x02, 0x10, 0x65, 0x00, 0x08,
+            0x00, 0x03, 0x00, 0x10, 0x77, 0x01, 0x0b, 0x01, 0x11, 0x01, 0x02, 0x10, 0x00, 0x05,
+            0x00, 0x04, 0x00, 0x12, 0x0d, 0x79, 0x02, 0x00, 0xa4, 0x03, 0x00, 0x00, 0xab, 0x03,
+            0x00, 0x00, 0xb8, 0x03, 0x00, 0x00,
+        ],
+        "LNP/DebugInfo section matches upstream es2abc for the fixture"
+    );
 }
 
 #[test]
@@ -3520,7 +2880,6 @@ fn test_api18_standalone_lexical_arrow_matches_upstream_abc_tail_layout() {
         target_api_version: 18,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -3549,7 +2908,29 @@ fn test_api18_standalone_lexical_arrow_matches_upstream_abc_tail_layout() {
         .expect("compile lexical arrow fixture");
 
     let bytes = std::fs::read(&out).expect("read .abc");
-    assert_lnp_index_at_file_tail(&bytes, 6);
+    assert_eq!(bytes.len(), 2048, "API18 lexical fixture size");
+    assert_eq!(read_u32(&bytes, 0x28), 0x7e8, "LNP index offset");
+    assert_eq!(
+        bytes[0x770], 0x00,
+        "standalone lexenv catch-all handler code_size matches upstream"
+    );
+    assert_eq!(
+        &bytes[0x771..0x800],
+        &[
+            0x0b, 0x01, 0x02, 0x10, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x03, 0x00, 0x06,
+            0x27, 0x00, 0x06, 0x00, 0x03, 0x00, 0x0a, 0x79, 0x00, 0x0b, 0xaf, 0x7e, 0x01, 0x12,
+            0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x02, 0x00, 0x10, 0x02, 0xff, 0xff, 0xff,
+            0xff, 0x0f, 0x00, 0x04, 0x00, 0x06, 0x1e, 0x10, 0x01, 0x0b, 0x01, 0x02, 0x10, 0x7f,
+            0x01, 0x12, 0x00, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x04, 0x00, 0x06, 0x13, 0x10,
+            0x01, 0x0b, 0x6b, 0x2f, 0x01, 0x11, 0x00, 0x09, 0x00, 0x02, 0x00, 0x10, 0x03, 0x0b,
+            0x01, 0x11, 0x6b, 0xfe, 0xaa, 0x00, 0x13, 0x00, 0x02, 0x00, 0x15, 0x04, 0x0b, 0x01,
+            0x11, 0x2f, 0xfe, 0xaa, 0x00, 0x1e, 0x00, 0x02, 0x00, 0x15, 0x05, 0x05, 0x00, 0x03,
+            0x00, 0x24, 0x7a, 0x00, 0x00, 0x00, 0x00, 0x71, 0x07, 0x00, 0x00, 0xa4, 0x07, 0x00,
+            0x00, 0x88, 0x07, 0x00, 0x00, 0xb8, 0x07, 0x00, 0x00, 0xc4, 0x07, 0x00, 0x00, 0xd1,
+            0x07, 0x00, 0x00,
+        ],
+        "DebugInfo/LNP tail matches upstream es2abc for lexical fixture"
+    );
 }
 
 #[test]
@@ -3615,7 +2996,6 @@ fn test_non_merge_module_record_field_name_option_matches_upstream() {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: false,
         module: true,
         module_record_field_name: Some("customModuleRecord".to_string()),
@@ -3768,7 +3148,6 @@ fn program_cache_hit_restores_program_and_skips_source_compile() {
         "",
         "",
         version_for_target_api(12, None),
-        12,
     );
     ProgramCacheFile::write(&cache_file, invalid_source_hash, entry.program).unwrap();
 
@@ -3902,7 +3281,6 @@ fn module_debug_compiler() -> AbcCompiler {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -3924,7 +3302,6 @@ fn module_compiler_for_target(
         target_api_version,
         target_api_sub_version: target_api_sub_version.map(str::to_string),
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -3943,7 +3320,6 @@ fn module_compiler_with_annotations() -> AbcCompiler {
         target_api_version: 20,
         target_api_sub_version: None,
         enable_annotations: true,
-        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -4779,39 +4155,6 @@ with (obj) { value = 2; }"#,
     );
 }
 
-#[test]
-fn test_commonjs_direct_eval_optional_require_matches_upstream_es2abc() {
-    // API20 upstream es2abc compiles @protobufjs/inquire's optional-require
-    // probe as plain CommonJS bytecode. It is not a compile-time hard error;
-    // if `eval` or Node `require` is unavailable at runtime, the package's own
-    // try/catch returns null.
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("protobufjs_inquire.abc");
-    module_compiler()
-        .compile(
-            vec![commonjs_module_record(
-                "pkg_modules/.ohpm/@protobufjs+inquire@1.1.0/pkg_modules/@protobufjs/inquire/index",
-                r#""use strict";
-module.exports = inquire;
-
-function inquire(moduleName) {
-    try {
-        var mod = eval("quire".replace(/^/,"re"))(moduleName);
-        if (mod && (mod.length || Object.keys(mod).length))
-            return mod;
-    } catch (e) {}
-    return null;
-}
-"#,
-            )],
-            &out,
-        )
-        .expect("direct eval optional require must compile like upstream es2abc");
-
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-}
-
 /// Assignment to `eval` is forbidden in strict mode.
 /// es2panda rejects this at compile time (strict mode violation).
 #[test]
@@ -5411,32 +4754,6 @@ fn test_typeof_emits_typeof_opcode() {
     assert!(
         bytes.contains(&0x1c),
         "typeof opcode (0x1c) must appear for 'typeof' expression"
-    );
-}
-
-#[test]
-fn test_typeof_unbound_identifier_uses_non_throwing_global_property_load() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("typeof_unbound.abc");
-    let record_name = "test/typeof_unbound";
-    module_compiler()
-        .compile(
-            vec![module_record(record_name, r#"const t = typeof global;"#)],
-            &out,
-        )
-        .expect("compile typeof unbound identifier source");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let bytecode = module_func_main_bytecode(&bytes, record_name);
-    assert!(
-        bytecode_contains_opcode(&bytecode, 0x6d)
-            && bytecode_contains_opcode(&bytecode, 0x42)
-            && bytecode_contains_opcode(&bytecode, 0x1c),
-        "typeof unbound identifier must load the global object property before typeof"
-    );
-    assert!(
-        !bytecode_contains_opcode(&bytecode, 0x3f),
-        "typeof unbound identifier must not use throwing global load"
     );
 }
 
@@ -6507,17 +5824,13 @@ const box = new Box();"#,
     let (_, bytecode) = module_method_bytecode_by_suffix(&bytes, record_name, "Box")
         .expect("class constructor bytecode exists");
     assert!(
-        bytecode_contains_opcode(&bytecode, 0x43),
-        "useDefineSemantic=false public field initializers must be constructor assignments"
-    );
-    assert!(
-        !bytecode_contains_opcode(&bytecode, 0x7a) && !bytecode_contains_opcode(&bytecode, 0xdb),
-        "useDefineSemantic=false public field initializers must not use instance-initializer stores"
+        bytecode_contains_opcode(&bytecode, 0xdb),
+        "instance class fields must use definefieldbyname like upstream CompileField"
     );
 }
 
 #[test]
-fn test_uninitialized_instance_class_field_is_skipped_without_define_semantic() {
+fn test_uninitialized_instance_class_field_defines_undefined_property() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("uninitialized_class_field.abc");
     let record_name = "test/uninitialized_class_field";
@@ -6535,13 +5848,17 @@ const box = new Box();"#,
     let (_, bytecode) = module_method_bytecode_by_suffix(&bytes, record_name, "Box")
         .expect("class constructor bytecode exists");
     assert!(
-        !bytecode_contains_any_opcode(&bytecode, &[0x43, 0x7a, 0xdb, 0xdc]),
-        "useDefineSemantic=false type-only public fields must not emit a property write"
+        bytecode_contains_opcode(&bytecode, 0x00),
+        "uninitialized instance class fields must load undefined like upstream CompileField"
+    );
+    assert!(
+        bytecode_contains_opcode(&bytecode, 0xdb),
+        "uninitialized instance class fields must define the own property"
     );
 }
 
 #[test]
-fn test_computed_instance_class_field_does_not_use_synthetic_class_key_capture() {
+fn test_computed_instance_class_field_uses_captured_class_key() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("computed_instance_class_field.abc");
     let record_name = "test/computed_instance_class_field";
@@ -6549,27 +5866,32 @@ fn test_computed_instance_class_field_does_not_use_synthetic_class_key_capture()
         .compile(
             vec![module_record(
                 record_name,
-                r#"class Box { ["value"] = 1; }
+                r#"const key = "value";
+class Box { [key] = 1; }
 const box = new Box();"#,
             )],
             &out,
         )
-        .expect("computed instance class field must compile");
+        .expect("computed instance class field must compile through captured class key");
     let bytes = std::fs::read(&out).unwrap();
     let main = module_func_main_bytecode(&bytes, record_name);
     assert!(
-        !bytecode_contains_opcode(&main, 0x3d) && !bytecode_contains_opcode(&main, 0x8b),
-        "computed instance field keys must not be stored through a synthetic class lexical binding"
+        bytecode_contains_opcode(&main, 0x09),
+        "computed instance field keys must allocate a class lexical environment"
+    );
+    assert!(
+        bytecode_contains_opcode(&main, 0x3d) || bytecode_contains_opcode(&main, 0x8b),
+        "computed instance field keys must be saved during class evaluation"
     );
     let (_, ctor) = module_method_bytecode_by_suffix(&bytes, record_name, "Box")
         .expect("class constructor bytecode exists");
     assert!(
-        !bytecode_contains_opcode(&ctor, 0x3c) && !bytecode_contains_opcode(&ctor, 0x8a),
-        "constructor must not read a synthetic computed-key lexical binding"
+        bytecode_contains_opcode(&ctor, 0x3c) || bytecode_contains_opcode(&ctor, 0x8a),
+        "constructor must read the precomputed key instead of recomputing it"
     );
     assert!(
-        bytecode_contains_opcode(&ctor, 0x38),
-        "useDefineSemantic=false computed instance fields must store through StoreObjByValue"
+        ctor.windows(2).any(|window| window == [0xfb, 0x01]),
+        "computed instance fields must define the property by runtime key value"
     );
 }
 
@@ -6594,50 +5916,9 @@ fn test_static_class_field_runs_static_initializer() {
         bytecode_contains_opcode(&main, 0x2d),
         "class definition must call the generated static initializer with callthis0"
     );
-    let (initializer_name, initializer) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer")
+    let (_, initializer) =
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
             .expect("static initializer method exists");
-    assert_eq!(
-        initializer_name, "#~Box>#static_initializer",
-        "static initializer internal name must follow upstream scope naming"
-    );
-    assert!(
-        !bytecode_contains_opcode(&main, 0x33),
-        "static initializer must not be materialized with definefunc"
-    );
-    let define_method_pos =
-        bytecode_first_opcode_pos(&main, 0x34).expect("static initializer uses definemethod");
-    let define_method_index =
-        u16::from_le_bytes([main[define_method_pos + 2], main[define_method_pos + 3]]);
-
-    let reader = AbcReader::new(&bytes).expect("ABC reader");
-    let classes = reader.class_items().expect("class items");
-    let class = classes
-        .iter()
-        .find(|class| class.name == format!("L{record_name};"))
-        .expect("module class");
-    let func_main = class
-        .methods
-        .iter()
-        .find(|method| method.name == "func_main_0")
-        .expect("func_main_0 method");
-    let initializer_method = class
-        .methods
-        .iter()
-        .find(|method| method.name == initializer_name)
-        .expect("static initializer method");
-    assert_eq!(
-        (initializer_method.access_flags >> 8) & 0xff,
-        0,
-        "static initializer MethodItem keeps FunctionKind::NONE like upstream method functions"
-    );
-    assert_eq!(
-        reader
-            .resolve_method_index(func_main.offset, define_method_index as u32)
-            .expect("method index resolves"),
-        Some(initializer_method.offset),
-        "definemethod must resolve to the generated static initializer"
-    );
     assert!(
         bytecode_contains_opcode(&initializer, 0x6f),
         "static initializer must load this like upstream CompileClassInitializer"
@@ -6665,7 +5946,7 @@ fn test_default_export_uninitialized_static_class_field_defines_undefined_proper
 
     let bytes = std::fs::read(&out).unwrap();
     let (_, initializer) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer")
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
             .expect("static initializer method exists");
     assert!(
         bytecode_contains_opcode(&initializer, 0x00),
@@ -6700,7 +5981,7 @@ const value = Box.value;"#,
         "class definition must call the generated static block initializer with callthis0"
     );
     let (_, initializer) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer")
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
             .expect("static block initializer method exists");
     assert!(
         bytecode_contains_opcode(&initializer, 0x6f),
@@ -6731,7 +6012,7 @@ class Box { static [name] = 1; }"#,
     let bytes = std::fs::read(&out).unwrap();
     let main = module_func_main_bytecode(&bytes, record_name);
     let (_, initializer) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer")
+        module_method_bytecode_by_suffix(&bytes, record_name, "static_initializer#")
             .expect("computed static field must create a static initializer method");
     assert!(
         bytecode_contains_opcode(&main, 0x2e),
@@ -6748,233 +6029,6 @@ class Box { static [name] = 1; }"#,
     assert!(
         !bytecode_contains_opcode(&initializer, 0x3f),
         "static initializer must use the precomputed key argument instead of recomputing the key expression"
-    );
-}
-
-#[test]
-fn test_exported_class_name_is_initialized_before_static_initializer() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("exported_class_static_self.abc");
-    let record_name = "test/exported_class_static_self";
-    module_compiler()
-        .compile(
-            vec![module_record(
-                record_name,
-                r#"export class OpeTypeConversion {
-  static NUMBER_RADIX_DECIMAL = 10;
-  static NUMBER_RADIX_DECIMAL_LOG2 = Math.log2(OpeTypeConversion.NUMBER_RADIX_DECIMAL);
-}"#,
-            )],
-            &out,
-        )
-        .expect("exported class static self-reference must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let main = module_func_main_bytecode(&bytes, record_name);
-    let store_module =
-        bytecode_first_opcode_pos(&main, 0x7c).expect("class name must be stored to module var");
-    let static_call =
-        bytecode_first_opcode_pos(&main, 0x2d).expect("static initializer must be called");
-    assert!(
-        store_module < static_call,
-        "upstream ClassDefinition::InitializeClassName stores the class binding before StaticInitialize"
-    );
-
-    let (_, initializer) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer")
-            .expect("static initializer method exists");
-    assert!(
-        bytecode_contains_opcode(&initializer, 0x7d),
-        "exported static initializer reads the already-initialized module binding"
-    );
-}
-
-#[test]
-fn api20_explicit_typescript_static_class_fields_inline_after_module_binding() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("explicit_ts_static_class_field.abc");
-    let record_name = "test/explicit_ts_static_class_field";
-    let source = r#"
-export class OpeTypeConversion {
-  static NUMBER_RADIX_DECIMAL = 10;
-  static NUMBER_RADIX_DECIMAL_LOG2 = Math.log2(OpeTypeConversion.NUMBER_RADIX_DECIMAL);
-}
-"#;
-
-    make_api20_module_compiler()
-        .compile(
-            vec![AbcModule {
-                record_name: record_name.to_string(),
-                source: source.to_string(),
-                source_map: None,
-                source_file: Some(
-                    "phone|@hw-agconnect/cloud|1.0.2|src/main/ets/database/encrypt/ope/OpeTypeConversion.ts"
-                        .to_string(),
-                ),
-                package_name: Some("@hw-agconnect/cloud".to_string()),
-                is_commonjs: false,
-                is_shared_module: false,
-                origin_source_lang: "ts".to_string(),
-            }],
-            &out,
-        )
-        .expect("explicit TypeScript class static fields must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer").is_none(),
-        "explicit .ts class static fields are inlined into func_main_0 like hvigor"
-    );
-
-    let main = module_func_main_bytecode(&bytes, record_name);
-    let store_module =
-        bytecode_first_opcode_pos(&main, 0x7c).expect("class must be stored to module var first");
-    let load_module = bytecode_first_opcode_pos(&main, 0x7d)
-        .expect("inlined static fields must reload the class from module var");
-    let store_property = bytecode_first_opcode_pos(&main, 0x43)
-        .expect("TypeScript static fields must use stobjbyname");
-    assert!(
-        store_module < load_module && load_module < store_property,
-        "explicit .ts static field initialization must follow hvigor order: stmodulevar, ldlocalmodulevar, stobjbyname"
-    );
-    assert!(
-        !bytecode_contains_opcode(&main, 0x34),
-        "explicit .ts static fields must not materialize a definemethod static initializer"
-    );
-}
-
-#[test]
-fn api20_typescript_origin_static_blocks_inline_after_module_binding() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("ts_origin_static_blocks.abc");
-    let record_name = "test/ts_origin_static_blocks";
-    let source = r#"
-export class OpeTypeConversion {
-  static {
-    this.NUMBER_RADIX_DECIMAL = 10;
-  }
-  static {
-    this.NUMBER_RADIX_DECIMAL_LOG2 = Math.log2(OpeTypeConversion.NUMBER_RADIX_DECIMAL);
-  }
-}
-"#;
-
-    make_api20_module_compiler()
-        .compile(
-            vec![AbcModule {
-                record_name: record_name.to_string(),
-                source: source.to_string(),
-                source_map: None,
-                source_file: Some(
-                    "phone|@hw-agconnect/cloud|1.0.2|src/main/ets/database/encrypt/ope/OpeTypeConversion.js"
-                        .to_string(),
-                ),
-                package_name: Some("@hw-agconnect/cloud".to_string()),
-                is_commonjs: false,
-                is_shared_module: false,
-                origin_source_lang: "ts".to_string(),
-            }],
-            &out,
-        )
-        .expect("TypeScript-origin static blocks must compile inline");
-
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer").is_none(),
-        "TypeScript-origin static blocks generated from class fields are inlined like hvigor"
-    );
-
-    let main = module_func_main_bytecode(&bytes, record_name);
-    let store_module =
-        bytecode_first_opcode_pos(&main, 0x7c).expect("class must be stored to module var first");
-    let store_property = bytecode_first_opcode_pos(&main, 0x43)
-        .expect("inlined static block must assign class properties");
-    assert!(
-        store_module < store_property,
-        "TypeScript-origin static block initialization must run after stmodulevar"
-    );
-    assert!(
-        !bytecode_contains_opcode(&main, 0x34),
-        "TypeScript-origin static blocks must not materialize a definemethod static initializer"
-    );
-}
-
-#[test]
-fn ets_origin_transformed_ts_source_file_info_parses_as_typescript() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("ets_origin_transformed_ts.abc");
-    let record_name = "test/ets_origin_transformed_ts";
-    let source = r#"
-type Resource = { id: number };
-const resource: Resource = { id: { "id": 1 }.id };
-export class UserModel {
-  private static instance: UserModel;
-  static getInstance(): UserModel {
-    if (!UserModel.instance) {
-      UserModel.instance = new UserModel();
-    }
-    return UserModel.instance;
-  }
-}
-"#;
-
-    make_api20_module_compiler()
-        .compile(
-            vec![AbcModule {
-                record_name: record_name.to_string(),
-                source: source.to_string(),
-                source_map: None,
-                source_file: Some("phone|mine|1.0.0|src/main/ets/model/UserModel.ts".to_string()),
-                package_name: Some("mine".to_string()),
-                is_commonjs: false,
-                is_shared_module: false,
-                origin_source_lang: "ets".to_string(),
-            }],
-            &out,
-        )
-        .expect("ArkTS-origin transformed .ts source-file-info must parse as TypeScript");
-}
-
-#[test]
-fn test_top_level_class_static_initializer_captures_class_name_lexically() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("top_level_class_static_self.abc");
-    let record_name = "test/top_level_class_static_self";
-    module_compiler_for_target(18, None)
-        .compile(
-            vec![module_record(
-                record_name,
-                r#"class Box {
-  static seed = 1;
-  static value = Box.seed;
-}
-const value = Box.value;"#,
-            )],
-            &out,
-        )
-        .expect("top-level class static self-reference must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let main = module_func_main_bytecode(&bytes, record_name);
-    let store_lex =
-        bytecode_first_opcode_pos(&main, 0x3d).expect("class name must be stored to lexical env");
-    let static_call =
-        bytecode_first_opcode_pos(&main, 0x2d).expect("static initializer must be called");
-    assert!(
-        store_lex < static_call,
-        "class lexical binding must be initialized before StaticInitialize"
-    );
-
-    let (_, initializer) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "#static_initializer")
-            .expect("static initializer method exists");
-    assert!(
-        bytecode_contains_opcode(&initializer, 0x3c),
-        "static initializer must load top-level class binding through the module lexical env"
-    );
-    assert!(
-        !bytecode_contains_opcode(&initializer, 0x3f),
-        "static initializer must not fall back to global lookup for the class name"
     );
 }
 
@@ -7286,41 +6340,6 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "x"});
 }
 
 #[test]
-fn test_chained_member_call_callbacks_use_internal_method_ids() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("chain-callback.abc");
-    let source = r#"
-if (!("finalizeConstruction" in ViewPU.prototype))
-    Reflect.set(ViewPU.prototype, "finalizeConstruction", () => {});
-export class DiscoverModel {
-    getHomeResources() {
-        return Promise.resolve(1)
-            .then((data) => {
-                return data;
-            })
-            .catch((err) => {
-                return err;
-            });
-    }
-}
-"#;
-
-    module_compiler()
-        .compile(
-            vec![module_record(
-                "com.example.app/phone@discover/ets/model/DiscoverModel",
-                source,
-            )],
-            &out,
-        )
-        .expect("compile chained member call callbacks");
-
-    let bytes = std::fs::read(&out).unwrap();
-    assert!(bytes.starts_with(b"PANDA\0\0\0"));
-    AbcReader::new(&bytes).expect("valid ABC");
-}
-
-#[test]
 fn test_two_module_debug_parity() {
     // Compile with debug_info:true (LNP enabled) to measure parity against hvigor.
     // Hvigor produces 9844 bytes for the same source.  We track progress here.
@@ -7406,7 +6425,6 @@ registerNamedRoute(() => new Index(void 0, {}), "", {bundleName: "com.example.ar
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -7784,105 +6802,6 @@ const value = new Child([1, 2]);
 }
 
 #[test]
-fn test_default_derived_constructor_uses_upstream_constructor_flags_and_args_layout() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("default_derived_constructor.abc");
-    let record_name = "test/default_derived_constructor";
-    let source = r#"
-class Base {}
-export default class EntryAbility extends Base {}
-"#;
-    module_compiler()
-        .compile(vec![module_record(record_name, source)], &out)
-        .expect("compile default derived constructor source");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let reader = AbcReader::new(&bytes).expect("ABC reader");
-    let classes = reader.class_items().expect("class items");
-    let class = classes
-        .iter()
-        .find(|class| class.name == format!("L{record_name};"))
-        .expect("module class");
-    let constructor = class
-        .methods
-        .iter()
-        .find(|method| method.name.contains("EntryAbility") && method.code.is_some())
-        .expect("generated derived constructor must be emitted");
-    let code = constructor.code.as_ref().expect("constructor code");
-
-    assert_eq!(
-        constructor.access_flags, 0x108,
-        "constructors must use upstream MODULE_OR_CTOR access flags"
-    );
-    assert_eq!(
-        code.num_vregs, 6,
-        "DevEco 6.0 default derived constructor uses the upstream six-vreg layout"
-    );
-    assert_eq!(
-        code.num_args, 4,
-        "default derived constructor has three mandatory params plus the generated rest param"
-    );
-    assert!(
-        code.bytecode.starts_with(&[
-            0x44, 0x60, 0x44, 0x71, 0x44, 0x82, 0x44, 0x93, 0x60, 0x00, 0x61, 0x05, 0xfb, 0x19,
-            0x05,
-        ]),
-        "generated constructor must use upstream callruntime.supercallforwardallargs layout"
-    );
-}
-
-#[test]
-fn test_callthisrange_argument_registers_count_toward_num_vregs() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("callthisrange_vregs.abc");
-    let record_name = "test/callthisrange_vregs";
-    let source = r#"
-class AspectUtil {
-  static addBefore(a, b, c, d) {}
-}
-class MyNodeController {}
-export class WebAspect {
-  static createAspect() {
-    const methodClassName = 'MyNodeController';
-    AspectUtil.addBefore(methodClassName, MyNodeController, 'initWeb', false);
-  }
-}
-"#;
-    module_compiler()
-        .compile(vec![module_record(record_name, source)], &out)
-        .expect("compile callthisrange source");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let class_name = format!("L{record_name};");
-    let class_off = class_offsets(&bytes)
-        .into_iter()
-        .map(|off| off as usize)
-        .find(|&off| class_name_at(&bytes, off) == class_name)
-        .expect("module class must exist");
-    let create_code = class_method_items(&bytes, class_off)
-        .into_iter()
-        .find_map(|(_, name, code_off)| {
-            (name.contains("createAspect")).then_some(code_off.expect("createAspect has code"))
-        })
-        .expect("createAspect method must exist") as usize;
-    let (num_vregs, num_args, _, _) = code_item_header(&bytes, create_code);
-    let bytecode = code_item_bytecode(&bytes, create_code);
-    let callthisrange = bytecode
-        .windows(4)
-        .find(|window| window[0] == 0x31 && window[2] == 4)
-        .expect("four-argument method call must use callthisrange");
-    let this_reg = u64::from(callthisrange[3]);
-    let argc = u64::from(callthisrange[2]);
-
-    assert_eq!(num_args, 3, "static method has only mandatory parameters");
-    assert!(
-        num_vregs >= this_reg + 1 + argc,
-        "callthisrange receiver and arguments must be covered by num_vregs: \
-         num_vregs={num_vregs}, this_reg={this_reg}, argc={argc}"
-    );
-}
-
-#[test]
 fn test_super_property_access_uses_upstream_super_opcodes() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("super_property.abc");
@@ -7957,207 +6876,6 @@ child.write("value");
 }
 
 #[test]
-fn test_typescript_public_fields_do_not_define_before_super() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("ts_public_fields.abc");
-    let record_name = "test/ts_public_fields";
-    let source = r#"
-class ViewPU {}
-class PreferenceManager { static getInstance() { return new PreferenceManager(); } }
-class SplashPage extends ViewPU {
-  private preferenceManager: PreferenceManager;
-  private isAgreedPrivacy: boolean;
-  constructor() {
-    super();
-    this.preferenceManager = PreferenceManager.getInstance();
-    this.isAgreedPrivacy = false;
-  }
-}
-"#;
-    module_compiler()
-        .compile(
-            vec![module_record_with_source_file(
-                record_name,
-                source,
-                "src/main/ets/pages/SplashPage.ts",
-            )],
-            &out,
-        )
-        .expect("compile CompileArkTS-style TypeScript class source");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let class_name = format!("L{record_name};");
-    let class_off = class_offsets(&bytes)
-        .into_iter()
-        .map(|off| off as usize)
-        .find(|&off| class_name_at(&bytes, off) == class_name)
-        .expect("module class must exist");
-    let methods = class_method_items(&bytes, class_off);
-    assert!(
-        !methods
-            .iter()
-            .any(|(_, name, _)| name == "#~SplashPage>#instance_initializer"),
-        "useDefineSemantic=false must not synthesize an initializer for TS public fields"
-    );
-    let constructor = methods
-        .iter()
-        .find_map(|(_, name, code_off)| {
-            (name == "#~SplashPage=#SplashPage").then(|| {
-                code_item_bytecode(&bytes, code_off.expect("constructor has code") as usize)
-            })
-        })
-        .expect("SplashPage constructor must exist");
-    assert!(
-        bytecode_contains_opcode(constructor, 0x32),
-        "derived constructor must still call super via supercallthisrange"
-    );
-    assert!(
-        !bytecode_contains_any_opcode(constructor, &[0xdb, 0xdc]),
-        "TS-only public field declarations must not lower to definefieldbyname/definepropertybyname"
-    );
-    assert!(
-        !constructor.windows(2).any(|window| window == [0xfb, 0x06]),
-        "constructor must not call an instance initializer for skipped TS public fields"
-    );
-}
-
-#[test]
-fn test_base_constructor_with_body_returns_this_like_upstream() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("base_constructor_returns_this.abc");
-    let record_name = "test/base_constructor_returns_this";
-    let source = r#"
-class PreferenceManager {
-  private preferences?: unknown;
-  private constructor() {
-    this.preferences = undefined;
-  }
-  static getInstance() {
-    return new PreferenceManager();
-  }
-}
-"#;
-
-    make_api20_module_compiler()
-        .compile(vec![ets_module(record_name, source)], &out)
-        .expect("base constructor with body must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let (_, constructor) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "=#PreferenceManager")
-            .expect("PreferenceManager constructor must exist");
-
-    assert!(
-        !bytecode_contains_opcode(&constructor, 0x65),
-        "base constructor with a body must return this, not returnundefined"
-    );
-}
-
-#[test]
-fn api20_use_define_semantic_instance_fields_use_store_own_property() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("arkts_instance_field_assignment.abc");
-    let record_name = "test/arkts_instance_field_assignment";
-    let source = r#"
-function getContext(value: unknown): unknown { return value; }
-
-class PreferenceManager {
-  private preferences?: unknown;
-  private context = getContext(this);
-  private constructor() {}
-  static getInstance(): PreferenceManager {
-    return new PreferenceManager();
-  }
-}
-
-export class DarkModeUtil {
-  private preferenceManager = PreferenceManager.getInstance();
-}
-"#;
-
-    make_api20_module_compiler()
-        .compile(vec![ets_module(record_name, source)], &out)
-        .expect("ArkTS-origin instance fields must compile");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let (_, preference_constructor) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "=#PreferenceManager")
-            .expect("PreferenceManager constructor must exist");
-    assert!(
-        bytecode_contains_opcode(&preference_constructor, 0x7a),
-        "useDefineSemantic=true initialized instance fields must use upstream StoreOwnProperty"
-    );
-    assert!(
-        !bytecode_contains_opcode(&preference_constructor, 0xdc),
-        "useDefineSemantic=true must not use definepropertybyname for instance fields"
-    );
-
-    let (_, dark_mode_constructor) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "=#DarkModeUtil")
-            .expect("DarkModeUtil constructor must exist");
-    assert!(
-        bytecode_contains_opcode(&dark_mode_constructor, 0x7a),
-        "useDefineSemantic=true field initializer must store the resolved value with StoreOwnProperty"
-    );
-    assert!(
-        !bytecode_contains_opcode(&dark_mode_constructor, 0xdc),
-        "useDefineSemantic=true field initializer must not use definepropertybyname"
-    );
-}
-
-#[test]
-fn api20_arkts_origin_without_define_semantic_uses_constructor_assignments() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("arkts_instance_field_constructor_assignment.abc");
-    let record_name = "test/arkts_instance_field_constructor_assignment";
-    let source = r#"
-function getContext(value: unknown): unknown { return value; }
-
-class PreferenceManager {
-  private preferences?: unknown;
-  private context = getContext(this);
-  private constructor() {}
-  static getInstance(): PreferenceManager {
-    return new PreferenceManager();
-  }
-}
-
-export class DarkModeUtil {
-  private preferenceManager = PreferenceManager.getInstance();
-}
-"#;
-
-    module_compiler_for_target(20, None)
-        .compile(vec![ets_module(record_name, source)], &out)
-        .expect("ArkTS-origin instance fields must compile with useDefineSemantic=false");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let (_, preference_constructor) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "=#PreferenceManager")
-            .expect("PreferenceManager constructor must exist");
-    assert!(
-        bytecode_contains_opcode(&preference_constructor, 0x43),
-        "useDefineSemantic=false initialized instance fields must use StoreObjProperty"
-    );
-    assert!(
-        !bytecode_contains_any_opcode(&preference_constructor, &[0x7a, 0xdb, 0xdc]),
-        "useDefineSemantic=false must not emit instance-initializer writes for public fields"
-    );
-
-    let (_, dark_mode_constructor) =
-        module_method_bytecode_by_suffix(&bytes, record_name, "=#DarkModeUtil")
-            .expect("DarkModeUtil constructor must exist");
-    assert!(
-        bytecode_contains_opcode(&dark_mode_constructor, 0x43),
-        "default constructor public field initializers must be constructor assignments"
-    );
-    assert!(
-        !bytecode_contains_any_opcode(&dark_mode_constructor, &[0x7a, 0xdb, 0xdc]),
-        "default constructor public field initializers must not use instance-initializer writes"
-    );
-}
-
-#[test]
 fn test_function_object_literal_uses_definefieldbyname_on_default_api() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("object_methods.abc");
@@ -8218,36 +6936,6 @@ const result = (function () {
     assert!(
         !bytecode_contains_opcode(body, 0x3f),
         "function declaration used before its source position must be loaded from the hoisted local binding, not tryldglobalbyname"
-    );
-}
-
-#[test]
-fn test_function_declaration_name_captured_by_own_body_from_outer_scope() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("function_decl_self_capture.abc");
-    let record_name = "test/function_decl_self_capture";
-    let source = r#"
-const result = (function () {
-  function clone() {
-    return clone;
-  }
-  return clone();
-})();
-"#;
-    module_compiler()
-        .compile(vec![module_record(record_name, source)], &out)
-        .expect("compile function declaration self-capture source");
-
-    let bytes = std::fs::read(&out).unwrap();
-    let (_, clone_body) = module_method_bytecode_by_suffix(&bytes, record_name, "clone")
-        .expect("clone function method must exist");
-    assert!(
-        bytecode_contains_opcode(&clone_body, 0x3c),
-        "function declaration name used in its body must load from the captured outer binding"
-    );
-    assert!(
-        !bytecode_contains_opcode(&clone_body, 0x3f),
-        "function declaration self-reference must not fall back to a throwing global lookup"
     );
 }
 
@@ -8688,7 +7376,6 @@ fn proto_bin_cache_file_written_with_correct_format() {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: true,
         module_record_field_name: None,
@@ -8769,135 +7456,12 @@ fn proto_bin_cache_file_written_with_correct_format() {
         "", // source_file (None → empty string in hash)
         "", // package_name (None → empty string in hash)
         version_for_target_api(12, None),
-        12,
     );
     assert_eq!(
         entry.hash_code, expected_hash,
         "ProgramCache hash_code must match source_cache_hash(source, file_name, \
          record_name, \"\", \"\", panda_file_version)"
     );
-}
-
-#[test]
-fn api20_class_scope_separates_module_and_class_lexical_envs() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let out = tmp.path().join("class_scope_lexenv.abc");
-    let source = r#"
-const TAG: string = "tag";
-
-export class WindowUtil {
-  static request(context: any) {
-    return () => TAG + WindowUtil.name + context;
-  }
-}
-"#;
-
-    make_api20_module_compiler()
-        .compile(vec![ets_module("test/class_scope_lexenv", source)], &out)
-        .expect("API20 class scoped lexical source must compile");
-
-    let bytes = std::fs::read(&out).expect("compiled ABC must be readable");
-    let class_items = AbcReader::new(&bytes)
-        .expect("ABC reader")
-        .class_items()
-        .expect("class items must parse");
-    let methods = class_items
-        .iter()
-        .flat_map(|class| class.methods.iter())
-        .collect::<Vec<_>>();
-
-    let main = methods
-        .iter()
-        .find(|method| method.name == "func_main_0")
-        .and_then(|method| method.code.as_ref())
-        .expect("module main code must exist");
-    assert!(
-        !main
-            .bytecode
-            .windows(2)
-            .any(|window| window == [0x09, 0x02]),
-        "func_main_0 must not collapse TAG and WindowUtil into one two-slot lexenv"
-    );
-    assert!(
-        main.bytecode
-            .windows(2)
-            .filter(|window| *window == [0x09, 0x01])
-            .count()
-            >= 2,
-        "func_main_0 must create separate one-slot module and class lexenvs"
-    );
-
-    let lexical_reads = methods
-        .iter()
-        .filter_map(|method| method.code.as_ref())
-        .flat_map(|code| compact_ldlexvar_operands(&code.bytecode))
-        .collect::<Vec<_>>();
-    assert!(
-        lexical_reads.contains(&(1, 0)),
-        "nested class functions must read WindowUtil from the class lexenv"
-    );
-    assert!(
-        lexical_reads.contains(&(2, 0)),
-        "nested class functions must read TAG from the module lexenv outside the class lexenv"
-    );
-}
-
-#[test]
-fn api20_route_factory_captures_entry_class_from_module_lexenv() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let out = tmp.path().join("route_factory_module_lexenv.abc");
-    let record_name = "phone|phone|1.0.0|src/main/ets/pages/SplashPage.ts";
-    let source = r#"
-if (!("finalizeConstruction" in ViewPU.prototype)) {
-  Reflect.set(ViewPU.prototype, "finalizeConstruction", () => {});
-}
-
-const TAG: string = "[SplashPage]";
-
-class SplashPage extends ViewPU {
-  initialRender() {
-    this.observeComponentCreation2(() => {
-      new ImgItem(undefined, {});
-    }, ImgItem);
-  }
-  static getEntryName(): string {
-    return "SplashPage";
-  }
-}
-
-class ImgItem extends ViewPU {}
-
-registerNamedRoute(() => new SplashPage(undefined, {}), "", { bundleName: "x" });
-"#;
-
-    make_api20_module_compiler()
-        .compile(vec![ets_module(record_name, source)], &out)
-        .expect("API20 route factory source must compile");
-
-    let bytes = std::fs::read(&out).expect("compiled ABC must be readable");
-    let (_, route_factory) = module_method_bytecode_by_suffix(&bytes, record_name, "#*#^1")
-        .or_else(|| module_method_bytecode_by_suffix(&bytes, record_name, "#*#"))
-        .expect("registerNamedRoute factory method must exist");
-
-    assert!(
-        bytecode_contains_opcode(&route_factory, 0x3c),
-        "route factory must capture SplashPage from the module lexical env"
-    );
-    assert!(
-        !bytecode_contains_opcode(&route_factory, 0x3f),
-        "route factory must not fall back to tryldglobalbyname for SplashPage"
-    );
-}
-
-fn compact_ldlexvar_operands(bytecode: &[u8]) -> Vec<(u8, u8)> {
-    bytecode
-        .windows(2)
-        .filter(|window| window[0] == 0x3c)
-        .map(|window| {
-            let operand = window[1];
-            (operand & 0x0f, operand >> 4)
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

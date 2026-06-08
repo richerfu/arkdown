@@ -43,7 +43,7 @@ fn uleb128(mut value: u64) -> Vec<u8> {
 /// our simplified reader uses to locate individual items.  The real Panda
 /// format does *not* have a count header — strings are referenced directly by
 /// file offset.  Full offset-based referencing is a SPEC-009 follow-up.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StringTable {
     strings: Vec<String>,
     index: FxHashMap<String, u32>,

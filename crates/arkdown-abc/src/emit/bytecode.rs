@@ -1,47 +1,16 @@
 use rustc_hash::FxHashMap;
 
-use crate::emit::strings::StringTable;
 use crate::isa::{id_operands as isa_id_operands, instruction_len as isa_instruction_len, IdKind};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BytecodeIndexDependency {
-    String(u16),
-    Method(u16),
-    LiteralArray(u16),
-}
-
-pub(super) struct BytecodeIndexPlan<'a> {
-    strings: &'a StringTable,
-    string_pool_indices: &'a FxHashMap<u16, u16>,
-    literal_pool_indices: &'a FxHashMap<u16, u16>,
-    method_pool_indices: &'a FxHashMap<u16, u16>,
-    class_name: &'a str,
-    method_name: &'a str,
-}
-
-impl<'a> BytecodeIndexPlan<'a> {
-    pub(super) fn new(
-        strings: &'a StringTable,
-        string_pool_indices: &'a FxHashMap<u16, u16>,
-        literal_pool_indices: &'a FxHashMap<u16, u16>,
-        method_pool_indices: &'a FxHashMap<u16, u16>,
-        class_name: &'a str,
-        method_name: &'a str,
-    ) -> Self {
-        Self {
-            strings,
-            string_pool_indices,
-            literal_pool_indices,
-            method_pool_indices,
-            class_name,
-            method_name,
-        }
-    }
-}
-
-pub(super) fn patch_bytecode_index_operands(
+pub(crate) fn patch_bytecode_index_operands(
     bytecode: &[u8],
-    plan: &BytecodeIndexPlan<'_>,
+    string_pool_indices: &FxHashMap<u16, u16>,
+    literal_pool_indices: &FxHashMap<u16, u16>,
+    ctor_pool_indices: &[u16],
+    definefunc_pool_indices: &[u16],
+    definemethod_pool_indices_by_name: &FxHashMap<u16, u16>,
+    defineclass_cursor: &mut usize,
+    definefunc_cursor: &mut usize,
 ) -> Vec<u8> {
     let mut patched = bytecode.to_vec();
     let mut pos = 0;
@@ -51,43 +20,63 @@ pub(super) fn patch_bytecode_index_operands(
         };
         match opcode {
             0x3e if pos + 2 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 1, plan.string_pool_indices);
+                rewrite_u16_operand(&mut patched, pos + 1, string_pool_indices);
                 pos += 3;
                 continue;
             }
             0x3f | 0x40 | 0x42 if pos + 3 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 2, plan.string_pool_indices);
+                rewrite_u16_operand(&mut patched, pos + 2, string_pool_indices);
                 pos += 4;
                 continue;
             }
             0x43 | 0x7a | 0x8e | 0xdb | 0xdc if pos + 4 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 2, plan.string_pool_indices);
+                rewrite_u16_operand(&mut patched, pos + 2, string_pool_indices);
                 pos += 5;
                 continue;
             }
             0xfe if patched.get(pos + 1) == Some(&0x09) && pos + 3 < patched.len() => {
-                rewrite_u16_operand(&mut patched, pos + 2, plan.string_pool_indices);
+                rewrite_u16_operand(&mut patched, pos + 2, string_pool_indices);
                 pos += 4;
                 continue;
             }
             _ => {}
         }
         if opcode == 0x33 && pos + 4 < patched.len() {
-            rewrite_method_operand(&mut patched, pos + 2, plan);
+            let method_pos = pos + 2;
+            let method_name_id = u16::from_le_bytes([patched[method_pos], patched[method_pos + 1]]);
+            let method_index = if method_name_id != 0 {
+                definemethod_pool_indices_by_name
+                    .get(&method_name_id)
+                    .copied()
+                    .unwrap_or(method_name_id)
+            } else if let Some(&index) = definefunc_pool_indices.get(*definefunc_cursor) {
+                *definefunc_cursor += 1;
+                index
+            } else {
+                ctor_pool_indices.first().copied().unwrap_or_default()
+            };
+            patched[method_pos..method_pos + 2].copy_from_slice(&method_index.to_le_bytes());
             pos += 5;
             continue;
         }
         if opcode == 0x34 && pos + 4 < patched.len() {
-            rewrite_method_operand(&mut patched, pos + 2, plan);
+            let method_pos = pos + 2;
+            let method_name_id = u16::from_le_bytes([patched[method_pos], patched[method_pos + 1]]);
+            if let Some(&method_index) = definemethod_pool_indices_by_name.get(&method_name_id) {
+                patched[method_pos..method_pos + 2].copy_from_slice(&method_index.to_le_bytes());
+            }
             pos += 5;
             continue;
         }
         if opcode == 0x35 && pos + 8 < patched.len() {
-            rewrite_method_operand(&mut patched, pos + 2, plan);
+            let ctor_pos = pos + 2;
+            if let Some(&ctor_pool_index) = ctor_pool_indices.get(*defineclass_cursor) {
+                *defineclass_cursor += 1;
+                patched[ctor_pos..ctor_pos + 2].copy_from_slice(&ctor_pool_index.to_le_bytes());
+            }
             let buf_pos = pos + 4;
             let old_buf = u16::from_le_bytes([patched[buf_pos], patched[buf_pos + 1]]);
-            let new_buf = plan
-                .literal_pool_indices
+            let new_buf = literal_pool_indices
                 .get(&old_buf)
                 .copied()
                 .unwrap_or(old_buf);
@@ -98,8 +87,7 @@ pub(super) fn patch_bytecode_index_operands(
         if opcode == 0xb6 && pos + 3 < patched.len() {
             let literal_pos = pos + 2;
             let old_literal = u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]);
-            let new_literal = plan
-                .literal_pool_indices
+            let new_literal = literal_pool_indices
                 .get(&old_literal)
                 .copied()
                 .unwrap_or(old_literal);
@@ -110,8 +98,7 @@ pub(super) fn patch_bytecode_index_operands(
         if matches!(opcode, 0x06 | 0x07) && pos + 3 < patched.len() {
             let literal_pos = pos + 2;
             let old_literal = u16::from_le_bytes([patched[literal_pos], patched[literal_pos + 1]]);
-            let new_literal = plan
-                .literal_pool_indices
+            let new_literal = literal_pool_indices
                 .get(&old_literal)
                 .copied()
                 .unwrap_or(old_literal);
@@ -122,10 +109,9 @@ pub(super) fn patch_bytecode_index_operands(
         if let Some(len) = patch_isa_id_operands(
             &mut patched,
             pos,
-            plan.string_pool_indices,
-            plan.literal_pool_indices,
-            plan.method_pool_indices,
-            plan,
+            string_pool_indices,
+            literal_pool_indices,
+            definemethod_pool_indices_by_name,
         ) {
             pos += len;
             continue;
@@ -133,18 +119,6 @@ pub(super) fn patch_bytecode_index_operands(
         pos += instruction_len(opcode, patched.get(pos + 1).copied());
     }
     patched
-}
-
-fn rewrite_method_operand(bytecode: &mut [u8], operand_pos: usize, plan: &BytecodeIndexPlan<'_>) {
-    let old = u16::from_le_bytes([bytecode[operand_pos], bytecode[operand_pos + 1]]);
-    let Some(&new) = plan.method_pool_indices.get(&old) else {
-        let value = plan.strings.get(old as u32).unwrap_or("<missing>");
-        panic!(
-            "unresolved method_id string index {old} ('{value}') while building ABC index section for {}::{}",
-            plan.class_name, plan.method_name
-        );
-    };
-    bytecode[operand_pos..operand_pos + 2].copy_from_slice(&new.to_le_bytes());
 }
 
 pub(crate) fn remap_literal_array_ids(bytecode: &mut [u8], literal_indices: &FxHashMap<u16, u16>) {
@@ -198,7 +172,6 @@ fn patch_isa_id_operands(
     string_pool_indices: &FxHashMap<u16, u16>,
     literal_pool_indices: &FxHashMap<u16, u16>,
     method_pool_indices: &FxHashMap<u16, u16>,
-    plan: &BytecodeIndexPlan<'_>,
 ) -> Option<usize> {
     let len = isa_instruction_len(bytecode, pos)?;
     if pos.checked_add(len)? > bytecode.len() {
@@ -210,128 +183,12 @@ fn patch_isa_id_operands(
         let old = read_id_operand(bytecode, operand_pos, operand.width)?;
         let new = match operand.kind {
             IdKind::String => string_pool_indices.get(&(old as u16)).copied(),
-            IdKind::Method => Some(*method_pool_indices.get(&(old as u16)).unwrap_or_else(|| {
-                let value = plan.strings.get(old).unwrap_or("<missing>");
-                panic!(
-                    "unresolved method_id string index {} ('{}') while building ABC index section for {}::{}",
-                    old, value, plan.class_name, plan.method_name
-                )
-            })),
+            IdKind::Method => method_pool_indices.get(&(old as u16)).copied(),
             IdKind::LiteralArray => literal_pool_indices.get(&(old as u16)).copied(),
             IdKind::Other => None,
         };
         if let Some(new) = new {
             write_id_operand(bytecode, operand_pos, operand.width, new as u32)?;
-        }
-    }
-    Some(len)
-}
-
-pub(super) fn collect_bytecode_index_dependencies(bytecode: &[u8]) -> Vec<BytecodeIndexDependency> {
-    let mut deps = Vec::new();
-    let mut pos = 0usize;
-    while pos < bytecode.len() {
-        let Some(opcode) = bytecode.get(pos).copied() else {
-            break;
-        };
-        match opcode {
-            0x3e if pos + 2 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::String(u16::from_le_bytes([
-                    bytecode[pos + 1],
-                    bytecode[pos + 2],
-                ])));
-                pos += 3;
-                continue;
-            }
-            0x3f | 0x40 | 0x42 if pos + 3 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::String(u16::from_le_bytes([
-                    bytecode[pos + 2],
-                    bytecode[pos + 3],
-                ])));
-                pos += 4;
-                continue;
-            }
-            0x43 | 0x7a | 0x8e | 0xdb | 0xdc if pos + 4 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::String(u16::from_le_bytes([
-                    bytecode[pos + 2],
-                    bytecode[pos + 3],
-                ])));
-                pos += 5;
-                continue;
-            }
-            0xfe if bytecode.get(pos + 1) == Some(&0x09) && pos + 3 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::String(u16::from_le_bytes([
-                    bytecode[pos + 2],
-                    bytecode[pos + 3],
-                ])));
-                pos += 4;
-                continue;
-            }
-            0x33 | 0x34 if pos + 4 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::Method(u16::from_le_bytes([
-                    bytecode[pos + 2],
-                    bytecode[pos + 3],
-                ])));
-                pos += 5;
-                continue;
-            }
-            0x35 if pos + 8 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::Method(u16::from_le_bytes([
-                    bytecode[pos + 2],
-                    bytecode[pos + 3],
-                ])));
-                deps.push(BytecodeIndexDependency::LiteralArray(u16::from_le_bytes([
-                    bytecode[pos + 4],
-                    bytecode[pos + 5],
-                ])));
-                pos += 9;
-                continue;
-            }
-            0xb6 if pos + 3 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::LiteralArray(u16::from_le_bytes([
-                    bytecode[pos + 2],
-                    bytecode[pos + 3],
-                ])));
-                pos += 4;
-                continue;
-            }
-            0x06 | 0x07 if pos + 3 < bytecode.len() => {
-                deps.push(BytecodeIndexDependency::LiteralArray(u16::from_le_bytes([
-                    bytecode[pos + 2],
-                    bytecode[pos + 3],
-                ])));
-                pos += 4;
-                continue;
-            }
-            _ => {}
-        }
-        if let Some(len) = collect_isa_id_dependencies(bytecode, pos, &mut deps) {
-            pos += len;
-            continue;
-        }
-        pos += instruction_len(opcode, bytecode.get(pos + 1).copied()).max(1);
-    }
-    deps
-}
-
-fn collect_isa_id_dependencies(
-    bytecode: &[u8],
-    pos: usize,
-    deps: &mut Vec<BytecodeIndexDependency>,
-) -> Option<usize> {
-    let len = isa_instruction_len(bytecode, pos)?;
-    if pos.checked_add(len)? > bytecode.len() {
-        return None;
-    }
-    for operand in isa_id_operands(bytecode, pos)? {
-        let operand_pos = pos.checked_add(operand.offset)?;
-        let old = read_id_operand(bytecode, operand_pos, operand.width)?;
-        let old = u16::try_from(old).ok()?;
-        match operand.kind {
-            IdKind::String => deps.push(BytecodeIndexDependency::String(old)),
-            IdKind::Method => deps.push(BytecodeIndexDependency::Method(old)),
-            IdKind::LiteralArray => deps.push(BytecodeIndexDependency::LiteralArray(old)),
-            IdKind::Other => {}
         }
     }
     Some(len)
@@ -474,6 +331,41 @@ fn rewrite_u16_operand(patched: &mut [u8], operand_pos: usize, pool_indices: &Fx
     }
 }
 
+pub(super) fn collect_bytecode_string_indices(bytecode: &[u8], indices: &mut Vec<u32>) {
+    let mut pos = 0usize;
+    while pos < bytecode.len() {
+        let Some(opcode) = bytecode.get(pos).copied() else {
+            break;
+        };
+        match opcode {
+            0x3e if pos + 2 < bytecode.len() => {
+                indices.push(u16::from_le_bytes([bytecode[pos + 1], bytecode[pos + 2]]) as u32);
+                pos += 3;
+                continue;
+            }
+            0x3f | 0x40 | 0x42 if pos + 3 < bytecode.len() => {
+                indices.push(u16::from_le_bytes([bytecode[pos + 2], bytecode[pos + 3]]) as u32);
+                pos += 4;
+                continue;
+            }
+            0x43 | 0x7a | 0x8e | 0xdb | 0xdc if pos + 4 < bytecode.len() => {
+                indices.push(u16::from_le_bytes([bytecode[pos + 2], bytecode[pos + 3]]) as u32);
+                pos += 5;
+                continue;
+            }
+            0xfe if bytecode.get(pos + 1) == Some(&0x09) && pos + 3 < bytecode.len() => {
+                indices.push(u16::from_le_bytes([bytecode[pos + 2], bytecode[pos + 3]]) as u32);
+                pos += 4;
+                continue;
+            }
+            _ => {}
+        }
+
+        let next = bytecode.get(pos + 1).copied();
+        pos += instruction_len(opcode, next).max(1);
+    }
+}
+
 pub(crate) fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
     match opcode {
         0x00..=0x04
@@ -491,10 +383,10 @@ pub(crate) fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
         | 0xc0
         | 0xd5 => 1,
         0x05 | 0x09 | 0x1c | 0x1d | 0x29 | 0x36 | 0x3c | 0x3d | 0x44 | 0x4d | 0x4f | 0x51
-        | 0x60 | 0x61 | 0x67 | 0x76 | 0x7c | 0x7d | 0x7e | 0xb1 | 0xc2 | 0xc3 | 0xc4 | 0xc5
-        | 0xcd | 0xce => 2,
+        | 0x60 | 0x61 | 0x67 | 0x76 | 0x7c | 0x7d | 0x7e | 0xa1 | 0xb1 | 0xc2 | 0xc3 | 0xc4
+        | 0xc5 | 0xcd | 0xce => 2,
         0x2a | 0x2d | 0x39 | 0x3e | 0x45 | 0x50 | 0x68 | 0x77 | 0x8a | 0x8b | 0x9b | 0x4e
-        | 0xa1 | 0xb4 | 0xb9 | 0xc1 | 0xc6 | 0xd3 => 3,
+        | 0xb4 | 0xb9 | 0xc1 | 0xc6 | 0xd3 => 3,
         0x0a..=0x1b | 0x25 | 0x26 | 0x27 | 0x28 => 3,
         0x1e..=0x22 => 2,
         0x06 | 0x07 | 0x08 | 0x2b | 0x2e | 0x31 | 0x32 | 0x38 | 0x3f | 0x40 | 0x42 | 0x46
@@ -518,7 +410,7 @@ pub(crate) fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
         0xfb if next == Some(0x04) => 6,
         0xfb if next == Some(0x05) => 8,
         0xfb if next == Some(0x06) => 4,
-        0xfb if matches!(next, Some(0x13 | 0x14 | 0x19)) => 3,
+        0xfb if matches!(next, Some(0x13 | 0x14)) => 3,
         _ => 1,
     }
 }

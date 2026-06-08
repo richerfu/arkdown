@@ -207,10 +207,6 @@ pub enum Insn {
     /// Upstream emits this runtime form for non-default API builds.
     CallRuntimeIsFalse(u8),
 
-    /// `0xFB 0x19` — forward all constructor arguments to `super`.
-    /// Upstream es2abc emits this for generated default derived constructors.
-    CallRuntimeSuperCallForwardAllArgs(u8),
-
     // ── `this` loader ─────────────────────────────────────────────────────────
     /// `0x6F` `op_none` — load the current `this` value into accumulator.
     /// Used in regular (non-arrow) function bodies to access the receiver.
@@ -669,16 +665,16 @@ pub enum Insn {
     GetResumeMode,
 
     // ── Rest parameters ───────────────────────────────────────────────────────
-    /// `0xCF` `op_imm_8` — copy rest arguments into an array in the accumulator.
+    /// `0xA1` `op_imm_8` — copy rest arguments into an array in the accumulator.
     ///
     /// `n` = number of fixed (non-rest) parameters.  The runtime collects all
     /// actual arguments starting at index `n` into a new Array and places it
     /// in the accumulator.
     ///
-    /// Encoding: `[0xCF] [n: u8]` = 2 bytes.
+    /// Encoding: `[0xA1] [n: u8]` = 2 bytes.
     ///
     /// Source: `isa.yaml` — `copyrestargs imm:u8`, format `op_imm_8`,
-    /// `opcode_idx: [0xcf]`.
+    /// `opcode_idx: [0xa1]`.
     CopyRestArgs(u8),
 
     // ── Async function ────────────────────────────────────────────────────────
@@ -899,7 +895,6 @@ impl Insn {
             | Insn::NewObjApply(_, reg)
             | Insn::CloseIterator(_, reg)
             | Insn::CallRuntimeCallInit(_, reg)
-            | Insn::CallRuntimeSuperCallForwardAllArgs(reg)
             | Insn::NewObjRange(_, _, reg)
             | Insn::CallRange(_, _, reg)
             | Insn::CallThisRange(_, _, reg)
@@ -996,7 +991,6 @@ impl Insn {
             Insn::DefineGetterSetterByValue(_, _, _, _) => &[1, 2, 3, 4],
             Insn::CallRuntimeDefineFieldByValue(_, _, _) => &[3, 4],
             Insn::CallRuntimeCallInit(_, _) => &[3],
-            Insn::CallRuntimeSuperCallForwardAllArgs(_) => &[2],
             // Private property: obj operand is at byte offset 6 within the encoded instruction.
             Insn::StPrivateProperty(_, _, _, _) => &[6],
             // callruntime.defineprivateproperty: obj operand at byte offset 7.
@@ -1125,7 +1119,6 @@ impl Insn {
             Insn::IsFalse => vec![0x24],
             Insn::CallRuntimeIsTrue(slot) => vec![0xfb, 0x13, *slot],
             Insn::CallRuntimeIsFalse(slot) => vec![0xfb, 0x14, *slot],
-            Insn::CallRuntimeSuperCallForwardAllArgs(reg) => vec![0xfb, 0x19, *reg],
 
             // ── this loader ──────────────────────────────────────────────────
             Insn::LdThis => vec![0x6F],
@@ -1420,7 +1413,7 @@ impl Insn {
             Insn::GetResumeMode => vec![0xC0],
 
             // ── rest parameters / async ───────────────────────────────────────
-            Insn::CopyRestArgs(n) => vec![0xCF, *n],
+            Insn::CopyRestArgs(n) => vec![0xA1, *n],
             Insn::AsyncFunctionEnter => vec![0xAE],
             Insn::AsyncFunctionAwaitUncaught(async_reg) => vec![0xC4, *async_reg],
             Insn::AsyncFunctionResolve(async_reg) => vec![0xCD, *async_reg],
@@ -1479,9 +1472,7 @@ impl Insn {
             | Insn::Inc(_)
             | Insn::Dec(_) => 2,
             Insn::IsTrue | Insn::IsFalse => 1,
-            Insn::CallRuntimeIsTrue(_)
-            | Insn::CallRuntimeIsFalse(_)
-            | Insn::CallRuntimeSuperCallForwardAllArgs(_) => 3,
+            Insn::CallRuntimeIsTrue(_) | Insn::CallRuntimeIsFalse(_) => 3,
             Insn::LdThis => 1,
             Insn::CallArg0(_) => 2,
             Insn::CallArg1(_, _) => 3,

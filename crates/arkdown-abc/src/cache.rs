@@ -253,18 +253,15 @@ pub fn source_cache_hash(
     source_file: &str,
     package_name: &str,
     panda_file_version: u32,
-    target_api_version: u32,
 ) -> u32 {
     let version = panda_file_version_string(panda_file_version);
-    let target_api = target_api_version.to_string();
     let mut bytes = Vec::with_capacity(
         source.len()
             + file_name.len()
             + record_name.len()
             + source_file.len()
             + package_name.len()
-            + version.len()
-            + target_api.len(),
+            + version.len(),
     );
     bytes.extend_from_slice(source.as_bytes());
     bytes.extend_from_slice(file_name.as_bytes());
@@ -272,7 +269,6 @@ pub fn source_cache_hash(
     bytes.extend_from_slice(source_file.as_bytes());
     bytes.extend_from_slice(package_name.as_bytes());
     bytes.extend_from_slice(version.as_bytes());
-    bytes.extend_from_slice(target_api.as_bytes());
     get_hash32_string(&bytes)
 }
 
@@ -375,9 +371,8 @@ mod tests {
                 "main.ts",
                 "entry",
                 0x0001_000D,
-                20,
             ),
-            0x5ae6_2daa
+            0x643f_91c5
         );
     }
 
@@ -394,7 +389,6 @@ mod tests {
             "main.ts",
             "entry",
             0x0002_000C,
-            12,
         );
         let api13_hash = source_cache_hash(
             "export const x = 1;",
@@ -403,33 +397,8 @@ mod tests {
             "main.ts",
             "entry",
             0x0001_000D,
-            13,
         );
         assert_ne!(api12_hash, api13_hash);
-    }
-
-    #[test]
-    fn cache_hash_uses_target_api_even_when_panda_version_matches() {
-        let api20_hash = source_cache_hash(
-            "export const x = 1;",
-            "entry/main",
-            "entry/main",
-            "main.ts",
-            "entry",
-            0x0001_000D,
-            20,
-        );
-        let api21_hash = source_cache_hash(
-            "export const x = 1;",
-            "entry/main",
-            "entry/main",
-            "main.ts",
-            "entry",
-            0x0001_000D,
-            21,
-        );
-
-        assert_ne!(api20_hash, api21_hash);
     }
 
     #[test]

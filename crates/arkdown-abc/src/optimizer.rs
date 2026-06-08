@@ -548,6 +548,7 @@ fn is_known_instruction(opcode: u8, next: Option<u8>) -> bool {
             | 0x8a..=0x8b
             | 0x8e..=0x8f
             | 0x98..=0x9c
+            | 0xa1
             | 0xb0..=0xb1
             | 0xb3..=0xb6
             | 0xb9..=0xbd
@@ -734,6 +735,7 @@ mod tests {
             function_kind: function_kind::FUNCTION,
             source_lang: None,
             concurrent_module_requests: Vec::new(),
+            method_pool_entry: false,
             expected_property_count: None,
             annotations: Vec::new(),
             metadata_attrs: Default::default(),

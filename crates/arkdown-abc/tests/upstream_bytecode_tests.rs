@@ -46,7 +46,6 @@ fn compile_case(case: &UpstreamCase) -> Vec<u8> {
         target_api_version: 12,
         target_api_sub_version: None,
         enable_annotations: false,
-        use_define_semantic: false,
         merge_abc: true,
         module: false,
         module_record_field_name: None,

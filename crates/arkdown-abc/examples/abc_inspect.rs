@@ -60,7 +60,7 @@ fn instruction_len(opcode: u8, next: Option<u8>) -> usize {
         0xfe if matches!(next, Some(0x05 | 0x07)) => 3,
         0xfe if next == Some(0x09) => 4,
         0xfb if next == Some(0x01) => 5,
-        0xfb if matches!(next, Some(0x13 | 0x14 | 0x19)) => 3,
+        0xfb if matches!(next, Some(0x13 | 0x14)) => 3,
         _ => 1,
     }
 }

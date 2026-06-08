@@ -296,7 +296,6 @@ fn compile_to_abc_writes_upstream_program_cache_proto_bin() {
             source_file,
             package_name,
             version_for_target_api(17, Some("Release")),
-            17,
         )
     );
     assert_eq!(entry.program.record_table.len(), 3);

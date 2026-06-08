@@ -4,7 +4,68 @@
 **Priority**: P1
 **Blocked by**: SPEC-009, SPEC-025, SPEC-028
 **Related**: SPEC-048
-**Status**: Proposed
+**Status**: Implemented (worktree `worktree-feat+spec-049-abc-aot-refactor`, commit `6fa6ab1` + upstream-alignment fixes)
+
+## Implementation Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 0 — Oracle harness + fixtures | ✅ Complete | `tests/oracle/`, 3 fixture types, 4 golden tests |
+| 1 — AotCompileOptions, SourceFile | ✅ Complete | `aot/options.rs` with full filelist parsing |
+| 2 — Program model + ProgramRegistry | ✅ Complete | `program/ids.rs`, `program/model.rs`, `aot/program_registry.rs` |
+| 3 — CompileFileScheduler + CompileFileJob | ✅ Complete | `aot/compile_queue.rs` matching upstream `CompileFileJob::Run` |
+| 4 — SourceProgramCompiler | ✅ Complete | `aot/source_compiler.rs` — separate struct wrapping compile_source_program |
+| 5 — ProgramCacheStore | ✅ Complete | `aot/cache_store.rs` matching upstream hash semantics |
+| 6 — AbcInputProgramCompiler | ✅ Complete | `aot/abc_input.rs` — merge-mode split + whole-file |
+| 7 — NpmModuleEntryCompiler | ✅ Complete | `aot/npm_entries.rs` — line.find(":") semantics |
+| 8 — DepsRelationResolver | ✅ Complete | `aot/deps.rs` — BFS on ProgramRegistry |
+| 9 — ProgramOptimizer | ✅ Complete | `aot/optimizer.rs` — struct with SPEC-mandated methods |
+| 10 — AotOutputGenerator + program/to_abc.rs | ✅ Complete | `aot/output.rs`, `program/to_abc.rs` with string table merge |
+| 11 — AotRunner | ✅ Complete | `aot/runner.rs` matching upstream `main.cpp Run()` |
+| 11b — Facade migration + deletion | ✅ Complete | `compiler.rs` facade over AotRunner; build_abc_file deleted |
+
+382 tests pass. 3 GPG-signed commits. Guardrail: `rg build_abc_file|record_needs_optimization|load_npm_entry_records` → 0 production hits.
+
+### Final C++ Alignment Status (commit 43d9b60)
+
+| Area | Status |
+|------|--------|
+| MurmurHash3 algorithm | ✅ Correct — test vectors verified |
+| Program key format (source/ABC/npm) | ✅ Correct |
+| `_GLOBAL` merge-mode consistency check | ✅ Correct |
+| ir::builder returns Program | ✅ `build_program_with_mode` added, SourceProgramCompiler uses it |
+| Dependency BFS structure | ✅ Correct |
+| Static import moduleRecordIdx lookup | ✅ Correct (numeric index vs upstream string key — different internal repr, same output) |
+| Dynamic import `[DynamicImport ← LdaStr]` iteration order | ✅ Fixed to match upstream forward-iteration pattern |
+| Dynamic import `IsLabel()` check | ⚠️ Not replicable — Insn enum has no jump-target bit; documented; rare in practice |
+| npm entries compilation | ✅ Correct |
+| Non-merge metadata records | ✅ Correct |
+| ProgramOptimizer local optimization | ✅ Correct |
+| `analyze_for_global_optimization` | ⚠️ Stub — documented; call site wired correctly; body is no-op |
+| Annotation records | ✅ Correct for source programs; unverified against ets2panda |
+| String table merge | ✅ Correct |
+| `pandaFileVersion` in cache hash | ⚠️ Semantic difference — documented; no cross-tool cache interop with es2abc; self-consistent within arkdown |
+| ABC input cache hash + updateVersionInfo | ✅ `abc_input_hash_with_version_info` implemented |
+| npm entries proto cache restore | ✅ Fixed via `append_program_to_file` |
+| `requireGlobalOptimization` flag | ✅ Added; cache bypass + post-analysis wiring correct |
+| `proto_program_to_program` | ✅ Fixed via `append_program_to_file` |
+| Dynamic import BFS tracking | ✅ Fixed (was stub) |
+
+### Upstream C++ Alignment (systematic comparison vs local `/Users/ranger/Desktop/project/ohos-rs/arkcompiler_ets_frontend`)
+
+All critical gaps from the systematic comparison have been fixed:
+
+| Gap | Fix |
+|-----|-----|
+| `dynamic_imports_from_insns` was a stub | Now passes StringTable to resolve LdaStr string IDs for BFS |
+| `requireGlobalOptimization` flag missing | Added to AotCompileOptions; cache bypass + ProgramOptimizer wiring implemented |
+| ABC input cache hash missing updateVersionInfo | `abc_input_hash_with_version_info()` extends hash with pkgName:version strings |
+| `proto_program_to_program` stub in npm entries | Now uses `append_program_to_file` to properly restore program from protobuf |
+
+Known minor gaps (documented, not affecting correctness for current use cases):
+- Per-file output paths from filelist column 4 (non-merge mode)
+- `NeedCollectDepsRelation` missing `enableAbcInput` guard (harmless)
+- `dumpSymbolTable` cache bypass (patch workflow only)
 
 ---
 

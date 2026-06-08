@@ -326,6 +326,7 @@ pub(crate) fn append_program_to_file(
 
     let module_literal_keys = collect_module_literal_keys(&program)?;
     let mut literal_key_to_index = BTreeMap::new();
+    let mut literal_method_refs = BTreeSet::new();
     let literal_base_index = file.literal_arrays.len();
     let literal_entries = program.literal_array_table;
     for (index, entry) in literal_entries.iter().enumerate() {
@@ -343,6 +344,7 @@ pub(crate) fn append_program_to_file(
             key.clone(),
             literal_array_record_name(&key),
             &literal_key_to_index,
+            &mut literal_method_refs,
         )?;
         file.literal_arrays.push(literal);
     }
@@ -388,8 +390,11 @@ pub(crate) fn append_program_to_file(
             methods.push(method);
         }
 
+        function_refs
+            .method_pool_entries
+            .extend(literal_method_refs.iter().cloned());
         for method in &mut methods {
-            finalize_method_kind(method, &function_refs);
+            finalize_method_kind_and_pool(method, &function_refs);
         }
 
         let record_annotations =
@@ -695,6 +700,7 @@ fn literal_array_from_proto(
     explicit_key: String,
     record_name: Option<&str>,
     literal_key_to_index: &BTreeMap<String, usize>,
+    method_refs: &mut BTreeSet<String>,
 ) -> io::Result<LiteralArray> {
     if module_style {
         let mut entries = Vec::with_capacity(array.literals.len());
@@ -743,6 +749,7 @@ fn literal_array_from_proto(
             value_literal,
             record_name,
             literal_key_to_index,
+            method_refs,
         )?);
     }
     Ok(LiteralArray {
@@ -882,6 +889,7 @@ fn tagged_literal_from_proto(
     literal: Literal,
     record_name: Option<&str>,
     literal_key_to_index: &BTreeMap<String, usize>,
+    method_refs: &mut BTreeSet<String>,
 ) -> io::Result<LiteralEntry> {
     let Some(value) = literal.value else {
         return invalid_data("missing literal value");
@@ -913,6 +921,7 @@ fn tagged_literal_from_proto(
         }
         (LITERAL_TAG_METHOD, Some(variant_value::Value::ValueStr(value)), _) => {
             let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
             Ok(LiteralEntry::TaggedMethodName(name))
         }
         (LITERAL_TAG_GENERATOR_METHOD, Some(variant_value::Value::ValueInt(value)), _) => Ok(
@@ -920,6 +929,7 @@ fn tagged_literal_from_proto(
         ),
         (LITERAL_TAG_GENERATOR_METHOD, Some(variant_value::Value::ValueStr(value)), _) => {
             let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
             Ok(LiteralEntry::TaggedGeneratorMethodName(name))
         }
         (LITERAL_TAG_ASYNC_GENERATOR_METHOD, Some(variant_value::Value::ValueInt(value)), _) => {
@@ -930,6 +940,7 @@ fn tagged_literal_from_proto(
         }
         (LITERAL_TAG_ASYNC_GENERATOR_METHOD, Some(variant_value::Value::ValueStr(value)), _) => {
             let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
             Ok(LiteralEntry::TaggedAsyncGeneratorMethodName(name))
         }
         (LITERAL_TAG_GETTER, Some(variant_value::Value::ValueInt(value)), _) => {
@@ -937,6 +948,7 @@ fn tagged_literal_from_proto(
         }
         (LITERAL_TAG_GETTER, Some(variant_value::Value::ValueStr(value)), _) => {
             let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
             Ok(LiteralEntry::TaggedGetterName(name))
         }
         (LITERAL_TAG_SETTER, Some(variant_value::Value::ValueInt(value)), _) => {
@@ -944,6 +956,7 @@ fn tagged_literal_from_proto(
         }
         (LITERAL_TAG_SETTER, Some(variant_value::Value::ValueStr(value)), _) => {
             let name = method_literal_name(record_name, &value)?;
+            method_refs.insert(name.clone());
             Ok(LiteralEntry::TaggedSetterName(name))
         }
         (LITERAL_TAG_ACCESSOR, Some(variant_value::Value::ValueInt(value)), _) => Ok(
@@ -1056,6 +1069,7 @@ fn field_value_from_proto(
 #[derive(Default)]
 struct FunctionRefs {
     constructor_names: BTreeSet<String>,
+    method_pool_entries: BTreeSet<String>,
     definefunc_order: BTreeMap<String, u32>,
     next_definefunc_order: u32,
 }
@@ -1094,7 +1108,10 @@ fn method_from_proto(
         function_insns_from_proto(function, record_name, strings, literal_key_to_index)?;
     refs.constructor_names
         .extend(method_refs.constructor_names.iter().cloned());
+    refs.method_pool_entries
+        .extend(method_refs.method_pool_entries.iter().cloned());
     for definefunc in &method_refs.definefunc_order {
+        refs.method_pool_entries.insert(definefunc.clone());
         refs.definefunc_order
             .entry(definefunc.clone())
             .or_insert_with(|| {
@@ -1151,6 +1168,7 @@ fn method_from_proto(
         function_kind: function.function_kind,
         source_lang: Some(to_u8(function.language as u64, "function language")?),
         concurrent_module_requests: function.concurrent_module_requests.clone(),
+        method_pool_entry: false,
         expected_property_count: function_expected_property_count(function)?,
         annotations: function_custom_annotations(function, literal_key_to_index, literal_refs)?,
         metadata_attrs: function_metadata_attrs(function)?,
@@ -1244,12 +1262,17 @@ fn function_debug_line_start(debug: &[InstructionDebugInfo]) -> u32 {
     debug.first().map(|debug| debug.line_number).unwrap_or(1)
 }
 
-fn finalize_method_kind(method: &mut MethodRecord, refs: &FunctionRefs) {
+fn finalize_method_kind_and_pool(method: &mut MethodRecord, refs: &FunctionRefs) {
     if refs.constructor_names.contains(&method.name) {
         method.kind = MethodKind::Constructor;
     } else if method.name == "func_main_0" {
         method.kind = MethodKind::Module;
     }
+    method.method_pool_entry = refs.method_pool_entries.contains(&method.name)
+        || matches!(
+            method.kind,
+            MethodKind::FunctionLiteral | MethodKind::Anonymous | MethodKind::Constructor
+        );
     if matches!(
         method.kind,
         MethodKind::FunctionLiteral | MethodKind::Anonymous
@@ -1345,6 +1368,7 @@ fn line_ops_from_instruction_debug(insns: &[Insn], debug: &[InstructionDebugInfo
 #[derive(Default)]
 struct MethodDecodeRefs {
     constructor_names: BTreeSet<String>,
+    method_pool_entries: BTreeSet<String>,
     definefunc_order: Vec<String>,
     literal_indices: BTreeSet<usize>,
 }
@@ -1670,6 +1694,7 @@ fn insn_from_proto(
             }
             147 => {
                 let name = short_method_name(record_name, &utf8(id(ins, 0)?)?);
+                refs.method_pool_entries.insert(name.clone());
                 Insn::DefineMethodShort(
                     imm_u8(ins, 0, "definemethod slot")?,
                     intern_id(strings, name.as_bytes())?,
@@ -1679,6 +1704,7 @@ fn insn_from_proto(
             148 => {
                 let ctor = short_method_name(record_name, &utf8(id(ins, 0)?)?);
                 refs.constructor_names.insert(ctor.clone());
+                refs.method_pool_entries.insert(ctor);
                 let literal = literal_ref(literal_key_to_index, id(ins, 1)?, refs)?;
                 Insn::DefineClassWithBuffer(
                     imm_u8(ins, 0, "defineclass slot")?,
@@ -3013,18 +3039,11 @@ impl FunctionLabelPlan {
     }
 
     fn add(&mut self, offset: usize, name: String) {
-        self.add_target(offset, offset, name);
-    }
-
-    fn add_target(&mut self, label_offset: usize, target_offset: usize, name: String) {
         self.labels_by_offset
-            .entry(label_offset)
+            .entry(offset)
             .or_default()
             .push(name.clone());
-        self.target_names
-            .entry(target_offset)
-            .or_insert(name.clone());
-        self.target_names.entry(label_offset).or_insert(name);
+        self.target_names.entry(offset).or_insert(name);
         self.len += 1;
     }
 
@@ -3070,7 +3089,7 @@ fn method_label_plan(
             .cloned()
             .unwrap_or_else(|| label_name_for_source_index(plan.len()));
         let name = unique_label_name(base, &mut used_names);
-        plan.add_target(offset.min(end_offset), offset, name);
+        plan.add(offset, name);
     }
 
     plan
@@ -3254,8 +3273,7 @@ fn insn_to_proto(
         | Insn::SuspendGenerator(reg)
         | Insn::AsyncFunctionAwaitUncaught(reg)
         | Insn::AsyncFunctionResolve(reg)
-        | Insn::AsyncFunctionReject(reg)
-        | Insn::CallRuntimeSuperCallForwardAllArgs(reg) => out.regs.push(*reg as u32),
+        | Insn::AsyncFunctionReject(reg) => out.regs.push(*reg as u32),
         Insn::MovV4(dst, src) | Insn::MovV8(dst, src) => {
             out.regs.extend([*dst as u32, *src as u32]);
         }
@@ -4159,7 +4177,6 @@ mod tests {
             false,
             false,
             false,
-            false,
         )
         .unwrap();
         let main_idx = record
@@ -4252,12 +4269,14 @@ mod tests {
             ]
         );
 
+        let mut method_refs = BTreeSet::new();
         let restored = literal_array_from_proto(
             proto,
             false,
             "record_0".to_string(),
             Some("record"),
             &BTreeMap::new(),
+            &mut method_refs,
         )
         .unwrap();
         assert_eq!(restored.entries, entries);
@@ -4291,9 +4310,16 @@ mod tests {
         );
         assert!(!tags.contains(&LITERAL_TAG_TAGVALUE));
 
-        let restored =
-            literal_array_from_proto(proto, true, "record_1".to_string(), None, &BTreeMap::new())
-                .unwrap();
+        let mut method_refs = BTreeSet::new();
+        let restored = literal_array_from_proto(
+            proto,
+            true,
+            "record_1".to_string(),
+            None,
+            &BTreeMap::new(),
+            &mut method_refs,
+        )
+        .unwrap();
         assert_eq!(restored.entries, entries);
     }
 
@@ -4316,7 +4342,7 @@ mod tests {
                 std::str::from_utf8(&entry.key)
                     .map(|key| {
                         let short = key.rsplit('.').next().unwrap_or(key);
-                        function_short_name_matches(short, name)
+                        short == name || short.ends_with(&format!("#*#{name}"))
                     })
                     .unwrap_or(false)
             })
@@ -4334,19 +4360,11 @@ mod tests {
                 std::str::from_utf8(&entry.key)
                     .map(|key| {
                         let short = key.rsplit('.').next().unwrap_or(key);
-                        function_short_name_matches(short, name)
+                        short == name || short.ends_with(&format!("#*#{name}"))
                     })
                     .unwrap_or(false)
             })
             .and_then(|entry| entry.value.as_mut())
-    }
-
-    fn function_short_name_matches(short: &str, name: &str) -> bool {
-        short == name
-            || short.ends_with(&format!("*#{name}"))
-            || short.ends_with(&format!(">#{name}"))
-            || short.ends_with(&format!("<#{name}"))
-            || short.ends_with(&format!("=#{name}"))
     }
 
     fn functions_by_short_suffix<'a>(program: &'a Program, name: &str) -> Vec<&'a Function> {
@@ -4534,7 +4552,6 @@ mod tests {
             true,
             false,
             true,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -6252,31 +6269,6 @@ class A {}
         });
         file.records[0].literal_indices.push(u64_array);
         file.records[0].literal_indices.push(string_array);
-        let main_method_idx = file.records[0]
-            .methods
-            .iter()
-            .position(|method| method.name == "func_main_0")
-            .expect("annotation usage file must contain func_main_0");
-        let mut insns = file.records[0].methods[main_method_idx]
-            .pandasm_insns
-            .clone();
-        let insert_at = insns
-            .iter()
-            .position(|insn| matches!(insn, Insn::Return | Insn::ReturnUndefined))
-            .unwrap_or(insns.len());
-        insns.insert(insert_at, Insn::CreateArrayWithBuffer(0, u64_array as u16));
-        insns.insert(
-            insert_at + 1,
-            Insn::CreateArrayWithBuffer(0, string_array as u16),
-        );
-        let bytecode = insns
-            .iter()
-            .flat_map(|insn| insn.encode(&mut file.strings))
-            .collect::<Vec<_>>();
-        let main_method = &mut file.records[0].methods[main_method_idx];
-        main_method.pandasm_insns = insns;
-        main_method.bytecode = bytecode;
-        main_method.slots_num = None;
 
         let program = program_for_file(&file, 20).unwrap();
         let typed_arrays = program
@@ -6543,7 +6535,6 @@ af(); gf(); ag(); ar(); aa(); cf(); sf(); saf();
             false,
             false,
             true,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -6614,7 +6605,6 @@ cf();
             false,
             false,
             true,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -6668,7 +6658,6 @@ outer();
             false,
             false,
             true,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -6717,7 +6706,6 @@ new C().method();
             false,
             false,
             true,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -6753,7 +6741,6 @@ cf();
             false,
             false,
             true,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -6785,7 +6772,6 @@ cf();
                 false,
                 false,
                 true,
-                false,
             )
             .unwrap_err()
             .to_string()
@@ -6861,7 +6847,6 @@ sf(); saf();
                 false,
                 false,
                 true,
-                false,
             )
             .unwrap();
             file.add_record(record);
@@ -6918,7 +6903,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             false,
             false,
             true,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -6980,7 +6964,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             false,
             false,
             false,
-            false,
         )
         .unwrap();
         for method in &mut record.methods {
@@ -7016,55 +6999,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
     }
 
     #[test]
-    fn source_label_plan_materializes_jump_aliases_at_function_end() {
-        let mut file = AbcFile::new();
-        let record = build_record_with_debug_and_package_for_target_with_mode(
-            "let x = 1; x;",
-            "@bundle:demo/entry/ets/pages/Index",
-            &mut file.strings,
-            &mut file.literal_arrays,
-            Some("entry/src/main/ets/pages/Index.ets"),
-            None,
-            false,
-            false,
-            "ets",
-            true,
-            12,
-            None,
-            false,
-            false,
-            false,
-            false,
-        )
-        .unwrap();
-        let mut method = record.methods[0].clone();
-        method.label_style = MethodLabelStyle::Source;
-        method.program_labels = vec![ProgramLabel {
-            name: "label_0".to_string(),
-            offset: 2,
-            file_location: None,
-        }];
-
-        let insns = vec![Insn::JmpShort(4)];
-        let required_offsets = BTreeSet::from([2usize, 4usize]);
-        let plan = method_label_plan(&insns, &required_offsets, &method);
-
-        let names_at_end = plan.names_at(2).unwrap();
-        assert_eq!(
-            names_at_end,
-            &["label_0".to_string(), "label_1".to_string()]
-        );
-        assert_eq!(
-            plan.target_names().get(&2).map(String::as_str),
-            Some("label_0")
-        );
-        assert_eq!(
-            plan.target_names().get(&4).map(String::as_str),
-            Some("label_1")
-        );
-    }
-
-    #[test]
     fn compiled_record_can_build_proto_program() {
         let mut file = AbcFile::new();
         let record = build_record_with_debug_and_package_for_target_with_mode(
@@ -7080,7 +7014,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
-            false,
             false,
             false,
             false,
@@ -7192,7 +7125,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             false,
             false,
             false,
-            false,
         )
         .unwrap();
         file.add_record(record);
@@ -7248,7 +7180,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             false,
             false,
             false,
-            false,
         )
         .unwrap();
         let a_record = build_record_with_debug_and_package_for_target_with_mode(
@@ -7264,7 +7195,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
-            false,
             false,
             false,
             false,
@@ -7322,7 +7252,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             false,
             false,
             false,
-            false,
         )
         .unwrap();
         let expected_labels = record.methods[0]
@@ -7365,7 +7294,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
-            false,
             false,
             false,
             false,
@@ -7412,7 +7340,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
-            false,
             false,
             false,
             false,
@@ -7479,7 +7406,6 @@ obj.m(); obj.am(); obj.gm(); obj.agm();
             true,
             12,
             None,
-            false,
             false,
             false,
             false,

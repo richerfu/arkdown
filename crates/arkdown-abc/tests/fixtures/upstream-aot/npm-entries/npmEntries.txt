@@ -1,0 +1,2 @@
+@bundle:com.example.npm1/ohpm_modules/a:exports
+@bundle:com.example.npm2/ohpm_modules/b:exports

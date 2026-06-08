@@ -81,6 +81,7 @@ async-trait = "0.1"
 
 # Data structures
 rustc-hash = "2"
+index_vec = "0.1"
 oxc_index = { version = "4.1.0", features = ["nonmax", "serde"] }
 compact_str = { version = "0.8", features = ["serde"] }
 bitflags = "2"

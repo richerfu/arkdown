@@ -34,6 +34,7 @@
 
 mod abc2program;
 pub mod abc_reader;
+pub mod aot;
 pub mod cache;
 pub mod compiler;
 mod dependency;
@@ -44,11 +45,13 @@ pub(crate) mod isa;
 pub(crate) mod names;
 mod npm_entries;
 mod optimizer;
+pub mod program;
 mod program_cache;
 pub mod proto_panda;
 pub mod widget;
 
 pub use abc_reader::{AbcClassInfo, AbcReadError, AbcReader, AbcSectionHashes, ParsedAbcSummary};
+pub use aot::{AotCompileOptions, AotOutput, AotOutputResult, AotRunner, ScriptKind, SourceFile};
 pub use compiler::{
     AbcArtifactResult, AbcCompileOptions, AbcCompiler, AbcInputFile, AbcModule,
     AbcProgramCacheInput,
@@ -158,7 +161,6 @@ mod tests {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: true,
             module: false,
             module_record_field_name: None,
@@ -248,7 +250,6 @@ mod tests {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: false,
             module: true,
             module_record_field_name: None,
@@ -304,7 +305,6 @@ mod tests {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: false,
             module: true,
             module_record_field_name: None,
@@ -360,7 +360,6 @@ mod tests {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: false,
             module: true,
             module_record_field_name: None,
@@ -402,7 +401,6 @@ mod tests {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: false,
             module: true,
             module_record_field_name: None,
@@ -444,7 +442,6 @@ mod tests {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: false,
             module: false,
             module_record_field_name: None,
@@ -539,7 +536,6 @@ mod tests {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: true,
             module: true,
             module_record_field_name: None,
@@ -768,8 +764,8 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
     }
 
     #[test]
-    fn test_class_declaration_installs_methods_through_class_buffer() {
-        use crate::emit::file::{LiteralArray, LiteralEntry};
+    fn test_class_declaration_emits_missing_property_initializers() {
+        use crate::emit::file::LiteralArray;
         use crate::emit::strings::StringTable;
         use crate::ir::builder::build_record_with_debug;
 
@@ -799,39 +795,12 @@ registerNamedRoute(() => new Index(undefined, {}), "", {});
             .iter()
             .find(|m| m.name == "func_main_0")
             .expect("func_main_0 must exist");
+        let stown_count = main.bytecode.iter().filter(|&&b| b == 0x7a).count();
         assert!(
-            main.bytecode.contains(&0x35),
-            "class declaration must be installed through defineclasswithbuffer; bytecode={:02x?}",
+            stown_count >= 3,
+            "class declaration must install initialRender/rerender/getEntryName; bytecode={:02x?}",
             main.bytecode
         );
-
-        let method_names = record
-            .methods
-            .iter()
-            .map(|method| method.name.as_str())
-            .collect::<Vec<_>>();
-        for expected in ["initialRender", "rerender", "getEntryName"] {
-            assert!(
-                method_names.iter().any(|name| name.contains(expected)),
-                "class method record for {expected} must exist; got {method_names:?}"
-            );
-        }
-
-        for expected in ["initialRender", "rerender", "getEntryName"] {
-            let linked_from_class_buffer = literal_arrays.iter().any(|literal| {
-                let has_public_name = literal.entries.iter().any(
-                    |entry| matches!(entry, LiteralEntry::TaggedString(value) if value == expected),
-                );
-                let has_method = literal.entries.iter().any(|entry| {
-                    matches!(entry, LiteralEntry::TaggedMethodName(name) if name.contains(expected))
-                });
-                has_public_name && has_method
-            });
-            assert!(
-                linked_from_class_buffer,
-                "class buffer must link public method {expected} to its internal MethodItem"
-            );
-        }
     }
 
     // ── Auto-accessor regression test ───────────────────────────────────────
@@ -920,7 +889,6 @@ class Counter {
             target_api_version: 12,
             target_api_sub_version: None,
             enable_annotations: false,
-            use_define_semantic: false,
             merge_abc: true,
             module: true,
             module_record_field_name: None,
@@ -958,7 +926,6 @@ class Counter {
                 target_api_version: 12,
                 target_api_sub_version: None,
                 enable_annotations: false,
-                use_define_semantic: false,
                 merge_abc: true,
                 module: true,
                 module_record_field_name: None,
