@@ -27,6 +27,8 @@
 
 use std::path::{Path, PathBuf};
 
+use arkdown_path::HvigorNativeLibraryPattern;
+
 /// Classification of a dependency node in the dependency graph.
 ///
 /// Mirrors hvigor's `DependencyManager.NodeType` taxonomy.
@@ -300,12 +302,12 @@ fn has_native_so(pkg_root: &Path) -> bool {
     ] {
         let dir = pkg_root.join(arm_dir);
         if dir.is_dir() {
-            if let Ok(mut entries) = std::fs::read_dir(&dir) {
-                if entries.any(|e| {
-                    e.ok()
-                        .and_then(|entry| entry.path().extension().map(|ext| ext == "so"))
-                        .unwrap_or(false)
-                }) {
+            for entry in walkdir::WalkDir::new(&dir)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_file())
+            {
+                if HvigorNativeLibraryPattern::matches_path_under(&dir, entry.path()) {
                     return true;
                 }
             }

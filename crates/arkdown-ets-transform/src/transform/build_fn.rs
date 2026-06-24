@@ -68,13 +68,27 @@ pub struct CustomComponentInfo {
 
 pub type CustomComponentUpdateProps = FxHashMap<String, CustomComponentInfo>;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct BuildContext {
     use_parent_context: bool,
     current_component_reusable: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
     component_metadata: Arc<ComponentMetadata>,
     module_name: Arc<str>,
+    custom_component_base_name: &'static str,
+}
+
+impl Default for BuildContext {
+    fn default() -> Self {
+        Self {
+            use_parent_context: false,
+            current_component_reusable: false,
+            raw_object_fields: Arc::default(),
+            component_metadata: Arc::new(ComponentMetadata::default()),
+            module_name: Arc::from(""),
+            custom_component_base_name: GeneratedViewpuName::VIEWPU_BASE,
+        }
+    }
 }
 
 pub(super) struct BuildSourceMetadata<'a> {
@@ -144,10 +158,12 @@ pub struct BuildBodyPlan<'a> {
     module_name: Option<Arc<str>>,
     context_kind: BuildBodyContextKind,
     current_component_reusable: bool,
+    custom_component_base_name: &'static str,
 }
 
 impl<'a> BuildBodyPlan<'a> {
-    pub(crate) fn component(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn component_v2(
         body: Option<&'a FunctionBody<'a>>,
         source_text: &str,
         source_id: &str,
@@ -160,34 +176,6 @@ impl<'a> BuildBodyPlan<'a> {
         module_name: Option<&str>,
         current_component_reusable: bool,
     ) -> Self {
-        Self::component_with_shared_metadata(
-            body,
-            source_text,
-            source_id,
-            custom_components,
-            builder_methods,
-            builder_param_methods,
-            custom_component_update_props,
-            Arc::new(component_metadata.clone()),
-            raw_object_fields,
-            module_name,
-            current_component_reusable,
-        )
-    }
-
-    pub(crate) fn component_with_shared_metadata(
-        body: Option<&'a FunctionBody<'a>>,
-        source_text: &str,
-        source_id: &str,
-        custom_components: &FxHashSet<String>,
-        builder_methods: &FxHashSet<String>,
-        builder_param_methods: &FxHashSet<String>,
-        custom_component_update_props: &CustomComponentUpdateProps,
-        component_metadata: Arc<ComponentMetadata>,
-        raw_object_fields: &FxHashSet<String>,
-        module_name: Option<&str>,
-        current_component_reusable: bool,
-    ) -> Self {
         Self::component_with_shared_inputs(
             body,
             Arc::from(source_text),
@@ -196,10 +184,11 @@ impl<'a> BuildBodyPlan<'a> {
             builder_methods,
             builder_param_methods,
             custom_component_update_props,
-            component_metadata,
+            Arc::new(component_metadata.clone()),
             raw_object_fields,
             module_name.map(Arc::from),
             current_component_reusable,
+            GeneratedViewpuName::VIEW_V2_BASE,
         )
     }
 
@@ -215,6 +204,7 @@ impl<'a> BuildBodyPlan<'a> {
         raw_object_fields: &FxHashSet<String>,
         module_name: Option<Arc<str>>,
         current_component_reusable: bool,
+        custom_component_base_name: &'static str,
     ) -> Self {
         Self::new(
             body,
@@ -229,10 +219,12 @@ impl<'a> BuildBodyPlan<'a> {
             module_name,
             BuildBodyContextKind::Component,
             current_component_reusable,
+            custom_component_base_name,
         )
     }
 
-    pub(crate) fn builder(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn builder_v2(
         body: Option<&'a FunctionBody<'a>>,
         source_text: &str,
         source_id: &str,
@@ -244,32 +236,6 @@ impl<'a> BuildBodyPlan<'a> {
         raw_object_fields: &FxHashSet<String>,
         module_name: Option<&str>,
     ) -> Self {
-        Self::builder_with_shared_metadata(
-            body,
-            source_text,
-            source_id,
-            custom_components,
-            builder_methods,
-            builder_param_methods,
-            custom_component_update_props,
-            Arc::new(component_metadata.clone()),
-            raw_object_fields,
-            module_name,
-        )
-    }
-
-    pub(crate) fn builder_with_shared_metadata(
-        body: Option<&'a FunctionBody<'a>>,
-        source_text: &str,
-        source_id: &str,
-        custom_components: &FxHashSet<String>,
-        builder_methods: &FxHashSet<String>,
-        builder_param_methods: &FxHashSet<String>,
-        custom_component_update_props: &CustomComponentUpdateProps,
-        component_metadata: Arc<ComponentMetadata>,
-        raw_object_fields: &FxHashSet<String>,
-        module_name: Option<&str>,
-    ) -> Self {
         Self::builder_with_shared_inputs(
             body,
             Arc::from(source_text),
@@ -278,9 +244,10 @@ impl<'a> BuildBodyPlan<'a> {
             builder_methods,
             builder_param_methods,
             custom_component_update_props,
-            component_metadata,
+            Arc::new(component_metadata.clone()),
             raw_object_fields,
             module_name.map(Arc::from),
+            GeneratedViewpuName::VIEW_V2_BASE,
         )
     }
 
@@ -295,6 +262,7 @@ impl<'a> BuildBodyPlan<'a> {
         component_metadata: Arc<ComponentMetadata>,
         raw_object_fields: &FxHashSet<String>,
         module_name: Option<Arc<str>>,
+        custom_component_base_name: &'static str,
     ) -> Self {
         Self::new(
             body,
@@ -309,6 +277,7 @@ impl<'a> BuildBodyPlan<'a> {
             module_name,
             BuildBodyContextKind::Builder,
             false,
+            custom_component_base_name,
         )
     }
 
@@ -325,6 +294,7 @@ impl<'a> BuildBodyPlan<'a> {
         module_name: Option<Arc<str>>,
         context_kind: BuildBodyContextKind,
         current_component_reusable: bool,
+        custom_component_base_name: &'static str,
     ) -> Self {
         Self {
             body,
@@ -339,6 +309,7 @@ impl<'a> BuildBodyPlan<'a> {
             module_name,
             context_kind,
             current_component_reusable,
+            custom_component_base_name,
         }
     }
 
@@ -359,7 +330,9 @@ impl<'a> BuildBodyPlan<'a> {
         if let Some(module_name) = &self.module_name {
             context = context.with_module_name(module_name);
         }
-        context.with_shared_component_metadata(Arc::clone(&self.component_metadata))
+        context
+            .with_shared_component_metadata(Arc::clone(&self.component_metadata))
+            .with_custom_component_base_name(self.custom_component_base_name)
     }
 
     fn source_metadata(&self) -> BuildSourceMetadata<'_> {
@@ -1624,6 +1597,15 @@ impl BuildContext {
     fn with_current_component_reusable(mut self, reusable: bool) -> Self {
         self.current_component_reusable = reusable;
         self
+    }
+
+    fn with_custom_component_base_name(mut self, base_name: &'static str) -> Self {
+        self.custom_component_base_name = base_name;
+        self
+    }
+
+    fn custom_component_base_name(&self) -> &'static str {
+        self.custom_component_base_name
     }
 
     fn is_raw_object_field(&self, name: &str) -> bool {

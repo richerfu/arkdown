@@ -109,6 +109,7 @@ sourcemap = "9"
 # File system
 fs-err = "3"
 walkdir = "2"
+fast-glob = "1.0.1"
 
 # Parallel
 rayon = "1"

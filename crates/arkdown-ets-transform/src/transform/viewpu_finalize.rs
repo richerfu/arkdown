@@ -66,7 +66,7 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
 
     fn run(&mut self) {
         self.changed |= self.first_statement_start().is_some_and(|start| start > 0);
-        if !self.has_viewpu_class() {
+        if !self.has_view_class() {
             return;
         }
 
@@ -141,11 +141,11 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
             .map(|statement| statement.span().start as usize)
     }
 
-    fn has_viewpu_class(&self) -> bool {
+    fn has_view_class(&self) -> bool {
         self.program
             .body
             .iter()
-            .any(ViewpuClassProbe::declares_viewpu)
+            .any(ViewpuClassProbe::declares_view_class)
     }
 
     fn has_finalize_construction_probe(&self) -> bool {
@@ -297,21 +297,24 @@ impl<'a> ViewPuParamsInterfaceName<'a> {
 struct ViewpuClassProbe;
 
 impl ViewpuClassProbe {
-    fn declares_viewpu(statement: &Statement<'_>) -> bool {
+    fn declares_view_class(statement: &Statement<'_>) -> bool {
         match statement {
-            Statement::ClassDeclaration(class) => Self::class_extends_viewpu(&class.super_class),
+            Statement::ClassDeclaration(class) => Self::class_extends_view_base(&class.super_class),
             Statement::ExportDefaultDeclaration(export) => {
-                matches!(&export.declaration, ExportDefaultDeclarationKind::ClassDeclaration(class) if Self::class_extends_viewpu(&class.super_class))
+                matches!(&export.declaration, ExportDefaultDeclarationKind::ClassDeclaration(class) if Self::class_extends_view_base(&class.super_class))
             }
             Statement::ExportNamedDeclaration(export) => {
-                matches!(&export.declaration, Some(Declaration::ClassDeclaration(class)) if Self::class_extends_viewpu(&class.super_class))
+                matches!(&export.declaration, Some(Declaration::ClassDeclaration(class)) if Self::class_extends_view_base(&class.super_class))
             }
             _ => false,
         }
     }
 
-    fn class_extends_viewpu(super_class: &Option<Expression<'_>>) -> bool {
-        matches!(super_class, Some(Expression::Identifier(identifier)) if identifier.name.as_str() == GeneratedViewpuName::VIEWPU_BASE)
+    fn class_extends_view_base(super_class: &Option<Expression<'_>>) -> bool {
+        matches!(super_class, Some(Expression::Identifier(identifier)) if matches!(
+            identifier.name.as_str(),
+            GeneratedViewpuName::VIEWPU_BASE | GeneratedViewpuName::VIEW_V2_BASE
+        ))
     }
 }
 

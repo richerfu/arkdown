@@ -8,8 +8,6 @@
 //! lowering boundary; it is not used by production bundling.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-#[cfg(test)]
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::RwLock;
@@ -33,8 +31,6 @@ use oxc_syntax::{number::NumberBase, operator::UnaryOperator};
 use oxc_transformer::{TransformOptions, Transformer};
 
 use crate::source::{TransformSourceFile, TransformSourceSnapshot};
-#[cfg(test)]
-use crate::transform::source_emit::CodegenSourceText;
 use crate::ModuleExportNameText;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,17 +76,18 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
     }
 
     pub(crate) fn emit(&self) -> Option<String> {
-        let mut rewriter = ImportedConstEnumRewriter::new(self.source, self.id, self.sources);
-        if let Some(cache) = self.const_enum_exports {
-            rewriter = rewriter.with_const_enum_export_cache(cache);
-        }
-        let source = rewriter.rewrite();
         let allocator = Allocator::default();
         let source_type = self.source_type();
-        let mut parsed = Parser::new(&allocator, source.as_ref(), source_type).parse();
+        let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return None;
         }
+
+        let mut rewriter = ImportedConstEnumRewriter::new(self.id, self.sources);
+        if let Some(cache) = self.const_enum_exports {
+            rewriter = rewriter.with_const_enum_export_cache(cache);
+        }
+        rewriter.rewrite_program(&allocator, &mut parsed.program);
 
         let scoping = {
             let semantic_ret = SemanticBuilder::new()
@@ -129,7 +126,6 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
 }
 
 pub(crate) struct ImportedConstEnumRewriter<'a> {
-    source: &'a str,
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
     #[cfg(test)]
@@ -137,9 +133,8 @@ pub(crate) struct ImportedConstEnumRewriter<'a> {
 }
 
 impl<'a> ImportedConstEnumRewriter<'a> {
-    pub(crate) fn new(source: &'a str, id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
+    pub(crate) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
         Self {
-            source,
             id,
             sources,
             #[cfg(test)]
@@ -151,49 +146,6 @@ impl<'a> ImportedConstEnumRewriter<'a> {
     pub(crate) fn with_const_enum_export_cache(mut self, cache: &'a ConstEnumExportCache) -> Self {
         self.const_enum_exports = Some(cache);
         self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn rewrite(&self) -> Cow<'a, str> {
-        if !self.may_rewrite() {
-            return Cow::Borrowed(self.source);
-        }
-        let allocator = Allocator::default();
-        let source_type = self.source_type();
-        let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Cow::Borrowed(self.source);
-        }
-
-        let imports = {
-            let collector =
-                ConstEnumImportCollector::new(&parsed.program.body, self.id, self.sources);
-            #[cfg(test)]
-            let collector = collector.with_const_enum_export_cache_opt(self.const_enum_exports);
-            collector.collect()
-        };
-        if imports.is_empty() {
-            return Cow::Borrowed(self.source);
-        }
-
-        let mut visitor = ConstEnumInlineMutator {
-            ast: AstBuilder::new(&allocator),
-            imports,
-            changed: false,
-        };
-        visitor.visit_program(&mut parsed.program);
-        if !visitor.changed {
-            return Cow::Borrowed(self.source);
-        }
-
-        Cow::Owned(
-            CodegenSourceText::new(Codegen::new().build(&parsed.program).code)
-                .without_trailing_newline(),
-        )
-    }
-
-    pub(crate) fn may_rewrite(&self) -> bool {
-        self.source.contains("import")
     }
 
     pub(crate) fn rewrite_program<'ast>(
@@ -218,11 +170,6 @@ impl<'a> ImportedConstEnumRewriter<'a> {
         };
         visitor.visit_program(program);
         visitor.changed
-    }
-
-    #[cfg(test)]
-    fn source_type(&self) -> SourceType {
-        SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true))
     }
 }
 

@@ -19,6 +19,7 @@ pub mod artifact;
 pub mod classify;
 pub mod compat;
 pub mod hvigor;
+pub mod native_library;
 pub mod normalize;
 pub mod ohm;
 pub mod rel;
@@ -31,11 +32,12 @@ pub use artifact::ArtifactPath;
 pub use classify::PathKind;
 pub use compat::{canonicalize_or_owned, to_slash};
 pub use hvigor::HvigorModulePath;
+pub use native_library::HvigorNativeLibraryPattern;
 pub use normalize::{lexical_normalize, strip_relative_prefix};
 pub use ohm::{NormalizedOhmUrl, OhmSchema, OhmUrl};
 pub use rel::RelPath;
 pub use serializer::ArtifactPathSerializer;
-pub use source_file::SourceFileName;
+pub use source_file::{HvigorSourceFileFilter, SourceFileName};
 pub use specifier::{
     ModuleSpecifier, ModuleSpecifierText, PackageSpecifierCandidate, SpecifierKind,
 };

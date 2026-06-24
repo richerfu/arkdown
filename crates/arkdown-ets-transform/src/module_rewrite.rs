@@ -16,8 +16,6 @@ use oxc_ast::{
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
-#[cfg(test)]
-use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, SPAN};
 use oxc_syntax::symbol::SymbolId;
 
@@ -31,106 +29,13 @@ use crate::transform::source_emit::CodegenSourceText;
 use crate::ModuleExportNameText;
 
 pub(super) struct TypeOnlyNamedImportSplitter<'a> {
-    source: &'a str,
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
 }
 
 impl<'a> TypeOnlyNamedImportSplitter<'a> {
-    pub(super) fn new(source: &'a str, id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
-        Self {
-            source,
-            id,
-            sources,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn split(&self) -> Cow<'a, str> {
-        if !self.may_split() {
-            return Cow::Borrowed(self.source);
-        }
-        let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Cow::Borrowed(self.source);
-        }
-
-        let local_bindings = TopLevelBindingKindCollector::new(&parsed.program).collect();
-        let mut type_import_locals = FxHashSet::default();
-        let split_plans = {
-            let semantic_ret = SemanticBuilder::new().build(&parsed.program);
-            if !semantic_ret.diagnostics.is_empty() {
-                return Cow::Borrowed(self.source);
-            }
-            let scoping = semantic_ret.semantic.scoping();
-            parsed
-                .program
-                .body
-                .iter()
-                .map(|statement| match statement {
-                    Statement::ImportDeclaration(import) => {
-                        let split =
-                            ImportDeclarationSplit::new(import, self.id, self.sources, scoping)
-                                .split()?;
-                        type_import_locals.extend(split.type_local_names().iter().cloned());
-                        Some(split.into_emitter())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let ast = AstBuilder::new(&allocator);
-        let mut changed = false;
-        let mut body = OxcVec::new_in(&allocator);
-        let old_body = std::mem::replace(&mut parsed.program.body, OxcVec::new_in(&allocator));
-        for (statement, split_plan) in old_body.into_iter().zip(split_plans) {
-            if let Some(split) = split_plan {
-                changed = true;
-                for statement in split.statements(ast) {
-                    body.push(statement);
-                }
-            } else if let Some(split) = match &statement {
-                Statement::ExportNamedDeclaration(export) => {
-                    LocalTypeOnlyExportSplit::new(export, &type_import_locals, &local_bindings)
-                        .split()
-                }
-                _ => None,
-            } {
-                changed = true;
-                for statement in split.statements(ast) {
-                    body.push(statement);
-                }
-            } else {
-                body.push(statement);
-            }
-        }
-        parsed.program.body = body;
-
-        if !changed {
-            return Cow::Borrowed(self.source);
-        }
-
-        Cow::Owned(
-            CodegenSourceText::new(
-                Codegen::new()
-                    .with_options(CodegenOptions {
-                        indent_char: IndentChar::Space,
-                        indent_width: 4,
-                        ..CodegenOptions::default()
-                    })
-                    .build(&parsed.program)
-                    .code,
-            )
-            .without_trailing_newline(),
-        )
-    }
-
-    pub(crate) fn may_split(&self) -> bool {
-        self.source.contains("import") || MayContainLocalNamedExport::new(self.source).check()
+    pub(super) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
+        Self { id, sources }
     }
 
     pub(crate) fn split_program<'ast>(
@@ -185,126 +90,11 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
     }
 }
 
-struct MayContainLocalNamedExport<'a> {
-    source: &'a str,
-}
+pub(super) struct DefaultImportReexportRewriter;
 
-impl<'a> MayContainLocalNamedExport<'a> {
-    fn new(source: &'a str) -> Self {
-        Self { source }
-    }
-
-    fn check(&self) -> bool {
-        let bytes = self.source.as_bytes();
-        let mut cursor = 0usize;
-        while let Some(relative) = self.source[cursor..].find("export") {
-            let index = cursor + relative;
-            cursor = index + "export".len();
-            if !self.is_word_boundary(index, cursor) {
-                continue;
-            }
-            let mut next = cursor;
-            while matches!(bytes.get(next), Some(b' ' | b'\t' | b'\r' | b'\n')) {
-                next += 1;
-            }
-            if matches!(bytes.get(next), Some(b'{')) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn is_word_boundary(&self, start: usize, end: usize) -> bool {
-        !self
-            .source
-            .as_bytes()
-            .get(start.wrapping_sub(1))
-            .is_some_and(Self::is_identifier_continue)
-            && !self
-                .source
-                .as_bytes()
-                .get(end)
-                .is_some_and(Self::is_identifier_continue)
-    }
-
-    fn is_identifier_continue(byte: &u8) -> bool {
-        byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$'
-    }
-}
-
-pub(super) struct DefaultImportReexportRewriter<'a> {
-    source: &'a str,
-    #[cfg(test)]
-    id: &'a str,
-}
-
-impl<'a> DefaultImportReexportRewriter<'a> {
-    pub(super) fn new(source: &'a str, id: &'a str) -> Self {
-        #[cfg(not(test))]
-        let _ = id;
-        Self {
-            source,
-            #[cfg(test)]
-            id,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn rewrite(&self) -> Cow<'a, str> {
-        if !self.may_rewrite() {
-            return Cow::Borrowed(self.source);
-        }
-        let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Cow::Borrowed(self.source);
-        }
-
-        let semantic_ret = SemanticBuilder::new().build(&parsed.program);
-        if !semantic_ret.diagnostics.is_empty() {
-            return Cow::Borrowed(self.source);
-        }
-        let Some(plan) =
-            DefaultImportReexportAnalyzer::new(&parsed.program, semantic_ret.semantic.scoping())
-                .analyze()
-        else {
-            return Cow::Borrowed(self.source);
-        };
-
-        let ast = AstBuilder::new(&allocator);
-        let mut body = OxcVec::new_in(&allocator);
-        let old_body = std::mem::replace(&mut parsed.program.body, OxcVec::new_in(&allocator));
-        for (statement_index, statement) in old_body.into_iter().enumerate() {
-            if statement_index == plan.import_statement_index {
-                continue;
-            }
-            if statement_index == plan.export_statement_index {
-                body.push(plan.export_statement(ast));
-            } else {
-                body.push(statement);
-            }
-        }
-        parsed.program.body = body;
-
-        Cow::Owned(
-            CodegenSourceText::new(
-                Codegen::new()
-                    .with_options(CodegenOptions {
-                        indent_char: IndentChar::Space,
-                        indent_width: 4,
-                        ..CodegenOptions::default()
-                    })
-                    .build(&parsed.program)
-                    .code,
-            )
-            .without_trailing_newline(),
-        )
-    }
-
-    pub(crate) fn may_rewrite(&self) -> bool {
-        self.source.contains("import") && self.source.contains("export default")
+impl DefaultImportReexportRewriter {
+    pub(super) fn new() -> Self {
+        Self
     }
 
     pub(crate) fn rewrite_program<'ast>(
@@ -479,7 +269,7 @@ impl<'a, 'b> ImportDeclarationSplit<'a, 'b> {
         let source = ModuleStringLiteral::from_string_literal(&self.import.source);
         let mut value_bindings = Vec::new();
         let mut type_bindings = Vec::new();
-        let mut has_type_only = false;
+        let mut changed_bindings = false;
 
         for specifier in specifiers {
             match specifier {
@@ -491,34 +281,36 @@ impl<'a, 'b> ImportDeclarationSplit<'a, 'b> {
                         imported: ModuleBindingName::from_module_export_name(&specifier.imported),
                         local: local_name.clone(),
                     };
-                    let is_type_only = specifier.import_kind.is_type()
-                        || specifier.local.symbol_id.get().is_some_and(|symbol_id| {
-                            !self
-                                .scoping
-                                .get_resolved_references(symbol_id)
-                                .any(|reference| reference.flags().is_value())
-                        })
-                        || self.imported_binding_is_declared_type(&imported_name);
-                    has_type_only |= is_type_only;
-                    if is_type_only {
-                        type_bindings.push(TypeImportBinding::Named(named));
-                    } else {
-                        value_bindings.push(ValueImportBinding::Named(named));
+                    match self.binding_decision(
+                        specifier.import_kind.is_type(),
+                        specifier.local.symbol_id.get(),
+                        &imported_name,
+                    ) {
+                        ImportBindingDecision::Value => {
+                            value_bindings.push(ValueImportBinding::Named(named));
+                        }
+                        ImportBindingDecision::Type => {
+                            changed_bindings = true;
+                            type_bindings.push(TypeImportBinding::Named(named));
+                        }
+                        ImportBindingDecision::Drop => {
+                            changed_bindings = true;
+                        }
                     }
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
                     let local_name = specifier.local.name.to_string();
-                    let is_type_only = specifier.local.symbol_id.get().is_some_and(|symbol_id| {
-                        !self
-                            .scoping
-                            .get_resolved_references(symbol_id)
-                            .any(|reference| reference.flags().is_value())
-                    }) || self.imported_binding_is_declared_type("default");
-                    has_type_only |= is_type_only;
-                    if is_type_only {
-                        type_bindings.push(TypeImportBinding::Default(local_name));
-                    } else {
-                        value_bindings.push(ValueImportBinding::Default(local_name));
+                    match self.binding_decision(false, specifier.local.symbol_id.get(), "default") {
+                        ImportBindingDecision::Value => {
+                            value_bindings.push(ValueImportBinding::Default(local_name));
+                        }
+                        ImportBindingDecision::Type => {
+                            changed_bindings = true;
+                            type_bindings.push(TypeImportBinding::Default(local_name));
+                        }
+                        ImportBindingDecision::Drop => {
+                            changed_bindings = true;
+                        }
                     }
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
@@ -529,7 +321,7 @@ impl<'a, 'b> ImportDeclarationSplit<'a, 'b> {
             }
         }
 
-        if !has_type_only {
+        if !changed_bindings {
             return None;
         }
 
@@ -554,6 +346,67 @@ impl<'a, 'b> ImportDeclarationSplit<'a, 'b> {
                 imported_name,
             )
             .is_some_and(ModuleBindingKind::is_type_only)
+    }
+
+    fn binding_decision(
+        &self,
+        explicit_type: bool,
+        symbol_id: Option<SymbolId>,
+        imported_name: &str,
+    ) -> ImportBindingDecision {
+        if explicit_type {
+            return ImportBindingDecision::Type;
+        }
+        let Some(symbol_id) = symbol_id else {
+            return if self.imported_binding_is_declared_type(imported_name) {
+                ImportBindingDecision::Type
+            } else {
+                ImportBindingDecision::Value
+            };
+        };
+        let usage = ImportLocalReferenceUsage::new(self.scoping, symbol_id);
+        if usage.is_unused() {
+            return ImportBindingDecision::Drop;
+        }
+        if usage.has_value {
+            return if self.imported_binding_is_declared_type(imported_name) {
+                ImportBindingDecision::Type
+            } else {
+                ImportBindingDecision::Value
+            };
+        }
+        if usage.has_type || self.imported_binding_is_declared_type(imported_name) {
+            return ImportBindingDecision::Type;
+        }
+        ImportBindingDecision::Drop
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportBindingDecision {
+    Value,
+    Type,
+    Drop,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ImportLocalReferenceUsage {
+    has_value: bool,
+    has_type: bool,
+}
+
+impl ImportLocalReferenceUsage {
+    fn new(scoping: &oxc_semantic::Scoping, symbol_id: SymbolId) -> Self {
+        let mut usage = Self::default();
+        for reference in scoping.get_resolved_references(symbol_id) {
+            usage.has_value |= reference.flags().is_value();
+            usage.has_type |= reference.flags().is_type();
+        }
+        usage
+    }
+
+    fn is_unused(self) -> bool {
+        !self.has_value && !self.has_type
     }
 }
 
@@ -676,9 +529,6 @@ where
     }
 
     pub fn rewrite(mut self) -> Cow<'a, str> {
-        if !self.source.contains("import") && !self.source.contains("export") {
-            return Cow::Borrowed(self.source);
-        }
         let allocator = Allocator::default();
         let source_type =
             SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -812,82 +662,13 @@ where
 }
 
 pub(super) struct TypeOnlyReexportSplitter<'a> {
-    source: &'a str,
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
 }
 
 impl<'a> TypeOnlyReexportSplitter<'a> {
-    pub(super) fn new(source: &'a str, id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
-        Self {
-            source,
-            id,
-            sources,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn split(&self) -> Cow<'a, str> {
-        if !self.may_split() {
-            return Cow::Borrowed(self.source);
-        }
-        let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Cow::Borrowed(self.source);
-        }
-
-        let split_plans = parsed
-            .program
-            .body
-            .iter()
-            .map(|statement| match statement {
-                Statement::ExportNamedDeclaration(export) => {
-                    TypeOnlyReexportSplit::new(export, self.id, self.sources).split()
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        let ast = AstBuilder::new(&allocator);
-        let mut changed = false;
-        let mut body = OxcVec::new_in(&allocator);
-        let old_body = std::mem::replace(&mut parsed.program.body, OxcVec::new_in(&allocator));
-        for (statement, split_plan) in old_body.into_iter().zip(split_plans) {
-            if let Some(split) = split_plan {
-                changed = true;
-                for statement in split.statements(ast) {
-                    body.push(statement);
-                }
-            } else {
-                body.push(statement);
-            }
-        }
-        parsed.program.body = body;
-
-        if !changed {
-            return Cow::Borrowed(self.source);
-        }
-
-        Cow::Owned(
-            CodegenSourceText::new(
-                Codegen::new()
-                    .with_options(CodegenOptions {
-                        indent_char: IndentChar::Space,
-                        indent_width: 4,
-                        ..CodegenOptions::default()
-                    })
-                    .build(&parsed.program)
-                    .code,
-            )
-            .without_trailing_newline(),
-        )
-    }
-
-    pub(crate) fn may_split(&self) -> bool {
-        self.source.contains("export") && self.source.contains("from")
+    pub(super) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
+        Self { id, sources }
     }
 
     pub(crate) fn split_program<'ast>(
@@ -1769,6 +1550,96 @@ mod tests {
     use std::sync::Arc;
 
     use crate::typescript_emit::TypeScriptJavascriptEmitter;
+    use oxc_semantic::SemanticBuilder;
+
+    fn codegen_source(program: &Program<'_>) -> String {
+        CodegenSourceText::new(
+            Codegen::new()
+                .with_options(CodegenOptions {
+                    indent_char: IndentChar::Space,
+                    indent_width: 4,
+                    ..CodegenOptions::default()
+                })
+                .build(program)
+                .code,
+        )
+        .without_trailing_newline()
+    }
+
+    fn split_type_only_named_imports<'a>(
+        source: &'a str,
+        id: &str,
+        sources: &TransformSourceSnapshot,
+    ) -> Cow<'a, str> {
+        let allocator = Allocator::default();
+        let source_type =
+            SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Cow::Borrowed(source);
+        }
+        let semantic_ret = SemanticBuilder::new().build(&parsed.program);
+        if !semantic_ret.diagnostics.is_empty() {
+            return Cow::Borrowed(source);
+        }
+        let scoping = semantic_ret.semantic.into_scoping();
+        let changed = TypeOnlyNamedImportSplitter::new(id, sources).split_program(
+            &allocator,
+            &mut parsed.program,
+            &scoping,
+        );
+        if changed {
+            Cow::Owned(codegen_source(&parsed.program))
+        } else {
+            Cow::Borrowed(source)
+        }
+    }
+
+    fn split_type_only_reexports<'a>(
+        source: &'a str,
+        id: &str,
+        sources: &TransformSourceSnapshot,
+    ) -> Cow<'a, str> {
+        let allocator = Allocator::default();
+        let source_type =
+            SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Cow::Borrowed(source);
+        }
+        let changed = TypeOnlyReexportSplitter::new(id, sources)
+            .split_program(&allocator, &mut parsed.program);
+        if changed {
+            Cow::Owned(codegen_source(&parsed.program))
+        } else {
+            Cow::Borrowed(source)
+        }
+    }
+
+    fn rewrite_default_import_reexport<'a>(source: &'a str, id: &str) -> Cow<'a, str> {
+        let allocator = Allocator::default();
+        let source_type =
+            SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Cow::Borrowed(source);
+        }
+        let semantic_ret = SemanticBuilder::new().build(&parsed.program);
+        if !semantic_ret.diagnostics.is_empty() {
+            return Cow::Borrowed(source);
+        }
+        let scoping = semantic_ret.semantic.into_scoping();
+        let changed = DefaultImportReexportRewriter::new().rewrite_program(
+            &allocator,
+            &mut parsed.program,
+            &scoping,
+        );
+        if changed {
+            Cow::Owned(codegen_source(&parsed.program))
+        } else {
+            Cow::Borrowed(source)
+        }
+    }
 
     #[test]
     fn type_only_named_import_from_directory_declaration_is_elided() {
@@ -1802,7 +1673,7 @@ export const AESEncrypt: (input: string, key: string, iv: string) => EncryptionR
         let sources = TransformSourceSnapshot::new(files);
         let importer_id = importer.to_str().unwrap();
 
-        let split = TypeOnlyNamedImportSplitter::new(source, importer_id, &sources).split();
+        let split = split_type_only_named_imports(source, importer_id, &sources);
         assert!(split
             .contains("import type { EncryptionResult } from \"../../cpp/types/libmtcrypto\";"));
         assert!(split.contains("export type { EncryptionResult };"));
@@ -1813,6 +1684,38 @@ export const AESEncrypt: (input: string, key: string, iv: string) => EncryptionR
         assert!(emitted.contains("libmtcrypto.so"));
         assert!(!emitted.contains("../../cpp/types/libmtcrypto"));
         assert!(!emitted.contains("EncryptionResult"));
+    }
+
+    #[test]
+    fn type_only_named_import_split_drops_unused_value_specifiers_like_hvigor() {
+        let importer = PathBuf::from("/project/pkg/src/main/ets/FormAbility.ets");
+        let source = r#"import { UsedType, usedValue, unusedValue, UnusedType } from './dep';
+
+const value = usedValue();
+let typed: UsedType;
+"#;
+        let sources = TransformSourceSnapshot::default();
+        let importer_id = importer.to_str().unwrap();
+
+        let split = split_type_only_named_imports(source, importer_id, &sources);
+        assert!(
+            split.contains("import { usedValue } from \"./dep\";"),
+            "{split}"
+        );
+        assert!(
+            split.contains("import type { UsedType } from \"./dep\";"),
+            "{split}"
+        );
+        assert!(!split.contains("unusedValue"), "{split}");
+        assert!(!split.contains("UnusedType"), "{split}");
+
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &split, SourceType::ts().with_module(true)).parse();
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "type-only import split must emit valid TypeScript: {:?}\n{split}",
+            parsed.diagnostics
+        );
     }
 
     #[test]
@@ -1850,7 +1753,7 @@ export { EncryptionResult };
         let sources = TransformSourceSnapshot::new(files);
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_reexports(index_source, index_id, &sources);
         assert!(
             split.contains("export { AESUtil } from \"./src/main/ets/core/AES\";"),
             "{split}"
@@ -1896,12 +1799,11 @@ export { setSwitchTestEnvListener, removeSwitchTestEnvListener, switchTestEnvLis
         );
         let sources = TransformSourceSnapshot::new(files);
 
-        let dispatcher_split = TypeOnlyNamedImportSplitter::new(
+        let dispatcher_split = split_type_only_named_imports(
             dispatcher_source,
             dispatcher.to_str().unwrap(),
             &sources,
-        )
-        .split();
+        );
         assert!(
             dispatcher_split
                 .contains("import type { switchTestEnvListener } from \"./model/ResultCallBack\";"),
@@ -1926,12 +1828,8 @@ export { setSwitchTestEnvListener, removeSwitchTestEnvListener, switchTestEnvLis
         assert!(dispatcher_emitted.contains("setSwitchTestEnvListener"));
         assert!(!dispatcher_emitted.contains("switchTestEnvListener"));
 
-        let switch_split = TypeOnlyReexportSplitter::new(
-            switch_source,
-            switch_test_env.to_str().unwrap(),
-            &sources,
-        )
-        .split();
+        let switch_split =
+            split_type_only_reexports(switch_source, switch_test_env.to_str().unwrap(), &sources);
         assert!(
             switch_split.contains(
                 "export { setSwitchTestEnvListener, removeSwitchTestEnvListener } from \"./dispatcher\";"
@@ -1953,7 +1851,7 @@ export { setSwitchTestEnvListener, removeSwitchTestEnvListener, switchTestEnvLis
         assert!(!switch_emitted.contains("switchTestEnvListener"));
 
         let index_split =
-            TypeOnlyReexportSplitter::new(index_source, index.to_str().unwrap(), &sources).split();
+            split_type_only_reexports(index_source, index.to_str().unwrap(), &sources);
         assert!(
             index_split.contains(
                 "export { setSwitchTestEnvListener, removeSwitchTestEnvListener } from \"./src/main/ets/switchTestEnv\";"
@@ -2001,7 +1899,7 @@ export {
         let sources = TransformSourceSnapshot::new(files);
 
         let http_split =
-            TypeOnlyNamedImportSplitter::new(http_source, http.to_str().unwrap(), &sources).split();
+            split_type_only_named_imports(http_source, http.to_str().unwrap(), &sources);
         assert!(
             http_split.contains("export { getCardDataAndFormat };"),
             "{http_split}"
@@ -2018,7 +1916,7 @@ export {
         assert!(!http_emitted.contains("ShowData"));
 
         let index_split =
-            TypeOnlyReexportSplitter::new(index_source, index.to_str().unwrap(), &sources).split();
+            split_type_only_reexports(index_source, index.to_str().unwrap(), &sources);
         assert!(
             index_split.contains(
                 "export { getCardDataAndFormat } from \"./src/main/ets/form_utils/httpForNewline\";"
@@ -2077,12 +1975,11 @@ export struct VideoCardContent {
             Arc::<str>::from(video_content_source),
         );
         let sources = TransformSourceSnapshot::new(files);
-        let split = TypeOnlyNamedImportSplitter::new(
+        let split = split_type_only_named_imports(
             video_content_source,
             video_content.to_str().unwrap(),
             &sources,
-        )
-        .split();
+        );
         assert!(
             split.contains(
                 "import type { CardContentController, Rect } from \"../container/CardContainer\";"
@@ -2121,8 +2018,7 @@ export class Vector2D {
         files.insert(vector.clone(), Arc::<str>::from(vector_source));
         let sources = TransformSourceSnapshot::new(files);
         let split =
-            TypeOnlyNamedImportSplitter::new(vector_source, vector.to_str().unwrap(), &sources)
-                .split();
+            split_type_only_named_imports(vector_source, vector.to_str().unwrap(), &sources);
         assert!(
             split.contains("import { Directions } from \"./IncomingEvent\";"),
             "{split}"
@@ -2155,7 +2051,7 @@ export { InterruptConfig };"#;
         let sources = TransformSourceSnapshot::new(files);
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyNamedImportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_named_imports(index_source, index_id, &sources);
         assert!(
             split.contains(
                 "import type { InterruptConfig } from \"./src/main/ets/mrouter/types/Interceptor\";"
@@ -2195,7 +2091,7 @@ export interface RerouteOptions {
         let sources = TransformSourceSnapshot::new(files);
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_reexports(index_source, index_id, &sources);
         assert!(
             split.contains(
                 "export type { QueryRerouteConfigInfo, RerouteOptions } from \"./src/main/ets/types/Index.d\";"
@@ -2233,7 +2129,7 @@ export class RNInstancesCoordinator {}"#;
         let sources = TransformSourceSnapshot::new(files);
         let entry_id = entry.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(entry_source, entry_id, &sources).split();
+        let split = split_type_only_reexports(entry_source, entry_id, &sources);
         assert!(
             split.contains("export { RNInstancesCoordinator } from \"./src/main/ets/RNOH/ets\";"),
             "{split}"
@@ -2274,7 +2170,7 @@ export namespace AddressDataCenter {
         let sources = TransformSourceSnapshot::new(files);
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_reexports(index_source, index_id, &sources);
         assert_eq!(split, index_source);
 
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
@@ -2308,7 +2204,7 @@ export { UnreadResponseData }"#;
         let sources = TransformSourceSnapshot::new(files);
         let unread_id = unread.to_str().unwrap();
 
-        let split = TypeOnlyNamedImportSplitter::new(unread_source, unread_id, &sources).split();
+        let split = split_type_only_named_imports(unread_source, unread_id, &sources);
         assert!(
             split.contains(
                 "import type UnreadResponseData from \"../../interfaces/MessageCenterModels\";"
@@ -2340,7 +2236,7 @@ export { generatePageInfoKey } from './src/main/ets/utils/Utils';"#;
         let sources = TransformSourceSnapshot::new(FxHashMap::default());
         let index_id = index.to_str().unwrap();
 
-        let rewritten = DefaultImportReexportRewriter::new(index_source, index_id).rewrite();
+        let rewritten = rewrite_default_import_reexport(index_source, index_id);
         assert!(
             rewritten.contains("export { default } from \"./src/main/ets/LX\";"),
             "{rewritten}"
@@ -2369,7 +2265,7 @@ export const init = LX.init;
 export default LX;"#;
         let index_id = index.to_str().unwrap();
 
-        let rewritten = DefaultImportReexportRewriter::new(index_source, index_id).rewrite();
+        let rewritten = rewrite_default_import_reexport(index_source, index_id);
         assert_eq!(rewritten, index_source);
     }
 
@@ -2397,7 +2293,7 @@ export interface ModelOptions {
         let sources = TransformSourceSnapshot::new(files);
         let page_id = page.to_str().unwrap();
 
-        let split = TypeOnlyNamedImportSplitter::new(page_source, page_id, &sources).split();
+        let split = split_type_only_named_imports(page_source, page_id, &sources);
         assert!(
             split.contains("import type Model from \"./models\";"),
             "{split}"
@@ -2429,7 +2325,7 @@ export { Model as default };"#;
         let sources = TransformSourceSnapshot::new(files);
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_reexports(index_source, index_id, &sources);
         assert!(
             split.contains("export type { default as Model } from \"./models\";"),
             "{split}"
@@ -2463,7 +2359,7 @@ export const RuntimeModel = {
         let sources = TransformSourceSnapshot::new(files);
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_reexports(index_source, index_id, &sources);
         assert!(
             split.contains("export type { Model } from \"./barrel\";"),
             "{split}"
@@ -2493,7 +2389,7 @@ export const RuntimeModel = {
         let sources = TransformSourceSnapshot::new(files);
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_reexports(index_source, index_id, &sources);
         assert_eq!(split, index_source);
     }
 
@@ -2524,7 +2420,7 @@ export enum NetworkType {
         let sources = TransformSourceSnapshot::new(files);
         let core_id = core_index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(core_source, core_id, &sources).split();
+        let split = split_type_only_reexports(core_source, core_id, &sources);
         assert!(
             split.contains("export { NetworkType } from \"@knb/protocol\";"),
             "{split}"
@@ -2570,7 +2466,7 @@ export const nativeCall: () => void;"#;
         );
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyReexportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_reexports(index_source, index_id, &sources);
 
         assert!(
             split.contains("export { nativeCall } from \"libwidget.so\";"),
@@ -2610,7 +2506,7 @@ export const logan = loganNapi;"#;
         );
         let index_id = index.to_str().unwrap();
 
-        let split = TypeOnlyNamedImportSplitter::new(index_source, index_id, &sources).split();
+        let split = split_type_only_named_imports(index_source, index_id, &sources);
 
         assert!(
             split.contains("import loganNapi from \"liblogan.so\";"),

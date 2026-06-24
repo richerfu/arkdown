@@ -20,7 +20,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arcstr::ArcStr;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::Statement;
 use oxc_index::IndexVec;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 
 use arkdown_ets_transform::RolldownEtsTransformPlan;
 
@@ -1115,13 +1119,32 @@ impl<'a> HvigorModuleSourceWriter<'a> {
     ) -> Result<(HvigorChunkImportMap, Vec<String>), ArkdownError> {
         let mut imports = HvigorChunkImportMap::default();
         let mut imported_record_names = BTreeSet::new();
+        let mut seen_specifiers = FxHashSet::default();
 
         if let Some(resolved_imports) = self.state.resolved_imports.get(module_id) {
             for (specifier, resolved_id) in resolved_imports {
+                seen_specifiers.insert(specifier.clone());
                 self.record_import(
                     module_id,
                     specifier,
                     resolved_id,
+                    &mut imports,
+                    &mut imported_record_names,
+                    module_records,
+                )?;
+            }
+        }
+        if let Some(source) = self.state.sources.get(module_id) {
+            for specifier in
+                HvigorStaticModuleSpecifiers::new(source.code.as_ref(), module_id).collect()
+            {
+                if !seen_specifiers.insert(specifier.clone()) {
+                    continue;
+                }
+                self.record_import(
+                    module_id,
+                    &specifier,
+                    &specifier,
                     &mut imports,
                     &mut imported_record_names,
                     module_records,
@@ -1236,11 +1259,12 @@ impl<'a> HvigorModuleSourceImportRewriter<'a> {
             return Cow::Borrowed(self.source);
         }
 
-        let mut patches = if self.import_records.is_empty() {
-            self.collect_global_literal_patches()
+        let mut patches = self.collect_static_module_literal_patches();
+        if self.import_records.is_empty() && patches.is_empty() {
+            patches = self.collect_global_literal_patches();
         } else {
-            self.collect_import_record_patches()
-        };
+            patches.extend(self.collect_import_record_patches());
+        }
         if patches.is_empty() {
             return Cow::Borrowed(self.source);
         }
@@ -1303,6 +1327,96 @@ impl<'a> HvigorModuleSourceImportRewriter<'a> {
         }
         patches
     }
+
+    fn collect_static_module_literal_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
+        HvigorStaticModuleSpecifiers::new(self.source, "")
+            .collect_literals()
+            .into_iter()
+            .filter_map(|literal| {
+                let replacement = self.imports.get(literal.specifier.as_str())?;
+                if replacement == literal.specifier.as_str() {
+                    return None;
+                }
+                let source_literal =
+                    HvigorModuleSourceLiteralScanner::new(self.source, Some(literal.source_span))
+                        .find(literal.specifier.as_str())?;
+                Some(HvigorModuleSourceImportPatch {
+                    start: source_literal.start,
+                    end: source_literal.end,
+                    replacement: replacement.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
+struct HvigorStaticModuleSpecifiers<'a> {
+    source: &'a str,
+    module_id: &'a str,
+}
+
+impl<'a> HvigorStaticModuleSpecifiers<'a> {
+    fn new(source: &'a str, module_id: &'a str) -> Self {
+        Self { source, module_id }
+    }
+
+    fn collect(&self) -> Vec<String> {
+        self.collect_literals()
+            .into_iter()
+            .map(|literal| literal.specifier)
+            .collect()
+    }
+
+    fn collect_literals(&self) -> Vec<HvigorStaticModuleLiteral> {
+        let allocator = Allocator::default();
+        let source_type = SourceType::from_path(self.module_id)
+            .unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let parsed = Parser::new(&allocator, self.source, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Vec::new();
+        }
+        let mut literals = Vec::new();
+        for statement in &parsed.program.body {
+            match statement {
+                Statement::ImportDeclaration(import) => {
+                    literals.push(HvigorStaticModuleLiteral {
+                        specifier: import.source.value.to_string(),
+                        source_span: HvigorSourceSpan {
+                            start: import.source.span.start,
+                            end: import.source.span.end,
+                        },
+                    });
+                }
+                Statement::ExportAllDeclaration(export) => {
+                    literals.push(HvigorStaticModuleLiteral {
+                        specifier: export.source.value.to_string(),
+                        source_span: HvigorSourceSpan {
+                            start: export.source.span.start,
+                            end: export.source.span.end,
+                        },
+                    });
+                }
+                Statement::ExportNamedDeclaration(export) => {
+                    if let Some(source) = &export.source {
+                        literals.push(HvigorStaticModuleLiteral {
+                            specifier: source.value.to_string(),
+                            source_span: HvigorSourceSpan {
+                                start: source.span.start,
+                                end: source.span.end,
+                            },
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        literals
+    }
+}
+
+struct HvigorStaticModuleLiteral {
+    specifier: String,
+    source_span: HvigorSourceSpan,
 }
 
 struct HvigorModuleSourceLiteralScanner<'a> {
@@ -2827,6 +2941,108 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&next_entry_file.path).unwrap(),
             output
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_type_only_static_imports_with_hvigor_requests() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let example_root = project_root.join("example");
+        let entry_id = example_root
+            .join("src/main/ets/pages/TypeOnly.ets")
+            .to_string_lossy()
+            .into_owned();
+        let module_path_map = HvigorModulePathMap::new("example", &example_root, &[]);
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: r#"
+import type Want from "@ohos.app.ability.Want";
+import type { MapBridge } from "libmsimap.so";
+import type { IMtBluetoothAccess } from "@example/privacy";
+
+export type Use = Want | MapBridge | IMtBluetoothAccess;
+"#
+                .to_string()
+                .into(),
+            },
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("debug");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "example".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "example".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "libmsimap.so".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "libmsimap.so".to_string(),
+                is_so: true,
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "@example/privacy".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@example/privacy".to_string(),
+                version: "0.3.20".to_string(),
+                entry_path: "Index.d.ets".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+        let byte_code_har_packages = vec!["@example/privacy".to_string()];
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hexample",
+            "example",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &byte_code_har_packages,
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec![
+                "&@example/privacy/Index&0.3.20".to_string(),
+                "&libmsimap.so&".to_string()
+            ]
+        );
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(output.contains("\"@ohos:app.ability.Want\""), "{output}");
+        assert!(
+            output.contains("\"@normalized:Y&&&libmsimap.so&\""),
+            "{output}"
+        );
+        assert!(
+            output.contains("\"@normalized:N&&&@example/privacy/Index&0.3.20\""),
+            "{output}"
         );
     }
 

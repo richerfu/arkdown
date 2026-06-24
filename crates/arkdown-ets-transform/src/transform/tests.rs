@@ -32,6 +32,14 @@ impl TransformHarness {
     fn collect_component_names(content: &str, id: &str) -> Result<Vec<String>, EtsTransformError> {
         ArkuiComponentNameCollector::new(content, id).collect()
     }
+
+    fn collect_component_names_with_options(
+        content: &str,
+        id: &str,
+        options: &TransformOptions,
+    ) -> Result<Vec<String>, EtsTransformError> {
+        ArkuiComponentNameCollector::with_options(content, id, options).collect()
+    }
 }
 
 #[test]
@@ -1188,6 +1196,167 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
     assert!(result.contains("pageFullPath: \"products/phone/src/main/ets/pages/Page\""));
     assert!(!result.contains("@Entry"));
     assert!(!result.contains("struct Page"));
+}
+
+#[test]
+fn test_viewv2_entry_lowers_external_custom_component_and_route_like_hvigor() {
+    let src = r#"
+import { LaunchProtectPage, LaunchProtect } from "launch_protect";
+
+LaunchProtect.setAppIcon($r("app.media.app_icon"));
+
+@Entry
+@ComponentV2
+export struct SecureModePage {
+  build() {
+    Column() {
+      LaunchProtectPage()
+    }
+  }
+}
+"#;
+    let options = TransformOptions {
+        bundle_name: Some("com.example.hexample".to_string()),
+        module_name: Some("example".to_string()),
+        project_root: None,
+        module_roots: Vec::new(),
+        component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
+        sources: crate::source::TransformSourceSnapshot::default(),
+        module_exports: ModuleExportIndex::default(),
+        emit_entry_registration: true,
+        partial_update: true,
+        checker_mode: crate::CheckerMode::Oxc,
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source("example/src/main/ets/pages/SecureModePage.ets", src),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.starts_with("if (!(\"finalizeConstruction\" in ViewPU.prototype))"),
+        "ViewV2 @Entry must keep hvigor's ViewPU finalizeConstruction shim:\n{}",
+        result
+    );
+    assert!(
+        result.contains("export class SecureModePage extends ViewV2"),
+        "@ComponentV2 entry must lower to ViewV2 class:\n{}",
+        result
+    );
+    assert!(
+        result.contains("new LaunchProtectPage("),
+        "unresolved external ArkUI component imports must lower as custom components like hvigor:\n{}",
+        result
+    );
+    assert!(
+        result.contains("ViewV2.create(componentCall)"),
+        "ViewV2 custom component creation must use ViewV2.create like hvigor:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("LaunchProtectPage.create()"),
+        "external custom component must not be emitted as SDK component create/pop:\n{}",
+        result
+    );
+    assert!(
+        result.contains("componentCall.paramsGenerator_ = paramsLambda"),
+        "custom component params generator must be retained:\n{}",
+        result
+    );
+    assert!(
+        result.contains("static getEntryName()"),
+        "ViewV2 @Entry must emit getEntryName like hvigor:\n{}",
+        result
+    );
+    assert!(
+        result.contains("registerNamedRoute(() => new SecureModePage(undefined, {})"),
+        "ViewV2 @Entry must still register the page route:\n{}",
+        result
+    );
+    assert!(result.contains("pagePath: \"pages/SecureModePage\""));
+}
+
+#[test]
+fn test_viewv2_entry_lowers_resolved_reexported_componentv2_like_hvigor() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let package_root = project_root.join("oh_modules/launch_protect");
+    let index_path = package_root.join("Index.ets");
+    let page_path = package_root.join("src/main/ets/pages/LaunchProtectPage.ets");
+    let index_source = r#"
+export { LaunchProtectPage } from './src/main/ets/pages/LaunchProtectPage'
+"#;
+    let page_source = r#"
+@Entry
+@ComponentV2
+export struct LaunchProtectPage {
+  build() {}
+}
+"#;
+    let src = r#"
+import { LaunchProtectPage, LaunchProtect } from "launch_protect";
+
+LaunchProtect.setAppIcon($r("app.media.app_icon"));
+
+@Entry
+@ComponentV2
+export struct SecureModePage {
+  build() {
+    Column() {
+      LaunchProtectPage()
+    }
+  }
+}
+"#;
+    let mut sources = rustc_hash::FxHashMap::default();
+    sources.insert(
+        arkdown_path::lexical_normalize(&index_path),
+        std::sync::Arc::<str>::from(index_source),
+    );
+    sources.insert(
+        arkdown_path::lexical_normalize(&page_path),
+        std::sync::Arc::<str>::from(page_source),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(sources);
+    let options = TransformOptions {
+        bundle_name: Some("com.example.hexample".to_string()),
+        module_name: Some("example".to_string()),
+        project_root: Some(project_root.clone()),
+        module_roots: Vec::new(),
+        component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
+        module_exports: ModuleExportIndex::build(&sources, &[]),
+        sources,
+        emit_entry_registration: true,
+        partial_update: true,
+        checker_mode: crate::CheckerMode::Oxc,
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(
+            project_root
+                .join("example/src/main/ets/pages/SecureModePage.ets")
+                .to_str()
+                .unwrap(),
+            src,
+        ),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("let componentCall = new LaunchProtectPage(this, {}, undefined"),
+        "resolved re-exported @ComponentV2 imports must lower as custom components like hvigor:\n{}",
+        result
+    );
+    assert!(
+        result.contains("ViewV2.create(componentCall)"),
+        "resolved re-exported @ComponentV2 imports must use ViewV2.create:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("LaunchProtectPage.create()"),
+        "resolved re-exported @ComponentV2 imports must not lower as SDK components:\n{}",
+        result
+    );
 }
 
 #[test]
@@ -2571,4 +2740,60 @@ struct WidgetCard {
         names,
         vec!["Row", "Image", "Column", "Text", "List", "ListItem", "If"]
     );
+}
+
+#[test]
+fn test_collect_arkui_component_names_skips_imported_custom_widget_like_hvigor() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let package_root = project_root.join("oh_modules/@example/card_subscribe");
+    let index_path = package_root.join("index.ets");
+    let widget_path = package_root.join("src/main/ets/widget/pages/Member2_2Widget.ets");
+    let index_source =
+        "export { Member2_2Widget } from './src/main/ets/widget/pages/Member2_2Widget';";
+    let widget_source = r#"
+@Component
+export struct Member2_2Widget {
+  build() {}
+}
+"#;
+    let src = r#"
+import { Member2_2Widget } from "@example/card_subscribe";
+
+@Component
+struct MemberForm {
+  build() {
+    Column() {
+      Member2_2Widget()
+    }
+  }
+}
+"#;
+    let mut sources = rustc_hash::FxHashMap::default();
+    sources.insert(
+        arkdown_path::lexical_normalize(&index_path),
+        std::sync::Arc::<str>::from(index_source),
+    );
+    sources.insert(
+        arkdown_path::lexical_normalize(&widget_path),
+        std::sync::Arc::<str>::from(widget_source),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(sources);
+    let options = TransformOptions {
+        project_root: Some(project_root.clone()),
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[]),
+        ..Default::default()
+    };
+    let names = TransformHarness::collect_component_names_with_options(
+        src,
+        project_root
+            .join("example/src/main/ets/widget/pages/member2_2.ets")
+            .to_str()
+            .unwrap(),
+        &options,
+    )
+    .unwrap();
+
+    assert_eq!(names, vec!["Column"]);
 }

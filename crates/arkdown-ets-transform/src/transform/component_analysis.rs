@@ -5,9 +5,9 @@ use std::sync::Arc;
 use arkdown_path::ModuleSpecifierText;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Declaration, ExportDefaultDeclarationKind, Function, ImportDeclarationSpecifier,
-    ModuleExportName, Program, Statement, StructElement, StructStatement, TSLiteral, TSType,
-    TSTypeName,
+    Argument, ArkUIChild, ArkUIComponentExpression, Declaration, ExportDefaultDeclarationKind,
+    Expression, Function, FunctionBody, ImportDeclarationSpecifier, ModuleExportName, Program,
+    Statement, StructElement, StructStatement, TSLiteral, TSType, TSTypeName,
 };
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -16,6 +16,7 @@ use super::{ArkuiDecorator, ArkuiDecoratorName, ArkuiDecoratorRules, TransformOp
 use crate::source::TransformSourceFile;
 use crate::transform::build_fn::{CustomComponentInfo, CustomComponentUpdateProps};
 use crate::transform::component_meta::SdkComponentInfo;
+use crate::transform::viewpu_emit::GeneratedViewpuName;
 
 struct ComponentModuleExportName;
 
@@ -114,6 +115,120 @@ pub(super) struct ImportedComponentNamesCollector<'a, 'b> {
     update_props: &'b mut CustomComponentUpdateProps,
 }
 
+pub(super) struct ImportedCustomComponentNamesCollector<'a, 'b> {
+    program: &'a Program<'a>,
+    id: &'a str,
+    options: &'a TransformOptions,
+    names: &'b mut FxHashSet<String>,
+}
+
+impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
+    pub(super) fn new(
+        program: &'a Program<'a>,
+        id: &'a str,
+        options: &'a TransformOptions,
+        names: &'b mut FxHashSet<String>,
+    ) -> Self {
+        Self {
+            program,
+            id,
+            options,
+            names,
+        }
+    }
+
+    pub(super) fn collect(&mut self) {
+        let importer = Path::new(self.id);
+        let resolver =
+            ImportTargetResolver::new(importer, &self.options.sources, &self.options.module_roots);
+        let external_component_usages =
+            ImportedArkuiComponentUsageCollector::collect_program(self.program);
+        for statement in &self.program.body {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            if import.import_kind.is_type() {
+                continue;
+            }
+            let Some(specifiers) = &import.specifiers else {
+                continue;
+            };
+            let source = import.source.value.as_str();
+            let Some(target) = resolver.resolve(source) else {
+                self.collect_unresolved_external_specifiers(
+                    source,
+                    specifiers,
+                    &external_component_usages,
+                );
+                continue;
+            };
+            let target_components = self.options.module_exports.component_names(&target.path);
+            if target_components.is_empty() {
+                continue;
+            }
+            for specifier in specifiers {
+                self.collect_specifier(specifier, &target_components);
+            }
+        }
+    }
+
+    fn collect_unresolved_external_specifiers(
+        &mut self,
+        source: &str,
+        specifiers: &[ImportDeclarationSpecifier<'_>],
+        external_component_usages: &FxHashSet<String>,
+    ) {
+        if ModuleSpecifierText::new(source).is_relative() {
+            return;
+        }
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if !specifier.import_kind.is_type()
+                        && external_component_usages.contains(specifier.local.name.as_str()) =>
+                {
+                    self.names.insert(specifier.local.name.to_string());
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier)
+                    if external_component_usages.contains(specifier.local.name.as_str()) =>
+                {
+                    self.names.insert(specifier.local.name.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_specifier(
+        &mut self,
+        specifier: &ImportDeclarationSpecifier<'_>,
+        target_components: &ExportedComponentNames,
+    ) {
+        match specifier {
+            ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                let imported = ComponentModuleExportName::value(&specifier.imported);
+                let local = specifier.local.name.to_string();
+                if imported == ComponentModuleExportName::DEFAULT && target_components.has_default {
+                    self.names.insert(local);
+                } else if target_components.named.contains_key(&imported) {
+                    self.names.insert(local);
+                }
+            }
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                let local = specifier.local.name.to_string();
+                if target_components.has_default
+                    || target_components
+                        .named
+                        .contains_key(ComponentModuleExportName::DEFAULT)
+                {
+                    self.names.insert(local);
+                }
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+        }
+    }
+}
+
 impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
     pub(super) fn new(
         program: &'a Program<'a>,
@@ -135,15 +250,26 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
         let importer = Path::new(self.id);
         let resolver =
             ImportTargetResolver::new(importer, &self.options.sources, &self.options.module_roots);
+        let external_component_usages =
+            ImportedArkuiComponentUsageCollector::collect_program(self.program);
         for statement in &self.program.body {
             let Statement::ImportDeclaration(import) = statement else {
                 continue;
             };
+            if import.import_kind.is_type() {
+                continue;
+            }
             let Some(specifiers) = &import.specifiers else {
                 continue;
             };
             self.collect_sdk_specifiers(import.source.value.as_str(), specifiers);
-            let Some(target) = resolver.resolve(import.source.value.as_str()) else {
+            let source = import.source.value.as_str();
+            let Some(target) = resolver.resolve(source) else {
+                self.collect_unresolved_external_specifiers(
+                    source,
+                    specifiers,
+                    &external_component_usages,
+                );
                 continue;
             };
             let target_components = self.options.module_exports.component_names(&target.path);
@@ -152,6 +278,33 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
             }
             for specifier in specifiers {
                 self.collect_specifier(specifier, &target_components);
+            }
+        }
+    }
+
+    fn collect_unresolved_external_specifiers(
+        &mut self,
+        source: &str,
+        specifiers: &[ImportDeclarationSpecifier<'_>],
+        external_component_usages: &FxHashSet<String>,
+    ) {
+        if ModuleSpecifierText::new(source).is_relative() {
+            return;
+        }
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if !specifier.import_kind.is_type()
+                        && external_component_usages.contains(specifier.local.name.as_str()) =>
+                {
+                    self.names.insert(specifier.local.name.to_string());
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier)
+                    if external_component_usages.contains(specifier.local.name.as_str()) =>
+                {
+                    self.names.insert(specifier.local.name.to_string());
+                }
+                _ => {}
             }
         }
     }
@@ -224,6 +377,127 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
                 }
             }
             ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+        }
+    }
+}
+
+struct ImportedArkuiComponentUsageCollector {
+    names: FxHashSet<String>,
+}
+
+impl ImportedArkuiComponentUsageCollector {
+    fn collect_program(program: &Program<'_>) -> FxHashSet<String> {
+        let mut collector = Self {
+            names: FxHashSet::default(),
+        };
+        for statement in &program.body {
+            collector.collect_statement(statement);
+        }
+        collector.names
+    }
+
+    fn collect_statement(&mut self, statement: &Statement<'_>) {
+        match statement {
+            Statement::StructStatement(statement) => {
+                self.collect_struct(statement);
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+                    self.collect_struct(statement);
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::StructStatement(statement) =
+                    &export.declaration
+                {
+                    self.collect_struct(statement);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_struct(&mut self, statement: &StructStatement<'_>) {
+        for element in &statement.body.body {
+            let StructElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            let Some(body) = method.value.body.as_deref() else {
+                continue;
+            };
+            if method
+                .key
+                .static_name()
+                .is_some_and(|name| name == GeneratedViewpuName::BUILD)
+                || method.decorators.iter().any(|decorator| {
+                    ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::BUILDER
+                })
+            {
+                self.collect_body(body);
+            }
+        }
+    }
+
+    fn collect_body(&mut self, body: &FunctionBody<'_>) {
+        for statement in &body.statements {
+            self.collect_body_statement(statement);
+        }
+    }
+
+    fn collect_body_statement(&mut self, statement: &Statement<'_>) {
+        match statement {
+            Statement::BlockStatement(block) => {
+                for statement in &block.body {
+                    self.collect_body_statement(statement);
+                }
+            }
+            Statement::ExpressionStatement(statement) => {
+                self.collect_expression(&statement.expression);
+            }
+            Statement::IfStatement(statement) => {
+                self.collect_body_statement(&statement.consequent);
+                if let Some(alternate) = &statement.alternate {
+                    self.collect_body_statement(alternate);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_expression(&mut self, expression: &Expression<'_>) {
+        if let Expression::ArkUIComponentExpression(component) = expression {
+            self.collect_component_expression(component);
+        }
+    }
+
+    fn collect_component_expression(&mut self, component: &ArkUIComponentExpression<'_>) {
+        if let Expression::Identifier(identifier) = &component.callee {
+            self.names.insert(identifier.name.to_string());
+        }
+        for argument in &component.arguments {
+            self.collect_argument(argument);
+        }
+        for child in &component.children {
+            match child {
+                ArkUIChild::Component(component) => {
+                    self.collect_component_expression(component);
+                }
+                ArkUIChild::Expression(expression) => {
+                    self.collect_expression(expression);
+                }
+                ArkUIChild::Statement(statement) => {
+                    self.collect_body_statement(statement);
+                }
+            }
+        }
+    }
+
+    fn collect_argument(&mut self, argument: &Argument<'_>) {
+        let Some(expression) = argument.as_expression() else {
+            return;
+        };
+        if let Expression::ArrowFunctionExpression(arrow) = expression {
+            self.collect_body(&arrow.body);
         }
     }
 }
@@ -693,7 +967,7 @@ impl<'a> ModuleExportAnalyzer<'a> {
                             if let Some(Declaration::StructStatement(statement)) =
                                 export.declaration.as_ref()
                             {
-                                if ArkuiDecoratorRules::is_component_struct(statement) {
+                                if ComponentExportRules::is_exported_component_struct(statement) {
                                     entry.components.named.insert(
                                         statement.id.name.to_string(),
                                         ComponentInfoCollector::new(statement).collect(),
@@ -761,7 +1035,7 @@ impl<'a> ModuleExportAnalyzer<'a> {
                             if let ExportDefaultDeclarationKind::StructStatement(statement) =
                                 &export.declaration
                             {
-                                if ArkuiDecoratorRules::is_component_struct(statement) {
+                                if ComponentExportRules::is_exported_component_struct(statement) {
                                     entry.components.has_default = true;
                                     entry.components.default_info =
                                         ComponentInfoCollector::new(statement).collect();
@@ -935,13 +1209,13 @@ impl<'a> LocalComponentExportCollector<'a> {
     fn collect_statement(&mut self, statement: &Statement<'_>) {
         match statement {
             Statement::StructStatement(statement)
-                if ArkuiDecoratorRules::is_component_struct(statement) =>
+                if ComponentExportRules::is_exported_component_struct(statement) =>
             {
                 self.insert(statement);
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
-                    if ArkuiDecoratorRules::is_component_struct(statement) {
+                    if ComponentExportRules::is_exported_component_struct(statement) {
                         self.insert(statement);
                     }
                 }
@@ -950,7 +1224,7 @@ impl<'a> LocalComponentExportCollector<'a> {
                 if let ExportDefaultDeclarationKind::StructStatement(statement) =
                     &export.declaration
                 {
-                    if ArkuiDecoratorRules::is_component_struct(statement) {
+                    if ComponentExportRules::is_exported_component_struct(statement) {
                         self.insert(statement);
                     }
                 }
@@ -964,6 +1238,16 @@ impl<'a> LocalComponentExportCollector<'a> {
             statement.id.name.to_string(),
             ComponentInfoCollector::new(statement).collect(),
         );
+    }
+}
+
+struct ComponentExportRules;
+
+impl ComponentExportRules {
+    fn is_exported_component_struct(statement: &StructStatement<'_>) -> bool {
+        statement.decorators.iter().any(|decorator| {
+            ArkuiDecoratorName::is_component_struct_or_dialog(ArkuiDecorator::new(decorator).name())
+        })
     }
 }
 

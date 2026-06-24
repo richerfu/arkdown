@@ -380,6 +380,7 @@ dependencies = [
 name = "arkdown-path"
 version = "0.1.0"
 dependencies = [
+ "fast-glob",
  "serde",
  "thiserror",
 ]
@@ -406,6 +407,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]

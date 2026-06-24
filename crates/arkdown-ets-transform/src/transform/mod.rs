@@ -45,8 +45,8 @@ use crate::transform::component::{
 };
 use crate::transform::component_analysis::{
     BuilderFunctionNameCollector, CustomComponentNameCollector, ImportedComponentNamesCollector,
-    LocalComponentUpdatePropsCollector, SimpleTypeContext, StructBuilderMethodNames,
-    StructBuilderParamNames,
+    ImportedCustomComponentNamesCollector, LocalComponentUpdatePropsCollector, SimpleTypeContext,
+    StructBuilderMethodNames, StructBuilderParamNames,
 };
 use crate::transform::component_collection::ComponentNameCollector;
 use crate::transform::component_meta::ComponentMetadata;
@@ -111,11 +111,24 @@ impl TransformOptions {
 pub struct ArkuiComponentNameCollector<'a> {
     content: &'a str,
     id: &'a str,
+    options: Option<&'a TransformOptions>,
 }
 
 impl<'a> ArkuiComponentNameCollector<'a> {
     pub fn new(content: &'a str, id: &'a str) -> Self {
-        Self { content, id }
+        Self {
+            content,
+            id,
+            options: None,
+        }
+    }
+
+    pub fn with_options(content: &'a str, id: &'a str, options: &'a TransformOptions) -> Self {
+        Self {
+            content,
+            id,
+            options: Some(options),
+        }
     }
 
     /// Collect ArkUI component names from an ETS file using OXC's ArkUI AST nodes.
@@ -138,6 +151,15 @@ impl<'a> ArkuiComponentNameCollector<'a> {
         let mut component_collector = CustomComponentNameCollector::new(&mut custom_components);
         for statement in &parsed.program.body {
             component_collector.collect_statement(statement);
+        }
+        if let Some(options) = self.options {
+            ImportedCustomComponentNamesCollector::new(
+                &parsed.program,
+                self.id,
+                options,
+                &mut custom_components,
+            )
+            .collect();
         }
         Ok(ComponentNameCollector::new(custom_components).collect_program(&parsed.program))
     }
@@ -280,6 +302,13 @@ impl<'a> ArktsTransformer<'a> {
                 if let Some(replacement) =
                     statement_transformer.component_v2(statement, emit_reusable_v2_helper)?
                 {
+                    if options.emit_entry_registration {
+                        if let Some((name, info)) =
+                            statement_transformer.component_v2_entry_registration(statement)
+                        {
+                            entry_registrations.push(&name, Some(&info));
+                        }
+                    }
                     reusable_v2_helper_emitted |= emit_reusable_v2_helper;
                     Ok(Some(StatementReplacementPlan::AstStatements(replacement)))
                 } else if let Some(component) = statement_transformer.component(statement)? {
@@ -495,6 +524,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             self.options.module_name.as_deref(),
             is_exported,
             is_default,
+            struct_stmt.decorators.iter().any(|decorator| {
+                ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY
+            }),
             emit_reusable_v2_helper,
         )
         .lower()
@@ -524,6 +556,37 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             && struct_stmt.decorators.iter().any(|decorator| {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REUSABLE_V2
             })
+    }
+
+    fn component_v2_entry_registration<'s>(
+        &self,
+        statement: &'s Statement<'s>,
+    ) -> Option<(String, EntryRegistrationInfo<'s>)> {
+        let struct_stmt = match statement {
+            Statement::StructStatement(s) => s.as_ref(),
+            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
+                Some(Declaration::StructStatement(s)) => s.as_ref(),
+                _ => return None,
+            },
+            Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                ExportDefaultDeclarationKind::StructStatement(s) => s.as_ref(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if !ArkuiDecoratorRules::is_component_v2_struct(struct_stmt) {
+            return None;
+        }
+        let entry_decorator = struct_stmt
+            .decorators
+            .iter()
+            .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY)?;
+        let storage = ArkuiDecorator::new(entry_decorator).arg_expression();
+        Some((
+            struct_stmt.id.name.to_string(),
+            EntryRegistrationFactory::new(self.hvigor_source_id.as_ref(), self.options)
+                .with_entry_argument(storage),
+        ))
     }
 
     fn component<'s>(
@@ -679,6 +742,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     Arc::clone(&self.options.component_metadata),
                     &raw_object_fields,
                     None,
+                    GeneratedViewpuName::VIEWPU_BASE,
                 );
                 TopLevelFunctionEmitter::decorated_with_params_statement(
                     self.allocator,
@@ -839,6 +903,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         &raw_object_fields,
                         self.module_name.as_ref().map(Arc::clone),
                         is_reusable,
+                        GeneratedViewpuName::VIEWPU_BASE,
                     );
                     initial_render_body = BuildBodyInfo::Plan(plan);
                 }
@@ -862,6 +927,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         Arc::clone(&self.options.component_metadata),
                         &raw_object_fields,
                         self.module_name.as_ref().map(Arc::clone),
+                        GeneratedViewpuName::VIEWPU_BASE,
                     );
                     builder_methods.push(BuilderMethodInfo {
                         name: name.into_owned(),

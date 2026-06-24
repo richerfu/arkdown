@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use arkdown_core::ModuleConfig;
+use arkdown_path::HvigorNativeLibraryPattern;
 use arkdown_session::DependencyGraphSnapshot;
 use rustc_hash::FxHashSet;
 
@@ -481,49 +482,17 @@ impl<'a> NativeLibraryRoot<'a> {
       if !abi_dir.is_dir() {
         continue;
       }
-      if let Ok(mut entries) = std::fs::read_dir(&abi_dir) {
-        if entries.any(|e| {
-          e.ok()
-            .map(|entry| {
-              let path = entry.path();
-              NativeSharedLibraryPath::new(&path).matches_hvigor_pattern()
-            })
-            .unwrap_or(false)
-        }) {
+      for entry in walkdir::WalkDir::new(&abi_dir)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+      {
+        if HvigorNativeLibraryPattern::matches_path_under(&abi_dir, entry.path()) {
           return true;
         }
       }
     }
     false
-  }
-}
-
-struct NativeSharedLibraryPath<'a> {
-  path: &'a Path,
-}
-
-impl<'a> NativeSharedLibraryPath<'a> {
-  fn new(path: &'a Path) -> Self {
-    Self { path }
-  }
-
-  fn matches_hvigor_pattern(&self) -> bool {
-    self
-      .path
-      .file_name()
-      .and_then(|name| name.to_str())
-      .is_some_and(Self::matches_hvigor_name_pattern)
-  }
-
-  fn matches_hvigor_name_pattern(name: &str) -> bool {
-    let Some((_, suffix)) = name.rsplit_once(".so") else {
-      return false;
-    };
-    suffix.is_empty()
-      || suffix
-        .as_bytes()
-        .last()
-        .is_some_and(|byte| byte.is_ascii_digit())
   }
 }
 
@@ -702,12 +671,12 @@ impl<'a> NativeLibCollector<'a> {
       .filter_map(|e| e.ok())
       .filter(|e| e.file_type().is_file())
     {
+      if !HvigorNativeLibraryPattern::matches_path_under(libs_dir, entry.path()) {
+        continue;
+      }
       let Some(name) = entry.path().file_name().and_then(|name| name.to_str()) else {
         continue;
       };
-      if !NativeSharedLibraryPath::matches_hvigor_name_pattern(name) {
-        continue;
-      }
       if seen.insert(name.to_string()) {
         names.push(name.to_string());
       }
@@ -729,7 +698,7 @@ impl<'a> NativeLibCollector<'a> {
       .filter(|e| e.file_type().is_file())
     {
       let path = entry.path();
-      if !NativeSharedLibraryPath::new(path).matches_hvigor_pattern() {
+      if !HvigorNativeLibraryPattern::matches_path_under(root, path) {
         continue;
       }
       if NativeAbiFilters::new(self.abi_filters).matches_path(path) {
@@ -795,12 +764,12 @@ impl NativeBuildConfig {
         if !abi_dir.is_dir() {
           continue;
         }
-        let Ok(entries) = std::fs::read_dir(&abi_dir) else {
-          continue;
-        };
-        let mut sorted: Vec<PathBuf> = entries
-          .filter_map(|e| e.ok().map(|e| e.path()))
-          .filter(|p| NativeSharedLibraryPath::new(p).matches_hvigor_pattern())
+        let mut sorted: Vec<PathBuf> = walkdir::WalkDir::new(&abi_dir)
+          .into_iter()
+          .filter_map(|e| e.ok())
+          .filter(|e| e.file_type().is_file())
+          .map(|e| e.into_path())
+          .filter(|p| HvigorNativeLibraryPattern::matches_path_under(&abi_dir, p))
           .collect();
         sorted.sort();
         for so_path in sorted {
@@ -1015,6 +984,27 @@ mod tests {
     assert_eq!(out.libs_by_abi.len(), 1);
     assert_eq!(out.libs_by_abi[0].0, "arm64-v8a");
     assert_eq!(out.libs_by_abi[0].1.file_name().unwrap(), "libexpat.so.1");
+  }
+
+  #[test]
+  fn test_native_import_skips_macos_appledouble_shared_libraries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let libs_dir = tmp.path().join("src/main/libs/arm64-v8a");
+    fs::create_dir_all(&libs_dir).unwrap();
+    fs::write(libs_dir.join("libnative.so"), b"ELF").unwrap();
+    fs::write(libs_dir.join("._libnative.so"), b"AppleDouble").unwrap();
+
+    let cfg = NativeBuildConfig {
+      module_root: tmp.path().to_path_buf(),
+      abi_filters: vec!["arm64-v8a".to_string()],
+      enable_cmake_build: false,
+      sanitizer: NativeBuildSanitizer::None,
+      build_mode: "debug".to_string(),
+      sdk_toolchain: NativeSdkToolchain::default(),
+    };
+    let out = cfg.run().expect("native scan");
+    assert_eq!(out.libs_by_abi.len(), 1);
+    assert_eq!(out.libs_by_abi[0].1.file_name().unwrap(), "libnative.so");
   }
 
   #[test]
