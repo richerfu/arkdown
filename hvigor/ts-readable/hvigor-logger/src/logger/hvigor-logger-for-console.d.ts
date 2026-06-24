@@ -1,0 +1,23 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-logger/src/logger/hvigor-logger-for-console.d.ts
+ */
+import { HvigorLogger } from './hvigor-logger';
+/**
+ * 基于log4js封装的HvigorLogger，直接进行控制台和日志文件的输出。
+ * 日志打印的核心类，只负责将标准HvigorLogInfo对象进行打印适配log4js打印不负责message转义
+ */
+export declare class HvigorLoggerForConsole extends HvigorLogger {
+    private static hvigorLoggerCache;
+    private constructor();
+    /**
+     * 获取对应类别的HvigorLoggerForConsole实例
+     *
+     * @param {string} category 默认是default
+     * @return {HvigorLoggerForConsole}
+     */
+    static getLogger(category: string): HvigorLoggerForConsole;
+    static getLoggerWithDurationId(category: string, durationId: string): HvigorLoggerForConsole;
+}

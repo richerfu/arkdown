@@ -1,0 +1,23 @@
+{
+  "_comment": "Hvigor parity allowlist — section 3.9 CI gate requirement.",
+  "_schema": {
+    "entry": {
+      "id": "unique identifier for this allowlist entry",
+      "fixture": "fixture name (matches hvigor_parity.rs test name prefix)",
+      "stage": "which stage artifact differs: profile|resource|loader|cacheTS|ABC|archive|signing",
+      "field_path": "JSON-pointer or file path to the differing field/file",
+      "reason": "why this difference is expected and acceptable",
+      "owner": "GitHub username of the person who added this entry",
+      "expires": "ISO-8601 date after which this entry must be resolved or renewed",
+      "ticket": "optional issue/PR reference for tracking"
+    }
+  },
+  "_instructions": [
+    "Each entry allows a known parity difference to pass in strict mode.",
+    "Entries MUST have an `expires` date. Expired entries cause CI failure.",
+    "When a gap is fixed, delete the entry — do not just extend the expiry.",
+    "The CI job reads this file via ARKDOWN_PARITY_ALLOWLIST env var.",
+    "Cannot declare full parity (Phase 7 in gap analysis) while this list is non-empty."
+  ],
+  "entries": []
+}

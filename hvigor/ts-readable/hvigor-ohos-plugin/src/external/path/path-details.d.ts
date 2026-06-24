@@ -1,0 +1,11 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-ohos-plugin/src/external/path/path-details.d.ts
+ */
+export interface PathDetails {
+    getModuleBuildCachePath(): string;
+    getIntermediatesRes(): string;
+    getModuleBuildPath(): string;
+}

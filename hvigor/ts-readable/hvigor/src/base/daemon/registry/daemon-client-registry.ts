@@ -1,0 +1,55 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor/src/base/daemon/registry/daemon-client-registry.js
+ */
+import process_1 from "process";
+import * as daemon_const_js_1 from "../const/daemon-const";
+import * as hvigor_daemon_client_log_js_1 from "../log/hvigor-daemon-client-log";
+import * as process_info_util_js_1 from "../util/process-info-util";
+import * as daemon_info_js_1 from "./daemon-info";
+import * as default_daemon_registry_js_1 from "./default-daemon-registry";
+const _log = hvigor_daemon_client_log_js_1.HvigorDaemonClientLogger.getLogger("daemon-client");
+class DaemonClientRegistry extends default_daemon_registry_js_1.DefaultDaemonRegistry {
+  constructor() {
+    super(_log);
+  }
+  updateDaemonProcessState(e, t, o) {
+    const n = {
+      ...e,
+      state: t,
+      info: o
+    };
+    _log.debug(`hvigor client: Update daemon info in registry. daemonInfo=${JSON.stringify(n)}`), this.setInfo(e.keyId, n), this.executeAfterChangeProcessStateInClient(e, t);
+  }
+  executeAfterChangeProcessStateInClient(e, t) {
+    switch (t) {
+      case daemon_info_js_1.DaemonState.IDLE:
+      case daemon_info_js_1.DaemonState.HALF_BUSY:
+      case daemon_info_js_1.DaemonState.CANCELED:
+      case daemon_info_js_1.DaemonState.BUSY:
+      case daemon_info_js_1.DaemonState.STOP_REQ:
+        break;
+      case daemon_info_js_1.DaemonState.BROKEN:
+      case daemon_info_js_1.DaemonState.STOPPED:
+        (0, process_info_util_js_1.isHvigorDaemonProcess)(e.pid) ? (process_1.kill(e.pid, "SIGTERM"), _log.debug(`hvigor client: Send a 'SIGTERM' signal to daemon process. pid=${e.pid}`)) : _log.debug(`hvigor client: Process is not a hvigor daemon or not exist. pid=${e.pid}`);
+        break;
+      default:
+        throw new Error("hvigor client: Daemon state transition error.");
+    }
+  }
+  findProjectDaemon() {
+    const e = process_1.cwd();
+    return this.getAlive().filter(t => t.cwdPath === e).pop();
+  }
+  isAvailableDaemonOverLimit() {
+    return this.getInfos().filter(e => e.state !== daemon_info_js_1.DaemonState.STOPPED && e.state !== daemon_info_js_1.DaemonState.BROKEN).length === daemon_const_js_1.DAEMON_PROCESS_ACTIVE_MAX_LIMIT;
+  }
+  findIdleDaemonWithLRU() {
+    const e = this.getIdles();
+    if (0 !== e.length) return e.sort((e, t) => e.lastUsedTime - t.lastUsedTime), e[0];
+    _log.debug("hvigor client: Cannot find an idle daemon process.");
+  }
+}
+export const defaultDaemonClientRegistry = new DaemonClientRegistry();

@@ -1,0 +1,232 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-ohos-plugin/src/project/build-option/build-option-util.js
+ */
+import * as wdk_1 from "@baize/wdk";
+import * as build_mode_const_js_1 from "../../const/build-mode-const";
+import * as common_const_js_1 from "../../const/common-const";
+import * as ohos_logger_js_1 from "../../utils/log/ohos-logger";
+const log = ohos_logger_js_1.OhosLogger.getLogger("BuildOptionUtil");
+export class BuildOptionUtil {
+  static getDefaultModuleBuildOpt(t) {
+    var e;
+    return null !== (e = {
+      debug: {
+        debuggable: true,
+        copyFrom: "default"
+      },
+      release: {
+        debuggable: false,
+        copyFrom: "default"
+      },
+      default: {
+        debuggable: true
+      }
+    }[t]) && undefined !== e ? e : {};
+  }
+  static getDefaultBuildModeBuildOpt(t) {
+    var e;
+    return null !== (e = {
+      debug: {
+        debuggable: true
+      },
+      release: {
+        debuggable: false
+      },
+      test: {
+        debuggable: true
+      }
+    }[t]) && undefined !== e ? e : {};
+  }
+  static getOrDefaultBuildModeBinderSet(t) {
+    const e = this.arrayDeduplication(t, "buildModeName");
+    e.forEach(t => {
+      t.mappings && (t.mappings = this.arrayDeduplication(t.mappings, "targetName"));
+    });
+    return [build_mode_const_js_1.BuildModeConst.DEBUG, build_mode_const_js_1.BuildModeConst.RELEASE, build_mode_const_js_1.BuildModeConst.TEST].forEach(o => {
+      t.some(t => t.buildModeName === o) || e.push({
+        buildModeName: o,
+        mappings: [{
+          targetName: common_const_js_1.DefaultTargetConst.DEFAULT_TARGET,
+          buildOptionName: o === build_mode_const_js_1.BuildModeConst.RELEASE ? build_mode_const_js_1.BuildOptionConst.RELEASE : build_mode_const_js_1.BuildOptionConst.DEBUG
+        }, {
+          targetName: common_const_js_1.DefaultTargetConst.OHOS_TEST_TARGET,
+          buildOptionName: build_mode_const_js_1.BuildOptionConst.DEFAULT
+        }]
+      });
+    }), e;
+  }
+  static arrayDeduplication(t, e = "name") {
+    const o = new Set(),
+      i = [];
+    for (let n = t.length - 1; n >= 0; n--) {
+      const r = t[n];
+      o.has(r[e]) || (i.push(r), o.add(r[e]));
+    }
+    return i;
+  }
+  static validateBuildMode(t, e) {
+    var o;
+    return !(null !== (o = e.getProfileOpt().app.buildModeSet) && undefined !== o ? o : []).map(t => t.name).concat([build_mode_const_js_1.BuildModeConst.DEBUG, build_mode_const_js_1.BuildModeConst.RELEASE, build_mode_const_js_1.BuildModeConst.TEST]).some(e => e === t);
+  }
+  static validateBinderSet(t) {
+    var e, o;
+    const i = t.getProfileOpt().buildModeBinder;
+    if (undefined === i) return;
+    const n = i.map(t => t.buildModeName),
+      r = i.map(t => {
+        var e;
+        return null !== (e = t.mappings) && undefined !== e ? e : [];
+      }).flat(),
+      s = r.map(t => t.targetName),
+      a = r.map(t => t.buildOptionName),
+      l = (null !== (e = t.getParentProject().getProfileOpt().app.buildModeSet) && undefined !== e ? e : []).map(t => t.name).concat([build_mode_const_js_1.BuildModeConst.DEBUG, build_mode_const_js_1.BuildModeConst.RELEASE, build_mode_const_js_1.BuildModeConst.TEST]);
+    this.validateBinderSetBuildModes(l, n, t);
+    const d = t.getTargetOptions().map(t => t.name).concat([common_const_js_1.DefaultTargetConst.DEFAULT_TARGET]);
+    this.validateBinderSetTargetNames(d, s, t);
+    const u = (null !== (o = t.getProfileOpt().buildOptionSet) && undefined !== o ? o : []).map(t => t.name).concat([build_mode_const_js_1.BuildOptionConst.DEFAULT, build_mode_const_js_1.BuildOptionConst.DEBUG, build_mode_const_js_1.BuildOptionConst.RELEASE]);
+    this.validateBinderSetBuildOptNames(u, a, t);
+  }
+  static validateBuildOptionSet(t) {
+    const e = t.getProfileOpt().buildOptionSet;
+    if (undefined === e) return;
+    const o = e.map(t => t.name);
+    [build_mode_const_js_1.BuildOptionConst.DEFAULT, build_mode_const_js_1.BuildOptionConst.DEBUG, build_mode_const_js_1.BuildOptionConst.RELEASE].forEach(t => {
+      o.includes(t) || e.push({
+        name: t
+      });
+    });
+    const i = this.buildOptionSetToMap(e);
+    this.validateCopyFromNameExists(t, e, i), this.validateCopyFromCircle(t, e, i);
+  }
+  static isCopyFromNameExists(t, e) {
+    return t.copyFrom && e.has(t.copyFrom);
+  }
+  static isCopyFromHasCircle(t, e, o) {
+    const i = new Set();
+    let n = t;
+    for (; n && n.copyFrom;) {
+      if (null == o || o.push(n.name), i.has(n.name)) return true;
+      i.add(n.name), n = e.get(n.copyFrom);
+    }
+    return false;
+  }
+  static buildOptionSetToMap(t) {
+    const e = new Map();
+    return t.forEach(t => {
+      t.name && e.set(t.name, t);
+    }), e;
+  }
+  static validateCopyFromNameExists(t, e, o) {
+    e.forEach(e => {
+      if (e.copyFrom) {
+        this.isCopyFromNameExists(e, o) || log.warn(`buildOptionSet config buildOption:${e.name} copyFrom name:${e.copyFrom} not exists in ${t.getProfilePath()} .`);
+      }
+    });
+  }
+  static validateCopyFromCircle(t, e, o) {
+    e.forEach(e => {
+      if (e.copyFrom) {
+        const i = [];
+        this.isCopyFromHasCircle(e, o, i) && log.printErrorExit("IS_COPY_FROM_HAS_CIRCLE", [e.name, i.join(" -> "), t.getProfilePath()]);
+      }
+    });
+  }
+  static validateBinderSetBuildModes(t, e, o) {
+    e.forEach(e => {
+      t.includes(e) || log.printErrorExit("BUILD_MODE_BINDER_ERROR", [e, o.getParentProject().getProfilePath()], [[e, o.getParentProject().getProfilePath()]]);
+    });
+  }
+  static validateBinderSetTargetNames(t, e, o) {
+    e.forEach(e => {
+      t.includes(e) || log.printErrorExit("TARGET_IN_BUILD_MODE_BINDER_NOT_DEFINED", [e, o.getProfilePath()], [[o.getProfilePath()]]);
+    });
+  }
+  static validateBinderSetBuildOptNames(t, e, o) {
+    e.forEach(e => {
+      t.includes(e) || log.printErrorExit("BUILD_OPTION_IN_BUILD_MODE_BINDER_NOT_DEFINED", [e, o.getProfilePath()], [[o.getProfilePath()]]);
+    });
+  }
+}
+export class BuildOptionCombiner {
+  static replaceBuildOption(t, e) {
+    if (t.name !== e.name) throw new Error("only buildOption with same name can be replaced");
+    return replace(t, e);
+  }
+  static mergeBuildOption(t, e, o = []) {
+    return t ? merge(t, e, o) : e;
+  }
+  static mergeBuildOptionPath(t, e, o) {
+    return mergeBuildOptPath(o, readOpt(t, e));
+  }
+  static mergeProductBuildOptionPath(t, e) {
+    for (const [o, i] of t) e.has(o) || e.set(o, i);
+    return e;
+  }
+  static processCopyFrom(t) {
+    const e = BuildOptionUtil.buildOptionSetToMap(t);
+    for (let o = 0; o < t.length; o++) {
+      const i = t[o];
+      if (i.copyFrom && !BuildOptionUtil.isCopyFromHasCircle(i, e)) {
+        const n = doCopyFromMerge(i, e);
+        n && (t[o] = n);
+      }
+    }
+  }
+}
+function replace(t, e) {
+  return (0, wdk_1.cloneDeep)(e);
+}
+function merge(t, e, o = [], i = "") {
+  const n = new Set([...Object.keys(t), ...Object.keys(e)]),
+    r = {};
+  return n.forEach(n => {
+    const s = (0, wdk_1.cloneDeep)(t[n]),
+      a = (0, wdk_1.cloneDeep)(e[n]),
+      l = "string" == typeof n ? i ? `${i}.${n}` : n : "",
+      d = "string" == typeof n && Array.isArray(s) && Array.isArray(a) && o.includes(l);
+    n in t && n in e ? d ? r[n] = [...a, ...s] : isObject(s) && isObject(a) ? r[n] = merge(s, a, o, l) : r[n] = a : n in t ? r[n] = s : n in e && (r[n] = a);
+  }), r;
+}
+const xpathSet = new Set(["arkOptions.expandImportPath"]);
+function joinXpath(t, e) {
+  return xpathSet.has(e) ? `${e}.${t}` : t;
+}
+export function readOpt(t, e, o = "") {
+  let i = new Map();
+  return t ? (Object.keys(t).forEach(n => {
+    const r = t[n];
+    isObject(r) ? i = new Map([...i, ...readOpt(r, e, `${o}${o ? "." : ""}${n}`)]) : i.set(joinXpath(String(n), o), {
+      value: String(r),
+      srcPath: e
+    });
+  }), i) : i;
+}
+export function mergeBuildOptPath(t, e) {
+  const o = new Set([...Array.from(t.keys()), ...Array.from(e.keys())]),
+    i = new Map();
+  return o.forEach(o => {
+    const n = t.get(o),
+      r = e.get(o);
+    n && r ? n.value === r.value ? i.set(o, n) : i.set(o, r) : n ? i.set(o, n) : r && i.set(o, r);
+  }), i;
+}
+function isObject(t) {
+  return null !== t && "object" == typeof t && !Array.isArray(t);
+}
+function doCopyFromMerge(t, e) {
+  const o = [];
+  let i = t;
+  for (; i && i.name && (o.push(i.name), i.copyFrom);) i = e.get(i.copyFrom);
+  if (o.length < 1) return;
+  if (1 === o.length) return t;
+  const n = o.reverse();
+  let r = e.get(n[0]);
+  for (let t = 1; t < n.length; t++) {
+    const o = e.get(n[t]);
+    r && o && (r = BuildOptionCombiner.mergeBuildOption(r, o));
+  }
+  return r;
+}

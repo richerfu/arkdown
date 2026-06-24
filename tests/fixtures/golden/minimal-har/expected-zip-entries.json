@@ -1,0 +1,15 @@
+{
+  "description": "Expected zip entry structure for a source HAR built from minimal-har fixture.",
+  "required": [
+    "oh-package.json5",
+    "src/main/ets/Index.ets"
+  ],
+  "forbidden": [
+    "module.json",
+    "pack.info",
+    ".pages.info",
+    "ets/modules.abc",
+    "index.abc",
+    "resources.index"
+  ]
+}

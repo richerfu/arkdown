@@ -1,0 +1,95 @@
+
+[package]
+name = "arkdown-napi"
+version = "0.1.0"
+edition = "2021"
+description = "Node.js bindings for arkdown — OHOS build tool with Rolldown-aligned plugin support"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "arkdown"
+path = "src/main.rs"
+
+[dependencies]
+# NAPI-RS bridge (workspace = true — versions managed in root Cargo.toml)
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+# arkdown core crates (workspace = true)
+arkdown = { workspace = true }
+arkdown-cache = { workspace = true }
+arkdown-core = { workspace = true }
+arkdown-config = { workspace = true }
+arkdown-ets-transform = { workspace = true }
+arkdown-obfuscate = { workspace = true }
+arkdown-pack = { workspace = true }
+arkdown-path = { workspace = true }
+arkdown-profile = { workspace = true }
+arkdown-resolver = { workspace = true }
+arkdown-resource = { workspace = true }
+arkdown-session = { workspace = true }
+arkdown-sign = { workspace = true }
+arkdown-ts2abc = { workspace = true }
+arkdown-watcher = { workspace = true }
+
+rolldown_plugin = { workspace = true }
+rolldown_common = { workspace = true }
+
+clap = { workspace = true }
+fs-err = { workspace = true }
+indexmap = { workspace = true }
+json5 = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+walkdir = { workspace = true }
+zip = { workspace = true }
+oxc_index = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
+oxc_codegen = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
+rustc-hash = { workspace = true }
+dhat = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mimalloc-safe = { workspace = true, optional = true, features = ["skip_collect_on_exit"] }
+
+[target.'cfg(all(target_os = "linux", not(target_arch = "arm"), not(target_arch = "aarch64")))'.dependencies]
+mimalloc-safe = { workspace = true, optional = true, features = [
+  "skip_collect_on_exit",
+  "local_dynamic_tls",
+] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+mimalloc-safe = { workspace = true, optional = true, features = [
+  "skip_collect_on_exit",
+  "local_dynamic_tls",
+  "no_opt_arch",
+] }
+
+[features]
+default = ["allocator"]
+allocator = ["dep:mimalloc-safe"]
+memory-diagnostics = ["arkdown/memory-diagnostics"]
+dhat-heap = ["dep:dhat"]
+
+[build-dependencies]
+napi-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+walkdir = { workspace = true }

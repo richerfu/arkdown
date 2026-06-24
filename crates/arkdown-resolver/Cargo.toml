@@ -1,0 +1,18 @@
+[package]
+name = "arkdown-resolver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustc-hash = { workspace = true }
+arkdown-core = { workspace = true }
+arkdown-path = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+json5 = { workspace = true }
+fs-err = { workspace = true }
+oxc_resolver = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,5483 @@
+//! Core bundler for hvigor-style ESMODULE builds.
+//!
+//! hvigor disables Rollup generateBundle for Stage-model ESMODULE builds and
+//! hands transformed module sources to CompileArkTS/es2abc.  This module mirrors
+//! that shape: Rolldown owns resolve/load/transform/parse/semantic scan, while
+//! arkdown consumes the collected module graph and writes the CompileArkTS module
+//! source cache.  It does not generate or write bundled JavaScript chunks on the
+//! production path.
+
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+#[cfg(feature = "memory-diagnostics")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+use arcstr::ArcStr;
+use oxc_index::IndexVec;
+
+use arkdown_ets_transform::RolldownEtsTransformPlan;
+
+use arkdown_core::{
+    ArkdownConfig, ArkdownError, BuildMode, ChunkGraph, ChunkSourceFile, HvigorModuleSourceFile,
+    HvigorNpmEntry,
+};
+use arkdown_path::{
+    lexical_normalize, specifier::SpecifierKind, strip_relative_prefix, ArtifactPathSerializer,
+    ModuleSpecifier, NormalizedOhmUrl,
+};
+use arkdown_resolver::OhPackage;
+use rolldown::{BundlerOptions, InputItem, ModuleSourceScanOutput, OutputFormat};
+use rolldown_common::{
+    BundlerTransformOptions, ChunkingContext, CodeSplittingMode, ManualCodeSplittingOptions,
+    MatchGroup, MatchGroupName, MatchGroupTest, ModuleType as RdModuleType, SanitizeFilename,
+    TreeshakeOptions, TypeScriptOptions,
+};
+use rolldown_plugin::{
+    __inner::SharedPluginable, HookTransformArgs, HookTransformReturn, HookUsage, Plugin,
+    SharedTransformPluginContext,
+};
+use rolldown_utils::dashmap::FxDashMap;
+
+use crate::chunk_module_request::{HvigorChunkImportMap, HvigorChunkModuleRequestProcessor};
+use crate::compile_entry::CompileEntryNamer;
+use crate::diagnostics::RolldownBuildDiagnostics;
+use crate::manual_chunks::{ChunkName, ManualChunkPolicy};
+use crate::output;
+use crate::plan::{BundlePlan, BundleRuntimePackageContext, BundleRuntimePackageInfo};
+use crate::plugins::ets_transform::EtsTransformModuleSourceMaps;
+use crate::plugins::module_meta::ModuleMetaPlugin;
+
+/// The top-level bundler for one OHOS module build.
+///
+/// Orchestrates the full pipeline via rolldown with OHOS-specific plugins.
+pub struct Bundler {
+    pub config: Arc<ArkdownConfig>,
+    pub plugins: Vec<SharedPluginable>,
+    ets_transform_plan: Option<Arc<RolldownEtsTransformPlan>>,
+}
+
+/// The output produced by a successful [`Bundler::bundle`] call.
+pub struct BundleOutput {
+    pub chunk_graph: ChunkGraph,
+    pub output_dir: PathBuf,
+    /// `(chunk_name, absolute_path)` for each written `.js` file.
+    pub chunk_files: Vec<(String, PathBuf)>,
+    /// `(chunk_name, source path relative to src/main)` for compile-entry chunks.
+    ///
+    /// The bytecode stage uses this to derive hvigor-compatible ABC record names
+    /// for `filesInfo.txt`.
+    pub chunk_source_files: Vec<ChunkSourceFile>,
+    /// Transformed module sources compiled by SDK es2abc in hvigor ESMODULE mode.
+    pub module_source_files: Vec<HvigorModuleSourceFile>,
+    /// Entry module IDs passed to Rolldown scan.
+    pub entry_module_ids: Vec<String>,
+    /// Module graph import edges collected from Rolldown/OXC module records.
+    pub module_imports: FxHashMap<String, Vec<String>>,
+    /// External module requests collected from Rolldown module import records.
+    ///
+    /// The bytecode stage lowers these to hvigor-compatible `npmEntries.txt`
+    /// entries before invoking SDK es2abc.
+    pub external_module_requests: Vec<String>,
+    /// Package and local dependency mappings written to `npmEntries.txt`.
+    pub npm_entries: Vec<HvigorNpmEntry>,
+    /// Native ABC backend output path. Packagers must use this path as the
+    /// source for the final archive entry `ets/modules.abc`.
+    pub modules_abc_path: PathBuf,
+    /// `sourceMaps.map` if a real source map was produced from bundler inputs.
+    pub source_maps_path: Option<PathBuf>,
+}
+
+impl Bundler {
+    /// Create a new `Bundler` with the given configuration and plugin list.
+    pub fn new(config: ArkdownConfig, plugins: Vec<SharedPluginable>) -> Self {
+        Bundler {
+            config: Arc::new(config),
+            plugins,
+            ets_transform_plan: None,
+        }
+    }
+
+    pub fn with_ets_transform_plan(mut self, plan: Arc<RolldownEtsTransformPlan>) -> Self {
+        self.ets_transform_plan = Some(plan);
+        self
+    }
+
+    /// Run the full bundle pipeline and return the chunk outputs.
+    ///
+    /// The output remains ESM so the Rust ABC backend compiles the same
+    /// CompileArkTS-stage module shape that hvigor sends to es2abc.
+    pub async fn bundle(&self, plan: &BundlePlan) -> Result<BundleOutput, ArkdownError> {
+        let bundle_start = Instant::now();
+        plan.validate()?;
+        let input_plan = RolldownInputPlan::from_bundle_plan(plan);
+
+        // ── 2. Pass plugins directly to rolldown ─────────────────────────────
+        let source_map_store = HvigorModuleSourceMapStore::default();
+        let mut rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
+        let source_collector = Arc::new(HvigorModuleTransformCollector::new(
+            source_map_store.clone(),
+        )) as SharedPluginable;
+        let source_collector_index = rd_plugins
+            .iter()
+            .position(|plugin| plugin.call_name().as_ref() == "ets-transform")
+            .map(|index| index + 1)
+            .unwrap_or(rd_plugins.len());
+        rd_plugins.insert(source_collector_index, source_collector);
+        #[cfg(feature = "memory-diagnostics")]
+        rd_plugins.push(Arc::new(MemoryTransformDiagnosticPlugin::new()) as SharedPluginable);
+
+        // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
+        //
+        // Output format is ESM.  hvigor's CompileArkTS phase feeds es2abc the
+        // transformed module source directly; generating CJS here injects
+        // rolldown helpers (`__toESM`, `__copyProps`, etc.) that do not exist
+        // in hvigor's bytecode.
+        //
+        // module_types maps ".ets" → Ts so rolldown parses the post-transform
+        // source as standard TypeScript. EtsTransformPlugin also implements the
+        // load hook, so ArkTS-only syntax such as @Builder functions and ArkUI
+        // DSL blocks is lowered before rolldown's parser sees the module.
+        let mut module_types = rustc_hash::FxHashMap::default();
+        module_types.insert("ets".to_string(), RdModuleType::Ts);
+
+        // cwd: canonicalize the project root so rolldown's resolver operates on
+        // an absolute path.  The entry paths built above are already absolute.
+        let cwd = Self::canonical_project_root(&plan.input.project_root);
+
+        // Disable tree-shaking for debug builds.  ArkRuntime entry pages
+        // (@Entry @Component struct) have no exports — only a side-effect
+        // `registerNamedRoute(...)` call at module level.  With tree-shaking
+        // enabled rolldown eliminates the entire module body when nothing
+        // imports from it, producing an empty chunk (0 bytes).
+        // hvigor also disables tree-shaking in debug mode.
+        let treeshake_default = !matches!(plan.build_mode, BuildMode::Debug);
+        let treeshake_enabled = plan.treeshake_override.unwrap_or(treeshake_default);
+        let treeshake = TreeshakeOptions::Boolean(treeshake_enabled);
+
+        // manualChunks for supportChunks=true: mirrors hvigor's arkts-pack.js logic.
+        // oh_modules/node_modules → "commons"; non-entry local modules → "vendors".
+        let code_splitting = if plan.input.support_chunks {
+            Some(CodeSplittingMode::Advanced(
+                Self::build_manual_code_splitting_options()?,
+            ))
+        } else {
+            None
+        };
+
+        let options = BundlerOptions {
+            input: Some(input_plan.input_items()?),
+            cwd: Some(cwd),
+            format: Some(OutputFormat::Esm),
+            module_types: Some(module_types),
+            sourcemap: None,
+            treeshake,
+            code_splitting,
+            transform: Some(BundlerTransformOptions {
+                typescript: Some(TypeScriptOptions::default()),
+                ..Default::default()
+            }),
+            // Match hvigor's rollup options:
+            // shimMissingExports: true — suppress "missing export" errors for
+            // modules that are present at runtime but not statically exported.
+            shim_missing_exports: Some(plan.shim_missing_exports_override.unwrap_or(true)),
+            // context: "globalThis" — hvigor sets this so top-level `this`
+            // resolves to globalThis rather than undefined in strict ESM.
+            context: Some(
+                plan.context_override
+                    .clone()
+                    .unwrap_or_else(|| "globalThis".to_string()),
+            ),
+            // sanitizeFileName: false — hvigor disables file-name sanitization
+            // so OHM URL path segments are preserved verbatim.
+            sanitize_filename: Some(SanitizeFilename::Boolean(false)),
+            ..Default::default()
+        };
+        let entry_module_ids = input_plan.entry_module_ids()?;
+        #[cfg(feature = "memory-diagnostics")]
+        crate::memory_diagnostics::dump_with(
+            "bundle:before-scan",
+            format_args!(
+                "inputs={} plugins={} treeshake={} support_chunks={}",
+                options.input.as_ref().map_or(0, Vec::len),
+                rd_plugins.len(),
+                treeshake_enabled,
+                plan.input.support_chunks
+            ),
+        );
+
+        // ── 4. Scan the hvigor module-source graph ──────────────────────────
+        let scan_start = Instant::now();
+        let mut rd_bundler = rolldown::Bundler::with_plugins(options, rd_plugins)
+            .map_err(|e| ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message()))?;
+        let module_source_scan = rd_bundler
+            .scan_module_sources()
+            .await
+            .map_err(|e| ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message()))?;
+        rd_bundler
+            .close()
+            .await
+            .map_err(|e| ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message()))?;
+        #[cfg(feature = "memory-diagnostics")]
+        crate::memory_diagnostics::dump("bundle:after-scan");
+        tracing::info!(
+            elapsed_ms = scan_start.elapsed().as_millis(),
+            "rolldown scan completed"
+        );
+
+        // ── 5. Materialize the hvigor CompileArkTS module-source handoff ─────
+        let module_source_start = Instant::now();
+        let mut module_source_state = HvigorModuleSourceState::from_rolldown_scan(
+            module_source_scan,
+            source_map_store.finish(),
+        );
+        #[cfg(feature = "memory-diagnostics")]
+        crate::memory_diagnostics::dump_with(
+            "bundle:module-source-state",
+            format_args!("{}", module_source_state.memory_summary()),
+        );
+        tracing::info!(
+            elapsed_ms = module_source_start.elapsed().as_millis(),
+            "hvigor module source snapshot materialized"
+        );
+        let module_graph_start = Instant::now();
+        let module_graph_facts = module_source_state.module_graph_facts();
+        if module_graph_facts.full_module_ids.is_empty() {
+            return Err(ArkdownError::Bundler(
+                "rolldown did not publish module graph facts during scan".to_string(),
+            ));
+        }
+        let chunk_graph = module_graph_facts.chunk_graph();
+        let chunk_source_files = input_plan.chunk_source_files()?;
+        let module_imports = module_source_state.module_imports();
+        let module_source_ids = Self::module_source_ids(&module_graph_facts, &module_source_state);
+        let external_module_requests = module_source_state.external_module_requests();
+        #[cfg(feature = "memory-diagnostics")]
+        crate::memory_diagnostics::dump_with(
+            "bundle:module-graph",
+            format_args!(
+                "modules={} entry_modules={} importers={} module_source_ids={} external_module_requests={}",
+                module_graph_facts.full_module_ids.len(),
+                entry_module_ids.len(),
+                module_imports.len(),
+                module_source_ids.len(),
+                external_module_requests.len()
+            ),
+        );
+        tracing::info!(
+            elapsed_ms = module_graph_start.elapsed().as_millis(),
+            "rolldown module graph collected"
+        );
+
+        // ── 6. Write CompileArkTS handoff artifacts to disk ─────────────────
+        let output_dir = plan.output.output_dir.clone();
+        fs_err::create_dir_all(&output_dir).map_err(ArkdownError::Io)?;
+
+        let source_map_packages = &plan.input.source_map_packages;
+        if source_map_packages.entry_package_name.is_empty()
+            || source_map_packages.entry_package_version.is_empty()
+        {
+            return Err(ArkdownError::Bundler(
+                "source map entry package metadata is missing from BundlePlan".to_string(),
+            ));
+        }
+        let package_versions = Self::source_map_package_versions(plan, &module_graph_facts);
+        let source_map_opts = output::SourceMapOptions {
+            module_name: source_map_packages.entry_package_name.clone(),
+            package_name: source_map_packages.entry_package_name.clone(),
+            version: source_map_packages.entry_package_version.clone(),
+            chunk_source_files: input_plan.chunk_source_file_map(&chunk_source_files),
+            package_versions,
+        };
+
+        let source_map_start = Instant::now();
+        let mut raw_source_maps = module_source_state
+            .source_maps
+            .iter()
+            .map(|(module_id, source_map)| (module_id.as_str(), source_map.as_ref()))
+            .collect::<Vec<_>>();
+        raw_source_maps.sort_by(|left, right| left.0.cmp(right.0));
+        let source_maps_path = output::WrittenOutput::write_hvigor_source_maps_from_raw(
+            &output_dir,
+            raw_source_maps,
+            &source_map_opts,
+        )?;
+        module_source_state.source_maps.clear();
+        tracing::info!(
+            elapsed_ms = source_map_start.elapsed().as_millis(),
+            "source map output written"
+        );
+        let module_source_write_start = Instant::now();
+        #[cfg(feature = "memory-diagnostics")]
+        crate::memory_diagnostics::dump("bundle:before-module-source-write");
+        let module_source_files = HvigorModuleSourceWriter::new(
+            plan.bundle_name.as_str(),
+            plan.input.module_name.as_str(),
+            &plan.input.project_root,
+            &input_plan.module_path_map,
+            &plan.input.runtime_packages,
+            &plan.input.byte_code_har_packages,
+            plan.use_normalized_ohm_url,
+            &module_graph_facts,
+            module_source_ids,
+            module_source_state,
+            plan.output
+                .module_source_output_dir
+                .clone()
+                .ok_or_else(|| {
+                    ArkdownError::Bundler(
+                        "hvigor module source output dir is required for ModuleMode compilation"
+                            .to_string(),
+                    )
+                })?,
+        )
+        .write()?;
+        #[cfg(feature = "memory-diagnostics")]
+        crate::memory_diagnostics::dump_with(
+            "bundle:after-module-source-write",
+            format_args!("module_source_files={}", module_source_files.len()),
+        );
+        tracing::info!(
+            elapsed_ms = module_source_write_start.elapsed().as_millis(),
+            "hvigor module sources written"
+        );
+        let npm_entries_start = Instant::now();
+        let npm_entries = input_plan.module_path_map.npm_entries(
+            &plan.input.project_root,
+            &plan.input.runtime_packages,
+            &module_source_files,
+        )?;
+        tracing::info!(
+            elapsed_ms = npm_entries_start.elapsed().as_millis(),
+            "npm entries collected"
+        );
+        let mut chunk_source_files = chunk_source_files.into_values().collect::<Vec<_>>();
+        chunk_source_files.sort_by(|left, right| left.chunk_name.cmp(&right.chunk_name));
+        let modules_abc_path = output::WrittenOutput::abc_path_in(&output_dir);
+
+        tracing::info!(
+            elapsed_ms = bundle_start.elapsed().as_millis(),
+            "bundler completed"
+        );
+
+        Ok(BundleOutput {
+            chunk_graph,
+            output_dir,
+            chunk_files: Vec::new(),
+            chunk_source_files,
+            module_source_files,
+            entry_module_ids,
+            module_imports,
+            external_module_requests,
+            npm_entries,
+            modules_abc_path,
+            source_maps_path,
+        })
+    }
+
+    fn canonical_project_root(path: &std::path::Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| {
+            if path.is_absolute() {
+                lexical_normalize(path)
+            } else {
+                lexical_normalize(
+                    &std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(path),
+                )
+            }
+        })
+    }
+
+    fn module_source_ids(
+        module_graph_facts: &ModuleGraphFacts,
+        module_source_state: &HvigorModuleSourceState,
+    ) -> Vec<String> {
+        let mut seen = FxHashSet::default();
+        let mut ids = Vec::new();
+        for id in &module_graph_facts.full_module_ids {
+            if seen.insert(id.clone()) {
+                ids.push(id.clone());
+            }
+        }
+        let mut source_ids = module_source_state
+            .sources
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        source_ids.sort();
+        for id in source_ids {
+            if seen.insert(id.clone()) {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
+    fn source_map_package_versions(
+        plan: &BundlePlan,
+        module_graph_facts: &ModuleGraphFacts,
+    ) -> FxHashMap<String, String> {
+        let mut package_versions = plan
+            .input
+            .source_map_packages
+            .dependency_package_versions
+            .clone();
+        for module_id in &module_graph_facts.full_module_ids {
+            let meta = ModuleMetaPlugin::compute_meta(
+                module_id,
+                &plan.input.project_root,
+                &plan.input.module_name,
+            );
+            let Some(package_name) = meta.pkg_name.filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            let Some(package_version) = meta.pkg_version.filter(|version| !version.is_empty())
+            else {
+                continue;
+            };
+            package_versions
+                .entry(package_name)
+                .or_insert(package_version);
+        }
+        package_versions
+    }
+
+    /// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
+    ///
+    /// Group 1 (`commons`): modules under dependency module directories.
+    /// Group 2 (`vendors`): all remaining non-entry modules.
+    ///
+    /// This matches the hvigor `arkts-pack.js` logic:
+    /// ```js
+    /// function manualChunks(id, { getModuleInfo }) {
+    ///   if (id.includes(NODE_MODULES) || id.includes(OH_NODE_MODULES)) return "commons";
+    ///   const info = getModuleInfo(id);
+    ///   return info && !info.isEntry ? "vendors" : undefined;
+    /// }
+    /// ```
+    fn build_manual_code_splitting_options() -> Result<ManualCodeSplittingOptions, ArkdownError> {
+        let common_chunk_policy =
+            Arc::new(ManualChunkPolicy::from_plan(Vec::new(), Default::default()));
+        let commons_test_policy = Arc::clone(&common_chunk_policy);
+        let commons_test = Arc::new(move |module_id: &str| {
+            let is_common = commons_test_policy.is_common_dependency(module_id);
+            Box::pin(async move { Ok(Some(is_common)) })
+                as Pin<Box<dyn Future<Output = anyhow::Result<Option<bool>>> + Send + 'static>>
+        });
+
+        let commons_group = MatchGroup {
+            name: MatchGroupName::Static(ChunkName::COMMONS.to_string()),
+            test: Some(MatchGroupTest::Function(commons_test)),
+            ..Default::default()
+        };
+
+        // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
+        // The function captures no state; it queries `is_entry` via ChunkingContext.
+        let vendors_name_fn: Arc<
+            dyn Fn(
+                    &str,
+                    &ChunkingContext,
+                )
+                    -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>
+                + Send
+                + Sync,
+        > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
+            let result = ctx.get_module_info(module_id).and_then(|info| {
+                if !info.is_entry {
+                    Some(ChunkName::VENDORS.to_string())
+                } else {
+                    None
+                }
+            });
+            Box::pin(async move { Ok(result) })
+        });
+
+        let vendors_group = MatchGroup {
+            name: MatchGroupName::Dynamic(vendors_name_fn),
+            test: None,
+            ..Default::default()
+        };
+
+        Ok(ManualCodeSplittingOptions {
+            groups: Some(vec![commons_group, vendors_group]),
+            ..Default::default()
+        })
+    }
+}
+
+struct HvigorExternalModuleRequest<'a> {
+    request: &'a str,
+}
+
+impl<'a> HvigorExternalModuleRequest<'a> {
+    fn new(request: &'a str) -> Self {
+        Self { request }
+    }
+
+    fn is_match(&self) -> bool {
+        self.request.starts_with("@ohos:")
+            || self.request.starts_with("@ohos.")
+            || self.request.starts_with("@hms:")
+            || self.request.starts_with("@hms.")
+            || self.request.starts_with("@native:")
+            || self.request.starts_with("@native.")
+            || self.request.starts_with("@app:")
+            || self.request.starts_with("@system.")
+    }
+}
+
+struct HvigorNormalizedOhmUrl<'a> {
+    context: &'a BundleRuntimePackageContext,
+    project_file_path: &'a str,
+}
+
+impl<'a> HvigorNormalizedOhmUrl<'a> {
+    fn new(context: &'a BundleRuntimePackageContext, project_file_path: &'a str) -> Self {
+        Self {
+            context,
+            project_file_path,
+        }
+    }
+
+    fn to_request(&self) -> String {
+        let is_so = if self.context.is_so { "Y" } else { "N" };
+        let module_name = self.context.module_name.as_str();
+        format!("@normalized:{}&{}&{}", is_so, module_name, self.to_record())
+    }
+
+    fn to_record(&self) -> String {
+        let source_path = Path::new(self.project_file_path).with_extension("");
+        let source_path = ArtifactPathSerializer::rel_to_slash(&source_path);
+        format!(
+            "{}&{}/{}&{}",
+            self.context.bundle_name, self.context.package_name, source_path, self.context.version
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct HvigorModuleSourceMapStore {
+    source_maps: Arc<FxDashMap<String, Arc<str>>>,
+}
+
+impl HvigorModuleSourceMapStore {
+    fn record(&self, module_id: String, source_map: Arc<str>) {
+        self.source_maps.insert(module_id, source_map);
+    }
+
+    fn finish(&self) -> FxHashMap<String, Arc<str>> {
+        let mut source_maps = FxHashMap::default();
+        for item in self.source_maps.iter() {
+            source_maps.insert(item.key().clone(), Arc::clone(item.value()));
+        }
+        self.source_maps.clear();
+        source_maps
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct HvigorModuleSourceState {
+    sources: FxHashMap<String, HvigorCollectedModuleSource>,
+    source_maps: FxHashMap<String, Arc<str>>,
+    resolved_imports: FxHashMap<String, FxHashMap<String, String>>,
+    resolved_import_records: FxHashMap<String, Vec<HvigorResolvedImportRecord>>,
+    module_ids: Vec<String>,
+    seen_module_ids: FxHashSet<String>,
+    full_module_is_commonjs: FxHashMap<String, bool>,
+}
+
+impl HvigorModuleSourceState {
+    fn from_rolldown_scan(
+        scan: ModuleSourceScanOutput,
+        source_maps: FxHashMap<String, Arc<str>>,
+    ) -> Self {
+        let mut state = Self {
+            source_maps,
+            ..Self::default()
+        };
+        for module in scan.modules {
+            let module_id = module.id.to_string();
+            state.record_module_id(module_id.clone());
+            state.sources.insert(
+                module_id.clone(),
+                HvigorCollectedModuleSource {
+                    code: module.source,
+                },
+            );
+            state
+                .full_module_is_commonjs
+                .insert(module_id.clone(), module.exports_kind.is_commonjs());
+
+            for import in module.imports {
+                let resolved_id = import
+                    .resolved_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| import.module_request.clone());
+                state.record_module_id(resolved_id.clone());
+                state
+                    .resolved_imports
+                    .entry(module_id.clone())
+                    .or_default()
+                    .insert(import.module_request.clone(), resolved_id);
+                state
+                    .resolved_import_records
+                    .entry(module_id.clone())
+                    .or_default()
+                    .push(HvigorResolvedImportRecord {
+                        specifier: import.module_request,
+                        source_span: HvigorSourceSpan {
+                            start: import.importer_span.start,
+                            end: import.importer_span.end,
+                        },
+                    });
+            }
+        }
+        state
+    }
+
+    fn record_module_id(&mut self, id: String) {
+        if self.seen_module_ids.insert(id.clone()) {
+            self.module_ids.push(id);
+        }
+    }
+
+    fn module_graph_facts(&self) -> ModuleGraphFacts {
+        let mut ids = self.module_ids.clone();
+        ids.sort();
+        ids.dedup();
+        ModuleGraphFacts {
+            full_module_ids: ids,
+            full_module_is_commonjs: self.full_module_is_commonjs.clone(),
+        }
+    }
+
+    fn module_imports(&self) -> FxHashMap<String, Vec<String>> {
+        let mut imports = FxHashMap::default();
+        for (importer, resolved_imports) in &self.resolved_imports {
+            let mut imported_ids = resolved_imports.values().cloned().collect::<Vec<_>>();
+            imported_ids.sort();
+            imported_ids.dedup();
+            imports.insert(importer.clone(), imported_ids);
+        }
+        imports
+    }
+
+    fn external_module_requests(&self) -> Vec<String> {
+        let mut requests = Vec::new();
+        for resolved_imports in self.resolved_imports.values() {
+            for (specifier, resolved_id) in resolved_imports {
+                if HvigorExternalModuleRequest::new(specifier).is_match() {
+                    requests.push(specifier.clone());
+                } else if HvigorExternalModuleRequest::new(resolved_id).is_match() {
+                    requests.push(resolved_id.clone());
+                }
+            }
+        }
+        requests.sort();
+        requests.dedup();
+        requests
+    }
+}
+
+#[cfg(feature = "memory-diagnostics")]
+impl HvigorModuleSourceState {
+    fn memory_summary(&self) -> String {
+        let source_bytes = self
+            .sources
+            .values()
+            .map(|source| source.code.len())
+            .sum::<usize>();
+        let source_map_bytes = self
+            .source_maps
+            .values()
+            .map(|source_map| source_map.len())
+            .sum::<usize>();
+        let resolved_imports = self
+            .resolved_imports
+            .values()
+            .map(|imports| imports.len())
+            .sum::<usize>();
+        let resolved_import_records = self
+            .resolved_import_records
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        format!(
+            "sources={} source_bytes={} source_maps={} source_map_bytes={} module_ids={} resolved_importers={} resolved_imports={} resolved_import_records={} pending_resolved_imports={} full_commonjs={}",
+            self.sources.len(),
+            source_bytes,
+            self.source_maps.len(),
+            source_map_bytes,
+            self.module_ids.len(),
+            self.resolved_imports.len(),
+            resolved_imports,
+            resolved_import_records,
+            0,
+            self.full_module_is_commonjs.len()
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HvigorCollectedModuleSource {
+    code: ArcStr,
+}
+
+#[derive(Debug, Clone)]
+struct HvigorResolvedImportRecord {
+    specifier: String,
+    source_span: HvigorSourceSpan,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HvigorSourceSpan {
+    start: u32,
+    end: u32,
+}
+
+impl HvigorSourceSpan {
+    #[cfg(test)]
+    fn for_literal(source: &str, specifier: &str) -> Option<Self> {
+        HvigorModuleSourceLiteralScanner::new(source, None)
+            .find(specifier)
+            .map(|literal| Self {
+                start: literal.start as u32,
+                end: literal.end as u32,
+            })
+    }
+}
+
+#[derive(Debug)]
+struct HvigorModuleTransformCollector {
+    store: HvigorModuleSourceMapStore,
+}
+
+impl HvigorModuleTransformCollector {
+    fn new(store: HvigorModuleSourceMapStore) -> Self {
+        Self { store }
+    }
+}
+
+impl Plugin for HvigorModuleTransformCollector {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("arkdown-module-source-transform-collector")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::Transform
+    }
+
+    fn transform(
+        &self,
+        ctx: SharedTransformPluginContext,
+        args: &HookTransformArgs<'_>,
+    ) -> impl Future<Output = HookTransformReturn> + Send {
+        let store = self.store.clone();
+        let module_id = args.id.to_string();
+        let source_map = ctx
+            .meta()
+            .get::<EtsTransformModuleSourceMaps>()
+            .and_then(|source_maps| source_maps.take(&module_id));
+        async move {
+            if let Some(source_map) = source_map {
+                store.record(module_id, source_map);
+            }
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(feature = "memory-diagnostics")]
+#[derive(Debug, Default)]
+struct MemoryTransformDiagnosticPlugin {
+    transformed_modules: AtomicUsize,
+    transformed_code_bytes: AtomicUsize,
+}
+
+#[cfg(feature = "memory-diagnostics")]
+impl MemoryTransformDiagnosticPlugin {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(feature = "memory-diagnostics")]
+impl Plugin for MemoryTransformDiagnosticPlugin {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("arkdown-memory-transform-diagnostics")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::Transform
+    }
+
+    fn transform(
+        &self,
+        _ctx: SharedTransformPluginContext,
+        args: &HookTransformArgs<'_>,
+    ) -> impl Future<Output = HookTransformReturn> + Send {
+        let count = self.transformed_modules.fetch_add(1, Ordering::Relaxed) + 1;
+        let bytes = self
+            .transformed_code_bytes
+            .fetch_add(args.code.len(), Ordering::Relaxed)
+            + args.code.len();
+        if count == 1 || count % 500 == 0 {
+            crate::memory_diagnostics::dump_with(
+                "bundle:transform-progress",
+                format_args!(
+                    "modules={} observed_code_bytes={} last_module={} last_code_bytes={}",
+                    count,
+                    bytes,
+                    args.id,
+                    args.code.len()
+                ),
+            );
+        }
+        async { Ok(None) }
+    }
+}
+
+struct HvigorModuleSourceWriter<'a> {
+    module_name: &'a str,
+    project_root: &'a Path,
+    module_path_map: &'a HvigorModulePathMap,
+    runtime_packages: &'a BundleRuntimePackageInfo,
+    bytecode_har_imports: HvigorBytecodeHarImports<'a>,
+    module_graph_facts: &'a ModuleGraphFacts,
+    module_source_ids: Vec<String>,
+    state: HvigorModuleSourceState,
+    output_dir: PathBuf,
+    processor: HvigorChunkModuleRequestProcessor,
+}
+
+#[derive(Default)]
+struct HvigorModuleSourceRecordIndex {
+    by_module_id: FxHashMap<String, HvigorModuleSourceRecord>,
+    by_canonical_module_id: FxHashMap<String, String>,
+}
+
+struct HvigorModuleSourceRecord {
+    ownership: HvigorChunkSource,
+    record_name: String,
+}
+
+impl<'a> HvigorModuleSourceWriter<'a> {
+    fn new(
+        bundle_name: &'a str,
+        module_name: &'a str,
+        project_root: &'a Path,
+        module_path_map: &'a HvigorModulePathMap,
+        runtime_packages: &'a BundleRuntimePackageInfo,
+        byte_code_har_packages: &'a [String],
+        use_normalized_ohm_url: bool,
+        module_graph_facts: &'a ModuleGraphFacts,
+        module_source_ids: Vec<String>,
+        state: HvigorModuleSourceState,
+        output_dir: PathBuf,
+    ) -> Self {
+        Self {
+            module_name,
+            project_root,
+            module_path_map,
+            runtime_packages,
+            bytecode_har_imports: HvigorBytecodeHarImports::new(
+                runtime_packages,
+                byte_code_har_packages,
+                use_normalized_ohm_url,
+            ),
+            module_graph_facts,
+            module_source_ids,
+            state,
+            output_dir,
+            processor: HvigorChunkModuleRequestProcessor::new(bundle_name, module_name),
+        }
+    }
+
+    fn write(self) -> Result<Vec<HvigorModuleSourceFile>, ArkdownError> {
+        let had_output_dir = self.output_dir.exists();
+        if had_output_dir && !self.output_dir.is_dir() {
+            fs_err::remove_file(&self.output_dir)
+                .map_err(|e| ArkdownError::Bundler(e.to_string()))?;
+        }
+        if !self.output_dir.exists() {
+            fs_err::create_dir_all(&self.output_dir)
+                .map_err(|e| ArkdownError::Bundler(e.to_string()))?;
+        }
+
+        let mut module_ids = self
+            .module_source_ids
+            .iter()
+            .filter(|module_id| self.state.sources.contains_key(module_id.as_str()))
+            .filter(|module_id| HvigorModuleSourceId::new(module_id).should_compile())
+            .cloned()
+            .collect::<Vec<_>>();
+        module_ids.dedup();
+
+        let module_records = self.module_source_record_index(&module_ids)?;
+        let mut files = Vec::with_capacity(module_ids.len());
+        let mut created_dirs = FxHashSet::<PathBuf>::default();
+        let mut active_paths = FxHashSet::<PathBuf>::default();
+        for module_id in &module_ids {
+            if let Some(file) =
+                self.write_module_source(module_id.as_str(), &module_records, &mut created_dirs)?
+            {
+                active_paths.insert(file.path.clone());
+                files.push(file);
+            }
+        }
+        if had_output_dir {
+            self.remove_stale_output_files(&active_paths)?;
+        }
+        Ok(files)
+    }
+
+    fn write_module_source(
+        &self,
+        module_id: &str,
+        module_records: &HvigorModuleSourceRecordIndex,
+        created_dirs: &mut FxHashSet<PathBuf>,
+    ) -> Result<Option<HvigorModuleSourceFile>, ArkdownError> {
+        let Some(source) = self.state.sources.get(module_id) else {
+            return Ok(None);
+        };
+        let Some(module_record) = module_records.by_module_id.get(module_id) else {
+            return Ok(None);
+        };
+        let ownership = &module_record.ownership;
+        let (imports, imported_record_names) =
+            self.imports_for_module(module_id, module_records)?;
+        let code = HvigorModuleSourceImportRewriter::new(
+            source.code.as_ref(),
+            self.state
+                .resolved_import_records
+                .get(module_id)
+                .map(Vec::as_slice),
+            &imports,
+        )
+        .rewrite();
+        let path = HvigorModuleSourceOutputPath::new(
+            &self.output_dir,
+            self.project_root,
+            ownership,
+            &ownership.module_name,
+            &ownership.source_file,
+            module_id,
+        )
+        .path()?;
+        if let Some(parent) = path.parent() {
+            let parent = parent.to_path_buf();
+            if created_dirs.insert(parent.clone()) {
+                fs_err::create_dir_all(&parent)
+                    .map_err(|e| ArkdownError::Bundler(e.to_string()))?;
+            }
+        }
+        self.write_file(&path, code.as_bytes())?;
+        let origin_source_lang = HvigorModuleSourceId::new(module_id)
+            .origin_source_lang()
+            .to_string();
+        Ok(Some(HvigorModuleSourceFile {
+            module_id: module_id.to_string(),
+            path,
+            record_name: module_record.record_name.clone(),
+            source_file: ownership.file_info_source_file(self.module_name),
+            package_name: Some(self.file_info_package_name(ownership)),
+            is_commonjs: self
+                .module_graph_facts
+                .full_module_is_commonjs
+                .get(module_id)
+                .copied()
+                .unwrap_or(false),
+            origin_source_lang,
+            imported_record_names,
+        }))
+    }
+
+    fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), ArkdownError> {
+        match fs_err::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {
+                fs_err::remove_dir_all(path).map_err(|e| ArkdownError::Bundler(e.to_string()))?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(ArkdownError::Bundler(error.to_string())),
+        }
+
+        fs_err::write(path, contents).map_err(|e| ArkdownError::Bundler(e.to_string()))
+    }
+
+    fn remove_stale_output_files(
+        &self,
+        active_paths: &FxHashSet<PathBuf>,
+    ) -> Result<(), ArkdownError> {
+        if !self.output_dir.is_dir() {
+            return Ok(());
+        }
+
+        let mut stack = vec![self.output_dir.clone()];
+        let mut dirs = Vec::new();
+        while let Some(dir) = stack.pop() {
+            dirs.push(dir.clone());
+            for entry in fs_err::read_dir(&dir).map_err(|e| ArkdownError::Bundler(e.to_string()))? {
+                let entry = entry.map_err(|e| ArkdownError::Bundler(e.to_string()))?;
+                let file_type = entry
+                    .file_type()
+                    .map_err(|e| ArkdownError::Bundler(e.to_string()))?;
+                let path = entry.path();
+                if file_type.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if file_type.is_file() && !active_paths.contains(&path) {
+                    fs_err::remove_file(&path).map_err(|e| ArkdownError::Bundler(e.to_string()))?;
+                }
+            }
+        }
+
+        for dir in dirs.into_iter().rev() {
+            if dir == self.output_dir {
+                continue;
+            }
+            match fs_err::remove_dir(&dir) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::DirectoryNotEmpty | ErrorKind::NotFound
+                    ) => {}
+                Err(error) => return Err(ArkdownError::Bundler(error.to_string())),
+            }
+        }
+        Ok(())
+    }
+
+    fn module_source_record_index(
+        &self,
+        module_ids: &[String],
+    ) -> Result<HvigorModuleSourceRecordIndex, ArkdownError> {
+        let mut index = HvigorModuleSourceRecordIndex::default();
+        for module_id in module_ids {
+            let ownership = self.module_path_map.source_file_for_entry(module_id)?;
+            if ownership.module_name.is_empty() {
+                continue;
+            }
+            let record_name = ownership.record_name(self.runtime_packages, self.module_name)?;
+            if let Some(canonical_module_id) = Self::canonical_module_id(module_id) {
+                index
+                    .by_canonical_module_id
+                    .insert(canonical_module_id, module_id.clone());
+            }
+            index.by_module_id.insert(
+                module_id.clone(),
+                HvigorModuleSourceRecord {
+                    ownership,
+                    record_name,
+                },
+            );
+        }
+        Ok(index)
+    }
+
+    fn canonical_module_id(module_id: &str) -> Option<String> {
+        let path = Path::new(module_id);
+        path.is_absolute().then(|| {
+            HvigorModulePathMap::canonical_root(path)
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    fn record_for_resolved_id<'b>(
+        module_records: &'b HvigorModuleSourceRecordIndex,
+        resolved_id: &str,
+    ) -> Option<&'b HvigorModuleSourceRecord> {
+        module_records.by_module_id.get(resolved_id).or_else(|| {
+            Self::canonical_module_id(resolved_id)
+                .and_then(|canonical| module_records.by_canonical_module_id.get(&canonical))
+                .and_then(|module_id| module_records.by_module_id.get(module_id))
+        })
+    }
+
+    fn file_info_package_name(&self, ownership: &HvigorChunkSource) -> String {
+        ownership.module_name.clone()
+    }
+
+    fn imports_for_module(
+        &self,
+        module_id: &str,
+        module_records: &HvigorModuleSourceRecordIndex,
+    ) -> Result<(HvigorChunkImportMap, Vec<String>), ArkdownError> {
+        let mut imports = HvigorChunkImportMap::default();
+        let mut imported_record_names = BTreeSet::new();
+
+        if let Some(resolved_imports) = self.state.resolved_imports.get(module_id) {
+            for (specifier, resolved_id) in resolved_imports {
+                self.record_import(
+                    module_id,
+                    specifier,
+                    resolved_id,
+                    &mut imports,
+                    &mut imported_record_names,
+                    module_records,
+                )?;
+            }
+        }
+
+        Ok((imports, imported_record_names.into_iter().collect()))
+    }
+
+    fn record_import(
+        &self,
+        _importer: &str,
+        specifier: &str,
+        resolved_id: &str,
+        imports: &mut HvigorChunkImportMap,
+        imported_record_names: &mut BTreeSet<String>,
+        module_records: &HvigorModuleSourceRecordIndex,
+    ) -> Result<(), ArkdownError> {
+        if let Some(ohm_url) = self.bytecode_har_imports.ohm_url_for_request(specifier)? {
+            let record_name = NormalizedOhmUrl::parse(&ohm_url)
+                .and_then(|url| url.record_name())
+                .ok_or_else(|| {
+                    ArkdownError::Bundler(format!(
+                        "bytecode HAR import '{}' produced invalid normalized OHM URL '{}'",
+                        specifier, ohm_url
+                    ))
+                })?;
+            imported_record_names.insert(record_name);
+            imports.insert(specifier.to_string(), ohm_url);
+            return Ok(());
+        }
+        let sdk_request = self.processor.process_request(specifier);
+        if sdk_request != specifier {
+            imports.insert(specifier.to_string(), sdk_request);
+            return Ok(());
+        }
+        let resolved_ohm_url = self.ohm_url_for_resolved_id(resolved_id)?;
+        let specifier_ohm_url = if resolved_ohm_url.is_some() {
+            None
+        } else {
+            self.ohm_url_for_resolved_id(specifier)?
+        };
+        if let Some(ohm_url) = resolved_ohm_url.or(specifier_ohm_url) {
+            imports.insert(specifier.to_string(), ohm_url);
+        }
+        if let Some(record) = Self::record_for_resolved_id(module_records, resolved_id) {
+            imported_record_names.insert(record.record_name.clone());
+        }
+        Ok(())
+    }
+
+    fn ohm_url_for_resolved_id(&self, resolved_id: &str) -> Result<Option<String>, ArkdownError> {
+        if resolved_id.starts_with("@bundle:")
+            || resolved_id.starts_with("@shared:")
+            || resolved_id.starts_with("@app:")
+            || resolved_id.starts_with("@normalized:")
+        {
+            return Ok(Some(resolved_id.to_string()));
+        }
+        if resolved_id.starts_with("@ohos:")
+            || resolved_id.starts_with("@hms:")
+            || resolved_id.starts_with("@native:")
+        {
+            return Ok(Some(resolved_id.to_string()));
+        }
+
+        let path = Path::new(resolved_id);
+        if !path.is_absolute() {
+            return Ok(None);
+        }
+        let ownership = self.module_path_map.source_file_for_entry(resolved_id)?;
+        if ownership.module_name.is_empty() {
+            return Ok(None);
+        }
+        let request = match &ownership.kind {
+            HvigorChunkSourceKind::SourceModule => {
+                ownership.to_normalized_request(self.runtime_packages, self.module_name)?
+            }
+            HvigorChunkSourceKind::PackageModule(package) => {
+                package.to_normalized_request(self.runtime_packages)?
+            }
+            HvigorChunkSourceKind::LocalDependencyModule(package) => {
+                package.to_normalized_request(self.runtime_packages)?
+            }
+        };
+        Ok(Some(request))
+    }
+}
+
+struct HvigorModuleSourceImportRewriter<'a> {
+    source: &'a str,
+    import_records: &'a [HvigorResolvedImportRecord],
+    imports: &'a HvigorChunkImportMap,
+}
+
+impl<'a> HvigorModuleSourceImportRewriter<'a> {
+    fn new(
+        source: &'a str,
+        import_records: Option<&'a [HvigorResolvedImportRecord]>,
+        imports: &'a HvigorChunkImportMap,
+    ) -> Self {
+        Self {
+            source,
+            import_records: import_records.unwrap_or(&[]),
+            imports,
+        }
+    }
+
+    fn rewrite(&self) -> Cow<'a, str> {
+        if self.imports.is_empty() {
+            return Cow::Borrowed(self.source);
+        }
+
+        let mut patches = if self.import_records.is_empty() {
+            self.collect_global_literal_patches()
+        } else {
+            self.collect_import_record_patches()
+        };
+        if patches.is_empty() {
+            return Cow::Borrowed(self.source);
+        }
+
+        patches.sort_by_key(|patch| (patch.start, patch.end));
+        patches.dedup_by_key(|patch| (patch.start, patch.end));
+
+        let mut rewritten = self.source.to_string();
+        let mut previous_start = self.source.len();
+        for patch in patches.into_iter().rev() {
+            if patch.end > previous_start || patch.start >= patch.end || patch.end > rewritten.len()
+            {
+                continue;
+            }
+            previous_start = patch.start;
+            rewritten.replace_range(patch.start..patch.end, &patch.quoted_replacement());
+        }
+        Cow::Owned(rewritten)
+    }
+
+    fn collect_import_record_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
+        let mut patches = Vec::new();
+        for record in self.import_records {
+            let Some(replacement) = self.imports.get(record.specifier.as_str()) else {
+                continue;
+            };
+            if replacement == record.specifier.as_str() {
+                continue;
+            }
+            let Some(literal) =
+                HvigorModuleSourceLiteralScanner::new(self.source, Some(record.source_span))
+                    .find(record.specifier.as_str())
+            else {
+                continue;
+            };
+            patches.push(HvigorModuleSourceImportPatch {
+                start: literal.start,
+                end: literal.end,
+                replacement: replacement.clone(),
+            });
+        }
+        patches
+    }
+
+    fn collect_global_literal_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
+        let mut scanner = HvigorModuleSourceLiteralScanner::new(self.source, None);
+        let mut patches = Vec::new();
+        while let Some(literal) = scanner.next() {
+            let Some(replacement) = self.imports.get(literal.value) else {
+                continue;
+            };
+            if replacement == literal.value {
+                continue;
+            }
+            patches.push(HvigorModuleSourceImportPatch {
+                start: literal.start,
+                end: literal.end,
+                replacement: replacement.clone(),
+            });
+        }
+        patches
+    }
+}
+
+struct HvigorModuleSourceLiteralScanner<'a> {
+    source: &'a str,
+    cursor: usize,
+    end: usize,
+}
+
+impl<'a> HvigorModuleSourceLiteralScanner<'a> {
+    fn new(source: &'a str, span: Option<HvigorSourceSpan>) -> Self {
+        let start = span.map_or(0, |span| span.start as usize).min(source.len());
+        let end = span
+            .map_or(source.len(), |span| span.end as usize)
+            .min(source.len());
+        Self {
+            source,
+            cursor: start,
+            end: end.max(start),
+        }
+    }
+
+    fn find(mut self, value: &str) -> Option<HvigorModuleSourceLiteral<'a>> {
+        while let Some(literal) = self.next() {
+            if literal.value == value {
+                return Some(literal);
+            }
+        }
+        None
+    }
+
+    fn next(&mut self) -> Option<HvigorModuleSourceLiteral<'a>> {
+        let bytes = self.source.as_bytes();
+        while self.cursor < self.end {
+            let quote = bytes[self.cursor];
+            if !matches!(quote, b'"' | b'\'' | b'`') {
+                self.cursor += 1;
+                continue;
+            }
+
+            let literal_start = self.cursor;
+            let mut cursor = self.cursor + 1;
+            let mut escaped = false;
+            while cursor < self.end {
+                let byte = bytes[cursor];
+                if escaped {
+                    escaped = false;
+                    cursor += 1;
+                    continue;
+                }
+                if byte == b'\\' {
+                    escaped = true;
+                    cursor += 1;
+                    continue;
+                }
+                if byte == quote {
+                    let literal = HvigorModuleSourceLiteral {
+                        start: literal_start,
+                        end: cursor + 1,
+                        value: &self.source[literal_start + 1..cursor],
+                    };
+                    self.cursor = cursor + 1;
+                    return Some(literal);
+                }
+                cursor += 1;
+            }
+            self.cursor = literal_start + 1;
+        }
+        None
+    }
+}
+
+struct HvigorModuleSourceLiteral<'a> {
+    start: usize,
+    end: usize,
+    value: &'a str,
+}
+
+struct HvigorModuleSourceImportPatch {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+impl HvigorModuleSourceImportPatch {
+    fn quoted_replacement(&self) -> String {
+        serde_json::to_string(&self.replacement)
+            .expect("module request replacement must serialize as a JSON string")
+    }
+}
+
+struct HvigorBytecodeHarImports<'a> {
+    runtime_packages: &'a BundleRuntimePackageInfo,
+    package_names: FxHashSet<&'a str>,
+    use_normalized_ohm_url: bool,
+}
+
+impl<'a> HvigorBytecodeHarImports<'a> {
+    fn new(
+        runtime_packages: &'a BundleRuntimePackageInfo,
+        package_names: &'a [String],
+        use_normalized_ohm_url: bool,
+    ) -> Self {
+        Self {
+            runtime_packages,
+            package_names: package_names.iter().map(String::as_str).collect(),
+            use_normalized_ohm_url,
+        }
+    }
+
+    fn ohm_url_for_request(&self, request: &str) -> Result<Option<String>, ArkdownError> {
+        if !self.use_normalized_ohm_url {
+            return Ok(None);
+        }
+        if let Some(ohm_url) = self.normalized_so_ohm_url(request) {
+            return Ok(Some(ohm_url));
+        }
+        if self.package_names.is_empty() {
+            return Ok(None);
+        }
+        let Some(package_name) = self.alias_for_request(request) else {
+            return Ok(None);
+        };
+        Ok(Some(self.normalized_ohm_url(package_name, request)?))
+    }
+
+    fn normalized_so_ohm_url(&self, request: &str) -> Option<String> {
+        let context = self.runtime_packages.packages.get(request)?;
+        if !context.is_so {
+            return None;
+        }
+        Some(format!(
+            "@normalized:Y&{}&{}&{}&{}",
+            context.module_name,
+            context.bundle_name,
+            Path::new(request)
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .unwrap_or(request),
+            context.version
+        ))
+    }
+
+    fn alias_for_request(&self, request: &str) -> Option<&'a str> {
+        if let Some(package_name) = self.package_names.get(request).copied() {
+            return Some(package_name);
+        }
+        self.package_names
+            .iter()
+            .copied()
+            .filter(|package_name| {
+                request
+                    .strip_prefix(*package_name)
+                    .is_some_and(|remaining| remaining.as_bytes().first() == Some(&b'/'))
+            })
+            .max_by_key(|package_name| package_name.len())
+    }
+
+    fn normalized_ohm_url(
+        &self,
+        package_name: &str,
+        request: &str,
+    ) -> Result<String, ArkdownError> {
+        let context = self
+            .runtime_packages
+            .packages
+            .get(package_name)
+            .ok_or_else(|| {
+                ArkdownError::Bundler(format!(
+                    "pkgContextInfo is missing runtime package context for bytecode HAR '{}'",
+                    package_name
+                ))
+            })?;
+        let record = if request == package_name {
+            if context.entry_path.is_empty() {
+                return Err(ArkdownError::Bundler(format!(
+                    "pkgContextInfo is missing bytecode HAR entryPath for '{}'",
+                    package_name
+                )));
+            }
+            self.remove_module_suffix(&format!("{package_name}/{}", context.entry_path))
+        } else {
+            request.replacen(package_name, &context.package_name, 1)
+        };
+        Ok(format!(
+            "@normalized:{}&{}&{}&{}&{}",
+            if context.is_so { "Y" } else { "N" },
+            context.module_name,
+            context.bundle_name,
+            ArtifactPathSerializer::rel_to_slash(Path::new(&record)),
+            context.version
+        ))
+    }
+
+    fn remove_module_suffix(&self, value: &str) -> String {
+        let value = value.replace('\\', "/");
+        for suffix in [".d.ets", ".d.ts", ".ets", ".ts", ".mjs", ".cjs", ".js"] {
+            if let Some(stripped) = value.strip_suffix(suffix) {
+                return stripped.to_string();
+            }
+        }
+        value
+    }
+}
+
+struct HvigorModuleSourceId<'a> {
+    module_id: &'a str,
+}
+
+impl<'a> HvigorModuleSourceId<'a> {
+    fn new(module_id: &'a str) -> Self {
+        Self { module_id }
+    }
+
+    fn should_compile(&self) -> bool {
+        let path = Path::new(self.module_id);
+        if !path.is_absolute() {
+            return false;
+        }
+        if arkdown_path::SourceFileName::new(path).is_declaration() {
+            return false;
+        }
+        matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("ets" | "ts" | "js" | "mjs" | "cjs")
+        )
+    }
+
+    fn origin_source_lang(&self) -> &'static str {
+        match Path::new(self.module_id)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("ets") => "ets",
+            Some("ts") => "ts",
+            _ => "js",
+        }
+    }
+}
+
+struct HvigorModuleSourceOutputPath<'a> {
+    output_dir: &'a Path,
+    project_root: &'a Path,
+    ownership: &'a HvigorChunkSource,
+    module_name: &'a str,
+    source_file: &'a str,
+    module_id: &'a str,
+}
+
+impl<'a> HvigorModuleSourceOutputPath<'a> {
+    fn new(
+        output_dir: &'a Path,
+        project_root: &'a Path,
+        ownership: &'a HvigorChunkSource,
+        module_name: &'a str,
+        source_file: &'a str,
+        module_id: &'a str,
+    ) -> Self {
+        Self {
+            output_dir,
+            project_root,
+            ownership,
+            module_name,
+            source_file,
+            module_id,
+        }
+    }
+
+    fn path(&self) -> Result<PathBuf, ArkdownError> {
+        Ok(self.output_dir.join(match &self.ownership.kind {
+            HvigorChunkSourceKind::SourceModule => Path::new(self.module_name).join(
+                HvigorModuleSourceFileAttribution::project_source_file_for(self.source_file),
+            ),
+            HvigorChunkSourceKind::LocalDependencyModule(_) => {
+                self.local_dependency_cache_source_file()
+            }
+            HvigorChunkSourceKind::PackageModule(_) => self.package_cache_source_file()?,
+        }))
+    }
+
+    fn local_dependency_cache_source_file(&self) -> PathBuf {
+        Path::new(&self.ownership.cache_module_name)
+            .join(self.source_file)
+            .with_extension(self.output_extension())
+    }
+
+    fn package_cache_source_file(&self) -> Result<PathBuf, ArkdownError> {
+        let module_path = Path::new(self.module_id);
+        let relative = module_path.strip_prefix(self.project_root).map_err(|_| {
+            ArkdownError::Bundler(format!(
+                "hvigor package module source is outside project root: {} not under {}",
+                module_path.display(),
+                self.project_root.display()
+            ))
+        })?;
+        Ok(relative.with_extension(self.output_extension()))
+    }
+
+    fn output_extension(&self) -> &'static str {
+        match Path::new(self.module_id)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("ets" | "ts") => "ts",
+            Some("js" | "mjs" | "cjs") => "js",
+            _ => "js",
+        }
+    }
+}
+
+struct HvigorModuleSourceFileAttribution;
+
+impl HvigorModuleSourceFileAttribution {
+    fn project_source_file_for(source_file: &str) -> PathBuf {
+        let source_file_path = Path::new(source_file).with_extension("ts");
+        if source_file.starts_with("ets/")
+            || source_file.starts_with("js/")
+            || source_file.starts_with("mock/")
+        {
+            Path::new("src").join("main").join(source_file_path)
+        } else {
+            source_file_path
+        }
+    }
+
+    fn package_source_file_for(source_file: &str) -> PathBuf {
+        let path = Path::new(source_file);
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("ets") => path.with_extension("ts"),
+            _ => path.to_path_buf(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+struct RolldownInputPlan {
+    module_root: PathBuf,
+    module_path_map: HvigorModulePathMap,
+    entries: Vec<String>,
+    namer: CompileEntryNamer,
+}
+
+impl RolldownInputPlan {
+    fn from_bundle_plan(plan: &BundlePlan) -> Self {
+        let module_root = Self::canonical_module_root(&plan.input.module_root);
+        let mut module_path_map = HvigorModulePathMap::new(
+            &plan.input.module_name,
+            &module_root,
+            &plan.input.module_path_map,
+        );
+        module_path_map.add_module_record_roots(&plan.input.module_record_roots);
+        let entries = plan.input.entries.clone();
+        module_path_map.add_compile_entry_package_roots(&entries);
+        Self {
+            module_root,
+            module_path_map,
+            namer: CompileEntryNamer::new(&entries),
+            entries,
+        }
+    }
+
+    fn input_items(&self) -> Result<Vec<InputItem>, ArkdownError> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                Ok(InputItem {
+                    name: Some(self.namer.chunk_name(entry, index)),
+                    import: self.import_path(entry)?,
+                })
+            })
+            .collect()
+    }
+
+    fn chunk_source_files(&self) -> Result<FxHashMap<String, ChunkSourceFile>, ArkdownError> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let chunk_name = self.namer.chunk_name(entry, index);
+                let source = self.module_path_map.source_file_for_entry(entry)?;
+                Ok((chunk_name.clone(), source.with_chunk_name(chunk_name)))
+            })
+            .collect()
+    }
+
+    fn entry_module_ids(&self) -> Result<Vec<String>, ArkdownError> {
+        let mut entry_module_ids = Vec::with_capacity(self.entries.len());
+        let mut seen = FxHashSet::default();
+        for entry in &self.entries {
+            let module_id = self.import_path(entry)?;
+            if seen.insert(module_id.clone()) {
+                entry_module_ids.push(module_id);
+            }
+        }
+        Ok(entry_module_ids)
+    }
+
+    fn chunk_source_file_map(
+        &self,
+        sources: &FxHashMap<String, ChunkSourceFile>,
+    ) -> FxHashMap<String, String> {
+        sources
+            .iter()
+            .map(|(chunk_name, source)| (chunk_name.clone(), source.source_file.clone()))
+            .collect()
+    }
+
+    fn import_path(&self, entry: &str) -> Result<String, ArkdownError> {
+        let specifier = ModuleSpecifier::new(entry);
+        if matches!(
+            specifier.kind(),
+            SpecifierKind::AbsolutePath | SpecifierKind::OhmUrl | SpecifierKind::ScopedPackage
+        ) {
+            return Ok(entry.to_string());
+        }
+
+        let candidate = self.module_root.join(strip_relative_prefix(entry));
+        std::fs::canonicalize(&candidate)
+            .unwrap_or_else(|_| lexical_normalize(&candidate))
+            .into_os_string()
+            .into_string()
+            .map_err(|path| {
+                ArkdownError::Bundler(format!(
+                    "bundle entry path is not valid UTF-8: {}",
+                    path.display()
+                ))
+            })
+    }
+
+    fn canonical_module_root(path: &std::path::Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| {
+            if path.is_absolute() {
+                lexical_normalize(path)
+            } else {
+                lexical_normalize(
+                    &std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(path),
+                )
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HvigorModulePathMap {
+    current_module_name: String,
+    roots: Vec<HvigorModuleRoot>,
+}
+
+impl HvigorModulePathMap {
+    fn new(
+        current_module_name: &str,
+        module_root: &Path,
+        module_path_map: &[(String, PathBuf)],
+    ) -> Self {
+        let mut roots = module_path_map
+            .iter()
+            .map(|(name, root)| {
+                HvigorModuleRoot::from_module_path_map(
+                    current_module_name,
+                    name.clone(),
+                    module_root,
+                    Self::canonical_root(root),
+                )
+            })
+            .collect::<Vec<_>>();
+        roots.push(HvigorModuleRoot::source_root(
+            current_module_name.to_string(),
+            module_root.to_path_buf(),
+        ));
+        Self::from_roots(current_module_name.to_string(), roots)
+    }
+
+    fn add_compile_entry_package_roots(&mut self, entries: &[String]) {
+        let mut roots = std::mem::take(&mut self.roots);
+        for entry in entries {
+            let entry_path = Path::new(entry);
+            if !entry_path.is_absolute()
+                || !arkdown_path::classify::is_inside_oh_modules(entry_path)
+            {
+                continue;
+            }
+            let Some(root_path) = Self::package_root_for_compile_entry(entry_path) else {
+                continue;
+            };
+            if roots.iter().any(|root| root.path == root_path) {
+                continue;
+            }
+            let Some(root) = HvigorModuleRoot::from_package_root(root_path) else {
+                continue;
+            };
+            roots.push(root);
+        }
+        let current_module_name = self.current_module_name.clone();
+        *self = Self::from_roots(current_module_name, roots);
+    }
+
+    fn add_module_record_roots(&mut self, module_record_roots: &[(String, PathBuf)]) {
+        let mut roots = std::mem::take(&mut self.roots);
+        for (name, root) in module_record_roots {
+            roots.push(HvigorModuleRoot::from_record_root(
+                name.clone(),
+                Self::canonical_root(root),
+            ));
+        }
+        let current_module_name = self.current_module_name.clone();
+        *self = Self::from_roots(current_module_name, roots);
+    }
+
+    fn from_roots(current_module_name: String, mut roots: Vec<HvigorModuleRoot>) -> Self {
+        roots.sort_by(|left, right| {
+            right
+                .path
+                .components()
+                .count()
+                .cmp(&left.path.components().count())
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| {
+                    left.module_name
+                        .starts_with('@')
+                        .cmp(&right.module_name.starts_with('@'))
+                })
+                .then_with(|| left.module_name.cmp(&right.module_name))
+        });
+        let mut merged_roots: Vec<HvigorModuleRoot> = Vec::with_capacity(roots.len());
+        for root in roots {
+            if let Some(existing) = merged_roots
+                .iter_mut()
+                .find(|existing| existing.path == root.path)
+            {
+                existing.dependency_aliases.extend(root.dependency_aliases);
+                existing.dependency_aliases.sort();
+                existing.dependency_aliases.dedup();
+                continue;
+            }
+            merged_roots.push(root);
+        }
+        Self {
+            current_module_name,
+            roots: merged_roots,
+        }
+    }
+
+    fn package_root_for_compile_entry(entry_path: &Path) -> Option<PathBuf> {
+        let mut current = if entry_path.is_dir() {
+            Some(entry_path)
+        } else {
+            entry_path.parent()
+        };
+        while let Some(path) = current {
+            if path.join("oh-package.json5").is_file() || path.join("package.json").is_file() {
+                return Some(Self::canonical_root(path));
+            }
+            current = path.parent();
+        }
+        None
+    }
+
+    fn source_file_for_entry(&self, entry: &str) -> Result<HvigorChunkSource, ArkdownError> {
+        let entry_path = Path::new(entry);
+        if !entry_path.is_absolute() {
+            return Ok(HvigorChunkSource::source_module(
+                self.current_module_name.clone(),
+                self.current_module_name.clone(),
+                "1.0.0".to_string(),
+                strip_relative_prefix(entry).to_string(),
+            ));
+        }
+
+        let entry_path = Self::canonical_root(entry_path);
+        for root in &self.roots {
+            if let Ok(relative) = entry_path.strip_prefix(&root.path) {
+                return root.source_for_relative(&entry_path, relative);
+            }
+        }
+        Ok(HvigorChunkSource::source_module(
+            String::new(),
+            String::new(),
+            "1.0.0".to_string(),
+            HvigorModuleRelativeSourceFile::new(&entry_path).source_file(),
+        ))
+    }
+
+    fn canonical_root(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path))
+    }
+
+    fn npm_entries(
+        &self,
+        project_root: &Path,
+        runtime_packages: &BundleRuntimePackageInfo,
+        module_source_files: &[HvigorModuleSourceFile],
+    ) -> Result<Vec<HvigorNpmEntry>, ArkdownError> {
+        let active_records = module_source_files
+            .iter()
+            .map(|source| source.record_name.as_str())
+            .collect::<FxHashSet<_>>();
+        let mut entries = Vec::new();
+        let mut active_package_roots = FxHashSet::default();
+
+        for root in self
+            .roots
+            .iter()
+            .filter(|root| root.kind == HvigorModuleRootKind::PackageModule)
+        {
+            let Some((entry_path, build_path)) =
+                self.package_root_entry(project_root, runtime_packages, root)?
+            else {
+                continue;
+            };
+            if !active_records.contains(build_path.as_str()) {
+                continue;
+            }
+            active_package_roots.insert(entry_path.clone());
+            entries.push(HvigorNpmEntry {
+                entry_path,
+                build_path,
+            });
+        }
+
+        self.add_package_symlink_entries(project_root, &active_package_roots, &mut entries)?;
+        self.add_local_dependency_entries(
+            project_root,
+            runtime_packages,
+            &active_records,
+            &mut entries,
+        )?;
+
+        entries.sort_by(|left, right| {
+            left.entry_path
+                .cmp(&right.entry_path)
+                .then_with(|| left.build_path.cmp(&right.build_path))
+        });
+        entries.dedup_by(|left, right| {
+            left.entry_path == right.entry_path && left.build_path == right.build_path
+        });
+        Ok(entries)
+    }
+
+    fn package_root_entry(
+        &self,
+        project_root: &Path,
+        runtime_packages: &BundleRuntimePackageInfo,
+        root: &HvigorModuleRoot,
+    ) -> Result<Option<(String, String)>, ArkdownError> {
+        let Some(entry_path) = self.package_record_for_path(project_root, &root.path) else {
+            return Ok(None);
+        };
+        let entry_rel = OhPackage::load_from_root(&root.path)
+            .and_then(|package| {
+                package
+                    .exports_import_field()
+                    .or_else(|| package.main.clone())
+            })
+            .unwrap_or_else(|| "index".to_string());
+        let entry_rel = strip_relative_prefix(&entry_rel);
+        let context = runtime_packages
+            .packages
+            .get(root.package_name.as_str())
+            .ok_or_else(|| {
+                ArkdownError::Bundler(format!(
+                    "pkgContextInfo is missing runtime package context for '{}'",
+                    root.package_name
+                ))
+            })?;
+        let build_path = HvigorNormalizedOhmUrl::new(context, entry_rel).to_record();
+        Ok(Some((entry_path, build_path)))
+    }
+
+    fn add_package_symlink_entries(
+        &self,
+        project_root: &Path,
+        active_package_roots: &FxHashSet<String>,
+        entries: &mut Vec<HvigorNpmEntry>,
+    ) -> Result<(), ArkdownError> {
+        let mut canonical_package_roots = FxHashMap::default();
+        for root in self
+            .roots
+            .iter()
+            .filter(|root| root.kind == HvigorModuleRootKind::PackageModule)
+        {
+            let Some(record) = self.package_record_for_path(project_root, &root.path) else {
+                continue;
+            };
+            if !active_package_roots.contains(record.as_str()) {
+                continue;
+            }
+            canonical_package_roots.insert(Self::canonical_root(&root.path), record);
+        }
+
+        for oh_modules_root in self.oh_modules_scan_roots(project_root) {
+            self.scan_symlink_entries(
+                project_root,
+                &oh_modules_root,
+                &canonical_package_roots,
+                entries,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn scan_symlink_entries(
+        &self,
+        project_root: &Path,
+        root: &Path,
+        canonical_package_roots: &FxHashMap<PathBuf, String>,
+        entries: &mut Vec<HvigorNpmEntry>,
+    ) -> Result<(), ArkdownError> {
+        if !root.is_dir() {
+            return Ok(());
+        }
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let read_dir = match fs_err::read_dir(&dir) {
+                Ok(read_dir) => read_dir,
+                Err(_) => continue,
+            };
+            for entry in read_dir {
+                let entry = entry?;
+                let path = entry.path();
+                let metadata = fs_err::symlink_metadata(&path)?;
+                if metadata.file_type().is_symlink() {
+                    let target = Self::canonical_root(&path);
+                    let Some(build_path) = canonical_package_roots.get(&target) else {
+                        continue;
+                    };
+                    let Some(entry_path) = self.package_record_for_path(project_root, &path) else {
+                        continue;
+                    };
+                    entries.push(HvigorNpmEntry {
+                        entry_path,
+                        build_path: build_path.clone(),
+                    });
+                    continue;
+                }
+                if metadata.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_local_dependency_entries(
+        &self,
+        project_root: &Path,
+        runtime_packages: &BundleRuntimePackageInfo,
+        active_records: &FxHashSet<&str>,
+        entries: &mut Vec<HvigorNpmEntry>,
+    ) -> Result<(), ArkdownError> {
+        let current_root = self
+            .roots
+            .iter()
+            .find(|root| {
+                root.kind == HvigorModuleRootKind::SourceModule
+                    && root.package_name == self.current_module_name
+            })
+            .or_else(|| {
+                self.roots
+                    .iter()
+                    .find(|root| root.kind == HvigorModuleRootKind::SourceModule)
+            });
+        let Some(current_root) = current_root else {
+            return Ok(());
+        };
+        let current_package = OhPackage::load_from_root(&current_root.path);
+        let dependency_aliases = current_package
+            .as_ref()
+            .map(|package| package.file_dependencies())
+            .unwrap_or_default();
+
+        for root in self
+            .roots
+            .iter()
+            .filter(|root| root.kind == HvigorModuleRootKind::LocalDependencyModule)
+            .filter(|root| root.path != current_root.path)
+        {
+            let Some(alias) = dependency_aliases
+                .iter()
+                .find_map(|(alias, path)| {
+                    let canonical = Self::canonical_root(path);
+                    if canonical == root.path {
+                        return Some(alias.as_str());
+                    }
+                    OhPackage::load_from_root(&canonical).and_then(|package| {
+                        (package.name() == Some(root.package_name.as_str()))
+                            .then_some(alias.as_str())
+                    })
+                })
+                .or_else(|| root.dependency_aliases.first().map(String::as_str))
+            else {
+                continue;
+            };
+            let entry_source = OhPackage::load_from_root(&root.path)
+                .and_then(|package| package.main_field().map(str::to_string))
+                .filter(|main| !main.is_empty())
+                .unwrap_or_else(|| "Index.ets".to_string());
+            let context = runtime_packages
+                .packages
+                .get(root.package_name.as_str())
+                .ok_or_else(|| {
+                    ArkdownError::Bundler(format!(
+                        "pkgContextInfo is missing runtime package context for '{}'",
+                        root.package_name
+                    ))
+                })?;
+            let build_record =
+                HvigorNormalizedOhmUrl::new(context, entry_source.as_str()).to_record();
+            if !active_records.contains(build_record.as_str()) {
+                continue;
+            }
+            entries.push(HvigorNpmEntry {
+                entry_path: format!("pkg_modules@{}/{}", self.current_module_name, alias),
+                build_path: build_record.clone(),
+            });
+            entries.push(HvigorNpmEntry {
+                entry_path: alias.to_string(),
+                build_path: format!("@normalized.{}", build_record),
+            });
+        }
+
+        let _ = project_root;
+        Ok(())
+    }
+
+    fn oh_modules_scan_roots(&self, project_root: &Path) -> Vec<PathBuf> {
+        let mut roots = vec![project_root.join("oh_modules")];
+        roots.extend(
+            self.roots
+                .iter()
+                .filter(|root| root.kind.is_project_oh_modules_owner())
+                .map(|root| root.path.join("oh_modules")),
+        );
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    fn package_record_for_path(&self, project_root: &Path, path: &Path) -> Option<String> {
+        let project_oh_modules = project_root.join("oh_modules");
+        if let Ok(relative) = path.strip_prefix(&project_oh_modules) {
+            if relative.starts_with(Path::new(".ohpm").join("oh_modules")) {
+                return None;
+            }
+            return Some(Self::pkg_modules_record("pkg_modules", relative));
+        }
+
+        for root in self
+            .roots
+            .iter()
+            .filter(|root| root.kind.is_project_oh_modules_owner())
+        {
+            let oh_modules = root.path.join("oh_modules");
+            if let Ok(relative) = path.strip_prefix(&oh_modules) {
+                return Some(Self::pkg_modules_record(
+                    &format!("pkg_modules@{}", root.module_name),
+                    relative,
+                ));
+            }
+        }
+        None
+    }
+
+    fn pkg_modules_record(prefix: &str, relative: &Path) -> String {
+        let mut path = PathBuf::from(prefix);
+        for component in relative.components() {
+            let value = component.as_os_str();
+            if value == "oh_modules" {
+                path.push("pkg_modules");
+            } else {
+                path.push(value);
+            }
+        }
+        ArtifactPathSerializer::rel_to_slash(&path)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HvigorModuleRoot {
+    module_name: String,
+    package_name: String,
+    package_version: String,
+    dependency_aliases: Vec<String>,
+    path: PathBuf,
+    kind: HvigorModuleRootKind,
+}
+
+impl HvigorModuleRoot {
+    fn source_root(module_name: String, path: PathBuf) -> Self {
+        let package = OhPackage::load_from_root(&path);
+        Self::with_package(
+            module_name,
+            path,
+            HvigorModuleRootKind::SourceModule,
+            package,
+        )
+    }
+
+    fn from_module_path_map(
+        current_module_name: &str,
+        module_name: String,
+        current_module_root: &Path,
+        path: PathBuf,
+    ) -> Self {
+        let kind = HvigorModuleRootKind::from_root_path(&path);
+        let package = OhPackage::load_from_root(&path);
+        let kind = if kind == HvigorModuleRootKind::SourceModule
+            && module_name != current_module_name
+            && path != current_module_root
+            && package.is_some()
+        {
+            HvigorModuleRootKind::LocalDependencyModule
+        } else {
+            kind
+        };
+        Self::with_package(module_name, path, kind, package)
+    }
+
+    fn from_package_root(path: PathBuf) -> Option<Self> {
+        let package = OhPackage::load_from_root(&path)?;
+        let module_name = package.name().map(str::to_string)?;
+        let kind = HvigorModuleRootKind::from_root_path(&path);
+        Some(Self::with_package(module_name, path, kind, Some(package)))
+    }
+
+    fn from_record_root(module_name: String, path: PathBuf) -> Self {
+        let package = OhPackage::load_from_root(&path);
+        Self::with_package(
+            module_name,
+            path,
+            HvigorModuleRootKind::PackageModule,
+            package,
+        )
+    }
+
+    fn with_package(
+        module_name: String,
+        path: PathBuf,
+        kind: HvigorModuleRootKind,
+        package: Option<OhPackage>,
+    ) -> Self {
+        let package_name = package
+            .as_ref()
+            .and_then(|package| package.name())
+            .unwrap_or(module_name.as_str())
+            .to_string();
+        let package_version = package
+            .as_ref()
+            .map(|package| package.version())
+            .filter(|version| !version.is_empty())
+            .unwrap_or("1.0.0")
+            .to_string();
+        Self {
+            dependency_aliases: module_name
+                .starts_with('@')
+                .then(|| module_name.clone())
+                .into_iter()
+                .collect(),
+            module_name,
+            package_name,
+            package_version,
+            path,
+            kind,
+        }
+    }
+
+    fn source_for_relative(
+        &self,
+        absolute_path: &Path,
+        relative: &Path,
+    ) -> Result<HvigorChunkSource, ArkdownError> {
+        match self.kind {
+            HvigorModuleRootKind::SourceModule => Ok(HvigorChunkSource::source_module(
+                self.package_name.clone(),
+                self.module_name.clone(),
+                self.package_version.clone(),
+                HvigorModuleRelativeSourceFile::new(relative).source_file(),
+            )),
+            HvigorModuleRootKind::PackageModule => {
+                let package =
+                    HvigorPackageModuleSource::new(absolute_path, &self.path, &self.package_name)?;
+                Ok(HvigorChunkSource::package_module(
+                    self.package_name.clone(),
+                    self.module_name.clone(),
+                    self.package_version.clone(),
+                    ArtifactPathSerializer::rel_to_slash(relative),
+                    package,
+                ))
+            }
+            HvigorModuleRootKind::LocalDependencyModule => {
+                let package =
+                    HvigorPackageModuleSource::new(absolute_path, &self.path, &self.package_name)?;
+                Ok(HvigorChunkSource::local_dependency_module(
+                    self.package_name.clone(),
+                    self.module_name.clone(),
+                    self.package_version.clone(),
+                    ArtifactPathSerializer::rel_to_slash(relative),
+                    package,
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HvigorModuleRootKind {
+    SourceModule,
+    LocalDependencyModule,
+    PackageModule,
+}
+
+impl HvigorModuleRootKind {
+    fn from_root_path(path: &Path) -> Self {
+        if arkdown_path::classify::is_inside_oh_modules(path) {
+            Self::PackageModule
+        } else {
+            Self::SourceModule
+        }
+    }
+
+    fn is_project_oh_modules_owner(self) -> bool {
+        matches!(self, Self::SourceModule | Self::LocalDependencyModule)
+    }
+}
+
+struct HvigorChunkSource {
+    module_name: String,
+    cache_module_name: String,
+    package_version: String,
+    source_file: String,
+    kind: HvigorChunkSourceKind,
+}
+
+enum HvigorChunkSourceKind {
+    SourceModule,
+    LocalDependencyModule(HvigorPackageModuleSource),
+    PackageModule(HvigorPackageModuleSource),
+}
+
+impl HvigorChunkSource {
+    fn source_module(
+        module_name: String,
+        cache_module_name: String,
+        package_version: String,
+        source_file: String,
+    ) -> Self {
+        Self {
+            cache_module_name,
+            module_name,
+            package_version,
+            source_file,
+            kind: HvigorChunkSourceKind::SourceModule,
+        }
+    }
+
+    fn package_module(
+        module_name: String,
+        cache_module_name: String,
+        package_version: String,
+        source_file: String,
+        package: HvigorPackageModuleSource,
+    ) -> Self {
+        Self {
+            cache_module_name,
+            module_name,
+            package_version,
+            source_file,
+            kind: HvigorChunkSourceKind::PackageModule(package),
+        }
+    }
+
+    fn local_dependency_module(
+        module_name: String,
+        cache_module_name: String,
+        package_version: String,
+        source_file: String,
+        package: HvigorPackageModuleSource,
+    ) -> Self {
+        Self {
+            cache_module_name,
+            module_name,
+            package_version,
+            source_file,
+            kind: HvigorChunkSourceKind::LocalDependencyModule(package),
+        }
+    }
+
+    fn with_chunk_name(self, chunk_name: String) -> ChunkSourceFile {
+        ChunkSourceFile {
+            chunk_name,
+            module_name: self.module_name,
+            source_file: self.source_file,
+        }
+    }
+
+    fn record_name(
+        &self,
+        runtime_packages: &BundleRuntimePackageInfo,
+        _entry_module_name: &str,
+    ) -> Result<String, ArkdownError> {
+        match &self.kind {
+            HvigorChunkSourceKind::SourceModule => {
+                let context = self.runtime_context(runtime_packages)?;
+                let project_file_path = self.source_project_file_path(context);
+                Ok(HvigorNormalizedOhmUrl::new(context, &project_file_path).to_record())
+            }
+            HvigorChunkSourceKind::PackageModule(package) => {
+                package.to_normalized_record(runtime_packages)
+            }
+            HvigorChunkSourceKind::LocalDependencyModule(package) => {
+                package.to_normalized_record(runtime_packages)
+            }
+        }
+    }
+
+    fn to_normalized_request(
+        &self,
+        runtime_packages: &BundleRuntimePackageInfo,
+        _entry_module_name: &str,
+    ) -> Result<String, ArkdownError> {
+        let context = self.runtime_context(runtime_packages)?;
+        let project_file_path = self.source_project_file_path(context);
+        Ok(HvigorNormalizedOhmUrl::new(context, &project_file_path).to_request())
+    }
+
+    fn runtime_context<'a>(
+        &self,
+        runtime_packages: &'a BundleRuntimePackageInfo,
+    ) -> Result<&'a BundleRuntimePackageContext, ArkdownError> {
+        runtime_packages
+            .packages
+            .get(self.module_name.as_str())
+            .ok_or_else(|| {
+                ArkdownError::Bundler(format!(
+                    "pkgContextInfo is missing runtime package context for '{}'",
+                    self.module_name
+                ))
+            })
+    }
+
+    fn source_project_file_path(&self, context: &BundleRuntimePackageContext) -> String {
+        if context.entry_path.is_empty() || context.entry_path.ends_with('/') {
+            let mut path = PathBuf::from(&context.entry_path);
+            path.push(Path::new(&self.source_file));
+            return ArtifactPathSerializer::rel_to_slash(&path);
+        }
+        self.source_file.clone()
+    }
+
+    fn file_info_source_file(&self, entry_module_name: &str) -> String {
+        let source_file = match &self.kind {
+            HvigorChunkSourceKind::SourceModule => {
+                HvigorModuleSourceFileAttribution::project_source_file_for(&self.source_file)
+            }
+            HvigorChunkSourceKind::PackageModule(_) => {
+                HvigorModuleSourceFileAttribution::package_source_file_for(&self.source_file)
+            }
+            HvigorChunkSourceKind::LocalDependencyModule(_) => {
+                HvigorModuleSourceFileAttribution::package_source_file_for(&self.source_file)
+            }
+        };
+        let source_file = ArtifactPathSerializer::rel_to_slash(&source_file);
+        format!(
+            "{}|{}|{}|{}",
+            entry_module_name, self.module_name, self.package_version, source_file
+        )
+    }
+}
+
+struct HvigorPackageModuleSource {
+    package_name: String,
+    project_file_path: String,
+}
+
+impl HvigorPackageModuleSource {
+    fn new(
+        absolute_path: &Path,
+        package_root: &Path,
+        package_name: &str,
+    ) -> Result<Self, ArkdownError> {
+        let project_file_path = absolute_path.strip_prefix(package_root).map_err(|error| {
+            ArkdownError::Bundler(format!(
+                "hvigor package module source is outside package root: {} not under {}: {}",
+                absolute_path.display(),
+                package_root.display(),
+                error
+            ))
+        })?;
+        let project_file_path = ArtifactPathSerializer::rel_to_slash(project_file_path);
+        let package = OhPackage::load_from_root(package_root).ok_or_else(|| {
+            ArkdownError::Bundler(format!(
+                "hvigor package root for {package_name} does not contain package metadata: {}",
+                package_root.display()
+            ))
+        })?;
+        if package.version().is_empty() {
+            return Err(ArkdownError::Bundler(format!(
+                "hvigor package root for {package_name} does not contain package version metadata: {}",
+                package_root.display()
+            )));
+        }
+        Ok(Self {
+            package_name: package_name.to_string(),
+            project_file_path,
+        })
+    }
+
+    fn normalized_project_file_path<'a>(
+        &'a self,
+        _context: &BundleRuntimePackageContext,
+    ) -> Cow<'a, str> {
+        Cow::Borrowed(&self.project_file_path)
+    }
+
+    fn to_normalized_record(
+        &self,
+        runtime_packages: &BundleRuntimePackageInfo,
+    ) -> Result<String, ArkdownError> {
+        let context = self.runtime_context(runtime_packages)?;
+        let project_file_path = self.normalized_project_file_path(context);
+        Ok(HvigorNormalizedOhmUrl::new(context, project_file_path.as_ref()).to_record())
+    }
+
+    fn to_normalized_request(
+        &self,
+        runtime_packages: &BundleRuntimePackageInfo,
+    ) -> Result<String, ArkdownError> {
+        let context = self.runtime_context(runtime_packages)?;
+        let project_file_path = self.normalized_project_file_path(context);
+        Ok(HvigorNormalizedOhmUrl::new(context, project_file_path.as_ref()).to_request())
+    }
+
+    fn runtime_context<'a>(
+        &self,
+        runtime_packages: &'a BundleRuntimePackageInfo,
+    ) -> Result<&'a BundleRuntimePackageContext, ArkdownError> {
+        runtime_packages
+            .packages
+            .get(self.package_name.as_str())
+            .ok_or_else(|| {
+                ArkdownError::Bundler(format!(
+                    "pkgContextInfo is missing runtime package context for '{}'",
+                    self.package_name
+                ))
+            })
+    }
+}
+
+struct HvigorModuleRelativeSourceFile<'a> {
+    relative: &'a Path,
+}
+
+impl<'a> HvigorModuleRelativeSourceFile<'a> {
+    fn new(relative: &'a Path) -> Self {
+        Self { relative }
+    }
+
+    fn source_file(&self) -> String {
+        let source = self
+            .after_src_main()
+            .unwrap_or_else(|| self.relative.to_path_buf());
+        ArtifactPathSerializer::rel_to_slash(&source)
+    }
+
+    fn after_src_main(&self) -> Option<PathBuf> {
+        let components = self.relative.components().collect::<Vec<_>>();
+        let src_main_index = components.windows(2).position(|window| {
+            matches!(window[0], std::path::Component::Normal(component) if component == "src")
+                && matches!(window[1], std::path::Component::Normal(component) if component == "main")
+        })?;
+        let mut path = PathBuf::new();
+        for component in components.into_iter().skip(src_main_index + 2) {
+            path.push(component.as_os_str());
+        }
+        (!path.as_os_str().is_empty()).then_some(path)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModuleGraphFacts {
+    full_module_ids: Vec<String>,
+    full_module_is_commonjs: FxHashMap<String, bool>,
+}
+
+impl ModuleGraphFacts {
+    fn chunk_graph(&self) -> ChunkGraph {
+        ChunkGraph {
+            chunks: IndexVec::new(),
+            full_module_ids: self.full_module_ids.clone(),
+            full_module_is_commonjs: self.full_module_is_commonjs.clone(),
+            module_to_chunk: IndexVec::new(),
+            entry_module_to_entry_chunk: FxHashMap::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        BundleCachePolicy, BundleInput, BundleOutputOptions, BundlePluginSet, LoaderResourceJoin,
+        SourceMapPolicy,
+    };
+
+    fn runtime_packages(
+        contexts: &[(&str, &str, &str, &str, &str, bool)],
+    ) -> BundleRuntimePackageInfo {
+        let mut packages = FxHashMap::default();
+        for (key, package_name, bundle_name, module_name, version, is_so) in contexts {
+            packages.insert(
+                (*key).to_string(),
+                BundleRuntimePackageContext {
+                    package_name: (*package_name).to_string(),
+                    bundle_name: (*bundle_name).to_string(),
+                    module_name: (*module_name).to_string(),
+                    version: (*version).to_string(),
+                    entry_path: if *key == "phone" || *key == "audioplayer" {
+                        "src/main/".to_string()
+                    } else {
+                        "index".to_string()
+                    },
+                    is_so: *is_so,
+                },
+            );
+        }
+        BundleRuntimePackageInfo { packages }
+    }
+
+    fn record_resolved_import(
+        state: &mut HvigorModuleSourceState,
+        importer: &str,
+        specifier: &str,
+        resolved_id: &str,
+    ) {
+        state
+            .resolved_imports
+            .entry(importer.to_string())
+            .or_default()
+            .insert(specifier.to_string(), resolved_id.to_string());
+        if let Some(source_span) = state
+            .sources
+            .get(importer)
+            .and_then(|source| HvigorSourceSpan::for_literal(source.code.as_ref(), specifier))
+        {
+            state
+                .resolved_import_records
+                .entry(importer.to_string())
+                .or_default()
+                .push(HvigorResolvedImportRecord {
+                    specifier: specifier.to_string(),
+                    source_span,
+                });
+        }
+    }
+
+    #[test]
+    fn bytecode_har_imports_follow_hvigor_normalized_alias_rules() {
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "@tencent/qq-open-sdk".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@tencent/qq-open-sdk".to_string(),
+                bundle_name: String::new(),
+                module_name: String::new(),
+                version: "1.0.4".to_string(),
+                entry_path: "Index.d.ets".to_string(),
+                is_so: false,
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+        let package_names = vec!["@tencent/qq-open-sdk".to_string()];
+        let imports = HvigorBytecodeHarImports::new(&runtime_packages, &package_names, true);
+
+        assert_eq!(
+            imports
+                .ohm_url_for_request("@tencent/qq-open-sdk")
+                .unwrap()
+                .as_deref(),
+            Some("@normalized:N&&&@tencent/qq-open-sdk/Index&1.0.4")
+        );
+        assert_eq!(
+            imports
+                .ohm_url_for_request("@tencent/qq-open-sdk/src/main/ets/QQOpenApi")
+                .unwrap()
+                .as_deref(),
+            Some("@normalized:N&&&@tencent/qq-open-sdk/src/main/ets/QQOpenApi&1.0.4")
+        );
+    }
+
+    #[test]
+    fn normalized_native_so_imports_follow_hvigor_pkg_context_info() {
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "liblx.so".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "liblx.so".to_string(),
+                is_so: true,
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+        let imports = HvigorBytecodeHarImports::new(&runtime_packages, &[], true);
+
+        assert_eq!(
+            imports.ohm_url_for_request("liblx.so").unwrap().as_deref(),
+            Some("@normalized:Y&&&liblx.so&")
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_unresolved_native_so_static_import() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("phone");
+        let entry_id = phone_root
+            .join("src/main/ets/entryability/EntryAbility.ets")
+            .to_string_lossy()
+            .into_owned();
+        let module_path_map = HvigorModulePathMap::new("phone", &phone_root, &[]);
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { setHornLxDict } from \"liblx.so\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        record_resolved_import(&mut state, &entry_id, "liblx.so", "liblx.so");
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("debug");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "phone".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "phone".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "liblx.so".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "liblx.so".to_string(),
+                is_so: true,
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir.clone(),
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        assert_eq!(entry_file.imported_record_names, vec!["&liblx.so&"]);
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(output.contains("\"@normalized:Y&&&liblx.so&\""), "{output}");
+        assert!(!output.contains("@app:"), "{output}");
+
+        let stale_file = out_dir.join("stale").join("Old.ts");
+        fs_err::create_dir_all(stale_file.parent().unwrap()).unwrap();
+        fs_err::write(&stale_file, "old").unwrap();
+
+        let mut next_state = HvigorModuleSourceState::default();
+        next_state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { setHornLxDict } from \"liblx.so\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        record_resolved_import(&mut next_state, &entry_id, "liblx.so", "liblx.so");
+
+        let next_files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            next_state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+        let next_entry_file = next_files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source after second write");
+        assert!(!stale_file.exists(), "stale module source must be removed");
+        assert_eq!(
+            std::fs::read_to_string(&next_entry_file.path).unwrap(),
+            output
+        );
+    }
+
+    #[test]
+    fn module_source_ids_include_scanned_graph_and_collected_source_modules() {
+        let entry_id = "/project/entry/src/main/ets/EntryAbility.ets".to_string();
+        let dependency_id = "/project/oh_modules/@scope/pkg/Index.ets".to_string();
+        let collected_id = "/project/oh_modules/@scope/extra/Index.ets".to_string();
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone(), dependency_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            collected_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const value = 1;".to_string().into(),
+            },
+        );
+
+        assert_eq!(
+            Bundler::module_source_ids(&facts, &state),
+            vec![entry_id, dependency_id, collected_id]
+        );
+    }
+
+    #[test]
+    fn module_source_writer_records_bytecode_har_import_records_for_compile_context() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("phone");
+        let entry_id = phone_root
+            .join("src/main/ets/entryability/EntryAbility.ets")
+            .to_string_lossy()
+            .into_owned();
+        let module_path_map = HvigorModulePathMap::new("phone", &phone_root, &[]);
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { IQQOpenApi } from \"@tencent/qq-open-sdk\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert(
+                "@tencent/qq-open-sdk".to_string(),
+                "@tencent/qq-open-sdk".to_string(),
+            );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "phone".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "phone".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "@tencent/qq-open-sdk".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@tencent/qq-open-sdk".to_string(),
+                version: "1.0.4".to_string(),
+                entry_path: "Index".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+        let byte_code_har_packages = vec!["@tencent/qq-open-sdk".to_string()];
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &byte_code_har_packages,
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec!["&@tencent/qq-open-sdk/Index&1.0.4".to_string()]
+        );
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@tencent/qq-open-sdk/Index&1.0.4\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_case_mismatched_bare_package_entry_request() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("phone");
+        let abtest_root =
+            project_root.join("oh_modules/.ohpm/@meituan+abtest@0.0.23/oh_modules/@meituan/abtest");
+        std::fs::create_dir_all(&abtest_root).unwrap();
+        std::fs::write(
+            abtest_root.join("oh-package.json5"),
+            r#"{ name: "@meituan/abtest", version: "0.0.23", main: "Index.ets" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            abtest_root.join("Index.ets"),
+            "export class ABTestService {}",
+        )
+        .unwrap();
+        let entry_id = phone_root
+            .join("src/main/ets/entryability/EntryAbility.ets")
+            .to_string_lossy()
+            .into_owned();
+        let abtest_id = abtest_root.join("Index.ets").to_string_lossy().into_owned();
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@meituan/abtest".to_string(), abtest_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { ABTestService } from \"@meituan/abTest\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            abtest_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class ABTestService {}".to_string().into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert("@meituan/abTest".to_string(), abtest_id.clone());
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone(), abtest_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "phone".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "phone".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "@meituan/abtest".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@meituan/abtest".to_string(),
+                version: "0.0.23".to_string(),
+                entry_path: "Index.ets".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec!["&@meituan/abtest/Index&0.0.23".to_string()]
+        );
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@meituan/abtest/Index&0.0.23\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn chunk_source_files_follow_hvigor_module_path_map() {
+        let app_root = PathBuf::from("/workspace/app");
+        let module_root = app_root.join("products/phone/src/main");
+        let plan = BundlePlan {
+            input: BundleInput {
+                loader_json_path: app_root.join("loader.json"),
+                project_root: app_root.clone(),
+                module_root: module_root.clone(),
+                module_name: "phone".to_string(),
+                module_path_map: vec![
+                    ("phone".to_string(), app_root.join("products/phone")),
+                    (
+                        "audioplayer".to_string(),
+                        app_root.join("commons/audioplayer"),
+                    ),
+                ],
+                module_record_roots: Vec::new(),
+                entries: vec![
+                    "./ets/entryability/EntryAbility.ets".to_string(),
+                    app_root
+                        .join("commons/audioplayer/src/main/ets/service/SpeechPlayerService.ets")
+                        .to_string_lossy()
+                        .into_owned(),
+                    app_root
+                        .join("commons/audioplayer/Index.ets")
+                        .to_string_lossy()
+                        .into_owned(),
+                ],
+                runtime_entry_sources: vec![],
+                support_chunks: false,
+                source_map_packages: crate::plan::BundleSourceMapPackageInfo {
+                    entry_package_name: "phone".to_string(),
+                    entry_package_version: "1.0.0".to_string(),
+                    dependency_package_versions: FxHashMap::default(),
+                },
+                runtime_packages: runtime_packages(&[("phone", "phone", "", "", "", false)]),
+                byte_code_har_packages: Vec::new(),
+            },
+            output: BundleOutputOptions::default(),
+            source_map: SourceMapPolicy::External,
+            cache: BundleCachePolicy::default(),
+            loader_resource: LoaderResourceJoin {
+                loader_json_path: app_root.join("loader.json"),
+                resources_index_path: None,
+                resource_table_path: None,
+            },
+            plugins: BundlePluginSet::default(),
+            build_mode: BuildMode::Debug,
+            target_api_version: 12,
+            bundle_name: "com.example.hmosworld".to_string(),
+            use_normalized_ohm_url: true,
+            should_emit_js: true,
+            output_target: arkdown_core::OutputTarget::Hap,
+            shim_missing_exports_override: None,
+            treeshake_override: None,
+            context_override: None,
+        };
+
+        let input_plan = RolldownInputPlan::from_bundle_plan(&plan);
+        let source_files = input_plan.chunk_source_files().unwrap();
+
+        assert_eq!(
+            source_files
+                .get("entryability/EntryAbility")
+                .unwrap()
+                .source_file,
+            "ets/entryability/EntryAbility.ets"
+        );
+        assert_eq!(
+            source_files
+                .get("entryability/EntryAbility")
+                .unwrap()
+                .module_name,
+            "phone"
+        );
+        assert_eq!(
+            source_files.get("SpeechPlayerService").unwrap().source_file,
+            "ets/service/SpeechPlayerService.ets"
+        );
+        assert_eq!(
+            source_files.get("SpeechPlayerService").unwrap().module_name,
+            "audioplayer"
+        );
+        assert_eq!(source_files.get("Index").unwrap().source_file, "Index.ets");
+        assert_eq!(
+            source_files.get("Index").unwrap().module_name,
+            "audioplayer"
+        );
+    }
+
+    #[test]
+    fn compile_entry_package_roots_do_not_require_loader_module_path_map_entries() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let module_root = project_root.join("phone/src/main");
+        let phone_root = project_root.join("phone");
+        let package_root =
+            project_root.join("oh_modules/.ohpm/mtlauncher@hash=/oh_modules/mtlauncher");
+        fs_err::create_dir_all(&package_root).unwrap();
+        fs_err::write(
+            package_root.join("oh-package.json5"),
+            r#"{
+  "name": "mtlauncher",
+  "version": "12.59.403",
+  "main": "Index.ets"
+}"#,
+        )
+        .unwrap();
+        let package_entry = package_root.join("Index.ets");
+        fs_err::write(&package_entry, "export const launcher = 1;").unwrap();
+        let package_entry_id = package_entry.to_string_lossy().into_owned();
+        let mut runtime_package_info = runtime_packages(&[("phone", "phone", "", "", "", false)]);
+        runtime_package_info.packages.insert(
+            "mtlauncher".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "mtlauncher".to_string(),
+                version: "12.59.403".to_string(),
+                entry_path: "Index.ets".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let plan = BundlePlan {
+            input: BundleInput {
+                loader_json_path: project_root.join("loader.json"),
+                project_root: project_root.to_path_buf(),
+                module_root: module_root.clone(),
+                module_name: "phone".to_string(),
+                module_path_map: vec![("phone".to_string(), phone_root)],
+                module_record_roots: Vec::new(),
+                entries: vec![package_entry_id.clone()],
+                runtime_entry_sources: vec![],
+                support_chunks: false,
+                source_map_packages: crate::plan::BundleSourceMapPackageInfo {
+                    entry_package_name: "phone".to_string(),
+                    entry_package_version: "1.0.0".to_string(),
+                    dependency_package_versions: FxHashMap::default(),
+                },
+                runtime_packages: runtime_package_info,
+                byte_code_har_packages: Vec::new(),
+            },
+            output: BundleOutputOptions::default(),
+            source_map: SourceMapPolicy::External,
+            cache: BundleCachePolicy::default(),
+            loader_resource: LoaderResourceJoin {
+                loader_json_path: project_root.join("loader.json"),
+                resources_index_path: None,
+                resource_table_path: None,
+            },
+            plugins: BundlePluginSet::default(),
+            build_mode: BuildMode::Debug,
+            target_api_version: 12,
+            bundle_name: "com.example.hmosworld".to_string(),
+            use_normalized_ohm_url: true,
+            should_emit_js: true,
+            output_target: arkdown_core::OutputTarget::Hap,
+            shim_missing_exports_override: None,
+            treeshake_override: None,
+            context_override: None,
+        };
+
+        let input_plan = RolldownInputPlan::from_bundle_plan(&plan);
+        let source_files = input_plan.chunk_source_files().unwrap();
+        assert_eq!(source_files.get("Index").unwrap().module_name, "mtlauncher");
+        assert_eq!(source_files.get("Index").unwrap().source_file, "Index.ets");
+
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            package_entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const launcher = 1;".to_string().into(),
+            },
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![package_entry_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &input_plan.module_path_map,
+            &plan.input.runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            project_root.join("cache"),
+        )
+        .write()
+        .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].record_name, "&mtlauncher/Index&12.59.403");
+        assert_eq!(files[0].source_file, "phone|mtlauncher|12.59.403|Index.ts");
+    }
+
+    #[test]
+    fn module_record_roots_attribute_dependency_sources_without_loader_module_path_map_entries() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("phone");
+        let log_root =
+            project_root.join("oh_modules/.ohpm/@meituan+log@hash=/oh_modules/@meituan/log");
+        fs_err::create_dir_all(&log_root).unwrap();
+        fs_err::write(
+            log_root.join("oh-package.json5"),
+            r#"{
+  "name": "@meituan/log",
+  "version": "0.0.18",
+  "main": "Index.ets"
+}"#,
+        )
+        .unwrap();
+        let log_entry = log_root.join("Index.ets");
+        fs_err::write(&log_entry, "export const log = 1;").unwrap();
+        let log_entry_id = log_entry.to_string_lossy().into_owned();
+        let mut module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("phone".to_string(), phone_root.clone())],
+        );
+        module_path_map.add_module_record_roots(&[("@meituan/log".to_string(), log_root.clone())]);
+
+        let ownership = module_path_map
+            .source_file_for_entry(&log_entry_id)
+            .expect("dependency source ownership");
+        assert_eq!(ownership.module_name, "@meituan/log");
+        assert_eq!(ownership.source_file, "Index.ets");
+
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            log_entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const log = 1;".to_string().into(),
+            },
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![log_entry_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let mut runtime_packages = runtime_packages(&[("phone", "phone", "", "", "", false)]);
+        runtime_packages.packages.insert(
+            "@meituan/log".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@meituan/log".to_string(),
+                version: "0.0.18".to_string(),
+                entry_path: "Index.ets".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            project_root.join("cache"),
+        )
+        .write()
+        .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].record_name, "&@meituan/log/Index&0.0.18");
+        assert_eq!(files[0].source_file, "phone|@meituan/log|0.0.18|Index.ts");
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_source_har_imports_with_pkg_context_module_name() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("phone");
+        let audioplayer_root = project_root.join("commons/audioplayer");
+        let entry_id = phone_root
+            .join("src/main/ets/entryability/EntryAbility.ets")
+            .to_string_lossy()
+            .into_owned();
+        let speech_id = audioplayer_root
+            .join("src/main/ets/service/SpeechPlayerService.ets")
+            .to_string_lossy()
+            .into_owned();
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("audioplayer".to_string(), audioplayer_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { SpeechPlayerService } from \"../SpeechPlayerService\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            speech_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class SpeechPlayerService {}".to_string().into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert("../SpeechPlayerService".to_string(), speech_id.clone());
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone(), speech_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages = runtime_packages(&[
+            ("phone", "phone", "", "", "", false),
+            ("audioplayer", "audioplayer", "", "", "1.0.0", false),
+        ]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        assert_eq!(files.len(), 2);
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        let speech_file = files
+            .iter()
+            .find(|file| file.module_id == speech_id)
+            .expect("dependency module source");
+        assert_eq!(
+            entry_file.record_name,
+            "&phone/src/main/ets/entryability/EntryAbility&"
+        );
+        assert_eq!(
+            entry_file.source_file,
+            "phone|phone|1.0.0|src/main/ets/entryability/EntryAbility.ts"
+        );
+        assert_eq!(
+            entry_file.path,
+            app_root
+                .path()
+                .join("cache")
+                .join("default@CompileArkTS")
+                .join("esmodule")
+                .join("release")
+                .join("phone")
+                .join("src")
+                .join("main")
+                .join("ets")
+                .join("entryability")
+                .join("EntryAbility.ts")
+        );
+        assert_eq!(entry_file.package_name.as_deref(), Some("phone"));
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec!["&audioplayer/src/main/ets/service/SpeechPlayerService&1.0.0".to_string()]
+        );
+        assert_eq!(
+            speech_file.record_name,
+            "&audioplayer/src/main/ets/service/SpeechPlayerService&1.0.0"
+        );
+        assert_eq!(
+            speech_file.source_file,
+            "phone|audioplayer|1.0.0|src/main/ets/service/SpeechPlayerService.ts"
+        );
+        assert_eq!(speech_file.package_name.as_deref(), Some("audioplayer"));
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            output.contains(
+                "\"@normalized:N&&&audioplayer/src/main/ets/service/SpeechPlayerService&1.0.0\""
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_static_re_exports_from_rolldown_graph() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let mrn_root = project_root.join("oh_modules/.ohpm/@mrn+mrn@12.59.403/oh_modules/@mrn/mrn");
+        let index_id = mrn_root.join("Index.ets").to_string_lossy().into_owned();
+        let config_id = mrn_root
+            .join("src/main/ets/config/MRNConfigCenter.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&mrn_root).unwrap();
+        std::fs::write(
+            mrn_root.join("oh-package.json5"),
+            r#"{
+                "name": "@mrn/mrn",
+                "version": "12.59.403",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(mrn_root.join("Index.ets"), "export {};").unwrap();
+        std::fs::create_dir_all(mrn_root.join("src/main/ets/config")).unwrap();
+        std::fs::write(
+            mrn_root.join("src/main/ets/config/MRNConfigCenter.ets"),
+            "export class MRNConfigCenter {}",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@mrn/mrn".to_string(), mrn_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export { MRNConfigCenter } from \"./src/main/ets/config/MRNConfigCenter\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            config_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class MRNConfigCenter {}".to_string().into(),
+            },
+        );
+        record_resolved_import(
+            &mut state,
+            &index_id,
+            "./src/main/ets/config/MRNConfigCenter",
+            &config_id,
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![index_id.clone(), config_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut runtime_packages =
+            runtime_packages(&[("@mrn/mrn", "@mrn/mrn", "", "", "12.59.403", false)]);
+        runtime_packages
+            .packages
+            .get_mut("@mrn/mrn")
+            .expect("mrn package context")
+            .entry_path = "Index.ets".to_string();
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let index_file = files
+            .iter()
+            .find(|file| file.module_id == index_id)
+            .expect("package index source");
+        assert_eq!(index_file.record_name, "&@mrn/mrn/Index&12.59.403");
+        assert_eq!(
+            index_file.imported_record_names,
+            vec!["&@mrn/mrn/src/main/ets/config/MRNConfigCenter&12.59.403".to_string()]
+        );
+        let output = std::fs::read_to_string(&index_file.path).unwrap();
+        assert!(
+            output.contains(
+                "\"@normalized:N&&&@mrn/mrn/src/main/ets/config/MRNConfigCenter&12.59.403\""
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_relative_package_imports_from_resolved_module_ids() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let launcher_root =
+            project_root.join("oh_modules/.ohpm/mtlauncher@12.59.403/oh_modules/mtlauncher");
+        let index_id = launcher_root
+            .join("Index.ets")
+            .to_string_lossy()
+            .into_owned();
+        let build_profile_id = launcher_root
+            .join("BuildProfile.ets")
+            .to_string_lossy()
+            .into_owned();
+        let resolved_build_profile_id = launcher_root
+            .join(".")
+            .join("BuildProfile.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&launcher_root).unwrap();
+        std::fs::write(
+            launcher_root.join("oh-package.json5"),
+            r#"{
+                "name": "mtlauncher",
+                "version": "12.59.403",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(launcher_root.join("Index.ets"), "export {};").unwrap();
+        std::fs::write(
+            launcher_root.join("BuildProfile.ets"),
+            "export default class BuildProfile {}",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("mtlauncher".to_string(), launcher_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import BuildProfile from \"./BuildProfile\"; export { BuildProfile };"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            build_profile_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export default class BuildProfile {}".to_string().into(),
+            },
+        );
+        record_resolved_import(
+            &mut state,
+            &index_id,
+            "./BuildProfile",
+            &resolved_build_profile_id,
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![index_id.clone(), build_profile_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut runtime_packages =
+            runtime_packages(&[("mtlauncher", "mtlauncher", "", "", "12.59.403", false)]);
+        runtime_packages
+            .packages
+            .get_mut("mtlauncher")
+            .expect("mtlauncher package context")
+            .entry_path = "Index.ets".to_string();
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let index_file = files
+            .iter()
+            .find(|file| file.module_id == index_id)
+            .expect("launcher index source");
+        assert_eq!(index_file.record_name, "&mtlauncher/Index&12.59.403");
+        assert_eq!(
+            index_file.imported_record_names,
+            vec!["&mtlauncher/BuildProfile&12.59.403".to_string()]
+        );
+        let output = std::fs::read_to_string(&index_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&mtlauncher/BuildProfile&12.59.403\""),
+            "{output}"
+        );
+        assert!(!output.contains("\"./BuildProfile\""), "{output}");
+    }
+
+    #[test]
+    fn module_source_writer_preserves_duplicate_specifiers_in_resolved_id_map() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let package_root =
+            project_root.join("oh_modules/.ohpm/mtlauncher@12.59.403/oh_modules/mtlauncher");
+        let index_id = package_root
+            .join("Index.ets")
+            .to_string_lossy()
+            .into_owned();
+        let constant_id = package_root
+            .join("constant/index.ets")
+            .to_string_lossy()
+            .into_owned();
+        let reporter_id = package_root
+            .join("reporter/ApiCallReporter.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(package_root.join("constant")).unwrap();
+        std::fs::create_dir_all(package_root.join("reporter")).unwrap();
+        std::fs::write(
+            package_root.join("oh-package.json5"),
+            r#"{
+                "name": "mtlauncher",
+                "version": "12.59.403",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(package_root.join("Index.ets"), "export {};").unwrap();
+        std::fs::write(
+            package_root.join("constant/index.ets"),
+            "export const ASYNC_OR_SYNC_MODE = 1; export const INNER_SCOPE = 2;",
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("reporter/ApiCallReporter.ets"),
+            "export const KEY_SCOPE = 'scope';",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("mtlauncher".to_string(), package_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: r#"import { ASYNC_OR_SYNC_MODE } from "./constant";
+import { INNER_SCOPE } from "./constant/index";
+import { KEY_SCOPE } from "./reporter/ApiCallReporter";
+export { ASYNC_OR_SYNC_MODE, INNER_SCOPE, KEY_SCOPE };"#
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            constant_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const ASYNC_OR_SYNC_MODE = 1; export const INNER_SCOPE = 2;"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            reporter_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const KEY_SCOPE = 'scope';".to_string().into(),
+            },
+        );
+        record_resolved_import(&mut state, &index_id, "./constant", &constant_id);
+        record_resolved_import(&mut state, &index_id, "./constant/index", &constant_id);
+        record_resolved_import(
+            &mut state,
+            &index_id,
+            "./reporter/ApiCallReporter",
+            &reporter_id,
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![index_id.clone(), constant_id.clone(), reporter_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut runtime_packages =
+            runtime_packages(&[("mtlauncher", "mtlauncher", "", "", "12.59.403", false)]);
+        runtime_packages
+            .packages
+            .get_mut("mtlauncher")
+            .expect("mtlauncher package context")
+            .entry_path = "Index.ets".to_string();
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let index_file = files
+            .iter()
+            .find(|file| file.module_id == index_id)
+            .expect("launcher index source");
+        assert_eq!(
+            index_file.imported_record_names,
+            vec![
+                "&mtlauncher/constant/index&12.59.403".to_string(),
+                "&mtlauncher/reporter/ApiCallReporter&12.59.403".to_string(),
+            ]
+        );
+        let output = std::fs::read_to_string(&index_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&mtlauncher/constant/index&12.59.403\""),
+            "{output}"
+        );
+        assert!(
+            output.contains("\"@normalized:N&&&mtlauncher/reporter/ApiCallReporter&12.59.403\""),
+            "{output}"
+        );
+        assert!(!output.contains("\"./constant\""), "{output}");
+        assert!(
+            !output.contains("\"./reporter/ApiCallReporter\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_preserves_arkts_syntax_when_rewriting_requests() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let lx_root =
+            project_root.join("oh_modules/.ohpm/@meituan+lx@4.119.1/oh_modules/@meituan/lx");
+        let manager_id = lx_root
+            .join("src/main/ets/channel/ChannelManager.ets")
+            .to_string_lossy()
+            .into_owned();
+        let utils_id = lx_root
+            .join("src/main/ets/utils/Utils.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(lx_root.join("src/main/ets/channel")).unwrap();
+        std::fs::create_dir_all(lx_root.join("src/main/ets/utils")).unwrap();
+        std::fs::write(
+            lx_root.join("oh-package.json5"),
+            r#"{
+                "name": "@meituan/lx",
+                "version": "4.119.1",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        let manager_code = [
+            "import type { PageInfo } from '../pageinfo/PageInfo';",
+            "import { isEmptyString } from '../utils/Utils';",
+            "export default class ChannelManager {",
+            "  private defaultChannelName: string;",
+            "  private static instance: ChannelManager;",
+            "  constructor(defaultChannelName: string) {",
+            "    this.defaultChannelName = isEmptyString(defaultChannelName) ? '' : defaultChannelName;",
+            "  }",
+            "}",
+        ]
+        .join("\n");
+        let utils_code =
+            "export function isEmptyString(value?: string): boolean { return !value; }".to_string();
+        std::fs::write(&manager_id, &manager_code).unwrap();
+        std::fs::write(&utils_id, &utils_code).unwrap();
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@meituan/lx".to_string(), lx_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            manager_id.clone(),
+            HvigorCollectedModuleSource {
+                code: manager_code.into(),
+            },
+        );
+        state.sources.insert(
+            utils_id.clone(),
+            HvigorCollectedModuleSource {
+                code: utils_code.into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(manager_id.clone())
+            .or_default()
+            .insert("../utils/Utils".to_string(), utils_id.clone());
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![manager_id.clone(), utils_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages =
+            runtime_packages(&[("@meituan/lx", "@meituan/lx", "", "", "4.119.1", false)]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let manager_file = files
+            .iter()
+            .find(|file| file.module_id == manager_id)
+            .expect("manager module source");
+        let output = std::fs::read_to_string(&manager_file.path).unwrap();
+        assert!(
+            output.contains("import type { PageInfo } from '../pageinfo/PageInfo';"),
+            "{output}"
+        );
+        assert!(
+            output.contains("\"@normalized:N&&&@meituan/lx/src/main/ets/utils/Utils&4.119.1\""),
+            "{output}"
+        );
+        assert!(
+            output.contains("private defaultChannelName: string;"),
+            "{output}"
+        );
+        assert!(
+            output.contains("private static instance: ChannelManager;"),
+            "{output}"
+        );
+        assert!(
+            output.contains("constructor(defaultChannelName: string)"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_lowercase_index_request_to_pascal_index_record() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let mrn_root = project_root.join("oh_modules/.ohpm/@mrn+mrn@12.59.403/oh_modules/@mrn/mrn");
+        let manager_id = mrn_root
+            .join("src/main/ets/engine/MRNInstanceManager.ets")
+            .to_string_lossy()
+            .into_owned();
+        let route_index_id = mrn_root
+            .join("src/main/ets/route/Index.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(mrn_root.join("src/main/ets/engine")).unwrap();
+        std::fs::create_dir_all(mrn_root.join("src/main/ets/route")).unwrap();
+        std::fs::write(
+            mrn_root.join("oh-package.json5"),
+            r#"{
+                "name": "@mrn/mrn",
+                "version": "12.59.403",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            mrn_root.join("src/main/ets/engine/MRNInstanceManager.ets"),
+            "import { getMRNRouteURL } from \"../route/index\";",
+        )
+        .unwrap();
+        std::fs::write(
+            mrn_root.join("src/main/ets/route/Index.ets"),
+            "export function getMRNRouteURL() { return \"imeituan://www.meituan.com/mrn\"; }",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@mrn/mrn".to_string(), mrn_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            manager_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { getMRNRouteURL } from \"../route/index\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            route_index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export function getMRNRouteURL() { return \"imeituan://www.meituan.com/mrn\"; }"
+                    .to_string().into(),
+            },
+        );
+        record_resolved_import(&mut state, &manager_id, "../route/index", &route_index_id);
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![manager_id.clone(), route_index_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages =
+            runtime_packages(&[("@mrn/mrn", "@mrn/mrn", "", "", "12.59.403", false)]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let manager_file = files
+            .iter()
+            .find(|file| file.module_id == manager_id)
+            .expect("manager module source");
+        assert_eq!(
+            manager_file.imported_record_names,
+            vec!["&@mrn/mrn/src/main/ets/route/Index&12.59.403".to_string()]
+        );
+        let output = std::fs::read_to_string(&manager_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@mrn/mrn/src/main/ets/route/Index&12.59.403\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_mixed_case_request_to_uppercase_record() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let lx_root =
+            project_root.join("oh_modules/.ohpm/@meituan+lx@4.119.1/oh_modules/@meituan/lx");
+        let inner_id = lx_root
+            .join("src/main/ets/event/inner/InnerDataManager.ets")
+            .to_string_lossy()
+            .into_owned();
+        let lx_id = lx_root
+            .join("src/main/ets/LX.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(lx_root.join("src/main/ets/event/inner")).unwrap();
+        std::fs::create_dir_all(lx_root.join("src/main/ets")).unwrap();
+        std::fs::write(
+            lx_root.join("oh-package.json5"),
+            r#"{
+                "name": "@meituan/lx",
+                "version": "4.119.1",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            lx_root.join("src/main/ets/event/inner/InnerDataManager.ets"),
+            "import { isInitialized } from \"../../Lx\";",
+        )
+        .unwrap();
+        std::fs::write(
+            lx_root.join("src/main/ets/LX.ets"),
+            "export const isInitialized = true;",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@meituan/lx".to_string(), lx_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            inner_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { isInitialized } from \"../../Lx\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            lx_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const isInitialized = true;".to_string().into(),
+            },
+        );
+        record_resolved_import(&mut state, &inner_id, "../../Lx", &lx_id);
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![inner_id.clone(), lx_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages =
+            runtime_packages(&[("@meituan/lx", "@meituan/lx", "", "", "4.119.1", false)]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let inner_file = files
+            .iter()
+            .find(|file| file.module_id == inner_id)
+            .expect("inner module source");
+        assert_eq!(
+            inner_file.imported_record_names,
+            vec!["&@meituan/lx/src/main/ets/LX&4.119.1".to_string()]
+        );
+        let output = std::fs::read_to_string(&inner_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@meituan/lx/src/main/ets/LX&4.119.1\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_case_mismatched_relative_file_request() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let network_root =
+            project_root.join("oh_modules/.ohpm/@waimai+network@1.0.32/oh_modules/@waimai/network");
+        let index_id = network_root
+            .join("src/main/ets/network/index.ets")
+            .to_string_lossy()
+            .into_owned();
+        let init_id = network_root
+            .join("src/main/ets/network/NetworkInit.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(network_root.join("src/main/ets/network")).unwrap();
+        std::fs::write(
+            network_root.join("oh-package.json5"),
+            r#"{
+                "name": "@waimai/network",
+                "version": "1.0.32",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            network_root.join("src/main/ets/network/index.ets"),
+            "export { NetWorkInit } from \"./NetWorkInit\";",
+        )
+        .unwrap();
+        std::fs::write(
+            network_root.join("src/main/ets/network/NetworkInit.ets"),
+            "export class NetWorkInit {}",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@waimai/network".to_string(), network_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export { NetWorkInit } from \"./NetWorkInit\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            init_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class NetWorkInit {}".to_string().into(),
+            },
+        );
+        record_resolved_import(&mut state, &index_id, "./NetWorkInit", &init_id);
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![index_id.clone(), init_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages = runtime_packages(&[(
+            "@waimai/network",
+            "@waimai/network",
+            "",
+            "",
+            "1.0.32",
+            false,
+        )]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let index_file = files
+            .iter()
+            .find(|file| file.module_id == index_id)
+            .expect("network index module source");
+        assert_eq!(
+            index_file.imported_record_names,
+            vec!["&@waimai/network/src/main/ets/network/NetworkInit&1.0.32".to_string()]
+        );
+        let output = std::fs::read_to_string(&index_file.path).unwrap();
+        assert!(
+            output.contains(
+                "\"@normalized:N&&&@waimai/network/src/main/ets/network/NetworkInit&1.0.32\""
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_preserves_standard_source_root_index_record() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let msi_root = project_root.join("oh_modules/.ohpm/@msi+msi@12.59.400/oh_modules/@msi/msi");
+        let package_index_id = msi_root.join("Index.ets").to_string_lossy().into_owned();
+        let source_root_index_id = msi_root
+            .join("src/main/ets/index.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(msi_root.join("src/main/ets")).unwrap();
+        std::fs::write(
+            msi_root.join("oh-package.json5"),
+            r#"{
+                "name": "@msi/msi",
+                "version": "12.59.400",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            msi_root.join("Index.ets"),
+            "export * from \"./src/main/ets/index\";",
+        )
+        .unwrap();
+        std::fs::write(
+            msi_root.join("src/main/ets/index.ets"),
+            "export class MSI {}",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@msi/msi".to_string(), msi_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            package_index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export * from \"./src/main/ets/index\";".to_string().into(),
+            },
+        );
+        state.sources.insert(
+            source_root_index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class MSI {}".to_string().into(),
+            },
+        );
+        record_resolved_import(
+            &mut state,
+            &package_index_id,
+            "./src/main/ets/index",
+            &source_root_index_id,
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![package_index_id.clone(), source_root_index_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages =
+            runtime_packages(&[("@msi/msi", "@msi/msi", "", "", "12.59.400", false)]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let source_root_index_file = files
+            .iter()
+            .find(|file| file.module_id == source_root_index_id)
+            .expect("source root index module source");
+        assert_eq!(
+            source_root_index_file.record_name,
+            "&@msi/msi/src/main/ets/index&12.59.400"
+        );
+        let package_index_file = files
+            .iter()
+            .find(|file| file.module_id == package_index_id)
+            .expect("package index module source");
+        assert_eq!(
+            package_index_file.imported_record_names,
+            vec!["&@msi/msi/src/main/ets/index&12.59.400".to_string()]
+        );
+        let output = std::fs::read_to_string(&package_index_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@msi/msi/src/main/ets/index&12.59.400\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_preserves_package_source_index_subpath_record() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let privacy_root = project_root
+            .join("oh_modules/.ohpm/@meituan+privacy@0.3.20/oh_modules/@meituan/privacy");
+        let privacy_impl_root = project_root
+            .join("oh_modules/.ohpm/@meituan+privacy_impl@1.0.0/oh_modules/@meituan/privacy_impl");
+        let importer_id = privacy_impl_root
+            .join("src/main/ets/monitor/BabelMonitor.ets")
+            .to_string_lossy()
+            .into_owned();
+        let def_index_id = privacy_root
+            .join("src/main/ets/def/index.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(privacy_root.join("src/main/ets/def")).unwrap();
+        std::fs::create_dir_all(privacy_impl_root.join("src/main/ets/monitor")).unwrap();
+        std::fs::write(
+            privacy_root.join("oh-package.json5"),
+            r#"{
+                "name": "@meituan/privacy",
+                "version": "0.3.20",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            privacy_impl_root.join("oh-package.json5"),
+            r#"{
+                "name": "@meituan/privacy_impl",
+                "version": "1.0.0",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            privacy_impl_root.join("src/main/ets/monitor/BabelMonitor.ets"),
+            "import { DefFilterResult } from \"@meituan/privacy/src/main/ets/def\";",
+        )
+        .unwrap();
+        std::fs::write(
+            privacy_root.join("src/main/ets/def/index.ets"),
+            "export class DefFilterResult {}",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[
+                ("@meituan/privacy".to_string(), privacy_root.clone()),
+                (
+                    "@meituan/privacy_impl".to_string(),
+                    privacy_impl_root.clone(),
+                ),
+            ],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            importer_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { DefFilterResult } from \"@meituan/privacy/src/main/ets/def\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            def_index_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class DefFilterResult {}".to_string().into(),
+            },
+        );
+        record_resolved_import(
+            &mut state,
+            &importer_id,
+            "@meituan/privacy/src/main/ets/def",
+            &def_index_id,
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![importer_id.clone(), def_index_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages = runtime_packages(&[
+            (
+                "@meituan/privacy",
+                "@meituan/privacy",
+                "",
+                "",
+                "0.3.20",
+                false,
+            ),
+            (
+                "@meituan/privacy_impl",
+                "@meituan/privacy_impl",
+                "",
+                "",
+                "1.0.0",
+                false,
+            ),
+        ]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let def_index_file = files
+            .iter()
+            .find(|file| file.module_id == def_index_id)
+            .expect("privacy def index module source");
+        assert_eq!(
+            def_index_file.record_name,
+            "&@meituan/privacy/src/main/ets/def/index&0.3.20"
+        );
+        let importer_file = files
+            .iter()
+            .find(|file| file.module_id == importer_id)
+            .expect("privacy impl importer module source");
+        assert_eq!(
+            importer_file.imported_record_names,
+            vec!["&@meituan/privacy/src/main/ets/def/index&0.3.20".to_string()]
+        );
+        let output = std::fs::read_to_string(&importer_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@meituan/privacy/src/main/ets/def/index&0.3.20\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_uses_local_dependency_module_name_for_cache_path() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let runtime_root = project_root.join("repo/repos/_msi_runtime/msi_runtime");
+        let runtime_api_id = runtime_root
+            .join("src/main/ets/ApiPortal.ts")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(runtime_root.join("src/main/ets")).unwrap();
+        std::fs::write(
+            runtime_root.join("oh-package.json5"),
+            r#"{
+                "name": "@msi/runtime",
+                "version": "12.59.400",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            runtime_root.join("src/main/ets/ApiPortal.ts"),
+            "export class ApiPortal {}",
+        )
+        .unwrap();
+
+        let mut module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[
+                ("phone".to_string(), phone_root.clone()),
+                ("msi_runtime".to_string(), runtime_root.clone()),
+            ],
+        );
+        module_path_map
+            .add_module_record_roots(&[("@msi/runtime".to_string(), runtime_root.clone())]);
+
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            runtime_api_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class ApiPortal {}".to_string().into(),
+            },
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![runtime_api_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("debug");
+        let mut runtime_packages = runtime_packages(&[("phone", "phone", "", "", "", false)]);
+        runtime_packages.packages.insert(
+            "@msi/runtime".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@msi/runtime".to_string(),
+                version: "12.59.400".to_string(),
+                entry_path: "Index.ets".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir.clone(),
+        )
+        .write()
+        .unwrap();
+
+        let api_file = files
+            .iter()
+            .find(|file| file.module_id == runtime_api_id)
+            .expect("local dependency source");
+        assert_eq!(
+            api_file.record_name,
+            "&@msi/runtime/src/main/ets/ApiPortal&12.59.400"
+        );
+        assert_eq!(
+            api_file.path,
+            out_dir.join("msi_runtime/src/main/ets/ApiPortal.ts")
+        );
+        assert_eq!(
+            api_file.source_file,
+            "phone|@msi/runtime|12.59.400|src/main/ets/ApiPortal.ts"
+        );
+        assert_eq!(api_file.package_name.as_deref(), Some("@msi/runtime"));
+    }
+
+    #[test]
+    fn module_source_writer_uses_actual_package_file_path_for_package_root_record() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let imageknife_root = project_root
+            .join("oh_modules/.ohpm/@meituan+imageknife@5.0.8/oh_modules/@meituan/imageknife");
+        let entry_id = phone_root
+            .join("src/main/ets/abilitystage/EntryAbilityStage.ets")
+            .to_string_lossy()
+            .into_owned();
+        let imageknife_id = imageknife_root
+            .join("index.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&imageknife_root).unwrap();
+        std::fs::write(
+            imageknife_root.join("oh-package.json5"),
+            r#"{
+                "name": "@meituan/imageknife",
+                "version": "5.0.8",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            imageknife_root.join("index.ets"),
+            "export class ImageKnife {}",
+        )
+        .unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@meituan/imageknife".to_string(), imageknife_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { ImageKnife } from \"@meituan/imageknife\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            imageknife_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class ImageKnife {}".to_string().into(),
+            },
+        );
+        record_resolved_import(&mut state, &entry_id, "@meituan/imageknife", &imageknife_id);
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone(), imageknife_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "phone".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "phone".to_string(),
+                entry_path: "src/main/".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "@meituan/imageknife".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@meituan/imageknife".to_string(),
+                version: "5.0.8".to_string(),
+                entry_path: "Index.ets".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let imageknife_file = files
+            .iter()
+            .find(|file| file.module_id == imageknife_id)
+            .expect("imageknife package entry module source");
+        assert_eq!(
+            imageknife_file.record_name,
+            "&@meituan/imageknife/index&5.0.8"
+        );
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec!["&@meituan/imageknife/index&5.0.8".to_string()]
+        );
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@meituan/imageknife/index&5.0.8\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_bare_package_imports_from_rolldown_graph() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let log_root =
+            project_root.join("oh_modules/.ohpm/@meituan+log@0.0.18/oh_modules/@meituan/log");
+        let entry_id = phone_root
+            .join("src/main/ets/abilitystage/EntryAbilityStage.ets")
+            .to_string_lossy()
+            .into_owned();
+        let log_id = log_root.join("Index.ets").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&log_root).unwrap();
+        std::fs::write(
+            log_root.join("oh-package.json5"),
+            r#"{
+                "name": "@meituan/log",
+                "version": "0.0.18",
+                "main": "Index.ets"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(log_root.join("Index.ets"), "export class MLog {}").unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("@meituan/log".to_string(), log_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { MLog } from \"@meituan/log\";".to_string().into(),
+            },
+        );
+        state.sources.insert(
+            log_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class MLog {}".to_string().into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert("@meituan/log".to_string(), log_id.clone());
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone(), log_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "phone".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "phone".to_string(),
+                entry_path: "src/main/".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "@meituan/log".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@meituan/log".to_string(),
+                version: "0.0.18".to_string(),
+                entry_path: "Index.ets".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec!["&@meituan/log/Index&0.0.18".to_string()]
+        );
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@meituan/log/Index&0.0.18\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_uses_actual_entry_file_when_pkg_context_entry_path_is_empty() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let pako_root = project_root.join("oh_modules/.ohpm/pako@2.1.0/oh_modules/pako");
+        let entry_id = phone_root
+            .join("src/main/ets/entryability/EntryAbility.ets")
+            .to_string_lossy()
+            .into_owned();
+        let pako_id = pako_root
+            .join("dist/pako.esm.mjs")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(pako_root.join("dist")).unwrap();
+        std::fs::write(
+            pako_root.join("oh-package.json5"),
+            r#"{
+                "name": "pako",
+                "version": "2.1.0",
+                "module": "./dist/pako.esm.mjs",
+                "exports": {
+                    ".": {
+                        "import": "./dist/pako.esm.mjs"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(pako_root.join("dist/pako.esm.mjs"), "export const zip = 1;").unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[("pako".to_string(), pako_root.clone())],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { zip } from \"pako\";".to_string().into(),
+            },
+        );
+        state.sources.insert(
+            pako_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const zip = 1;".to_string().into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert("pako".to_string(), pako_id.clone());
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone(), pako_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "phone".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "phone".to_string(),
+                entry_path: "src/main/".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "pako".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "pako".to_string(),
+                version: "2.1.0".to_string(),
+                entry_path: String::new(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        let pako_file = files
+            .iter()
+            .find(|file| file.module_id == pako_id)
+            .expect("pako module source");
+        assert_eq!(pako_file.record_name, "&pako/dist/pako.esm&2.1.0");
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec!["&pako/dist/pako.esm&2.1.0".to_string()]
+        );
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&pako/dist/pako.esm&2.1.0\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_writer_matches_index_source_for_empty_main_package_root_record() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let subscribe_root = project_root.join(
+            "oh_modules/.ohpm/@meituan+card_subscribe@1.0.32/oh_modules/@meituan/card_subscribe",
+        );
+        let entry_id = phone_root
+            .join("src/main/ets/form/FormAbility.ets")
+            .to_string_lossy()
+            .into_owned();
+        let subscribe_id = subscribe_root
+            .join("index.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&subscribe_root).unwrap();
+        std::fs::write(
+            subscribe_root.join("oh-package.json5"),
+            r#"{
+                "name": "@meituan/card_subscribe",
+                "version": "1.0.32",
+                "main": "",
+                "metadata": {
+                    "sourceRoots": ["./src/main"],
+                    "useNormalizedOHMUrl": true
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(subscribe_root.join("index.ets"), "export const status = 1;").unwrap();
+
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[(
+                "@meituan/card_subscribe".to_string(),
+                subscribe_root.clone(),
+            )],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "import { status } from \"@meituan/card_subscribe\";"
+                    .to_string()
+                    .into(),
+            },
+        );
+        state.sources.insert(
+            subscribe_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const status = 1;".to_string().into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert("@meituan/card_subscribe".to_string(), subscribe_id.clone());
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![entry_id.clone(), subscribe_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "phone".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "phone".to_string(),
+                entry_path: "src/main/".to_string(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        packages.insert(
+            "@meituan/card_subscribe".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "@meituan/card_subscribe".to_string(),
+                version: "1.0.32".to_string(),
+                entry_path: String::new(),
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        let subscribe_file = files
+            .iter()
+            .find(|file| file.module_id == subscribe_id)
+            .expect("subscribe package source");
+        assert_eq!(
+            subscribe_file.record_name,
+            "&@meituan/card_subscribe/index&1.0.32"
+        );
+        assert_eq!(
+            entry_file.imported_record_names,
+            vec!["&@meituan/card_subscribe/index&1.0.32".to_string()]
+        );
+        let output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            output.contains("\"@normalized:N&&&@meituan/card_subscribe/index&1.0.32\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn module_source_state_consumes_rolldown_compact_scan_facts() {
+        let importer = "/workspace/oh_modules/@meituan/passport/RSAEncryptionUtils.ets";
+        let resolved = "/workspace/oh_modules/@ohos/hypium/index.js";
+        let cjs_module = "/workspace/oh_modules/@sgfe/flashbuy_price_harmony/build/index.cjs.js";
+        let mut source_maps = FxHashMap::default();
+        source_maps.insert(importer.to_string(), Arc::from("{\"version\":3}"));
+        let state = HvigorModuleSourceState::from_rolldown_scan(
+            rolldown::ModuleSourceScanOutput {
+                warnings: Vec::new(),
+                modules: vec![
+                    rolldown::ModuleSourceScanModule {
+                        id: importer.into(),
+                        source: r#"import { HostType } from "@sgfe/flashbuy_price_harmony";
+import hypium from "@ohos/hypium";
+const dynamicHar = import("bytecode-har-dep");"#
+                            .into(),
+                        module_type: rolldown_common::ModuleType::Ts,
+                        exports_kind: rolldown_common::ExportsKind::Esm,
+                        imports: vec![
+                            rolldown::ModuleSourceScanImport {
+                                module_request: "@sgfe/flashbuy_price_harmony".to_string(),
+                                resolved_id: Some(cjs_module.into()),
+                                kind: rolldown_common::ImportKind::Import,
+                                importer_span: rolldown::ModuleSourceScanSpan { start: 0, end: 62 },
+                            },
+                            rolldown::ModuleSourceScanImport {
+                                module_request: "@ohos/hypium".to_string(),
+                                resolved_id: Some(resolved.into()),
+                                kind: rolldown_common::ImportKind::Import,
+                                importer_span: rolldown::ModuleSourceScanSpan {
+                                    start: 63,
+                                    end: 91,
+                                },
+                            },
+                            rolldown::ModuleSourceScanImport {
+                                module_request: "bytecode-har-dep".to_string(),
+                                resolved_id: None,
+                                kind: rolldown_common::ImportKind::DynamicImport,
+                                importer_span: rolldown::ModuleSourceScanSpan {
+                                    start: 92,
+                                    end: 142,
+                                },
+                            },
+                        ],
+                    },
+                    rolldown::ModuleSourceScanModule {
+                        id: cjs_module.into(),
+                        source: "exports.HostType = void 0;".into(),
+                        module_type: rolldown_common::ModuleType::Js,
+                        exports_kind: rolldown_common::ExportsKind::CommonJs,
+                        imports: Vec::new(),
+                    },
+                ],
+            },
+            source_maps,
+        );
+        assert_eq!(
+            state
+                .resolved_imports
+                .get("/workspace/oh_modules/@meituan/passport/RSAEncryptionUtils.ets")
+                .and_then(|imports| imports.get("@sgfe/flashbuy_price_harmony"))
+                .map(String::as_str),
+            Some(cjs_module)
+        );
+        assert_eq!(
+            state
+                .resolved_imports
+                .get("/workspace/oh_modules/@meituan/passport/RSAEncryptionUtils.ets")
+                .and_then(|imports| imports.get("@ohos/hypium"))
+                .map(String::as_str),
+            Some(resolved)
+        );
+        assert_eq!(
+            state
+                .resolved_imports
+                .get("/workspace/oh_modules/@meituan/passport/RSAEncryptionUtils.ets")
+                .and_then(|imports| imports.get("bytecode-har-dep"))
+                .map(String::as_str),
+            Some("bytecode-har-dep")
+        );
+        assert_eq!(
+            state
+                .full_module_is_commonjs
+                .get("/workspace/oh_modules/@meituan/passport/RSAEncryptionUtils.ets"),
+            Some(&false)
+        );
+        assert_eq!(state.full_module_is_commonjs.get(cjs_module), Some(&true));
+        assert!(state
+            .source_maps
+            .contains_key("/workspace/oh_modules/@meituan/passport/RSAEncryptionUtils.ets"));
+        assert_eq!(
+            state
+                .resolved_import_records
+                .get("/workspace/oh_modules/@meituan/passport/RSAEncryptionUtils.ets")
+                .map(Vec::len),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn module_source_writer_rewrites_ohpm_imports_to_package_records() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let phone_root = project_root.join("products/phone");
+        let hmcore_root = project_root
+            .join("oh_modules/.ohpm/@hw-agconnect+hmcore@1.0.6/oh_modules/@hw-agconnect/hmcore");
+        let hypium_root =
+            project_root.join("oh_modules/.ohpm/@ohos+hypium@1.0.11/oh_modules/@ohos/hypium");
+        let entry_id = phone_root
+            .join("src/main/ets/entryability/EntryAbility.ets")
+            .to_string_lossy()
+            .into_owned();
+        let hmcore_id = hmcore_root.join("index.ts").to_string_lossy().into_owned();
+        let hypium_id = hypium_root.join("index.js").to_string_lossy().into_owned();
+        let logger_id = hmcore_root
+            .join("src/main/ets/base/log/Logger.ts")
+            .to_string_lossy()
+            .into_owned();
+        let router_id = hmcore_root
+            .join("src/main/ets/components/RouterMap.ets")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&hmcore_root).unwrap();
+        std::fs::write(
+            hmcore_root.join("oh-package.json5"),
+            r#"{
+                "name": "@hw-agconnect/hmcore",
+                "version": "1.0.6",
+                "main": "index"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(hmcore_root.join("index.ts"), "export {};").unwrap();
+        std::fs::create_dir_all(&hypium_root).unwrap();
+        std::fs::write(
+            hypium_root.join("oh-package.json5"),
+            r#"{
+                "name": "@ohos/hypium",
+                "version": "1.0.11",
+                "main": "index.js"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            hypium_root.join("index.js"),
+            "export const DEFAULT = 'default';",
+        )
+        .unwrap();
+        std::fs::create_dir_all(hmcore_root.join("src/main/ets/base/log")).unwrap();
+        std::fs::write(
+            hmcore_root.join("src/main/ets/base/log/Logger.ts"),
+            "export class Logger {}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(hmcore_root.join("src/main/ets/components")).unwrap();
+        std::fs::write(
+            hmcore_root.join("src/main/ets/components/RouterMap.ets"),
+            "@Component\nstruct RouterMap { build() {} }",
+        )
+        .unwrap();
+        let module_path_map = HvigorModulePathMap::new(
+            "phone",
+            &phone_root,
+            &[
+                ("@hw-agconnect/hmcore".to_string(), hmcore_root.clone()),
+                ("@ohos/hypium".to_string(), hypium_root.clone()),
+            ],
+        );
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            entry_id.clone(),
+            HvigorCollectedModuleSource {
+                code: [
+                    "import { initialize } from \"@hw-agconnect/hmcore\";",
+                    "import { DEFAULT } from \"@ohos/hypium\";",
+                ]
+                .join("\n")
+                .into(),
+            },
+        );
+        state.sources.insert(
+            hmcore_id.clone(),
+            HvigorCollectedModuleSource {
+                code: [
+                    "export { Logger } from \"./src/main/ets/base/log/Logger\";",
+                    "export { RouterMap } from \"./src/main/ets/components/RouterMap\";",
+                ]
+                .join("\n")
+                .into(),
+            },
+        );
+        state.sources.insert(
+            hypium_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const DEFAULT = 'default';".to_string().into(),
+            },
+        );
+        state.sources.insert(
+            logger_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class Logger {}".to_string().into(),
+            },
+        );
+        state.sources.insert(
+            router_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export class RouterMap {}".to_string().into(),
+            },
+        );
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert("@hw-agconnect/hmcore".to_string(), hmcore_id.clone());
+        state
+            .resolved_imports
+            .entry(entry_id.clone())
+            .or_default()
+            .insert("@ohos/hypium".to_string(), hypium_id.clone());
+        state
+            .resolved_imports
+            .entry(hmcore_id.clone())
+            .or_default()
+            .insert(
+                "./src/main/ets/base/log/Logger".to_string(),
+                logger_id.clone(),
+            );
+        state
+            .resolved_imports
+            .entry(hmcore_id.clone())
+            .or_default()
+            .insert(
+                "./src/main/ets/components/RouterMap".to_string(),
+                router_id.clone(),
+            );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![
+                entry_id.clone(),
+                hmcore_id.clone(),
+                hypium_id.clone(),
+                logger_id.clone(),
+                router_id.clone(),
+            ],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let out_dir = app_root
+            .path()
+            .join("cache")
+            .join("default@CompileArkTS")
+            .join("esmodule")
+            .join("release");
+        let runtime_packages = runtime_packages(&[
+            ("phone", "phone", "", "", "", false),
+            (
+                "@hw-agconnect/hmcore",
+                "@hw-agconnect/hmcore",
+                "",
+                "",
+                "1.0.6",
+                false,
+            ),
+            ("@ohos/hypium", "@ohos/hypium", "", "", "1.0.11", false),
+        ]);
+
+        let files = HvigorModuleSourceWriter::new(
+            "com.example.hmosworld",
+            "phone",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            true,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            out_dir,
+        )
+        .write()
+        .unwrap();
+
+        let entry_file = files
+            .iter()
+            .find(|file| file.module_id == entry_id)
+            .expect("entry module source");
+        let hmcore_file = files
+            .iter()
+            .find(|file| file.module_id == hmcore_id)
+            .expect("hmcore module source");
+        let hypium_file = files
+            .iter()
+            .find(|file| file.module_id == hypium_id)
+            .expect("hypium module source");
+        let logger_file = files
+            .iter()
+            .find(|file| file.module_id == logger_id)
+            .expect("logger module source");
+        let router_file = files
+            .iter()
+            .find(|file| file.module_id == router_id)
+            .expect("router module source");
+        assert_eq!(hmcore_file.record_name, "&@hw-agconnect/hmcore/index&1.0.6");
+        assert_eq!(hypium_file.record_name, "&@ohos/hypium/index&1.0.11");
+        assert_eq!(
+            hmcore_file.source_file,
+            "phone|@hw-agconnect/hmcore|1.0.6|index.ts"
+        );
+        assert_eq!(
+            hypium_file.source_file,
+            "phone|@ohos/hypium|1.0.11|index.js"
+        );
+        assert_eq!(
+            entry_file.path,
+            app_root
+                .path()
+                .join("cache")
+                .join("default@CompileArkTS")
+                .join("esmodule")
+                .join("release")
+                .join("phone")
+                .join("src")
+                .join("main")
+                .join("ets")
+                .join("entryability")
+                .join("EntryAbility.ts")
+        );
+        assert_eq!(
+            hmcore_file.path,
+            app_root
+                .path()
+                .join("cache")
+                .join("default@CompileArkTS")
+                .join("esmodule")
+                .join("release")
+                .join("oh_modules")
+                .join(".ohpm")
+                .join("@hw-agconnect+hmcore@1.0.6")
+                .join("oh_modules")
+                .join("@hw-agconnect")
+                .join("hmcore")
+                .join("index.ts")
+        );
+        assert_eq!(
+            hmcore_file.package_name.as_deref(),
+            Some("@hw-agconnect/hmcore")
+        );
+        assert_eq!(
+            logger_file.record_name,
+            "&@hw-agconnect/hmcore/src/main/ets/base/log/Logger&1.0.6"
+        );
+        assert_eq!(
+            router_file.record_name,
+            "&@hw-agconnect/hmcore/src/main/ets/components/RouterMap&1.0.6"
+        );
+        assert_eq!(
+            router_file.source_file,
+            "phone|@hw-agconnect/hmcore|1.0.6|src/main/ets/components/RouterMap.ts"
+        );
+        assert_eq!(
+            router_file.path,
+            app_root
+                .path()
+                .join("cache")
+                .join("default@CompileArkTS")
+                .join("esmodule")
+                .join("release")
+                .join("oh_modules")
+                .join(".ohpm")
+                .join("@hw-agconnect+hmcore@1.0.6")
+                .join("oh_modules")
+                .join("@hw-agconnect")
+                .join("hmcore")
+                .join("src")
+                .join("main")
+                .join("ets")
+                .join("components")
+                .join("RouterMap.ts")
+        );
+        let entry_output = std::fs::read_to_string(&entry_file.path).unwrap();
+        assert!(
+            entry_output.contains("\"@normalized:N&&&@hw-agconnect/hmcore/index&1.0.6\""),
+            "{entry_output}"
+        );
+        assert!(
+            entry_output.contains("\"@normalized:N&&&@ohos/hypium/index&1.0.11\""),
+            "{entry_output}"
+        );
+        let hmcore_output = std::fs::read_to_string(&hmcore_file.path).unwrap();
+        assert!(
+            hmcore_output.contains(
+                "\"@normalized:N&&&@hw-agconnect/hmcore/src/main/ets/base/log/Logger&1.0.6\""
+            ),
+            "{hmcore_output}"
+        );
+        assert!(
+            hmcore_output.contains(
+                "\"@normalized:N&&&@hw-agconnect/hmcore/src/main/ets/components/RouterMap&1.0.6\""
+            ),
+            "{hmcore_output}"
+        );
+    }
+}

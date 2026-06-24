@@ -1,0 +1,67 @@
+{
+  "_comment": "Deprecated API module import rewrites for FA→Stage model migration.",
+  "_format": "Each entry maps a deprecated import specifier to its Stage model replacement.",
+  "_upstream": "Mirrors hvigor ets-loader apiTransform migration tables.",
+  "module_rewrites": [
+    {
+      "from": "@ohos.ability.featureAbility",
+      "to": "@ohos.app.ability.UIAbility",
+      "note": "FA model featureAbility → Stage model UIAbility"
+    },
+    {
+      "from": "@ohos.ability.particleAbility",
+      "to": "@ohos.app.ability.ServiceExtensionAbility",
+      "note": "FA model particleAbility → Stage model ServiceExtensionAbility"
+    },
+    {
+      "from": "@ohos.multimedia.media",
+      "to": "@kit.MediaKit",
+      "note": "Multimedia media → kit import"
+    },
+    {
+      "from": "@ohos.multimedia.camera",
+      "to": "@kit.CameraKit",
+      "note": "Camera → kit import"
+    },
+    {
+      "from": "@ohos.net.http",
+      "to": "@kit.NetworkKit",
+      "note": "Network http → kit import"
+    },
+    {
+      "from": "@ohos.data.rdb",
+      "to": "@kit.ArkData",
+      "note": "RDB → ArkData kit import"
+    },
+    {
+      "from": "@ohos.data.preferences",
+      "to": "@kit.ArkData",
+      "note": "Preferences → ArkData kit import"
+    },
+    {
+      "from": "@ohos.fileio",
+      "to": "@kit.CoreFileKit",
+      "note": "fileio → CoreFileKit"
+    },
+    {
+      "from": "@ohos.app.ability.Want",
+      "to": "@ohos.app.ability.Want",
+      "note": "Already Stage model — no rewrite needed (passthrough)"
+    },
+    {
+      "from": "@system.fetch",
+      "to": "@kit.NetworkKit",
+      "note": "Legacy FA @system.fetch → NetworkKit"
+    },
+    {
+      "from": "@system.storage",
+      "to": "@kit.ArkData",
+      "note": "Legacy FA @system.storage → ArkData"
+    },
+    {
+      "from": "@system.prompt",
+      "to": "@kit.ArkUI",
+      "note": "Legacy FA @system.prompt → ArkUI"
+    }
+  ]
+}

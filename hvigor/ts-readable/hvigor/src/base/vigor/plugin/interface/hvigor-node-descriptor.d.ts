@@ -1,0 +1,13 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor/src/base/vigor/plugin/interface/hvigor-node-descriptor.d.ts
+ */
+export interface HvigorNodeDescriptor {
+    name: string;
+    srcPath: string;
+    extraOptions: Map<string, any>;
+    getChildNode(): HvigorNodeDescriptor[] | undefined;
+    getRootNode(): HvigorNodeDescriptor;
+}

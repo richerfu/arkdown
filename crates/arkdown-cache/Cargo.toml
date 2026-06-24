@@ -1,0 +1,14 @@
+[package]
+name = "arkdown-cache"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+fs-err = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

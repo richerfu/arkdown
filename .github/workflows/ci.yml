@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "fix/*", "feat/*"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Unit tests (always run, no SDK required) ────────────────────────────
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: cargo test (all workspace lib tests)
+        run: cargo test --workspace --lib
+
+      - name: cargo test (integration tests, no hvigor)
+        run: cargo test --workspace --test '*'
+        env:
+          # Parity tests skip gracefully when ARKDOWN_PARITY_RUN is unset.
+          ARKDOWN_PARITY_RUN: ""
+
+  # ── Hvigor parity gate (runs only when SDK + hvigorw are available) ─────
+  #
+  # Section 3.9: "增加 SDK 可用时运行的 parity job + allowlist"
+  #
+  # This job is gated on the presence of the hvigor binary and the DevEco SDK.
+  # It is intended to run on self-hosted runners that have DevEco Studio installed.
+  # Set the repository secrets:
+  #   OHOS_SDK_PATH     — path to the OpenHarmony SDK root
+  #   HVIGORW_PATH      — path to the hvigorw script
+  # and add a self-hosted runner labelled `ohos-sdk` to enable this job.
+  #
+  # When ARKDOWN_PARITY_STRICT=1 is set, any artifact diff causes a hard failure.
+  # Diffs that are expected (known deviations) must be added to
+  # tests/parity_allowlist.json with an owner and expiry date.
+  parity:
+    name: Hvigor Parity (SDK required)
+    runs-on: [self-hosted, ohos-sdk]
+    # Only run when explicitly triggered or on the main branch.
+    if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+      contains(github.event.pull_request.labels.*.name, 'run-parity')
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-parity-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build arkdown CLI
+        run: cargo build --release -p arkdown-cli
+
+      - name: Run hvigor parity tests (strict mode)
+        run: cargo test --test hvigor_parity -- --nocapture
+        env:
+          ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
+          ARKDOWN_PARITY_ARKDOWN_BIN: target/release/arkdown
+          ARKDOWN_PARITY_RUN: "1"
+          ARKDOWN_PARITY_STRICT: "1"
+          ARKDOWN_PARITY_ALLOWLIST: tests/parity_allowlist.json
+          OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
+
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report-${{ github.sha }}
+          path: target/parity-reports/
+          retention-days: 30

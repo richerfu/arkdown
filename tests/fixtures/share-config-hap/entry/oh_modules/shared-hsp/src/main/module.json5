@@ -1,0 +1,11 @@
+{
+  module: {
+    name: "shared",
+    type: "shared",
+    deviceTypes: [
+      "phone"
+    ],
+    deliveryWithInstall: true,
+    crossAppSharedConfig: "$profile:cross_app_shared_config"
+  }
+}

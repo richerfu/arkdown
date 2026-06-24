@@ -1,0 +1,71 @@
+{
+  "name": "arkdown",
+  "version": "0.1.0",
+  "description": "Node.js bindings for arkdown — OHOS build tool with Rolldown-aligned plugin support",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "bin": {
+    "arkdown": "bin/arkdown.js"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ohos",
+    "harmonyos",
+    "arkdown",
+    "napi-rs",
+    "rolldown",
+    "bundler"
+  ],
+  "files": [
+    "bin/arkdown.js",
+    "index.d.ts",
+    "index.js",
+    "runtime.js",
+    "README.md",
+    "*.node"
+  ],
+  "napi": {
+    "binaryName": "arkdown",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-apple-darwin",
+      "aarch64-unknown-linux-musl"
+    ]
+  },
+  "engines": {
+    "node": ">= 18.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test __test__/*.test.cjs",
+    "smoke": "node -e \"const arkdown = require('./index.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node bin/arkdown.js --help",
+    "format": "prettier . -w",
+    "format:rs": "cargo fmt",
+    "prepublishOnly": "napi prepublish -t npm",
+    "preversion": "napi build --platform && git add .",
+    "version": "napi version"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.7.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.8.3"
+  },
+  "prettier": {
+    "printWidth": 120,
+    "semi": false,
+    "trailingComma": "all",
+    "singleQuote": true,
+    "arrowParens": "always"
+  },
+  "packageManager": "pnpm@10.12.1"
+}

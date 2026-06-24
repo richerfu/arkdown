@@ -1,0 +1,14 @@
+[package]
+name = "arkdown-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustc-hash = { workspace = true }
+arkdown-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+json5 = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+fs-err = { workspace = true }

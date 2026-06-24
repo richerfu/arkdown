@@ -1,0 +1,14 @@
+{
+  module: {
+    name: "entry",
+    type: "shared",
+    srcEntry: "./ets/Index.ets",
+    description: "$string:module_desc",
+    deviceTypes: [
+      "phone"
+    ],
+    deliveryWithInstall: true,
+    installationFree: false,
+    pages: "$profile:main_pages"
+  }
+}

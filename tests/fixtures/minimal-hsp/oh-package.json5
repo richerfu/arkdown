@@ -1,0 +1,5 @@
+{
+  "modelVersion": "6.0.0",
+  "description": "Minimal OHOS HSP fixture for arkdown integration tests.",
+  "dependencies": {}
+}

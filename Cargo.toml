@@ -1,0 +1,159 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/arkdown-core",
+    "crates/arkdown-path",
+    "crates/arkdown-ohos-schema",
+    "crates/arkdown-config",
+    "crates/arkdown-resolver",
+    "crates/arkdown",
+    "crates/arkdown-ets-transform",
+    "crates/arkdown-ts2abc",
+    "crates/arkdown-resource",
+    "crates/arkdown-profile",
+    "crates/arkdown-pack",
+    "crates/arkdown-cache",
+    "crates/arkdown-sign",
+    "crates/arkdown-obfuscate",
+    "crates/arkdown-watcher",
+    "crates/arkdown-session",
+    "crates/arkdown-ohpm",
+    # Node.js NAPI binding — built by `npm run build` in packages/arkdown/.
+    # Part of the workspace so cargo uses a unified dependency graph and avoids
+    # rolldown version conflicts from a separate [workspace] resolution.
+    "packages/arkdown",
+]
+
+[workspace.dependencies]
+# Workspace crates
+arkdown = { path = "crates/arkdown" }
+arkdown-cache = { path = "crates/arkdown-cache" }
+arkdown-config = { path = "crates/arkdown-config" }
+arkdown-core = { path = "crates/arkdown-core" }
+arkdown-ets-transform = { path = "crates/arkdown-ets-transform" }
+arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
+arkdown-ohos-schema = { path = "crates/arkdown-ohos-schema" }
+arkdown-ohpm = { path = "crates/arkdown-ohpm" }
+arkdown-pack = { path = "crates/arkdown-pack" }
+arkdown-path = { path = "crates/arkdown-path" }
+arkdown-profile = { path = "crates/arkdown-profile" }
+arkdown-resolver = { path = "crates/arkdown-resolver" }
+arkdown-resource = { path = "crates/arkdown-resource" }
+arkdown-session = { path = "crates/arkdown-session" }
+arkdown-sign = { path = "crates/arkdown-sign" }
+arkdown-ts2abc = { path = "crates/arkdown-ts2abc" }
+arkdown-watcher = { path = "crates/arkdown-watcher" }
+
+# Parser — ohos-rs OXC fork with ArkTS/ArkUI support.
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc_resolver = "11.21.3"
+
+# Rolldown
+rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36", default-features = false, features = ["experimental"] }
+rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
+rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
+rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
+rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
+rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
+
+# NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
+napi = { version = "3.9.1", features = ["async", "napi4", "tokio_rt", "compat-mode"] }
+napi-derive = "3.5.6"
+napi-build = "2"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Data structures
+rustc-hash = "2"
+arcstr = { version = "1.2.0", default-features = false }
+oxc_index = { version = "5.0.0", features = ["nonmax", "serde"] }
+compact_str = { version = "0.8", features = ["serde"] }
+bitflags = "2"
+indexmap = { version = "2", features = ["serde"] }
+bytes = "1"
+phf = { version = "0.13.1", features = ["macros"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+json5 = "0.4"
+
+# HTTP client (OHPM registry integration)
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+# Tarball extraction (OHPM package download)
+flate2 = "1"
+tar = "0.4"
+# Base64 encoding (OHPM integrity verification)
+base64 = "0.22"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Source maps
+sourcemap = "9"
+
+# File system
+fs-err = "3"
+walkdir = "2"
+
+# Parallel
+rayon = "1"
+
+# ZIP
+zip = "2"
+rawzip = "0.4.4"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dhat = "0.3.3"
+memory-stats = "1.2.0"
+mimalloc-safe = "0.1.62"
+
+# Filesystem watching
+notify = "6"
+
+# Channels
+crossbeam-channel = "0.5"
+
+# Cryptography — pure Rust HAP signing (arkdown-sign, SPEC-021)
+p256        = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rsa         = { version = "0.9",  features = ["sha2", "pem"] }
+sha2        = "0.10"
+signature   = "2"
+der         = "0.7"
+x509-cert   = { version = "0.2", features = ["pem"] }
+pkcs12      = "0.1"
+pkcs5       = { version = "0.7", features = ["pbes2"] }
+pkcs8       = { version = "0.10", features = ["alloc", "pkcs5"] }
+cms         = "0.2"
+const-oid   = { version = "0.9", features = ["db"] }
+spki        = "0.7"
+rand        = "0.8"
+p12         = "0.6"
+aes-gcm     = "0.10"
+aes         = { version = "0.8", features = ["zeroize"] }
+cbc         = "0.1"
+pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
+hex         = "0.4"
+hex-literal = "0.4"
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
