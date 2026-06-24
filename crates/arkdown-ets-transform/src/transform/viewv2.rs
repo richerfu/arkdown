@@ -130,6 +130,7 @@ pub(super) struct ComponentV2Lowerer<'a, 'b> {
     module_name: Option<&'a str>,
     is_exported: bool,
     is_default: bool,
+    is_entry: bool,
     emit_reusable_v2_helper: bool,
 }
 
@@ -148,6 +149,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         module_name: Option<&'a str>,
         is_exported: bool,
         is_default: bool,
+        is_entry: bool,
         emit_reusable_v2_helper: bool,
     ) -> Self {
         Self {
@@ -163,6 +165,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             module_name,
             is_exported,
             is_default,
+            is_entry,
             emit_reusable_v2_helper,
         }
     }
@@ -198,7 +201,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     if self.is_method_named(method, GeneratedViewpuName::BUILD) =>
                 {
                     has_build = true;
-                    let plan = BuildBodyPlan::component(
+                    let plan = BuildBodyPlan::component_v2(
                         method.value.body.as_deref(),
                         self.source_text,
                         self.source_id,
@@ -217,7 +220,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     let Some(method_name) = method.key.static_name() else {
                         continue;
                     };
-                    let plan = BuildBodyPlan::builder(
+                    let plan = BuildBodyPlan::builder_v2(
                         method.value.body.as_deref(),
                         self.source_text,
                         self.source_id,
@@ -288,6 +291,9 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             }
         }
         elements.push(self.rerender_element());
+        if self.is_entry {
+            elements.push(self.entry_name_element(name));
+        }
 
         let rewriter = GlobalContextCallRewriter::new(self.allocator);
         for method in &other_methods {
@@ -760,6 +766,20 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             builder.formal_parameters(),
             stmts,
             false,
+            None,
+        )
+    }
+
+    fn entry_name_element(&self, name: &str) -> ClassElement<'b> {
+        let builder = ViewpuAstBuilder::new(self.allocator);
+        let mut stmts = builder.statements();
+        stmts.push(builder.return_string_statement(name));
+        ViewpuMemberAstEmitter::new(self.allocator).method_with_type_annotation(
+            GeneratedViewpuName::GET_ENTRY_NAME,
+            builder.formal_parameters(),
+            Some(builder.string_type_annotation()),
+            stmts,
+            true,
             None,
         )
     }

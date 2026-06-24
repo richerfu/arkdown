@@ -89,6 +89,21 @@ impl RolldownEtsTransformPlan {
         self
     }
 
+    pub fn transform_options_for(&self, id: &str) -> TransformOptions {
+        TransformOptions {
+            bundle_name: Some(self.bundle_name.clone()),
+            module_name: Some(self.module_name.clone()),
+            project_root: Some(self.project_root.clone()),
+            module_roots: self.module_roots.clone(),
+            component_metadata: Arc::clone(&self.component_metadata),
+            sources: self.sources.clone(),
+            module_exports: self.module_exports.clone(),
+            emit_entry_registration: self.should_emit_entry_registration(id),
+            partial_update: true,
+            checker_mode: self.checker_mode,
+        }
+    }
+
     fn should_emit_entry_registration(&self, id: &str) -> bool {
         let Some(entry_source_ids) = &self.entry_source_ids else {
             return true;
@@ -173,18 +188,7 @@ impl RolldownEtsTransformer {
             source_map: None,
         };
 
-        let options = TransformOptions {
-            bundle_name: Some(self.plan.bundle_name.clone()),
-            module_name: Some(self.plan.module_name.clone()),
-            project_root: Some(self.plan.project_root.clone()),
-            module_roots: self.plan.module_roots.clone(),
-            component_metadata: Arc::clone(&self.plan.component_metadata),
-            sources: self.plan.sources.clone(),
-            module_exports: self.plan.module_exports.clone(),
-            emit_entry_registration: self.plan.should_emit_entry_registration(id),
-            partial_update: true,
-            checker_mode: self.plan.checker_mode,
-        };
+        let options = self.plan.transform_options_for(id);
 
         let transformed =
             transform::ArktsTransformer::with_options(&source, &options).transform()?;
@@ -294,14 +298,10 @@ impl<'a, 'pipeline> HvigorPrepareSourcePass<'a, 'pipeline> {
 
     fn run<'s>(&self, source: &'s str) -> Cow<'s, str> {
         let reexports = TypeOnlyReexportSplitter::new(
-            source,
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
         );
-        let default_reexport = DefaultImportReexportRewriter::new(source, self.pipeline.id);
-        if !reexports.may_split() && !default_reexport.may_rewrite() {
-            return Cow::Borrowed(source);
-        }
+        let default_reexport = DefaultImportReexportRewriter::new();
 
         let allocator = Allocator::default();
         let source_type = self.source_type();
@@ -351,10 +351,6 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
     }
 
     fn run<'s>(&self, source: &'s str) -> Cow<'s, str> {
-        if !self.may_rewrite(source) {
-            return Cow::Borrowed(source);
-        }
-
         let allocator = Allocator::default();
         let source_type = self.source_type();
         let mut parsed = Parser::new(&allocator, source, source_type).parse();
@@ -401,14 +397,12 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         .rewrite_program(&allocator, &mut parsed.program);
 
         changed |= ImportedConstEnumRewriter::new(
-            source,
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
         )
         .rewrite_program(&allocator, &mut parsed.program);
 
         changed |= TypeOnlyNamedImportSplitter::new(
-            source,
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
         )
@@ -427,34 +421,6 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             return Cow::Borrowed(source);
         }
         Cow::Owned(hvigor_stage_codegen(&parsed.program))
-    }
-
-    fn may_rewrite(&self, source: &str) -> bool {
-        api_transform::KitImportRewriter::new(source).may_rewrite()
-            || source.contains("@ohos:")
-            || source.contains("@ohos.util.emitter")
-            || source.contains("@system.emitter")
-            || (self.pipeline.transformer.plan.api_version < 9 && source.contains("@ohos/"))
-            || ImportedConstEnumRewriter::new(
-                source,
-                self.pipeline.id,
-                &self.pipeline.transformer.plan.sources,
-            )
-            .may_rewrite()
-            || TypeOnlyNamedImportSplitter::new(
-                source,
-                self.pipeline.id,
-                &self.pipeline.transformer.plan.sources,
-            )
-            .may_split()
-            || ResourceReferenceRewriter::new(
-                source,
-                self.pipeline.id,
-                self.pipeline.transformer.plan.resource_refs.as_ref(),
-                &self.pipeline.transformer.plan.bundle_name,
-                Some(&self.pipeline.transformer.plan.module_name),
-            )
-            .may_rewrite()
     }
 
     fn source_type(&self) -> SourceType {

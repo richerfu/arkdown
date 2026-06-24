@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arkdown_path::HvigorSourceFileFilter;
 use rustc_hash::FxHashMap;
 
 use arkdown_core::SourceFileId;
@@ -227,6 +228,9 @@ impl SourceStore {
                 .filter(|e| e.file_type().is_file())
             {
                 let path = entry.path().to_path_buf();
+                if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
+                    continue;
+                }
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if !matches!(ext, "ets" | "ts" | "js" | "json" | "json5") {
                     continue;
@@ -335,5 +339,25 @@ mod tests {
         let store = SourceStore::discover(&[std::path::PathBuf::from("/nonexistent/path")])
             .expect("discover should not fail for nonexistent path");
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn discover_skips_hvigor_ignored_macos_metadata_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("entry/src/main/ets");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+        let real_source = source_dir.join("Index.ets");
+        let apple_double = source_dir.join("._BuildProfile.ets");
+        let ds_store = source_dir.join(".DS_Store");
+        std::fs::write(&real_source, "export const value = 1;").expect("write source");
+        std::fs::write(&apple_double, "metadata").expect("write apple double");
+        std::fs::write(&ds_store, "metadata").expect("write ds store");
+
+        let store = SourceStore::discover(&[temp.path().to_path_buf()]).expect("discover");
+
+        assert_eq!(store.len(), 1);
+        assert!(store.source_by_path(&real_source).is_some());
+        assert!(store.source_by_path(&apple_double).is_none());
+        assert!(store.source_by_path(&ds_store).is_none());
     }
 }

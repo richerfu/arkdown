@@ -20,6 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+use arkdown_path::HvigorNativeLibraryPattern;
+
 use crate::dependency_graph::snapshot::DependencyGraphSnapshot;
 use crate::module::snapshot::ModuleSnapshot;
 
@@ -116,7 +118,7 @@ impl ResourceInput {
 /// Upstream: `ProcessLibs` native library scan in hvigor.
 #[derive(Debug, Clone, Default)]
 pub struct NativeLibInventory {
-    /// Absolute paths to `.so` files found in the package.
+    /// Absolute paths to native libraries found by hvigor's default glob.
     pub lib_paths: Vec<PathBuf>,
     /// ABI subdirectory names found (e.g., `["arm64-v8a", "x86_64"]`).
     pub abi_dirs: Vec<String>,
@@ -125,7 +127,8 @@ pub struct NativeLibInventory {
 impl NativeLibInventory {
     /// Scan a package root for native libraries.
     ///
-    /// Looks for `.so` files under `<package_root>/libs/<abi>/`.
+    /// Looks under `<package_root>/libs` with hvigor's default
+    /// `NativeConst.LIBRARY_FILE_PATTERN`.
     ///
     /// Upstream: `ProcessLibs` in hvigor.
     pub fn from_package_root(package_root: &Path) -> Self {
@@ -143,23 +146,23 @@ impl NativeLibInventory {
                 if abi_path.is_dir() {
                     if let Some(abi_name) = abi_path.file_name().and_then(|n| n.to_str()) {
                         abi_dirs.push(abi_name.to_string());
-                        if let Ok(so_entries) = std::fs::read_dir(&abi_path) {
-                            for so_entry in so_entries.flatten() {
-                                let so_path = so_entry.path();
-                                if so_path
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .map(|e| e == "so")
-                                    .unwrap_or(false)
-                                {
-                                    lib_paths.push(so_path);
-                                }
-                            }
-                        }
                     }
                 }
             }
         }
+
+        for entry in walkdir::WalkDir::new(&libs_dir)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path();
+            if HvigorNativeLibraryPattern::matches_path_under(&libs_dir, path) {
+                lib_paths.push(path.to_path_buf());
+            }
+        }
+        abi_dirs.sort();
+        lib_paths.sort();
 
         Self {
             lib_paths,
@@ -337,6 +340,24 @@ mod tests {
         let inv = NativeLibInventory::from_package_root(Path::new("/nonexistent/package"));
         assert!(inv.lib_paths.is_empty());
         assert!(inv.abi_dirs.is_empty());
+    }
+
+    #[test]
+    fn native_lib_inventory_matches_hvigor_default_pattern() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abi_dir = tmp.path().join("libs/arm64-v8a");
+        std::fs::create_dir_all(&abi_dir).unwrap();
+        std::fs::write(abi_dir.join("libplain.so"), b"ELF").unwrap();
+        std::fs::write(abi_dir.join("libversioned.so.1"), b"ELF").unwrap();
+        std::fs::write(abi_dir.join("._libplain.so"), b"AppleDouble").unwrap();
+
+        let inv = NativeLibInventory::from_package_root(tmp.path());
+        let names = inv
+            .lib_paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["libplain.so", "libversioned.so.1"]);
     }
 
     #[test]

@@ -95,18 +95,19 @@ fn lower_build_body_with_component_context_and_module(
     module_name: Option<&str>,
     current_component_reusable: bool,
 ) -> Result<String, BuildLoweringError> {
-    let plan = BuildBodyPlan::component(
+    let plan = BuildBodyPlan::component_with_shared_inputs(
         body,
-        source_text,
-        source_id,
+        Arc::from(source_text),
+        Arc::from(source_id),
         custom_components,
         builder_methods,
         builder_param_methods,
         custom_component_update_props,
-        component_metadata,
+        Arc::new(component_metadata.clone()),
         raw_object_fields,
-        module_name,
+        module_name.map(Arc::from),
         current_component_reusable,
+        GeneratedViewpuName::VIEWPU_BASE,
     );
     let allocator = Allocator::default();
     let ast = AstBuilder::new(&allocator);

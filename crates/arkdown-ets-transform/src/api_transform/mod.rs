@@ -50,75 +50,11 @@ use crate::ModuleExportNameText;
 ///
 /// If a kit specifier is unknown or none of its named imports have a mapping the
 /// original declaration is left unchanged.
-pub struct KitImportRewriter<'a> {
-    source: &'a str,
-}
+pub struct KitImportRewriter;
 
-impl<'a> KitImportRewriter<'a> {
-    pub fn new(source: &'a str) -> Self {
-        Self { source }
-    }
-
-    #[cfg(test)]
-    pub fn rewrite(&self) -> Cow<'a, str> {
-        if !self.may_rewrite() {
-            return Cow::Borrowed(self.source);
-        }
-        let allocator = Allocator::default();
-        let source_type = SourceType::from_path("arkdown-input.ets")
-            .unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Cow::Borrowed(self.source);
-        }
-
-        let replacement_plans = {
-            let semantic_ret = SemanticBuilder::new().build(&parsed.program);
-            if !semantic_ret.diagnostics.is_empty() {
-                return Cow::Borrowed(self.source);
-            }
-            let scoping = semantic_ret.semantic.scoping();
-            parsed
-                .program
-                .body
-                .iter()
-                .map(|statement| match statement {
-                    Statement::ImportDeclaration(import) => {
-                        KitImportDeclarationRewriter::new(import, scoping).bindings()
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let ast = AstBuilder::new(&allocator);
-        let mut changed = false;
-        let mut body = OxcVec::new_in(&allocator);
-        let old_body = std::mem::replace(&mut parsed.program.body, OxcVec::new_in(&allocator));
-        for (statement, replacement_plan) in old_body.into_iter().zip(replacement_plans) {
-            if let Some(imports) = replacement_plan {
-                changed = true;
-                for statement in KitImportEmitter::new(imports).statements(ast) {
-                    body.push(statement);
-                }
-            } else {
-                body.push(statement);
-            }
-        }
-        parsed.program.body = body;
-
-        if !changed {
-            return Cow::Borrowed(self.source);
-        }
-
-        Cow::Owned(
-            CodegenSourceText::new(Codegen::new().build(&parsed.program).code)
-                .without_trailing_newline(),
-        )
-    }
-
-    pub(crate) fn may_rewrite(&self) -> bool {
-        self.source.contains("@kit.")
+impl KitImportRewriter {
+    pub fn new(_source: &str) -> Self {
+        Self
     }
 
     pub(crate) fn rewrite_program<'ast>(
@@ -305,11 +241,39 @@ impl KitImportEmitter {
 mod tests {
     use super::*;
 
+    fn rewrite_source(source: &str) -> Cow<'_, str> {
+        let allocator = Allocator::default();
+        let source_type = SourceType::from_path("arkdown-input.ets")
+            .unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Cow::Borrowed(source);
+        }
+        let semantic_ret = SemanticBuilder::new().build(&parsed.program);
+        if !semantic_ret.diagnostics.is_empty() {
+            return Cow::Borrowed(source);
+        }
+        let scoping = semantic_ret.semantic.into_scoping();
+        let changed = KitImportRewriter::new(source).rewrite_program(
+            &allocator,
+            &mut parsed.program,
+            &scoping,
+        );
+        if changed {
+            Cow::Owned(
+                CodegenSourceText::new(Codegen::new().build(&parsed.program).code)
+                    .without_trailing_newline(),
+            )
+        } else {
+            Cow::Borrowed(source)
+        }
+    }
+
     #[test]
     fn test_rewrite_single_import() {
         let src = r#"import { UIAbility } from "@kit.AbilityKit";
 const Ability = UIAbility;"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import UIAbility from \"@ohos.app.ability.UIAbility\""),
             "got: {out}"
@@ -325,7 +289,7 @@ const Ability = UIAbility;"#;
         let src = r#"import { UIAbility, Want } from "@kit.AbilityKit";
 const Ability = UIAbility;
 const value = new Want();"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import UIAbility from \"@ohos.app.ability.UIAbility\""),
             "got: {out}"
@@ -340,7 +304,7 @@ const value = new Want();"#;
     fn test_rewrite_aliased_import() {
         let src = r#"import { UIAbility as UA } from "@kit.AbilityKit";
 const Ability = UA;"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import UA from \"@ohos.app.ability.UIAbility\""),
             "alias must be the binding; got: {out}"
@@ -351,7 +315,7 @@ const Ability = UA;"#;
     fn test_rewrite_hilog() {
         let src = r#"import { hilog } from "@kit.PerformanceAnalysisKit";
 hilog.info(0, "tag", "message");"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import hilog from \"@ohos.hilog\""),
             "got: {out}"
@@ -361,14 +325,14 @@ hilog.info(0, "tag", "message");"#;
     #[test]
     fn test_unknown_kit_kept_verbatim() {
         let src = r#"import { something } from "@kit.UnknownKit";"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert_eq!(out, src, "unknown kit import must be left unchanged");
     }
 
     #[test]
     fn test_non_kit_import_untouched() {
         let src = r#"import hilog from "@ohos:hilog";"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert_eq!(out, src);
     }
 
@@ -380,7 +344,7 @@ hilog.info(0, "tag", "message");"#;
         // classifies it as a value import, not a type import.
         let src = r#"import { Callee } from "@kit.AbilityKit";
 const c = new Callee();"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import { Callee } from \"@ohos.app.ability.UIAbility\""),
             "named import without alias; got: {out}"
@@ -398,7 +362,7 @@ const c = new Callee();"#;
         // Use the symbol as a value so the semantic analysis classifies it as a value import.
         let src = r#"import { Callee as MyCallee } from "@kit.AbilityKit";
 const c = new MyCallee();"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import { Callee as MyCallee } from \"@ohos.app.ability.UIAbility\""),
             "named import with alias; got: {out}"
@@ -412,7 +376,7 @@ const c = new MyCallee();"#;
     #[test]
     fn test_single_quoted_kit_import() {
         let src = "import { hilog } from '@kit.PerformanceAnalysisKit';\nhilog.info(0, 'tag', 'message');";
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import hilog from \"@ohos.hilog\""),
             "got: {out}"
@@ -424,7 +388,7 @@ const c = new MyCallee();"#;
         let src = r#"import { AbilityConstant } from "@kit.AbilityKit";
 type LaunchParam = AbilityConstant.StartOptions;
 const text = "AbilityConstant";"#;
-        let out = KitImportRewriter::new(src).rewrite();
+        let out = rewrite_source(src);
         assert!(
             out.contains("import type AbilityConstant from \"@ohos.app.ability.AbilityConstant\""),
             "type-only kit import must be decided from semantic references; got: {out}"

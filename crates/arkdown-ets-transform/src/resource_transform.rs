@@ -199,7 +199,6 @@ impl ResourceNames {
 }
 
 pub(crate) struct ResourceReferenceRewriter<'a> {
-    source: &'a str,
     resource_refs: &'a FxHashMap<String, ResourceReference>,
     names: ResourceNames,
 }
@@ -212,17 +211,12 @@ impl<'a> ResourceReferenceRewriter<'a> {
         bundle_name: &str,
         module_name: Option<&str>,
     ) -> Self {
+        let _ = source;
         let _ = id;
         Self {
-            source,
             resource_refs,
             names: ResourceNames::new(bundle_name, module_name),
         }
-    }
-
-    pub(crate) fn may_rewrite(&self) -> bool {
-        self.source.contains(ResourceCallName::RESOURCE)
-            || self.source.contains(ResourceCallName::RAWFILE)
     }
 
     pub(crate) fn rewrite_program<'ast>(

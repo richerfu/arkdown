@@ -325,7 +325,7 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
         self.call_statement(
             self.member_expression(
                 self.ast
-                    .expression_identifier(SPAN, GeneratedViewpuName::VIEWPU_BASE),
+                    .expression_identifier(SPAN, self.context.custom_component_base_name()),
                 &self.context.runtime_names().method_create,
             ),
             self.ast.vec1(Argument::from(self.ast.expression_identifier(
@@ -728,7 +728,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
         reuse_id: Expression<'a>,
     ) -> Statement<'a> {
         self.static_call_statement(
-            GeneratedViewpuName::VIEWPU_BASE,
+            self.context.custom_component_base_name(),
             &self.context.runtime_names().method_create_recycle,
             self.ast.vec_from_iter([
                 Argument::from(self.ast.expression_identifier(

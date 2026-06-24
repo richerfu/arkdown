@@ -28,9 +28,12 @@ use std::time::Instant;
 use anyhow::Result;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
+use arkdown_core::{
+  ArkdownConfig, BuildMode, HapManifest, ModuleConfig, OhosModuleType, OutputTarget,
+};
 use arkdown_path::{
-  canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, NormalizedOhmUrl,
+  canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, HvigorSourceFileFilter,
+  NormalizedOhmUrl,
 };
 use arkdown_session::dependency_graph::snapshot::{DependencyNodeSnapshot, DependencyNodeType};
 use arkdown_session::module::snapshot::OhosModuleType as SessionOhosModuleType;
@@ -55,7 +58,9 @@ use super::layout::{
 use super::module_plan::ModuleSelectionPlanner;
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{PackagePlugin, PluginFactory, PluginFactoryInput};
-use arkdown::{BundleCacheBridge, BundleSourceMapPackageInfo, ShouldInvalidCacheRequest};
+use arkdown::{
+  BundleCacheBridge, BundleSourceMapPackageInfo, ShouldInvalidCacheRequest, SourceMapPolicy,
+};
 
 use crate::cmd::native_build::{NativeLibCollectionPolicy, NativeLibCollector, NativeSdkToolchain};
 use crate::progress::Progress;
@@ -68,15 +73,18 @@ use arkdown::plugins::ets_transform::{
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
 use arkdown_config::build_profile::parse_api_version;
-use arkdown_ets_transform::SourceClassifier;
+use arkdown_ets_transform::{
+  ArkuiComponentNameCollector, RolldownEtsTransformPlan, SourceClassifier,
+};
 use arkdown_obfuscate::{ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator};
 use arkdown_pack::{
   HarPackInput, IntegratedHspCandidate, IntegratedHspCollector, PackAbility, PackInput, Packager,
 };
 use arkdown_profile::{
-  ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, LoaderJson, PkgContextCurrentInput,
-  PkgContextDependencyInput, PkgContextDependencyKind, PkgContextInfoGenerator,
-  PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind, ProfileProcessor,
+  ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, FormProfileProcessor, LoaderJson,
+  ModuleFormProfileInput, PkgContextCurrentInput, PkgContextDependencyInput,
+  PkgContextDependencyKind, PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt,
+  PkgContextModuleKind, ProfileProcessor,
 };
 use arkdown_resolver::{OhPackage, PkgBriefInfo};
 use arkdown_resource::{ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput};
@@ -89,6 +97,173 @@ use arkdown_resource::{ResourceBackendRunner, ResourceCompileConfig, ResourceCom
 pub struct BuildOutput {
   /// Absolute paths to all produced artifacts (signed HAP/HSP/HAR files).
   pub artifact_paths: Vec<PathBuf>,
+}
+
+struct WidgetCompileArktsPlan {
+  entries: Vec<String>,
+  cache_dir: PathBuf,
+  output_dir: PathBuf,
+  modules_abc_path: PathBuf,
+  cache_file: PathBuf,
+}
+
+struct WidgetCompileArktsOutput {
+  bundle_out: BundleStageOutput,
+  plan: WidgetCompileArktsPlan,
+}
+
+struct WidgetCompileArktsPass<'a> {
+  config: &'a ArkdownConfig,
+  module: &'a ModuleConfig,
+  manifest: &'a HapManifest,
+  loader_json: &'a LoaderJson,
+}
+
+impl<'a> WidgetCompileArktsPass<'a> {
+  fn new(
+    config: &'a ArkdownConfig,
+    module: &'a ModuleConfig,
+    manifest: &'a HapManifest,
+    loader_json: &'a LoaderJson,
+  ) -> Self {
+    Self {
+      config,
+      module,
+      manifest,
+      loader_json,
+    }
+  }
+
+  fn plan(&self) -> Result<Option<WidgetCompileArktsPlan>> {
+    if self.module.module_type == OhosModuleType::Shared {
+      return Ok(None);
+    }
+    let module_layout = ModuleBuildLayout::new(&self.module.src_path);
+    let form_sources = FormProfileProcessor::new()
+      .collect_module_form_sources(ModuleFormProfileInput {
+        module_name: &self.module.name,
+        module_root: &self.module.src_path,
+        module_type: &self.module.module_type,
+        module_json_path: &module_layout.source().module_json5(),
+        extension_abilities: &self.manifest.extension_abilities,
+        project_modules: &self.config.modules,
+        compatible_api_version: Some(self.loader_json.api_version),
+      })
+      .map_err(|err| anyhow::anyhow!("collect widget form sources failed: {}", err))?;
+    let mut entries = form_sources
+      .into_iter()
+      .filter(|source| source.is_arkts())
+      .map(|source| {
+        canonicalize_or_owned(&source.source_path)
+          .to_string_lossy()
+          .into_owned()
+      })
+      .collect::<Vec<_>>();
+    entries.sort();
+    entries.dedup();
+    if entries.is_empty() {
+      return Ok(None);
+    }
+
+    let cache_dir = self.widget_cache_dir();
+    let output_dir = PathBuf::from(&self.loader_json.ace_module_build);
+    Ok(Some(WidgetCompileArktsPlan {
+      entries,
+      cache_file: cache_dir.join("modules.cache"),
+      cache_dir,
+      modules_abc_path: output_dir.join("widgets.abc"),
+      output_dir,
+    }))
+  }
+
+  fn bundle_plan(
+    &self,
+    base_plan: &arkdown::BundlePlan,
+    plan: &WidgetCompileArktsPlan,
+  ) -> arkdown::BundlePlan {
+    let mut bundle_plan = base_plan.clone();
+    bundle_plan.input.entries = plan.entries.clone();
+    bundle_plan.input.runtime_entry_sources.clear();
+    bundle_plan.output.module_source_output_dir = Some(plan.cache_dir.clone());
+    bundle_plan.output.output_dir = plan.output_dir.clone();
+    bundle_plan.source_map = SourceMapPolicy::None;
+    bundle_plan
+  }
+
+  fn compile_context_loader_json(&self, plan: &WidgetCompileArktsPlan) -> LoaderJson {
+    let mut loader_json = self.loader_json.clone();
+    loader_json.hvigor_compile_entry.clear();
+    loader_json.compile_entry = plan.entries.clone();
+    loader_json.runtime_entry_sources.clear();
+    loader_json.cache_path = plan.cache_dir.to_string_lossy().into_owned();
+    loader_json
+  }
+
+  fn write_component_collection(
+    &self,
+    output: &WidgetCompileArktsOutput,
+    ets_transform_plan: &RolldownEtsTransformPlan,
+  ) -> Result<()> {
+    let mut collection = BTreeMap::<String, Vec<String>>::new();
+    for source in &output.bundle_out.bundle_output.module_source_files {
+      let module_id = Path::new(&source.module_id);
+      if module_id.extension().and_then(|ext| ext.to_str()) != Some("ets") {
+        continue;
+      }
+      if !module_id.is_file() {
+        continue;
+      }
+      let content = fs_err::read_to_string(module_id)?;
+      let options = ets_transform_plan.transform_options_for(&source.module_id);
+      let names = ArkuiComponentNameCollector::with_options(&content, &source.module_id, &options)
+        .collect()
+        .map_err(|err| anyhow::anyhow!("collect widget component names failed: {}", err))?;
+      if names.is_empty() {
+        continue;
+      }
+      collection.insert(self.collection_key(module_id), names);
+    }
+
+    let cache_path = output.plan.cache_dir.join("component_collection.json");
+    let loader_path = output
+      .plan
+      .output_dir
+      .join("widget")
+      .join("component_collection.json");
+    self.write_component_collection_file(&cache_path, &collection)?;
+    self.write_component_collection_file(&loader_path, &collection)?;
+    Ok(())
+  }
+
+  fn widget_cache_dir(&self) -> PathBuf {
+    let cache_dir = PathBuf::from(&self.loader_json.cache_path);
+    let widget_name = format!("{}_widget", self.loader_json.build_mode);
+    cache_dir
+      .parent()
+      .map(|parent| parent.join(&widget_name))
+      .unwrap_or_else(|| cache_dir.with_file_name(widget_name))
+  }
+
+  fn collection_key(&self, module_id: &Path) -> String {
+    let project_root = canonicalize_or_owned(&self.config.project_root);
+    let source_path = canonicalize_or_owned(module_id);
+    let rel = source_path
+      .strip_prefix(&project_root)
+      .unwrap_or(&source_path);
+    ArtifactPathSerializer::rel_to_slash(rel)
+  }
+
+  fn write_component_collection_file(
+    &self,
+    path: &Path,
+    collection: &BTreeMap<String, Vec<String>>,
+  ) -> Result<()> {
+    if let Some(parent) = path.parent() {
+      fs_err::create_dir_all(parent)?;
+    }
+    fs_err::write(path, serde_json::to_vec_pretty(collection)?)?;
+    Ok(())
+  }
 }
 
 struct TransformSourceSnapshotBuilder<'a> {
@@ -189,6 +364,9 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
       .filter_map(|entry| entry.ok())
       .filter(|entry| entry.file_type().is_file())
     {
+      if HvigorSourceFileFilter::new(entry.path()).is_ignored_macos_metadata() {
+        continue;
+      }
       let kind = SourceClassifier::classify_path(entry.path());
       let accepts = match mode {
         SourceRootMode::TransformAndDeclarations => {
@@ -2518,11 +2696,14 @@ impl BuildCoordinator {
     // ── Step 3: Bundling ──────────────────────────────────────────────
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleStageOutput,)> = Vec::new();
-    for (module, _manifest, loader_json, resource_refs) in &loader_jsons {
+    let mut widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>> = Vec::new();
+    for (module, manifest, loader_json, resource_refs) in &loader_jsons {
       let module_layout = ModuleBuildLayout::new(&module.src_path);
       let cache_dir = PathBuf::from(&loader_json.cache_path);
       let output_dir = PathBuf::from(&loader_json.ace_module_build);
       let cached_abc = output_dir.join("modules.abc");
+      let widget_pass = WidgetCompileArktsPass::new(config.as_ref(), module, manifest, loader_json);
+      let widget_compile_plan = widget_pass.plan()?;
       let task_inputs = TaskInputs::compute(config.as_ref(), loader_json);
       let task_plugin_hash =
         package_plugins
@@ -2577,8 +2758,13 @@ impl BuildCoordinator {
         group_snapshots.clone(),
       );
 
-      let mut cache_hit =
-        !disable_abc_cache && task_inputs.matches_cached(&cache_dir) && cached_abc.exists();
+      let widget_cache_ready = widget_compile_plan
+        .as_ref()
+        .is_none_or(|plan| plan.modules_abc_path.exists());
+      let mut cache_hit = !disable_abc_cache
+        && task_inputs.matches_cached(&cache_dir)
+        && cached_abc.exists()
+        && widget_cache_ready;
       if cache_hit {
         // System-level check: compile-env + file changes + cache group changes.
         let system_request = ShouldInvalidCacheRequest {
@@ -2625,6 +2811,7 @@ impl BuildCoordinator {
 
       if cache_hit {
         bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir),));
+        widget_bundle_outs.push(None);
         continue;
       }
 
@@ -2842,6 +3029,11 @@ impl BuildCoordinator {
       };
       let plugin_factory_output = PluginFactory::new(&bundle_plan, factory_input).build_output()?;
       let plugins = plugin_factory_output.plugins;
+      let widget_plugins = plugins.clone();
+      let ets_transform_plan = plugin_factory_output.ets_transform_plan;
+      let widget_bundle_plan = widget_compile_plan
+        .as_ref()
+        .map(|plan| widget_pass.bundle_plan(&bundle_plan, plan));
       tracing::info!(
         module = %module.name,
         elapsed_ms = plugin_factory_start.elapsed().as_millis(),
@@ -2864,10 +3056,30 @@ impl BuildCoordinator {
       let bundle_out = BundleStage::run(BundleStageInput {
         config: config.clone(),
         plugins,
-        ets_transform_plan: Some(plugin_factory_output.ets_transform_plan),
+        ets_transform_plan: Some(Arc::clone(&ets_transform_plan)),
         plan: bundle_plan,
       })
       .await?;
+      let widget_bundle_out = if let (Some(widget_compile_plan), Some(widget_bundle_plan)) =
+        (widget_compile_plan, widget_bundle_plan)
+      {
+        let mut bundle_out = BundleStage::run(BundleStageInput {
+          config: config.clone(),
+          plugins: widget_plugins,
+          ets_transform_plan: Some(Arc::clone(&ets_transform_plan)),
+          plan: widget_bundle_plan,
+        })
+        .await?;
+        bundle_out.bundle_output.modules_abc_path = widget_compile_plan.modules_abc_path.clone();
+        let output = WidgetCompileArktsOutput {
+          bundle_out,
+          plan: widget_compile_plan,
+        };
+        widget_pass.write_component_collection(&output, &ets_transform_plan)?;
+        Some(output)
+      } else {
+        None
+      };
       #[cfg(feature = "memory-diagnostics")]
       arkdown::memory_diagnostics::dump_with(
         "build:after-bundle-stage",
@@ -2964,6 +3176,7 @@ impl BuildCoordinator {
       }
 
       bundle_outs.push((bundle_out,));
+      widget_bundle_outs.push(widget_bundle_out);
     }
     progress.done();
 
@@ -3188,11 +3401,14 @@ impl BuildCoordinator {
 
     // ── Step 5: ABC compilation ───────────────────────────────────────
     progress.step(5, 6, "Compiling ABC");
-    for (((module, _manifest, loader_json, _resource_refs), (bundle_out,)), bc_har_deps) in
-      loader_jsons
-        .iter()
-        .zip(bundle_outs.iter())
-        .zip(all_bc_har_deps.iter())
+    for (
+      bundle_index,
+      (((module, manifest, loader_json, _resource_refs), (bundle_out,)), bc_har_deps),
+    ) in loader_jsons
+      .iter()
+      .zip(bundle_outs.iter())
+      .zip(all_bc_har_deps.iter())
+      .enumerate()
     {
       let module_layout = ModuleBuildLayout::new(&module.src_path);
       if bundle_out.from_cache {
@@ -3271,7 +3487,7 @@ impl BuildCoordinator {
         bundle_name: config.product.bundle_name.clone(),
         module_name: module.name.clone(),
         cache_file: effective_cache_file,
-        abc_input_files,
+        abc_input_files: abc_input_files.clone(),
         compile_context_info_path,
       });
       // On ABC compile failure, remove the task-inputs cache so the next build
@@ -3295,15 +3511,71 @@ impl BuildCoordinator {
       bytecode_result?;
 
       // ── P12: Widget compile pass ──────────────────────────────────
-      // Mirrors hvigor's widgetCompile pass: when the module declares a
-      // form extension ability with `metadata.widgetCompile = "true"`,
-      // produce `ets/widgets.abc` alongside `ets/modules.abc`.
-      //
-      // Detection uses the parsed module.json5 from the build session
-      // snapshot.  The placeholder ABC written here satisfies packager
-      // path references; a full separate bundle pass for form entries is
-      // a future improvement.
-      {}
+      if let Some(widget_out) = widget_bundle_outs
+        .get(bundle_index)
+        .and_then(Option::as_ref)
+      {
+        let widget_loader_json =
+          WidgetCompileArktsPass::new(config.as_ref(), module, manifest, loader_json)
+            .compile_context_loader_json(&widget_out.plan);
+        let widget_compile_context_info_path = if loader_json.use_normalized_ohm_url {
+          let module_context = session
+            .module_context(&module.name)
+            .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
+          let pkg_context_input =
+            PkgContextInfoInputBuilder::new(config.as_ref(), &session, module, &module_context)
+              .build()?;
+          let pkg_context_info = PkgContextInfoGenerator::new()
+            .generate(&pkg_context_input)
+            .map_err(|e| anyhow::anyhow!("GeneratePkgContextInfo failed: {}", e))?;
+          let path = widget_out.plan.cache_dir.join("compileContextInfo.json");
+          CompileContextInfoWriter::new(
+            &widget_loader_json,
+            &widget_out.bundle_out.bundle_output.module_source_files,
+            &pkg_context_info,
+            &session.project.bundle_type,
+            &config.product.bundle_name,
+          )
+          .write(&path)
+          .map_err(|e| anyhow::anyhow!("GenerateWidgetCompileContextInfo failed: {}", e))?;
+          Some(path)
+        } else {
+          None
+        };
+        BytecodeStage::run(BytecodeStageInput {
+          compiler: RolldownBytecodeCompiler::new(
+            abc_ts2abc_backend_inner,
+            config.sdk_config.es2abc_path.clone(),
+            config.sdk_config.compile_api_version,
+            matches!(config.build_mode, BuildMode::Debug),
+          ),
+          chunk_files: widget_out.bundle_out.bundle_output.chunk_files.clone(),
+          chunk_source_files: widget_out
+            .bundle_out
+            .bundle_output
+            .chunk_source_files
+            .clone(),
+          module_source_files: widget_out
+            .bundle_out
+            .bundle_output
+            .module_source_files
+            .clone(),
+          external_module_requests: widget_out
+            .bundle_out
+            .bundle_output
+            .external_module_requests
+            .clone(),
+          npm_entries: widget_out.bundle_out.bundle_output.npm_entries.clone(),
+          modules_abc_path: widget_out.plan.modules_abc_path.clone(),
+          output_dir: widget_out.plan.output_dir.clone(),
+          cache_dir: widget_out.plan.cache_dir.clone(),
+          bundle_name: config.product.bundle_name.clone(),
+          module_name: module.name.clone(),
+          cache_file: Some(widget_out.plan.cache_file.clone()),
+          abc_input_files: abc_input_files.clone(),
+          compile_context_info_path: widget_compile_context_info_path,
+        })?;
+      }
 
       if let Some(source_maps_path) = &bundle_out.bundle_output.source_maps_path {
         intermediate_writer
