@@ -1,0 +1,27 @@
+[package]
+name = "arkdown-profile"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+arkdown-core = { workspace = true }
+tempfile = { workspace = true }
+
+[dependencies]
+rustc-hash = { workspace = true }
+arkdown-core = { workspace = true }
+arkdown-config = { workspace = true }
+arkdown-path = { workspace = true }
+arkdown-ohpm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+json5 = { workspace = true }
+thiserror = { workspace = true }
+fs-err = { workspace = true }
+indexmap = { workspace = true }
+tracing = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }

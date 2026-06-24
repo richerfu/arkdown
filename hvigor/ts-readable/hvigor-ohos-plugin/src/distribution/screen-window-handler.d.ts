@@ -1,0 +1,16 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-ohos-plugin/src/distribution/screen-window-handler.d.ts
+ */
+import { DistroFilterConfig, DistroFilterHandler } from './distro-filter-handler';
+/**
+ * screenWindow对象校验
+ * policy:include/exclude
+ * value:["454*454"...]
+ */
+export declare class ScreenWindowHandler extends DistroFilterHandler {
+    validateDistroFilterRequest(sourceDistroFilterConfig: DistroFilterConfig, targetDistroFilterConfig: DistroFilterConfig): void;
+    getDimensionValue(distroFilterConfig: DistroFilterConfig): number[] | string[] | undefined;
+}

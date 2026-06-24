@@ -1,0 +1,182 @@
+{
+  "entry/build/default/cache/bundle/bundle.json": {
+    "sha256": "fbe31b86e4ec28a5092c1a85bb2e3beaf154e74690c5a02746be7ed6d3082484",
+    "size": 128
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/entry/src/main/ets/entryability/EntryAbility.protoBin": {
+    "sha256": "8ecd9eb2e0afaeee2b9a7fb39bfbd3d94485e22b1d0600ffdc304a0c67b54155",
+    "size": 9674
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/entry/src/main/ets/entryability/EntryAbility.ts": {
+    "sha256": "0041a671818ff09e5f0f8a1fe637a6192055eb448d34c7e378bf062153888b55",
+    "size": 1182
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/entry/src/main/ets/pages/Index.protoBin": {
+    "sha256": "3d1d632bc101e061ea9ed4d9862b5740b108dc1c438b9bd4f2188d2e55596d48",
+    "size": 20100
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/entry/src/main/ets/pages/Index.ts": {
+    "sha256": "a916af195f81bcdf6b07a7561b688f706c62a32eea30dfd296dfa3e227143d3e",
+    "size": 2401
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/filesInfo.txt": {
+    "sha256": "cae8a0afb45530ba9a38674280d06e96429c74545503742761cf398b50e7b0ba",
+    "size": 668
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/modules.cache": {
+    "sha256": "cdda05860d6c7cc87b84391a50f02f7341d5ce31776799bad4d163cd638d1c7c",
+    "size": 1207
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/npmEntries.protoBin": {
+    "sha256": "6c52d1a4fe2688a5e6a20c992f8fd385dd569c71ae7c2db4055f0f5c8eb6c565",
+    "size": 716
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/npmEntries.txt": {
+    "sha256": "3f5ff6968d562f00c5ef1cb0b45bb5242c43f0e80fce5ba0167bdd95593967dd",
+    "size": 239
+  },
+  "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/sourceMaps.json": {
+    "sha256": "024654dec3f16a72d4a5f4083b02a7281b16bc34aa2de4a783469f277bb0092f",
+    "size": 686
+  },
+  "entry/build/default/cache/ets_transform/transform_cache.json": {
+    "sha256": "25abca8810c743f74aa6389e32438296770170903ad0f3be114324e410500a46",
+    "size": 4198
+  },
+  "entry/build/default/intermediates/cache/router_map_hash.txt": {
+    "sha256": "6934f89a10dbc1c1d094400705b6c242472c82fd41dbedd30327006c99aa5929",
+    "size": 20
+  },
+  "entry/build/default/intermediates/hap_metadata/default/output_metadata.json": {
+    "sha256": "2e12a3845f5e82bed4fc49941c3fb91f7bb468a0b8f26d35dca7ceb5197a00c1",
+    "size": 103
+  },
+  "entry/build/default/intermediates/importee/default/entry/importee.json": {
+    "sha256": "abe1b6b5d86bb11080e7062062b40730d7ed1d88dae651b3171c23a36b38f735",
+    "size": 130
+  },
+  "entry/build/default/intermediates/importer_map/default/importer_map.json": {
+    "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "size": 2
+  },
+  "entry/build/default/intermediates/loader/default/loader.json": {
+    "sha256": "59d2091c95f9750cf93a12cf1ed0d90c71871e74bd4f8de3d080a3965ce9475b",
+    "size": 993
+  },
+  "entry/build/default/intermediates/loader/pkgContextInfo/default/pkgContextInfo.json": {
+    "sha256": "220209d269dd0b2ee95ac5976920cfafbd2f6b96dfc4bf48c533240a9c6908bd",
+    "size": 473
+  },
+  "entry/build/default/intermediates/loader_out/default/ets/cache/.task_inputs": {
+    "sha256": "45832c9311456412147152f8553813aa0187a856129870d5551e40546bd48287",
+    "size": 408
+  },
+  "entry/build/default/intermediates/loader_out/default/ets/cache/compileInfo.json": {
+    "sha256": "6ba164054de05ae59a9318bd7458dc541b0ad98595a9c548b7128a4048dc80b5",
+    "size": 21
+  },
+  "entry/build/default/intermediates/loader_out/default/ets/modules.abc": {
+    "sha256": "69af72d64e9bb1eb902ebe568f7c0a2d257c18310b8776f40dcf6f71fa365194",
+    "size": 9944
+  },
+  "entry/build/default/intermediates/loader_out/default/ets/sourceMaps.map": {
+    "sha256": "a4e1feddf8c25ab0e6b6653c2558228b32b0ade92b17b1195d7e532fd87a5ae4",
+    "size": 733
+  },
+  "entry/build/default/intermediates/merge_profile/default/module.json": {
+    "sha256": "ff674c3c3de8678eabade48685b6ce280ad553e53a7ca06bd255005d8e48ffc8",
+    "size": 1471
+  },
+  "entry/build/default/intermediates/package/default/module.json": {
+    "sha256": "c6963a840f37483978e3a37f75eec0a8455f40a519eb10b4321cf0b6016d2bf8",
+    "size": 1320
+  },
+  "entry/build/default/intermediates/patch/default/base_native_libs.json": {
+    "sha256": "5b9e28dbb48bf86cbe4c43d937d35ad81c3d2c2331916c032f54b69187469d1e",
+    "size": 25
+  },
+  "entry/build/default/intermediates/process_profile/default/module.json": {
+    "sha256": "283bb7d6ed18b25efed10a0513850d5497203e4f1f07bc138359587a0d289792",
+    "size": 1563
+  },
+  "entry/build/default/intermediates/res/default/ResourceTable.txt": {
+    "sha256": "bcea16bd807e89b3292bb65521af3305126f53e84b18d1db3eec2f7924ea3aac",
+    "size": 314
+  },
+  "entry/build/default/intermediates/res/default/ark_module.json": {
+    "sha256": "d9accf371e4a3e9a571cf596bb54008eaf7c8ed4b62e5e2a7de3f9bccda17f25",
+    "size": 1132
+  },
+  "entry/build/default/intermediates/res/default/ids_map/id_defined.json": {
+    "sha256": "a532f597b63f9faccc2a3b28c21a4a4e3eb2b5ebedb1f04e7d0b5233d5ae41aa",
+    "size": 945
+  },
+  "entry/build/default/intermediates/res/default/module.json": {
+    "sha256": "de45ddc5b6191c5cddae9dcb453bdaff0868284e2e1e34268a45a27c96bb2411",
+    "size": 1819
+  },
+  "entry/build/default/intermediates/res/default/opt-compression.json": {
+    "sha256": "14ad50774966d6c6b325047a223e702740befaf62fa77442d99ddf228d5bb946",
+    "size": 193
+  },
+  "entry/build/default/intermediates/res/default/resConfig.json": {
+    "sha256": "3cb8c8eb4a84cfbd3446c951329faff3451bdde29a6a5d61c5e83a821fef2f97",
+    "size": 1510
+  },
+  "entry/build/default/intermediates/res/default/resources.index": {
+    "sha256": "7c2280e08c1e168c64fa6ba3a3eeca0c8868759221796913a821a5f99a80b07a",
+    "size": 801
+  },
+  "entry/build/default/intermediates/res/default/resources/base/media/background.png": {
+    "sha256": "0f1e42d1456915ff823e39af49f5f822fb02438b9300d8ff34a5582ca918d02d",
+    "size": 70
+  },
+  "entry/build/default/intermediates/res/default/resources/base/media/foreground.png": {
+    "sha256": "0f1e42d1456915ff823e39af49f5f822fb02438b9300d8ff34a5582ca918d02d",
+    "size": 70
+  },
+  "entry/build/default/intermediates/res/default/resources/base/media/layered_image.json": {
+    "sha256": "d8909216bf765b22be1d954790d0f8c163b44c3024de1bb62fd86dd1ebcd9b8d",
+    "size": 101
+  },
+  "entry/build/default/intermediates/res/default/resources/base/media/startIcon.png": {
+    "sha256": "567c7c0c7a321ca180e010ad880f0f7519f6d351ac2b9665e2ee710e7cfe7778",
+    "size": 20093
+  },
+  "entry/build/default/intermediates/res/default/resources/base/profile/main_pages.json": {
+    "sha256": "5308f930c5518fda4f244086266274cf6e1f09c8a3c1200830cfef22bbd7ae74",
+    "size": 29
+  },
+  "entry/build/default/intermediates/router_map/default/loader-router-map.json": {
+    "sha256": "64289156985cec621bedfe6b3a9d79b8ba2676bf8b6f81fb48b4f4624683bcf3",
+    "size": 16
+  },
+  "entry/build/default/intermediates/router_map/default/temp-router-map.json": {
+    "sha256": "64289156985cec621bedfe6b3a9d79b8ba2676bf8b6f81fb48b4f4624683bcf3",
+    "size": 16
+  },
+  "entry/build/default/intermediates/share_config/default/temp-share-config.json": {
+    "sha256": "32ba6aa162dcfbb7c4c1722f0778714bc6c286c2d0adfcb180fdb02a9f4f0b19",
+    "size": 27
+  },
+  "entry/build/default/intermediates/source_map/default/sourceMaps.map": {
+    "sha256": "a4e1feddf8c25ab0e6b6653c2558228b32b0ade92b17b1195d7e532fd87a5ae4",
+    "size": 733
+  },
+  "entry/build/default/outputs/default/entry-default-signed.hap": {
+    "sha256": "749a764ef6696b087450e295710f324c75ddd2033c7f83abde6239d2f854d0e2",
+    "size": 45878
+  },
+  "entry/build/default/outputs/default/entry-default-unsigned.hap": {
+    "sha256": "42e886c3d03db4758aa957d6c8de44fb525530f050d7b1badaf99dfe157c84c6",
+    "size": 34960
+  },
+  "entry/build/default/outputs/default/mapping/sourceMaps.map": {
+    "sha256": "a4e1feddf8c25ab0e6b6653c2558228b32b0ade92b17b1195d7e532fd87a5ae4",
+    "size": 733
+  },
+  "entry/build/default/outputs/default/pack.info": {
+    "sha256": "e8cb777236e521ea08d07a3905605d05ef531f7790b2ca9aa06b15f06f5eba87",
+    "size": 545
+  }
+}

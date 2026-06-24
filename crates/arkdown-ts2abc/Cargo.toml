@@ -1,0 +1,15 @@
+[package]
+name = "arkdown-ts2abc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arkdown-core = { workspace = true }
+arkdown-path = { workspace = true }
+thiserror = { workspace = true }
+fs-err = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

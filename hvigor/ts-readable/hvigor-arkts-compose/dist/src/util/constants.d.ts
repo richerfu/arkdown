@@ -1,0 +1,32 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-arkts-compose/dist/src/util/constants.d.ts
+ */
+export declare const NODE_MODULES = "node_modules";
+export declare const OH_NODE_MODULES = "oh_modules";
+export declare const JSBUNDLE = "jsbundle";
+export declare const ESMODULE = "esmodule";
+export declare const DEBUG = "debug";
+export declare const RELEASE = "release";
+export declare const INDEX_PREFIX = "index";
+export declare const PACKAGE_JSON = "package.json";
+export declare const OH_PACKAGE_JSON5 = "oh-package.json5";
+export declare const OHPM = "ohpm";
+export declare const MODULE_JSON_5 = "module.json5";
+export declare const CONFIG_JSON = "config.json";
+export declare const SUPPORT_EXTENSIONS: string[];
+export declare const SUFFIX_EXTENSIONS: string[];
+export declare const VIRTUAL_FILE_PREFIX = "\0";
+export declare enum AnalyzeMode {
+    DEFAULT = 0,
+    VERBOSE = 1,
+    FALSE = 2,
+    TRACE = 3
+}
+export declare const API_VERSION_11 = 11;
+export declare const OPEN_HARMONY = "OpenHarmony";
+export declare const TSC_COMMON_CACHE_KEY = "common";
+export declare const ES6_BROWSER_EMPTY = "\0node-resolve:empty";
+export declare const TRANSFORM_ABC_WORKER_REQUEST = "transformAbc";

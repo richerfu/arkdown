@@ -1,0 +1,49 @@
+//! OXC-based ArkTS/ArkUI transform core (SPEC-048).
+//!
+//! This crate owns the ETS transform core, migrated from
+//! `arkdown-plugin-ets-transform` (the rolldown adapter layer).
+//!
+//! It implements the transform stages currently wired into the Rolldown
+//! adapter:
+//!
+//! | Stage        | SDK equivalent        | What it does                                    |
+//! | ------------ | --------------------- | ----------------------------------------------- |
+//! | `etsTransform` | `etsTransform`      | Desugars ArkUI decorators and struct components |
+//! | `apiTransform` | `apiTransform`      | Rewrites OHOS API imports by target SDK version |
+//!
+//! ## Key constraints
+//!
+//! - `.ets` files use OXC `SourceType::ets()` (ohos-rs/oxc fork, pinned rev).
+//! - `.ts` files use OXC TS parser; `.js` uses OXC JS parser.
+//! - `.d.ts`/`.d.ets` are excluded by both `SourceClassifier` and the pipeline.
+//! - Transform crate does not read SDK, profile, package, or resource files directly.
+
+mod api_transform;
+mod checker;
+pub mod error;
+mod hvigor_format;
+mod kit_map;
+mod lazy_import;
+mod module_emit;
+mod module_name;
+mod module_rewrite;
+mod resource_transform;
+mod rolldown_plan;
+mod source;
+mod source_map;
+mod sys_resource;
+pub mod transform;
+mod typescript_emit;
+
+// Narrow re-exports per spec (lib.rs only re-exports, no new business functions).
+pub use module_rewrite::StaticModuleSpecifierRewrite;
+pub use resource_transform::ResourceReference;
+pub use rolldown_plan::{
+    RolldownEtsTransformOutput, RolldownEtsTransformPlan, RolldownEtsTransformer,
+    TransformEntrySourceId,
+};
+pub use source::{SourceClassifier, TransformResolvedStaticModule, TransformSourceSnapshot};
+pub use sys_resource::SystemResourceReferenceLoader;
+pub use transform::{ArktsTransformer, ArkuiComponentNameCollector, CheckerMode};
+
+pub(crate) use module_name::ModuleExportNameText;

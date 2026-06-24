@@ -1,0 +1,11 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "bc-har-dep",
+  "version": "1.0.0",
+  "description": "Pre-compiled ByteCode HAR fixture for testing",
+  "main": "index",
+  "author": "",
+  "license": "Apache-2.0",
+  "byteCodeHar": true,
+  "dependencies": {}
+}

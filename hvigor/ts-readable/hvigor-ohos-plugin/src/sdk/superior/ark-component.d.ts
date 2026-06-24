@@ -1,0 +1,12 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-ohos-plugin/src/sdk/superior/ark-component.d.ts
+ */
+export interface ArkComponent {
+    /**
+     * 获取ark版本
+     */
+    getArkVersion(compatibleSdkVersion?: number, compatibleSdkVersionStage?: string): string;
+}

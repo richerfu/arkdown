@@ -1,0 +1,498 @@
+use rustc_hash::FxHashMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::{CompileMode, OhosModuleType};
+
+/// Compiled ArkCompiler bytecode artifact for one OHOS module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbcArtifact {
+    /// Absolute path to the output `.abc` file.
+    pub path: PathBuf,
+    /// API version this was compiled for (from `compatibleSdkVersion`).
+    pub api_version: u32,
+    /// Whether debug info is included.
+    pub has_debug_info: bool,
+    /// Source maps chain (`.chunk.js.map` files used as input to `es2abc`).
+    pub source_maps: Vec<PathBuf>,
+    /// Path to `es2abc` incremental cache file.
+    pub cache_path: Option<PathBuf>,
+}
+
+/// ByteCode HAR dependency information (from `loader.json` `byteCodeHarInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BytecodeHarInfo {
+    pub package_name: String,
+    pub abc_path: PathBuf,
+    pub compatible_sdk_version: String,
+    pub compatible_sdk_version_stage: Option<String>,
+    pub source_maps_path: Option<PathBuf>,
+    pub insight_intent_path: Option<PathBuf>,
+}
+
+/// Compiled OHOS resources (output of `arkdown-resource`/`restool`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OhosResource {
+    /// Path to compiled `resources.index` file.
+    pub resources_index: PathBuf,
+    /// Path to `ResourceTable.txt` (used by HSP consumers).
+    pub resource_table: Option<PathBuf>,
+    /// Profile JSON files written to `resources/base/profile/`.
+    pub profiles: Vec<ResourceProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceProfile {
+    /// Profile name, e.g. `"routerMap"`, `"startup_config"`.
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Processed `module.json` (output of `ProcessProfile` + `MergeProfile`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HapManifest {
+    pub module_name: String,
+    pub module_type: OhosModuleType,
+    pub device_types: Vec<String>,
+    /// e.g. `"ark3.5.0.0"`
+    pub virtual_machine: String,
+    pub compile_mode: CompileMode,
+    pub abilities: Vec<AbilityEntry>,
+    pub extension_abilities: Vec<ExtensionAbilityEntry>,
+    pub dependencies: Vec<HspDependency>,
+    /// `$profile:` router map reference (if router map is generated).
+    pub router_map: Option<String>,
+    /// e.g. `"$profile:main_pages"`
+    pub pages: Option<String>,
+    pub main_element: Option<String>,
+    /// Module-level description resource reference, e.g. `"$string:module_desc"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Module-level `srcEntry` for shared packages (HSP) that export a single
+    /// entry file without declaring abilities.  e.g. `"./ets/Index.ets"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_entry: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbilityEntry {
+    pub name: String,
+    pub src_entry: String,
+    pub exported: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_window_icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_window_background: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionAbilityEntry {
+    pub name: String,
+    pub src_entry: String,
+    pub extension_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<MetadataEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HspDependency {
+    pub bundle_name: String,
+    pub module_name: String,
+}
+
+/// Raw parsed `module.json5` (before processing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleJson5 {
+    pub module: ModuleJson5Module,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleJson5Module {
+    #[serde(default)]
+    pub name: String,
+    /// `"entry"` | `"feature"` | `"shared"` | `"har"`
+    #[serde(rename = "type", default)]
+    pub type_: String,
+    pub main_element: Option<String>,
+    #[serde(default)]
+    pub device_types: Vec<String>,
+    pub pages: Option<String>,
+    /// `$profile:` router map reference, e.g. `"$profile:router_map"`.
+    #[serde(default, rename = "routerMap")]
+    pub router_map: Option<String>,
+    /// Module description resource reference, e.g. `"$string:module_desc"`.
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub abilities: Vec<AbilityConfig>,
+    #[serde(default)]
+    pub extension_abilities: Vec<ExtensionAbilityConfig>,
+    pub src_entry: Option<String>,
+    #[serde(default)]
+    pub metadata: Vec<MetadataEntry>,
+    /// `$profile:` reference to the app startup config JSON, e.g. `"$profile:startup_config"`.
+    /// Used by `ProcessStartupConfig` to locate the startup task list for this module.
+    #[serde(default)]
+    pub app_startup: Option<String>,
+    /// Cross-app shared component config exported by this HSP module.
+    ///
+    /// Hvigor accepts either a `$profile:<name>` reference string or an inline
+    /// array. Keep the two shapes distinct so ProcessShareConfig can read the
+    /// referenced profile file instead of silently dropping it.
+    #[serde(default, rename = "crossAppSharedConfig")]
+    pub cross_app_shared_config: CrossAppSharedConfig,
+    /// Permissions requested by this module, preserved verbatim in the output `module.json`.
+    #[serde(
+        rename = "requestPermissions",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub request_permissions: Vec<serde_json::Value>,
+    /// Permissions defined/exported by this module.
+    #[serde(
+        rename = "definePermissions",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub define_permissions: Vec<serde_json::Value>,
+    /// Proxy data entries (cross-app data proxy configuration), preserved verbatim.
+    #[serde(rename = "proxyData", default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_data: Vec<serde_json::Value>,
+    /// HAP module field pointing at the HSP form widget module.
+    #[serde(rename = "formWidgetModule", default)]
+    pub form_widget_module: Option<String>,
+    /// HSP module field pointing at the HAP form extension module.
+    #[serde(rename = "formExtensionModule", default)]
+    pub form_extension_module: Option<String>,
+    /// Module dependencies declared in `module.json5` (HSP inter-module deps).
+    /// Each entry has at minimum `bundleName` and `moduleName` fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<serde_json::Value>,
+    /// Raw `deliveryWithInstall` flag used by hvigor's form module checks.
+    #[serde(rename = "deliveryWithInstall", default)]
+    pub delivery_with_install: Option<bool>,
+    /// Raw `compileMode` field from `module.json5`.
+    ///
+    /// Valid hvigor values are `"esmodule"` (default, Stage model) and
+    /// `"jsbundle"` (legacy FA model).  arkdown only supports `"esmodule"`.
+    /// The value is stored as a raw `Option<String>` so the CLI can detect
+    /// and reject `"jsbundle"` before starting the build pipeline.
+    #[serde(rename = "compileMode", default)]
+    pub compile_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbilityConfig {
+    pub name: String,
+    /// e.g. `"./ets/entryability/EntryAbility.ets"`
+    pub src_entry: String,
+    #[serde(default)]
+    pub exported: bool,
+    #[serde(default)]
+    pub skills: Vec<SkillConfig>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "startWindowIcon", default)]
+    pub start_window_icon: Option<String>,
+    #[serde(rename = "startWindowBackground", default)]
+    pub start_window_background: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionAbilityConfig {
+    pub name: String,
+    pub src_entry: String,
+    #[serde(rename = "type", alias = "extensionType", default)]
+    pub extension_type: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub metadata: Vec<MetadataEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uris: Vec<SkillUri>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillUri {
+    pub scheme: Option<String>,
+    pub host: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataEntry {
+    pub name: String,
+    pub value: Option<String>,
+    pub resource: Option<String>,
+}
+
+/// One entry in the `crossAppSharedConfig` array from an HSP dep's `module.json5`.
+///
+/// Hvigor merges these from all HSP dependencies into the consuming module's
+/// `temp-share-config.json` intermediate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossAppSharedConfigEntry {
+    /// Package name of the HSP that exports this shared component.
+    #[serde(default)]
+    pub package_name: String,
+    /// URI identifying the shared component (must be unique across all deps).
+    pub uri: String,
+    /// Source entry path for the shared component, e.g. `"./ets/components/Foo.ets"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_entry: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum CrossAppSharedConfig {
+    #[default]
+    None,
+    Profile(String),
+    Inline(Vec<CrossAppSharedConfigEntry>),
+}
+
+impl CrossAppSharedConfig {
+    pub fn inline_entries(&self) -> &[CrossAppSharedConfigEntry] {
+        match self {
+            Self::Inline(entries) => entries,
+            Self::None | Self::Profile(_) => &[],
+        }
+    }
+
+    pub fn profile_name(&self) -> Option<&str> {
+        let Self::Profile(value) = self else {
+            return None;
+        };
+        value.strip_prefix("$profile:").or(Some(value.as_str()))
+    }
+}
+
+impl Serialize for CrossAppSharedConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::None => Vec::<CrossAppSharedConfigEntry>::new().serialize(serializer),
+            Self::Profile(value) => value.serialize(serializer),
+            Self::Inline(entries) => entries.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CrossAppSharedConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct Visitor;
+
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = CrossAppSharedConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a crossAppSharedConfig array or \"$profile:<name>\" reference string",
+                )
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(CrossAppSharedConfig::Profile(value.to_string()))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = seq.next_element::<CrossAppSharedConfigEntry>()? {
+                    entries.push(entry);
+                }
+                Ok(CrossAppSharedConfig::Inline(entries))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Startup task entry from a module's `appStartup` profile JSON.
+///
+/// Written to `temp-startup-config.json` after merging all HAR/HSP dep startup tasks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupTask {
+    /// Unique name for this startup task within the bundle.
+    pub name: String,
+    /// Relative source entry path, e.g. `"./ets/startup/MyTask.ets"`.
+    pub src_entry: String,
+    /// Whether this task runs before the ability window is ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_on_thread: Option<String>,
+    /// Whether this task waits for all preceding tasks to finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_on_main_thread: Option<bool>,
+    /// Whether the startup entry is excluded from automatic startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_from_auto_start: Option<bool>,
+    /// Explicit dependencies on other startup task names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
+    /// Module name populated during merging (not in the source JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_name: Option<String>,
+    /// OHM URL for the task src entry, populated during merging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ohmurl: Option<String>,
+    /// Absolute path to the task source file, populated during merging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_entry_absolute_path: Option<String>,
+    /// Path to the startup config JSON that declared this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_config_path: Option<String>,
+    /// Whether an app preload SO task came from a remote ByteCode HAR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_remote_byte_code_har: Option<bool>,
+}
+
+/// Merged startup config written to `temp-startup-config.json`.
+///
+/// Aggregates `startupTasks` and `appPreloadHintStartupTasks` from the current
+/// module and all its HAR/HSP dependencies.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergedStartupConfig {
+    /// Regular startup tasks (run at app startup).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub startup_tasks: Vec<StartupTask>,
+    /// App preload hint tasks (run before the first ability is created).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_preload_hint_startup_tasks: Vec<StartupTask>,
+    /// System preload hint tasks merged from ByteCode HAR `META-INF/preload.json`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_preload_hint_startup_tasks: Vec<StartupTask>,
+}
+
+/// Raw parsed app startup profile JSON (`resources/base/profile/<name>.json`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStartupProfile {
+    #[serde(default)]
+    pub startup_tasks: Vec<StartupTask>,
+    #[serde(default)]
+    pub app_preload_hint_startup_tasks: Vec<StartupTask>,
+    /// Optional config entry path referenced by the startup config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_entry: Option<String>,
+}
+
+/// Raw parsed `oh-package.json5`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OhPackageJson5 {
+    pub model_version: String,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub main: Option<String>,
+    pub types: Option<String>,
+    #[serde(default)]
+    pub dependencies: FxHashMap<String, String>,
+    #[serde(default)]
+    pub dev_dependencies: FxHashMap<String, String>,
+    #[serde(default)]
+    pub dynamic_dependencies: FxHashMap<String, String>,
+    #[serde(default)]
+    pub overrides: FxHashMap<String, String>,
+    /// Internal metadata (used by SDK, ByteCode HAR metadata).
+    pub metadata: Option<PackageMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageMetadata {
+    #[serde(default)]
+    pub custom_types: Vec<String>,
+    #[serde(default)]
+    pub declaration_entry: Vec<String>,
+    pub runtime_only: Option<crate::config::RuntimeOnlyConfig>,
+    #[serde(default)]
+    pub workers: Vec<String>,
+    #[serde(default)]
+    pub dependency_pkg_version: FxHashMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cross_app_shared_config_deserializes_profile_ref() {
+        let parsed: ModuleJson5 = serde_json::from_str(
+            r#"{
+                "module": {
+                    "crossAppSharedConfig": "$profile:cross_app_shared_config"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.module.cross_app_shared_config.profile_name(),
+            Some("cross_app_shared_config")
+        );
+        assert!(parsed
+            .module
+            .cross_app_shared_config
+            .inline_entries()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_cross_app_shared_config_deserializes_inline_entries() {
+        let parsed: ModuleJson5 = serde_json::from_str(
+            r#"{
+                "module": {
+                    "crossAppSharedConfig": [
+                        { "uri": "myapp://shared/Foo", "srcEntry": "./ets/Foo.ets" }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let entries = parsed.module.cross_app_shared_config.inline_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].uri, "myapp://shared/Foo");
+        assert_eq!(entries[0].src_entry.as_deref(), Some("./ets/Foo.ets"));
+        assert_eq!(entries[0].package_name, "");
+        assert_eq!(parsed.module.cross_app_shared_config.profile_name(), None);
+    }
+}

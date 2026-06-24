@@ -1,0 +1,14 @@
+[package]
+name = "arkdown-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+arkdown-path = { workspace = true }
+bitflags = { workspace = true }
+oxc_index = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

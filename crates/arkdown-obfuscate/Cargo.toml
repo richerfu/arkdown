@@ -1,0 +1,22 @@
+[package]
+name = "arkdown-obfuscate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arkdown-core  = { workspace = true }
+arkdown-path  = { workspace = true }
+thiserror     = { workspace = true }
+walkdir       = { workspace = true }
+rustc-hash    = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_parser    = { workspace = true }
+oxc_ast       = { workspace = true }
+oxc_span      = { workspace = true }
+oxc_syntax    = { workspace = true }
+oxc_codegen   = { workspace = true }
+oxc_minifier  = { workspace = true }
+oxc_ast_visit = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

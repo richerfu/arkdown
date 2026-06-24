@@ -1,0 +1,39 @@
+//! Built-in rolldown plugins for the OpenHarmony OS build pipeline.
+//!
+//! These modules were previously separate workspace crates
+//! (`arkdown-plugin-*`). They are now consolidated under the `arkdown`
+//! bundler crate so that the full plugin set is available through a single
+//! dependency and the inter-plugin API surface can be kept internal.
+//!
+//! # Sub-modules
+//!
+//! | Module | Responsibility |
+//! |--------|---------------|
+//! | `factory` | `PluginFactory` — assembles the ordered plugin set for a module build |
+//! | `json5` | JSON/JSON5 import transform (was `arkdown-plugin-json5`) |
+//! | `duplicate_check` | Filename uniqueness check (was `arkdown-plugin-duplicate-check`) |
+//! | `module_meta` | Per-module OHOS metadata (was `arkdown-plugin-module-meta`) |
+//! | `ohos_resolve` | Resolve plugin wrapping the OHOS resolver (was `arkdown-plugin-ohos-resolve`) |
+//! | `har_dedup` | HAR deduplication for HSP builds (was `arkdown-plugin-har-dedup`) |
+//! | `ets_transform` | ArkTS transform replacing SDK JS plugins (was `arkdown-plugin-ets-transform`) |
+//! | `wrapper_chunk` | Wrapper chunk emission for globalThis module registry |
+//! | `import_check` | Import validity / cross-module import guard |
+//! | `minify` | Minification pass (release builds) |
+
+pub mod duplicate_check;
+pub mod ets_transform;
+/// External compile plugin support (declarative subset, OXC-analyzed).
+///
+/// Bridges `compilePluginPath` JS plugins to the Rolldown `Plugin` trait.
+/// See [`external::ExternalPluginLoader`] and the SPEC-008 design doc.
+pub mod external;
+pub mod factory;
+pub mod har_dedup;
+pub mod import_check;
+pub mod json5;
+pub mod minify;
+pub mod module_meta;
+/// Node.js subprocess runner for external JavaScript compile plugins.
+pub mod node_js;
+pub mod ohos_resolve;
+pub mod wrapper_chunk;

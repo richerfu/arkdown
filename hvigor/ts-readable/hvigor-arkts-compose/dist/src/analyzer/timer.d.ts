@@ -1,0 +1,16 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-arkts-compose/dist/src/analyzer/timer.d.ts
+ */
+export interface SerializedTimings {
+    name: string;
+    startTime: number;
+    endTime: number;
+    time: number;
+    frequency: number;
+    memory: number;
+    startMemory: number;
+    totalMemory: number;
+}

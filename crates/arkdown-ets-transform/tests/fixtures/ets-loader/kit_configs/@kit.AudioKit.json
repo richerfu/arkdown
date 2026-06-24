@@ -1,0 +1,16 @@
+{
+  "symbols": {
+    "audio": {
+      "source": "@ohos.multimedia.audio.d.ts",
+      "bindings": "default"
+    },
+    "AVVolumePanel": {
+      "source": "@ohos.multimedia.avVolumePanel.d.ets",
+      "bindings": "AVVolumePanel"
+    },
+    "AVVolumePanelParameter": {
+      "source": "@ohos.multimedia.avVolumePanel.d.ets",
+      "bindings": "AVVolumePanelParameter"
+    }
+  }
+}

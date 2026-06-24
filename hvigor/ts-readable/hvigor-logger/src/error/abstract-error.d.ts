@@ -1,0 +1,72 @@
+/*
+ * Human-readable TypeScript reconstruction.
+ * Generated from hvigor/ts by hvigor/tools/reconstruct-readable-ts.cjs.
+ * Keep semantic edits in Rust ports or separate hand-refined notes.
+ * Source baseline: hvigor-logger/src/error/abstract-error.d.ts
+ */
+import { MoreInfo } from '../types/error-log-types';
+import { BaseErrorInfo, ErrorInfoId, MatchOptions } from './type';
+interface ErrorInfo {
+    /**
+     * 查找错误信息的方式
+     * @protected
+     */
+    findErrorInfo(): any;
+}
+export declare abstract class BaseError<T extends BaseErrorInfo> implements ErrorInfo {
+    protected _timestamp: Date;
+    protected readonly _errorJsonPaths: string[];
+    protected _id: string | undefined;
+    protected _message: string | undefined;
+    protected _solutions: string[] | undefined;
+    protected _moreInfo: MoreInfo | undefined;
+    protected _code: string | undefined;
+    protected _checkMessage: string | undefined;
+    protected _stack: string | undefined;
+    protected _errorInfo: (T & ErrorInfoId) | undefined;
+    private _matchOptions;
+    private static readonly validFields;
+    protected constructor(errorJsonPaths: string[], matchOptions: MatchOptions);
+    /**
+     * 是否从json文件中匹配到错误信息
+     * @returns {boolean}
+     */
+    isMatchSuccess(): boolean;
+    findErrorInfo(): (T & ErrorInfoId) | undefined;
+    /**
+     * 查找错误信息
+     */
+    private match;
+    /**
+     * 通过field字段匹配错误信息
+     */
+    private matchByField;
+    /**
+     * 通过标识匹配错误信息
+     */
+    private matchById;
+    private putIdIntoErrorInfo;
+    /**
+     * 获取json文件对象
+     */
+    private getErrorInfoJson;
+    private getJsonObj;
+    get timestamp(): Date;
+    get errorJsonPaths(): string[];
+    get id(): string | undefined;
+    set id(value: string | undefined);
+    get message(): string | undefined;
+    set message(value: string | undefined);
+    get solutions(): string[] | undefined;
+    set solutions(value: string[] | undefined);
+    get moreInfo(): MoreInfo | undefined;
+    set moreInfo(value: MoreInfo | undefined);
+    get code(): string | undefined;
+    set code(value: string | undefined);
+    get stack(): string | undefined;
+    set stack(value: string | undefined);
+    get checkMessage(): string | undefined;
+    set checkMessage(value: string | undefined);
+    get errorInfo(): (T & ErrorInfoId) | undefined;
+}
+export {};
