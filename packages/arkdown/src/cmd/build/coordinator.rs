@@ -69,8 +69,8 @@ use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
 
 use arkdown::plugins::ets_transform::{
-  CheckerMode, ComponentMetadata, ResourceReference, SystemResourceReferenceLoader,
-  TransformResolvedStaticModule, TransformSourceSnapshot,
+  CheckerMode, ComponentMetadata, ModuleAnalyzerKind, ResourceReference,
+  SystemResourceReferenceLoader, TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
@@ -2076,6 +2076,7 @@ impl BuildCoordinator {
     let cli_cache_file = args.cache_file.clone();
     let abc_backend = args.abc_backend;
     let named_target = args.build_target_name.clone();
+    let module_analyzer = ModuleAnalyzerKind::from(args.module_analyzer);
 
     let checker_mode = match args.checker.as_deref().unwrap_or("oxc") {
       "oxc" => CheckerMode::Oxc,
@@ -2883,7 +2884,8 @@ impl BuildCoordinator {
       let cached_abc = output_dir.join("modules.abc");
       let widget_pass = WidgetCompileArktsPass::new(config.as_ref(), module, manifest, loader_json);
       let widget_compile_plan = widget_pass.plan()?;
-      let task_inputs = TaskInputs::compute(config.as_ref(), loader_json);
+      let task_inputs =
+        TaskInputs::compute(config.as_ref(), loader_json).with_module_analyzer(module_analyzer);
       let module_obfuscation_dependency_rule_files = if obfuscation_enabled_for_release {
         let module_context = session
           .module_context(&module.name)
@@ -3098,6 +3100,7 @@ impl BuildCoordinator {
         PathBuf::from(&loader_json.ace_module_build),
         config.as_ref(),
         Some(&custom_cfg),
+        module_analyzer,
         source_map_packages,
         runtime_packages,
       );
@@ -3323,13 +3326,14 @@ impl BuildCoordinator {
         };
         let bundle_config_hash = {
           let key_str = format!(
-            "{}#{}#{:?}",
+            "{}#{}#{:?}#{}",
             config.sdk_config.compile_sdk_version,
             match config.build_mode {
               BuildMode::Debug => "debug",
               BuildMode::Release => "release",
             },
-            config.output_target
+            config.output_target,
+            module_analyzer.as_str()
           );
           arkdown_cache::CacheKeyMaterial::hash_u64(&key_str)
         };
@@ -3756,7 +3760,8 @@ impl BuildCoordinator {
       }
 
       let cache_dir = PathBuf::from(&loader_json.cache_path);
-      let task_inputs = TaskInputs::compute(config.as_ref(), loader_json);
+      let task_inputs =
+        TaskInputs::compute(config.as_ref(), loader_json).with_module_analyzer(module_analyzer);
       let task_plugin_hash =
         package_plugins
           .iter()
@@ -4276,6 +4281,7 @@ impl BuildCoordinator {
         disable_abc_cache,
         cache_file: cli_cache_file.clone(),
         checker: args.checker.clone(),
+        module_analyzer: args.module_analyzer,
         cache: args.cache,
         package_plugins: package_plugins.clone(),
         preview_mode,

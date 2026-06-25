@@ -11,7 +11,7 @@ use anyhow::Result;
 use rolldown_plugin::__inner::SharedPluginable;
 use rustc_hash::FxHashSet;
 
-use arkdown::plugins::ets_transform::RolldownEtsTransformPlan;
+use arkdown::plugins::ets_transform::{ModuleAnalyzerKind, RolldownEtsTransformPlan};
 use arkdown::{
   BundleCachePolicy, BundleInput, BundleOutput, BundleOutputOptions, BundlePlan, BundlePluginSet,
   BundleRuntimePackageContext, BundleRuntimePackageInfo, BundleSourceMapPackageInfo, Bundler,
@@ -38,6 +38,7 @@ pub(super) fn make_bundle_plan(
   output_dir: impl Into<PathBuf>,
   config: &ArkdownConfig,
   custom_cfg: Option<&ArkdownCustomConfig>,
+  module_analyzer: ModuleAnalyzerKind,
   mut source_map_packages: BundleSourceMapPackageInfo,
   mut runtime_packages: BundleRuntimePackageInfo,
 ) -> BundlePlan {
@@ -87,6 +88,7 @@ pub(super) fn make_bundle_plan(
     bundle_name: config.product.bundle_name.clone(),
     use_normalized_ohm_url: loader_json.use_normalized_ohm_url,
     should_emit_js: true,
+    module_analyzer,
     output_target: config.output_target.clone(),
     shim_missing_exports_override: custom_cfg.and_then(|c| c.shim_missing_exports),
     treeshake_override: custom_cfg.and_then(|c| c.treeshake),

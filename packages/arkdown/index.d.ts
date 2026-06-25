@@ -79,6 +79,7 @@ export interface BuildConfig {
   disableAbcCache?: boolean
   cacheFile?: string
   checker?: string
+  moduleAnalyzer?: 'oxc' | 'yuku'
   cache?: boolean
   compilePluginPath?: string | string[]
   hvigorPluginFile?: string | string[]

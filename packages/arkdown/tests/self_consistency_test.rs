@@ -178,7 +178,7 @@ impl SelfConsistencyOracle {
   /// via the [`BuildArgs`] struct. The project root is always set to
   /// `project_path`.
   pub fn run_build(project_path: &Path, disable_abc_cache: bool) -> BuildOutput {
-    use arkdown_napi::cmd::build::args::AbcBackendChoice;
+    use arkdown_napi::cmd::build::args::{AbcBackendChoice, ModuleAnalyzerChoice};
     use arkdown_napi::cmd::build::{BuildArgs, BuildCommand};
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -199,6 +199,7 @@ impl SelfConsistencyOracle {
         cache_file: None,
         abc_backend: AbcBackendChoice::Auto,
         checker: Some("oxc".to_string()),
+        module_analyzer: ModuleAnalyzerChoice::Oxc,
         cache: true,
         skip_resource: false,
         skip_profile: false,

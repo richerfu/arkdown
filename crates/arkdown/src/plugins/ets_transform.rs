@@ -24,9 +24,9 @@ pub use arkdown_ets_transform::error::{DiagnosticSeverity, EtsTransformError};
 pub use arkdown_ets_transform::transform;
 pub use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
 pub use arkdown_ets_transform::{
-    CheckerMode, ResourceReference, RolldownEtsTransformPlan, StaticModuleSpecifierRewrite,
-    SystemResourceReferenceLoader, TransformEntrySourceId, TransformResolvedStaticModule,
-    TransformSourceSnapshot,
+    CheckerMode, ModuleAnalyzerKind, ResourceReference, RolldownEtsTransformPlan,
+    StaticModuleSpecifierRewrite, SystemResourceReferenceLoader, TransformEntrySourceId,
+    TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 
 /// ArkTS transform plugin adapter.

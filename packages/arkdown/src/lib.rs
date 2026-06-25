@@ -909,6 +909,7 @@ pub struct BuildConfig {
   pub disable_abc_cache: Option<bool>,
   pub cache_file: Option<String>,
   pub checker: Option<String>,
+  pub module_analyzer: Option<String>,
   pub cache: Option<bool>,
   #[napi(ts_type = "string | string[]")]
   pub compile_plugin_path: Option<String>,
@@ -1000,6 +1001,7 @@ pub fn build(
     disable_abc_cache,
     cache_file,
     checker,
+    module_analyzer,
     cache,
     compile_plugin_path: _,
     hvigor_plugin_file: _,
@@ -1017,6 +1019,7 @@ pub fn build(
     disable_abc_cache: disable_abc_cache.unwrap_or(false),
     cache_file,
     checker,
+    module_analyzer,
     cache: cache.unwrap_or(true),
   };
 
@@ -1075,6 +1078,7 @@ struct PackageBuildArgs {
   disable_abc_cache: bool,
   cache_file: Option<String>,
   checker: Option<String>,
+  module_analyzer: Option<String>,
   cache: bool,
 }
 
@@ -1087,7 +1091,7 @@ async fn run_build(
   package_args: PackageBuildArgs,
   js_plugins: Vec<PackagePlugin>,
 ) -> anyhow::Result<Vec<String>> {
-  use crate::cmd::build::args::AbcBackendChoice;
+  use crate::cmd::build::args::{AbcBackendChoice, ModuleAnalyzerChoice};
   use crate::cmd::build::BuildArgs;
   use arkdown_config::load_config;
   use arkdown_core::{BuildMode, OutputTarget};
@@ -1098,6 +1102,11 @@ async fn run_build(
       anyhow::bail!("unsupported checker '{checker}'; expected 'oxc' or 'off'");
     }
   }
+  let module_analyzer = match package_args.module_analyzer.as_deref().unwrap_or("oxc") {
+    "oxc" => ModuleAnalyzerChoice::Oxc,
+    "yuku" => ModuleAnalyzerChoice::Yuku,
+    other => anyhow::bail!("unsupported module analyzer '{other}'; expected 'oxc' or 'yuku'"),
+  };
 
   let project_path = std::path::PathBuf::from(&project);
   let output_target = match target.as_str() {
@@ -1142,6 +1151,7 @@ async fn run_build(
     cache_file: package_args.cache_file.map(std::path::PathBuf::from),
     abc_backend: AbcBackendChoice::Sdk,
     checker: package_args.checker.or_else(|| Some("oxc".to_string())),
+    module_analyzer,
     cache: package_args.cache,
     // Hot-rebuild flags are always false when invoked via the Node.js API
     // — only the watch stage sets them for incremental rebuilds.

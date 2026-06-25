@@ -102,6 +102,9 @@ class ArkdownPackageCli {
         case '--checker':
           config.checker = nextValue()
           break
+        case '--module-analyzer':
+          config.moduleAnalyzer = nextValue()
+          break
         case '--hvigor-plugin-file':
           appendPathConfig(config, 'hvigorPluginFile', nextValue())
           break
@@ -150,6 +153,8 @@ Options:
   --disable-abc-cache Disable CompileArkTS cache.
   --cache-file <path> Override es2abc cache file.
   --checker <mode>    Checker mode: oxc or off. Defaults to oxc.
+  --module-analyzer <mode>
+                      Module analyzer: oxc or yuku. Defaults to oxc.
   --hvigor-plugin-file <path>
                       Load a hvigor plugin file before compile plugins.
   --compile-plugin-path <path>

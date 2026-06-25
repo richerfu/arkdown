@@ -560,7 +560,8 @@ impl<'a> PluginFactory<'a> {
         )
         .with_entry_source_ids(TransformEntrySources::new(&self.plan).source_ids())
         .with_checker_mode(self.input.checker_mode)
-        .with_should_emit_js(self.plan.should_emit_js);
+        .with_should_emit_js(self.plan.should_emit_js)
+        .with_module_analyzer(self.plan.module_analyzer);
         let ets_transform_plan = Arc::new(ets_transform_plan);
         let ets_transform_plugin: SharedPluginable = Arc::new(EtsTransformPlugin::from_plan(
             Arc::clone(&ets_transform_plan),
@@ -705,6 +706,7 @@ mod tests {
             bundle_name: "com.example.test".to_string(),
             use_normalized_ohm_url: true,
             should_emit_js: true,
+            module_analyzer: arkdown_ets_transform::ModuleAnalyzerKind::default(),
             output_target: OutputTarget::Hap,
             shim_missing_exports_override: None,
             treeshake_override: None,

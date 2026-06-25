@@ -15,7 +15,8 @@ use crate::api_transform::event_emitter::EventEmitterImportRewriter;
 use crate::error::EtsTransformError;
 use crate::hvigor_format::HvigorStandardTs;
 use crate::module_rewrite::{
-    DefaultImportReexportRewriter, TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
+    DefaultImportReexportRewriter, ModuleAnalyzerKind, TypeOnlyNamedImportSplitter,
+    TypeOnlyReexportSplitter,
 };
 use crate::resource_transform::{ResourceReference, ResourceReferenceRewriter};
 use crate::source::{SourceClassifier, SourceFileKind, TransformSourceSnapshot};
@@ -44,6 +45,7 @@ pub struct RolldownEtsTransformPlan {
     entry_source_ids: Option<Arc<FxHashSet<String>>>,
     pub checker_mode: CheckerMode,
     pub should_emit_js: bool,
+    pub module_analyzer: ModuleAnalyzerKind,
 }
 
 impl RolldownEtsTransformPlan {
@@ -71,6 +73,7 @@ impl RolldownEtsTransformPlan {
             entry_source_ids: None,
             checker_mode: CheckerMode::Oxc,
             should_emit_js: true,
+            module_analyzer: ModuleAnalyzerKind::default(),
         }
     }
 
@@ -81,6 +84,11 @@ impl RolldownEtsTransformPlan {
 
     pub fn with_should_emit_js(mut self, should_emit_js: bool) -> Self {
         self.should_emit_js = should_emit_js;
+        self
+    }
+
+    pub fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
+        self.module_analyzer = module_analyzer;
         self
     }
 
@@ -301,6 +309,8 @@ impl<'a, 'pipeline> HvigorPrepareSourcePass<'a, 'pipeline> {
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
         );
+        let reexports =
+            reexports.with_module_analyzer(self.pipeline.transformer.plan.module_analyzer);
         let default_reexport = DefaultImportReexportRewriter::new();
 
         let allocator = Allocator::default();
@@ -406,6 +416,7 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
         )
+        .with_module_analyzer(self.pipeline.transformer.plan.module_analyzer)
         .split_program(&allocator, &mut parsed.program, &scoping);
 
         changed |= ResourceReferenceRewriter::new(
