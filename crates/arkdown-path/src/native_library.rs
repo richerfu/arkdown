@@ -11,28 +11,44 @@ pub struct HvigorNativeLibraryPattern;
 
 impl HvigorNativeLibraryPattern {
     pub const LIBRARY_FILE_PATTERN: &'static str = "**/*.so*(.*[0-9])";
+    pub const LIBRARY_ALL_FILE_PATTERN: &'static str = "**/*";
 
     const FAST_GLOB_PATTERNS: [&'static str; 4] =
         ["*.so", "**/*.so", "*.so.*[0-9]", "**/*.so.*[0-9]"];
     const FAST_GLOB_FILE_NAME_PATTERNS: [&'static str; 2] = ["*.so", "*.so.*[0-9]"];
 
     pub fn matches_relative_path(path: &Path) -> bool {
+        Self::matches_relative_path_with_collect_all(path, false)
+    }
+
+    pub fn matches_relative_path_with_collect_all(path: &Path, collect_all_libs: bool) -> bool {
         if Self::has_hvigor_dot_component(path) {
             return false;
         }
         let Ok(path) = ArtifactPathSerializer::path_to_slash_string(path) else {
             return false;
         };
+        if collect_all_libs {
+            return fast_glob::glob_match(Self::LIBRARY_ALL_FILE_PATTERN, &path);
+        }
         Self::FAST_GLOB_PATTERNS
             .iter()
             .any(|pattern| fast_glob::glob_match(pattern, &path))
     }
 
     pub fn matches_path_under(base: &Path, path: &Path) -> bool {
+        Self::matches_path_under_with_collect_all(base, path, false)
+    }
+
+    pub fn matches_path_under_with_collect_all(
+        base: &Path,
+        path: &Path,
+        collect_all_libs: bool,
+    ) -> bool {
         let Ok(relative) = path.strip_prefix(base) else {
             return false;
         };
-        Self::matches_relative_path(relative)
+        Self::matches_relative_path_with_collect_all(relative, collect_all_libs)
     }
 
     pub fn matches_file_name(name: &str) -> bool {
@@ -42,6 +58,17 @@ impl HvigorNativeLibraryPattern {
         Self::FAST_GLOB_FILE_NAME_PATTERNS
             .iter()
             .any(|pattern| fast_glob::glob_match(pattern, name))
+    }
+
+    /// Match hvigor `minimatch(relativePath, pattern)` for native-lib filters.
+    pub fn matches_filter_pattern(relative_path: &Path, pattern: &str, dot: bool) -> bool {
+        if !dot && Self::has_hvigor_dot_component(relative_path) {
+            return false;
+        }
+        let Ok(path) = ArtifactPathSerializer::path_to_slash_string(relative_path) else {
+            return false;
+        };
+        fast_glob::glob_match(pattern, &path)
     }
 
     fn has_hvigor_dot_component(path: &Path) -> bool {
@@ -91,6 +118,47 @@ mod tests {
         ));
         assert!(!HvigorNativeLibraryPattern::matches_relative_path(
             Path::new(".hidden/liba.so")
+        ));
+    }
+
+    #[test]
+    fn native_library_pattern_collect_all_matches_hvigor_all_file_glob() {
+        assert!(
+            HvigorNativeLibraryPattern::matches_relative_path_with_collect_all(
+                Path::new("arm64-v8a/liba.so"),
+                true
+            )
+        );
+        assert!(
+            HvigorNativeLibraryPattern::matches_relative_path_with_collect_all(
+                Path::new("arm64-v8a/liba.sym"),
+                true
+            )
+        );
+        assert!(
+            !HvigorNativeLibraryPattern::matches_relative_path_with_collect_all(
+                Path::new("arm64-v8a/.hidden"),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn native_library_filter_pattern_matches_hvigor_minimatch_dot_modes() {
+        assert!(HvigorNativeLibraryPattern::matches_filter_pattern(
+            Path::new("arm64-v8a/liba.so"),
+            "**/*.so",
+            false
+        ));
+        assert!(!HvigorNativeLibraryPattern::matches_filter_pattern(
+            Path::new("arm64-v8a/.hidden.so"),
+            "**/*.so",
+            false
+        ));
+        assert!(HvigorNativeLibraryPattern::matches_filter_pattern(
+            Path::new("arm64-v8a/.hidden.so"),
+            "**/*.so",
+            true
         ));
     }
 }

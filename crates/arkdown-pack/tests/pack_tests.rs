@@ -5,7 +5,8 @@ use std::io::Read;
 use std::sync::Arc;
 
 use arkdown_core::{
-    ArkdownConfig, BuildMode, BuildOption, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    ArkdownConfig, BuildMode, BuildOption, NativeLibOption, OutputTarget, ProductConfig, SdkConfig,
+    StrictModeConfig,
 };
 use arkdown_pack::{
     normalize_integrated_hsps, HarPackInput, IntegratedHspEntry, PackError, PackInput, Packager,
@@ -35,6 +36,7 @@ fn make_config() -> Arc<ArkdownConfig> {
                 host_pgo: None,
                 ap_path: None,
                 abi_filters: vec![],
+                native_lib: NativeLibOption::default(),
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,
@@ -212,10 +214,12 @@ fn test_hap_deflates_native_libs_when_compress_native_libs_enabled() {
     let so_dir = tmp.path().join("src/main/libs/arm64-v8a");
     fs::create_dir_all(&so_dir).unwrap();
     let so = so_dir.join("libnative.so");
-    fs::write(&so, vec![0u8; 1024]).unwrap();
+    let second_so = so_dir.join("libnative2.so");
+    fs::write(&so, b"native payload one".repeat(64)).unwrap();
+    fs::write(&second_so, b"native payload two".repeat(64)).unwrap();
 
     let mut input = minimal_pack_input(abc, res, modj, out.clone());
-    input.native_libs = vec![so];
+    input.native_libs = vec![so, second_so];
     input.compress_native_libs = true;
     Packager::new(make_config())
         .pack_hap(input)
@@ -223,6 +227,19 @@ fn test_hap_deflates_native_libs_when_compress_native_libs_enabled() {
 
     let file = fs::File::open(&out).expect("open HAP");
     let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+    let first_index = names
+        .iter()
+        .position(|name| name == "libs/arm64-v8a/libnative.so")
+        .expect("first native lib");
+    let second_index = names
+        .iter()
+        .position(|name| name == "libs/arm64-v8a/libnative2.so")
+        .expect("second native lib");
+    assert!(
+        first_index < second_index,
+        "native lib entry order must follow input order; entries: {names:?}"
+    );
     assert_eq!(
         archive
             .by_name("libs/arm64-v8a/libnative.so")
@@ -230,6 +247,20 @@ fn test_hap_deflates_native_libs_when_compress_native_libs_enabled() {
             .compression(),
         zip::CompressionMethod::Deflated
     );
+    assert_eq!(
+        archive
+            .by_name("libs/arm64-v8a/libnative2.so")
+            .unwrap()
+            .compression(),
+        zip::CompressionMethod::Deflated
+    );
+    let mut contents = String::new();
+    archive
+        .by_name("libs/arm64-v8a/libnative.so")
+        .unwrap()
+        .read_to_string(&mut contents)
+        .unwrap();
+    assert_eq!(contents, "native payload one".repeat(64));
 }
 
 #[test]

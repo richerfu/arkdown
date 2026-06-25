@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use arkdown_core::{
     AbilityEntry, ArkOptions, ArkdownConfig, BuildMode, BuildOption, ExtensionAbilityEntry,
-    HapManifest, MetadataEntry, ModuleConfig, OhosModuleType, OutputTarget, ProductConfig,
-    RuntimeOnlyConfig, SdkConfig, StrictModeConfig,
+    HapManifest, MetadataEntry, ModuleConfig, NativeLibOption, OhosModuleType, OutputTarget,
+    ProductConfig, RuntimeOnlyConfig, SdkConfig, StrictModeConfig,
 };
 
 use super::*;
@@ -36,6 +36,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 host_pgo: None,
                 ap_path: None,
                 abi_filters: vec![],
+                native_lib: NativeLibOption::default(),
             },
             version_code: None,
             version_name: None,

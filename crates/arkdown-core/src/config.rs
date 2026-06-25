@@ -178,6 +178,76 @@ pub struct BuildOption {
     /// Empty means default: `["arm64-v8a"]`.
     #[serde(default)]
     pub abi_filters: Vec<String>,
+    /// Native library collection options from `buildOption.nativeLib`.
+    #[serde(default)]
+    pub native_lib: NativeLibOption,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NativeLibOption {
+    /// `buildOption.nativeLib.collectAllLibs`; when true hvigor scans `**/*`
+    /// instead of `**/*.so*(.*[0-9])`.
+    #[serde(default)]
+    pub collect_all_libs: bool,
+    /// `TargetTaskService.getNativeLibOption().filter`, merged from
+    /// `napiLibFilterOption` and `nativeLib.filter`.
+    #[serde(default)]
+    pub filter: NativeLibFilterOption,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeLibFilterOption {
+    /// `filter.excludes`.
+    #[serde(default)]
+    pub excludes: Vec<String>,
+    /// `filter.pickFirsts`.
+    #[serde(default)]
+    pub pick_firsts: Vec<String>,
+    /// `filter.pickLasts`.
+    #[serde(default)]
+    pub pick_lasts: Vec<String>,
+    /// `filter.enableOverride`.
+    #[serde(default)]
+    pub enable_override: bool,
+    /// `filter.select`.
+    #[serde(default)]
+    pub select: Vec<NativeLibPackageSelection>,
+}
+
+impl NativeLibFilterOption {
+    pub fn is_configured(&self) -> bool {
+        self.enable_override
+            || !self.excludes.is_empty()
+            || !self.pick_firsts.is_empty()
+            || !self.pick_lasts.is_empty()
+            || !self.select.is_empty()
+    }
+
+    pub fn has_order_sensitive_rules(&self) -> bool {
+        self.enable_override || !self.pick_firsts.is_empty() || !self.pick_lasts.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeLibPackageSelection {
+    /// `select[].package`.
+    #[serde(default)]
+    pub package: String,
+    /// `select[].version`.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// `select[].include`.
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
+    /// `select[].exclude`.
+    #[serde(default)]
+    pub exclude: Option<Vec<String>>,
+    /// `select[].includePattern`.
+    #[serde(default)]
+    pub include_pattern: Option<Vec<String>>,
+    /// `select[].excludePattern`.
+    #[serde(default)]
+    pub exclude_pattern: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

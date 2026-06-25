@@ -9,6 +9,7 @@ arkdown-path = { workspace = true }
 zip = { workspace = true }
 rawzip = { workspace = true }
 flate2 = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 json5 = { workspace = true }

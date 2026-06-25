@@ -200,6 +200,7 @@ mod tests {
                     host_pgo: None,
                     ap_path: None,
                     abi_filters: vec![],
+                    native_lib: arkdown_core::NativeLibOption::default(),
                 },
                 version_code: None,
                 version_name: None,

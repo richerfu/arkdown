@@ -10,7 +10,6 @@
 //! - Output archive path (signed artifact destination)
 //! - Signing material (keystore, key alias, profile)
 //! - Password handling strategy (plaintext or DevEco-encrypted)
-//! - Tool selection (in-process Rust signer or external SDK binary)
 //!
 //! Plan validation does not discover paths.  [`SigningPassword::resolve`]
 //! reads DevEco material only when the password strategy explicitly asks for
@@ -23,7 +22,6 @@
 //! | `SignPlan` | `SignModel` + `CommonSignCommandBuilder` inputs |
 //! | `SignKind` | `SignHap`/`SignHsp`/`PackageSignHar` task selection |
 //! | `SigningMaterial` | `CommonSignCommandBuilder` keystore/profile fields |
-//! | `SigningTool` | `signing-options.js` / `new-signing-options.js` backend |
 //! | `SigningPassword` | `DecipherUtil` password handling strategy |
 
 use std::path::{Path, PathBuf};
@@ -296,7 +294,7 @@ pub struct SigningMaterial {
     /// The signature algorithm name.
     ///
     /// Accepted values: `"SHA256withECDSA"`, `"ECDSA_WITH_SHA256"`,
-    /// `"SHA256withRSA/PSS"`, `"SHA256withRSA"`.
+    /// `"SHA256withRSA/PSS"`, `"SHA256withRSAANDMGF1"`.
     /// Defaults to `"SHA256withECDSA"` if not specified.
     pub sign_alg: String,
 }
@@ -325,36 +323,6 @@ impl SigningMaterial {
 }
 
 // ---------------------------------------------------------------------------
-// SigningTool
-// ---------------------------------------------------------------------------
-
-/// Which signing backend to use.
-///
-/// # Upstream correspondence
-///
-/// Corresponds to the backend selection in `signing-options.js` /
-/// `new-signing-options.js`.  When an external tool path is provided,
-/// hvigor invokes the SDK `hap-sign-tool.jar`; arkdown replaces this with
-/// its in-process Rust signer.
-#[derive(Debug, Clone, Default)]
-pub enum SigningTool {
-    /// Use arkdown's built-in pure-Rust signer (`arkdown-sign` crate).
-    ///
-    /// This is the default and preferred backend.  It does not require any
-    /// SDK binary and runs entirely in-process.
-    #[default]
-    InProcess,
-
-    /// Invoke an external signing tool at the given path.
-    ///
-    /// Used for compatibility when the project explicitly configures an
-    /// external signer (e.g., `hap-sign-tool.jar` or a custom script).
-    /// The tool is invoked via subprocess with the standard hapsigner CLI
-    /// argument format.
-    External(PathBuf),
-}
-
-// ---------------------------------------------------------------------------
 // SignPlan
 // ---------------------------------------------------------------------------
 
@@ -376,7 +344,7 @@ pub enum SigningTool {
 /// # Example
 ///
 /// ```no_run
-/// use arkdown_sign::plan::{SignPlan, SignKind, SigningMaterial, SigningPassword, SigningTool};
+/// use arkdown_sign::plan::{SignPlan, SignKind, SigningMaterial, SigningPassword};
 /// use std::path::PathBuf;
 ///
 /// let material = SigningMaterial {
@@ -394,7 +362,6 @@ pub enum SigningTool {
 ///     PathBuf::from("/build/signed/entry.hap"),
 ///     SignKind::Hap,
 ///     material,
-///     SigningTool::InProcess,
 ///     12,
 /// );
 ///
@@ -414,9 +381,6 @@ pub struct SignPlan {
     /// All cryptographic material needed for signing.
     material: SigningMaterial,
 
-    /// Which signing backend to use.
-    tool: SigningTool,
-
     /// The `compatibleSdkVersion` from `module.json5`.
     ///
     /// Controls whether V2 (`< 8`) or V3 (`>= 8`) signing block magic is
@@ -434,7 +398,6 @@ impl SignPlan {
         output_path: PathBuf,
         kind: SignKind,
         material: SigningMaterial,
-        tool: SigningTool,
         compatible_sdk_version: u32,
     ) -> Self {
         Self {
@@ -442,7 +405,6 @@ impl SignPlan {
             output_path,
             kind,
             material,
-            tool,
             compatible_sdk_version,
         }
     }
@@ -469,11 +431,6 @@ impl SignPlan {
     /// Return the artifact kind being signed.
     pub fn kind(&self) -> SignKind {
         self.kind
-    }
-
-    /// Return the signing tool selection.
-    pub fn tool(&self) -> &SigningTool {
-        &self.tool
     }
 
     /// Return the `compatibleSdkVersion` used to select V2/V3 magic.
@@ -522,7 +479,7 @@ impl SignPlan {
             "SHA256withECDSA",
             "ECDSA_WITH_SHA256",
             "SHA256withRSA/PSS",
-            "SHA256withRSA",
+            "SHA256withRSAANDMGF1",
         ];
         if !known_algs.contains(&self.material.sign_alg.as_str()) {
             return Err(SignError::Config(format!(
@@ -572,14 +529,7 @@ mod tests {
     }
 
     fn make_plan_with_paths(input: PathBuf, output: PathBuf) -> SignPlan {
-        SignPlan::new(
-            input,
-            output,
-            SignKind::Hap,
-            make_material(),
-            SigningTool::InProcess,
-            12,
-        )
+        SignPlan::new(input, output, SignKind::Hap, make_material(), 12)
     }
 
     // --- SignKind ---
@@ -621,19 +571,6 @@ mod tests {
         assert_eq!(pw.resolve().unwrap(), "plainpass");
     }
 
-    // --- SigningTool ---
-
-    #[test]
-    fn signing_tool_default_is_in_process() {
-        assert!(matches!(SigningTool::default(), SigningTool::InProcess));
-    }
-
-    #[test]
-    fn signing_tool_external_holds_path() {
-        let tool = SigningTool::External(PathBuf::from("/sdk/hap-sign-tool.jar"));
-        assert!(matches!(tool, SigningTool::External(_)));
-    }
-
     // --- SignPlan accessors ---
 
     #[test]
@@ -643,14 +580,12 @@ mod tests {
             PathBuf::from("/build/signed/entry.hap"),
             SignKind::Hap,
             make_material(),
-            SigningTool::InProcess,
             12,
         );
         assert_eq!(plan.input(), Path::new("/build/unsigned/entry.hap"));
         assert_eq!(plan.output(), Path::new("/build/signed/entry.hap"));
         assert_eq!(plan.kind(), SignKind::Hap);
         assert_eq!(plan.compatible_sdk_version(), 12);
-        assert!(matches!(plan.tool(), SigningTool::InProcess));
     }
 
     // --- SignPlan::validate ---
@@ -686,7 +621,6 @@ mod tests {
             PathBuf::from("/build/signed/entry.hap"),
             SignKind::Hap,
             material,
-            SigningTool::InProcess,
             12,
         );
         let err = plan.validate().unwrap_err();
@@ -720,7 +654,6 @@ mod tests {
             PathBuf::from("/build/signed/entry.hap"),
             SignKind::Hap,
             make_material(), // paths like /certs/app.p12 won't exist
-            SigningTool::InProcess,
             12,
         );
         // The plan will fail either on missing input or missing material.
@@ -736,7 +669,7 @@ mod tests {
             "SHA256withECDSA",
             "ECDSA_WITH_SHA256",
             "SHA256withRSA/PSS",
-            "SHA256withRSA",
+            "SHA256withRSAANDMGF1",
         ];
         for alg in algs {
             let mut material = make_material();
@@ -746,7 +679,6 @@ mod tests {
                 PathBuf::from("/build/signed/entry.hap"),
                 SignKind::Hap,
                 material,
-                SigningTool::InProcess,
                 12,
             );
             let err = plan.validate().unwrap_err();
@@ -777,7 +709,6 @@ mod tests {
             PathBuf::from("/build/signed/shared.hsp"),
             SignKind::Hsp,
             make_material(),
-            SigningTool::InProcess,
             9,
         );
         assert_eq!(plan.kind(), SignKind::Hsp);
@@ -792,7 +723,6 @@ mod tests {
             PathBuf::from("/build/signed/utils.har"),
             SignKind::Har,
             make_material(),
-            SigningTool::InProcess,
             12,
         );
         assert!(!plan.kind().requires_signing_block());

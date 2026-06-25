@@ -284,9 +284,15 @@ pub struct RawSigningMaterial {
     pub store_password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RawBuildOption {
+    /// Optional name when the same shape is used inside module `buildOptionSet`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional copyFrom when the same shape is used inside module `buildOptionSet`.
+    #[serde(default)]
+    pub copy_from: Option<String>,
     #[serde(default)]
     pub strict_mode: Option<RawStrictMode>,
     #[serde(default)]
@@ -322,6 +328,12 @@ pub struct RawBuildOption {
     /// architectures' SO libraries are collected and included in the package.
     #[serde(rename = "externalNativeOptions", default)]
     pub external_native_options: Option<RawExternalNativeOptions>,
+    /// Legacy native filter entry merged before `nativeLib.filter` by hvigor.
+    #[serde(rename = "napiLibFilterOption", default)]
+    pub napi_lib_filter_option: Option<RawNativeLibFilterOption>,
+    /// Native library packaging options.
+    #[serde(rename = "nativeLib", default)]
+    pub native_lib: Option<RawNativeLibOption>,
 }
 
 /// `buildOption.externalNativeOptions` — controls native/CMake build settings.
@@ -332,6 +344,82 @@ pub struct RawExternalNativeOptions {
     /// When empty, defaults to `["arm64-v8a"]` (hvigor default).
     #[serde(default)]
     pub abi_filters: Vec<String>,
+}
+
+/// `buildOption.nativeLib` — controls hvigor ProcessLibs collection/filtering.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawNativeLibOption {
+    /// When true hvigor scans `**/*` instead of `**/*.so*(.*[0-9])`.
+    #[serde(default)]
+    pub collect_all_libs: Option<bool>,
+    /// `nativeLib.filter`, merged over `napiLibFilterOption`.
+    #[serde(default)]
+    pub filter: Option<RawNativeLibFilterOption>,
+}
+
+/// `NapiLibFilterOpt` from hvigor `options/build/build-opt.d.ts`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawNativeLibFilterOption {
+    #[serde(default)]
+    pub excludes: Option<Vec<String>>,
+    #[serde(default)]
+    pub pick_firsts: Option<Vec<String>>,
+    #[serde(default)]
+    pub pick_lasts: Option<Vec<String>>,
+    #[serde(default)]
+    pub enable_override: Option<bool>,
+    #[serde(default)]
+    pub select: Option<Vec<RawNativeLibPackageSelection>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawNativeLibPackageSelection {
+    #[serde(default)]
+    pub package: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_pattern: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_pattern: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RawModuleBuildProfile {
+    #[serde(default)]
+    build_option: Option<RawBuildOption>,
+    #[serde(default)]
+    build_option_set: Vec<RawBuildOption>,
+    #[serde(default)]
+    build_mode_binder: Vec<RawBuildModeBinder>,
+    #[serde(default)]
+    targets: Vec<RawTarget>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RawBuildModeBinder {
+    #[serde(default)]
+    build_mode_name: String,
+    #[serde(default)]
+    mappings: Vec<RawBuildModeBinderMapping>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RawBuildModeBinderMapping {
+    #[serde(default)]
+    target_name: String,
+    #[serde(default)]
+    build_option_name: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -482,6 +570,10 @@ pub struct RawTargetConfig {
     pub distro_filter: Option<serde_json::Value>,
     #[serde(default)]
     pub distribution_filter: Option<serde_json::Value>,
+    /// Target-local build option; hvigor merges this over module/product
+    /// build options for the target.
+    #[serde(rename = "buildOption", default)]
+    pub build_option: Option<RawBuildOption>,
 }
 
 /// Source overlay for a target, allowing per-target ability configuration.
@@ -784,6 +876,217 @@ fn enumerate_applicable_raw_targets<'a>(
                 || t.build_mode_set.iter().any(|m| m.name == build_mode_name)
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectiveNativeBuildOption {
+    pub abi_filters: Vec<String>,
+    pub native_lib: arkdown_core::NativeLibOption,
+}
+
+pub fn resolve_product_native_build_option(
+    build_option: Option<&RawBuildOption>,
+) -> EffectiveNativeBuildOption {
+    let mut effective = EffectiveNativeBuildOption {
+        abi_filters: vec!["arm64-v8a".to_string()],
+        native_lib: arkdown_core::NativeLibOption::default(),
+    };
+    if let Some(build_option) = build_option {
+        NativeBuildOptionMerger::new(&mut effective).apply_build_option(build_option);
+    }
+    if effective.abi_filters.is_empty() {
+        effective.abi_filters.push("arm64-v8a".to_string());
+    }
+    effective
+}
+
+/// Resolve the native subset of hvigor target build options for one module
+/// target.
+///
+/// Upstream:
+/// - `BuildModeManager.initModuleTargetBuildOptionMap`
+/// - `TargetTaskService.getNativeLibOption`
+/// - `BuildOptionUtil.getBuildOptNameFromMapping`
+pub fn resolve_effective_native_build_option(
+    module_root: &Path,
+    product_abi_filters: &[String],
+    product_native_lib: &arkdown_core::NativeLibOption,
+    build_mode_name: &str,
+    target_name: &str,
+) -> Result<EffectiveNativeBuildOption, ConfigError> {
+    let mut effective = EffectiveNativeBuildOption {
+        abi_filters: product_abi_filters.to_vec(),
+        native_lib: product_native_lib.clone(),
+    };
+    let module_profile_path = module_root.join("build-profile.json5");
+    if !module_profile_path.is_file() {
+        return Ok(effective);
+    }
+    let content = std::fs::read_to_string(&module_profile_path)?;
+    let profile: RawModuleBuildProfile =
+        json5::from_str(&content).map_err(|error| ConfigError::ParseError {
+            file: module_profile_path.clone(),
+            message: error.to_string(),
+        })?;
+
+    if let Some(build_option) = profile.build_option.as_ref() {
+        NativeBuildOptionMerger::new(&mut effective).apply_build_option(build_option);
+    }
+
+    let build_option_name =
+        ModuleBuildOptionSelector::new(&profile).build_option_name(build_mode_name, target_name);
+    NativeBuildOptionSetResolver::new(&profile, &module_profile_path).apply_named(
+        &build_option_name,
+        &mut effective,
+        &mut Vec::new(),
+    )?;
+
+    if let Some(target) = profile
+        .targets
+        .iter()
+        .find(|target| target.name == target_name)
+    {
+        if let Some(build_option) = target
+            .config
+            .as_ref()
+            .and_then(|config| config.build_option.as_ref())
+        {
+            NativeBuildOptionMerger::new(&mut effective).apply_build_option(build_option);
+        }
+    }
+
+    if effective.abi_filters.is_empty() {
+        effective.abi_filters.push("arm64-v8a".to_string());
+    }
+    Ok(effective)
+}
+
+struct ModuleBuildOptionSelector<'a> {
+    profile: &'a RawModuleBuildProfile,
+}
+
+impl<'a> ModuleBuildOptionSelector<'a> {
+    fn new(profile: &'a RawModuleBuildProfile) -> Self {
+        Self { profile }
+    }
+
+    fn build_option_name(&self, build_mode_name: &str, target_name: &str) -> String {
+        for binder in &self.profile.build_mode_binder {
+            if binder.build_mode_name != build_mode_name {
+                continue;
+            }
+            for mapping in &binder.mappings {
+                if mapping.target_name == target_name && !mapping.build_option_name.is_empty() {
+                    return mapping.build_option_name.clone();
+                }
+            }
+        }
+        match build_mode_name {
+            "debug" | "test" => "debug".to_string(),
+            "release" => "release".to_string(),
+            _ => "default".to_string(),
+        }
+    }
+}
+
+struct NativeBuildOptionSetResolver<'a> {
+    profile: &'a RawModuleBuildProfile,
+    file: &'a Path,
+}
+
+impl<'a> NativeBuildOptionSetResolver<'a> {
+    fn new(profile: &'a RawModuleBuildProfile, file: &'a Path) -> Self {
+        Self { profile, file }
+    }
+
+    fn apply_named(
+        &self,
+        name: &str,
+        effective: &mut EffectiveNativeBuildOption,
+        stack: &mut Vec<String>,
+    ) -> Result<(), ConfigError> {
+        let Some(build_option) = self
+            .profile
+            .build_option_set
+            .iter()
+            .find(|build_option| build_option.name.as_deref() == Some(name))
+        else {
+            return Ok(());
+        };
+        if stack.iter().any(|visited| visited == name) {
+            return Err(ConfigError::ValidationError {
+                file: self.file.to_path_buf(),
+                message: format!(
+                    "circular buildOptionSet copyFrom chain: {}",
+                    stack.join(" -> ")
+                ),
+            });
+        }
+        stack.push(name.to_string());
+        if let Some(copy_from) = build_option.copy_from.as_deref() {
+            self.apply_named(copy_from, effective, stack)?;
+        }
+        NativeBuildOptionMerger::new(effective).apply_build_option(build_option);
+        stack.pop();
+        Ok(())
+    }
+}
+
+struct NativeBuildOptionMerger<'a> {
+    effective: &'a mut EffectiveNativeBuildOption,
+}
+
+impl<'a> NativeBuildOptionMerger<'a> {
+    fn new(effective: &'a mut EffectiveNativeBuildOption) -> Self {
+        Self { effective }
+    }
+
+    fn apply_build_option(&mut self, build_option: &RawBuildOption) {
+        if let Some(external_native_options) = build_option.external_native_options.as_ref() {
+            if !external_native_options.abi_filters.is_empty() {
+                self.effective.abi_filters = external_native_options.abi_filters.clone();
+            }
+        }
+        if let Some(filter) = build_option.napi_lib_filter_option.as_ref() {
+            self.apply_filter(filter);
+        }
+        if let Some(native_lib) = build_option.native_lib.as_ref() {
+            if let Some(collect_all_libs) = native_lib.collect_all_libs {
+                self.effective.native_lib.collect_all_libs = collect_all_libs;
+            }
+            if let Some(filter) = native_lib.filter.as_ref() {
+                self.apply_filter(filter);
+            }
+        }
+    }
+
+    fn apply_filter(&mut self, filter: &RawNativeLibFilterOption) {
+        if let Some(excludes) = filter.excludes.as_ref() {
+            self.effective.native_lib.filter.excludes = excludes.clone();
+        }
+        if let Some(pick_firsts) = filter.pick_firsts.as_ref() {
+            self.effective.native_lib.filter.pick_firsts = pick_firsts.clone();
+        }
+        if let Some(pick_lasts) = filter.pick_lasts.as_ref() {
+            self.effective.native_lib.filter.pick_lasts = pick_lasts.clone();
+        }
+        if let Some(enable_override) = filter.enable_override {
+            self.effective.native_lib.filter.enable_override = enable_override;
+        }
+        if let Some(select) = filter.select.as_ref() {
+            self.effective.native_lib.filter.select = select
+                .iter()
+                .map(|selection| arkdown_core::NativeLibPackageSelection {
+                    package: selection.package.clone(),
+                    version: selection.version.clone(),
+                    include: selection.include.clone(),
+                    exclude: selection.exclude.clone(),
+                    include_pattern: selection.include_pattern.clone(),
+                    exclude_pattern: selection.exclude_pattern.clone(),
+                })
+                .collect();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,6 +1716,96 @@ mod tests {
         let build_option = product.build_option.as_ref().unwrap();
         let eno = build_option.external_native_options.as_ref().unwrap();
         assert_eq!(eno.abi_filters, vec!["arm64-v8a", "armeabi-v7a", "x86_64"]);
+    }
+
+    #[test]
+    fn test_native_lib_collect_all_and_filter_presence_parsed() {
+        let json = r#"{
+            app: {
+              products: [{
+                name: "default",
+                buildOption: {
+                  nativeLib: {
+                    collectAllLibs: true,
+                    filter: { excludes: ["arm64-v8a/libdebug.so"] }
+                  }
+                }
+              }]
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let native_lib = profile.app.products[0]
+            .build_option
+            .as_ref()
+            .unwrap()
+            .native_lib
+            .as_ref()
+            .unwrap();
+        assert_eq!(native_lib.collect_all_libs, Some(true));
+        assert!(native_lib.filter.is_some());
+    }
+
+    #[test]
+    fn test_resolve_effective_native_build_option_reads_module_build_option_set() {
+        let tmp = std::env::temp_dir().join(format!(
+            "arkdown-config-native-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("build-profile.json5"),
+            r#"{
+              buildOption: {
+                nativeLib: { collectAllLibs: true }
+              },
+              buildOptionSet: [{
+                name: "release",
+                externalNativeOptions: { abiFilters: ["arm64-v8a"] },
+                napiLibFilterOption: {
+                  excludes: ["**/armeabi-v7a/*.so", "**/x86_64/*.so"]
+                },
+                nativeLib: {
+                  collectAllLibs: false,
+                  filter: {
+                    select: [{
+                      package: "native_pkg",
+                      version: "1.2.3",
+                      include: ["libkeep.so"]
+                    }]
+                  }
+                }
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let product_native = arkdown_core::NativeLibOption::default();
+        let effective = resolve_effective_native_build_option(
+            &tmp,
+            &["armeabi-v7a".to_string()],
+            &product_native,
+            "release",
+            "default",
+        )
+        .expect("module build option");
+        assert_eq!(effective.abi_filters, vec!["arm64-v8a"]);
+        assert!(!effective.native_lib.collect_all_libs);
+        assert_eq!(
+            effective.native_lib.filter.excludes,
+            vec!["**/armeabi-v7a/*.so", "**/x86_64/*.so"]
+        );
+        assert_eq!(effective.native_lib.filter.select.len(), 1);
+        assert_eq!(
+            effective.native_lib.filter.select[0].include,
+            Some(vec!["libkeep.so".to_string()])
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     /// Verify that `buildModeSet` on a target is parsed correctly.

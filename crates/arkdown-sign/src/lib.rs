@@ -1,7 +1,7 @@
 //! HAP signing primitives for the Rust signing backend.
 //!
-//! The CLI may select an SDK signing backend for hvigor parity. This crate owns
-//! the in-process Rust implementation when that backend is selected.
+//! This crate owns the in-process Rust implementation of the signing behavior
+//! from `developtools_hapsigner`.
 //!
 //! Ports `developtools_hapsigner` (Apache 2.0) from Java/BouncyCastle to Rust:
 //! - PKCS#12 keystore loading via `p12` crate
@@ -11,24 +11,32 @@
 //! - HAP-specific chunked SHA-256 content digest
 
 pub mod backend;
+mod code_sign;
 mod config_material;
 pub mod digest;
 pub mod error;
 pub mod keystore;
 pub mod pkcs7;
 pub mod plan;
+mod profile_content;
 pub mod signing_block;
 pub mod zip;
 
-pub use backend::{RustSignBackend, SdkSignBackend, SignBackend, SignBackendRunner};
+pub use backend::{RustSignBackend, SignBackend, SignBackendRunner};
 pub use error::SignError;
 pub use keystore::SigningKey;
-pub use plan::{SignKind, SignPlan, SigningMaterial, SigningPassword, SigningTool};
+pub use plan::{SignKind, SignPlan, SigningMaterial, SigningPassword};
 
 use arkdown_core::SigningConfig;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use crate::config_material::SigningConfigMaterial;
+
+/// Default `compatibleVersion` used by `developtools_hapsigner`
+/// `SignProvider.checkCompatibleVersion` when hvigor does not pass
+/// `-compatibleVersion`.
+pub const DEFAULT_COMPATIBLE_VERSION: u32 = 9;
 
 // ---------------------------------------------------------------------------
 // HapSigner — public signing API
@@ -57,15 +65,16 @@ impl HapSigner {
         let store_password = material.store_password()?;
         let key_password = material.key_password()?;
 
-        let signing_key = SigningKey::from_pkcs12(
+        let mut signing_key = SigningKey::from_pkcs12(
             &p12_bytes,
             &store_password,
             material.key_alias(),
             &key_password,
         )?;
+        signing_key.cert_chain = SigningKey::cert_chain_from_file(material.cert_path())?;
 
         let profile = fs_err::read(material.profile_path())?;
-        let alg_id = Self::parse_alg_id(material.sign_alg());
+        let alg_id = Self::parse_alg_id(material.sign_alg())?;
 
         Ok(HapSigner {
             signing_key,
@@ -85,12 +94,67 @@ impl HapSigner {
     fn signing_block_for_zip(&self, hap_zip: &mut zip::HapZip) -> Result<Vec<u8>, SignError> {
         // 1. Prepare ZIP
         hap_zip.sort_entries();
-        hap_zip.align();
+        hap_zip.align()?;
 
-        let content_digest = hap_zip.content_digest_for_signing()?;
+        // Java `SignProvider.loadOptionalBlocks` loads profile as an optional
+        // block before computing the content digest; `HapUtils.computeDigests`
+        // appends optional block values to the top-level digest input.
+        let blocks = self.optional_blocks_for_zip(hap_zip)?;
+        let optional_values = blocks
+            .iter()
+            .map(|(_, value)| value.as_slice())
+            .collect::<Vec<_>>();
+        let content_digest =
+            hap_zip.content_digest_for_signing_with_optional_blocks(&optional_values)?;
 
+        self.signing_block_from_digest(blocks, &content_digest)
+    }
+
+    fn optional_blocks(&self) -> Vec<(u32, Vec<u8>)> {
+        vec![(signing_block::BLOCK_ID_PROFILE, self.profile.clone())]
+    }
+
+    fn optional_blocks_for_zip(
+        &self,
+        hap_zip: &zip::HapZip,
+    ) -> Result<Vec<(u32, Vec<u8>)>, SignError> {
+        let mut blocks = self.optional_blocks();
+        let code_sign_offset = self.code_sign_offset(hap_zip.entries_len(), blocks.len())?;
+        let code_sign_property =
+            code_sign::CodeSignPropertyBuilder::new(&self.signing_key, self.alg_id, &self.profile)?
+                .build_property_block(hap_zip, code_sign_offset)?;
+        blocks.insert(0, (signing_block::BLOCK_ID_PROPERTY, code_sign_property));
+        Ok(blocks)
+    }
+
+    fn code_sign_offset(
+        &self,
+        central_directory_offset: usize,
+        optional_block_count_before_code_sign: usize,
+    ) -> Result<usize, SignError> {
+        // developtools_hapsigner `SignProvider.appendCodeSignBlock` inserts a
+        // property block at optionalBlocks[0]. The code sign bytes start after
+        // all top-level HAP signing block headers plus the nested code-sign
+        // TLV header inside that property value.
+        let offset = central_directory_offset
+            .checked_add(12 * (optional_block_count_before_code_sign + 2))
+            .and_then(|offset| offset.checked_add(12))
+            .ok_or_else(|| SignError::SigningFailed("code sign offset overflow".to_string()))?;
+        if offset > u32::MAX as usize {
+            return Err(SignError::SigningFailed(
+                "code sign offset exceeds hapsigner u32 field".to_string(),
+            ));
+        }
+        Ok(offset)
+    }
+
+    fn signing_block_from_digest(
+        &self,
+        mut blocks: Vec<(u32, Vec<u8>)>,
+        content_digest: &[u8; 32],
+    ) -> Result<Vec<u8>, SignError> {
         // 4. Encode (alg_id, digest) pairs
-        let digest_pairs = signing_block::encode_digest_pairs(&[(self.alg_id, &content_digest)]);
+        let digest_pairs = signing_block::encode_digest_pairs(&[(self.alg_id, content_digest)]);
 
         // 5. Build CMS SignedData
         let cms_data = pkcs7::build_cms_signed_data(
@@ -100,11 +164,8 @@ impl HapSigner {
             self.alg_id,
         )?;
 
-        // 6. Build optional blocks: profile + main signature
-        let blocks: Vec<(u32, Vec<u8>)> = vec![
-            (signing_block::BLOCK_ID_PROFILE, self.profile.clone()),
-            (signing_block::BLOCK_ID_SIGNATURE_V1, cms_data),
-        ];
+        // 6. Append the main signature scheme block after optional blocks.
+        blocks.push((signing_block::BLOCK_ID_SIGNATURE_V1, cms_data));
 
         // 7. Assemble signing block
         Ok(signing_block::build_signing_block(
@@ -116,10 +177,35 @@ impl HapSigner {
     /// Sign an unsigned HAP file and write the signed output to `output`.
     pub fn sign_file(&self, input: &Path, output: &Path) -> Result<(), SignError> {
         let mut hap_zip = zip::HapZip::parse_file(input)?;
-        let signing_block = self.signing_block_for_zip(&mut hap_zip)?;
-        let mut output_file = fs_err::File::create(output)?;
-        hap_zip.write_with_signing_block(&mut output_file, &signing_block)?;
-        Ok(())
+        hap_zip.sort_entries();
+        hap_zip.align()?;
+
+        let result = (|| {
+            let blocks = self.optional_blocks_for_zip(&hap_zip)?;
+            let optional_values = blocks
+                .iter()
+                .map(|(_, value)| value.as_slice())
+                .collect::<Vec<_>>();
+
+            let output_file = fs_err::File::create(output)?;
+            let mut output_file = BufWriter::with_capacity(4 * 1024 * 1024, output_file);
+            let sections =
+                hap_zip.write_entries_and_content_digest(&mut output_file, &optional_values)?;
+            let signing_block = self.signing_block_from_digest(blocks, &sections.content_digest)?;
+            hap_zip.write_signing_block_and_directory(
+                &mut output_file,
+                &signing_block,
+                sections,
+            )?;
+            output_file.flush()?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(output);
+        }
+
+        result
     }
 
     /// Sign or skip:
@@ -146,12 +232,16 @@ impl HapSigner {
         }
     }
 
-    fn parse_alg_id(sign_alg: &str) -> u32 {
-        match sign_alg {
+    fn parse_alg_id(sign_alg: &str) -> Result<u32, SignError> {
+        Ok(match sign_alg {
             "SHA256withECDSA" | "ECDSA_WITH_SHA256" => signing_block::ALG_ECDSA_SHA256,
-            "SHA256withRSA/PSS" | "SHA256withRSA" => signing_block::ALG_RSA_PSS_SHA256,
-            _ => signing_block::ALG_ECDSA_SHA256, // default
-        }
+            "SHA256withRSA/PSS" | "SHA256withRSAANDMGF1" => signing_block::ALG_RSA_PSS_SHA256,
+            _ => {
+                return Err(SignError::Config(format!(
+                    "unsupported sign_alg '{sign_alg}'; Rust HAP signer currently supports SHA256withECDSA, ECDSA_WITH_SHA256, SHA256withRSA/PSS, SHA256withRSAANDMGF1"
+                )));
+            }
+        })
     }
 }
 
@@ -190,9 +280,12 @@ mod tests {
     fn test_encode_digest_pairs() {
         let digest_val = [0xabu8; 32];
         let encoded = signing_block::encode_digest_pairs(&[(0x201, &digest_val)]);
-        assert_eq!(&encoded[0..4], &0x201u32.to_le_bytes());
-        assert_eq!(&encoded[4..8], &32u32.to_le_bytes());
-        assert_eq!(&encoded[8..40], &digest_val[..]);
+        assert_eq!(&encoded[0..4], &2u32.to_le_bytes());
+        assert_eq!(&encoded[4..8], &1u32.to_le_bytes());
+        assert_eq!(&encoded[8..12], &40u32.to_le_bytes());
+        assert_eq!(&encoded[12..16], &0x201u32.to_le_bytes());
+        assert_eq!(&encoded[16..20], &32u32.to_le_bytes());
+        assert_eq!(&encoded[20..52], &digest_val[..]);
     }
 
     #[test]

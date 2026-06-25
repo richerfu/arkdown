@@ -62,7 +62,9 @@ use arkdown::{
   BundleCacheBridge, BundleSourceMapPackageInfo, ShouldInvalidCacheRequest, SourceMapPolicy,
 };
 
-use crate::cmd::native_build::{NativeLibCollectionPolicy, NativeLibCollector, NativeSdkToolchain};
+use crate::cmd::native_build::{
+  NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
+};
 use crate::progress::Progress;
 use crate::task_cache::TaskInputs;
 
@@ -72,7 +74,7 @@ use arkdown::plugins::ets_transform::{
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
-use arkdown_config::build_profile::parse_api_version;
+use arkdown_config::build_profile::{parse_api_version, resolve_effective_native_build_option};
 use arkdown_ets_transform::{
   ArkuiComponentNameCollector, RolldownEtsTransformPlan, SourceClassifier,
 };
@@ -938,10 +940,16 @@ impl<'a> PkgContextInfoInputBuilder<'a> {
         bundle_type: None,
       });
     }
+    let native_build_option = self.effective_native_build_option()?;
     let native_libraries = NativeLibCollector::new(
       self.module,
-      &self.config.product.build_option.abi_filters,
+      &native_build_option.abi_filters,
       self.module_context.deps.as_ref(),
+    )
+    .with_policy(
+      NativeLibCollectionPolicy::default()
+        .with_native_lib_option(native_build_option.native_lib)
+        .with_self_package(self.self_package_info()),
     )
     .collect_context_names();
 
@@ -1016,6 +1024,41 @@ impl<'a> PkgContextInfoInputBuilder<'a> {
       entry_package_version: package.version.clone(),
       dependency_package_versions,
     })
+  }
+
+  fn effective_native_build_option(
+    &self,
+  ) -> Result<arkdown_config::build_profile::EffectiveNativeBuildOption> {
+    let build_mode_name = match self.config.build_mode {
+      BuildMode::Debug => "debug",
+      BuildMode::Release => "release",
+    };
+    let target_name = arkdown_config::build_profile::select_effective_target(
+      &self.config.project_root,
+      &self.module.name,
+      &self.config.product.name,
+      build_mode_name,
+    )
+    .map(|target| target.name)
+    .unwrap_or_else(|| "default".to_string());
+    resolve_effective_native_build_option(
+      &self.module.src_path,
+      &self.config.product.build_option.abi_filters,
+      &self.config.product.build_option.native_lib,
+      build_mode_name,
+      &target_name,
+    )
+    .map_err(|error| anyhow::anyhow!("resolve native build option failed: {}", error))
+  }
+
+  fn self_package_info(&self) -> NativeLibPackageInfo {
+    self
+      .module_context
+      .module
+      .package
+      .as_ref()
+      .map(|package| NativeLibPackageInfo::local(package.name.clone(), package.version.clone()))
+      .unwrap_or_else(|| NativeLibPackageInfo::local(self.module.name.clone(), String::new()))
   }
 
   fn current_module_kind(&self) -> Result<PkgContextModuleKind> {
@@ -3915,13 +3958,36 @@ impl BuildCoordinator {
                   elapsed_ms = integrated_hsp_start.elapsed().as_millis(),
                   "integrated hsp collection completed"
                 );
+                let native_build_option = resolve_effective_native_build_option(
+                  &module.src_path,
+                  &config.product.build_option.abi_filters,
+                  &config.product.build_option.native_lib,
+                  packaging_bm_name,
+                  artifact_target_label,
+                )
+                .map_err(|e| anyhow::anyhow!("resolve native build option failed: {}", e))?;
+                let self_package = module_context
+                  .module
+                  .package
+                  .as_ref()
+                  .map(|package| {
+                    NativeLibPackageInfo::local(package.name.clone(), package.version.clone())
+                  })
+                  .unwrap_or_else(|| {
+                    NativeLibPackageInfo::local(module.name.clone(), String::new())
+                  });
                 let native_lib_start = Instant::now();
+                let native_policy = sanitizer_native_policy
+                  .clone()
+                  .unwrap_or_default()
+                  .with_native_lib_option(native_build_option.native_lib)
+                  .with_self_package(self_package);
                 let native_libs = NativeLibCollector::new(
                   module,
-                  &config.product.build_option.abi_filters,
+                  &native_build_option.abi_filters,
                   module_context.deps.as_ref(),
                 )
-                .with_policy(sanitizer_native_policy.clone().unwrap_or_default())
+                .with_policy(native_policy)
                 .collect()
                 .map_err(|e| anyhow::anyhow!("ProcessLibs failed: {}", e))?;
                 tracing::info!(
@@ -3996,7 +4062,6 @@ impl BuildCoordinator {
                   &path,
                   &signed_output,
                   config.product.signing_config.as_ref(),
-                  config.sdk_config.compile_api_version,
                 )
                 .map_err(|e| anyhow::anyhow!("HAR sign failed: {}", e))?;
               signed_output.clone()
@@ -4016,7 +4081,6 @@ impl BuildCoordinator {
                 &path,
                 &signed_output,
                 config.product.signing_config.as_ref(),
-                config.sdk_config.compile_api_version,
               )
               .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
             tracing::info!(

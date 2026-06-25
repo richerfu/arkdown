@@ -193,7 +193,9 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         for element in &self.stmt.body.body {
             match element {
                 StructElement::PropertyDefinition(property) => {
-                    if let Some(field) = self.field_from_property(name, property)? {
+                    if let Some(field) =
+                        self.field_from_property(name, property, &visible_builder_methods)?
+                    {
                         fields.push(field);
                     }
                 }
@@ -246,9 +248,9 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                             computed_names.push(method_name.into_owned());
                         }
                     }
-                    has_monitor_method |= self
-                        .has_method_decorator(method, ArkuiDecoratorName::MONITOR)
-                        || self.has_method_decorator(method, ArkuiDecoratorName::SYNC_MONITOR);
+                    self.validate_lifecycle_method(name, method)?;
+                    has_monitor_method |=
+                        self.has_method_decorator(method, ArkuiDecoratorName::MONITOR);
                     other_methods.push(method.as_ref());
                 }
             }
@@ -465,13 +467,20 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         &self,
         component_name: &str,
         property: &'a PropertyDefinition<'a>,
+        visible_builder_methods: &FxHashSet<String>,
     ) -> Result<Option<V2Field<'a>>, ComponentV2Error> {
         let Some(field_name) = property.key.static_name() else {
             return Ok(None);
         };
         let field_name = field_name.into_owned();
         let decorator_names = self.property_decorator_names(property);
-        self.validate_field_decorators(component_name, &field_name, &decorator_names)?;
+        self.validate_field_decorators(
+            component_name,
+            &field_name,
+            property,
+            &decorator_names,
+            visible_builder_methods,
+        )?;
         Ok(Some(V2Field {
             name: field_name,
             property,
@@ -486,7 +495,9 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         &self,
         component_name: &str,
         field_name: &str,
+        property: &PropertyDefinition<'_>,
         decorator_names: &[&str],
+        visible_builder_methods: &FxHashSet<String>,
     ) -> Result<(), ComponentV2Error> {
         for decorator_name in decorator_names {
             if ArkuiDecoratorName::is_component_v2_meta(decorator_name)
@@ -500,18 +511,131 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 field: field_name.to_string(),
             });
         }
+        let has_param = decorator_names.contains(&ArkuiDecoratorName::PARAM);
+        let has_require = decorator_names.contains(&ArkuiDecoratorName::REQUIRE);
+        let has_builder_param = decorator_names.contains(&ArkuiDecoratorName::BUILDER_PARAM);
+        let kind = V2FieldKind::from_decorator_names(decorator_names);
+        if !matches!(kind, V2FieldKind::Regular) && property.type_annotation.is_none() {
+            return Err(ComponentV2Error::InvalidFieldDecorators {
+                name: component_name.to_string(),
+                field: field_name.to_string(),
+                message: format!("The property '{field_name}' must specify a type."),
+            });
+        }
+        if has_param && property.value.is_none() && !has_require {
+            return Err(ComponentV2Error::InvalidFieldDecorators {
+                name: component_name.to_string(),
+                field: field_name.to_string(),
+                message: "When a variable decorated with '@Param' is not assigned a default value, it must also be decorated with '@Require'.".to_string(),
+            });
+        }
         if decorator_names.contains(&ArkuiDecoratorName::ONCE)
             && !decorator_names.contains(&ArkuiDecoratorName::PARAM)
         {
             return Err(ComponentV2Error::InvalidFieldDecorators {
                 name: component_name.to_string(),
                 field: field_name.to_string(),
-                message: format!(
-                    "When a variable '{field_name}' decorated with '@Once', it must also be decorated with '@Param'."
-                ),
+                message:
+                    "When a variable decorated with '@Once', it must also be decorated with '@Param'."
+                        .to_string(),
+            });
+        }
+        if has_require && !has_param && !has_builder_param {
+            return Err(ComponentV2Error::InvalidFieldDecorators {
+                name: component_name.to_string(),
+                field: field_name.to_string(),
+                message: "In a struct decorated with '@ComponentV2', '@Require' can only be used with '@Param' and '@BuilderParam'.".to_string(),
+            });
+        }
+        if has_builder_param
+            && property.value.as_ref().is_some_and(|initializer| {
+                !self.builder_param_initializer_is_builder(initializer, visible_builder_methods)
+            })
+        {
+            return Err(ComponentV2Error::InvalidFieldDecorators {
+                name: component_name.to_string(),
+                field: field_name.to_string(),
+                message: "'@BuilderParam' property can only initialized by '@Builder' function."
+                    .to_string(),
             });
         }
         Ok(())
+    }
+
+    fn builder_param_initializer_is_builder(
+        &self,
+        initializer: &Expression<'_>,
+        visible_builder_methods: &FxHashSet<String>,
+    ) -> bool {
+        match initializer {
+            Expression::Identifier(identifier) => {
+                visible_builder_methods.contains(identifier.name.as_str())
+            }
+            Expression::StaticMemberExpression(member) => {
+                visible_builder_methods.contains(member.property.name.as_str())
+                    || self.is_wrapped_builder_property_access(initializer)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_wrapped_builder_property_access(&self, initializer: &Expression<'_>) -> bool {
+        let Expression::StaticMemberExpression(member) = initializer else {
+            return false;
+        };
+        if member.property.name != "builder" {
+            return false;
+        }
+        let Expression::CallExpression(call) = &member.object else {
+            return false;
+        };
+        matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "wrapBuilder")
+    }
+
+    fn validate_lifecycle_method(
+        &self,
+        component_name: &str,
+        method: &MethodDefinition<'_>,
+    ) -> Result<(), ComponentV2Error> {
+        let Some(decorator_name) = method.decorators.iter().find_map(|decorator| {
+            let name = ArkuiDecorator::new(decorator).name();
+            Self::component_lifecycle_member_decorator(name).then_some(name)
+        }) else {
+            return Ok(());
+        };
+        if method.value.params.items.is_empty() {
+            return Ok(());
+        }
+        let method_name = method
+            .key
+            .static_name()
+            .map(|name| name.into_owned())
+            .unwrap_or_else(|| "<anonymous>".to_string());
+        let message = if decorator_name == ArkuiDecoratorName::COMPONENT_REUSE {
+            "Methods decorated with '@ComponentReuse' in '@ComponentV2' cannot have input parameters."
+                .to_string()
+        } else {
+            format!("Methods decorated with '@{decorator_name}' cannot have input parameters.")
+        };
+        Err(ComponentV2Error::InvalidFieldDecorators {
+            name: component_name.to_string(),
+            field: method_name,
+            message,
+        })
+    }
+
+    fn component_lifecycle_member_decorator(name: &str) -> bool {
+        matches!(
+            name,
+            ArkuiDecoratorName::COMPONENT_INIT
+                | ArkuiDecoratorName::COMPONENT_APPEAR
+                | ArkuiDecoratorName::COMPONENT_BUILT
+                | ArkuiDecoratorName::COMPONENT_ATTACH
+                | ArkuiDecoratorName::COMPONENT_DETACH
+                | ArkuiDecoratorName::COMPONENT_REUSE
+                | ArkuiDecoratorName::COMPONENT_RECYCLE
+                | ArkuiDecoratorName::COMPONENT_DISAPPEAR
+        )
     }
 
     fn constructor_element(
@@ -550,16 +674,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 None,
                 Some(builder.minus_one_expression()),
             ),
-            builder.formal_parameter_with_initializer(
-                &self.runtime_names.params_lambda,
-                None,
-                Some(builder.undefined_expression()),
-            ),
-            builder.formal_parameter_with_initializer(
-                GeneratedViewpuName::EXTRA_INFO,
-                None,
-                Some(builder.undefined_expression()),
-            ),
+            builder.formal_parameter(&self.runtime_names.params_lambda),
+            builder.formal_parameter(GeneratedViewpuName::EXTRA_INFO),
         ]);
         ViewpuMemberAstEmitter::new(self.allocator).method_with_params(
             GeneratedViewpuName::CONSTRUCTOR,

@@ -103,10 +103,23 @@ impl HapDigestComputer {
         self.hasher.finalize().into()
     }
 
+    /// Append a HAP optional signing block value to the top-level digest.
+    ///
+    /// `developtools_hapsigner` hashes optional block values after the
+    /// first-level chunk digest bytes, without wrapping them in chunk records.
+    pub fn update_optional_block(&mut self, value: &[u8]) {
+        self.hasher.update(value);
+    }
+
     fn update_chunk(hasher: &mut Sha256, chunk: &[u8]) {
-        hasher.update([CHUNK_TYPE_BYTE]);
-        hasher.update((chunk.len() as u32).to_le_bytes());
-        hasher.update(chunk);
+        // Mirrors developtools_hapsigner `HapUtils.computeDigests`: hash each
+        // chunk record first, then append that fixed-size chunk digest to the
+        // top-level `0x5a | chunkCount | chunkDigests...` input.
+        let mut chunk_hasher = Sha256::new();
+        chunk_hasher.update([CHUNK_TYPE_BYTE]);
+        chunk_hasher.update((chunk.len() as u32).to_le_bytes());
+        chunk_hasher.update(chunk);
+        hasher.update(chunk_hasher.finalize());
     }
 }
 
@@ -115,9 +128,9 @@ impl HapDigestComputer {
 /// The digest algorithm (from `developtools_hapsigner`):
 ///
 /// 1. Split each section into CHUNK_SIZE chunks.
-///    For each chunk write: `0xa5 | u32_LE(chunk_len) | chunk_bytes`
-/// 2. Concatenate all such records across all four sections.
-/// 3. Final hash input: `0x5a | u32_LE(total_chunk_count) | all_chunk_records`
+/// 2. For each chunk compute `SHA-256(0xa5 | u32_LE(chunk_len) | chunk_bytes)`.
+/// 3. Final hash input:
+///    `0x5a | u32_LE(total_chunk_count) | chunk_digest_0 | chunk_digest_1 | ...`
 ///
 /// `signing_block_bytes` is empty (`&[]`) during initial signing and contains
 /// the signing block during *verification*.
@@ -125,18 +138,18 @@ pub fn compute_hap_digest(
     entries_bytes: &[u8],
     signing_block_bytes: &[u8],
     cd_bytes: &[u8],
-    eocd_zeroed: &[u8],
+    eocd_bytes: &[u8],
 ) -> [u8; 32] {
     let mut computer = HapDigestComputer::new(&[
         entries_bytes.len(),
         signing_block_bytes.len(),
         cd_bytes.len(),
-        eocd_zeroed.len(),
+        eocd_bytes.len(),
     ]);
     computer.update_section(entries_bytes);
     computer.update_section(signing_block_bytes);
     computer.update_section(cd_bytes);
-    computer.update_section(eocd_zeroed);
+    computer.update_section(eocd_bytes);
     computer.finalize()
 }
 
@@ -193,9 +206,9 @@ mod tests {
 
     #[test]
     fn test_single_byte_payload_produces_one_chunk() {
-        // One byte in entries_bytes → exactly one chunk record
-        // chunk record: 0xa5 | u32_LE(1) | 0x??
-        // top-level: SHA-256(0x5a | u32_LE(1) | chunk_record)
+        // One byte in entries_bytes -> exactly one chunk digest.
+        // chunk digest: SHA-256(0xa5 | u32_LE(1) | 0x??)
+        // top-level: SHA-256(0x5a | u32_LE(1) | chunk_digest)
         let payload = b"X";
         let d = compute_hap_digest(payload, &[], &[], &[]);
 
@@ -203,11 +216,12 @@ mod tests {
         let mut chunk_record = vec![0xa5];
         chunk_record.extend_from_slice(&chunk_len.to_le_bytes());
         chunk_record.extend_from_slice(payload);
+        let chunk_digest = Sha256::digest(&chunk_record);
 
         let mut h = Sha256::new();
         h.update([0x5a_u8]);
         h.update(1u32.to_le_bytes()); // total_chunks = 1
-        h.update(&chunk_record);
+        h.update(chunk_digest);
         let expected: [u8; 32] = h.finalize().into();
 
         assert_eq!(d, expected);

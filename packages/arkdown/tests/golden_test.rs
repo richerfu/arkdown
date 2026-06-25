@@ -216,7 +216,8 @@ fn default_golden_dir() -> PathBuf {
 fn test_loader_json_golden_minimal_hap() {
   use arkdown_core::{
     AbilityConfig, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
-    ModuleJson5Module, OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    ModuleJson5Module, NativeLibOption, OhosModuleType, OutputTarget, ProductConfig, SdkConfig,
+    StrictModeConfig,
   };
   use arkdown_profile::ProfileProcessor;
   use std::sync::Arc;
@@ -247,6 +248,7 @@ fn test_loader_json_golden_minimal_hap() {
         host_pgo: None,
         ap_path: None,
         abi_filters: vec![],
+        native_lib: NativeLibOption::default(),
       },
       version_code: None,
       version_name: None,
