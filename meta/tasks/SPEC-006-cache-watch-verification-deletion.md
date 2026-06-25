@@ -135,7 +135,7 @@ cargo test -p arkdown-profile
 cargo test -p arkdown-resource
 cargo test -p arkdown-pack
 cargo test -p arkdown-sign
-cargo test -p arkdown-ts2abc
+cargo test -p arkdown-napi --lib bytecode
 cargo test -p arkdown-napi
 ```
 

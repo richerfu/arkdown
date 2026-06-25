@@ -124,7 +124,7 @@ SDK parsing, cache policy, or artifact writing.
 Allowed process-backed stages must be represented by typed inputs and typed
 outputs:
 
-- `arkdown-ts2abc`: `es2abc` command plans, cache-file/protoBin inputs,
+- `packages/arkdown::cmd::build::bytecode`: `es2abc` command plans, cache-file/protoBin inputs,
   bytecode outputs, diagnostics.
 - `arkdown-resource`: `restool` command plans and compiled resource outputs.
 - `arkdown-pack`: package command or archive writer plans and final package

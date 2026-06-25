@@ -150,7 +150,7 @@ Upstream es2panda then merges those cached programs during `ResolveAndGenerate()
 Implemented parity pieces:
 
 - CLI writes hvigor-style `filesInfo.txt`, `npmEntries.txt`, and `modules.cache`.
-- `arkdown-ts2abc` accepts `--npm-module-entry-list`.
+- `packages/arkdown::cmd::build::bytecode` passes `--npm-module-entry-list` to the SDK `es2abc` driver.
 - `arkdown-abc` lowers `npmEntries.txt` through the same record shape as
   upstream `CompileNpmModuleEntryList()`: one record per line, one `u8=false`
   field named by the build path. Record names are serialized in pandasm class

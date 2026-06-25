@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use arkdown_core::ArkdownConfig;
 use arkdown_path::ArtifactPathSerializer;
@@ -31,6 +31,8 @@ pub struct TaskInputs {
 
 const TASK_INPUTS_FILE: &str = ".task_inputs";
 const TASK_INPUTS_SCHEMA_VERSION: u32 = 2;
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
 
 impl TaskInputs {
   /// Compute current task inputs from config and loader data.
@@ -108,6 +110,22 @@ impl TaskInputs {
     self
   }
 
+  /// Builder: add dependency-exported obfuscation rule files to the existing
+  /// obfuscation hash.
+  pub fn with_additional_obfuscation_rule_files(mut self, paths: &[PathBuf]) -> Self {
+    if paths.is_empty() {
+      return self;
+    }
+    let mut h = if self.obfuscation_hash == 0 {
+      FNV_OFFSET_BASIS
+    } else {
+      self.obfuscation_hash
+    };
+    Self::hash_file_contents_into(&mut h, paths.iter().map(PathBuf::as_path));
+    self.obfuscation_hash = h;
+    self
+  }
+
   /// Return `true` if the persisted inputs in `cache_dir` match `self`.
   ///
   /// A mismatch on any field means the task must re-run.  Missing file is
@@ -168,14 +186,14 @@ struct StoredTaskInputs {
 impl TaskInputs {
   /// FNV-1a 64-bit hash of all source file paths in declaration order.
   fn hash_source_files(compile_entry: &[String]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+    let mut h: u64 = FNV_OFFSET_BASIS;
     for path in compile_entry {
       for b in path.bytes() {
         h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+        h = h.wrapping_mul(FNV_PRIME);
       }
       h ^= b'|' as u64;
-      h = h.wrapping_mul(0x100000001b3);
+      h = h.wrapping_mul(FNV_PRIME);
     }
     h
   }
@@ -193,24 +211,36 @@ impl TaskInputs {
     let Some(obf) = ark.obfuscation.as_ref() else {
       return 0;
     };
-    if !obf.enable_obfuscation || obf.rule_files.is_empty() {
+    if !obf.enable_obfuscation || (obf.rule_files.is_empty() && obf.consumer_rule_files.is_empty())
+    {
       return 0;
     }
-    let mut h: u64 = 0xcbf29ce484222325;
+    let mut h: u64 = FNV_OFFSET_BASIS;
     // Hash all rule files in order — a change to any file invalidates the cache.
-    for rules_path in &obf.rule_files {
+    Self::hash_file_contents_into(
+      &mut h,
+      obf
+        .rule_files
+        .iter()
+        .chain(obf.consumer_rule_files.iter())
+        .map(PathBuf::as_path),
+    );
+    h
+  }
+
+  fn hash_file_contents_into<'a>(h: &mut u64, paths: impl IntoIterator<Item = &'a Path>) {
+    for rules_path in paths {
       let Ok(content) = std::fs::read(rules_path) else {
         continue;
       };
       for b in content {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+        *h ^= b as u64;
+        *h = (*h).wrapping_mul(FNV_PRIME);
       }
-      // Separator between files so that [A, AB] ≠ [AA, B].
-      h ^= b'\0' as u64;
-      h = h.wrapping_mul(0x100000001b3);
+      // Separator between files so that [A, AB] != [AA, B].
+      *h ^= b'\0' as u64;
+      *h = (*h).wrapping_mul(FNV_PRIME);
     }
-    h
   }
 }
 
@@ -412,5 +442,26 @@ mod tests {
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn test_additional_obfuscation_rule_files_change_hash() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dep_rules = tmp.path().join("obfuscation.txt");
+    std::fs::write(&dep_rules, "-keep-global-name\nDepApi\n").unwrap();
+    let config = make_config();
+    let loader = make_loader(vec!["./ets/Index.ets".to_string()], "/tmp/cache");
+
+    let base = TaskInputs::compute(&config, &loader);
+    let with_dep = base
+      .clone()
+      .with_additional_obfuscation_rule_files(std::slice::from_ref(&dep_rules));
+
+    assert_ne!(base.obfuscation_hash, with_dep.obfuscation_hash);
+
+    std::fs::write(&dep_rules, "-keep-global-name\nDepApiV2\n").unwrap();
+    let changed = base.with_additional_obfuscation_rule_files(std::slice::from_ref(&dep_rules));
+
+    assert_ne!(with_dep.obfuscation_hash, changed.obfuscation_hash);
   }
 }

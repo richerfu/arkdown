@@ -74,7 +74,7 @@ dynamic graph API.
 | source | source inventory, code-resource copy, visual/worker inventories | `arkdown-session`, `arkdown-resource` |
 | bundle | Rolldown bundle and plugin facts | `arkdown` |
 | transform | OXC ArkTS transform and checker | `arkdown-ets-transform` |
-| bytecode | es2abc / Ark bytecode | `arkdown-ts2abc` |
+| bytecode | es2abc / Ark bytecode | `packages/arkdown::cmd::build::bytecode` |
 | native | CMake/Ninja/native libs/strip/binxo | `packages/arkdown::cmd::native_build` |
 | package | HAR/HSP/HAP/app package and metadata | `arkdown-pack` |
 | sign | validate sign, sign module/app/remote HSP | `arkdown-sign` |

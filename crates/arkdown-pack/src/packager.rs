@@ -462,7 +462,7 @@ pub struct HarPackInput {
     /// downstream consumers can resolve type information without full tsc.
     /// When `None` (or the directory does not exist), declaration stubs are omitted.
     pub declarations_dir: Option<PathBuf>,
-    /// Path to the consumer obfuscation rules file (`consumer-rules.txt`).
+    /// Path to the consumer obfuscation rules file (`obfuscation.txt`).
     ///
     /// hvigor calls `generateConsumerObConfigFile()` and includes the result so
     /// consumers know which symbols the HAR exposes and how to configure their
@@ -1033,13 +1033,13 @@ impl Packager {
             }
         }
 
-        // Consumer obfuscation rules (`consumer-rules.txt`) — packaged at the HAR root.
+        // Consumer obfuscation rules (`obfuscation.txt`) — packaged at the HAR root.
         //
         // hvigor's `generateConsumerObConfigFile()` writes the HAR's obfuscation rules
         // so that downstream consumers can extend their own obfuscation config.
         if let Some(consumer_rules) = input.consumer_rules_path.as_ref() {
             if consumer_rules.exists() {
-                zip_writer::add_file_deflate(&mut writer, "consumer-rules.txt", consumer_rules)?;
+                zip_writer::add_file_deflate(&mut writer, "obfuscation.txt", consumer_rules)?;
             }
         }
 

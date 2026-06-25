@@ -136,7 +136,7 @@ pub struct ConsumerObfuscationPlan {
     pub consumer_rule_files: Vec<PathBuf>,
     /// Absolute path where the merged consumer rule file is written.
     ///
-    /// Typically `<intermediates>/consumer-obfuscation-rules.txt`.
+    /// hvigor writes `<build>/default/intermediates/obfuscation/<target>/obfuscation.txt`.
     pub output_path: PathBuf,
 }
 
@@ -300,6 +300,11 @@ impl ObfuscationPlan {
             .rule_inputs
             .iter()
             .flat_map(|input| input.all_paths())
+            .chain(
+                self.consumer_plan
+                    .iter()
+                    .flat_map(|consumer| consumer.consumer_rule_files.iter()),
+            )
             .collect();
         fnv1a_hash_files(&all_paths)
     }
@@ -363,6 +368,7 @@ mod tests {
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![],
+            consumer_rule_files: vec![],
         };
         let plan = ObfuscationPlan::from_build_options(
             &BuildMode::Debug,
@@ -392,6 +398,7 @@ mod tests {
         let cfg = ObfuscationConfig {
             enable_obfuscation: false,
             rule_files: vec![],
+            consumer_rule_files: vec![],
         };
         let plan = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -405,10 +412,11 @@ mod tests {
     #[test]
     fn plan_enabled_for_release_with_enable_true() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule],
+            consumer_rule_files: vec![],
         };
         let plan = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -444,10 +452,11 @@ mod tests {
     #[test]
     fn validate_succeeds_when_rule_files_exist() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule],
+            consumer_rule_files: vec![],
         };
         let plan = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -465,6 +474,7 @@ mod tests {
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![missing.clone()],
+            consumer_rule_files: vec![],
         };
         let plan = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -482,11 +492,12 @@ mod tests {
     #[test]
     fn validate_errors_on_missing_dependency_rule_file() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let missing_dep = tmp.path().join("dep-missing.txt");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule],
+            consumer_rule_files: vec![],
         };
         let mut plan = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -509,11 +520,12 @@ mod tests {
     #[test]
     fn validate_errors_on_missing_consumer_rule_file() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let missing_consumer = tmp.path().join("consumer-missing.txt");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule],
+            consumer_rule_files: vec![],
         };
         let consumer_plan = ConsumerObfuscationPlan::new(
             vec![missing_consumer.clone()],
@@ -544,10 +556,11 @@ mod tests {
     #[test]
     fn fingerprint_is_deterministic() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule],
+            consumer_rule_files: vec![],
         };
         let plan1 = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -567,10 +580,11 @@ mod tests {
     #[test]
     fn fingerprint_changes_when_rule_content_changes() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule.clone()],
+            consumer_rule_files: vec![],
         };
         let plan1 = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -581,7 +595,7 @@ mod tests {
         let fp1 = plan1.rule_fingerprint();
 
         // Modify the rule file.
-        std::fs::write(&rule, b"-enable-obfuscation\n-compact\n").unwrap();
+        std::fs::write(&rule, b"-keep-global-name\nPlanRule\n-compact\n").unwrap();
 
         let plan2 = ObfuscationPlan::from_build_options(
             &BuildMode::Release,
@@ -600,11 +614,12 @@ mod tests {
     #[test]
     fn fingerprint_covers_dependency_rule_files() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let dep_rule = make_rule_file(tmp.path(), "dep-rules.txt", b"-keep-global-name\nFoo\n");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule],
+            consumer_rule_files: vec![],
         };
 
         let mut plan = ObfuscationPlan::from_build_options(
@@ -631,11 +646,12 @@ mod tests {
     #[test]
     fn all_rule_files_collects_primary_and_dep_paths() {
         let tmp = tempdir().unwrap();
-        let rule = make_rule_file(tmp.path(), "rules.txt", b"-enable-obfuscation\n");
+        let rule = make_rule_file(tmp.path(), "rules.txt", b"-keep-global-name\nPlanRule\n");
         let dep = make_rule_file(tmp.path(), "dep.txt", b"-keep-global-name\nBar\n");
         let cfg = ObfuscationConfig {
             enable_obfuscation: true,
             rule_files: vec![rule.clone()],
+            consumer_rule_files: vec![],
         };
         let mut plan = ObfuscationPlan::from_build_options(
             &BuildMode::Release,

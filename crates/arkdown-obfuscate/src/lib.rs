@@ -1,32 +1,17 @@
-//! Pure-Rust JS obfuscation for arkdown release builds.
+//! Hvigor-aligned obfuscation rule handling for arkdown release builds.
 //!
-//! Replaces the closed-source SDK `obfuscation` subprocess previously invoked
-//! between bundler output and SDK es2abc compilation.  The implementation
-//! uses [`oxc_parser`] to parse each file and performs span-based identifier
-//! renaming according to OHOS rule files.
-//!
-//! # Quick start
-//!
-//! ```rust,ignore
-//! use arkdown_obfuscate::{Obfuscator, ObfuscationOptions};
-//! use std::path::PathBuf;
-//!
-//! let ob = Obfuscator::new(ObfuscationOptions {
-//!     rule_files: vec![PathBuf::from("obfuscation-rules.txt")],
-//!     cache_dir: PathBuf::from("build/.obf-cache"),
-//!     export_rule_path: None,
-//! })?;
-//!
-//! let out = ob.obfuscate_source("var longName = 1;", "entry.js")?;
-//! assert!(!out.code.contains("longName"));
-//! ```
+//! The SDK implementation delegates source and bytecode obfuscation to
+//! `arkguard`.  This crate parses and merges arkguard rule files, exports HAR
+//! consumer `obfuscation.txt` files, and rejects source/bytecode options whose
+//! full arkguard semantics have not been ported to Rust.  It intentionally does
+//! not generate a local approximation for those options.
 
-pub(crate) mod minifier;
+mod consumer;
 pub mod plan;
-mod rename;
 mod rules;
 mod transform;
 
+pub use consumer::ConsumerObfuscationFileWriter;
 pub use plan::{
     ConsumerObfuscationPlan, ObfuscationOutputPaths, ObfuscationPlan, ObfuscationRuleInput,
 };
@@ -49,6 +34,8 @@ pub enum ObfuscationError {
     ParseError { file: String, message: String },
     #[error("Codegen error: {0}")]
     CodegenError(String),
+    #[error("Unsupported arkguard obfuscation options require full hvigor parity: {features}")]
+    UnsupportedArkguardObfuscationOptions { features: String },
     #[error(transparent)]
     Path(#[from] arkdown_path::serializer::SerializerError),
 }
@@ -58,8 +45,15 @@ pub enum ObfuscationError {
 /// Configuration for a single obfuscation pass.
 #[derive(Debug, Clone)]
 pub struct ObfuscationOptions {
+    /// `buildOption.arkOptions.obfuscation.ruleOptions.enable`.
+    ///
+    /// hvigor enables the pass from build-profile data; the rule file only
+    /// carries detailed options and keep lists.
+    pub enable_obfuscation: bool,
     /// Rule files whose directives control obfuscation behaviour.
     pub rule_files: Vec<PathBuf>,
+    /// Consumer obfuscation configs exported by HAR/HSP dependencies.
+    pub dependency_rule_files: Vec<PathBuf>,
     /// Cache directory for obfuscation outputs (used by the caller for
     /// incremental build cache invalidation; not written to by this crate).
     pub cache_dir: PathBuf,
@@ -69,10 +63,11 @@ pub struct ObfuscationOptions {
 
 // ── Obfuscator ────────────────────────────────────────────────────────────────
 
-/// Pure-Rust JS obfuscator.
+/// Hvigor-aligned obfuscation rule executor.
 ///
 /// Create once per build (rules are parsed at construction time) and reuse
-/// across all files in the same build.
+/// across all files in the same build. Active arkguard source/bytecode options
+/// are rejected during construction until their full semantics are ported.
 pub struct Obfuscator {
     rules: ObfuscationRules,
 }
@@ -89,23 +84,50 @@ impl Obfuscator {
                 return Err(ObfuscationError::RuleFileNotFound(rule.clone()));
             }
         }
+        for rule in &options.dependency_rule_files {
+            if !rule.exists() {
+                return Err(ObfuscationError::RuleFileNotFound(rule.clone()));
+            }
+        }
 
         // Parse and merge.
-        let merged = options.rule_files.iter().try_fold(
+        let mut merged = options.rule_files.iter().try_fold(
             ObfuscationRules::default(),
             |acc, path| -> Result<ObfuscationRules, ObfuscationError> {
                 let r = ObfuscationRules::from_file(path)?;
                 Ok(acc.merge(r))
             },
         )?;
+        let dependency_rules = options.dependency_rule_files.iter().try_fold(
+            ObfuscationRules::default(),
+            |acc, path| -> Result<ObfuscationRules, ObfuscationError> {
+                let r = ObfuscationRules::from_file(path)?;
+                Ok(acc.merge(r))
+            },
+        )?;
+        let dependency_disables_obfuscation = dependency_rules.disable_obfuscation;
+        merged = if merged.enable_lib_obfuscation_options {
+            merged.merge(dependency_rules)
+        } else {
+            merged.merge_keep_options(dependency_rules)
+        };
+        merged.disable_obfuscation = merged.disable_obfuscation || dependency_disables_obfuscation;
+        merged.enable_obfuscation = options.enable_obfuscation && !merged.disable_obfuscation;
+        if merged.enable_obfuscation {
+            let mut unsupported = vec!["arkguard-source-name-obfuscation"];
+            unsupported.extend(merged.unsupported_arkguard_obfuscation_options());
+            return Err(ObfuscationError::UnsupportedArkguardObfuscationOptions {
+                features: unsupported.join(", "),
+            });
+        }
 
         Ok(Obfuscator { rules: merged })
     }
 
-    /// Obfuscate JavaScript source text in memory.
+    /// Process JavaScript source text in memory.
     ///
-    /// When `rules.enable_obfuscation` is `false` the source is returned
-    /// unchanged — it is safe to call this unconditionally.
+    /// This returns source unchanged after construction has rejected unsupported
+    /// arkguard source/bytecode options.
     pub fn obfuscate_source(
         &self,
         source: &str,
@@ -114,7 +136,7 @@ impl Obfuscator {
         self.rules.apply(source, filename)
     }
 
-    /// Obfuscate a single `.js` file.
+    /// Process a single `.js` file.
     ///
     /// Reads `input`, writes the result to `output`, and returns the output
     /// path on success.
@@ -126,7 +148,7 @@ impl Obfuscator {
         Ok(output.to_path_buf())
     }
 
-    /// Obfuscate all `.js` files found up to 2 levels deep in `dir`, in-place.
+    /// Process all `.js` files found up to 2 levels deep in `dir`, in-place.
     ///
     /// Each file is written to a temporary path first and then atomically
     /// renamed over the original to avoid partial writes.
@@ -174,10 +196,9 @@ mod tests {
 
     #[test]
     fn test_rule_parser_enable_flags() {
-        let rules = ObfuscationRules::parse(
-            "-enable-obfuscation\n-enable-property-obfuscation\n-compact\n-remove-log\n",
-        );
-        assert!(rules.enable_obfuscation);
+        let rules =
+            ObfuscationRules::parse("-enable-property-obfuscation\n-compact\n-remove-log\n");
+        assert!(!rules.enable_obfuscation);
         assert!(rules.enable_property_obfuscation);
         assert!(rules.compact);
         assert!(rules.remove_log);
@@ -200,34 +221,118 @@ mod tests {
 
     #[test]
     fn test_comment_and_blank_lines_ignored() {
-        let rules = ObfuscationRules::parse("# this is a comment\n\n-enable-obfuscation\n\n");
-        assert!(rules.enable_obfuscation);
+        let rules = ObfuscationRules::parse("# this is a comment\n\n-compact\n\n");
+        assert!(rules.compact);
     }
 
     #[test]
     fn test_disable_directive_overrides_enable() {
-        let rules = ObfuscationRules::parse("-enable-obfuscation\n-disable-obfuscation\n");
+        let rules = ObfuscationRules::parse("-enable-property-obfuscation\n-disable-obfuscation\n");
         assert!(!rules.enable_obfuscation);
+        assert!(rules.enable_property_obfuscation);
+        assert!(rules.disable_obfuscation);
+    }
+
+    #[test]
+    fn consumer_config_serializes_arkguard_exported_subset() {
+        let rules = ObfuscationRules::parse(
+            "-enable-property-obfuscation\n\
+             -enable-string-property-obfuscation\n\
+             -enable-toplevel-obfuscation\n\
+             -enable-filename-obfuscation\n\
+             -enable-export-obfuscation\n\
+             -compact\n\
+             -remove-log\n\
+             -keep-global-name\n\
+             Zebra\n\
+             Alpha\n\
+             -keep-property-name\n\
+             beta\n\
+             alpha\n",
+        );
+
+        assert_eq!(
+            rules.serialize_consumer_config(),
+            "-enable-property-obfuscation\n\
+             -enable-string-property-obfuscation\n\
+             -enable-toplevel-obfuscation\n\
+             -compact\n\
+             -remove-log\n\
+             -keep-global-name\n\
+             Alpha\n\
+             Zebra\n\
+             -keep-property-name\n\
+             alpha\n\
+             beta\n"
+        );
+    }
+
+    #[test]
+    fn consumer_writer_writes_obfuscation_txt_content() {
+        let tmp = tempdir().unwrap();
+        let consumer = tmp.path().join("consumer-rules.txt");
+        let dependency = tmp.path().join("dep-obfuscation.txt");
+        std::fs::write(
+            &consumer,
+            "-enable-property-obfuscation\n-keep-property-name\nfoo\n",
+        )
+        .expect("write consumer rules");
+        std::fs::write(
+            &dependency,
+            "-enable-string-property-obfuscation\n-keep-property-name\nbar\n",
+        )
+        .expect("write dependency rules");
+        let output = tmp.path().join("obfuscation.txt");
+
+        ConsumerObfuscationFileWriter::new(vec![consumer], output.clone())
+            .with_dependency_rule_files(vec![dependency])
+            .write()
+            .expect("write obfuscation.txt");
+
+        let actual = std::fs::read_to_string(output).expect("read obfuscation.txt");
+        assert_eq!(
+            actual,
+            "-enable-property-obfuscation\n-enable-string-property-obfuscation\n-keep-property-name\nbar\nfoo\n"
+        );
+    }
+
+    #[test]
+    fn dependency_rules_merge_keep_options_without_lib_obfuscation_flag() {
+        let self_rules = ObfuscationRules::parse("-enable-property-obfuscation\n");
+        let dependency_rules =
+            ObfuscationRules::parse("-enable-toplevel-obfuscation\n-keep-global-name\nDepApi\n");
+
+        let merged = self_rules.merge_keep_options(dependency_rules);
+
+        assert!(merged.enable_property_obfuscation);
+        assert!(!merged.enable_toplevel_obfuscation);
+        assert!(merged.keep_global_names.contains("DepApi"));
     }
 
     // -- Obfuscator integration ------------------------------------------------
 
-    fn make_obfuscator(rules_str: &str, tmp: &tempfile::TempDir) -> Obfuscator {
+    fn make_obfuscator(
+        rules_str: &str,
+        tmp: &tempfile::TempDir,
+    ) -> Result<Obfuscator, ObfuscationError> {
         let rule_file = tmp.path().join("r.txt");
         std::fs::write(&rule_file, rules_str).expect("write rule file");
         Obfuscator::new(ObfuscationOptions {
+            enable_obfuscation: true,
             rule_files: vec![rule_file],
+            dependency_rule_files: vec![],
             cache_dir: tmp.path().to_path_buf(),
             export_rule_path: None,
         })
-        .expect("Obfuscator::new")
     }
 
     #[test]
     fn test_no_rule_files_builds_empty_rules() {
         let tmp = tempdir().expect("tempdir");
         let opts = ObfuscationOptions {
+            enable_obfuscation: false,
             rule_files: vec![],
+            dependency_rule_files: vec![],
             cache_dir: tmp.path().to_path_buf(),
             export_rule_path: None,
         };
@@ -239,67 +344,36 @@ mod tests {
     }
 
     #[test]
-    fn test_obfuscate_source_renames_local_when_enabled() {
+    fn build_profile_enable_requires_arkguard_source_obfuscation() {
         let tmp = tempdir().expect("tempdir");
-        let ob = make_obfuscator("-enable-obfuscation\n", &tmp);
-        let src = "var longVariableName = 1;";
-        let out = ob.obfuscate_source(src, "test.js").expect("obfuscate");
+        let err = match make_obfuscator("-keep-global-name\nKeptName\n", &tmp) {
+            Ok(_) => panic!("expected unsupported arkguard source obfuscation error"),
+            Err(err) => err,
+        };
         assert!(
-            !out.code.contains("longVariableName"),
-            "expected 'longVariableName' to be renamed, got: {}",
-            out.code
+            matches!(
+                err,
+                ObfuscationError::UnsupportedArkguardObfuscationOptions { ref features }
+                    if features.contains("arkguard-source-name-obfuscation")
+            ),
+            "expected source name obfuscation error, got {err:?}"
         );
     }
 
     #[test]
-    fn test_obfuscate_source_parses_typescript_handoff_files() {
+    fn unsupported_source_obfuscation_option_is_rejected() {
         let tmp = tempdir().expect("tempdir");
-        let ob = make_obfuscator("-enable-obfuscation\n", &tmp);
-        let src = "const typedName: number = 1;\ntypedName;";
-        let out = ob
-            .obfuscate_source(src, "entry/src/main/ets/pages/Index.ts")
-            .expect("obfuscate TypeScript source");
+        let err = match make_obfuscator("-enable-property-obfuscation\n", &tmp) {
+            Ok(_) => panic!("expected unsupported arkguard option error"),
+            Err(err) => err,
+        };
         assert!(
-            !out.code.contains("typedName"),
-            "typed binding should be renamed: {}",
-            out.code
-        );
-        assert!(
-            out.code.contains(": number"),
-            "type must parse: {}",
-            out.code
-        );
-    }
-
-    #[test]
-    fn test_obfuscate_source_keeps_global_name() {
-        let tmp = tempdir().expect("tempdir");
-        let ob = make_obfuscator("-enable-obfuscation\n-keep-global-name\nMyClass\n", &tmp);
-        let src = "class MyClass { }";
-        let out = ob.obfuscate_source(src, "test.js").expect("obfuscate");
-        assert!(
-            out.code.contains("MyClass"),
-            "expected 'MyClass' to be preserved, got: {}",
-            out.code
-        );
-    }
-
-    #[test]
-    fn test_remove_log_strips_console_log() {
-        let tmp = tempdir().expect("tempdir");
-        let ob = make_obfuscator("-enable-obfuscation\n-remove-log\n", &tmp);
-        let src = "var x = 1;\nconsole.log(x);\nvar y = 2;\n";
-        let out = ob.obfuscate_source(src, "test.js").expect("obfuscate");
-        assert!(
-            !out.code.contains("console.log"),
-            "expected console.log to be removed, got: {}",
-            out.code
-        );
-        // At least one non-log variable should still be present (renamed to a/b).
-        assert!(
-            out.code.contains('a') || out.code.contains('b'),
-            "non-log code should still be present: {}",
-            out.code
+            matches!(
+                err,
+                ObfuscationError::UnsupportedArkguardObfuscationOptions { ref features }
+                    if features.contains("-enable-property-obfuscation")
+            ),
+            "expected unsupported arkguard option error, got {err:?}"
         );
     }
 
@@ -309,20 +383,28 @@ mod tests {
         let input = tmp.path().join("input.js");
         let output = tmp.path().join("output.js");
         std::fs::write(&input, "var longName = 1;").expect("write input");
-        let ob = make_obfuscator("-enable-obfuscation\n", &tmp);
+        let rule_file = tmp.path().join("rules-disabled.txt");
+        std::fs::write(&rule_file, "-keep-global-name\nlongName\n").expect("write rule");
+        let ob = Obfuscator::new(ObfuscationOptions {
+            enable_obfuscation: false,
+            rule_files: vec![rule_file],
+            dependency_rule_files: vec![],
+            cache_dir: tmp.path().to_path_buf(),
+            export_rule_path: None,
+        })
+        .expect("new");
         let result_path = ob.obfuscate_file(&input, &output).expect("obfuscate_file");
         assert_eq!(result_path, output);
         let content = std::fs::read_to_string(&output).expect("read output");
-        assert!(
-            !content.contains("longName"),
-            "longName should be obfuscated: {content}"
-        );
+        assert_eq!(content, "var longName = 1;");
     }
 
     #[test]
     fn test_rule_file_not_found_error() {
         let opts = ObfuscationOptions {
+            enable_obfuscation: true,
             rule_files: vec![PathBuf::from("/nonexistent/rules.txt")],
+            dependency_rule_files: vec![],
             cache_dir: PathBuf::from("/tmp"),
             export_rule_path: None,
         };
@@ -331,30 +413,23 @@ mod tests {
     }
 
     #[test]
-    fn test_function_name_renamed() {
+    fn dependency_disable_obfuscation_suppresses_unsupported_option_rejection() {
         let tmp = tempdir().expect("tempdir");
-        let ob = make_obfuscator("-enable-obfuscation\n", &tmp);
-        let src = "function doSomethingComplex() { return 1; }";
-        let out = ob.obfuscate_source(src, "test.js").expect("obfuscate");
-        assert!(
-            !out.code.contains("doSomethingComplex"),
-            "function name should be renamed: {}",
-            out.code
-        );
-    }
+        let rule_file = tmp.path().join("rules.txt");
+        let dep_rule_file = tmp.path().join("dep-rules.txt");
+        std::fs::write(&rule_file, "-enable-property-obfuscation\n").expect("write rule");
+        std::fs::write(&dep_rule_file, "-disable-obfuscation\n").expect("write dep rule");
 
-    #[test]
-    fn test_property_access_not_renamed() {
-        let tmp = tempdir().expect("tempdir");
-        let ob = make_obfuscator("-enable-obfuscation\n", &tmp);
-        // The binding `obj` gets renamed, but `.prop` must NOT be touched.
-        let src = "var obj = {}; obj.prop = 1;";
+        let ob = Obfuscator::new(ObfuscationOptions {
+            enable_obfuscation: true,
+            rule_files: vec![rule_file],
+            dependency_rule_files: vec![dep_rule_file],
+            cache_dir: tmp.path().to_path_buf(),
+            export_rule_path: None,
+        })
+        .expect("dependency disable should match arkguard ConfigResolver");
+        let src = "var longName = 1;";
         let out = ob.obfuscate_source(src, "test.js").expect("obfuscate");
-        // `.prop` should still appear unchanged (it is a property access)
-        assert!(
-            out.code.contains(".prop"),
-            "property access .prop must not be renamed: {}",
-            out.code
-        );
+        assert_eq!(out.code, src);
     }
 }

@@ -65,6 +65,38 @@ impl ModuleJsonWriter {
         output_path: &Path,
         resource_ids: Option<&FxHashMap<String, u32>>,
     ) -> Result<(), ArkdownError> {
+        Self::write_with_optional_dependency_graph(
+            manifest,
+            config,
+            output_path,
+            resource_ids,
+            None,
+        )
+    }
+
+    pub(crate) fn write_with_dependency_graph(
+        manifest: &HapManifest,
+        config: &ArkdownConfig,
+        output_path: &Path,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+        dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
+    ) -> Result<(), ArkdownError> {
+        Self::write_with_optional_dependency_graph(
+            manifest,
+            config,
+            output_path,
+            resource_ids,
+            Some(dependency_graph),
+        )
+    }
+
+    fn write_with_optional_dependency_graph(
+        manifest: &HapManifest,
+        config: &ArkdownConfig,
+        output_path: &Path,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+        dependency_graph: Option<&crate::dependency_graph::LocalDependencyGraph>,
+    ) -> Result<(), ArkdownError> {
         let app_json5_fields = Self::read_app_json5_fields(config)?;
         let project_multi_projects = Self::read_project_multi_projects(config);
         let min_numeric_api =
@@ -91,8 +123,12 @@ impl ModuleJsonWriter {
         // source are appended verbatim after all known fields are emitted.
         let raw_module5 = Self::read_raw_module5(manifest, config);
         let target_ability_overrides = Self::read_target_ability_overrides(manifest, config);
-        let dependency_profile_merge =
-            Self::read_dependency_profile_merge(manifest, config, raw_module5.as_ref())?;
+        let dependency_profile_merge = Self::read_dependency_profile_merge(
+            manifest,
+            config,
+            raw_module5.as_ref(),
+            dependency_graph,
+        )?;
         let has_insight_intent =
             Self::read_module_has_insight_intent(manifest, config, raw_module5.as_ref());
 
@@ -738,6 +774,7 @@ impl ModuleJsonWriter {
         manifest: &HapManifest,
         config: &ArkdownConfig,
         raw_module5: Option<&serde_json::Value>,
+        dependency_graph: Option<&crate::dependency_graph::LocalDependencyGraph>,
     ) -> Result<DependencyProfileMerge, ArkdownError> {
         if matches!(manifest.module_type, OhosModuleType::Har) {
             return Ok(DependencyProfileMerge::default());
@@ -761,8 +798,17 @@ impl ModuleJsonWriter {
         // Matches hvigor's checkHarApiStatus() / checkHarDeviceTypes() behavior
         // which validates the entire dependency graph, not just the merging subset.
         {
-            use crate::dependency_graph::{DependencyNodeType, LocalDependencyGraph};
-            let graph = LocalDependencyGraph::build(&module_cfg.src_path, &config.project_root);
+            use crate::dependency_graph::DependencyNodeType;
+            let owned_graph;
+            let graph = if let Some(graph) = dependency_graph {
+                graph
+            } else {
+                owned_graph = crate::dependency_graph::LocalDependencyGraph::build(
+                    &module_cfg.src_path,
+                    &config.project_root,
+                );
+                &owned_graph
+            };
             for node in graph.nodes.values() {
                 if !matches!(
                     node.node_type,

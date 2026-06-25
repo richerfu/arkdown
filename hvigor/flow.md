@@ -76,7 +76,7 @@ flowchart TD
 | Loader generation | `generate-loader-json`, dependency metadata helpers | `arkdown-profile` plan output consumed by `arkdown` |
 | ArkTS bundle | `ark-compile`, `hvigor-arkts-compose/dist/src/arkts-pack.*` | `arkdown`, plugin crates, `arkdown-ets-transform` |
 | Rollup cache/importees | `hvigor-arkts-base/dist/src/build*`, `cache/rollup/**` | `arkdown-cache`, `arkdown` |
-| ABC compile | SDK compile plugin and es2abc handoff | `arkdown-ts2abc`, `arkdown-abc` |
+| ABC compile | SDK compile plugin and es2abc handoff | `packages/arkdown::cmd::build::bytecode` |
 | Packaging | `package-hap`, `package-hsp`, `package-har`, pack info tasks | `arkdown-pack` |
 | Signing | `sign-hap`, `sign-hsp`, signing command builders | `arkdown-sign` |
 | Watch/hot reload | watch, hot/cold reload, importer collection | `arkdown-watcher`, `arkdown-cli` |
@@ -119,4 +119,3 @@ BuildSession -> BuildPlan -> ModuleCompileContext -> domain plans -> artifacts
 Domain crates consume typed plans and owned snapshots. They must not rediscover
 project files, SDK metadata, dependency roots, or profile/resource inventories
 inside hot build stages.
-

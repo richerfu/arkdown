@@ -82,8 +82,9 @@ pub use plan::{
 };
 
 use rustc_hash::FxHashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use arkdown_config::{build_profile::parse_api_version, sdk::discover_ark_vm_version};
 use arkdown_core::{
@@ -99,10 +100,185 @@ pub struct ProfileProcessor {
     config: Arc<ArkdownConfig>,
 }
 
+pub struct ProfileDependencyContext {
+    graph: dependency_graph::LocalDependencyGraph,
+}
+
+impl ProfileDependencyContext {
+    fn build(config: &ArkdownConfig, module_cfg: &ModuleConfig) -> Self {
+        Self {
+            graph: dependency_graph::LocalDependencyGraph::build(
+                &module_cfg.src_path,
+                &config.project_root,
+            ),
+        }
+    }
+
+    pub fn from_session_graph(
+        config: &ArkdownConfig,
+        module_cfg: &ModuleConfig,
+        session_graph: &arkdown_session::DependencyGraphSnapshot,
+    ) -> Self {
+        let mut graph = dependency_graph::LocalDependencyGraph {
+            nodes: indexmap::IndexMap::new(),
+        };
+        for node in session_graph.nodes.values() {
+            let package_name = node.alias.clone();
+            graph.nodes.insert(
+                package_name.clone(),
+                dependency_graph::DependencyNode {
+                    package_name,
+                    pkg_root: node.package_root.clone().unwrap_or_default(),
+                    node_type: Self::session_node_type(node),
+                },
+            );
+        }
+        let mut context = Self { graph };
+        context.apply_root_runtime_only_packages(config, module_cfg);
+        context
+    }
+
+    pub(crate) fn graph(&self) -> &dependency_graph::LocalDependencyGraph {
+        &self.graph
+    }
+
+    fn session_node_type(
+        node: &arkdown_session::dependency_graph::snapshot::DependencyNodeSnapshot,
+    ) -> dependency_graph::DependencyNodeType {
+        if node.is_runtime_only {
+            return dependency_graph::DependencyNodeType::RuntimeOnly;
+        }
+        match node.node_type {
+            arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar => {
+                dependency_graph::DependencyNodeType::SourceHar
+            }
+            arkdown_session::dependency_graph::snapshot::DependencyNodeType::BytecodeHar => {
+                dependency_graph::DependencyNodeType::BytecodeHar
+            }
+            arkdown_session::dependency_graph::snapshot::DependencyNodeType::SharedHsp
+            | arkdown_session::dependency_graph::snapshot::DependencyNodeType::IntegratedHsp => {
+                dependency_graph::DependencyNodeType::SharedHsp
+            }
+            arkdown_session::dependency_graph::snapshot::DependencyNodeType::NativeSo => {
+                dependency_graph::DependencyNodeType::NativeSo
+            }
+            arkdown_session::dependency_graph::snapshot::DependencyNodeType::OhpmSource
+            | arkdown_session::dependency_graph::snapshot::DependencyNodeType::Unknown => {
+                dependency_graph::DependencyNodeType::RemoteOrUnknown
+            }
+        }
+    }
+
+    fn apply_root_runtime_only_packages(
+        &mut self,
+        config: &ArkdownConfig,
+        module_cfg: &ModuleConfig,
+    ) {
+        let mut runtime_only_packages = Self::runtime_only_package_names(&module_cfg.src_path);
+        runtime_only_packages.extend(Self::runtime_only_package_names(&config.project_root));
+        runtime_only_packages.sort();
+        runtime_only_packages.dedup();
+        for package_name in runtime_only_packages {
+            if let Some(node) = self.graph.nodes.get_mut(&package_name) {
+                node.node_type = dependency_graph::DependencyNodeType::RuntimeOnly;
+                continue;
+            }
+            let pkg_root = Self::resolve_runtime_only_root(
+                &module_cfg.src_path,
+                &config.project_root,
+                &package_name,
+            )
+            .unwrap_or_default();
+            self.graph.nodes.insert(
+                package_name.clone(),
+                dependency_graph::DependencyNode {
+                    package_name,
+                    pkg_root,
+                    node_type: dependency_graph::DependencyNodeType::RuntimeOnly,
+                },
+            );
+        }
+    }
+
+    fn runtime_only_package_names(package_root: &Path) -> Vec<String> {
+        let pkg_json = package_root.join("oh-package.json5");
+        let Ok(content) = fs_err::read_to_string(&pkg_json) else {
+            return Vec::new();
+        };
+        #[derive(serde::Deserialize)]
+        struct Pkg {
+            #[serde(default)]
+            metadata: PkgMetaRuntime,
+        }
+        #[derive(Default, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PkgMetaRuntime {
+            #[serde(default)]
+            runtime_only: RuntimeOnlySection,
+        }
+        #[derive(Default, serde::Deserialize)]
+        struct RuntimeOnlySection {
+            #[serde(default)]
+            packages: Vec<String>,
+        }
+        json5::from_str::<Pkg>(&content)
+            .map(|pkg| pkg.metadata.runtime_only.packages)
+            .unwrap_or_default()
+    }
+
+    fn resolve_runtime_only_root(
+        module_root: &Path,
+        project_root: &Path,
+        package_name: &str,
+    ) -> Option<PathBuf> {
+        for base in [
+            module_root.join("oh_modules"),
+            project_root.join("oh_modules"),
+        ] {
+            let candidate = base.join(package_name);
+            if candidate.is_dir() {
+                return Some(arkdown_path::canonicalize_or_owned(&candidate));
+            }
+        }
+        None
+    }
+}
+
+struct ProfileTimingProbe<'a> {
+    module: &'a str,
+    stage: &'static str,
+    start: Instant,
+}
+
+impl<'a> ProfileTimingProbe<'a> {
+    fn new(module: &'a str, stage: &'static str) -> Self {
+        Self {
+            module,
+            stage,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for ProfileTimingProbe<'_> {
+    fn drop(&mut self) {
+        tracing::debug!(
+            module = %self.module,
+            stage = self.stage,
+            elapsed_ms = self.start.elapsed().as_millis(),
+            "profile processor substage completed"
+        );
+    }
+}
+
 impl ProfileProcessor {
     /// Create a new processor for the given project configuration.
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
         ProfileProcessor { config }
+    }
+
+    pub fn dependency_context(&self, module_cfg: &ModuleConfig) -> ProfileDependencyContext {
+        ProfileDependencyContext::build(&self.config, module_cfg)
     }
 
     /// Process a single module: transform its `module.json5` into a
@@ -116,25 +292,41 @@ impl ProfileProcessor {
         module_cfg: &ModuleConfig,
         module_json5: &ModuleJson5,
     ) -> Result<(HapManifest, LoaderJson), ArkdownError> {
-        let profile_api_version = parse_api_version(&self.config.product.compatible_sdk_version)
-            .unwrap_or(self.config.sdk_config.compile_api_version);
-        let discovered_ark_vm_version =
-            discover_ark_vm_version(&self.config.sdk_config.ets_loader_path, profile_api_version);
+        let dependency_context = self.dependency_context(module_cfg);
+        self.process_module_with_dependency_context(module_cfg, module_json5, &dependency_context)
+    }
+
+    pub fn process_module_with_dependency_context(
+        &self,
+        module_cfg: &ModuleConfig,
+        module_json5: &ModuleJson5,
+        dependency_context: &ProfileDependencyContext,
+    ) -> Result<(HapManifest, LoaderJson), ArkdownError> {
+        let discovered_ark_vm_version = {
+            let _timer = ProfileTimingProbe::new(&module_cfg.name, "discover_ark_vm_version");
+            let profile_api_version =
+                parse_api_version(&self.config.product.compatible_sdk_version)
+                    .unwrap_or(self.config.sdk_config.compile_api_version);
+            discover_ark_vm_version(&self.config.sdk_config.ets_loader_path, profile_api_version)
+        };
         let profile_processor = ProcessProfileProcessor::new();
-        let mut manifest = if let Some(ark_vm_version) = discovered_ark_vm_version {
-            profile_processor.process_profile_with_ark_vm_version(
-                module_json5,
-                &ark_vm_version,
-                &self.config.product.bundle_name,
-                CompileMode::EsModule,
-            )
-        } else {
-            profile_processor.process_profile(
-                module_json5,
-                self.config.sdk_config.compile_api_version,
-                &self.config.product.bundle_name,
-                CompileMode::EsModule,
-            )
+        let mut manifest = {
+            let _timer = ProfileTimingProbe::new(&module_cfg.name, "process_profile");
+            if let Some(ark_vm_version) = discovered_ark_vm_version {
+                profile_processor.process_profile_with_ark_vm_version(
+                    module_json5,
+                    &ark_vm_version,
+                    &self.config.product.bundle_name,
+                    CompileMode::EsModule,
+                )
+            } else {
+                profile_processor.process_profile(
+                    module_json5,
+                    self.config.sdk_config.compile_api_version,
+                    &self.config.product.bundle_name,
+                    CompileMode::EsModule,
+                )
+            }
         };
 
         // Auto-derive HSP dependencies from workspace modules.
@@ -172,7 +364,15 @@ impl ProfileProcessor {
             }
         }
 
-        let loader = LoaderJson::try_generate(&self.config, module_cfg, &manifest)?;
+        let loader = {
+            let _timer = ProfileTimingProbe::new(&module_cfg.name, "loader_json_try_generate");
+            LoaderJson::try_generate_with_dependency_graph(
+                &self.config,
+                module_cfg,
+                &manifest,
+                dependency_context.graph(),
+            )?
+        };
         if manifest.router_map.is_none() && !loader.router_map.is_empty() {
             manifest.router_map = Some("$profile:default-router-map".to_string());
         }
@@ -209,6 +409,22 @@ impl ProfileProcessor {
         resource_ids: Option<&FxHashMap<String, u32>>,
     ) -> Result<(), ArkdownError> {
         ModuleJsonWriter::write(manifest, &self.config, output_path, resource_ids)
+    }
+
+    pub fn write_module_json_with_dependency_context(
+        &self,
+        manifest: &HapManifest,
+        output_path: &Path,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+        dependency_context: &ProfileDependencyContext,
+    ) -> Result<(), ArkdownError> {
+        ModuleJsonWriter::write_with_dependency_graph(
+            manifest,
+            &self.config,
+            output_path,
+            resource_ids,
+            dependency_context.graph(),
+        )
     }
 
     /// Annotate an existing processed `module.json` with resource IDs from

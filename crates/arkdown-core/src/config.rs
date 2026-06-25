@@ -276,6 +276,11 @@ pub struct ObfuscationConfig {
     /// `ruleOptions.rules`.  Empty when no rule files are configured.
     #[serde(default)]
     pub rule_files: Vec<PathBuf>,
+    /// Resolved, absolute paths to every consumer rule file listed in
+    /// `consumerRules` or `consumerFiles`.  Empty when no consumer rules are
+    /// configured.
+    #[serde(default)]
+    pub consumer_rule_files: Vec<PathBuf>,
 }
 
 impl ObfuscationConfig {

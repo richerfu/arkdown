@@ -301,8 +301,8 @@ impl<'a> ProjectBuildLayout<'a> {
       .join("default")
   }
 
-  pub(super) fn consumer_rules_txt(&self) -> PathBuf {
-    self.obfuscation_default_dir().join("consumer-rules.txt")
+  pub(super) fn obfuscation_txt(&self) -> PathBuf {
+    self.obfuscation_default_dir().join("obfuscation.txt")
   }
 }
 

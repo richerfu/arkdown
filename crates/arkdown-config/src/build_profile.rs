@@ -502,16 +502,38 @@ pub struct RawRuntimeOnly {
 #[serde(rename_all = "camelCase")]
 pub struct RawObfuscation {
     pub rule_options: Option<RawRuleOptions>,
+    #[serde(default)]
+    pub consumer_files: Option<StringList>,
+    #[serde(default)]
+    pub consumer_rules: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RawRuleOptions {
     #[serde(default)]
     pub enable: bool,
+    #[serde(default)]
+    pub files: Option<StringList>,
     /// Paths to rule files (relative to the project root), e.g.
     /// `["./obfuscation-rules.txt"]`.
     #[serde(default)]
     pub rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StringList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StringList {
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values.as_slice(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1463,6 +1485,55 @@ mod tests {
         assert_eq!(rule_options.rules.len(), 2);
         assert_eq!(rule_options.rules[0], "./obfuscation-rules.txt");
         assert_eq!(rule_options.rules[1], "./extra-rules.txt");
+    }
+
+    #[test]
+    fn test_parse_obfuscation_files_and_consumer_files() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        arkOptions: {
+                            obfuscation: {
+                                ruleOptions: {
+                                    enable: true,
+                                    files: "./obfuscation-rules.txt"
+                                },
+                                consumerFiles: [
+                                    "./consumer-rules.txt",
+                                    "./extra-consumer-rules.txt"
+                                ]
+                            }
+                        }
+                    }
+                }],
+            },
+            modules: []
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let obfuscation = profile.app.products[0]
+            .build_option
+            .as_ref()
+            .and_then(|build_option| build_option.ark_options.as_ref())
+            .and_then(|ark_options| ark_options.obfuscation.as_ref())
+            .unwrap();
+        let rule_options = obfuscation.rule_options.as_ref().unwrap();
+        assert_eq!(
+            rule_options.files.as_ref().unwrap().as_slice(),
+            &["./obfuscation-rules.txt".to_string()]
+        );
+        assert_eq!(
+            obfuscation.consumer_files.as_ref().unwrap().as_slice(),
+            &[
+                "./consumer-rules.txt".to_string(),
+                "./extra-consumer-rules.txt".to_string()
+            ]
+        );
     }
 
     // -----------------------------------------------------------------------

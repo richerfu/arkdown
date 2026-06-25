@@ -28,7 +28,6 @@ crates/
   arkdown/
   arkdown-profile/
   arkdown-resource/
-  arkdown-ts2abc/
   arkdown-pack/
   arkdown-sign/
   arkdown-obfuscate/
@@ -497,26 +496,24 @@ crates/arkdown-resource/src/
 - `preview.rs`: preview-specific resource variants.
 - `output.rs`: compiled resource output inventory.
 
-## `arkdown-ts2abc`
+## `packages/arkdown::cmd::build::bytecode`
 
 ```text
-crates/arkdown-ts2abc/src/
-  lib.rs
+packages/arkdown/src/cmd/build/bytecode/
+  mod.rs
   plan.rs
   compiler.rs
   backend.rs
-  command.rs
+  driver.rs
   file_info.rs
-  cache_file.rs
-  output.rs
-  diagnostics.rs
+  compile_context.rs
   error.rs
 ```
 
 - `plan.rs`: bytecode compile plan and backend choice.
 - `compiler.rs`: high-level bytecode compiler facade.
 - `backend.rs`: SDK/Rust backend selection.
-- `command.rs`: SDK `es2abc` command plan and process runner.
+- `driver.rs`: SDK `es2abc` command construction and process runner.
 - `file_info.rs`: file list and source metadata.
 - `cache_file.rs`: cache-file/protoBin handling.
 - `output.rs`: ABC output inventory.
@@ -686,7 +683,7 @@ packages/arkdown/src/
 - `cmd/build/resource_stage.rs`: calls `arkdown-resource`.
 - `cmd/build/profile_stage.rs`: calls `arkdown-profile`.
 - `cmd/build/bundle_stage.rs`: calls `Bundler::bundle_with_plan`.
-- `cmd/build/bytecode_stage.rs`: calls `arkdown-ts2abc`.
+- `cmd/build/bytecode_stage.rs`: calls `cmd::build::bytecode`.
 - `cmd/build/package_stage.rs`: calls `arkdown-pack`.
 - `cmd/build/sign_stage.rs`: calls `arkdown-sign`.
 - `cmd/build/native_stage.rs`: native C/C++/SO stage integration.
