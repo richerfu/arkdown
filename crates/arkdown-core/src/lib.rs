@@ -53,8 +53,9 @@ pub use chunk::{ArkChunk, ChunkGraph, ChunkIdx, ChunkSourceFile, CrossChunkImpor
 // migration period.
 pub use config::{
     ArkOptions, ArkdownConfig, BuildMode, BuildOption, CompileMode, ModuleConfig,
-    ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig, ResOptions, RuntimeOnlyConfig,
-    SdkConfig, SigningConfig, SourceOption, StrictModeConfig,
+    NativeLibFilterOption, NativeLibOption, NativeLibPackageSelection, ObfuscationConfig,
+    OhosModuleType, OutputTarget, ProductConfig, ResOptions, RuntimeOnlyConfig, SdkConfig,
+    SigningConfig, SourceOption, StrictModeConfig,
 };
 
 // diagnostic

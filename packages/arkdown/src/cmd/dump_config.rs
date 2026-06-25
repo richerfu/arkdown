@@ -131,6 +131,10 @@ pub fn run(args: DumpConfigArgs) -> anyhow::Result<()> {
               "case_sensitive_check": config.product.build_option.strict_mode.case_sensitive_check,
               "preload_system_so": config.product.build_option.preload_system_so,
               "abi_filters": config.product.build_option.abi_filters,
+              "native_lib": {
+                  "collect_all_libs": config.product.build_option.native_lib.collect_all_libs,
+                  "filter": config.product.build_option.native_lib.filter,
+              },
               "aot_compile_mode": config.product.build_option.aot_compile_mode,
           }
       },

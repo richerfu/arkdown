@@ -3,10 +3,12 @@
 //! Manual ZIP parsing — does not use the `zip` crate, since we need precise
 //! control over the local-header extra field for alignment padding.
 
+use std::cmp::Ordering;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+use flate2::read::DeflateDecoder;
 
 use crate::{digest, error::SignError};
 
@@ -18,6 +20,12 @@ const LOCAL_FILE_HEADER_SIG: u32 = 0x04034b50;
 const CENTRAL_DIR_SIG: u32 = 0x02014b50;
 const EOCD_SIG: u32 = 0x06054b50;
 const LOCAL_HEADER_FIXED: usize = 30; // bytes before filename
+const STREAM_BUFFER_SIZE: usize = digest::CHUNK_SIZE;
+const DATA_DESCRIPTOR_FLAG: u16 = 0x0008;
+const DATA_DESCRIPTOR_SIG: u32 = 0x08074b50;
+const DATA_DESCRIPTOR_LEN: usize = 16;
+const METHOD_STORED: u16 = 0;
+const METHOD_DEFLATE: u16 = 8;
 
 /// Alignment for runnable files (.abc, .so): 4096 bytes.
 pub const ALIGNMENT_RUNNABLE: usize = 4096;
@@ -75,8 +83,119 @@ impl ZipEntryData {
     }
 }
 
+impl ZipEntry {
+    pub(crate) fn compressed_size(&self) -> Result<usize, SignError> {
+        Ok(HapZip::read_u32(&self.cd_entry, 20)? as usize)
+    }
+
+    pub(crate) fn uncompressed_size(&self) -> Result<usize, SignError> {
+        Ok(HapZip::read_u32(&self.cd_entry, 24)? as usize)
+    }
+
+    pub(crate) fn data_descriptor_len(&self) -> usize {
+        let flags = u16::from_le_bytes([self.local_header_fixed[6], self.local_header_fixed[7]]);
+        if flags & DATA_DESCRIPTOR_FLAG == 0 {
+            0
+        } else {
+            DATA_DESCRIPTOR_LEN
+        }
+    }
+
+    pub(crate) fn compressed_data_len(&self) -> Result<usize, SignError> {
+        self.compressed_size()
+    }
+
+    pub(crate) fn is_bitmap(&self) -> bool {
+        ZipEntryName::new(&self.name).is_bitmap()
+    }
+
+    pub(crate) fn is_native_file(&self) -> bool {
+        if self.name.ends_with('/') {
+            return false;
+        }
+        self.name.ends_with(".an") || self.name.starts_with("libs/")
+    }
+
+    fn entry_type(&self) -> ZipEntryType {
+        ZipEntryName::new(&self.name).entry_type()
+    }
+
+    fn cd_filename_len(&self) -> Result<usize, SignError> {
+        Ok(HapZip::read_u16(&self.cd_entry, 28)? as usize)
+    }
+
+    fn cd_extra_len(&self) -> Result<usize, SignError> {
+        Ok(HapZip::read_u16(&self.cd_entry, 30)? as usize)
+    }
+
+    fn cd_comment_len(&self) -> Result<usize, SignError> {
+        Ok(HapZip::read_u16(&self.cd_entry, 32)? as usize)
+    }
+
+    fn set_extra_len(&mut self, new_len: usize) -> Result<(), SignError> {
+        if new_len > u16::MAX as usize {
+            return Err(SignError::InvalidZip("ZIP entry extra field is too large"));
+        }
+        if new_len < self.extra.len() || new_len < self.cd_extra_len()? {
+            return Err(SignError::InvalidZip("ZIP entry extra field cannot shrink"));
+        }
+
+        self.extra.resize(new_len, 0);
+        let local_len = (new_len as u16).to_le_bytes();
+        self.local_header_fixed[28] = local_len[0];
+        self.local_header_fixed[29] = local_len[1];
+
+        self.set_cd_extra_len(new_len)
+    }
+
+    fn set_cd_extra_len(&mut self, new_len: usize) -> Result<(), SignError> {
+        let fn_len = self.cd_filename_len()?;
+        let old_extra_len = self.cd_extra_len()?;
+        let comment_len = self.cd_comment_len()?;
+        let filename_start = 46;
+        let extra_start = filename_start + fn_len;
+        let comment_start = extra_start + old_extra_len;
+        let cd_end = comment_start + comment_len;
+        if cd_end > self.cd_entry.len() {
+            return Err(SignError::InvalidZip(
+                "central directory entry data out of bounds",
+            ));
+        }
+
+        let mut cd = Vec::with_capacity(46 + fn_len + new_len + comment_len);
+        cd.extend_from_slice(&self.cd_entry[..46]);
+        let len = (new_len as u16).to_le_bytes();
+        cd[30] = len[0];
+        cd[31] = len[1];
+        cd.extend_from_slice(&self.cd_entry[filename_start..extra_start]);
+        cd.extend_from_slice(&self.cd_entry[extra_start..comment_start]);
+        cd.resize(46 + fn_len + new_len, 0);
+        cd.extend_from_slice(&self.cd_entry[comment_start..cd_end]);
+        self.cd_entry = cd;
+        Ok(())
+    }
+
+    fn sync_local_and_cd_extra_len(&mut self) -> Result<usize, SignError> {
+        let cd_extra_len = self.cd_extra_len()?;
+        let local_extra_len = self.extra.len();
+        let new_len = cd_extra_len.max(local_extra_len);
+        if new_len == local_extra_len && new_len == cd_extra_len {
+            return Ok(0);
+        }
+        self.set_extra_len(new_len)?;
+        Ok(new_len - local_extra_len.min(cd_extra_len))
+    }
+}
+
 struct ZipEntryName<'a> {
     raw: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ZipEntryType {
+    Runnable,
+    Bitmap,
+    Resource,
 }
 
 impl<'a> ZipEntryName<'a> {
@@ -85,7 +204,21 @@ impl<'a> ZipEntryName<'a> {
     }
 
     fn is_runnable(&self) -> bool {
-        self.has_extension("abc") || self.has_extension("so")
+        self.has_extension("abc") || self.has_extension("an") || self.raw.starts_with("libs/")
+    }
+
+    fn is_bitmap(&self) -> bool {
+        self.raw == ".pages.info"
+    }
+
+    fn entry_type(&self) -> ZipEntryType {
+        if self.is_runnable() {
+            ZipEntryType::Runnable
+        } else if self.is_bitmap() {
+            ZipEntryType::Bitmap
+        } else {
+            ZipEntryType::Resource
+        }
     }
 
     fn has_extension(&self, expected: &str) -> bool {
@@ -114,6 +247,12 @@ pub struct HapZip {
     pub entries: Vec<ZipEntry>,
     pub eocd: EocdRecord,
     source_path: Option<PathBuf>,
+}
+
+pub(crate) struct PreparedSigningSections {
+    pub(crate) content_digest: [u8; 32],
+    pub(crate) cd_bytes: Vec<u8>,
+    pub(crate) entries_len: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,12 +393,20 @@ impl HapZip {
                 ..lh_pos + LOCAL_HEADER_FIXED + lh_fn_len + lh_ef_len]
                 .to_vec();
 
-            let data_start = lh_pos + LOCAL_HEADER_FIXED + lh_fn_len + lh_ef_len;
+            let header_end = lh_pos + LOCAL_HEADER_FIXED + lh_fn_len + lh_ef_len;
+            if header_end > raw.len() {
+                return Err(SignError::InvalidZip(
+                    "local header variable data out of bounds",
+                ));
+            }
 
-            // Compressed size comes from CD. This also handles data descriptors,
-            // and a zero value is valid for empty file entries.
-            let cd_comp_size = Self::read_u32(&cd_entry, 20)? as usize;
-            let data_size = cd_comp_size;
+            let data_start = header_end;
+            let data_size = Self::entry_payload_len(&cd_entry, &local_header_fixed, |offset| {
+                let absolute_offset = data_start.checked_add(offset).ok_or(
+                    SignError::InvalidZip("data descriptor offset out of bounds"),
+                )?;
+                Self::read_u32(raw, absolute_offset)
+            })?;
 
             if data_start + data_size > raw.len() {
                 return Err(SignError::InvalidZip("file data extends beyond file"));
@@ -357,7 +504,17 @@ impl HapZip {
 
             let data_start =
                 lh_pos + LOCAL_HEADER_FIXED as u64 + lh_fn_len as u64 + lh_ef_len as u64;
-            let data_size = Self::read_u32(&cd_entry, 20)? as usize;
+            let data_size = Self::entry_payload_len(&cd_entry, &local_header_fixed, |offset| {
+                let offset = u64::try_from(offset)
+                    .map_err(|_| SignError::InvalidZip("data descriptor offset out of bounds"))?;
+                let absolute_offset = data_start.checked_add(offset).ok_or(
+                    SignError::InvalidZip("data descriptor offset out of bounds"),
+                )?;
+                file.seek(SeekFrom::Start(absolute_offset))?;
+                let mut sig = [0u8; 4];
+                file.read_exact(&mut sig)?;
+                Ok(u32::from_le_bytes(sig))
+            })?;
             if data_start + data_size as u64 > file_len {
                 return Err(SignError::InvalidZip("file data extends beyond file"));
             }
@@ -382,15 +539,41 @@ impl HapZip {
         Ok(entries)
     }
 
-    /// Sort entries: runnable uncompressed (.abc, .so) first, then normal, then compressed.
+    fn entry_payload_len(
+        cd_entry: &[u8],
+        local_header_fixed: &[u8; LOCAL_HEADER_FIXED],
+        mut read_u32_at: impl FnMut(usize) -> Result<u32, SignError>,
+    ) -> Result<usize, SignError> {
+        let compressed_size = Self::read_u32(cd_entry, 20)? as usize;
+        let flags = u16::from_le_bytes([local_header_fixed[6], local_header_fixed[7]]);
+        if flags & DATA_DESCRIPTOR_FLAG == 0 {
+            return Ok(compressed_size);
+        }
+
+        let descriptor_offset = compressed_size;
+        let signature = read_u32_at(descriptor_offset)?;
+        if signature != DATA_DESCRIPTOR_SIG {
+            return Err(SignError::InvalidZip("data descriptor signature mismatch"));
+        }
+
+        compressed_size
+            .checked_add(DATA_DESCRIPTOR_LEN)
+            .ok_or(SignError::InvalidZip("ZIP entry payload is too large"))
+    }
+
+    /// Sort entries like `developtools_hapsigner` `Zip.sort()`:
+    /// uncompressed runnable/bitmap/resource entries first by type and name,
+    /// then compressed entries by name.
     pub fn sort_entries(&mut self) {
-        self.entries.sort_by_key(|e| {
-            if e.is_runnable && e.method == 0 {
-                0u8
-            } else if e.method == 0 {
-                1u8
-            } else {
-                2u8
+        self.entries.sort_by(|left, right| {
+            match (left.method == METHOD_STORED, right.method == METHOD_STORED) {
+                (true, true) => left
+                    .entry_type()
+                    .cmp(&right.entry_type())
+                    .then_with(|| left.name.cmp(&right.name)),
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => left.name.cmp(&right.name),
             }
         });
     }
@@ -399,17 +582,27 @@ impl HapZip {
     ///
     /// Alignment is achieved so that the file data of each entry starts at the
     /// required alignment boundary from the beginning of the output stream.
-    pub fn align(&mut self) {
-        // We need to calculate the running offset to determine alignment padding.
-        // First pass: compute current total sizes without any modification.
+    pub fn align(&mut self) -> Result<(), SignError> {
+        // Mirrors `developtools_hapsigner` `Zip.alignment()`.
         let mut current_offset: usize = 0;
+        let mut first_unrunnable_file = true;
 
         for entry in &mut self.entries {
-            let alignment = if entry.is_runnable && entry.method == 0 {
-                ALIGNMENT_RUNNABLE
-            } else {
-                ALIGNMENT_NORMAL
-            };
+            if entry.method != METHOD_STORED && !first_unrunnable_file {
+                break;
+            }
+
+            let alignment =
+                if (entry.is_runnable && entry.method == METHOD_STORED) || entry.is_bitmap() {
+                    ALIGNMENT_RUNNABLE
+                } else if first_unrunnable_file {
+                    first_unrunnable_file = false;
+                    ALIGNMENT_RUNNABLE
+                } else {
+                    ALIGNMENT_NORMAL
+                };
+
+            entry.sync_local_and_cd_extra_len()?;
 
             let fn_len = entry.filename.len();
             let header_before_data = LOCAL_HEADER_FIXED + fn_len + entry.extra.len();
@@ -423,47 +616,59 @@ impl HapZip {
             };
 
             if needed_padding > 0 {
-                // Pad the extra field with zero bytes.
-                entry.extra.extend(std::iter::repeat_n(0u8, needed_padding));
-                // Update ef_len in the fixed header (bytes 28..30 LE).
-                let new_ef_len = entry.extra.len() as u16;
-                let ef_len_bytes = new_ef_len.to_le_bytes();
-                entry.local_header_fixed[28] = ef_len_bytes[0];
-                entry.local_header_fixed[29] = ef_len_bytes[1];
+                let new_extra_len = entry.extra.len() + needed_padding;
+                entry.set_extra_len(new_extra_len)?;
             }
 
             let total_entry_size =
                 LOCAL_HEADER_FIXED + entry.filename.len() + entry.extra.len() + entry.data.len();
             current_offset += total_entry_size;
         }
+        Ok(())
     }
 
     /// Returns the three byte sections needed for the content digest:
     /// - entries section (all local headers + data)
     /// - central directory section (with updated offsets)
-    /// - EOCD section (with CD offset zeroed)
+    /// - EOCD section with the CD offset set to the signing block offset.
     pub fn sections_for_signing(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let (entries_bytes, cd_bytes, _cd_offset) = self.build_entries_and_cd(0);
-        let eocd_zeroed = self.build_eocd_zeroed(&cd_bytes);
+        let eocd_for_signing = self.build_eocd_for_signing(entries_bytes.len(), &cd_bytes);
 
-        (entries_bytes, cd_bytes, eocd_zeroed)
+        (entries_bytes, cd_bytes, eocd_for_signing)
     }
 
     /// Compute the content digest for initial signing without materializing the
     /// local-entry section as one contiguous buffer.
     pub fn content_digest_for_signing(&self) -> Result<[u8; 32], SignError> {
+        self.content_digest_for_signing_with_optional_blocks(&[])
+    }
+
+    /// Compute the content digest for initial signing, including HAP optional
+    /// signing block values exactly as `HapUtils.computeDigests` does.
+    pub fn content_digest_for_signing_with_optional_blocks(
+        &self,
+        optional_block_values: &[&[u8]],
+    ) -> Result<[u8; 32], SignError> {
         let (entry_offsets, entries_len) = self.entry_offsets();
         let cd_bytes = self.build_cd(&entry_offsets);
-        let eocd_zeroed = self.build_eocd_zeroed(&cd_bytes);
+        let eocd_for_signing = self.build_eocd_for_signing(entries_len, &cd_bytes);
 
-        let mut digest =
-            digest::HapDigestComputer::new(&[entries_len, 0, cd_bytes.len(), eocd_zeroed.len()]);
+        let mut digest = digest::HapDigestComputer::new(&[
+            entries_len,
+            0,
+            cd_bytes.len(),
+            eocd_for_signing.len(),
+        ]);
         digest.try_update_section_pieces(entries_len, |push| {
             self.try_for_each_entry_section_piece(push)
         })?;
         digest.update_section(&[]);
         digest.update_section(&cd_bytes);
-        digest.update_section(&eocd_zeroed);
+        digest.update_section(&eocd_for_signing);
+        for value in optional_block_values {
+            digest.update_optional_block(value);
+        }
         Ok(digest.finalize())
     }
 
@@ -503,6 +708,73 @@ impl HapZip {
         }
         writer.write_all(signing_block)?;
         writer.write_all(&cd_bytes)?;
+        writer.write_all(&eocd_bytes)?;
+        Ok(())
+    }
+
+    pub(crate) fn write_entries_and_content_digest<W: Write>(
+        &self,
+        writer: &mut W,
+        optional_block_values: &[&[u8]],
+    ) -> Result<PreparedSigningSections, SignError> {
+        let (entry_offsets, entries_len) = self.entry_offsets();
+        let cd_bytes = self.build_cd(&entry_offsets);
+        let eocd_for_signing = self.build_eocd_for_signing(entries_len, &cd_bytes);
+
+        let mut source_file = match &self.source_path {
+            Some(source_path) => Some(fs_err::File::open(source_path)?),
+            None => None,
+        };
+        let mut read_buffer = vec![0u8; STREAM_BUFFER_SIZE];
+
+        let mut digest = digest::HapDigestComputer::new(&[
+            entries_len,
+            0,
+            cd_bytes.len(),
+            eocd_for_signing.len(),
+        ]);
+        digest.try_update_section_pieces(entries_len, |push| {
+            for entry in &self.entries {
+                writer.write_all(&entry.local_header_fixed)?;
+                push(&entry.local_header_fixed);
+                writer.write_all(&entry.filename)?;
+                push(&entry.filename);
+                writer.write_all(&entry.extra)?;
+                push(&entry.extra);
+                self.write_entry_data_and_push(
+                    writer,
+                    entry,
+                    &mut source_file,
+                    &mut read_buffer,
+                    push,
+                )?;
+            }
+            Ok::<(), SignError>(())
+        })?;
+        digest.update_section(&[]);
+        digest.update_section(&cd_bytes);
+        digest.update_section(&eocd_for_signing);
+        for value in optional_block_values {
+            digest.update_optional_block(value);
+        }
+
+        Ok(PreparedSigningSections {
+            content_digest: digest.finalize(),
+            cd_bytes,
+            entries_len,
+        })
+    }
+
+    pub(crate) fn write_signing_block_and_directory<W: Write>(
+        &self,
+        writer: &mut W,
+        signing_block: &[u8],
+        sections: PreparedSigningSections,
+    ) -> Result<(), SignError> {
+        let cd_offset = sections.entries_len + signing_block.len();
+        let eocd_bytes = self.build_eocd(cd_offset as u32, &sections.cd_bytes);
+        writer.write_all(signing_block)?;
+        writer.write_all(&sections.cd_bytes)?;
         writer.write_all(&eocd_bytes)?;
         Ok(())
     }
@@ -552,6 +824,184 @@ impl HapZip {
         (offsets, current_offset)
     }
 
+    pub(crate) fn entries_len(&self) -> usize {
+        self.entry_offsets().1
+    }
+
+    pub(crate) fn entry_data_offset(&self, entry_index: usize) -> Result<usize, SignError> {
+        let (offsets, _) = self.entry_offsets();
+        let entry = self
+            .entries
+            .get(entry_index)
+            .ok_or(SignError::InvalidZip("ZIP entry index out of bounds"))?;
+        Ok(offsets[entry_index] + LOCAL_HEADER_FIXED + entry.filename.len() + entry.extra.len())
+    }
+
+    pub(crate) fn code_sign_data_size(&self) -> Result<usize, SignError> {
+        for (index, entry) in self.entries.iter().enumerate() {
+            if entry.is_runnable && entry.method == METHOD_STORED {
+                continue;
+            }
+            if entry.is_bitmap() {
+                continue;
+            }
+            let data_offset = self.entry_data_offset(index)?;
+            if data_offset == LOCAL_HEADER_FIXED + entry.filename.len() + entry.extra.len() {
+                return Ok(0);
+            }
+            if data_offset % ALIGNMENT_RUNNABLE != 0 {
+                return Err(SignError::InvalidZip(
+                    "code signing data size is not 4096-byte aligned",
+                ));
+            }
+            return Ok(data_offset);
+        }
+        Ok(0)
+    }
+
+    pub(crate) fn entry_section_prefix(&self, limit: usize) -> Result<Vec<u8>, SignError> {
+        let mut output = Vec::with_capacity(limit);
+        let mut source_file = match &self.source_path {
+            Some(source_path) => Some(fs_err::File::open(source_path)?),
+            None => None,
+        };
+        let mut read_buffer = vec![0u8; STREAM_BUFFER_SIZE];
+
+        for entry in &self.entries {
+            self.append_prefix_piece(&mut output, limit, &entry.local_header_fixed);
+            self.append_prefix_piece(&mut output, limit, &entry.filename);
+            self.append_prefix_piece(&mut output, limit, &entry.extra);
+            if output.len() >= limit {
+                break;
+            }
+            self.append_entry_data_prefix(
+                &mut output,
+                limit,
+                entry,
+                &mut source_file,
+                &mut read_buffer,
+            )?;
+            if output.len() >= limit {
+                break;
+            }
+        }
+
+        if output.len() != limit {
+            return Err(SignError::InvalidZip(
+                "entry section prefix is shorter than requested",
+            ));
+        }
+        Ok(output)
+    }
+
+    pub(crate) fn native_entry_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.is_native_file())
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    pub(crate) fn read_uncompressed_entry(&self, name: &str) -> Result<Vec<u8>, SignError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or(SignError::InvalidZip("ZIP entry not found"))?;
+        let compressed = self.read_entry_compressed_data(entry)?;
+        let expected_len = entry.uncompressed_size()?;
+        match entry.method {
+            METHOD_STORED => {
+                if compressed.len() != expected_len {
+                    return Err(SignError::InvalidZip("stored ZIP entry size mismatch"));
+                }
+                Ok(compressed)
+            }
+            METHOD_DEFLATE => {
+                let mut decoder = DeflateDecoder::new(compressed.as_slice());
+                let mut output = Vec::with_capacity(expected_len);
+                decoder.read_to_end(&mut output)?;
+                if output.len() != expected_len {
+                    return Err(SignError::InvalidZip("deflated ZIP entry size mismatch"));
+                }
+                Ok(output)
+            }
+            _ => Err(SignError::InvalidZip(
+                "unsupported ZIP compression method for code signing",
+            )),
+        }
+    }
+
+    fn append_prefix_piece(&self, output: &mut Vec<u8>, limit: usize, piece: &[u8]) {
+        if output.len() >= limit {
+            return;
+        }
+        let remaining = limit - output.len();
+        let take = remaining.min(piece.len());
+        output.extend_from_slice(&piece[..take]);
+    }
+
+    fn append_entry_data_prefix(
+        &self,
+        output: &mut Vec<u8>,
+        limit: usize,
+        entry: &ZipEntry,
+        source_file: &mut Option<fs_err::File>,
+        buffer: &mut [u8],
+    ) -> Result<(), SignError> {
+        if output.len() >= limit {
+            return Ok(());
+        }
+        let remaining_limit = limit - output.len();
+        let to_read = remaining_limit.min(entry.data.len());
+        match &entry.data {
+            ZipEntryData::Memory(bytes) => {
+                output.extend_from_slice(&bytes[..to_read]);
+                Ok(())
+            }
+            ZipEntryData::FileRange { offset, .. } => {
+                let Some(file) = source_file.as_mut() else {
+                    return Err(SignError::InvalidZip(
+                        "file-backed ZIP entry is missing a source path",
+                    ));
+                };
+                file.seek(SeekFrom::Start(*offset))?;
+                let mut remaining = to_read;
+                while remaining > 0 {
+                    let chunk_len = remaining.min(buffer.len());
+                    file.read_exact(&mut buffer[..chunk_len])?;
+                    output.extend_from_slice(&buffer[..chunk_len]);
+                    remaining -= chunk_len;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn read_entry_compressed_data(&self, entry: &ZipEntry) -> Result<Vec<u8>, SignError> {
+        let len = entry.compressed_data_len()?;
+        if len + entry.data_descriptor_len() > entry.data.len() {
+            return Err(SignError::InvalidZip(
+                "ZIP entry compressed data out of bounds",
+            ));
+        }
+        match &entry.data {
+            ZipEntryData::Memory(bytes) => Ok(bytes[..len].to_vec()),
+            ZipEntryData::FileRange { offset, .. } => {
+                let Some(source_path) = &self.source_path else {
+                    return Err(SignError::InvalidZip(
+                        "file-backed ZIP entry is missing a source path",
+                    ));
+                };
+                let mut file = fs_err::File::open(source_path)?;
+                file.seek(SeekFrom::Start(*offset))?;
+                let mut data = vec![0u8; len];
+                file.read_exact(&mut data)?;
+                Ok(data)
+            }
+        }
+    }
+
     fn try_for_each_entry_section_piece(
         &self,
         push: &mut dyn FnMut(&[u8]),
@@ -593,7 +1043,7 @@ impl HapZip {
         mut remaining: usize,
         push: &mut dyn FnMut(&[u8]),
     ) -> Result<(), SignError> {
-        let mut buffer = vec![0u8; 256 * 1024];
+        let mut buffer = vec![0u8; STREAM_BUFFER_SIZE];
         while remaining > 0 {
             let to_read = remaining.min(buffer.len());
             file.read_exact(&mut buffer[..to_read])?;
@@ -625,6 +1075,43 @@ impl HapZip {
                 remaining = remaining.saturating_sub(copied);
                 if remaining != 0 {
                     return Err(SignError::InvalidZip("file data ended before range length"));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn write_entry_data_and_push<W: Write>(
+        &self,
+        writer: &mut W,
+        entry: &ZipEntry,
+        source_file: &mut Option<fs_err::File>,
+        buffer: &mut [u8],
+        push: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), SignError>
+    where
+        W: Write,
+    {
+        match &entry.data {
+            ZipEntryData::Memory(bytes) => {
+                writer.write_all(bytes)?;
+                push(bytes);
+                Ok(())
+            }
+            ZipEntryData::FileRange { offset, len } => {
+                let Some(file) = source_file.as_mut() else {
+                    return Err(SignError::InvalidZip(
+                        "file-backed ZIP entry is missing a source path",
+                    ));
+                };
+                file.seek(SeekFrom::Start(*offset))?;
+                let mut remaining = *len;
+                while remaining > 0 {
+                    let to_read = remaining.min(buffer.len());
+                    file.read_exact(&mut buffer[..to_read])?;
+                    writer.write_all(&buffer[..to_read])?;
+                    push(&buffer[..to_read]);
+                    remaining -= to_read;
                 }
                 Ok(())
             }
@@ -676,17 +1163,12 @@ impl HapZip {
         eocd
     }
 
-    fn build_eocd_zeroed(&self, cd_bytes: &[u8]) -> Vec<u8> {
-        let mut eocd_zeroed = self.build_eocd(0, cd_bytes);
-        // Bytes 16..20 of EOCD are the CD offset field included as zero in the
-        // initial-signing digest, matching developtools_hapsigner.
-        if eocd_zeroed.len() >= 20 {
-            eocd_zeroed[16] = 0;
-            eocd_zeroed[17] = 0;
-            eocd_zeroed[18] = 0;
-            eocd_zeroed[19] = 0;
-        }
-        eocd_zeroed
+    fn build_eocd_for_signing(&self, signing_block_offset: usize, cd_bytes: &[u8]) -> Vec<u8> {
+        // developtools_hapsigner signs the aligned unsigned ZIP before
+        // inserting the HAP signing block. At verify time it rewrites the EOCD
+        // CD offset back to the signing block offset before recomputing the
+        // digest, so the signed digest must use this pre-insertion offset.
+        self.build_eocd(signing_block_offset as u32, cd_bytes)
     }
 }
 
@@ -778,6 +1260,101 @@ mod tests {
         zip
     }
 
+    fn make_zip_bytes_with_data_descriptors(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut zip = Vec::new();
+        let mut central_directory_entries = Vec::new();
+
+        for (filename, data) in entries {
+            let local_offset = zip.len() as u32;
+            let fn_len = filename.len() as u16;
+            let data_len = data.len() as u32;
+            let crc32 = 0x1234_5678u32;
+
+            zip.extend_from_slice(&0x04034b50u32.to_le_bytes()); // signature
+            zip.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            zip.extend_from_slice(&DATA_DESCRIPTOR_FLAG.to_le_bytes()); // flags
+            zip.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+            zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            zip.extend_from_slice(&0u32.to_le_bytes()); // crc32 in descriptor
+            zip.extend_from_slice(&0u32.to_le_bytes()); // compressed size in descriptor
+            zip.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size in descriptor
+            zip.extend_from_slice(&fn_len.to_le_bytes());
+            zip.extend_from_slice(&0u16.to_le_bytes()); // extra length
+            zip.extend_from_slice(filename);
+            zip.extend_from_slice(data);
+            zip.extend_from_slice(&DATA_DESCRIPTOR_SIG.to_le_bytes());
+            zip.extend_from_slice(&crc32.to_le_bytes());
+            zip.extend_from_slice(&data_len.to_le_bytes());
+            zip.extend_from_slice(&data_len.to_le_bytes());
+
+            let mut cd = Vec::new();
+            cd.extend_from_slice(&0x02014b50u32.to_le_bytes()); // signature
+            cd.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            cd.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            cd.extend_from_slice(&DATA_DESCRIPTOR_FLAG.to_le_bytes()); // flags
+            cd.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+            cd.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            cd.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            cd.extend_from_slice(&crc32.to_le_bytes());
+            cd.extend_from_slice(&data_len.to_le_bytes());
+            cd.extend_from_slice(&data_len.to_le_bytes());
+            cd.extend_from_slice(&fn_len.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes()); // extra length
+            cd.extend_from_slice(&0u16.to_le_bytes()); // comment length
+            cd.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+            cd.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+            cd.extend_from_slice(&0u32.to_le_bytes()); // external attributes
+            cd.extend_from_slice(&local_offset.to_le_bytes());
+            cd.extend_from_slice(filename);
+            central_directory_entries.extend_from_slice(&cd);
+        }
+
+        let cd_offset = zip.len() as u32;
+        zip.extend_from_slice(&central_directory_entries);
+        let cd_size = central_directory_entries.len() as u32;
+        let total_entries = entries.len() as u16;
+
+        zip.extend_from_slice(&0x06054b50u32.to_le_bytes()); // signature
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk with start of CD
+        zip.extend_from_slice(&total_entries.to_le_bytes());
+        zip.extend_from_slice(&total_entries.to_le_bytes());
+        zip.extend_from_slice(&cd_size.to_le_bytes());
+        zip.extend_from_slice(&cd_offset.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+        zip
+    }
+
+    fn descriptor_signature_after_entry_data(bytes: &[u8], filename: &[u8]) -> u32 {
+        let eocd = find_eocd(bytes).expect("EOCD");
+        let mut pos = eocd.cd_offset as usize;
+        for _ in 0..eocd.total_entries {
+            assert_eq!(
+                HapZip::read_u32(bytes, pos).expect("CD sig"),
+                CENTRAL_DIR_SIG
+            );
+            let comp_size = HapZip::read_u32(bytes, pos + 20).expect("compressed size") as usize;
+            let fn_len = HapZip::read_u16(bytes, pos + 28).expect("filename length") as usize;
+            let extra_len = HapZip::read_u16(bytes, pos + 30).expect("extra length") as usize;
+            let comment_len = HapZip::read_u16(bytes, pos + 32).expect("comment length") as usize;
+            let local_offset = HapZip::read_u32(bytes, pos + 42).expect("local offset") as usize;
+            let cd_filename = &bytes[pos + 46..pos + 46 + fn_len];
+            if cd_filename == filename {
+                let local_fn_len = HapZip::read_u16(bytes, local_offset + 26)
+                    .expect("local filename length") as usize;
+                let local_extra_len = HapZip::read_u16(bytes, local_offset + 28)
+                    .expect("local extra length") as usize;
+                let descriptor_offset =
+                    local_offset + LOCAL_HEADER_FIXED + local_fn_len + local_extra_len + comp_size;
+                return HapZip::read_u32(bytes, descriptor_offset).expect("descriptor signature");
+            }
+            pos += 46 + fn_len + extra_len + comment_len;
+        }
+        panic!("entry not found: {}", String::from_utf8_lossy(filename));
+    }
+
     // ── HapZip::parse ────────────────────────────────────────────────────
 
     #[test]
@@ -832,14 +1409,38 @@ mod tests {
     }
 
     #[test]
+    fn test_signing_preserves_data_descriptor_when_local_header_flag_is_set() {
+        let bytes = make_zip_bytes_with_data_descriptors(&[
+            (b"module.json", b"{}"),
+            (b"resources.index", b"resource-index"),
+        ]);
+        let mut hap = HapZip::parse(&bytes).expect("data-descriptor ZIP must parse");
+        assert_eq!(hap.entries[0].data.len(), 2 + DATA_DESCRIPTOR_LEN);
+
+        hap.align().expect("align");
+        let signed = hap.with_signing_block(&[0x5Au8; 128]);
+
+        assert_eq!(
+            descriptor_signature_after_entry_data(&signed, b"module.json"),
+            DATA_DESCRIPTOR_SIG,
+            "signer must preserve the data descriptor required by hapsigner/app_packing_tool ZIP entries"
+        );
+        assert_eq!(
+            descriptor_signature_after_entry_data(&signed, b"resources.index"),
+            DATA_DESCRIPTOR_SIG,
+            "every bit-3 entry must keep its descriptor after alignment and signing block insertion"
+        );
+    }
+
+    #[test]
     fn test_parse_owned_matches_slice_parse_sections_and_output() {
         let bytes = make_zip_bytes(b"ets/modules.abc", &[0x7Au8; 8193]);
         let mut borrowed = HapZip::parse(&bytes).expect("borrowed parse");
         let mut owned = HapZip::parse_owned(bytes).expect("owned parse");
         borrowed.sort_entries();
         owned.sort_entries();
-        borrowed.align();
-        owned.align();
+        borrowed.align().expect("align");
+        owned.align().expect("align");
 
         assert_eq!(
             borrowed.sections_for_signing(),
@@ -868,8 +1469,8 @@ mod tests {
         let mut file = HapZip::parse_file(temp.path()).expect("file parse");
         memory.sort_entries();
         file.sort_entries();
-        memory.align();
-        file.align();
+        memory.align().expect("align");
+        file.align().expect("align");
 
         assert_eq!(
             memory.content_digest_for_signing().expect("memory digest"),
@@ -885,6 +1486,18 @@ mod tests {
         file.write_with_signing_block(&mut file_out, &signing_block)
             .expect("file output");
         assert_eq!(memory_out, file_out);
+
+        let mut streamed_once = Vec::new();
+        let sections = file
+            .write_entries_and_content_digest(&mut streamed_once, &[])
+            .expect("file-backed one-pass entries digest");
+        assert_eq!(
+            sections.content_digest,
+            memory.content_digest_for_signing().expect("memory digest")
+        );
+        file.write_signing_block_and_directory(&mut streamed_once, &signing_block, sections)
+            .expect("file-backed one-pass output");
+        assert_eq!(streamed_once, memory_out);
     }
 
     #[test]
@@ -950,7 +1563,7 @@ mod tests {
     fn test_align_abc_pads_to_4096() {
         let bytes = make_zip_bytes(b"ets/modules.abc", b"PAND\x00\x00\x00\x00");
         let mut hap = HapZip::parse(&bytes).expect("parse must succeed");
-        hap.align();
+        hap.align().expect("align");
 
         // After alignment, data must start at a multiple of 4096.
         // Data offset = LOCAL_HEADER_FIXED(30) + filename.len() + extra.len()
@@ -967,7 +1580,7 @@ mod tests {
     fn test_align_json_pads_to_4() {
         let bytes = make_zip_bytes(b"module.json", b"{}");
         let mut hap = HapZip::parse(&bytes).expect("parse must succeed");
-        hap.align();
+        hap.align().expect("align");
 
         let e = &hap.entries[0];
         let data_offset = 30 + e.filename.len() + e.extra.len();
@@ -985,14 +1598,23 @@ mod tests {
         let bytes = make_zip_bytes(b"test.txt", b"payload");
         let mut hap = HapZip::parse(&bytes).expect("parse");
         hap.sort_entries();
-        hap.align();
-        let (entries_bytes, cd_bytes, eocd_zeroed) = hap.sections_for_signing();
+        hap.align().expect("align");
+        let (entries_bytes, cd_bytes, eocd_for_signing) = hap.sections_for_signing();
         assert!(
             !entries_bytes.is_empty(),
             "entries section must not be empty"
         );
         assert!(!cd_bytes.is_empty(), "CD section must not be empty");
-        assert!(!eocd_zeroed.is_empty(), "EOCD section must not be empty");
+        assert!(
+            !eocd_for_signing.is_empty(),
+            "EOCD section must not be empty"
+        );
+        let cd_offset = u32::from_le_bytes(eocd_for_signing[16..20].try_into().unwrap());
+        assert_eq!(
+            cd_offset as usize,
+            entries_bytes.len(),
+            "signing digest EOCD must use developtools_hapsigner's pre-insertion CD offset"
+        );
     }
 
     #[test]
@@ -1026,14 +1648,30 @@ mod tests {
         let bytes = make_zip_bytes(b"ets/modules.abc", &[0xAB; 8193]);
         let mut hap = HapZip::parse(&bytes).expect("parse");
         hap.sort_entries();
-        hap.align();
+        hap.align().expect("align");
 
         let expected = {
-            let (entries_bytes, cd_bytes, eocd_zeroed) = hap.sections_for_signing();
-            digest::compute_hap_digest(&entries_bytes, &[], &cd_bytes, &eocd_zeroed)
+            let (entries_bytes, cd_bytes, eocd_for_signing) = hap.sections_for_signing();
+            digest::compute_hap_digest(&entries_bytes, &[], &cd_bytes, &eocd_for_signing)
         };
 
         assert_eq!(hap.content_digest_for_signing().expect("digest"), expected);
+    }
+
+    #[test]
+    fn test_optional_block_values_participate_in_signing_digest() {
+        let bytes = make_zip_bytes(b"ets/modules.abc", b"payload");
+        let mut hap = HapZip::parse(&bytes).expect("parse");
+        hap.sort_entries();
+        hap.align().expect("align");
+
+        let without_optional = hap.content_digest_for_signing().expect("digest");
+        let profile = b"profile-block-from-hapsigner";
+        let with_optional = hap
+            .content_digest_for_signing_with_optional_blocks(&[profile.as_slice()])
+            .expect("digest with optional block");
+
+        assert_ne!(without_optional, with_optional);
     }
 }
 

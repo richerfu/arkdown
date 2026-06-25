@@ -6,7 +6,9 @@ use arkdown_core::{
     StrictModeConfig,
 };
 
-use crate::build_profile::{parse_api_version, RawAppJson5, RawBuildProfile};
+use crate::build_profile::{
+    parse_api_version, resolve_product_native_build_option, RawAppJson5, RawBuildProfile,
+};
 use crate::error::ConfigError;
 use crate::module_json::RawModuleJson;
 use crate::sdk::{discover_sdk_with_selection, SdkSelection};
@@ -220,15 +222,8 @@ pub fn load_config(
             }
         });
 
-    // ABI filters from buildOption.externalNativeOptions.abiFilters.
-    // When not configured, use the hvigor default of ["arm64-v8a"].
-    let abi_filters = raw_product
-        .build_option
-        .as_ref()
-        .and_then(|bo| bo.external_native_options.as_ref())
-        .map(|eno| eno.abi_filters.clone())
-        .filter(|filters| !filters.is_empty())
-        .unwrap_or_else(|| vec!["arm64-v8a".to_string()]);
+    let native_build_option =
+        resolve_product_native_build_option(raw_product.build_option.as_ref());
 
     let build_option = BuildOption {
         strict_mode,
@@ -259,7 +254,8 @@ pub fn load_config(
         aot_compile_mode,
         host_pgo,
         ap_path,
-        abi_filters,
+        abi_filters: native_build_option.abi_filters,
+        native_lib: native_build_option.native_lib,
     };
 
     let product = ProductConfig {

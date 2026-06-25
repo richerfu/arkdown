@@ -40,6 +40,11 @@ const OID_RSASSA_PSS: &[u8] = &[
     0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
 ];
 
+/// `id-mgf1` (1.2.840.113549.1.1.8)
+const OID_MGF1: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08,
+];
+
 /// `id-contentType` (1.2.840.113549.1.9.3)
 const OID_CONTENT_TYPE: &[u8] = &[
     0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x03,
@@ -54,6 +59,45 @@ const OID_SIGNING_TIME: &[u8] = &[
 const OID_MESSAGE_DIGEST: &[u8] = &[
     0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x04,
 ];
+
+/// hapsigner code-sign ownerID (1.3.6.1.4.1.2011.2.376.1.4.1)
+const OID_CODE_SIGN_OWNER_ID: &[u8] = &[
+    0x06, 0x0d, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x8f, 0x5b, 0x02, 0x82, 0x78, 0x01, 0x04, 0x01,
+];
+
+/// hapsigner code-sign pluginId (1.3.6.1.4.1.2011.2.376.1.4.2)
+const OID_CODE_SIGN_PLUGIN_ID: &[u8] = &[
+    0x06, 0x0d, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x8f, 0x5b, 0x02, 0x82, 0x78, 0x01, 0x04, 0x02,
+];
+
+#[derive(Debug, Clone, Copy)]
+struct CodeSignAttributes<'a> {
+    owner_id: Option<&'a str>,
+    plugin_id: Option<&'a str>,
+}
+
+pub(crate) struct CodeSignSignedDataBuilder {
+    signer: CmsSigningContext,
+}
+
+struct CmsSigningContext {
+    issuer_and_serial: Vec<u8>,
+    certificates: Vec<u8>,
+    signature_algorithm: Vec<u8>,
+    private_key: CmsPrivateKey,
+    verifier: SignatureVerifier,
+}
+
+enum CmsPrivateKey {
+    Ecdsa(p256::ecdsa::SigningKey),
+    RsaPss(rsa::pss::SigningKey<Sha256>),
+}
+
+enum SignatureVerifier {
+    EcdsaP256(Vec<u8>),
+    EcdsaP384(Vec<u8>),
+    RsaPss(rsa::pss::VerifyingKey<Sha256>),
+}
 
 // ---------------------------------------------------------------------------
 // DER helper namespace
@@ -135,9 +179,19 @@ impl Der {
         Der::tlv(0x04, bytes)
     }
 
+    /// Encode a DER UTF8String TLV.
+    #[inline]
+    fn utf8_string(value: &str) -> Vec<u8> {
+        Der::tlv(0x0c, value.as_bytes())
+    }
+
     /// Encode `INTEGER 1` as DER.
     fn integer_one() -> Vec<u8> {
         vec![0x02, 0x01, 0x01]
+    }
+
+    fn integer_u8(value: u8) -> Vec<u8> {
+        vec![0x02, 0x01, value]
     }
 
     /// Concatenate multiple byte slices.
@@ -231,26 +285,228 @@ impl Der {
     // Signing
     // -----------------------------------------------------------------------
 
-    fn sign_ecdsa(key_der: &[u8], data: &[u8]) -> Result<Vec<u8>, SignError> {
-        use p256::pkcs8::DecodePrivateKey;
-        use signature::Signer;
+    fn rsa_pss_sha256_params() -> Vec<u8> {
+        let sha256_algorithm = Der::sequence(&Der::concat(&[OID_SHA256, &[0x05, 0x00]]));
+        let mgf1_algorithm = Der::sequence(&Der::concat(&[OID_MGF1, &sha256_algorithm]));
+        Der::sequence(&Der::concat(&[
+            &Der::explicit_ctx(0, &sha256_algorithm),
+            &Der::explicit_ctx(1, &mgf1_algorithm),
+            &Der::explicit_ctx(2, &Der::integer_u8(32)),
+        ]))
+    }
+}
 
-        let signing_key = p256::ecdsa::SigningKey::from_pkcs8_der(key_der)
-            .map_err(|e| SignError::Pkcs8Error(format!("ECDSA key load: {e}")))?;
-
-        let sig: p256::ecdsa::DerSignature = signing_key.sign(data);
-        Ok(sig.as_bytes().to_vec())
+impl CodeSignSignedDataBuilder {
+    pub(crate) fn new(
+        private_key_der: &[u8],
+        cert_chain: &[Vec<u8>],
+        alg_id: u32,
+    ) -> Result<Self, SignError> {
+        Ok(Self {
+            signer: CmsSigningContext::new(private_key_der, cert_chain, alg_id)?,
+        })
     }
 
-    fn sign_rsa_pss(key_der: &[u8], data: &[u8]) -> Result<Vec<u8>, SignError> {
-        use rsa::pkcs8::DecodePrivateKey;
-        use signature::{RandomizedSigner, SignatureEncoding};
+    pub(crate) fn build(
+        &self,
+        content: &[u8],
+        owner_id: Option<&str>,
+        plugin_id: Option<&str>,
+    ) -> Result<Vec<u8>, SignError> {
+        self.signer.build_signed_data(
+            content,
+            false,
+            Some(CodeSignAttributes {
+                owner_id,
+                plugin_id,
+            }),
+        )
+    }
+}
 
-        let rsa_key = rsa::RsaPrivateKey::from_pkcs8_der(key_der)
-            .map_err(|e| SignError::Pkcs8Error(format!("RSA key load: {e}")))?;
-        let signing_key = rsa::pss::SigningKey::<sha2::Sha256>::new(rsa_key);
-        let sig = signing_key.sign_with_rng(&mut rand::rngs::OsRng, data);
-        Ok(sig.to_vec())
+impl CmsSigningContext {
+    fn new(private_key_der: &[u8], cert_chain: &[Vec<u8>], alg_id: u32) -> Result<Self, SignError> {
+        if cert_chain.is_empty() {
+            return Err(SignError::NoCertificate);
+        }
+
+        let leaf_cert = Certificate::from_der(&cert_chain[0])
+            .map_err(|e| SignError::DerError(format!("cert parse: {e}")))?;
+        let issuer_der = leaf_cert
+            .tbs_certificate
+            .issuer
+            .to_der()
+            .map_err(|e| SignError::DerError(format!("issuer encode: {e}")))?;
+        let serial_der = leaf_cert
+            .tbs_certificate
+            .serial_number
+            .to_der()
+            .map_err(|e| SignError::DerError(format!("serial encode: {e}")))?;
+        let issuer_and_serial = Der::sequence(&Der::concat(&[&issuer_der, &serial_der]));
+
+        let mut certs_inner = Vec::new();
+        for cert_der in cert_chain {
+            certs_inner.extend_from_slice(cert_der);
+        }
+        let certificates = Der::implicit_ctx(0, &certs_inner);
+
+        let signature_algorithm = match alg_id {
+            ALG_RSA_PSS_SHA256 => Der::sequence(&Der::concat(&[
+                OID_RSASSA_PSS,
+                &Der::rsa_pss_sha256_params(),
+            ])),
+            ALG_ECDSA_SHA256 => Der::sequence(OID_ECDSA_WITH_SHA256),
+            _ => {
+                return Err(SignError::Config(format!(
+                    "unsupported HAP signature algorithm id: 0x{alg_id:x}"
+                )));
+            }
+        };
+
+        Ok(Self {
+            issuer_and_serial,
+            certificates,
+            signature_algorithm,
+            private_key: Self::load_private_key(private_key_der, alg_id)?,
+            verifier: Self::load_verifier(&leaf_cert, alg_id)?,
+        })
+    }
+
+    fn load_private_key(private_key_der: &[u8], alg_id: u32) -> Result<CmsPrivateKey, SignError> {
+        match alg_id {
+            ALG_ECDSA_SHA256 => {
+                use p256::pkcs8::DecodePrivateKey;
+
+                let signing_key = p256::ecdsa::SigningKey::from_pkcs8_der(private_key_der)
+                    .map_err(|e| SignError::Pkcs8Error(format!("ECDSA key load: {e}")))?;
+                Ok(CmsPrivateKey::Ecdsa(signing_key))
+            }
+            ALG_RSA_PSS_SHA256 => {
+                use rsa::pkcs8::DecodePrivateKey;
+
+                let rsa_key = rsa::RsaPrivateKey::from_pkcs8_der(private_key_der)
+                    .map_err(|e| SignError::Pkcs8Error(format!("RSA key load: {e}")))?;
+                Ok(CmsPrivateKey::RsaPss(rsa::pss::SigningKey::<Sha256>::new(
+                    rsa_key,
+                )))
+            }
+            _ => Err(SignError::Config(format!(
+                "unsupported HAP signature algorithm id: 0x{alg_id:x}"
+            ))),
+        }
+    }
+
+    fn load_verifier(leaf_cert: &Certificate, alg_id: u32) -> Result<SignatureVerifier, SignError> {
+        match alg_id {
+            ALG_ECDSA_SHA256 => {
+                let public_key = leaf_cert
+                    .tbs_certificate
+                    .subject_public_key_info
+                    .subject_public_key
+                    .as_bytes()
+                    .ok_or_else(|| {
+                        SignError::DerError(
+                            "leaf certificate public key has unused bits".to_string(),
+                        )
+                    })?
+                    .to_vec();
+                match public_key.len() {
+                    65 => Ok(SignatureVerifier::EcdsaP256(public_key)),
+                    97 => Ok(SignatureVerifier::EcdsaP384(public_key)),
+                    len => Err(SignError::SigningFailed(format!(
+                        "unsupported ECDSA public key length for SHA256withECDSA: {len}"
+                    ))),
+                }
+            }
+            ALG_RSA_PSS_SHA256 => {
+                use rsa::pkcs8::DecodePublicKey;
+
+                let spki_der = leaf_cert
+                    .tbs_certificate
+                    .subject_public_key_info
+                    .to_der()
+                    .map_err(|e| SignError::DerError(format!("leaf SPKI encode: {e}")))?;
+                let public_key = rsa::RsaPublicKey::from_public_key_der(&spki_der)
+                    .map_err(|e| SignError::DerError(format!("leaf RSA public key parse: {e}")))?;
+                Ok(SignatureVerifier::RsaPss(
+                    rsa::pss::VerifyingKey::<Sha256>::new(public_key),
+                ))
+            }
+            _ => Err(SignError::Config(format!(
+                "unsupported HAP signature algorithm id: 0x{alg_id:x}"
+            ))),
+        }
+    }
+
+    fn build_signed_data(
+        &self,
+        content: &[u8],
+        embed_content: bool,
+        code_sign_attributes: Option<CodeSignAttributes<'_>>,
+    ) -> Result<Vec<u8>, SignError> {
+        build_cms_signed_data_internal(content, self, embed_content, code_sign_attributes)
+    }
+
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignError> {
+        match &self.private_key {
+            CmsPrivateKey::Ecdsa(signing_key) => {
+                use signature::Signer;
+
+                let sig: p256::ecdsa::DerSignature = signing_key.sign(data);
+                Ok(sig.as_bytes().to_vec())
+            }
+            CmsPrivateKey::RsaPss(signing_key) => {
+                use signature::{RandomizedSigner, SignatureEncoding};
+
+                let sig = signing_key.sign_with_rng(&mut rand::rngs::OsRng, data);
+                Ok(sig.to_vec())
+            }
+        }
+    }
+
+    fn verify_generated_signature(
+        &self,
+        data: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<(), SignError> {
+        match &self.verifier {
+            SignatureVerifier::EcdsaP256(public_key) => {
+                let verifier = ring::signature::UnparsedPublicKey::new(
+                    &ring::signature::ECDSA_P256_SHA256_ASN1,
+                    public_key,
+                );
+                verifier.verify(data, signature_bytes).map_err(|_| {
+                    SignError::SigningFailed(
+                        "generated ECDSA signature did not verify with leaf certificate"
+                            .to_string(),
+                    )
+                })
+            }
+            SignatureVerifier::EcdsaP384(public_key) => {
+                let verifier = ring::signature::UnparsedPublicKey::new(
+                    &ring::signature::ECDSA_P384_SHA256_ASN1,
+                    public_key,
+                );
+                verifier.verify(data, signature_bytes).map_err(|_| {
+                    SignError::SigningFailed(
+                        "generated ECDSA signature did not verify with leaf certificate"
+                            .to_string(),
+                    )
+                })
+            }
+            SignatureVerifier::RsaPss(verifier) => {
+                use signature::Verifier;
+
+                let signature = rsa::pss::Signature::try_from(signature_bytes).map_err(|e| {
+                    SignError::SigningFailed(format!("RSA-PSS signature parse: {e}"))
+                })?;
+                verifier.verify(data, &signature).map_err(|e| {
+                    SignError::SigningFailed(format!(
+                        "generated RSA-PSS signature did not verify with leaf certificate: {e}"
+                    ))
+                })
+            }
+        }
     }
 }
 
@@ -271,24 +527,16 @@ pub fn build_cms_signed_data(
     cert_chain: &[Vec<u8>],
     alg_id: u32,
 ) -> Result<Vec<u8>, SignError> {
-    if cert_chain.is_empty() {
-        return Err(SignError::NoCertificate);
-    }
+    let signer = CmsSigningContext::new(private_key_der, cert_chain, alg_id)?;
+    signer.build_signed_data(content, true, None)
+}
 
-    // Parse leaf certificate to extract issuer and serial number for SignerInfo.
-    let leaf_cert = Certificate::from_der(&cert_chain[0])
-        .map_err(|e| SignError::DerError(format!("cert parse: {e}")))?;
-    let issuer_der = leaf_cert
-        .tbs_certificate
-        .issuer
-        .to_der()
-        .map_err(|e| SignError::DerError(format!("issuer encode: {e}")))?;
-    let serial_der = leaf_cert
-        .tbs_certificate
-        .serial_number
-        .to_der()
-        .map_err(|e| SignError::DerError(format!("serial encode: {e}")))?;
-
+fn build_cms_signed_data_internal(
+    content: &[u8],
+    signer: &CmsSigningContext,
+    embed_content: bool,
+    code_sign_attributes: Option<CodeSignAttributes<'_>>,
+) -> Result<Vec<u8>, SignError> {
     // -----------------------------------------------------------------------
     // 1. digestAlgorithms SET
     // -----------------------------------------------------------------------
@@ -300,20 +548,22 @@ pub fn build_cms_signed_data(
     // 2. encapContentInfo
     // -----------------------------------------------------------------------
     // ContentInfo { OID(id-data), [0] EXPLICIT { OCTET STRING(content) } }
-    let econtent_inner = Der::concat(&[
-        OID_ID_DATA,
-        &Der::explicit_ctx(0, &Der::octet_string(content)),
-    ]);
+    // hapsigner code signing uses detached content:
+    // `new ContentInfo(PKCSObjectIdentifiers.data, null)`.
+    let econtent_inner = if embed_content {
+        Der::concat(&[
+            OID_ID_DATA,
+            &Der::explicit_ctx(0, &Der::octet_string(content)),
+        ])
+    } else {
+        OID_ID_DATA.to_vec()
+    };
     let encap_content_info = Der::sequence(&econtent_inner);
 
     // -----------------------------------------------------------------------
     // 3. Certificates ([0] IMPLICIT set of DER certs)
     // -----------------------------------------------------------------------
-    let mut certs_inner = Vec::new();
-    for cert_der in cert_chain {
-        certs_inner.extend_from_slice(cert_der);
-    }
-    let certificates = Der::implicit_ctx(0, &certs_inner);
+    let certificates = &signer.certificates;
 
     // -----------------------------------------------------------------------
     // 4. Signed attributes (for computing signature)
@@ -339,9 +589,26 @@ pub fn build_cms_signed_data(
         &Der::set(&Der::octet_string(content_digest.as_slice())),
     ]));
 
-    // Concatenate signed attrs (order: contentType, signingTime, messageDigest)
-    let signed_attrs_inner =
-        Der::concat(&[&attr_content_type, &attr_signing_time, &attr_message_digest]);
+    // Java hapsigner uses `new DERSet(new AttributeTable(tab).toASN1EncodableVector())`.
+    // DER SET elements are sorted by their full DER encoding before signing.
+    let mut signed_attrs = vec![attr_content_type, attr_signing_time, attr_message_digest];
+    if let Some(attributes) = code_sign_attributes {
+        if let Some(owner_id) = attributes.owner_id {
+            signed_attrs.push(Der::sequence(&Der::concat(&[
+                OID_CODE_SIGN_OWNER_ID,
+                &Der::set(&Der::utf8_string(owner_id)),
+            ])));
+        }
+        if let Some(plugin_id) = attributes.plugin_id {
+            signed_attrs.push(Der::sequence(&Der::concat(&[
+                OID_CODE_SIGN_PLUGIN_ID,
+                &Der::set(&Der::utf8_string(plugin_id)),
+            ])));
+        }
+    }
+    signed_attrs.sort();
+    let signed_attr_parts = signed_attrs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let signed_attrs_inner = Der::concat(&signed_attr_parts);
 
     // For signing: encode as SET (tag 0x31)
     let signed_attrs_for_signing = Der::set(&signed_attrs_inner);
@@ -352,25 +619,8 @@ pub fn build_cms_signed_data(
     // -----------------------------------------------------------------------
     // 5. Compute signature
     // -----------------------------------------------------------------------
-    let signature_bytes = match alg_id {
-        ALG_ECDSA_SHA256 => Der::sign_ecdsa(private_key_der, &signed_attrs_for_signing)?,
-        ALG_RSA_PSS_SHA256 => Der::sign_rsa_pss(private_key_der, &signed_attrs_for_signing)?,
-        _ => Der::sign_ecdsa(private_key_der, &signed_attrs_for_signing)?,
-    };
-
-    // -----------------------------------------------------------------------
-    // 6. signatureAlgorithm
-    // -----------------------------------------------------------------------
-    let sig_alg_oid = match alg_id {
-        ALG_RSA_PSS_SHA256 => OID_RSASSA_PSS,
-        _ => OID_ECDSA_WITH_SHA256,
-    };
-    let signature_algorithm = Der::sequence(sig_alg_oid);
-
-    // -----------------------------------------------------------------------
-    // 7. IssuerAndSerialNumber
-    // -----------------------------------------------------------------------
-    let issuer_and_serial = Der::sequence(&Der::concat(&[&issuer_der, &serial_der]));
+    let signature_bytes = signer.sign(&signed_attrs_for_signing)?;
+    signer.verify_generated_signature(&signed_attrs_for_signing, &signature_bytes)?;
 
     // -----------------------------------------------------------------------
     // 8. SignerInfo
@@ -380,10 +630,10 @@ pub fn build_cms_signed_data(
 
     let signer_info_inner = Der::concat(&[
         &Der::integer_one(),                  // version
-        &issuer_and_serial,                   // sid: IssuerAndSerialNumber
+        &signer.issuer_and_serial,            // sid: IssuerAndSerialNumber
         &digest_alg_for_signer,               // digestAlgorithm
         &signed_attrs_encoded,                // signedAttrs [0] IMPLICIT
-        &signature_algorithm,                 // signatureAlgorithm
+        &signer.signature_algorithm,          // signatureAlgorithm
         &Der::octet_string(&signature_bytes), // signature
     ]);
     let signer_info = Der::sequence(&signer_info_inner);

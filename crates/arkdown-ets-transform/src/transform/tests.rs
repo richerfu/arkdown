@@ -640,9 +640,118 @@ struct MyView {
     .expect_err("@Once without @Param must not lower as a standalone ComponentV2 param");
     assert!(
         err.to_string().contains(
-            "When a variable 'title' decorated with '@Once', it must also be decorated with '@Param'."
+            "When a variable decorated with '@Once', it must also be decorated with '@Param'."
         ),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_component_v2_rejects_param_without_default_or_require_even_when_checker_off() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @Param title: string;
+  build() {}
+}"#;
+    let err = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/MyView.ets", src),
+        &TransformOptions {
+            checker_mode: CheckerMode::Off,
+            ..Default::default()
+        },
+    )
+    .expect_err("@Param without initializer or @Require must match hvigor ComponentV2 error");
+    assert!(
+        err.to_string().contains(
+            "When a variable decorated with '@Param' is not assigned a default value, it must also be decorated with '@Require'."
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_component_v2_rejects_require_without_param_or_builder_param_even_when_checker_off() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @Require
+  count: number;
+  build() {}
+}"#;
+    let err = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/MyView.ets", src),
+        &TransformOptions {
+            checker_mode: CheckerMode::Off,
+            ..Default::default()
+        },
+    )
+    .expect_err("@Require must only combine with @Param/@BuilderParam in ComponentV2");
+    assert!(
+        err.to_string().contains(
+            "In a struct decorated with '@ComponentV2', '@Require' can only be used with '@Param' and '@BuilderParam'."
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_component_v2_rejects_decorated_property_without_type_even_when_checker_off() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @Local count = 0;
+  build() {}
+}"#;
+    let err = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/MyView.ets", src),
+        &TransformOptions {
+            checker_mode: CheckerMode::Off,
+            ..Default::default()
+        },
+    )
+    .expect_err("ComponentV2 decorated properties must specify a type like hvigor");
+    assert!(
+        err.to_string()
+            .contains("The property 'count' must specify a type."),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_component_v2_rejects_builder_param_non_builder_initializer_even_when_checker_off() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @BuilderParam content: () => void = () => {};
+  build() {}
+}"#;
+    let err = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/MyView.ets", src),
+        &TransformOptions {
+            checker_mode: CheckerMode::Off,
+            ..Default::default()
+        },
+    )
+    .expect_err("@BuilderParam initializer must be an @Builder function like hvigor");
+    assert!(
+        err.to_string()
+            .contains("'@BuilderParam' property can only initialized by '@Builder' function."),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_component_v2_allows_builder_param_builder_initializer() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @BuilderParam content: () => void = this.empty;
+  @Builder
+  empty() {}
+  build() {}
+}"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/MyView.ets", src))
+            .expect("@BuilderParam may be initialized by a @Builder method");
+    assert!(
+        result.contains("this.content = \"content\" in params ? params.content : this.empty;"),
+        "@BuilderParam initializer must be preserved as direct assignment:\n{result}"
     );
 }
 
@@ -897,6 +1006,71 @@ struct MyView {
     assert!(
         !result.contains("@ComponentDisappear"),
         "@ComponentDisappear must be stripped: {result}"
+    );
+}
+
+#[test]
+fn test_component_v2_rejects_lifecycle_method_params_even_when_checker_off() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @ComponentAppear
+  onAppear(value: number): void {}
+  build() {}
+}"#;
+    let err = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/MyView.ets", src),
+        &TransformOptions {
+            checker_mode: CheckerMode::Off,
+            ..Default::default()
+        },
+    )
+    .expect_err("ComponentV2 lifecycle methods with params must match hvigor syntax error");
+    assert!(
+        err.to_string()
+            .contains("Methods decorated with '@ComponentAppear' cannot have input parameters."),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_component_v2_rejects_component_reuse_params_even_when_checker_off() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @ComponentReuse
+  reuse(params: Record<string, Object>): void {}
+  build() {}
+}"#;
+    let err = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/MyView.ets", src),
+        &TransformOptions {
+            checker_mode: CheckerMode::Off,
+            ..Default::default()
+        },
+    )
+    .expect_err("ComponentV2 @ComponentReuse must not accept params");
+    assert!(
+        err.to_string().contains(
+            "Methods decorated with '@ComponentReuse' in '@ComponentV2' cannot have input parameters."
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_component_v2_sync_monitor_does_not_reset_monitors_without_monitor() {
+    let src = r#"@ComponentV2
+struct MyView {
+  @Local count: number = 0;
+  @SyncMonitor('count')
+  onCountChange(): void {}
+  build() {}
+}"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/MyView.ets", src))
+            .expect("@SyncMonitor method must lower without monitor reset side effect");
+    assert!(
+        !result.contains("this.resetMonitorsOnReuse();"),
+        "@SyncMonitor alone must not trigger resetMonitorsOnReuse like hvigor:\n{result}"
     );
 }
 
@@ -1241,6 +1415,13 @@ export struct SecureModePage {
     assert!(
         result.contains("export class SecureModePage extends ViewV2"),
         "@ComponentV2 entry must lower to ViewV2 class:\n{}",
+        result
+    );
+    assert!(
+        result.contains(
+            "constructor(parent, params, __localStorage, elmtId = -1, paramsLambda, extraInfo)"
+        ),
+        "ViewV2 constructor parameters must match hvigor without paramsLambda/extraInfo defaults:\n{}",
         result
     );
     assert!(

@@ -287,6 +287,7 @@ mod tests {
           host_pgo: None,
           ap_path: None,
           abi_filters: vec![],
+          native_lib: NativeLibOption::default(),
           strict_mode: StrictModeConfig {
             case_sensitive_check: false,
             use_normalized_ohm_url: true,

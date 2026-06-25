@@ -1236,19 +1236,31 @@ impl ArchivePath {
     fn native_lib(path: &Path) -> String {
         const NATIVE_ABI_DIRS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "armeabi"];
 
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown.so");
-        let abi = path
+        let components = path
             .components()
             .filter_map(|component| match component {
                 std::path::Component::Normal(name) => name.to_str(),
                 _ => None,
             })
-            .find(|name| NATIVE_ABI_DIRS.contains(name))
-            .unwrap_or("arm64-v8a");
-        ArtifactPathSerializer::rel_to_slash(&PathBuf::from("libs").join(abi).join(filename))
+            .collect::<Vec<_>>();
+        if let Some(index) = components
+            .iter()
+            .position(|component| NATIVE_ABI_DIRS.contains(component))
+        {
+            let mut rel = PathBuf::from("libs");
+            for component in &components[index..] {
+                rel.push(component);
+            }
+            return ArtifactPathSerializer::rel_to_slash(&rel);
+        }
+
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.so");
+        ArtifactPathSerializer::rel_to_slash(
+            &PathBuf::from("libs").join("arm64-v8a").join(filename),
+        )
     }
 
     fn integrated_hsp(dir_name: &str, file_name: &str) -> String {
@@ -1341,4 +1353,18 @@ fn compatible_api_version(version: &str) -> Option<u32> {
         return None;
     }
     version[open + 1..close].parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_lib_archive_path_preserves_relative_path_after_abi() {
+        let path = Path::new("/tmp/pkg/libs/arm64-v8a/plugin/libnative.so");
+        assert_eq!(
+            ArchivePath::native_lib(path),
+            "libs/arm64-v8a/plugin/libnative.so"
+        );
+    }
 }

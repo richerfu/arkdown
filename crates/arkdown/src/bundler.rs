@@ -29,7 +29,7 @@ use oxc_span::SourceType;
 use arkdown_ets_transform::RolldownEtsTransformPlan;
 
 use arkdown_core::{
-    ArkdownConfig, ArkdownError, BuildMode, ChunkGraph, ChunkSourceFile, HvigorModuleSourceFile,
+    ArkdownConfig, ArkdownError, ChunkGraph, ChunkSourceFile, HvigorModuleSourceFile,
     HvigorNpmEntry,
 };
 use arkdown_path::{
@@ -155,14 +155,14 @@ impl Bundler {
         // an absolute path.  The entry paths built above are already absolute.
         let cwd = Self::canonical_project_root(&plan.input.project_root);
 
-        // Disable tree-shaking for debug builds.  ArkRuntime entry pages
-        // (@Entry @Component struct) have no exports — only a side-effect
-        // `registerNamedRoute(...)` call at module level.  With tree-shaking
-        // enabled rolldown eliminates the entire module body when nothing
-        // imports from it, producing an empty chunk (0 bytes).
-        // hvigor also disables tree-shaking in debug mode.
-        let treeshake_default = !matches!(plan.build_mode, BuildMode::Debug);
-        let treeshake_enabled = plan.treeshake_override.unwrap_or(treeshake_default);
+        // hvigor still sets Rollup `treeshake: buildMode === "release"` in
+        // arkts-pack.ts, but ESMODULE builds also set `disableGenerateBundle`.
+        // The module-source handoff comes from Rollup's module graph/cache, not
+        // generated chunks, so Rollup has not rewritten the transformed source
+        // before collecting `resolvedIds`.  Rolldown runs OXC DCE before its AST
+        // scanner when treeshake is enabled; that can fold a local string into
+        // `import("pkg")` and create a module request Rollup never reports.
+        let treeshake_enabled = Self::module_source_scan_treeshake_enabled();
         let treeshake = TreeshakeOptions::Boolean(treeshake_enabled);
 
         // manualChunks for supportChunks=true: mirrors hvigor's arkts-pack.js logic.
@@ -397,6 +397,10 @@ impl Bundler {
                 )
             }
         })
+    }
+
+    fn module_source_scan_treeshake_enabled() -> bool {
+        false
     }
 
     fn module_source_ids(
@@ -2724,6 +2728,7 @@ mod tests {
         BundleCachePolicy, BundleInput, BundleOutputOptions, BundlePluginSet, LoaderResourceJoin,
         SourceMapPolicy,
     };
+    use arkdown_core::BuildMode;
 
     fn runtime_packages(
         contexts: &[(&str, &str, &str, &str, &str, bool)],
@@ -5392,6 +5397,72 @@ const dynamicHar = import("bytecode-har-dep");"#
                 .get("/workspace/oh_modules/@example/passport/RSAEncryptionUtils.ets")
                 .map(Vec::len),
             Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn rolldown_scan_preserves_variable_dynamic_import_without_request() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let build_profile = temp.path().join("BuildProfile.js");
+        std::fs::write(
+            &build_profile,
+            r#"export default class BuildProfile {
+}
+BuildProfile.USE_ANT_NETWORK_LIB = false;
+"#,
+        )
+        .expect("write build profile");
+        let entry = temp.path().join("entry.js");
+        std::fs::write(
+            &entry,
+            r#"import BuildProfile from "./BuildProfile.js";
+const USE_ANT_NETWORK_LIB = BuildProfile.USE_ANT_NETWORK_LIB;
+export class APDIDNetworkUtil {
+    static async executeRPC(value) {
+        if (USE_ANT_NETWORK_LIB) {
+            let request = "@alipay/network";
+            return import(request);
+        }
+        return value;
+    }
+}
+"#,
+        )
+        .expect("write entry");
+
+        let mut bundler = rolldown::Bundler::with_plugins(
+            BundlerOptions {
+                input: Some(vec![InputItem {
+                    name: None,
+                    import: entry.to_string_lossy().into_owned(),
+                }]),
+                cwd: Some(temp.path().to_path_buf()),
+                format: Some(OutputFormat::Esm),
+                transform: Some(BundlerTransformOptions {
+                    typescript: Some(TypeScriptOptions::default()),
+                    ..Default::default()
+                }),
+                treeshake: TreeshakeOptions::Boolean(
+                    Bundler::module_source_scan_treeshake_enabled(),
+                ),
+                ..Default::default()
+            },
+            Vec::new(),
+        )
+        .expect("bundler");
+
+        let scan = bundler.scan_module_sources().await.expect("scan");
+        bundler.close().await.expect("close");
+
+        let imports = scan
+            .modules
+            .iter()
+            .flat_map(|module| module.imports.iter())
+            .map(|import| import.module_request.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !imports.contains(&"@alipay/network"),
+            "non-static dynamic import must not become a module request: {imports:?}"
         );
     }
 

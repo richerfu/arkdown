@@ -367,6 +367,7 @@ dependencies = [
  "fs-err",
  "json5",
  "rawzip",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
@@ -471,11 +472,13 @@ dependencies = [
  "aes",
  "aes-gcm",
  "arkdown-core",
+ "base64",
  "bytes",
  "cbc",
  "cms",
  "const-oid",
  "der",
+ "flate2",
  "fs-err",
  "hex",
  "hex-literal",
@@ -486,7 +489,10 @@ dependencies = [
  "pkcs5",
  "pkcs8",
  "rand",
+ "rayon",
+ "ring",
  "rsa",
+ "serde_json",
  "sha2",
  "signature",
  "spki",
@@ -4617,6 +4623,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

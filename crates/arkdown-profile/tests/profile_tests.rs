@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use arkdown_core::{
     AbilityConfig, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ModuleJson5,
-    ModuleJson5Module, OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    ModuleJson5Module, NativeLibOption, OhosModuleType, OutputTarget, ProductConfig, SdkConfig,
+    StrictModeConfig,
 };
 use arkdown_profile::{LoaderJson, ProcessProfileProcessor, ProfileProcessor};
 
@@ -40,6 +41,7 @@ fn default_config() -> Arc<ArkdownConfig> {
                 host_pgo: None,
                 ap_path: None,
                 abi_filters: vec![],
+                native_lib: NativeLibOption::default(),
             },
             version_code: None,
             version_name: None,

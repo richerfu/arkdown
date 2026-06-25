@@ -94,7 +94,7 @@ json5 = "0.4"
 # HTTP client (OHPM registry integration)
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 # Tarball extraction (OHPM package download)
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 # Base64 encoding (OHPM integrity verification)
 base64 = "0.22"
@@ -135,7 +135,7 @@ crossbeam-channel = "0.5"
 # Cryptography — pure Rust HAP signing (arkdown-sign, SPEC-021)
 p256        = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 rsa         = { version = "0.9",  features = ["sha2", "pem"] }
-sha2        = "0.10"
+sha2        = { version = "0.10", features = ["asm", "asm-aarch64"] }
 signature   = "2"
 der         = "0.7"
 x509-cert   = { version = "0.2", features = ["pem"] }
@@ -146,6 +146,7 @@ cms         = "0.2"
 const-oid   = { version = "0.9", features = ["db"] }
 spki        = "0.7"
 rand        = "0.8"
+ring        = "0.17"
 p12         = "0.6"
 aes-gcm     = "0.10"
 aes         = { version = "0.8", features = ["zeroize"] }
@@ -158,3 +159,15 @@ tempfile = "3"
 [profile.release]
 lto = true
 codegen-units = 1
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+[profile.dev.package.zlib-rs]
+opt-level = 3
+
+[profile.dev.package.arkdown-sign]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

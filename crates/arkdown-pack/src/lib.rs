@@ -22,8 +22,8 @@ mod tests {
     use std::sync::Arc;
 
     use arkdown_core::{
-        ArkdownConfig, BuildMode, BuildOption, OutputTarget, ProductConfig, SdkConfig,
-        StrictModeConfig,
+        ArkdownConfig, BuildMode, BuildOption, NativeLibOption, OutputTarget, ProductConfig,
+        SdkConfig, StrictModeConfig,
     };
 
     use super::*;
@@ -48,6 +48,7 @@ mod tests {
                     host_pgo: None,
                     ap_path: None,
                     abi_filters: vec![],
+                    native_lib: NativeLibOption::default(),
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,

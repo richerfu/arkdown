@@ -831,10 +831,14 @@ fn check_struct_component(
                 };
                 errors.push(EtsTransformError::Diagnostic {
                     file: file.to_string(),
-                    message: format!(
-                        "'@Require' on field '{}' can only be combined with {}",
-                        field_name, allowed
-                    ),
+                    message: if has_component_v2 {
+                        "In a struct decorated with '@ComponentV2', '@Require' can only be used with '@Param' and '@BuilderParam'.".to_string()
+                    } else {
+                        format!(
+                            "'@Require' on field '{}' can only be combined with {}",
+                            field_name, allowed
+                        )
+                    },
                     severity: DiagnosticSeverity::Error,
                 });
             }
@@ -854,10 +858,16 @@ fn check_struct_component(
             if has_once && !has_param {
                 errors.push(EtsTransformError::Diagnostic {
                     file: file.to_string(),
-                    message: format!(
-                        "When a variable '{}' decorated with '@Once', it must also be decorated with '@Param'.",
-                        field_name
-                    ),
+                    message:
+                        "When a variable decorated with '@Once', it must also be decorated with '@Param'."
+                            .to_string(),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
+            if has_param && prop.value.is_none() && !has_require {
+                errors.push(EtsTransformError::Diagnostic {
+                    file: file.to_string(),
+                    message: "When a variable decorated with '@Param' is not assigned a default value, it must also be decorated with '@Require'.".to_string(),
                     severity: DiagnosticSeverity::Error,
                 });
             }

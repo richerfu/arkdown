@@ -22,14 +22,19 @@ cms            = { workspace = true }
 const-oid      = { workspace = true }
 spki           = { workspace = true }
 rand           = { workspace = true }
+ring           = { workspace = true }
+rayon          = { workspace = true }
 fs-err         = { workspace = true }
 aes-gcm        = { workspace = true }
 pbkdf2         = { workspace = true }
 hex            = { workspace = true }
 tracing        = { workspace = true }
 bytes          = { workspace = true }
+serde_json     = { workspace = true }
+flate2         = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 hex-literal = { workspace = true }
 zip = { workspace = true }
+base64 = { workspace = true }

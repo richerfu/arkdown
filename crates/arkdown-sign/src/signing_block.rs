@@ -14,6 +14,8 @@ pub const BLOCK_ID_PROOF_OF_ROTATION: u32 = 0x20000001;
 pub const BLOCK_ID_PROFILE: u32 = 0x20000002;
 /// Build property metadata block.
 pub const BLOCK_ID_PROPERTY: u32 = 0x20000003;
+/// Code signing block ID stored inside the property block value.
+pub const BLOCK_ID_CODE_SIGN: u32 = 0x30000001;
 
 // ---------------------------------------------------------------------------
 // Magic bytes
@@ -109,13 +111,21 @@ pub fn build_signing_block(blocks: &[(u32, Vec<u8>)], compatible_sdk_version: u3
 ///
 /// Format (little-endian):
 /// ```text
-/// u32: algorithm ID
-/// u32: digest length
-/// bytes: digest
+/// u32: content version (=2)
+/// u32: block number (=1)
+/// For each digest pair:
+///   u32: pair length (= u32 alg id + u32 digest length + digest bytes)
+///   u32: algorithm ID
+///   u32: digest length
+///   bytes: digest
 /// ```
 pub fn encode_digest_pairs(pairs: &[(u32, &[u8])]) -> Vec<u8> {
     let mut buf = Vec::new();
+    buf.extend_from_slice(&2u32.to_le_bytes());
+    buf.extend_from_slice(&1u32.to_le_bytes());
     for (alg_id, digest) in pairs {
+        let pair_len = (4 + 4 + digest.len()) as u32;
+        buf.extend_from_slice(&pair_len.to_le_bytes());
         buf.extend_from_slice(&alg_id.to_le_bytes());
         buf.extend_from_slice(&(digest.len() as u32).to_le_bytes());
         buf.extend_from_slice(digest);
@@ -270,19 +280,22 @@ mod tests {
     // ── encode_digest_pairs ────────────────────────────────────────────
 
     #[test]
-    fn test_encode_digest_pairs_empty_is_empty() {
+    fn test_encode_digest_pairs_empty_has_hapsigner_header() {
         let encoded = encode_digest_pairs(&[]);
-        assert!(encoded.is_empty());
+        assert_eq!(encoded, [2u32.to_le_bytes(), 1u32.to_le_bytes()].concat());
     }
 
     #[test]
-    fn test_encode_digest_pairs_single() {
+    fn test_encode_digest_pairs_single_matches_hapsigner_tlv() {
         let digest = [0xDEu8; 32];
         let encoded = encode_digest_pairs(&[(ALG_ECDSA_SHA256, &digest)]);
-        assert_eq!(encoded.len(), 4 + 4 + 32); // alg_id + len + digest
-        assert_eq!(&encoded[0..4], &ALG_ECDSA_SHA256.to_le_bytes());
-        assert_eq!(&encoded[4..8], &32u32.to_le_bytes());
-        assert_eq!(&encoded[8..40], &digest[..]);
+        assert_eq!(encoded.len(), 8 + 4 + 4 + 4 + 32);
+        assert_eq!(&encoded[0..4], &2u32.to_le_bytes());
+        assert_eq!(&encoded[4..8], &1u32.to_le_bytes());
+        assert_eq!(&encoded[8..12], &40u32.to_le_bytes());
+        assert_eq!(&encoded[12..16], &ALG_ECDSA_SHA256.to_le_bytes());
+        assert_eq!(&encoded[16..20], &32u32.to_le_bytes());
+        assert_eq!(&encoded[20..52], &digest[..]);
     }
 
     #[test]
@@ -290,10 +303,22 @@ mod tests {
         let d1 = [0x11u8; 32];
         let d2 = [0x22u8; 32];
         let encoded = encode_digest_pairs(&[(ALG_ECDSA_SHA256, &d1), (ALG_RSA_PSS_SHA256, &d2)]);
-        assert_eq!(encoded.len(), 2 * (4 + 4 + 32));
-        // Second entry starts at offset 40
-        assert_eq!(&encoded[40..44], &ALG_RSA_PSS_SHA256.to_le_bytes());
-        assert_eq!(&encoded[44..48], &32u32.to_le_bytes());
-        assert_eq!(&encoded[48..80], &d2[..]);
+        assert_eq!(encoded.len(), 8 + 2 * (4 + 4 + 4 + 32));
+        assert_eq!(&encoded[0..4], &2u32.to_le_bytes());
+        assert_eq!(&encoded[4..8], &1u32.to_le_bytes());
+        let second_start = 8 + 44;
+        assert_eq!(
+            &encoded[second_start..second_start + 4],
+            &40u32.to_le_bytes()
+        );
+        assert_eq!(
+            &encoded[second_start + 4..second_start + 8],
+            &ALG_RSA_PSS_SHA256.to_le_bytes()
+        );
+        assert_eq!(
+            &encoded[second_start + 8..second_start + 12],
+            &32u32.to_le_bytes()
+        );
+        assert_eq!(&encoded[second_start + 12..second_start + 44], &d2[..]);
     }
 }
