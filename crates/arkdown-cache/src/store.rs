@@ -135,9 +135,9 @@ impl CacheStore {
     pub fn put(&mut self, entry: CachedEntry) -> Result<(), CacheError> {
         let file_name = CacheEntryFileName::new(&entry.id).file_name();
         let cache_file = self.cache_dir.join(file_name);
-        fs_err::create_dir_all(&self.cache_dir).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::create_dir_all(&self.cache_dir).map_err(CacheError::Io)?;
         let json = serde_json::to_string_pretty(&entry)?;
-        fs_err::write(&cache_file, &json).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::write(&cache_file, &json).map_err(CacheError::Io)?;
         self.memory.insert(entry.id.clone(), entry);
         Ok(())
     }
@@ -265,9 +265,9 @@ impl BuildCache {
     pub fn insert(&mut self, entry: CachedEntry) -> Result<(), CacheError> {
         let file_name = CacheEntryFileName::new(&entry.id).file_name();
         let cache_file = self.cache_dir.join(file_name);
-        fs_err::create_dir_all(&self.cache_dir).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::create_dir_all(&self.cache_dir).map_err(CacheError::Io)?;
         let json = serde_json::to_string_pretty(&entry)?;
-        fs_err::write(&cache_file, &json).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::write(&cache_file, &json).map_err(CacheError::Io)?;
         self.memory.insert(entry.id.clone(), entry);
         Ok(())
     }
@@ -294,7 +294,7 @@ impl BuildCache {
         let env_file = self.cache_dir.join(COMPILE_ENV_FILE);
         let stored = if env_file.exists() {
             fs_err::read_to_string(&env_file)
-                .map_err(|e| CacheError::Io(e.into()))
+                .map_err(CacheError::Io)
                 .unwrap_or_default()
         } else {
             String::new()
@@ -303,8 +303,8 @@ impl BuildCache {
             return Ok(false);
         }
         self.invalidate_all()?;
-        fs_err::create_dir_all(&self.cache_dir).map_err(|e| CacheError::Io(e.into()))?;
-        fs_err::write(&env_file, current_env).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::create_dir_all(&self.cache_dir).map_err(CacheError::Io)?;
+        fs_err::write(&env_file, current_env).map_err(CacheError::Io)?;
         Ok(true)
     }
 
@@ -325,9 +325,9 @@ impl BuildCache {
 
     /// Persist `key` as the bundle-level cache manifest.
     pub fn write_bundle_manifest(&self, key: &BundleCacheKey) -> Result<(), CacheError> {
-        fs_err::create_dir_all(&self.cache_dir).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::create_dir_all(&self.cache_dir).map_err(CacheError::Io)?;
         let json = serde_json::to_string_pretty(key)?;
-        fs_err::write(self.bundle_manifest_path(), json).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::write(self.bundle_manifest_path(), json).map_err(CacheError::Io)?;
         Ok(())
     }
 
