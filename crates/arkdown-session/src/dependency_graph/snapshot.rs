@@ -25,6 +25,34 @@ pub enum DependencyNodeType {
     Unknown,
 }
 
+/// Classification of a declared dependency edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyEdgeKind {
+    /// `dependencies` entry from `oh-package.json5`.
+    Dependency,
+    /// `devDependencies` entry from `oh-package.json5`.
+    DevDependency,
+    /// `dynamicDependencies` entry from `oh-package.json5`.
+    DynamicDependency,
+}
+
+/// A declared dependency edge in traversal order.
+#[derive(Debug, Clone)]
+pub struct DependencyEdgeSnapshot {
+    /// Package root that declares the dependency.
+    pub issuer_root: PathBuf,
+    /// Alias (key in `oh-package.json5` dependencies).
+    pub alias: String,
+    /// Raw dependency specifier from the declaring `oh-package.json5`.
+    pub version_spec: Option<String>,
+    /// Resolved package name.
+    pub package_name: String,
+    /// Resolved package root directory.
+    pub package_root: PathBuf,
+    /// Declared dependency section.
+    pub kind: DependencyEdgeKind,
+}
+
 /// A node in the dependency graph.
 #[derive(Debug, Clone)]
 pub struct DependencyNodeSnapshot {
@@ -67,6 +95,8 @@ pub struct DependencyGraphSnapshot {
     pub host_module: String,
     /// Nodes indexed by package name.
     pub nodes: BTreeMap<String, DependencyNodeSnapshot>,
+    /// Declared dependency edges in graph traversal order.
+    pub edges: Vec<DependencyEdgeSnapshot>,
     /// Package roots by alias.
     pub roots_by_alias: BTreeMap<String, PathBuf>,
 }

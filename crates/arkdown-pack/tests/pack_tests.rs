@@ -1,7 +1,7 @@
 //! Integration tests for `arkdown-pack` public API.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::Arc;
 
 use arkdown_core::{
@@ -11,6 +11,7 @@ use arkdown_core::{
 use arkdown_pack::{
     normalize_integrated_hsps, HarPackInput, IntegratedHspEntry, PackError, PackInput, Packager,
 };
+use flate2::write::DeflateEncoder;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,6 +71,13 @@ fn write_minimal_inputs(
     fs::write(&res, b"\xf0\x0f\x12\x34\x00\x00\x00\x00").unwrap();
     fs::write(&modj, r#"{"module":{"name":"entry","type":"entry"}}"#).unwrap();
     (abc, res, modj)
+}
+
+fn rawzip_deflated_len_for_level(content: &[u8], level: flate2::Compression) -> usize {
+    let mut encoder = DeflateEncoder::new(Vec::new(), level);
+    encoder.write_all(content).unwrap();
+    encoder.flush().unwrap();
+    encoder.finish().unwrap().len()
 }
 
 fn minimal_pack_input(
@@ -215,7 +223,8 @@ fn test_hap_deflates_native_libs_when_compress_native_libs_enabled() {
     fs::create_dir_all(&so_dir).unwrap();
     let so = so_dir.join("libnative.so");
     let second_so = so_dir.join("libnative2.so");
-    fs::write(&so, b"native payload one".repeat(64)).unwrap();
+    let first_payload = b"native payload one".repeat(64);
+    fs::write(&so, &first_payload).unwrap();
     fs::write(&second_so, b"native payload two".repeat(64)).unwrap();
 
     let mut input = minimal_pack_input(abc, res, modj, out.clone());
@@ -246,6 +255,22 @@ fn test_hap_deflates_native_libs_when_compress_native_libs_enabled() {
             .unwrap()
             .compression(),
         zip::CompressionMethod::Deflated
+    );
+    assert_eq!(
+        archive
+            .by_name("libs/arm64-v8a/libnative.so")
+            .unwrap()
+            .compressed_size() as usize,
+        rawzip_deflated_len_for_level(&first_payload, flate2::Compression::new(1)),
+        "native lib deflate level must match SDK app_packing_tool.jar ohos.Utility default compressLevel=1"
+    );
+    assert_ne!(
+        archive
+            .by_name("libs/arm64-v8a/libnative.so")
+            .unwrap()
+            .compressed_size() as usize,
+        rawzip_deflated_len_for_level(&first_payload, flate2::Compression::default()),
+        "regression guard: native lib packing must not fall back to flate2 default compression level"
     );
     assert_eq!(
         archive

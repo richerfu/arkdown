@@ -781,12 +781,22 @@ impl Packager {
 
         // Native .so libraries — placed under libs/<abi>/, with compression
         // controlled by module.json#module.compressNativeLibs.
-        for so_path in &input.native_libs {
-            if so_path.exists() {
-                let dest = ArchivePath::native_lib(so_path);
-                if input.compress_native_libs {
-                    zip_writer::add_file_deflate(&mut writer, &dest, so_path)?;
-                } else {
+        if input.compress_native_libs {
+            let native_entries = input
+                .native_libs
+                .iter()
+                .filter(|so_path| so_path.exists())
+                .map(|so_path| (ArchivePath::native_lib(so_path), so_path.clone()))
+                .collect();
+            let compressed =
+                zip_writer::ParallelDeflatedFiles::compress_hvigor_default(native_entries)?;
+            for entry in compressed.entries() {
+                writer.add_precompressed_deflated(entry)?;
+            }
+        } else {
+            for so_path in &input.native_libs {
+                if so_path.exists() {
+                    let dest = ArchivePath::native_lib(so_path);
                     zip_writer::add_file_stored(&mut writer, &dest, so_path)?;
                 }
             }

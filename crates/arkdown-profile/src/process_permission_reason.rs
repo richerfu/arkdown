@@ -14,11 +14,15 @@
 use indexmap::IndexMap;
 use rustc_hash::FxHashSet;
 use serde::Deserialize;
-use std::collections::VecDeque;
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, VecDeque};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use arkdown_core::ArkdownError;
+use arkdown_path::canonicalize_or_owned;
+use arkdown_session::dependency_graph::snapshot::{
+    DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot,
+};
 
 const STRING_REF_PREFIX: &str = "$string:";
 
@@ -40,6 +44,18 @@ pub struct DependencyPermissionReasonResourceInput<'a> {
     pub project_root: &'a Path,
     /// Target name, normally `default`.
     pub target_name: &'a str,
+}
+
+/// Input for HAP dependency `resource_str` merging from a session dependency graph.
+pub struct DependencyPermissionReasonGraphResourceInput<'a> {
+    /// Root directory of the consuming module, e.g. `/project/entry`.
+    pub module_root: &'a Path,
+    /// Root directory of the project.
+    pub project_root: &'a Path,
+    /// Target name, normally `default`.
+    pub target_name: &'a str,
+    /// Session dependency graph for the consuming module.
+    pub dependency_graph: &'a DependencyGraphSnapshot,
 }
 
 #[derive(Deserialize)]
@@ -135,24 +151,57 @@ impl PermissionReasonProcessor {
         &self,
         input: DependencyPermissionReasonResourceInput<'_>,
     ) -> Result<Option<PathBuf>, ArkdownError> {
-        let output_dir = PermissionReasonLayout::new(input.module_root, input.target_name)
-            .resource_str_output_dir();
+        let package_dirs =
+            DependencyRootScanner::new(input.module_root, input.project_root).collect_roots();
+        self.merge_dependency_permission_reason_package_dirs(
+            input.module_root,
+            input.target_name,
+            package_dirs,
+        )
+    }
+
+    /// Merge dependency HSP/HAR `resource_str` data using dependency edges
+    /// already collected in the build session.
+    ///
+    /// The dependency graph supplies declared edge kinds and traversal order.
+    /// Root resolution still uses the same `oh_modules/<alias>` lookup as
+    /// `merge_dependency_permission_reason_resources`, matching hvigor's
+    /// `MergeProfile.initResourceStr()` behavior for this stage.
+    pub fn merge_dependency_permission_reason_resources_from_dependency_graph(
+        &self,
+        input: DependencyPermissionReasonGraphResourceInput<'_>,
+    ) -> Result<Option<PathBuf>, ArkdownError> {
+        let package_dirs = DependencyRootScanner::new(input.module_root, input.project_root)
+            .collect_roots_from_dependency_graph(input.dependency_graph);
+        self.merge_dependency_permission_reason_package_dirs(
+            input.module_root,
+            input.target_name,
+            package_dirs,
+        )
+    }
+
+    fn merge_dependency_permission_reason_package_dirs(
+        &self,
+        module_root: &Path,
+        target_name: &str,
+        package_dirs: Vec<PathBuf>,
+    ) -> Result<Option<PathBuf>, ArkdownError> {
+        let output_dir =
+            PermissionReasonLayout::new(module_root, target_name).resource_str_output_dir();
         if output_dir.exists() {
             std::fs::remove_dir_all(&output_dir)?;
         }
 
-        let package_dirs =
-            DependencyRootScanner::new(input.module_root, input.project_root).collect_roots();
-        let mut wrote_any = false;
+        let mut merger = ResourceStrMergeAccumulator::new(&output_dir);
         for package_dir in package_dirs {
-            for source_root in DependencyResourceLayout::new(&package_dir, input.target_name)
-                .resource_str_sources()
+            for source_root in
+                DependencyResourceLayout::new(&package_dir, target_name).resource_str_sources()
             {
-                wrote_any |= ResourceStrRootMerger::new(&source_root, &output_dir).merge()?;
+                merger.merge_root(&source_root)?;
             }
         }
 
-        Ok(wrote_any.then_some(output_dir))
+        Ok(merger.write()?.then_some(output_dir))
     }
 }
 
@@ -295,6 +344,35 @@ impl<'a> DependencyRootScanner<'a> {
         roots
     }
 
+    fn collect_roots_from_dependency_graph(
+        &self,
+        dependency_graph: &DependencyGraphSnapshot,
+    ) -> Vec<PathBuf> {
+        let edge_index = DependencyGraphEdgeIndex::new(dependency_graph);
+        let mut roots = Vec::new();
+        let mut queue = VecDeque::new();
+        let mut seen = FxHashSet::default();
+        queue.push_back(self.module_root.to_path_buf());
+        if self.project_root != self.module_root {
+            queue.push_back(self.project_root.to_path_buf());
+        }
+
+        while let Some(pkg_root) = queue.pop_front() {
+            for edge in edge_index.dependency_edges(&pkg_root) {
+                let Some(dep_root) = self.resolve_root(&pkg_root, &edge.alias) else {
+                    continue;
+                };
+                if !seen.insert(dep_root.clone()) {
+                    continue;
+                }
+                queue.push_back(dep_root.clone());
+                roots.push(dep_root);
+            }
+        }
+
+        roots
+    }
+
     fn read_package_json(&self, pkg_root: &Path) -> Option<DependencyPackageJson> {
         let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
         json5::from_str::<DependencyPackageJson>(&content).ok()
@@ -314,6 +392,37 @@ impl<'a> DependencyRootScanner<'a> {
         }
         let candidate = self.project_root.join("oh_modules").join(dep_name);
         candidate.is_dir().then_some(candidate)
+    }
+}
+
+struct DependencyGraphEdgeIndex<'a> {
+    edges_by_issuer: BTreeMap<PathBuf, Vec<&'a DependencyEdgeSnapshot>>,
+}
+
+impl<'a> DependencyGraphEdgeIndex<'a> {
+    fn new(dependency_graph: &'a DependencyGraphSnapshot) -> Self {
+        let mut edges_by_issuer: BTreeMap<PathBuf, Vec<&'a DependencyEdgeSnapshot>> =
+            BTreeMap::new();
+        for edge in &dependency_graph.edges {
+            if edge.kind != DependencyEdgeKind::Dependency {
+                continue;
+            }
+            edges_by_issuer
+                .entry(canonicalize_or_owned(&edge.issuer_root))
+                .or_default()
+                .push(edge);
+        }
+        Self { edges_by_issuer }
+    }
+
+    fn dependency_edges(
+        &self,
+        issuer_root: &Path,
+    ) -> impl Iterator<Item = &'a DependencyEdgeSnapshot> + '_ {
+        self.edges_by_issuer
+            .get(&canonicalize_or_owned(issuer_root))
+            .into_iter()
+            .flat_map(|edges| edges.iter().copied())
     }
 }
 
@@ -343,22 +452,21 @@ impl<'a> DependencyResourceLayout<'a> {
     }
 }
 
-struct ResourceStrRootMerger<'a> {
-    source_root: &'a Path,
+struct ResourceStrMergeAccumulator<'a> {
     output_dir: &'a Path,
+    documents_by_qualifier: IndexMap<OsString, serde_json::Value>,
 }
 
-impl<'a> ResourceStrRootMerger<'a> {
-    fn new(source_root: &'a Path, output_dir: &'a Path) -> Self {
+impl<'a> ResourceStrMergeAccumulator<'a> {
+    fn new(output_dir: &'a Path) -> Self {
         Self {
-            source_root,
             output_dir,
+            documents_by_qualifier: IndexMap::new(),
         }
     }
 
-    fn merge(&self) -> Result<bool, ArkdownError> {
-        let mut wrote_any = false;
-        let mut entries = std::fs::read_dir(self.source_root)?.collect::<Result<Vec<_>, _>>()?;
+    fn merge_root(&mut self, source_root: &Path) -> Result<(), ArkdownError> {
+        let mut entries = std::fs::read_dir(source_root)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             if !entry.file_type()?.is_dir() {
@@ -374,25 +482,29 @@ impl<'a> ResourceStrRootMerger<'a> {
                 continue;
             }
             let source_json = StringJsonDocument::read(&source)?;
-            let output =
-                ResourceStringLayout::new(self.output_dir).qualified_string_json(&qualifier);
-            let merged = if output.exists() {
-                let existing_json = StringJsonDocument::read(&output)?;
-                StringJsonDocument::merge(existing_json, source_json)
+            if let Some(existing_json) = self.documents_by_qualifier.get_mut(&qualifier) {
+                *existing_json = StringJsonDocument::merge(existing_json.take(), source_json);
             } else {
-                source_json
-            };
+                self.documents_by_qualifier.insert(qualifier, source_json);
+            }
+        }
+        Ok(())
+    }
+
+    fn write(&self) -> Result<bool, ArkdownError> {
+        for (qualifier, document) in &self.documents_by_qualifier {
+            let output = ResourceStringLayout::new(self.output_dir)
+                .qualified_string_json(qualifier.as_os_str());
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(
                 &output,
-                serde_json::to_vec(&merged)
+                serde_json::to_vec(document)
                     .expect("serializing merged permission reason strings should not fail"),
             )?;
-            wrote_any = true;
         }
-        Ok(wrote_any)
+        Ok(!self.documents_by_qualifier.is_empty())
     }
 }
 
@@ -586,6 +698,125 @@ mod tests {
             merged,
             r#"{"string":[{"name":"shared_reason","value":"from dep a"},{"name":"camera_reason","value":"camera"},{"name":"location_reason","value":"location"}]}"#
         );
+    }
+
+    #[test]
+    fn test_merge_dependency_permission_reason_resources_from_graph_skips_dev_and_dynamic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let module_root = tmp.path().join("entry");
+        let dep_b = module_root.join("oh_modules/dep-b");
+        let dep_a = module_root.join("oh_modules/dep-a");
+        let dev_dep = module_root.join("oh_modules/dev-lib");
+        let dynamic_dep = module_root.join("oh_modules/dynamic-lib");
+        std::fs::create_dir_all(dep_b.join("src/main/resources/base/element")).unwrap();
+        std::fs::create_dir_all(dep_a.join("src/main/resources/base/element")).unwrap();
+        std::fs::create_dir_all(dev_dep.join("src/main/resources/base/element")).unwrap();
+        std::fs::create_dir_all(dynamic_dep.join("src/main/resources/base/element")).unwrap();
+        std::fs::create_dir_all(&module_root).unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{
+                dependencies: {
+                    "dep-b": "1.0.0",
+                    "dep-a": "1.0.0"
+                },
+                devDependencies: { "dev-lib": "1.0.0" },
+                dynamicDependencies: { "dynamic-lib": "1.0.0" }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dep_b.join("src/main/resources/base/element/string.json"),
+            r#"{"string":[{"name":"shared_reason","value":"from dep b"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dep_a.join("src/main/resources/base/element/string.json"),
+            r#"{"string":[{"name":"shared_reason","value":"from dep a"},{"name":"dep_a_reason","value":"a"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dev_dep.join("src/main/resources/base/element/string.json"),
+            r#"{"string":[{"name":"dev_reason","value":"dev"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dynamic_dep.join("src/main/resources/base/element/string.json"),
+            r#"{"string":[{"name":"dynamic_reason","value":"dynamic"}]}"#,
+        )
+        .unwrap();
+
+        let graph = arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+            "entry",
+            tmp.path(),
+            module_root.clone(),
+        )
+        .build();
+        let output = PermissionReasonProcessor::new()
+            .merge_dependency_permission_reason_resources_from_dependency_graph(
+                DependencyPermissionReasonGraphResourceInput {
+                    module_root: &module_root,
+                    project_root: tmp.path(),
+                    target_name: "default",
+                    dependency_graph: &graph,
+                },
+            )
+            .unwrap()
+            .expect("dependency resources should produce resource_str");
+
+        let merged = std::fs::read_to_string(output.join("base/element/string.json")).unwrap();
+        assert_eq!(
+            merged,
+            r#"{"string":[{"name":"shared_reason","value":"from dep b"},{"name":"dep_a_reason","value":"a"}]}"#
+        );
+    }
+
+    #[test]
+    fn test_merge_dependency_permission_reason_resources_from_graph_does_not_follow_file_spec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let module_root = tmp.path().join("entry");
+        let file_dep = tmp.path().join("file-dep");
+        std::fs::create_dir_all(&module_root).unwrap();
+        std::fs::create_dir_all(file_dep.join("src/main/resources/base/element")).unwrap();
+        std::fs::write(
+            module_root.join("oh-package.json5"),
+            r#"{ dependencies: { "file-dep": "file:../file-dep" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            file_dep.join("oh-package.json5"),
+            r#"{ name: "file-dep", version: "1.0.0" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            file_dep.join("src/main/resources/base/element/string.json"),
+            r#"{"string":[{"name":"file_reason","value":"file"}]}"#,
+        )
+        .unwrap();
+
+        let graph = arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+            "entry",
+            tmp.path(),
+            module_root.clone(),
+        )
+        .build();
+        assert!(
+            graph.edges.iter().any(|edge| edge.alias == "file-dep"),
+            "session graph should resolve the file dependency edge"
+        );
+
+        let output = PermissionReasonProcessor::new()
+            .merge_dependency_permission_reason_resources_from_dependency_graph(
+                DependencyPermissionReasonGraphResourceInput {
+                    module_root: &module_root,
+                    project_root: tmp.path(),
+                    target_name: "default",
+                    dependency_graph: &graph,
+                },
+            )
+            .unwrap();
+
+        assert!(output.is_none());
     }
 
     #[test]
