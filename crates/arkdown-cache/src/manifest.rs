@@ -97,7 +97,7 @@ impl CacheManifest {
         if !path.exists() {
             return Ok(None);
         }
-        let content = fs_err::read_to_string(&path).map_err(|e| CacheError::Io(e.into()))?;
+        let content = fs_err::read_to_string(&path).map_err(CacheError::Io)?;
         let manifest: Self = serde_json::from_str(&content).map_err(CacheError::Decode)?;
         if manifest.version > CacheManifestVersion::CURRENT {
             // Newer manifest; treat as cache miss to avoid schema issues.
@@ -110,10 +110,10 @@ impl CacheManifest {
     ///
     /// Serializes entries in sorted order for deterministic output.
     pub fn store(&self, cache_dir: &Path) -> Result<(), CacheError> {
-        fs_err::create_dir_all(cache_dir).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::create_dir_all(cache_dir).map_err(CacheError::Io)?;
         let path = cache_dir.join(Self::FILE_NAME);
         let json = serde_json::to_string_pretty(self).map_err(CacheError::Decode)?;
-        fs_err::write(&path, json).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::write(&path, json).map_err(CacheError::Io)?;
         Ok(())
     }
 

@@ -78,9 +78,7 @@ impl ResourceBackend for SdkRestoolBackend {
             }
         }
 
-        let output = command
-            .output()
-            .map_err(|source| ResourceError::Io(source))?;
+        let output = command.output().map_err(ResourceError::Io)?;
         if !output.status.success() {
             return Err(ResourceError::Backend {
                 message: format!(

@@ -168,15 +168,14 @@ impl RollupCacheStore {
     ///
     /// Corresponds to `rollup-cache-service.js::writeCache`.
     pub fn write_cache(&self, plan: &RollupCacheWritePlan) -> Result<(), CacheError> {
-        fs_err::create_dir_all(&self.cache_dir).map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::create_dir_all(&self.cache_dir).map_err(CacheError::Io)?;
         let entry = RollupCacheEntry {
             key: plan.key.clone(),
             module_ids: plan.module_ids.clone(),
             event_names: plan.event_names.clone(),
         };
         let json = serde_json::to_string_pretty(&entry)?;
-        fs_err::write(self.cache_dir.join(Self::ENTRY_FILE), json)
-            .map_err(|e| CacheError::Io(e.into()))?;
+        fs_err::write(self.cache_dir.join(Self::ENTRY_FILE), json).map_err(CacheError::Io)?;
         Ok(())
     }
 
