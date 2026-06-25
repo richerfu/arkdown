@@ -1154,7 +1154,7 @@ fn test_har_includes_declaration_stubs() {
 }
 
 /// Verify that consumer obfuscation rules are included in the HAR archive
-/// at the root level as `consumer-rules.txt`.
+/// at the root level as `obfuscation.txt`.
 ///
 /// hvigor calls `generateConsumerObConfigFile()` and includes the rules so
 /// downstream consumers can extend their own obfuscation configuration.
@@ -1165,7 +1165,7 @@ fn test_har_includes_consumer_rules() {
     fs::create_dir_all(&src_dir).unwrap();
     fs::write(src_dir.join("Index.ets"), b"export class Index {}").unwrap();
 
-    let consumer_rules = tmp.path().join("consumer-rules.txt");
+    let consumer_rules = tmp.path().join("obfuscation.txt");
     fs::write(&consumer_rules, b"-keep public class com.example.lib.*\n").unwrap();
 
     let pkg_json = tmp.path().join("oh-package.json5");
@@ -1190,20 +1190,20 @@ fn test_har_includes_consumer_rules() {
     let names: Vec<_> = archive.file_names().map(str::to_string).collect();
 
     assert!(
-        names.iter().any(|n| n == "consumer-rules.txt"),
-        "HAR must contain consumer-rules.txt; entries: {:?}",
+        names.iter().any(|n| n == "obfuscation.txt"),
+        "HAR must contain obfuscation.txt; entries: {:?}",
         names
     );
 
     let mut content = String::new();
     archive
-        .by_name("consumer-rules.txt")
-        .expect("consumer-rules.txt entry")
+        .by_name("obfuscation.txt")
+        .expect("obfuscation.txt entry")
         .read_to_string(&mut content)
-        .expect("read consumer-rules.txt");
+        .expect("read obfuscation.txt");
     assert!(
         content.contains("-keep public class"),
-        "consumer-rules.txt must contain keep rules; got: {:?}",
+        "obfuscation.txt must contain keep rules; got: {:?}",
         content
     );
 }

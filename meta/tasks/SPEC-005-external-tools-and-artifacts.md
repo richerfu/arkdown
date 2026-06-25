@@ -10,7 +10,7 @@ with typed Rust plans and runners.
 
 | Tool family | Examples | Rust owner |
 | --- | --- | --- |
-| Ark bytecode | `es2abc`, SDK Ark compiler, protoBin/cache-file handling | `arkdown-ts2abc` |
+| Ark bytecode | `es2abc`, SDK Ark compiler, protoBin/cache-file handling | `packages/arkdown::cmd::build::bytecode` |
 | Resources | `restool` and SDK resource compiler/linker binaries | `arkdown-resource` |
 | Packaging | SDK package tools or Rust archive writer where selected | `arkdown-pack` |
 | Signing | SDK signing/verification binaries | `arkdown-sign` |
@@ -86,7 +86,7 @@ typed profile plans. They must not perform package discovery.
 
 ## Bytecode Pipeline
 
-`arkdown-ts2abc` must own:
+`packages/arkdown::cmd::build::bytecode` must own:
 
 - SDK es2abc path resolution via plan input
 - bytecode command construction
@@ -151,7 +151,7 @@ Native outputs feed `arkdown-pack` through typed `NativeLibInventory` and
 
 - `cargo test -p arkdown-resource`
 - `cargo test -p arkdown-profile`
-- `cargo test -p arkdown-ts2abc`
+- `cargo test -p arkdown-napi --lib bytecode`
 - `cargo test -p arkdown-pack`
 - `cargo test -p arkdown-sign`
 - Fixture builds covering resources, profile merge, bytecode, native SO,
@@ -159,5 +159,5 @@ Native outputs feed `arkdown-pack` through typed `NativeLibInventory` and
 - Guardrail search:
 
 ```bash
-rg -n "format!\\(.*\\{.*path|to_string_lossy\\(\\).*cache|replace\\('\\\\\\\\', \"/\"\\)" crates/arkdown-resource crates/arkdown-profile crates/arkdown-pack crates/arkdown-sign crates/arkdown-ts2abc packages/arkdown
+rg -n "format!\\(.*\\{.*path|to_string_lossy\\(\\).*cache|replace\\('\\\\\\\\', \"/\"\\)" crates/arkdown-resource crates/arkdown-profile crates/arkdown-pack crates/arkdown-sign packages/arkdown
 ```

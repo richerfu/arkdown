@@ -13,7 +13,6 @@
 //!   the source store
 //! - [`ResourceFileId`] — a resource file tracked by the resource inventory
 //! - [`ProfileFileId`] — a profile JSON5 file tracked by the profile store
-//! - [`CompileUnitId`] — a per-file ABC compile unit inside a typed plan
 //! - [`ChunkId`] — a bundler output chunk
 //! - [`PackEntryId`] — a HAP/HSP/HAR package entry artifact
 //!
@@ -126,14 +125,6 @@ define_id!(
     ///
     /// Used to reference router-map, startup, share-config, etc. profile files.
     pub struct ProfileFileId;
-);
-
-define_id!(
-    /// Identity of an ABC compile unit within a typed `Ts2abcPlan` or
-    /// `AotCompilePlan`.
-    ///
-    /// Corresponds to `CompileUnitPlan` in `arkdown-ts2abc::plan`.
-    pub struct CompileUnitId;
 );
 
 define_id!(

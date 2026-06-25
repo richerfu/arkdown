@@ -167,6 +167,7 @@ dependencies = [
  "oxc_ast_visit 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
  "oxc_codegen 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
  "oxc_index",
+ "oxc_minifier 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
  "oxc_parser 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
  "oxc_semantic 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
  "oxc_span 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
@@ -272,7 +273,6 @@ dependencies = [
  "arkdown-resource",
  "arkdown-session",
  "arkdown-sign",
- "arkdown-ts2abc",
  "arkdown-watcher",
  "async-trait",
  "clap",
@@ -300,6 +300,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -313,14 +314,6 @@ version = "0.1.0"
 dependencies = [
  "arkdown-core",
  "arkdown-path",
- "oxc_allocator 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
- "oxc_ast 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
- "oxc_ast_visit 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
- "oxc_codegen 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
- "oxc_minifier 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
- "oxc_parser 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
- "oxc_span 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
- "oxc_syntax 0.137.0 (git+https://github.com/ohos-rs/oxc?rev=f2da22725d1c6508ad66fd5d60541bb3866a4a6e)",
  "rustc-hash 2.1.2",
  "tempfile",
  "thiserror",
@@ -394,6 +387,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-ohpm",
  "arkdown-path",
+ "arkdown-session",
  "fs-err",
  "indexmap",
  "json5",
@@ -501,19 +495,6 @@ dependencies = [
  "tracing",
  "x509-cert",
  "zip",
-]
-
-[[package]]
-name = "arkdown-ts2abc"
-version = "0.1.0"
-dependencies = [
- "arkdown-core",
- "arkdown-path",
- "fs-err",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
 ]
 
 [[package]]

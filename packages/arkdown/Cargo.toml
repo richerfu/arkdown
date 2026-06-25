@@ -32,7 +32,6 @@ arkdown-resolver = { workspace = true }
 arkdown-resource = { workspace = true }
 arkdown-session = { workspace = true }
 arkdown-sign = { workspace = true }
-arkdown-ts2abc = { workspace = true }
 arkdown-watcher = { workspace = true }
 
 rolldown_plugin = { workspace = true }
@@ -44,6 +43,7 @@ indexmap = { workspace = true }
 json5 = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

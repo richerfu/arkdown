@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Narrow input view for the bytecode (ABC) compilation stage.
 ///
-/// Contains the inputs needed by `arkdown-ts2abc` to invoke SDK `es2abc`.
+/// Contains the inputs needed by `packages/arkdown::cmd::build::bytecode` to invoke SDK `es2abc`.
 ///
 /// # Upstream correspondence
 ///

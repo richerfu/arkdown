@@ -139,27 +139,45 @@ pub fn load_config(
     let ark_options = raw_ark_options.map(|ao| {
         let obfuscation = ao.obfuscation.as_ref().map(|o| {
             let enable = o.rule_options.as_ref().map(|r| r.enable).unwrap_or(false);
-            // Resolve rule file paths relative to the project root.
-            let rule_files: Vec<std::path::PathBuf> = o
+            let resolve_paths = |paths: &[String]| -> Vec<std::path::PathBuf> {
+                paths
+                    .iter()
+                    .map(|p| {
+                        let p = std::path::Path::new(p);
+                        if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            root.join(p)
+                        }
+                    })
+                    .collect()
+            };
+            let rule_files = o
                 .rule_options
                 .as_ref()
                 .map(|r| {
-                    r.rules
-                        .iter()
-                        .map(|p| {
-                            let p = std::path::Path::new(p);
-                            if p.is_absolute() {
-                                p.to_path_buf()
-                            } else {
-                                root.join(p)
-                            }
-                        })
-                        .collect()
+                    if r.rules.is_empty() {
+                        r.files
+                            .as_ref()
+                            .map(|files| resolve_paths(files.as_slice()))
+                            .unwrap_or_default()
+                    } else {
+                        resolve_paths(&r.rules)
+                    }
                 })
                 .unwrap_or_default();
+            let consumer_rule_files = if o.consumer_rules.is_empty() {
+                o.consumer_files
+                    .as_ref()
+                    .map(|files| resolve_paths(files.as_slice()))
+                    .unwrap_or_default()
+            } else {
+                resolve_paths(&o.consumer_rules)
+            };
             ObfuscationConfig {
                 enable_obfuscation: enable,
                 rule_files,
+                consumer_rule_files,
             }
         });
         let runtime_only = ao
@@ -540,8 +558,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Verify that `ruleOptions.rules` paths are resolved relative to the project
-    /// root and stored in `ObfuscationConfig.rule_files`.
+    /// Verify that `ruleOptions.rules` and `consumerFiles` paths are resolved
+    /// relative to the project root and stored in `ObfuscationConfig`.
     #[test]
     fn test_load_config_obfuscation_rule_files_resolved() {
         use std::io::Write;
@@ -562,7 +580,8 @@ mod tests {
                                 ruleOptions: {
                                     enable: true,
                                     rules: ["./obfuscation-rules.txt", "./extra-rules.txt"]
-                                }
+                                },
+                                consumerFiles: "./consumer-rules.txt"
                             },
                             runtimeOnly: {
                                 packages: ["@ohos/runtime-only"],
@@ -594,6 +613,9 @@ mod tests {
                 assert!(obf.rule_files[0].is_absolute());
                 assert!(obf.rule_files[0].ends_with("obfuscation-rules.txt"));
                 assert!(obf.rule_files[1].ends_with("extra-rules.txt"));
+                assert_eq!(obf.consumer_rule_files.len(), 1);
+                assert!(obf.consumer_rule_files[0].is_absolute());
+                assert!(obf.consumer_rule_files[0].ends_with("consumer-rules.txt"));
                 let runtime_only = ark_opts.runtime_only.as_ref().expect("runtimeOnly present");
                 assert_eq!(runtime_only.packages, vec!["@ohos/runtime-only"]);
                 assert_eq!(runtime_only.sources, vec!["src/main/ets/runtime"]);

@@ -1,29 +1,27 @@
-//! Minification pass plugin (release builds).
+//! Hvigor release minification plugin.
 //!
-//! Applies the OXC codegen minify pass to each output chunk in release mode,
-//! reducing bundle size before the ABC compilation step. Skipped entirely
-//! in debug builds to preserve source-level identifiers for debugging.
+//! Replaces the SDK JS `@rollup/plugin-terser` worker with an in-process OXC
+//! minifier for release Rollup/Rolldown chunks. Debug builds skip the hook.
 //!
 //! # Upstream correspondence
 //!
-//! Replaces `terser-plugin.ts` in the SDK JS pipeline.  The upstream plugin
-//! invoked Terser on each Rollup output chunk.  This adapter runs the OXC
-//! codegen minifier instead, which accepts the same ESM source that rolldown
-//! emits.
-//!
-//! # Policy
-//!
-//! - In debug builds the plugin is a no-op: `render_chunk` returns `None` so
-//!   rolldown keeps the original chunk code unchanged.
-//! - In release builds the plugin runs the OXC codegen with `minify: true`.
-//!   Identifier mangling is disabled by default because ArkRuntime uses
-//!   string-keyed module registries that must not be renamed.
+//! The SDK owner is
+//! `ets-loader/lib/fast_build/ark_compiler/terser-plugin.js`. It passes Terser
+//! `compress.defaults=false`, enables dead-code/collapse/reduce/unused,
+//! disables `join_vars` and `sequences`, and relies on
+//! `@rollup/plugin-terser` to set `module=true` for ESM output. Terser's
+//! default `mangle={}` is therefore active for module chunks. OXC exposes the
+//! matching behavior as compressor plus module top-level mangling.
 
 use std::borrow::Cow;
 use std::future::Future;
 
 use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions};
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_minifier::{
+    CompressOptions, CompressOptionsUnused, MangleOptions, MangleOptionsKeepNames, Minifier,
+    MinifierOptions,
+};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
@@ -43,32 +41,144 @@ pub enum MinifyMode {
 
 /// Minification policy applied in release mode.
 ///
-/// Mirrors the subset of Terser options that hvigor's `terser-plugin.ts`
-/// used.  Identifier mangling is off by default for ArkRuntime
-/// compatibility.
+/// Mirrors hvigor's `terser-plugin.js` release options for the Rolldown chunk
+/// path. The mangle default stays enabled because `@rollup/plugin-terser`
+/// enables Terser's default `mangle={}` and sets `module=true` for ESM chunks.
 #[derive(Debug, Clone)]
 pub struct MinifyPolicy {
-    /// Compress whitespace and remove unreachable code via OXC codegen minify.
+    /// Run the OXC compressor using hvigor's Terser-compatible release shape.
     pub compress: bool,
+    /// Run the OXC symbol mangler as Terser does for ESM chunks.
+    pub mangle: bool,
 }
 
 impl Default for MinifyPolicy {
     fn default() -> Self {
-        Self { compress: true }
+        Self {
+            compress: true,
+            mangle: true,
+        }
+    }
+}
+
+/// In-process Rust implementation of hvigor's release chunk minifier.
+pub struct HvigorReleaseMinifier {
+    mode: MinifyMode,
+    policy: MinifyPolicy,
+}
+
+impl std::fmt::Debug for HvigorReleaseMinifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HvigorReleaseMinifier")
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HvigorReleaseMinifier {
+    /// Create a release minifier with the given policy.
+    pub fn release(policy: MinifyPolicy) -> Self {
+        Self {
+            mode: MinifyMode::Release,
+            policy,
+        }
+    }
+
+    /// Create a no-op minifier for debug builds.
+    pub fn debug() -> Self {
+        Self {
+            mode: MinifyMode::Debug,
+            policy: MinifyPolicy::default(),
+        }
+    }
+
+    /// Create a minifier from a build-mode flag.
+    pub fn for_mode(is_release: bool) -> Self {
+        if is_release {
+            Self::release(MinifyPolicy::default())
+        } else {
+            Self::debug()
+        }
+    }
+
+    /// Apply hvigor's release minifier to one ESM chunk.
+    pub fn apply(&self, source: &str, filename: &str) -> anyhow::Result<Option<String>> {
+        if matches!(self.mode, MinifyMode::Debug) {
+            return Ok(None);
+        }
+
+        let allocator = Allocator::default();
+        // `@rollup/plugin-terser` sets `module=true` when output format is `es`.
+        let source_type = SourceType::mjs();
+        let parse_result = Parser::new(&allocator, source, source_type).parse();
+        if !parse_result.diagnostics.is_empty() {
+            return Err(anyhow::anyhow!(
+                "hvigor release minify failed to parse {filename}: {} diagnostic(s)",
+                parse_result.diagnostics.len()
+            ));
+        }
+
+        let mut program = parse_result.program;
+        let minifier_output =
+            Minifier::new(self.minifier_options()).minify(&allocator, &mut program);
+        let codegen_options = CodegenOptions {
+            minify: true,
+            comments: CommentOptions::disabled(),
+            ..Default::default()
+        };
+        let output = Codegen::new()
+            .with_options(codegen_options)
+            .with_scoping(minifier_output.scoping)
+            .build(&program);
+        let minified = output.code;
+
+        if minified == source {
+            return Ok(None);
+        }
+        Ok(Some(minified))
+    }
+
+    fn minifier_options(&self) -> MinifierOptions {
+        MinifierOptions {
+            compress: self.policy.compress.then(Self::compress_options),
+            mangle: self.policy.mangle.then(Self::mangle_options),
+        }
+    }
+
+    fn compress_options() -> CompressOptions {
+        let mut options = CompressOptions {
+            drop_debugger: true,
+            drop_console: false,
+            join_vars: false,
+            sequences: false,
+            unused: CompressOptionsUnused::Remove,
+            ..CompressOptions::smallest()
+        };
+        // Terser keeps unused import specifiers under `module=true`; removing
+        // them can hide module-linkage errors for missing exports.
+        options.treeshake.invalid_import_side_effects = true;
+        options
+    }
+
+    fn mangle_options() -> MangleOptions {
+        MangleOptions {
+            top_level: Some(true),
+            keep_names: MangleOptionsKeepNames::all_false(),
+            debug: false,
+        }
     }
 }
 
 /// Rolldown plugin adapter for the OXC minification pass.
 pub struct MinifyPlugin {
-    mode: MinifyMode,
-    policy: MinifyPolicy,
+    minifier: HvigorReleaseMinifier,
 }
 
 impl std::fmt::Debug for MinifyPlugin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MinifyPlugin")
-            .field("mode", &self.mode)
-            .finish_non_exhaustive()
+            .field("minifier", &self.minifier)
+            .finish()
     }
 }
 
@@ -77,16 +187,14 @@ impl MinifyPlugin {
     /// policy.
     pub fn release(policy: MinifyPolicy) -> Self {
         Self {
-            mode: MinifyMode::Release,
-            policy,
+            minifier: HvigorReleaseMinifier::release(policy),
         }
     }
 
     /// Create a no-op plugin for debug builds.
     pub fn debug() -> Self {
         Self {
-            mode: MinifyMode::Debug,
-            policy: MinifyPolicy::default(),
+            minifier: HvigorReleaseMinifier::debug(),
         }
     }
 
@@ -98,40 +206,6 @@ impl MinifyPlugin {
             Self::debug()
         }
     }
-
-    /// Apply the OXC minifier to a single chunk's source text.
-    ///
-    /// Returns `None` if the source does not change or if the chunk cannot be
-    /// parsed (in which case the original source is preserved).
-    fn minify_chunk(source: &str, _policy: &MinifyPolicy) -> anyhow::Result<Option<String>> {
-        let allocator = Allocator::default();
-        let source_type = SourceType::mjs();
-
-        let parse_result = Parser::new(&allocator, source, source_type).parse();
-        if !parse_result.diagnostics.is_empty() {
-            // Do not fail the build for minifier parse errors; return None so
-            // the original source is kept and ABC compilation can still proceed.
-            tracing::warn!(
-                errors = parse_result.diagnostics.len(),
-                "minify: parse errors in chunk; skipping minification"
-            );
-            return Ok(None);
-        }
-
-        let codegen_options = CodegenOptions {
-            minify: true,
-            ..Default::default()
-        };
-        let output = Codegen::new()
-            .with_options(codegen_options)
-            .build(&parse_result.program);
-        let minified = output.code;
-
-        if minified == source {
-            return Ok(None);
-        }
-        Ok(Some(minified))
-    }
 }
 
 impl Plugin for MinifyPlugin {
@@ -140,7 +214,7 @@ impl Plugin for MinifyPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        if matches!(self.mode, MinifyMode::Debug) {
+        if matches!(self.minifier.mode, MinifyMode::Debug) {
             HookUsage::empty()
         } else {
             HookUsage::RenderChunk
@@ -152,15 +226,16 @@ impl Plugin for MinifyPlugin {
         _ctx: &PluginContext,
         args: &HookRenderChunkArgs<'_>,
     ) -> impl Future<Output = HookRenderChunkReturn> + Send {
-        // In debug mode register_hook_usage returns empty so rolldown will not
-        // call this hook, but guard here for safety.
-        if matches!(self.mode, MinifyMode::Debug) {
+        if matches!(self.minifier.mode, MinifyMode::Debug) {
             return std::future::ready(Ok(None));
         }
+
         let code = args.code.to_owned();
-        let policy = self.policy.clone();
+        let filename = args.chunk.filename.clone();
+        let minifier = HvigorReleaseMinifier::release(self.minifier.policy.clone());
         std::future::ready(
-            MinifyPlugin::minify_chunk(&code, &policy)
+            minifier
+                .apply(&code, &filename)
                 .map(|maybe_code| {
                     maybe_code.map(|minified| HookRenderChunkOutput {
                         code: minified,
@@ -169,5 +244,71 @@ impl Plugin for MinifyPlugin {
                 })
                 .map_err(|e| anyhow::anyhow!("minify: {e}")),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_minifier_matches_hvigor_terser_module_mangle_contract() {
+        let source = concat!(
+            "export function demo(input){",
+            "debugger;",
+            "const unused=1;",
+            "let longLocalName=input+1;",
+            "console.log(longLocalName);",
+            "return longLocalName;",
+            "}",
+            "const topLevelUnused=2;"
+        );
+
+        let minified = HvigorReleaseMinifier::release(MinifyPolicy::default())
+            .apply(source, "entry.js")
+            .expect("minify")
+            .expect("changed");
+
+        assert_eq!(
+            minified,
+            "export function demo(e){let t=e+1;console.log(t);return t}"
+        );
+    }
+
+    #[test]
+    fn debug_minifier_is_noop() {
+        let output = HvigorReleaseMinifier::debug()
+            .apply("export const value = 1;", "entry.js")
+            .expect("debug apply");
+
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn release_minifier_rejects_parse_errors_without_fallback() {
+        let error = HvigorReleaseMinifier::release(MinifyPolicy::default())
+            .apply("export function {", "entry.js")
+            .expect_err("parse error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("hvigor release minify failed to parse entry.js"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn release_minifier_keeps_unused_import_specifiers_like_terser_module_mode() {
+        let source = "import { unused, used } from 'pkg'; console.log(used);";
+
+        let minified = HvigorReleaseMinifier::release(MinifyPolicy::default())
+            .apply(source, "entry.js")
+            .expect("minify")
+            .expect("changed");
+
+        assert!(minified.contains("unused"), "{minified}");
+        assert!(minified.contains("used"), "{minified}");
+        assert!(minified.contains("console.log"), "{minified}");
     }
 }

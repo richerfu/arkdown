@@ -1,6 +1,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -455,6 +456,33 @@ struct MainPagesProfile {
     src: Vec<String>,
 }
 
+struct LoaderTimingProbe<'a> {
+    module: &'a str,
+    stage: &'static str,
+    start: Instant,
+}
+
+impl<'a> LoaderTimingProbe<'a> {
+    fn new(module: &'a str, stage: &'static str) -> Self {
+        Self {
+            module,
+            stage,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for LoaderTimingProbe<'_> {
+    fn drop(&mut self) {
+        tracing::debug!(
+            module = %self.module,
+            stage = self.stage,
+            elapsed_ms = self.start.elapsed().as_millis(),
+            "loader json substage completed"
+        );
+    }
+}
+
 impl<'a> LoaderRouterModuleName<'a> {
     fn new(host_module_name: &'a str, module_name: &'a str) -> Self {
         Self {
@@ -674,19 +702,34 @@ impl LoaderJson {
     ) -> Result<Self, ArkdownError> {
         // Build the dependency graph ONCE per try_generate() invocation.
         // Per SPEC-048: the same snapshot feeds all downstream helpers.
-        let dep_graph = crate::dependency_graph::LocalDependencyGraph::build(
-            &module_cfg.src_path,
-            &config.project_root,
-        );
+        let dep_graph = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "local_dependency_graph_build");
+            crate::dependency_graph::LocalDependencyGraph::build(
+                &module_cfg.src_path,
+                &config.project_root,
+            )
+        };
+        Self::try_generate_with_dependency_graph(config, module_cfg, manifest, &dep_graph)
+    }
 
+    pub(crate) fn try_generate_with_dependency_graph(
+        config: &ArkdownConfig,
+        module_cfg: &ModuleConfig,
+        manifest: &HapManifest,
+        dep_graph: &crate::dependency_graph::LocalDependencyGraph,
+    ) -> Result<Self, ArkdownError> {
         let module_layout = ProfileModuleLayout::new(&module_cfg.src_path);
-        let runtime_entry_sources = Self::collect_runtime_entry_sources(manifest, &module_layout)?;
+        let runtime_entry_sources = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "runtime_entry_sources");
+            Self::collect_runtime_entry_sources(manifest, &module_layout)?
+        };
 
         // Collect compile_entry from runtime srcEntry values.
         let mut compile_entry = runtime_entry_sources.clone();
         let runtime_only_collector = RuntimeOnlyCollector::new(config, module_cfg);
         let module_json_path = module_layout.module_json5();
-        let form_sources =
+        let form_sources = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "form_sources");
             FormProfileProcessor::new().collect_module_form_sources(ModuleFormProfileInput {
                 module_name: &module_cfg.name,
                 module_root: &module_cfg.src_path,
@@ -696,7 +739,8 @@ impl LoaderJson {
                 project_modules: &config.modules,
                 compatible_api_version: parse_api_version(&config.product.compatible_sdk_version)
                     .or(Some(config.sdk_config.compile_api_version)),
-            })?;
+            })?
+        };
         let src_main_root = module_layout.src_main();
         for form_source in &form_sources {
             if let Ok(rel) = form_source.source_path.strip_prefix(&src_main_root) {
@@ -728,7 +772,10 @@ impl LoaderJson {
         // recursively. Keep both surfaces aligned: serialize absolute worker paths
         // for loader consumers and add relative `./ets/...` entries for arkdown's
         // in-process bundler.
-        let worker_files = runtime_only_collector.discover_worker_files();
+        let worker_files = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "worker_files");
+            runtime_only_collector.discover_worker_files()
+        };
         let mut discovered_workers: Vec<String> = vec![];
         let ets_root = module_layout.ets_source_root();
         for path in &worker_files {
@@ -737,7 +784,10 @@ impl LoaderJson {
             }
             discovered_workers.push(to_absolute_path_string(path));
         }
-        let dependency_worker_files = Self::collect_dependency_worker_files(&dep_graph);
+        let dependency_worker_files = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "dependency_worker_files");
+            Self::collect_dependency_worker_files(dep_graph)
+        };
         for path in &dependency_worker_files {
             let abs = to_absolute_path_string(path);
             if !discovered_workers.contains(&abs) {
@@ -769,37 +819,73 @@ impl LoaderJson {
             .build_option
             .strict_mode
             .use_normalized_ohm_url;
-        let pkg_contexts = use_normalized_ohm_url
-            .then(|| Self::dependency_pkg_contexts(config, module_cfg, &dep_graph))
-            .flatten();
-        let router_map = Self::read_loader_router_maps(
-            config,
-            module_cfg,
-            manifest.router_map.as_deref(),
-            &dep_graph,
-            pkg_contexts.as_ref(),
-        );
+        let pkg_contexts = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "dependency_pkg_contexts");
+            use_normalized_ohm_url
+                .then(|| Self::dependency_pkg_contexts(config, module_cfg, dep_graph))
+                .flatten()
+        };
+        let router_map = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "router_map");
+            Self::read_loader_router_maps(
+                config,
+                module_cfg,
+                manifest.router_map.as_deref(),
+                dep_graph,
+                pkg_contexts.as_ref(),
+            )
+        };
 
-        let mut serialized_compile_entry = Self::collect_insight_intent_src_entries(module_cfg);
-        serialized_compile_entry.extend(Self::collect_mock_compile_entries(config, module_cfg));
+        let mut serialized_compile_entry = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "insight_intent_compile_entries");
+            Self::collect_insight_intent_src_entries(module_cfg)
+        };
+        serialized_compile_entry.extend({
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "mock_compile_entries");
+            Self::collect_mock_compile_entries(config, module_cfg)
+        });
         // ohosTest (local-test injection): add src/ohosTest/ets/ sources for Test builds.
-        serialized_compile_entry
-            .extend(Self::collect_ohos_test_compile_entries(config, module_cfg));
-        serialized_compile_entry.extend(Self::collect_app_startup_compile_entries(module_cfg));
-        serialized_compile_entry.extend(runtime_only_collector.collect_source_files());
-        serialized_compile_entry.extend(runtime_only_collector.collect_package_source_files());
+        serialized_compile_entry.extend({
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "ohos_test_compile_entries");
+            Self::collect_ohos_test_compile_entries(config, module_cfg)
+        });
+        serialized_compile_entry.extend({
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "app_startup_compile_entries");
+            Self::collect_app_startup_compile_entries(module_cfg)
+        });
+        serialized_compile_entry.extend({
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "runtime_only_source_files");
+            runtime_only_collector.collect_source_files()
+        });
+        serialized_compile_entry.extend({
+            let _timer =
+                LoaderTimingProbe::new(&module_cfg.name, "runtime_only_package_source_files");
+            runtime_only_collector.collect_package_source_files()
+        });
         serialized_compile_entry.extend(dependency_worker_files);
-        serialized_compile_entry.extend(Self::collect_dependency_router_map_source_files(
-            config,
-            module_cfg,
-            &dep_graph,
-            pkg_contexts.as_ref(),
-        ));
-        serialized_compile_entry.extend(Self::collect_dependency_ability_source_files(&dep_graph));
-        serialized_compile_entry.extend(Self::collect_dependency_insight_intent_src_entries(
-            &dep_graph,
-        ));
-        runtime_only_collector.dedupe_paths(&mut serialized_compile_entry);
+        serialized_compile_entry.extend({
+            let _timer =
+                LoaderTimingProbe::new(&module_cfg.name, "dependency_router_map_source_files");
+            Self::collect_dependency_router_map_source_files(
+                config,
+                module_cfg,
+                dep_graph,
+                pkg_contexts.as_ref(),
+            )
+        });
+        serialized_compile_entry.extend({
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "dependency_ability_sources");
+            Self::collect_dependency_ability_source_files(dep_graph)
+        });
+        serialized_compile_entry.extend({
+            let _timer =
+                LoaderTimingProbe::new(&module_cfg.name, "dependency_insight_intent_sources");
+            Self::collect_dependency_insight_intent_src_entries(dep_graph)
+        });
+        {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "compile_entry_dedupe");
+            runtime_only_collector.dedupe_paths(&mut serialized_compile_entry);
+        }
 
         let hvigor_compile_entry: Vec<String> = serialized_compile_entry
             .iter()
@@ -813,15 +899,21 @@ impl LoaderJson {
             }
         }
 
-        let bytecode_har_deps = ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(
-            &module_cfg.src_path,
-            &config.project_root,
-        );
-        let other_compile_paths = LoaderByteCodeHarFields::collect_other_compile_files(
-            &bytecode_har_deps,
-            &module_cfg.src_path,
-            &config.project_root,
-        );
+        let bytecode_har_deps = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_har_graph_scan");
+            ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(
+                &module_cfg.src_path,
+                &config.project_root,
+            )
+        };
+        let other_compile_paths = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_other_compile_files");
+            LoaderByteCodeHarFields::collect_other_compile_files(
+                &bytecode_har_deps,
+                &module_cfg.src_path,
+                &config.project_root,
+            )
+        };
         let other_compile_files: Vec<String> = other_compile_paths
             .iter()
             .map(|path| to_absolute_path_string(path))
@@ -911,6 +1003,7 @@ impl LoaderJson {
 
         // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
         let dynamic_import_lib_info: IndexMap<String, serde_json::Value> = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "dynamic_import_lib_info");
             let dynamic_dep_names = runtime_only_collector.collect_dynamic_import_dep_names();
             let entries = LoaderByteCodeHarFields::collect_dynamic_import_lib_info(
                 &module_cfg.name,
@@ -925,12 +1018,23 @@ impl LoaderJson {
         };
 
         // --- D5: hspNameOhmMap/harNameOhmMap from direct oh_modules deps ---
-        let (hsp_name_ohm_map, har_name_ohm_map) =
-            Self::collect_hsp_har_ohm_maps(config, module_cfg, &dep_graph, module_is_bytecode_har);
+        let (hsp_name_ohm_map, har_name_ohm_map) = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "hsp_har_ohm_maps");
+            Self::collect_hsp_har_ohm_maps(config, module_cfg, dep_graph, module_is_bytecode_har)
+        };
 
-        let aot_fields = AotLoaderFields::from_config(config, module_cfg, manifest);
-        let build_config_path = Self::loader_build_config_path(module_cfg);
-        let build_config = Self::read_loader_build_config(&build_config_path);
+        let aot_fields = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "aot_loader_fields");
+            AotLoaderFields::from_config(config, module_cfg, manifest)
+        };
+        let build_config_path = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "loader_build_config_path");
+            Self::loader_build_config_path(module_cfg)
+        };
+        let build_config = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "loader_build_config_read");
+            Self::read_loader_build_config(&build_config_path)
+        };
         let patch_config = (!matches!(config.output_target, OutputTarget::Test))
             .then(|| {
                 build_config
@@ -958,6 +1062,14 @@ impl LoaderJson {
         let cache_path = Self::absolute_dir_path_string(&compile_arkts_cache);
         let ets_loader_out = loader_out_root.join("ets");
         let ace_module_build = Self::absolute_dir_path_string(&ets_loader_out);
+        let hsp_resources_map = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "hsp_resources_map");
+            Self::collect_hsp_resources_map(dep_graph)
+        };
+        let pkg_name_to_pkg_brief_info = {
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "pkg_brief_info");
+            Self::build_pkg_brief_info(config, module_cfg, dep_graph)
+        };
 
         Ok(LoaderJson {
             module_path_map,
@@ -974,7 +1086,7 @@ impl LoaderJson {
             other_compile_files,
             dynamic_import_lib_info,
             router_map,
-            hsp_resources_map: Self::collect_hsp_resources_map(&dep_graph),
+            hsp_resources_map,
             update_version_info,
             an_build_out_put: aot_fields.an_build_out_put,
             an_build_mode: aot_fields.an_build_mode,
@@ -1000,7 +1112,7 @@ impl LoaderJson {
             use_normalized_ohm_url,
             api_version: config.sdk_config.compile_api_version,
             fallback_an_build: aot_fields.fallback_an_build,
-            pkg_name_to_pkg_brief_info: Self::build_pkg_brief_info(config, module_cfg, &dep_graph),
+            pkg_name_to_pkg_brief_info,
             workers: discovered_workers,
             source_roots: if matches!(manifest.module_type, OhosModuleType::Har) {
                 vec!["./src/main/ets".to_string()]

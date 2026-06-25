@@ -8,7 +8,6 @@ members = [
     "crates/arkdown-resolver",
     "crates/arkdown",
     "crates/arkdown-ets-transform",
-    "crates/arkdown-ts2abc",
     "crates/arkdown-resource",
     "crates/arkdown-profile",
     "crates/arkdown-pack",
@@ -41,7 +40,6 @@ arkdown-resolver = { path = "crates/arkdown-resolver" }
 arkdown-resource = { path = "crates/arkdown-resource" }
 arkdown-session = { path = "crates/arkdown-session" }
 arkdown-sign = { path = "crates/arkdown-sign" }
-arkdown-ts2abc = { path = "crates/arkdown-ts2abc" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
 
 # Parser — ohos-rs OXC fork with ArkTS/ArkUI support.

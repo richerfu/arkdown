@@ -1,5 +1,6 @@
 pub mod args;
 mod bundle_plan;
+pub(crate) mod bytecode;
 mod bytecode_har_declaration;
 mod bytecode_stage;
 pub mod coordinator;

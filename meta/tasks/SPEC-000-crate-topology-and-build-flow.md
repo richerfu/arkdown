@@ -57,7 +57,7 @@ collectors. They must not become separate lifecycle owners.
 | --- | --- |
 | `arkdown-profile` | Module/profile merge, generated module JSON, build profile, router map, startup/share/privacy/PAC, permission validation, bytecode-HAR metadata inputs. |
 | `arkdown-resource` | Resource inventory consumption, restool command plans, resource compile/link outputs, preview resource variants, code-resource/rawfile copy plans. |
-| `arkdown-ts2abc` | Bytecode compile plan, SDK `es2abc` command plan/runner, cache-file/protoBin inputs, optional Rust backend selection. |
+| `packages/arkdown::cmd::build::bytecode` | Bytecode compile plan, SDK `es2abc` command plan/runner, cache-file/protoBin inputs, optional Rust backend selection. |
 | `arkdown-pack` | HAR/HSP/HAP/app package plans, archive entry inventory/order, integrated HSP, native SO/preload entries, bytecode-HAR packaging metadata. |
 | `arkdown-sign` | Sign/verify plans, SDK signing command plans, signed package outputs, remote HSP signing variants. |
 | `arkdown-obfuscate` | Obfuscation option planning, rule merge, keep-name facts, mapping outputs consumed by transform/bundle/bytecode stages. |

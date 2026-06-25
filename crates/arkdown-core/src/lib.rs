@@ -72,8 +72,8 @@ pub use graph::{
 
 // ids — Typed build-context IDs (SPEC-048 Phase 3+).
 pub use ids::{
-    ChunkId, CompileUnitId, DependencyNodeId, ModuleId, PackEntryId, PackageId, ProfileFileId,
-    ProjectId, ResourceFileId, SourceFileId, TargetId,
+    ChunkId, DependencyNodeId, ModuleId, PackEntryId, PackageId, ProfileFileId, ProjectId,
+    ResourceFileId, SourceFileId, TargetId,
 };
 
 // manifest — Artifact-neutral manifest / profile structs.
