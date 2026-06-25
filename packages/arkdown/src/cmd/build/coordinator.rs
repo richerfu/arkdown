@@ -2359,11 +2359,12 @@ impl BuildCoordinator {
       } else if matches!(&config.output_target, OutputTarget::Hap) {
         let _timer = BuildTimingProbe::module(&module.name, "dependency_permission_reason_merge");
         permission_reason_processor
-          .merge_dependency_permission_reason_resources(
-            arkdown_profile::DependencyPermissionReasonResourceInput {
+          .merge_dependency_permission_reason_resources_from_dependency_graph(
+            arkdown_profile::DependencyPermissionReasonGraphResourceInput {
               module_root: &module.src_path,
               project_root: &project_root,
               target_name: "default",
+              dependency_graph: module_context.deps.as_ref(),
             },
           )
           .map_err(|e| {

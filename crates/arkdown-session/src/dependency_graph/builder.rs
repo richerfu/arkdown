@@ -7,7 +7,8 @@ use std::sync::Arc;
 use arkdown_path::canonicalize_or_owned;
 
 use crate::dependency_graph::snapshot::{
-    DependencyGraphSnapshot, DependencyNodeSnapshot, DependencyNodeType,
+    DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot, DependencyNodeSnapshot,
+    DependencyNodeType,
 };
 use crate::package::snapshot::PackageSnapshot;
 use crate::paths::ModulePathLayout;
@@ -54,19 +55,39 @@ impl DependencyGraphBuilder {
             let Some(package) = self.read_package(&package_root) else {
                 continue;
             };
-            for (dependencies, is_dynamic) in [
-                (&package.package_json.dependencies, false),
-                (&package.package_json.dev_dependencies, false),
-                (&package.package_json.dynamic_dependencies, true),
+            for (dependencies, edge_kind, is_dynamic) in [
+                (
+                    &package.package_json.dependencies,
+                    DependencyEdgeKind::Dependency,
+                    false,
+                ),
+                (
+                    &package.package_json.dev_dependencies,
+                    DependencyEdgeKind::DevDependency,
+                    false,
+                ),
+                (
+                    &package.package_json.dynamic_dependencies,
+                    DependencyEdgeKind::DynamicDependency,
+                    true,
+                ),
             ] {
                 for (alias, spec) in dependencies {
                     let Some(dep_root) = self.resolve_dep_root(&package_root, spec, alias) else {
                         continue;
                     };
+                    let dep_package = self.read_package(&dep_root);
+                    graph.edges.push(self.edge_snapshot(
+                        &package_root,
+                        alias,
+                        spec,
+                        &dep_root,
+                        dep_package.as_deref(),
+                        edge_kind,
+                    ));
                     if !seen_roots.insert(dep_root.clone()) {
                         continue;
                     }
-                    let dep_package = self.read_package(&dep_root);
                     let node = self.node_snapshot(
                         alias,
                         spec,
@@ -80,6 +101,25 @@ impl DependencyGraphBuilder {
                     queue.push_back(dep_root);
                 }
             }
+        }
+    }
+
+    fn edge_snapshot(
+        &self,
+        issuer_root: &Path,
+        alias: &str,
+        spec: &str,
+        root: &Path,
+        package: Option<&PackageSnapshot>,
+        kind: DependencyEdgeKind,
+    ) -> DependencyEdgeSnapshot {
+        DependencyEdgeSnapshot {
+            issuer_root: issuer_root.to_path_buf(),
+            alias: alias.to_string(),
+            version_spec: Some(spec.to_string()),
+            package_name: self.package_name(alias, package),
+            package_root: root.to_path_buf(),
+            kind,
         }
     }
 
@@ -127,11 +167,7 @@ impl DependencyGraphBuilder {
         is_transitive: bool,
         is_dynamic: bool,
     ) -> DependencyNodeSnapshot {
-        let package_name = package
-            .as_ref()
-            .map(|package| package.name.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| alias.to_string());
+        let package_name = self.package_name(alias, package.as_deref());
         let direct_deps = package
             .as_ref()
             .map(|package| self.direct_dependency_aliases(package))
@@ -148,6 +184,13 @@ impl DependencyGraphBuilder {
             is_transitive,
             direct_deps,
         }
+    }
+
+    fn package_name(&self, alias: &str, package: Option<&PackageSnapshot>) -> String {
+        package
+            .map(|package| package.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| alias.to_string())
     }
 
     fn classify_package(
@@ -314,5 +357,51 @@ mod tests {
         assert!(graph.nodes.contains_key("dev-lib"));
         assert!(graph.nodes.contains_key("dynamic-lib"));
         assert!(graph.nodes["dynamic-lib"].is_dynamic);
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .map(|edge| (edge.alias.as_str(), edge.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("runtime-lib", DependencyEdgeKind::Dependency),
+                ("dev-lib", DependencyEdgeKind::DevDependency),
+                ("dynamic-lib", DependencyEdgeKind::DynamicDependency),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_dependency_edge_declaration_order() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": {
+                "dep-b": "1.0.0",
+                "dep-a": "1.0.0"
+              }
+            }"#,
+        );
+        for name in ["dep-a", "dep-b"] {
+            fixture.write_package(
+                &format!("entry/oh_modules/{name}"),
+                &format!(r#"{{ "name": "{name}", "version": "1.0.0" }}"#),
+            );
+        }
+
+        let graph = fixture.build_for("entry");
+
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .map(|edge| edge.alias.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dep-b", "dep-a"]
+        );
     }
 }

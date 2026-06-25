@@ -82,6 +82,7 @@ bitflags = "2"
 indexmap = { version = "2", features = ["serde"] }
 bytes = "1"
 phf = { version = "0.13.1", features = ["macros"] }
+crc32fast = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

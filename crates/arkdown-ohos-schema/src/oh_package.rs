@@ -1,8 +1,8 @@
 //! Raw schema for `oh-package.json5`.
 
-use std::collections::BTreeMap;
-
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Top-level struct for `oh-package.json5`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -31,13 +31,13 @@ pub struct RawOhPackage {
     /// Values may be a version range (e.g. `"^1.0.0"`), a local path
     /// (e.g. `"../hsp-lib"`), or an OHPM registry specifier.
     #[serde(default)]
-    pub dependencies: BTreeMap<String, String>,
+    pub dependencies: IndexMap<String, String>,
     /// Development-only dependencies.
     #[serde(default)]
-    pub dev_dependencies: BTreeMap<String, String>,
+    pub dev_dependencies: IndexMap<String, String>,
     /// Dynamic (lazy-loaded) dependencies.
     #[serde(default)]
-    pub dynamic_dependencies: BTreeMap<String, String>,
+    pub dynamic_dependencies: IndexMap<String, String>,
     /// Declare the package as a HAR or HSP library.
     #[serde(default)]
     pub package_type: Option<String>,

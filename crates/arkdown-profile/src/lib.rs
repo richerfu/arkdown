@@ -55,8 +55,8 @@ pub use process_distro_filter::{
     DistroFilterProcessor, DistroFilterProfileInput, DistroFilterProfileOutput,
 };
 pub use process_permission_reason::{
-    DependencyPermissionReasonResourceInput, PermissionReasonProcessor,
-    PermissionReasonResourceInput,
+    DependencyPermissionReasonGraphResourceInput, DependencyPermissionReasonResourceInput,
+    PermissionReasonProcessor, PermissionReasonResourceInput,
 };
 pub use process_privacy_profile::{
     PrivacyProfileInput, PrivacyProfileOutput, PrivacyProfileProcessor, ProjectPrivacyProfileInput,
