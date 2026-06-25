@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use arkdown::plugins::ets_transform::ModuleAnalyzerKind;
 use arkdown::plugins::factory::PackagePlugin;
 use clap::{Args, ValueEnum};
 
@@ -11,6 +12,31 @@ pub enum AbcBackendChoice {
   Auto,
   #[default]
   Sdk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum ModuleAnalyzerChoice {
+  #[default]
+  Oxc,
+  Yuku,
+}
+
+impl ModuleAnalyzerChoice {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Oxc => "oxc",
+      Self::Yuku => "yuku",
+    }
+  }
+}
+
+impl From<ModuleAnalyzerChoice> for ModuleAnalyzerKind {
+  fn from(value: ModuleAnalyzerChoice) -> Self {
+    match value {
+      ModuleAnalyzerChoice::Oxc => Self::Oxc,
+      ModuleAnalyzerChoice::Yuku => Self::Yuku,
+    }
+  }
 }
 
 #[derive(Args, Default)]
@@ -91,6 +117,10 @@ pub struct BuildArgs {
   /// OXC checker diagnostics while keeping ETS transforms enabled.
   #[arg(long, default_value = "oxc")]
   pub checker: Option<String>,
+  /// Module analyzer used for hvigor type/value split. `yuku` requires a build
+  /// compiled with ARKDOWN_YUKU_ROOT and is opt-in for parity experiments.
+  #[arg(long = "module-analyzer", value_enum, default_value = "oxc")]
+  pub module_analyzer: ModuleAnalyzerChoice,
   /// Enable coarse build cache and ABC ProgramCache handoff.
   #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
   pub cache: bool,
@@ -151,6 +181,12 @@ impl BuildCommand {
       "har" => OutputTarget::Har,
       _ => OutputTarget::Hap,
     };
+    let module_analyzer = ModuleAnalyzerKind::from(self.args.module_analyzer);
+    if !module_analyzer.is_available() {
+      anyhow::bail!(
+        "module analyzer 'yuku' was requested but native yuku support is not compiled; rebuild with ARKDOWN_YUKU_ROOT"
+      );
+    }
 
     let config = std::sync::Arc::new(
       load_config(

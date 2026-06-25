@@ -28,14 +28,50 @@ use crate::source::{SourceClassifier, TransformSourceFile, TransformSourceSnapsh
 use crate::transform::source_emit::CodegenSourceText;
 use crate::ModuleExportNameText;
 
+#[cfg(arkdown_yuku_native)]
+mod yuku_module_analysis;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModuleAnalyzerKind {
+    #[default]
+    Oxc,
+    Yuku,
+}
+
+impl ModuleAnalyzerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Oxc => "oxc",
+            Self::Yuku => "yuku",
+        }
+    }
+
+    pub fn is_available(self) -> bool {
+        match self {
+            Self::Oxc => true,
+            Self::Yuku => cfg!(arkdown_yuku_native),
+        }
+    }
+}
+
 pub(super) struct TypeOnlyNamedImportSplitter<'a> {
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
+    module_analyzer: ModuleAnalyzerKind,
 }
 
 impl<'a> TypeOnlyNamedImportSplitter<'a> {
     pub(super) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
-        Self { id, sources }
+        Self {
+            id,
+            sources,
+            module_analyzer: ModuleAnalyzerKind::default(),
+        }
+    }
+
+    pub(super) fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
+        self.module_analyzer = module_analyzer;
+        self
     }
 
     pub(crate) fn split_program<'ast>(
@@ -46,19 +82,28 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
     ) -> bool {
         let local_bindings = TopLevelBindingKindCollector::new(program).collect();
         let mut type_import_locals = FxHashSet::default();
-        let split_plans = program
-            .body
-            .iter()
-            .map(|statement| match statement {
+        let mut binding_classifier =
+            ModuleBindingClassifier::new(self.sources, self.module_analyzer);
+        let mut split_plans = Vec::with_capacity(program.body.len());
+        for statement in &program.body {
+            let split_plan = match statement {
                 Statement::ImportDeclaration(import) => {
-                    let split = ImportDeclarationSplit::new(import, self.id, self.sources, scoping)
-                        .split()?;
-                    type_import_locals.extend(split.type_local_names().iter().cloned());
-                    Some(split.into_emitter())
+                    let split = ImportDeclarationSplit::new(
+                        import,
+                        self.id,
+                        &mut binding_classifier,
+                        scoping,
+                    )
+                    .split();
+                    split.map(|split| {
+                        type_import_locals.extend(split.type_local_names().iter().cloned());
+                        split.into_emitter()
+                    })
                 }
                 _ => None,
-            })
-            .collect::<Vec<_>>();
+            };
+            split_plans.push(split_plan);
+        }
 
         let ast = AstBuilder::new(allocator);
         let mut changed = false;
@@ -239,29 +284,29 @@ impl DefaultImportReexportPlan {
     }
 }
 
-struct ImportDeclarationSplit<'a, 'b> {
+struct ImportDeclarationSplit<'a, 'source, 'classifier> {
     import: &'a ImportDeclaration<'a>,
-    id: &'b str,
-    binding_classifier: ModuleBindingClassifier<'b>,
-    scoping: &'b oxc_semantic::Scoping,
+    id: &'source str,
+    binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
+    scoping: &'source oxc_semantic::Scoping,
 }
 
-impl<'a, 'b> ImportDeclarationSplit<'a, 'b> {
+impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> {
     fn new(
         import: &'a ImportDeclaration<'a>,
-        id: &'b str,
-        sources: &'b TransformSourceSnapshot,
-        scoping: &'b oxc_semantic::Scoping,
+        id: &'source str,
+        binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
+        scoping: &'source oxc_semantic::Scoping,
     ) -> Self {
         Self {
             import,
             id,
-            binding_classifier: ModuleBindingClassifier::new(sources),
+            binding_classifier,
             scoping,
         }
     }
 
-    fn split(&self) -> Option<NamedImportSplit> {
+    fn split(mut self) -> Option<NamedImportSplit> {
         if self.import.import_kind.is_type() {
             return None;
         }
@@ -338,7 +383,7 @@ impl<'a, 'b> ImportDeclarationSplit<'a, 'b> {
         ))
     }
 
-    fn imported_binding_is_declared_type(&self, imported_name: &str) -> bool {
+    fn imported_binding_is_declared_type(&mut self, imported_name: &str) -> bool {
         self.binding_classifier
             .classify_imported_binding(
                 Path::new(self.id),
@@ -349,7 +394,7 @@ impl<'a, 'b> ImportDeclarationSplit<'a, 'b> {
     }
 
     fn binding_decision(
-        &self,
+        &mut self,
         explicit_type: bool,
         symbol_id: Option<SymbolId>,
         imported_name: &str,
@@ -664,11 +709,21 @@ where
 pub(super) struct TypeOnlyReexportSplitter<'a> {
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
+    module_analyzer: ModuleAnalyzerKind,
 }
 
 impl<'a> TypeOnlyReexportSplitter<'a> {
     pub(super) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
-        Self { id, sources }
+        Self {
+            id,
+            sources,
+            module_analyzer: ModuleAnalyzerKind::default(),
+        }
+    }
+
+    pub(super) fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
+        self.module_analyzer = module_analyzer;
+        self
     }
 
     pub(crate) fn split_program<'ast>(
@@ -676,16 +731,18 @@ impl<'a> TypeOnlyReexportSplitter<'a> {
         allocator: &'ast Allocator,
         program: &mut Program<'ast>,
     ) -> bool {
-        let split_plans = program
-            .body
-            .iter()
-            .map(|statement| match statement {
+        let mut binding_classifier =
+            ModuleBindingClassifier::new(self.sources, self.module_analyzer);
+        let mut split_plans = Vec::with_capacity(program.body.len());
+        for statement in &program.body {
+            let split_plan = match statement {
                 Statement::ExportNamedDeclaration(export) => {
-                    TypeOnlyReexportSplit::new(export, self.id, self.sources).split()
+                    TypeOnlyReexportSplit::new(export, self.id, &mut binding_classifier).split()
                 }
                 _ => None,
-            })
-            .collect::<Vec<_>>();
+            };
+            split_plans.push(split_plan);
+        }
 
         let ast = AstBuilder::new(allocator);
         let mut changed = false;
@@ -706,32 +763,33 @@ impl<'a> TypeOnlyReexportSplitter<'a> {
     }
 }
 
-struct TypeOnlyReexportSplit<'a, 'b> {
+struct TypeOnlyReexportSplit<'a, 'source, 'classifier> {
     export: &'a ExportNamedDeclaration<'a>,
-    id: &'b str,
-    sources: &'b TransformSourceSnapshot,
+    id: &'source str,
+    binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
 }
 
-impl<'a, 'b> TypeOnlyReexportSplit<'a, 'b> {
+impl<'a, 'source, 'classifier> TypeOnlyReexportSplit<'a, 'source, 'classifier> {
     fn new(
         export: &'a ExportNamedDeclaration<'a>,
-        id: &'b str,
-        sources: &'b TransformSourceSnapshot,
+        id: &'source str,
+        binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
     ) -> Self {
         Self {
             export,
             id,
-            sources,
+            binding_classifier,
         }
     }
 
-    fn split(&self) -> Option<ReExportSplitEmitter> {
+    fn split(self) -> Option<ReExportSplitEmitter> {
         if self.export.export_kind.is_type() || self.export.specifiers.is_empty() {
             return None;
         }
         let source = self.export.source.as_ref()?;
         let specifier = source.value.as_str();
-        let target_exports = ModuleBindingClassifier::new(self.sources)
+        let target_exports = self
+            .binding_classifier
             .classify_specifier_exports(Path::new(self.id), specifier)?;
 
         let mut value_specifiers = Vec::new();
@@ -786,18 +844,27 @@ impl ModuleBindingKind {
     }
 }
 
-#[derive(Clone, Copy)]
 struct ModuleBindingClassifier<'a> {
     sources: &'a TransformSourceSnapshot,
+    module_analyzer: ModuleAnalyzerKind,
+    exports: FxHashMap<PathBuf, Option<FxHashMap<String, ModuleBindingKind>>>,
+    #[cfg(arkdown_yuku_native)]
+    yuku_classifier: Option<yuku_module_analysis::YukuModuleExportClassifier<'a>>,
 }
 
 impl<'a> ModuleBindingClassifier<'a> {
-    fn new(sources: &'a TransformSourceSnapshot) -> Self {
-        Self { sources }
+    fn new(sources: &'a TransformSourceSnapshot, module_analyzer: ModuleAnalyzerKind) -> Self {
+        Self {
+            sources,
+            module_analyzer,
+            exports: FxHashMap::default(),
+            #[cfg(arkdown_yuku_native)]
+            yuku_classifier: None,
+        }
     }
 
     fn classify_imported_binding(
-        &self,
+        &mut self,
         importer: &Path,
         specifier: &str,
         imported_name: &str,
@@ -813,7 +880,7 @@ impl<'a> ModuleBindingClassifier<'a> {
         {
             return Some(ModuleBindingKind::Value);
         }
-        exports.get(imported_name).copied().or_else(|| {
+        exports.get(imported_name).copied().or({
             if is_declaration {
                 Some(ModuleBindingKind::Type)
             } else {
@@ -823,7 +890,7 @@ impl<'a> ModuleBindingClassifier<'a> {
     }
 
     fn classify_specifier_exports(
-        &self,
+        &mut self,
         importer: &Path,
         specifier: &str,
     ) -> Option<FxHashMap<String, ModuleBindingKind>> {
@@ -834,9 +901,36 @@ impl<'a> ModuleBindingClassifier<'a> {
     }
 
     fn classify_source_exports(
-        &self,
+        &mut self,
         source: TransformSourceFile,
     ) -> Option<FxHashMap<String, ModuleBindingKind>> {
+        if let Some(exports) = self.exports.get(&source.path) {
+            return exports.clone();
+        }
+
+        let path = source.path.clone();
+        let exports = self.analyze_source_exports(source);
+        self.exports.insert(path, exports.clone());
+        exports
+    }
+
+    fn analyze_source_exports(
+        &mut self,
+        source: TransformSourceFile,
+    ) -> Option<FxHashMap<String, ModuleBindingKind>> {
+        #[cfg(not(arkdown_yuku_native))]
+        let _ = self.module_analyzer;
+
+        #[cfg(arkdown_yuku_native)]
+        if self.module_analyzer == ModuleAnalyzerKind::Yuku {
+            let classifier = self.yuku_classifier.get_or_insert_with(|| {
+                yuku_module_analysis::YukuModuleExportClassifier::new(self.sources)
+            });
+            if let Some(exports) = classifier.analyze(source.clone()) {
+                return Some(exports);
+            }
+        }
+
         ModuleExportClassifier::new(source)
             .with_sources(self.sources)
             .analyze()
@@ -1571,6 +1665,20 @@ mod tests {
         id: &str,
         sources: &TransformSourceSnapshot,
     ) -> Cow<'a, str> {
+        split_type_only_named_imports_with_analyzer(
+            source,
+            id,
+            sources,
+            ModuleAnalyzerKind::default(),
+        )
+    }
+
+    fn split_type_only_named_imports_with_analyzer<'a>(
+        source: &'a str,
+        id: &str,
+        sources: &TransformSourceSnapshot,
+        module_analyzer: ModuleAnalyzerKind,
+    ) -> Cow<'a, str> {
         let allocator = Allocator::default();
         let source_type =
             SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -1583,11 +1691,9 @@ mod tests {
             return Cow::Borrowed(source);
         }
         let scoping = semantic_ret.semantic.into_scoping();
-        let changed = TypeOnlyNamedImportSplitter::new(id, sources).split_program(
-            &allocator,
-            &mut parsed.program,
-            &scoping,
-        );
+        let changed = TypeOnlyNamedImportSplitter::new(id, sources)
+            .with_module_analyzer(module_analyzer)
+            .split_program(&allocator, &mut parsed.program, &scoping);
         if changed {
             Cow::Owned(codegen_source(&parsed.program))
         } else {
@@ -1600,6 +1706,15 @@ mod tests {
         id: &str,
         sources: &TransformSourceSnapshot,
     ) -> Cow<'a, str> {
+        split_type_only_reexports_with_analyzer(source, id, sources, ModuleAnalyzerKind::default())
+    }
+
+    fn split_type_only_reexports_with_analyzer<'a>(
+        source: &'a str,
+        id: &str,
+        sources: &TransformSourceSnapshot,
+        module_analyzer: ModuleAnalyzerKind,
+    ) -> Cow<'a, str> {
         let allocator = Allocator::default();
         let source_type =
             SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -1608,11 +1723,60 @@ mod tests {
             return Cow::Borrowed(source);
         }
         let changed = TypeOnlyReexportSplitter::new(id, sources)
+            .with_module_analyzer(module_analyzer)
             .split_program(&allocator, &mut parsed.program);
         if changed {
             Cow::Owned(codegen_source(&parsed.program))
         } else {
             Cow::Borrowed(source)
+        }
+    }
+
+    fn available_module_analyzers() -> Vec<ModuleAnalyzerKind> {
+        [ModuleAnalyzerKind::Oxc, ModuleAnalyzerKind::Yuku]
+            .into_iter()
+            .filter(|analyzer| analyzer.is_available())
+            .collect()
+    }
+
+    #[test]
+    fn module_binding_classifier_reuses_target_exports_within_pass() {
+        let importer = PathBuf::from("/project/src/main.ets");
+        let target = PathBuf::from("/project/src/bindings.ts");
+        let mut files = FxHashMap::default();
+        files.insert(
+            importer.clone(),
+            Arc::<str>::from(
+                r#"import { TypeName, RuntimeName } from "./bindings";
+
+const value = RuntimeName;
+type Alias = TypeName;"#,
+            ),
+        );
+        files.insert(
+            target,
+            Arc::<str>::from(
+                r#"export interface TypeName {}
+export class RuntimeName {}"#,
+            ),
+        );
+        let sources = TransformSourceSnapshot::new(files);
+
+        for analyzer in available_module_analyzers() {
+            let mut classifier = ModuleBindingClassifier::new(&sources, analyzer);
+            assert_eq!(
+                classifier.classify_imported_binding(&importer, "./bindings", "TypeName"),
+                Some(ModuleBindingKind::Type)
+            );
+            assert_eq!(
+                classifier.classify_imported_binding(&importer, "./bindings", "RuntimeName"),
+                Some(ModuleBindingKind::Value)
+            );
+            assert_eq!(
+                classifier.exports.len(),
+                1,
+                "{analyzer:?} must reuse target export analysis within one split pass"
+            );
         }
     }
 
@@ -2481,6 +2645,149 @@ export const nativeCall: () => void;"#;
             .expect("native declaration type reexport must be valid TypeScript");
         assert!(emitted.contains("nativeCall"));
         assert!(!emitted.contains("EdgeType"));
+    }
+
+    #[test]
+    fn declared_runtime_functions_keep_value_imports_like_hvigor() {
+        let sign_utils =
+            PathBuf::from("/project/oh_modules/@paydebugkit/base/src/main/ets/SignUtils.ts");
+        let utils = PathBuf::from(
+            "/project/oh_modules/@cashier_alipay/cashiersdk/src/main/ets/utils/Utils.ts",
+        );
+        let sign_source = r#"import { stringToUint8ArrayWithEncoder, uint8ArrayToStringWithDecoder } from "@cashier_alipay/cashiersdk/src/main/ets/utils/Utils";
+
+export function encode(value: string): string {
+    return uint8ArrayToStringWithDecoder(stringToUint8ArrayWithEncoder(value));
+}"#;
+        let utils_source = r#"export declare function stringToUint8ArrayWithEncoder(value: string): Uint8Array;
+export declare function uint8ArrayToStringWithDecoder(value: Uint8Array): string;
+
+export function stringToUint8ArrayWithEncoder(value: string): Uint8Array {
+    return new Uint8Array();
+}
+
+export function uint8ArrayToStringWithDecoder(value: Uint8Array): string {
+    return "";
+}"#;
+
+        let mut files = FxHashMap::default();
+        files.insert(sign_utils.clone(), Arc::<str>::from(sign_source));
+        files.insert(utils, Arc::<str>::from(utils_source));
+        let sources = TransformSourceSnapshot::new(files);
+        let sign_id = sign_utils.to_str().unwrap();
+
+        for analyzer in available_module_analyzers() {
+            let split = split_type_only_named_imports_with_analyzer(
+                sign_source,
+                sign_id,
+                &sources,
+                analyzer,
+            );
+            assert!(
+                split.contains(
+                    "import { stringToUint8ArrayWithEncoder, uint8ArrayToStringWithDecoder }"
+                ),
+                "{analyzer:?} must keep declared runtime functions as value imports:\n{split}"
+            );
+            assert!(
+                !split.contains("import type { stringToUint8ArrayWithEncoder"),
+                "{analyzer:?} must not convert runtime functions to type-only imports:\n{split}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_declaration_runtime_bindings_match_hvigor_type_split() {
+        let index = PathBuf::from("/project/oh_modules/@msi/jsi/src/main/ets/index.ts");
+        let native_index =
+            PathBuf::from("/project/oh_modules/@msi/jsi/src/main/cpp/types/libmsi/Index.d.ts");
+        let index_source = r#"import { ArkTSMSIModule as ArkTSMSIBridge, setMetadataInfo as msiSetMetadataInfo, recordMSIMoniter as msiRecordMSIMoniter, Options } from "libmsi.so";
+
+const bridge = new ArkTSMSIBridge({} as Options);
+msiSetMetadataInfo([]);
+msiRecordMSIMoniter("");
+export { bridge };"#;
+        let native_source = r#"export interface Options {
+    jsInvoker: Object;
+}
+
+export declare class ArkTSMSIModule {
+    constructor(option: Options);
+}
+
+export declare function setMetadataInfo(metadataInfo: string[]): void;
+export declare function recordMSIMoniter(pointer: string): void;"#;
+
+        let mut files = FxHashMap::default();
+        files.insert(index.clone(), Arc::<str>::from(index_source));
+        files.insert(native_index.clone(), Arc::<str>::from(native_source));
+        let sources = TransformSourceSnapshot::with_resolved_static_modules(
+            files,
+            vec![crate::source::TransformResolvedStaticModule::new(
+                "/project/oh_modules/@msi/jsi",
+                "libmsi.so",
+                &native_index,
+            )],
+        );
+        let index_id = index.to_str().unwrap();
+
+        for analyzer in available_module_analyzers() {
+            let split = split_type_only_named_imports_with_analyzer(
+                index_source,
+                index_id,
+                &sources,
+                analyzer,
+            );
+            assert!(
+                split.contains("import { ArkTSMSIModule as ArkTSMSIBridge, setMetadataInfo as msiSetMetadataInfo, recordMSIMoniter as msiRecordMSIMoniter } from \"libmsi.so\";"),
+                "{analyzer:?} must keep native runtime class/functions as value imports:\n{split}"
+            );
+            assert!(
+                split.contains("import type { Options } from \"libmsi.so\";"),
+                "{analyzer:?} must split native interface as type import:\n{split}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_declaration_reexport_keeps_runtime_bindings_like_hvigor() {
+        let index = PathBuf::from("/project/oh_modules/@scope/widget/Index.ets");
+        let native_index = PathBuf::from(
+            "/project/oh_modules/@scope/widget/native-declarations/custom-entry/Entry.d.ts",
+        );
+        let index_source = r#"export { EdgeType, NativeWidget, nativeCall } from "libwidget.so";"#;
+        let native_source = r#"export const enum EdgeType {
+    TOP = 1
+}
+
+export declare class NativeWidget {}
+export declare function nativeCall(): void;"#;
+
+        let mut files = FxHashMap::default();
+        files.insert(index.clone(), Arc::<str>::from(index_source));
+        files.insert(native_index.clone(), Arc::<str>::from(native_source));
+        let sources = TransformSourceSnapshot::with_resolved_static_modules(
+            files,
+            vec![crate::source::TransformResolvedStaticModule::new(
+                "/project/oh_modules/@scope/widget",
+                "libwidget.so",
+                &native_index,
+            )],
+        );
+        let index_id = index.to_str().unwrap();
+
+        for analyzer in available_module_analyzers() {
+            let split =
+                split_type_only_reexports_with_analyzer(index_source, index_id, &sources, analyzer);
+            assert!(
+                split.contains("export { NativeWidget, nativeCall } from \"libwidget.so\";"),
+                "{analyzer:?} must keep native runtime reexports live:\n{split}"
+            );
+            assert!(
+                split.contains("export type { EdgeType } from \"libwidget.so\";"),
+                "{analyzer:?} must keep const enum reexport type-only:\n{split}"
+            );
+        }
     }
 
     #[test]

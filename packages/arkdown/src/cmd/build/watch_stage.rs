@@ -25,7 +25,7 @@ use arkdown_watcher::{classify_watch_change, FileWatcher, WatchChangeKind};
 
 use arkdown::plugins::factory::PackagePlugin;
 
-use super::args::{AbcBackendChoice, BuildArgs, BuildCommand};
+use super::args::{AbcBackendChoice, BuildArgs, BuildCommand, ModuleAnalyzerChoice};
 use super::layout::ModuleBuildLayout;
 
 /// Input for the watch stage.
@@ -53,6 +53,7 @@ pub(super) struct WatchStageInput {
   pub(super) disable_abc_cache: bool,
   pub(super) cache_file: Option<PathBuf>,
   pub(super) checker: Option<String>,
+  pub(super) module_analyzer: ModuleAnalyzerChoice,
   pub(super) cache: bool,
   pub(super) package_plugins: Vec<PackagePlugin>,
   /// When `true`, only `src/main/resources/` directories are watched.
@@ -83,6 +84,7 @@ impl WatchStage {
     let disable_abc_cache = input.disable_abc_cache;
     let cache_file = input.cache_file;
     let checker = input.checker;
+    let module_analyzer = input.module_analyzer;
     let cache = input.cache;
     let package_plugins = input.package_plugins;
 
@@ -241,6 +243,7 @@ impl WatchStage {
           cache_file: cache_file.clone(),
           abc_backend,
           checker: checker.clone(),
+          module_analyzer,
           cache,
           skip_resource: is_hot,
           skip_profile: is_hot,

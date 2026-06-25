@@ -36,7 +36,7 @@ pub mod transform;
 mod typescript_emit;
 
 // Narrow re-exports per spec (lib.rs only re-exports, no new business functions).
-pub use module_rewrite::StaticModuleSpecifierRewrite;
+pub use module_rewrite::{ModuleAnalyzerKind, StaticModuleSpecifierRewrite};
 pub use resource_transform::ResourceReference;
 pub use rolldown_plan::{
     RolldownEtsTransformOutput, RolldownEtsTransformPlan, RolldownEtsTransformer,
