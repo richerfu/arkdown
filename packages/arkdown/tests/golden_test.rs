@@ -26,7 +26,57 @@
 //! root.  Each golden is a plain text file named `<name>.golden`.  The
 //! directory is created on first use.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use arkdown_profile::LoaderJson;
+
+const PROJECT_ROOT_TOKEN: &str = "<PROJECT_ROOT>";
+
+/// Rewrites checkout-local paths before a serialized `LoaderJson` is compared
+/// with its golden file. Production `loader.json` output remains unchanged and
+/// continues to contain the absolute paths required by hvigor.
+struct LoaderJsonGoldenNormalizer<'a> {
+  project_root: &'a Path,
+}
+
+impl<'a> LoaderJsonGoldenNormalizer<'a> {
+  fn new(project_root: &'a Path) -> Self {
+    Self { project_root }
+  }
+
+  fn normalize(&self, loader: &mut LoaderJson) {
+    for module_path in loader.module_path_map.values_mut() {
+      self.normalize_path(module_path);
+    }
+    self.normalize_path(&mut loader.project_root_path);
+    self.normalize_path(&mut loader.node_modules_path);
+    if let Some(an_build_output) = &mut loader.an_build_out_put {
+      self.normalize_path(an_build_output);
+    }
+    if let Some(ap_path) = &mut loader.ap_path {
+      self.normalize_path(ap_path);
+    }
+    if let Some(build_config_path) = &mut loader.build_config_path {
+      self.normalize_path(build_config_path);
+    }
+    for worker in &mut loader.workers {
+      self.normalize_path(worker);
+    }
+  }
+
+  fn normalize_path(&self, path: &mut String) {
+    let Ok(relative) = Path::new(path.as_str()).strip_prefix(self.project_root) else {
+      return;
+    };
+
+    let mut normalized = PROJECT_ROOT_TOKEN.to_string();
+    for component in relative.components() {
+      normalized.push('/');
+      normalized.push_str(&component.as_os_str().to_string_lossy());
+    }
+    *path = normalized;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // GoldenStore
@@ -222,8 +272,9 @@ fn test_loader_json_golden_minimal_hap() {
   use arkdown_profile::ProfileProcessor;
   use std::sync::Arc;
 
+  let project_root = workspace_root().join("tests/fixtures/minimal-hap");
   let config = Arc::new(ArkdownConfig {
-    project_root: workspace_root().join("tests/fixtures/minimal-hap"),
+    project_root: project_root.clone(),
     build_mode: BuildMode::Debug,
     output_target: OutputTarget::Hap,
     product: ProductConfig {
@@ -266,9 +317,7 @@ fn test_loader_json_golden_minimal_hap() {
 
   let module_cfg = ModuleConfig {
     name: "entry".to_string(),
-    src_path: workspace_root()
-      .join("tests/fixtures/minimal-hap")
-      .join("entry"),
+    src_path: project_root.join("entry"),
     module_type: OhosModuleType::Entry,
   };
 
@@ -302,12 +351,17 @@ fn test_loader_json_golden_minimal_hap() {
   };
 
   let processor = ProfileProcessor::new(config);
-  let (_, loader) = processor
+  let (_, mut loader) = processor
     .process_module(&module_cfg, &module_json5)
     .expect("process_module must succeed");
 
-  // Serialize to pretty JSON for golden comparison.
-  let actual = serde_json::to_string_pretty(&loader).expect("serialize loader.json");
+  // Keep machine-specific checkout paths out of the committed golden while
+  // preserving the production serializer's field order and absolute paths.
+  LoaderJsonGoldenNormalizer::new(&project_root).normalize(&mut loader);
+  let actual = format!(
+    "{}\n",
+    serde_json::to_string_pretty(&loader).expect("serialize loader.json")
+  );
 
   let store = GoldenStore::new(default_golden_dir());
   assert_golden(&store, "loader_json_minimal_hap", &actual);

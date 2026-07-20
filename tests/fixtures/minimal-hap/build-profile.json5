@@ -1,24 +1,9 @@
 {
   app: {
-    signingConfigs: [
-      {
-        "name": "default",
-        "type": "HarmonyOS",
-        "material": {
-          "certpath": "/Users/ranger/.ohos/config/default_minimal-hap_YwKQ1z12UQE8RNArp0QtmNHBdgynkTMsX5TAEv24uWE=.cer",
-          "keyAlias": "debugKey",
-          "keyPassword": "0000001B8D7943B53398E5ACE8F00CDD6BC24A9A30B1DC0F4DC26F3B02D878D95CCE9515E885071837430B",
-          "profile": "/Users/ranger/.ohos/config/default_minimal-hap_YwKQ1z12UQE8RNArp0QtmNHBdgynkTMsX5TAEv24uWE=.p7b",
-          "signAlg": "SHA256withECDSA",
-          "storeFile": "/Users/ranger/.ohos/config/default_minimal-hap_YwKQ1z12UQE8RNArp0QtmNHBdgynkTMsX5TAEv24uWE=.p12",
-          "storePassword": "0000001B671E25D1BFEA6B79CC362146CE1A8E7617CD833161992F301E8CE15E05CE2FBCA0D34737CC0D55"
-        }
-      }
-    ],
+    signingConfigs: [],
     products: [
       {
         name: "default",
-        signingConfig: "default",
         targetSdkVersion: "5.0.5(17)",
         compatibleSdkVersion: "5.0.5(17)",
         runtimeOS: "HarmonyOS",

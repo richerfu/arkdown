@@ -10,7 +10,9 @@ use arkdown_path::{
   canonicalize_or_owned as canonical_or_owned, ArtifactPath, ArtifactPathSerializer,
 };
 
-pub(super) struct IntermediateArtifactWriter;
+pub(super) struct IntermediateArtifactWriter {
+  restool_layout: RestoolLayout,
+}
 
 struct RouterMapSourcePath<'a> {
   rel_path: &'a Path,
@@ -59,8 +61,10 @@ struct RouterMapOwnership<'a> {
 }
 
 impl IntermediateArtifactWriter {
-  pub(super) fn new() -> Self {
-    Self
+  pub(super) fn new(restool_path: &Path) -> Self {
+    Self {
+      restool_layout: RestoolLayout::from_restool_path(restool_path),
+    }
   }
 
   pub(super) fn write_router_map_intermediates(
@@ -348,8 +352,11 @@ impl IntermediateArtifactWriter {
     let module_layout = ModuleBuildLayout::new(&module_root);
     let resource_layout = ResourceOutputLayout::new(&res_out);
     let project_layout = ProjectBuildLayout::new(&project_root);
-    let restool_layout =
-      RestoolLayout::new(self.resource_toolchains_dir(&config.sdk_config.restool_path));
+    let extension_path = self
+      .restool_layout
+      .image_transcoder_library()
+      .map(IntermediateArtifactWriter::path_string)
+      .unwrap_or_default();
 
     let dependencies: Vec<String> = dependency_res_dirs
       .iter()
@@ -367,42 +374,43 @@ impl IntermediateArtifactWriter {
     };
 
     self.write_json_minified_newline(
-            &resource_layout.opt_compression_json(),
-            &serde_json::json!({
-                "context": {
-                    "extensionPath": IntermediateArtifactWriter::path_string(&restool_layout.image_transcoder_library()),
-                },
-                "compression": {
-                    "media": {
-                        "enable": false,
-                    },
-                    "filters": [],
-                },
-            }),
-        )?;
+      &resource_layout.opt_compression_json(),
+      &serde_json::json!({
+          "context": {
+              "extensionPath": extension_path,
+          },
+          "compression": {
+              "media": {
+                  "enable": false,
+              },
+              "filters": [],
+          },
+      }),
+    )?;
 
-    self.write_json_minified_newline(
-            &resource_layout.res_config_json(),
-            &serde_json::json!({
-                "configPath": IntermediateArtifactWriter::path_string(&module_layout.process_profile_module_json()),
-                "packageName": config.product.bundle_name,
-                "output": IntermediateArtifactWriter::path_string(&res_out),
-                "moduleNames": module_names,
-                "ResourceTable": [
-                    IntermediateArtifactWriter::path_string(&module_layout.generated_resource_table_header()),
-                ],
-                "applicationResource": IntermediateArtifactWriter::path_string(&project_layout.app_scope_resources()),
-                "moduleResources": module_res_dirs.iter().map(|d| {
-                    serde_json::Value::String(IntermediateArtifactWriter::path_string(&canonical_or_owned(d)))
-                }).collect::<Vec<_>>(),
-                "dependencies": dependencies,
-                "iconCheck": true,
-                "compression": IntermediateArtifactWriter::path_string(&resource_layout.opt_compression_json()),
-                "ids": IntermediateArtifactWriter::path_string(&resource_layout.ids_map()),
-                "definedIds": IntermediateArtifactWriter::path_string(&resource_layout.id_defined_json()),
-                "definedSysIds": IntermediateArtifactWriter::path_string(&restool_layout.id_defined_json()),
-            }),
-        )?;
+    let mut res_config = serde_json::json!({
+        "configPath": IntermediateArtifactWriter::path_string(&module_layout.process_profile_module_json()),
+        "packageName": config.product.bundle_name,
+        "output": IntermediateArtifactWriter::path_string(&res_out),
+        "moduleNames": module_names,
+        "ResourceTable": [
+            IntermediateArtifactWriter::path_string(&module_layout.generated_resource_table_header()),
+        ],
+        "applicationResource": IntermediateArtifactWriter::path_string(&project_layout.app_scope_resources()),
+        "moduleResources": module_res_dirs.iter().map(|d| {
+            serde_json::Value::String(IntermediateArtifactWriter::path_string(&canonical_or_owned(d)))
+        }).collect::<Vec<_>>(),
+        "dependencies": dependencies,
+        "iconCheck": true,
+        "compression": IntermediateArtifactWriter::path_string(&resource_layout.opt_compression_json()),
+        "ids": IntermediateArtifactWriter::path_string(&resource_layout.ids_map()),
+        "definedIds": IntermediateArtifactWriter::path_string(&resource_layout.id_defined_json()),
+    });
+    if let Some(defined_sys_ids) = self.restool_layout.defined_sys_ids() {
+      res_config["definedSysIds"] =
+        serde_json::Value::String(IntermediateArtifactWriter::path_string(&defined_sys_ids));
+    }
+    self.write_json_minified_newline(&resource_layout.res_config_json(), &res_config)?;
 
     Ok(())
   }
@@ -514,24 +522,6 @@ impl IntermediateArtifactWriter {
     let mut content = serde_json::to_string(value)?;
     content.push('\n');
     self.write_bytes(path, content.as_bytes())
-  }
-
-  fn resource_toolchains_dir(&self, restool_path: &Path) -> PathBuf {
-    let Some(toolchains_dir) = restool_path.parent() else {
-      return PathBuf::new();
-    };
-    let Some(component_dir) = toolchains_dir.parent() else {
-      return toolchains_dir.to_path_buf();
-    };
-    if component_dir.file_name().and_then(|name| name.to_str()) == Some("openharmony") {
-      if let Some(sdk_default_dir) = component_dir.parent() {
-        let hms_toolchains = sdk_default_dir.join("hms").join("toolchains");
-        if hms_toolchains.exists() {
-          return hms_toolchains;
-        }
-      }
-    }
-    toolchains_dir.to_path_buf()
   }
 
   fn path_string(path: &Path) -> String {

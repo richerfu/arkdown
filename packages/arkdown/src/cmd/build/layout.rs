@@ -307,22 +307,73 @@ impl<'a> ProjectBuildLayout<'a> {
 }
 
 pub(super) struct RestoolLayout {
-  toolchains_dir: PathBuf,
+  image_transcoder_library: Option<PathBuf>,
+  defined_sys_ids: Option<PathBuf>,
 }
 
 impl RestoolLayout {
-  pub(super) fn new(toolchains_dir: PathBuf) -> Self {
-    Self { toolchains_dir }
+  /// Resolve the resource toolchain layout once for the selected SDK.
+  ///
+  /// This mirrors hvigor's SDK split: `OhosSdkInfo` exposes no image
+  /// transcoder extension, while `HosSdkInfo` resolves it from the sibling
+  /// HMS toolchains component.
+  pub(super) fn from_restool_path(restool_path: &Path) -> Self {
+    let toolchains_dir = restool_path
+      .parent()
+      .map(Path::to_path_buf)
+      .unwrap_or_default();
+    let hms_toolchains_dir = toolchains_dir
+      .parent()
+      .filter(|component_dir| {
+        component_dir.file_name().and_then(|name| name.to_str()) == Some("openharmony")
+      })
+      .and_then(Path::parent)
+      .map(|sdk_default_dir| sdk_default_dir.join("hms").join("toolchains"))
+      .filter(|path| path.is_dir());
+
+    if let Some(hms_toolchains_dir) = hms_toolchains_dir {
+      let image_transcoder_library = Some(Self::image_transcoder_library_in(&hms_toolchains_dir));
+      let defined_sys_ids = Self::defined_sys_ids_in(&hms_toolchains_dir);
+      return Self {
+        image_transcoder_library,
+        defined_sys_ids,
+      };
+    }
+
+    let image_transcoder_library = if toolchains_dir.join("oh-uni-package.json").is_file() {
+      None
+    } else {
+      Some(Self::image_transcoder_library_in(&toolchains_dir))
+    };
+    Self {
+      defined_sys_ids: image_transcoder_library
+        .as_ref()
+        .and_then(|_| Self::defined_sys_ids_in(&toolchains_dir)),
+      image_transcoder_library,
+    }
   }
 
-  pub(super) fn image_transcoder_library(&self) -> PathBuf {
-    self
-      .toolchains_dir
-      .join("lib")
-      .join("libimage_transcoder_shared.dylib")
+  pub(super) fn image_transcoder_library(&self) -> Option<&Path> {
+    self.image_transcoder_library.as_deref()
   }
 
-  pub(super) fn id_defined_json(&self) -> PathBuf {
-    self.toolchains_dir.join("id_defined.json")
+  fn image_transcoder_library_in(toolchains_dir: &Path) -> PathBuf {
+    let file_name = if cfg!(target_os = "windows") {
+      "libimage_transcoder_shared.dll"
+    } else if cfg!(target_os = "linux") {
+      "libimage_transcoder_shared.so"
+    } else {
+      "libimage_transcoder_shared.dylib"
+    };
+    toolchains_dir.join("lib").join(file_name)
+  }
+
+  fn defined_sys_ids_in(toolchains_dir: &Path) -> Option<PathBuf> {
+    let path = toolchains_dir.join("id_defined.json");
+    path.is_file().then_some(path)
+  }
+
+  pub(super) fn defined_sys_ids(&self) -> Option<PathBuf> {
+    self.defined_sys_ids.clone()
   }
 }
