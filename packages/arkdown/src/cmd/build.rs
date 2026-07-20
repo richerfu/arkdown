@@ -10,6 +10,8 @@ mod generate_har_declarations;
 mod intermediates;
 mod layout;
 mod module_plan;
+#[cfg(test)]
+mod tests;
 mod watch_stage;
 
 pub use args::{BuildArgs, BuildCommand};

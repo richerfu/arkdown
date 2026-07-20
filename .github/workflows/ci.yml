@@ -21,8 +21,14 @@ permissions:
   contents: read
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
+  OHOS_SDK_VERSION: "6.0"
   RUST_BACKTRACE: 1
+  RUST_TOOLCHAIN: "1.95.0"
+  LINUX_BUILD_DEPENDENCIES: >-
+    build-essential ca-certificates clang cmake libssl-dev ninja-build perl
+    pkg-config python3
 
 jobs:
   rust:
@@ -39,10 +45,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes $LINUX_BUILD_DEPENDENCIES
+
+      - name: Setup OpenHarmony SDK
+        id: setup-ohos-sdk
+        uses: openharmony-rs/setup-ohos-sdk@v0.2
+        with:
+          version: ${{ env.OHOS_SDK_VERSION }}
+          components: all
+
+      - name: Configure OpenHarmony SDK environment
+        shell: bash
+        run: |
+          sdk_home="${{ steps.setup-ohos-sdk.outputs.ohos-base-sdk-home }}"
+          test -n "$sdk_home"
+          test -d "$sdk_home/ets/build-tools/ets-loader"
+          test -x "$sdk_home/toolchains/restool"
+          case "${{ runner.os }}" in
+            Linux) platform_dir="build-linux" ;;
+            macOS) platform_dir="build-mac" ;;
+            *) echo "unsupported SDK host: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          es2abc="$sdk_home/ets/build-tools/ets-loader/bin/ark/$platform_dir/bin/es2abc"
+          if [[ ! -x "$es2abc" ]]; then
+            es2abc="$sdk_home/ets/build-tools/ets-loader/bin/ark/build/bin/es2abc"
+          fi
+          test -x "$es2abc"
+          echo "OHOS_BASE_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
+          echo "OHOS_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - name: Verify Rust environment
+        run: |
+          rustc --version --verbose
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -51,26 +98,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Check workspace
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
 
       - name: Test workspace libraries
-        run: cargo test --workspace --lib
+        run: cargo test --locked --workspace --lib
 
       - name: Test workspace integration tests
-        run: cargo test --workspace --test '*'
+        run: cargo test --locked --workspace --test '*'
         env:
           ARKDOWN_PARITY_RUN: ""
 
       - name: Build arkdown CLI
-        run: cargo build -p arkdown-napi --bin arkdown
+        run: cargo build --locked -p arkdown-napi --bin arkdown
 
   hvigor-parity:
     name: Hvigor Parity
@@ -86,6 +133,16 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - name: Verify Rust environment
+        run: |
+          rustc --version --verbose
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -94,9 +151,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-parity-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-parity-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-parity-cargo-
+            ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-parity-cargo-
 
       - name: Verify SDK environment
         run: |
@@ -109,10 +166,10 @@ jobs:
           OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
 
       - name: Build arkdown CLI
-        run: cargo build --release -p arkdown-napi --bin arkdown
+        run: cargo build --locked --release -p arkdown-napi --bin arkdown
 
       - name: Run hvigor parity tests
-        run: cargo test -p arkdown-napi --test hvigor_parity -- --nocapture
+        run: cargo test --locked -p arkdown-napi --test hvigor_parity -- --nocapture
         env:
           ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
           ARKDOWN_PARITY_ARKDOWN_BIN: target/release/arkdown
