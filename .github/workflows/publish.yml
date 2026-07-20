@@ -247,11 +247,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Select Node.js container
-        id: container
-        run: |
-          echo "platform=linux/amd64" >> "$GITHUB_OUTPUT"
-          echo "image=node:${{ matrix.node }}-slim" >> "$GITHUB_OUTPUT"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+          cache-dependency-path: packages/arkdown/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Download binding
         uses: actions/download-artifact@v7
@@ -260,13 +269,8 @@ jobs:
           path: packages/arkdown
 
       - name: Test JavaScript and native binding
-        run: |
-          docker run --rm \
-            --platform "${{ steps.container.outputs.platform }}" \
-            --volume "${{ github.workspace }}:/workspace" \
-            --workdir /workspace/packages/arkdown \
-            "${{ steps.container.outputs.image }}" \
-            sh -c "node --test __test__/*.test.cjs && node -e \"const arkdown = require('./index.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node bin/arkdown.js --help"
+        run: pnpm test && pnpm smoke
+        shell: bash
 
   publish:
     name: Publish npm packages
