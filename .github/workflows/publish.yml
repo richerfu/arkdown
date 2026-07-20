@@ -1,0 +1,277 @@
+name: Publish arkdown npm package
+
+on:
+  push:
+    branches:
+      - main
+    tags-ignore:
+      - "**"
+    paths:
+      - ".github/workflows/publish.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "packages/arkdown/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_NAME: arkdown
+  CARGO_INCREMENTAL: "1"
+  DEBUG: napi:*
+  MACOSX_DEPLOYMENT_TARGET: "10.13"
+  PNPM_VERSION: "10.12.1"
+
+defaults:
+  run:
+    working-directory: packages/arkdown
+
+jobs:
+  build:
+    name: Build ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: pnpm build --target x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: pnpm build --target x86_64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: pnpm build --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: pnpm build --target x86_64-unknown-linux-musl -x
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: pnpm build --target aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: pnpm build --target aarch64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build: pnpm build --target aarch64-unknown-linux-musl -x
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: packages/arkdown/pnpm-lock.yaml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.napi-rs
+            target/
+          key: ${{ runner.os }}-${{ matrix.settings.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.settings.target }}-cargo-
+
+      - name: Setup Zig
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install cargo-zigbuild
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        uses: taiki-e/install-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build binding
+        run: ${{ matrix.settings.build }}
+        shell: bash
+
+      - name: Upload binding
+        uses: actions/upload-artifact@v6
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: packages/arkdown/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+
+  test-macos-windows:
+    name: Test ${{ matrix.settings.target }}
+    needs: build
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            architecture: x64
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            architecture: x64
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            architecture: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          architecture: ${{ matrix.settings.architecture }}
+          cache: pnpm
+          cache-dependency-path: packages/arkdown/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download binding
+        uses: actions/download-artifact@v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: packages/arkdown
+
+      - name: Test JavaScript and native binding
+        run: pnpm test && pnpm smoke
+        shell: bash
+
+  test-linux:
+    name: Test ${{ matrix.target }}
+    needs: build
+    runs-on: ${{ contains(matrix.target, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Select Node.js container
+        id: container
+        run: |
+          if [[ "${{ matrix.target }}" == aarch64-* ]]; then
+            echo "platform=linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "platform=linux/amd64" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "${{ matrix.target }}" == *-musl ]]; then
+            echo "image=node:22-alpine" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=node:22-slim" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download binding
+        uses: actions/download-artifact@v7
+        with:
+          name: bindings-${{ matrix.target }}
+          path: packages/arkdown
+
+      - name: Test JavaScript and native binding
+        run: |
+          docker run --rm \
+            --platform "${{ steps.container.outputs.platform }}" \
+            --volume "${{ github.workspace }}:/workspace" \
+            --workdir /workspace/packages/arkdown \
+            "${{ steps.container.outputs.image }}" \
+            sh -c "node --test __test__/*.test.cjs && node -e \"const arkdown = require('./index.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node bin/arkdown.js --help"
+
+  publish:
+    name: Publish npm packages
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.head_commit.message, 'chore(release): publish')
+    needs:
+      - test-macos-windows
+      - test-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          cache: pnpm
+          cache-dependency-path: packages/arkdown/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download all bindings
+        uses: actions/download-artifact@v7
+        with:
+          path: packages/arkdown/artifacts
+
+      - name: Assemble platform packages
+        run: |
+          pnpm exec napi create-npm-dirs
+          pnpm artifacts
+
+      - name: Inspect packages
+        run: ls -R npm
+
+      - name: Publish to npm
+        run: |
+          NPM_TAG=$(node -p "const version = require('./package.json').version; const match = version.match(/^[^-]+-([0-9A-Za-z]+)(?:[.-].*)?$/); match ? match[1] : 'latest'")
+          echo "Publishing with npm dist-tag: ${NPM_TAG}"
+          export npm_config_tag="${NPM_TAG}"
+          export NPM_CONFIG_PROVENANCE=true
+          pnpm exec napi pre-publish --no-gh-release -t npm
+          npm publish --ignore-scripts --provenance --access public --tag "${NPM_TAG}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
