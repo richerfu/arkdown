@@ -23,6 +23,7 @@ permissions:
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
+  OHOS_SDK_VERSION: "6.0"
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: "1.95.0"
   LINUX_BUILD_DEPENDENCIES: >-
@@ -49,6 +50,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes $LINUX_BUILD_DEPENDENCIES
+
+      - name: Setup OpenHarmony SDK
+        id: setup-ohos-sdk
+        uses: openharmony-rs/setup-ohos-sdk@v0.2
+        with:
+          version: ${{ env.OHOS_SDK_VERSION }}
+          components: "ets;js;native;previewer;toolchains"
+
+      - name: Configure OpenHarmony SDK environment
+        shell: bash
+        run: |
+          sdk_home="${{ steps.setup-ohos-sdk.outputs.ohos-base-sdk-home }}"
+          test -n "$sdk_home"
+          test -d "$sdk_home/ets/build-tools/ets-loader"
+          test -x "$sdk_home/toolchains/restool"
+          echo "OHOS_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

@@ -2101,7 +2101,7 @@ impl BuildCoordinator {
     let progress = Progress::new();
 
     let custom_cfg = ArkdownCustomConfigLoader::new(&project_root).load();
-    let intermediate_writer = IntermediateArtifactWriter::new();
+    let intermediate_writer = IntermediateArtifactWriter::new(&config.sdk_config.restool_path);
 
     let build_modules =
       ModuleSelectionPlanner::build_modules_for_target(config.as_ref(), args.module.as_deref());
