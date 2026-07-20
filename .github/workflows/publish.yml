@@ -1,26 +1,19 @@
 name: Publish arkdown npm package
 
 on:
-  push:
-    branches:
-      - main
-    tags-ignore:
-      - "**"
-    paths:
-      - ".github/workflows/publish.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "README.md"
-      - "crates/**"
-      - "packages/arkdown/**"
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      publish:
+        description: "Publish assembled platform packages to npm"
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      NPM_TOKEN:
+        required: false
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
 
 env:
   APP_NAME: arkdown
@@ -116,31 +109,24 @@ jobs:
       fail-fast: false
       matrix:
         settings:
-          - host: macos-latest
-            target: x86_64-apple-darwin
-            build: pnpm build --target x86_64-apple-darwin
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             build: pnpm build --target x86_64-pc-windows-msvc
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            build: pnpm build --target x86_64-unknown-linux-gnu --use-napi-cross
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            build: pnpm build --target x86_64-unknown-linux-musl -x
           - host: macos-latest
             target: aarch64-apple-darwin
             build: pnpm build --target aarch64-apple-darwin
           - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            build: pnpm build --target aarch64-unknown-linux-gnu --use-napi-cross
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            build: pnpm build --target aarch64-unknown-linux-musl -x
+            target: x86_64-unknown-linux-gnu
+            build: pnpm build --target x86_64-unknown-linux-gnu --use-napi-cross
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Enable long paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -164,7 +150,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy, rustfmt
           targets: ${{ matrix.settings.target }}
 
       - name: Cache Cargo
@@ -180,41 +165,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.settings.target }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-
 
-      - name: Setup Zig
-        if: ${{ contains(matrix.settings.target, 'musl') }}
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Install cargo-zigbuild
-        if: ${{ contains(matrix.settings.target, 'musl') }}
-        uses: taiki-e/install-action@v2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          tool: cargo-zigbuild
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Verify build environment
-        run: |
-          rustc --version --verbose
-          cargo --version
-          cargo fmt --version
-          cargo clippy --version
-          node --version
-          pnpm --version
-          pnpm exec napi --version
-          cmake --version
-        shell: bash
-
-      - name: Verify Zig environment
-        if: ${{ contains(matrix.settings.target, 'musl') }}
-        run: |
-          zig version
-          cargo zigbuild --version
-        shell: bash
 
       - name: Build binding
         run: ${{ matrix.settings.build }}
@@ -228,7 +180,7 @@ jobs:
           if-no-files-found: error
 
   test-macos-windows:
-    name: Test ${{ matrix.settings.target }}
+    name: Test ${{ matrix.settings.target }} - node@${{ matrix.node }}
     needs: build
     runs-on: ${{ matrix.settings.host }}
     strategy:
@@ -239,15 +191,20 @@ jobs:
             target: x86_64-pc-windows-msvc
             architecture: x64
           - host: macos-latest
-            target: x86_64-apple-darwin
-            architecture: x64
-          - host: macos-latest
             target: aarch64-apple-darwin
             architecture: arm64
+        node:
+          - "20"
+          - "22"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Enable long paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -257,7 +214,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           architecture: ${{ matrix.settings.architecture }}
           cache: pnpm
           cache-dependency-path: packages/arkdown/pnpm-lock.yaml
@@ -276,17 +233,15 @@ jobs:
         shell: bash
 
   test-linux:
-    name: Test ${{ matrix.target }}
+    name: Test x86_64-unknown-linux-gnu - node@${{ matrix.node }}
     needs: build
-    runs-on: ${{ contains(matrix.target, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
+        node:
+          - "20"
+          - "22"
 
     steps:
       - name: Checkout
@@ -295,22 +250,13 @@ jobs:
       - name: Select Node.js container
         id: container
         run: |
-          if [[ "${{ matrix.target }}" == aarch64-* ]]; then
-            echo "platform=linux/arm64" >> "$GITHUB_OUTPUT"
-          else
-            echo "platform=linux/amd64" >> "$GITHUB_OUTPUT"
-          fi
-
-          if [[ "${{ matrix.target }}" == *-musl ]]; then
-            echo "image=node:22-alpine" >> "$GITHUB_OUTPUT"
-          else
-            echo "image=node:22-slim" >> "$GITHUB_OUTPUT"
-          fi
+          echo "platform=linux/amd64" >> "$GITHUB_OUTPUT"
+          echo "image=node:${{ matrix.node }}-slim" >> "$GITHUB_OUTPUT"
 
       - name: Download binding
         uses: actions/download-artifact@v7
         with:
-          name: bindings-${{ matrix.target }}
+          name: bindings-x86_64-unknown-linux-gnu
           path: packages/arkdown
 
       - name: Test JavaScript and native binding
@@ -324,9 +270,6 @@ jobs:
 
   publish:
     name: Publish npm packages
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.event.head_commit.message, 'chore(release): publish')
     needs:
       - test-macos-windows
       - test-linux
@@ -383,6 +326,7 @@ jobs:
           cmp ../../README.md README.md
 
       - name: Publish to npm
+        if: inputs.publish
         run: |
           NPM_TAG=$(node -p "const version = require('./package.json').version; const match = version.match(/^[^-]+-([0-9A-Za-z]+)(?:[.-].*)?$/); match ? match[1] : 'latest'")
           echo "Publishing with npm dist-tag: ${NPM_TAG}"
