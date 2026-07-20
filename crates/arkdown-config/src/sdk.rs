@@ -81,6 +81,44 @@ fn platform_dir() -> &'static str {
     }
 }
 
+struct SdkToolResolver<'a> {
+    ets_loader_path: &'a Path,
+}
+
+impl<'a> SdkToolResolver<'a> {
+    fn new(ets_loader_path: &'a Path) -> Self {
+        Self { ets_loader_path }
+    }
+
+    fn es2abc_path(&self) -> PathBuf {
+        self.existing_es2abc_path()
+            .unwrap_or_else(|| self.platform_es2abc_path())
+    }
+
+    fn existing_es2abc_path(&self) -> Option<PathBuf> {
+        self.es2abc_candidates()
+            .into_iter()
+            .find(|path| path.is_file())
+    }
+
+    fn es2abc_candidates(&self) -> [PathBuf; 2] {
+        let ark_dir = self.ets_loader_path.join("bin").join("ark");
+        [
+            self.platform_es2abc_path(),
+            ark_dir.join("build").join("bin").join("es2abc"),
+        ]
+    }
+
+    fn platform_es2abc_path(&self) -> PathBuf {
+        self.ets_loader_path
+            .join("bin")
+            .join("ark")
+            .join(platform_dir())
+            .join("bin")
+            .join("es2abc")
+    }
+}
+
 /// Attempt to discover the OHOS SDK root directory.
 ///
 /// Iterates the candidate list and returns the first directory that exists.
@@ -109,26 +147,15 @@ pub fn sdk_config_from_root(sdk_root: &Path, target_api_version: Option<u32>) ->
 
 fn sdk_config_from_root_with_selection(sdk_root: &Path, selection: &SdkSelection) -> SdkConfig {
     let ohos_base = openharmony_base_from_root(sdk_root);
-    let platform = platform_dir();
     let sdk_metadata = discover_sdk_metadata(&ohos_base);
     let compile_api_version = selection
         .target_api_version
         .or(sdk_metadata.api_version)
         .unwrap_or(12);
 
-    let es2abc_path = ohos_base
-        .join("ets")
-        .join("build-tools")
-        .join("ets-loader")
-        .join("bin")
-        .join("ark")
-        .join(format!("{platform}"))
-        .join("bin")
-        .join("es2abc");
-
-    let restool_path = ohos_base.join("toolchains").join("restool");
-
     let ets_loader_path = ohos_base.join("ets").join("build-tools").join("ets-loader");
+    let es2abc_path = SdkToolResolver::new(&ets_loader_path).es2abc_path();
+    let restool_path = ohos_base.join("toolchains").join("restool");
 
     let has_rollup_plugin = compile_api_version >= 9;
 
@@ -292,9 +319,7 @@ fn discover_ark_vm_version_from_es2abc(
     compile_api_version: u32,
     stage: Option<&str>,
 ) -> Option<String> {
-    let es2abc_path = es2abc_candidates(ets_loader_path)
-        .into_iter()
-        .find(|path| path.exists())?;
+    let es2abc_path = SdkToolResolver::new(ets_loader_path).existing_es2abc_path()?;
     let mut command = Command::new(es2abc_path);
     command
         .arg("--target-bc-version")
@@ -304,23 +329,6 @@ fn discover_ark_vm_version_from_es2abc(
         command.arg("--target-api-sub-version").arg(stage);
     }
     run_ark_version_command(command)
-}
-
-fn es2abc_candidates(ets_loader_path: &Path) -> Vec<PathBuf> {
-    let ark_dir = ets_loader_path.join("bin").join("ark");
-    let mut candidates = vec![
-        ark_dir.join(platform_dir()).join("bin").join("es2abc"),
-        ark_dir.join("build").join("bin").join("es2abc"),
-    ];
-
-    for platform in ["build-mac", "build-linux", "build-win"] {
-        let candidate = ark_dir.join(platform).join("bin").join("es2abc");
-        if !candidates.iter().any(|path| path == &candidate) {
-            candidates.push(candidate);
-        }
-    }
-
-    candidates
 }
 
 fn non_empty_stage(stage: Option<&str>) -> Option<&str> {
@@ -480,6 +488,38 @@ mod tests {
         assert!(cfg.restool_path.to_string_lossy().contains("restool"));
         assert!(cfg.ets_loader_path.to_string_lossy().contains("ets-loader"));
         assert!(cfg.pac_schema_path().is_none());
+    }
+
+    #[test]
+    fn test_sdk_config_from_root_accepts_linux_sdk_generic_ark_build_layout() {
+        let root = temp_root("linux-sdk-es2abc");
+        let ets_loader = root.join("ets").join("build-tools").join("ets-loader");
+        let es2abc = ets_loader
+            .join("bin")
+            .join("ark")
+            .join("build")
+            .join("bin")
+            .join("es2abc");
+        fs::create_dir_all(es2abc.parent().expect("es2abc parent"))
+            .expect("create generic ark build dir");
+        fs::write(&es2abc, []).expect("write fake es2abc");
+
+        // setup-ohos-sdk's Linux SDK can expose host tools under ark/build
+        // instead of the platform-qualified ark/build-linux directory.
+        let cfg = sdk_config_from_root(&root, Some(12));
+
+        assert_eq!(cfg.es2abc_path, es2abc);
+
+        let platform_es2abc = SdkToolResolver::new(&ets_loader).platform_es2abc_path();
+        fs::create_dir_all(platform_es2abc.parent().expect("platform es2abc parent"))
+            .expect("create platform ark build dir");
+        fs::write(&platform_es2abc, []).expect("write platform es2abc");
+
+        let cfg = sdk_config_from_root(&root, Some(12));
+
+        assert_eq!(cfg.es2abc_path, platform_es2abc);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

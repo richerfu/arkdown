@@ -56,7 +56,7 @@ jobs:
         uses: openharmony-rs/setup-ohos-sdk@v0.2
         with:
           version: ${{ env.OHOS_SDK_VERSION }}
-          components: "ets;js;native;previewer;toolchains"
+          components: all
 
       - name: Configure OpenHarmony SDK environment
         shell: bash
@@ -65,6 +65,17 @@ jobs:
           test -n "$sdk_home"
           test -d "$sdk_home/ets/build-tools/ets-loader"
           test -x "$sdk_home/toolchains/restool"
+          case "${{ runner.os }}" in
+            Linux) platform_dir="build-linux" ;;
+            macOS) platform_dir="build-mac" ;;
+            *) echo "unsupported SDK host: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          es2abc="$sdk_home/ets/build-tools/ets-loader/bin/ark/$platform_dir/bin/es2abc"
+          if [[ ! -x "$es2abc" ]]; then
+            es2abc="$sdk_home/ets/build-tools/ets-loader/bin/ark/build/bin/es2abc"
+          fi
+          test -x "$es2abc"
+          echo "OHOS_BASE_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
           echo "OHOS_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
 
       - name: Install Rust
