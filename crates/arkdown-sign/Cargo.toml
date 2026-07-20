@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 arkdown-core   = { workspace = true }
 thiserror      = { workspace = true }
-sha2           = { workspace = true }
 p256           = { workspace = true }
 rsa            = { workspace = true }
 signature      = { workspace = true }
@@ -32,6 +31,12 @@ tracing        = { workspace = true }
 bytes          = { workspace = true }
 serde_json     = { workspace = true }
 flate2         = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
