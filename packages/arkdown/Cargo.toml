@@ -1,10 +1,10 @@
 
 [package]
 name = "arkdown-napi"
-version = "0.1.0"
+version = "0.0.1-beta.0"
 edition = "2021"
 description = "Node.js bindings for arkdown — OHOS build tool with Rolldown-aligned plugin support"
-license = "MIT"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]

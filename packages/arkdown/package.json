@@ -1,13 +1,18 @@
 {
   "name": "arkdown",
-  "version": "0.1.0",
+  "version": "0.0.1-beta.0",
   "description": "Node.js bindings for arkdown — OHOS build tool with Rolldown-aligned plugin support",
   "main": "index.js",
   "types": "index.d.ts",
   "bin": {
     "arkdown": "bin/arkdown.js"
   },
-  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/richerfu/arkdown.git",
+    "directory": "packages/arkdown"
+  },
+  "license": "UNLICENSED",
   "keywords": [
     "ohos",
     "harmonyos",
@@ -41,7 +46,8 @@
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
     "artifacts": "napi artifacts",
