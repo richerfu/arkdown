@@ -49,7 +49,7 @@
     "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test __test__/*.test.cjs",
+    "test": "node --test",
     "smoke": "node -e \"const arkdown = require('./index.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node bin/arkdown.js --help",
     "format": "prettier . -w",
     "format:rs": "cargo fmt",
@@ -57,10 +57,12 @@
     "preversion": "napi build --platform && git add .",
     "version": "napi version"
   },
+  "dependencies": {
+    "typescript": "^5.8.3"
+  },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.1",
-    "prettier": "^3.6.2",
-    "typescript": "^5.8.3"
+    "prettier": "^3.6.2"
   },
   "prettier": {
     "printWidth": 120,
