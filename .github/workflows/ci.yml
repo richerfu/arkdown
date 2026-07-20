@@ -16,9 +16,18 @@ on:
         required: false
         default: false
         type: boolean
+      publish_package:
+        description: "Publish packages/arkdown after all CI and platform checks pass"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -186,3 +195,28 @@ jobs:
           path: target/parity-reports/
           if-no-files-found: ignore
           retention-days: 30
+
+  package:
+    name: Package arkdown
+    needs:
+      - rust
+      - hvigor-parity
+    if: >-
+      ${{
+        always() &&
+        needs.rust.result == 'success' &&
+        (needs.hvigor-parity.result == 'success' || needs.hvigor-parity.result == 'skipped')
+      }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      publish: >-
+        ${{
+          (github.event_name == 'push' &&
+            github.ref == 'refs/heads/main' &&
+            startsWith(github.event.head_commit.message, 'chore(release): publish')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish_package)
+        }}
+    secrets: inherit
