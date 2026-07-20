@@ -19,7 +19,10 @@ export interface ArkdownPlugin {
   load?: (id: string) => string | null | undefined | Promise<string | null | undefined>
   transform?: (code: string, id: string) => string | null | undefined | Promise<string | null | undefined>
   moduleParsed?: (id: string) => void | Promise<void>
-  resolveDynamicImport?: (id: string, importer?: string | null) => string | null | undefined | Promise<string | null | undefined>
+  resolveDynamicImport?: (
+    id: string,
+    importer?: string | null,
+  ) => string | null | undefined | Promise<string | null | undefined>
   beforeBuildEnd?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   buildEnd?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   afterBuildEnd?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
@@ -39,7 +42,7 @@ export interface ArkdownPlugin {
  *
  * @example
  * ```typescript
- * import { build } from 'arkdown'
+ * import { build } from '@ohos-rs/arkdown'
  *
  * const result = await build({
  *   project: './my-app',
@@ -62,7 +65,10 @@ export interface ArkdownPlugin {
  * Plugins are wrapped synchronously before spawning the async build task,
  * so non-Send JS values (Env, Array) don't cross the tokio task boundary.
  */
-export declare function build(config: BuildConfig, plugins?: Array<ArkdownPlugin> | undefined | null): Promise<BuildResult>
+export declare function build(
+  config: BuildConfig,
+  plugins?: Array<ArkdownPlugin> | undefined | null,
+): Promise<BuildResult>
 
 export interface BuildConfig {
   project?: string
