@@ -81,7 +81,7 @@ configurations may differ.
 ### Install
 
 ```sh
-npm install arkdown
+npm install @ohos-rs/arkdown
 ```
 
 ### CLI
@@ -99,7 +99,7 @@ the complete option list.
 ### Node.js API
 
 ```js
-const { build } = require("arkdown");
+const { build } = require("@ohos-rs/arkdown");
 
 const result = await build({
   project: "./my-app",
