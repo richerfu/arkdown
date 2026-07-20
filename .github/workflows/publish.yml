@@ -10,6 +10,7 @@ on:
       - ".github/workflows/publish.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "README.md"
       - "crates/**"
       - "packages/arkdown/**"
   workflow_dispatch:
@@ -373,6 +374,13 @@ jobs:
 
       - name: Inspect packages
         run: ls -R npm
+
+      - name: Materialize package README
+        run: |
+          test -L README.md
+          unlink README.md
+          cp ../../README.md README.md
+          cmp ../../README.md README.md
 
       - name: Publish to npm
         run: |
