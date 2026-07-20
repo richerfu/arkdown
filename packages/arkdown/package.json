@@ -1,5 +1,5 @@
 {
-  "name": "arkdown",
+  "name": "@ohos-rs/arkdown",
   "version": "0.0.1-beta.0",
   "description": "Node.js bindings for arkdown — OHOS build tool with Rolldown-aligned plugin support",
   "main": "index.js",

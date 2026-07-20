@@ -909,6 +909,7 @@ pub struct BuildConfig {
   pub disable_abc_cache: Option<bool>,
   pub cache_file: Option<String>,
   pub checker: Option<String>,
+  #[napi(ts_type = "'oxc' | 'yuku'")]
   pub module_analyzer: Option<String>,
   pub cache: Option<bool>,
   #[napi(ts_type = "string | string[]")]
@@ -935,7 +936,7 @@ pub struct BuildResult {
 ///
 /// @example
 /// ```typescript
-/// import { build } from 'arkdown'
+/// import { build } from '@ohos-rs/arkdown'
 ///
 /// const result = await build({
 ///   project: './my-app',
