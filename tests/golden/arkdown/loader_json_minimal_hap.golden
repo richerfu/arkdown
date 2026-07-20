@@ -1,10 +1,10 @@
 {
   "modulePathMap": {
-    "entry": "/Users/ranger/Desktop/project/ohos-rs/arkdown/tests/fixtures/minimal-hap/entry"
+    "entry": "<PROJECT_ROOT>/entry"
   },
   "compileMode": "esmodule",
-  "projectRootPath": "/Users/ranger/Desktop/project/ohos-rs/arkdown/tests/fixtures/minimal-hap",
-  "nodeModulesPath": "/Users/ranger/Desktop/project/ohos-rs/arkdown/tests/fixtures/minimal-hap/entry/build/default/intermediates/loader_out/default/node_modules",
+  "projectRootPath": "<PROJECT_ROOT>",
+  "nodeModulesPath": "<PROJECT_ROOT>/entry/build/default/intermediates/loader_out/default/node_modules",
   "byteCodeHarInfo": {},
   "declarationEntry": [],
   "moduleName": "entry",
@@ -17,6 +17,6 @@
   "routerMap": [],
   "hspResourcesMap": {},
   "updateVersionInfo": {},
-  "anBuildOutPut": "/Users/ranger/Desktop/project/ohos-rs/arkdown/tests/fixtures/minimal-hap/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
+  "anBuildOutPut": "<PROJECT_ROOT>/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
   "anBuildMode": "type"
 }
