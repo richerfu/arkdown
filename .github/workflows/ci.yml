@@ -21,8 +21,13 @@ permissions:
   contents: read
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUST_TOOLCHAIN: "1.95.0"
+  LINUX_BUILD_DEPENDENCIES: >-
+    build-essential ca-certificates clang cmake libssl-dev ninja-build perl
+    pkg-config python3
 
 jobs:
   rust:
@@ -39,10 +44,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes $LINUX_BUILD_DEPENDENCIES
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - name: Verify Rust environment
+        run: |
+          rustc --version --verbose
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -51,26 +70,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Check workspace
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
 
       - name: Test workspace libraries
-        run: cargo test --workspace --lib
+        run: cargo test --locked --workspace --lib
 
       - name: Test workspace integration tests
-        run: cargo test --workspace --test '*'
+        run: cargo test --locked --workspace --test '*'
         env:
           ARKDOWN_PARITY_RUN: ""
 
       - name: Build arkdown CLI
-        run: cargo build -p arkdown-napi --bin arkdown
+        run: cargo build --locked -p arkdown-napi --bin arkdown
 
   hvigor-parity:
     name: Hvigor Parity
@@ -86,6 +105,16 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - name: Verify Rust environment
+        run: |
+          rustc --version --verbose
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -94,9 +123,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-parity-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-parity-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-parity-cargo-
+            ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-parity-cargo-
 
       - name: Verify SDK environment
         run: |
@@ -109,10 +138,10 @@ jobs:
           OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
 
       - name: Build arkdown CLI
-        run: cargo build --release -p arkdown-napi --bin arkdown
+        run: cargo build --locked --release -p arkdown-napi --bin arkdown
 
       - name: Run hvigor parity tests
-        run: cargo test -p arkdown-napi --test hvigor_parity -- --nocapture
+        run: cargo test --locked -p arkdown-napi --test hvigor_parity -- --nocapture
         env:
           ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
           ARKDOWN_PARITY_ARKDOWN_BIN: target/release/arkdown
