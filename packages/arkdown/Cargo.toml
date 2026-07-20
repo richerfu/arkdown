@@ -89,7 +89,12 @@ napi-build = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-sha2 = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 walkdir = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
+sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dev-dependencies]
+sha2 = { workspace = true }
