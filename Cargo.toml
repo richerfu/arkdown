@@ -43,17 +43,17 @@ arkdown-sign = { path = "crates/arkdown-sign" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
 
 # Parser — ohos-rs OXC fork with ArkTS/ArkUI support.
-oxc = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd", features = ["full"] }
-oxc_allocator = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_ast = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_parser = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_semantic = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_span = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_ast_visit = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_syntax = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_transformer = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_codegen = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
-oxc_minifier = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "0875621c60e55a2e9db783d89b6c7badced26912" }
 oxc_resolver = "11.21.3"
 
 # Rolldown
