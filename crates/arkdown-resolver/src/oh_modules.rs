@@ -47,6 +47,9 @@ pub struct OhPackage {
     pub exports: Option<serde_json::Value>,
     /// ESM module entry (npm `module` field convention).
     pub module: Option<String>,
+    /// Legacy ESM entry consumed by hvigor's node-resolve main-field order.
+    #[serde(rename = "jsnext:main")]
+    pub jsnext_main: Option<String>,
     pub dependencies: FxHashMap<String, String>,
     pub dynamic_dependencies: FxHashMap<String, String>,
     pub metadata: OhPackageMetadata,
@@ -62,6 +65,7 @@ impl Default for OhPackage {
             types: None,
             exports: None,
             module: None,
+            jsnext_main: None,
             dependencies: FxHashMap::default(),
             dynamic_dependencies: FxHashMap::default(),
             metadata: OhPackageMetadata::default(),
@@ -116,6 +120,15 @@ impl OhPackage {
     /// Main entry point from the `main` field.
     pub fn main_field(&self) -> Option<&str> {
         self.main.as_deref()
+    }
+
+    /// Package entry selected by hvigor-arkts-compose's default
+    /// `mainFields`: `module`, `jsnext:main`, then `main`.
+    pub fn hvigor_main_field(&self) -> Option<&str> {
+        self.module
+            .as_deref()
+            .or(self.jsnext_main.as_deref())
+            .or(self.main.as_deref())
     }
 
     /// ESM entry from `exports["."].import` or `exports["."].default`.

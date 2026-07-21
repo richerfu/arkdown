@@ -2,10 +2,10 @@
 //!
 //! hvigor ESMODULE/CompileArkTS writes transformed TypeScript cache files and
 //! passes them to `es2abc` through `filesInfo.txt`/`modules.cache`. Production
-//! code keeps that TypeScript shape and only inlines imported const-enum reads
-//! that `es2abc` cannot resolve across transformed module files. The legacy
-//! TypeScript-to-JavaScript emitter below is test-only coverage for the old
-//! lowering boundary; it is not used by production bundling.
+//! code keeps that TypeScript shape except for files carrying TypeScript's
+//! `@ts-ignore`/`@ts-nocheck` pragmas. SDK `process_kit_import.js` records those
+//! files and `module_mode.js` emits JavaScript for them. The OXC emitter below
+//! implements that explicit production boundary.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
@@ -19,15 +19,12 @@ use oxc_ast::ast::{
 };
 use oxc_ast::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
-#[cfg(test)]
 use oxc_codegen::Codegen;
-#[cfg(test)]
 use oxc_codegen::CodegenOptions;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, SPAN};
 use oxc_syntax::{number::NumberBase, operator::UnaryOperator};
-#[cfg(test)]
 use oxc_transformer::{TransformOptions, Transformer};
 
 use crate::source::{TransformSourceFile, TransformSourceSnapshot};
@@ -51,25 +48,26 @@ enum ConstEnumImport {
     Namespace(FxHashMap<String, FxHashMap<String, EnumValue>>),
 }
 
-#[cfg(test)]
 pub(crate) struct TypeScriptJavascriptEmitter<'a> {
     source: &'a str,
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
+    #[cfg(test)]
     const_enum_exports: Option<&'a ConstEnumExportCache>,
 }
 
-#[cfg(test)]
 impl<'a> TypeScriptJavascriptEmitter<'a> {
     pub(crate) fn new(source: &'a str, id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
         Self {
             source,
             id,
             sources,
+            #[cfg(test)]
             const_enum_exports: None,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_const_enum_export_cache(mut self, cache: &'a ConstEnumExportCache) -> Self {
         self.const_enum_exports = Some(cache);
         self
@@ -83,10 +81,12 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             return None;
         }
 
-        let mut rewriter = ImportedConstEnumRewriter::new(self.id, self.sources);
-        if let Some(cache) = self.const_enum_exports {
-            rewriter = rewriter.with_const_enum_export_cache(cache);
-        }
+        let rewriter = ImportedConstEnumRewriter::new(self.id, self.sources);
+        #[cfg(test)]
+        let rewriter = match self.const_enum_exports {
+            Some(cache) => rewriter.with_const_enum_export_cache(cache),
+            None => rewriter,
+        };
         rewriter.rewrite_program(&allocator, &mut parsed.program);
 
         let scoping = {
@@ -122,6 +122,89 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
 
     fn source_type(&self) -> SourceType {
         SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true))
+    }
+}
+
+/// Parsed TypeScript pragma facts used by the CompileArkTS cache writer.
+///
+/// This deliberately reads OXC's comment AST instead of searching arbitrary
+/// source strings, so string literals and unrelated comments cannot change a
+/// module's output language.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypeScriptDirectiveFlags {
+    suppress_type_check: bool,
+    keep_typescript: bool,
+}
+
+impl TypeScriptDirectiveFlags {
+    pub fn from_source(source: &str, id: &str) -> Self {
+        let allocator = Allocator::default();
+        let source_type =
+            SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let parsed = Parser::new(&allocator, source, source_type).parse();
+        Self::from_program(&parsed.program)
+    }
+
+    pub fn should_emit_javascript(self) -> bool {
+        self.suppress_type_check && !self.keep_typescript
+    }
+
+    fn from_program(program: &oxc_ast::ast::Program<'_>) -> Self {
+        let mut flags = Self::default();
+        for comment in &program.comments {
+            let span = comment.content_span();
+            let Some(content) = program
+                .source_text
+                .get(span.start as usize..span.end as usize)
+            else {
+                continue;
+            };
+            let directive = TypeScriptCommentDirective::new(content, comment.is_line());
+            flags.suppress_type_check |= directive.suppresses_type_check();
+            flags.keep_typescript |= comment.is_line()
+                && program
+                    .source_text
+                    .get(..comment.span.start as usize)
+                    .is_some_and(|prefix| prefix.trim().is_empty())
+                && directive.is_keep_typescript();
+        }
+        flags
+    }
+}
+
+struct TypeScriptCommentDirective<'a> {
+    final_line: &'a str,
+    line_comment: bool,
+}
+
+impl<'a> TypeScriptCommentDirective<'a> {
+    fn new(content: &'a str, line_comment: bool) -> Self {
+        Self {
+            final_line: content.rsplit('\n').next().unwrap_or(content).trim_start(),
+            line_comment,
+        }
+    }
+
+    fn suppresses_type_check(&self) -> bool {
+        self.directive("@ts-ignore") || (self.line_comment && self.directive("@ts-nocheck"))
+    }
+
+    fn is_keep_typescript(&self) -> bool {
+        self.line_comment && self.final_line.trim() == "@keepTs"
+    }
+
+    fn directive(&self, name: &str) -> bool {
+        let line = self
+            .final_line
+            .trim_start_matches(|character: char| character == '*' || character.is_whitespace());
+        let Some(rest) = line.strip_prefix(name) else {
+            return false;
+        };
+        rest.is_empty()
+            || rest
+                .chars()
+                .next()
+                .is_some_and(|character| character == ':' || character.is_whitespace())
     }
 }
 
@@ -735,6 +818,27 @@ mod tests {
         let mut files = FxHashMap::default();
         files.insert(arkdown_path::lexical_normalize(path), Arc::from(source));
         TransformSourceSnapshot::new(files)
+    }
+
+    #[test]
+    fn typescript_directive_flags_use_comment_ast_not_string_matches() {
+        assert!(!TypeScriptDirectiveFlags::from_source(
+            "const marker = '// @ts-ignore';\n// ordinary comment",
+            "Index.ts",
+        )
+        .should_emit_javascript());
+        assert!(
+            TypeScriptDirectiveFlags::from_source(
+                "// @ts-ignore: runtime declaration is intentionally untyped\nconst value: string = runtime.value;",
+                "Index.ts",
+            )
+            .should_emit_javascript()
+        );
+        assert!(!TypeScriptDirectiveFlags::from_source(
+            "// @keepTs\n// @ts-ignore\nconst value: string = runtime.value;",
+            "Index.ts",
+        )
+        .should_emit_javascript());
     }
 
     #[test]

@@ -5,12 +5,14 @@
 //! wires `@Param` state through `initParam`/`updateParam`/`resetParam`.
 
 use rustc_hash::FxHashSet;
+use std::sync::Arc;
 
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
-    Argument, ClassElement, Decorator, Expression, FormalParameterKind, FormalParameters,
-    FunctionType, MethodDefinition, MethodDefinitionKind, PropertyDefinition, PropertyKind,
-    Statement, StructElement, StructStatement, TSAccessibility, TSType, TSTypeAnnotation,
+    AccessorProperty, Argument, ClassElement, Decorator, Expression, FormalParameterKind,
+    FormalParameters, FunctionType, MethodDefinition, MethodDefinitionKind, PropertyDefinition,
+    PropertyKind, Statement, StaticBlock, StructElement, StructStatement, TSAccessibility,
+    TSIndexSignature, TSType, TSTypeAnnotation,
 };
 use oxc_ast::{AstBuilder, NONE};
 use oxc_span::SPAN;
@@ -18,6 +20,7 @@ use oxc_span::SPAN;
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps, StylesBodyLowerer,
 };
+use crate::transform::component_analysis::ExtendAttributeIndex;
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
@@ -61,6 +64,36 @@ enum V2FieldKind {
     Consumer,
     BuilderParam,
     Regular,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum V2RegularMember<'a> {
+    Method(&'a MethodDefinition<'a>),
+    StaticBlock(&'a StaticBlock<'a>),
+    TSIndexSignature(&'a TSIndexSignature<'a>),
+    AccessorProperty(&'a AccessorProperty<'a>),
+}
+
+impl<'a> V2RegularMember<'a> {
+    fn to_class_element<'b>(&self, allocator: &'b Allocator) -> ClassElement<'b> {
+        let ast = AstBuilder::new(allocator);
+        match self {
+            Self::Method(method) => {
+                GlobalContextCallRewriter::new(allocator).method_definition(method)
+            }
+            Self::StaticBlock(block) => {
+                ClassElement::StaticBlock(ast.alloc(block.clone_in(allocator)))
+            }
+            Self::TSIndexSignature(signature) => {
+                ClassElement::TSIndexSignature(ast.alloc(signature.clone_in(allocator)))
+            }
+            Self::AccessorProperty(property) => {
+                let mut property = property.clone_in(allocator);
+                property.decorators.clear();
+                ClassElement::AccessorProperty(ast.alloc(property))
+            }
+        }
+    }
 }
 
 impl V2FieldKind {
@@ -127,6 +160,7 @@ pub(super) struct ComponentV2Lowerer<'a, 'b> {
     builder_functions: &'a FxHashSet<String>,
     custom_component_update_props: &'a CustomComponentUpdateProps,
     component_metadata: &'a ComponentMetadata,
+    extend_attributes: Arc<ExtendAttributeIndex>,
     module_name: Option<&'a str>,
     is_exported: bool,
     is_default: bool,
@@ -146,6 +180,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         builder_functions: &'a FxHashSet<String>,
         custom_component_update_props: &'a CustomComponentUpdateProps,
         component_metadata: &'a ComponentMetadata,
+        extend_attributes: Arc<ExtendAttributeIndex>,
         module_name: Option<&'a str>,
         is_exported: bool,
         is_default: bool,
@@ -162,6 +197,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             builder_functions,
             custom_component_update_props,
             component_metadata,
+            extend_attributes,
             module_name,
             is_exported,
             is_default,
@@ -185,7 +221,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         let mut has_build = false;
         let mut builder_methods = Vec::new();
         let mut styles_methods: Vec<&MethodDefinition<'_>> = Vec::new();
-        let mut other_methods: Vec<&MethodDefinition<'_>> = Vec::new();
+        let mut regular_members: Vec<V2RegularMember<'_>> = Vec::new();
         let mut constructor_method: Option<&MethodDefinition<'_>> = None;
         let mut computed_names = Vec::new();
         let mut has_monitor_method = false;
@@ -215,7 +251,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         &raw_object_fields,
                         self.module_name,
                         false,
-                    );
+                    )
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
                     build_body = Some(plan);
                 }
                 StructElement::MethodDefinition(method) if self.is_builder_method(method) => {
@@ -233,7 +270,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         self.component_metadata,
                         &raw_object_fields,
                         self.module_name,
-                    );
+                    )
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
                     builder_methods.push((method_name.into_owned(), method.as_ref(), plan));
                 }
                 StructElement::MethodDefinition(method) if self.is_styles_method(method) => {
@@ -251,7 +289,16 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     self.validate_lifecycle_method(name, method)?;
                     has_monitor_method |=
                         self.has_method_decorator(method, ArkuiDecoratorName::MONITOR);
-                    other_methods.push(method.as_ref());
+                    regular_members.push(V2RegularMember::Method(method));
+                }
+                StructElement::StaticBlock(block) => {
+                    regular_members.push(V2RegularMember::StaticBlock(block));
+                }
+                StructElement::TSIndexSignature(signature) => {
+                    regular_members.push(V2RegularMember::TSIndexSignature(signature));
+                }
+                StructElement::AccessorProperty(property) => {
+                    regular_members.push(V2RegularMember::AccessorProperty(property));
                 }
             }
         }
@@ -297,9 +344,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             elements.push(self.entry_name_element(name));
         }
 
-        let rewriter = GlobalContextCallRewriter::new(self.allocator);
-        for method in &other_methods {
-            elements.push(rewriter.method_definition(method));
+        for member in &regular_members {
+            elements.push(member.to_class_element(self.allocator));
         }
 
         let mut statements = ast.vec();
@@ -805,7 +851,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 name: component_name.to_string(),
                 detail: err.to_string(),
             })?
-            .unwrap_or_else(|| OxcVec::new_in(self.allocator));
+            .unwrap_or_else(|| OxcVec::new_in(&self.allocator));
         let builder = ViewpuAstBuilder::new(self.allocator);
         Ok(
             ViewpuMemberAstEmitter::new(self.allocator).method_with_params(

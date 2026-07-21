@@ -36,20 +36,30 @@ pub struct EtsTransformPlugin {
     memory_trace: EtsTransformMemoryTrace,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct EtsTransformModuleSourceMaps {
-    source_maps: FxDashMap<String, Arc<str>>,
+#[derive(Debug)]
+pub(crate) struct EtsTransformModuleMetadataEntry {
+    pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) emits_javascript: bool,
 }
 
-impl EtsTransformModuleSourceMaps {
-    fn record(&self, module_id: String, source_map: Arc<str>) {
-        self.source_maps.insert(module_id, source_map);
+#[derive(Debug, Default)]
+pub(crate) struct EtsTransformModuleMetadata {
+    entries: FxDashMap<String, EtsTransformModuleMetadataEntry>,
+}
+
+impl EtsTransformModuleMetadata {
+    fn record(&self, module_id: String, source_map: Option<Arc<str>>, emits_javascript: bool) {
+        self.entries.insert(
+            module_id,
+            EtsTransformModuleMetadataEntry {
+                source_map,
+                emits_javascript,
+            },
+        );
     }
 
-    pub(crate) fn take(&self, module_id: &str) -> Option<Arc<str>> {
-        self.source_maps
-            .remove(module_id)
-            .map(|(_, source_map)| source_map)
+    pub(crate) fn take(&self, module_id: &str) -> Option<EtsTransformModuleMetadataEntry> {
+        self.entries.remove(module_id).map(|(_, entry)| entry)
     }
 }
 
@@ -88,11 +98,13 @@ impl EtsTransformPlugin {
             return Ok(None);
         };
         if output.record_module_source_code {
-            if let Some(source_map) = output.source_map.as_deref() {
-                ctx.meta()
-                    .get_or_insert_default::<EtsTransformModuleSourceMaps>()
-                    .record(args.id.to_string(), Arc::from(source_map));
-            }
+            ctx.meta()
+                .get_or_insert_default::<EtsTransformModuleMetadata>()
+                .record(
+                    args.id.to_string(),
+                    output.source_map.as_deref().map(Arc::from),
+                    output.emits_javascript,
+                );
         }
         Ok(Some(HookTransformOutput {
             code: Some(output.code),

@@ -22,8 +22,11 @@ impl<'a> ViewpuOutputFinalizer<'a> {
 
     pub(super) fn finalize(&self) -> String {
         let allocator = Allocator::default();
-        let mut parsed =
-            Parser::new(&allocator, self.source, SourceType::ts().with_module(true)).parse();
+        // The lowered source no longer contains `struct` declarations, but it
+        // can still contain ArkUI class/member decorators. Keep the ArkUI
+        // source goal through this final AST pass so OXC applies the same
+        // decorator/export ordering as the SDK's TypeScript emitter.
+        let mut parsed = Parser::new(&allocator, self.source, SourceType::ets()).parse();
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             return self.source.to_owned();
         };
@@ -86,8 +89,8 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
         params_interfaces: &[usize],
     ) {
         let ast = AstBuilder::new(self.allocator);
-        let old_body = std::mem::replace(&mut self.program.body, OxcVec::new_in(self.allocator));
-        let mut final_body = OxcVec::new_in(self.allocator);
+        let old_body = std::mem::replace(&mut self.program.body, OxcVec::new_in(&self.allocator));
+        let mut final_body = OxcVec::new_in(&self.allocator);
         let mut params = Vec::new();
         let mut rest = Vec::new();
 
@@ -267,14 +270,14 @@ impl FinalizeConstructionShim {
             ast.formal_parameters(
                 Span::default(),
                 oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
-                OxcVec::new_in(allocator),
+                OxcVec::new_in(&allocator),
                 NONE,
             ),
             NONE,
             ast.function_body(
                 Span::default(),
-                OxcVec::new_in(allocator),
-                OxcVec::new_in(allocator),
+                OxcVec::new_in(&allocator),
+                OxcVec::new_in(&allocator),
             ),
         )
     }

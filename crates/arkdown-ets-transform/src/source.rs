@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, ModuleSpecifierText, SourceFileName};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// The kind of source file, used to select the right OXC parser mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,12 @@ impl SourceFileKind {
     /// Whether this file should be processed by the ETS transform pipeline.
     pub fn is_ets_transform_input(&self) -> bool {
         matches!(self, SourceFileKind::Ets | SourceFileKind::Ts)
+    }
+
+    /// Whether this is a runtime JavaScript module whose source does not need
+    /// to be retained by the ArkTS transform snapshot.
+    pub fn is_javascript_runtime(&self) -> bool {
+        matches!(self, SourceFileKind::Js)
     }
 }
 
@@ -67,6 +73,7 @@ impl SourceClassifier {
 pub struct TransformSourceSnapshot {
     files: Arc<FxHashMap<PathBuf, Arc<str>>>,
     lookup_paths: Arc<FxHashMap<PathBuf, PathBuf>>,
+    runtime_source_paths: Arc<FxHashSet<PathBuf>>,
     package_roots: Arc<FxHashMap<String, PathBuf>>,
     resolved_static_modules: Arc<Vec<TransformResolvedStaticModuleScope>>,
 }
@@ -80,12 +87,30 @@ impl TransformSourceSnapshot {
         files: FxHashMap<PathBuf, Arc<str>>,
         modules: Vec<TransformResolvedStaticModule>,
     ) -> Self {
+        let runtime_source_paths = files
+            .keys()
+            .filter(|path| SourceClassifier::classify_path(path).is_javascript_runtime())
+            .cloned()
+            .collect();
+        Self::with_resolved_static_modules_and_runtime_sources(files, modules, runtime_source_paths)
+    }
+
+    pub fn with_resolved_static_modules_and_runtime_sources(
+        files: FxHashMap<PathBuf, Arc<str>>,
+        modules: Vec<TransformResolvedStaticModule>,
+        runtime_source_paths: FxHashSet<PathBuf>,
+    ) -> Self {
         let indexed_files = TransformSourceFileIndex::new(files);
         let package_roots = SourcePackageRootCollector::new(indexed_files.files.keys()).collect();
         let resolved_static_modules = TransformResolvedStaticModuleIndex::new(modules).build();
+        let runtime_source_paths = runtime_source_paths
+            .into_iter()
+            .map(|path| canonicalize_or_owned(&lexical_normalize(&path)))
+            .collect();
         Self {
             files: Arc::new(indexed_files.files),
             lookup_paths: Arc::new(indexed_files.lookup_paths),
+            runtime_source_paths: Arc::new(runtime_source_paths),
             package_roots: Arc::new(package_roots),
             resolved_static_modules: Arc::new(resolved_static_modules),
         }
@@ -153,6 +178,16 @@ impl TransformSourceSnapshot {
 
     pub fn source_text_for_indexed_path(&self, path: &Path) -> Option<Arc<str>> {
         self.files.get(path).map(Arc::clone)
+    }
+
+    pub(crate) fn declaration_has_runtime_source(&self, declaration: &Path) -> bool {
+        SourceFileName::new(declaration)
+            .declaration_runtime_candidates()
+            .is_some_and(|candidates| {
+                candidates
+                    .iter()
+                    .any(|candidate| self.runtime_source_paths.contains(candidate))
+            })
     }
 
     fn resolve_relative_path(

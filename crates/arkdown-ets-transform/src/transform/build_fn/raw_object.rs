@@ -152,7 +152,7 @@ impl<'a, 'ctx> VisitMut<'a> for RawObjectArgumentMutator<'a, 'ctx> {
                 continue;
             };
             if RawObjectExpression::new(expression, self.context).is_raw_object_field() {
-                let expression = expression.take_in(self.allocator);
+                let expression = expression.take_in(&self.allocator);
                 let wrapped =
                     RawObjectCallEmitter::new(self.allocator, self.context).wrap(expression);
                 *argument = Argument::from(wrapped);

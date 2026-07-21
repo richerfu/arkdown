@@ -107,8 +107,8 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
 
         let ast = AstBuilder::new(allocator);
         let mut changed = false;
-        let mut body = OxcVec::new_in(allocator);
-        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(allocator));
+        let mut body = OxcVec::new_in(&allocator);
+        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(&allocator));
         for (statement, split_plan) in old_body.into_iter().zip(split_plans) {
             if let Some(split) = split_plan {
                 changed = true;
@@ -153,8 +153,8 @@ impl DefaultImportReexportRewriter {
         };
 
         let ast = AstBuilder::new(allocator);
-        let mut body = OxcVec::new_in(allocator);
-        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(allocator));
+        let mut body = OxcVec::new_in(&allocator);
+        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(&allocator));
         for (statement_index, statement) in old_body.into_iter().enumerate() {
             if statement_index == plan.import_statement_index {
                 continue;
@@ -746,8 +746,8 @@ impl<'a> TypeOnlyReexportSplitter<'a> {
 
         let ast = AstBuilder::new(allocator);
         let mut changed = false;
-        let mut body = OxcVec::new_in(allocator);
-        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(allocator));
+        let mut body = OxcVec::new_in(&allocator);
+        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(&allocator));
         for (statement, split_plan) in old_body.into_iter().zip(split_plans) {
             if let Some(split) = split_plan {
                 changed = true;
@@ -873,6 +873,8 @@ impl<'a> ModuleBindingClassifier<'a> {
             .sources
             .resolve_static_with_declarations(importer, specifier)?;
         let is_declaration = SourceClassifier::classify_path(&target.path).is_declaration();
+        let is_runtime_backed_declaration =
+            is_declaration && self.sources.declaration_has_runtime_source(&target.path);
         let exports = self.classify_source_exports(target)?;
         if is_declaration
             && imported_name == "default"
@@ -880,12 +882,20 @@ impl<'a> ModuleBindingClassifier<'a> {
         {
             return Some(ModuleBindingKind::Value);
         }
-        exports.get(imported_name).copied().or({
-            if is_declaration {
-                Some(ModuleBindingKind::Type)
-            } else {
-                None
+        exports.get(imported_name).copied().or_else(|| {
+            if !is_declaration {
+                return None;
             }
+            // TypeScript's declaration resolver can select `index.d.ts` for a
+            // CommonJS `index.js`. An export absent from that declaration is
+            // still a runtime binding supplied by the JavaScript module (for
+            // example its synthetic default export). Hvigor's TS checker keeps
+            // that import as a value; do not turn it into `import type`.
+            Some(if is_runtime_backed_declaration {
+                ModuleBindingKind::Value
+            } else {
+                ModuleBindingKind::Type
+            })
         })
     }
 
@@ -2386,6 +2396,51 @@ export { UnreadResponseData }"#;
         assert!(emitted.contains("requestUnread"));
         assert!(!emitted.contains("UnreadResponseData"));
         assert!(!emitted.contains("MessageCenterModels"));
+    }
+
+    #[test]
+    fn commonjs_default_absent_from_declaration_stays_a_runtime_import() {
+        let index = PathBuf::from("/project/pkg/index.ts");
+        let runtime = PathBuf::from("/project/pkg/src/main/js/index.js");
+        let declaration = PathBuf::from("/project/pkg/src/main/js/index.d.ts");
+        let index_source = r#"import jsbn from "./src/main/js/index";
+
+export default jsbn;
+export { jsbn };"#;
+        let mut files = FxHashMap::default();
+        files.insert(index.clone(), Arc::<str>::from(index_source));
+        files.insert(
+            runtime,
+            Arc::<str>::from("module.exports = { default: BigInteger };"),
+        );
+        files.insert(declaration, Arc::<str>::from("export class BigInteger {}"));
+        let sources = TransformSourceSnapshot::new(files);
+
+        let split = split_type_only_named_imports(index_source, index.to_str().unwrap(), &sources);
+        assert_eq!(split, index_source);
+    }
+
+    #[test]
+    fn decorator_reference_keeps_its_runtime_import() {
+        let config = PathBuf::from("/project/pkg/Config.ets");
+        let annotations = PathBuf::from("/project/pkg/annotations.ets");
+        let config_source = r#"import { ImmediateUpdateField } from "./annotations";
+
+export class Config {
+    @ImmediateUpdateField
+    enabled: boolean = false;
+}"#;
+        let mut files = FxHashMap::default();
+        files.insert(config.clone(), Arc::<str>::from(config_source));
+        files.insert(
+            annotations,
+            Arc::<str>::from("export function ImmediateUpdateField() {}"),
+        );
+        let sources = TransformSourceSnapshot::new(files);
+
+        let split =
+            split_type_only_named_imports(config_source, config.to_str().unwrap(), &sources);
+        assert_eq!(split, config_source);
     }
 
     #[test]

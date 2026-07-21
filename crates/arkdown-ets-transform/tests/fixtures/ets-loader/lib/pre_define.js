@@ -92,6 +92,7 @@ const BIND_OBJECT_PROPERTY = new Map([
   ["ListItem", new Set(["swipeAction"])],
   ["MenuItem", new Set(["create"])],
   ["Refresh", new Set(["create"])],
+  ["WaterFlow", new Set(["create"])],
   ["Navigation", new Set(["title", "menus", "toolbarConfiguration"])],
 ]);
 const CREATE_BIND_COMPONENT = new Set([

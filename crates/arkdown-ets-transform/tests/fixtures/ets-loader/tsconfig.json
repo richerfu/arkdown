@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "ets": {
+      "render": {
+        "method": ["build", "pageTransition"],
+        "decorator": ["LocalBuilder", "Builder"]
+      },
+      "components": ["Column", "Divider", "Image", "Row", "Text"],
+      "extend": {
+        "decorator": ["Extend", "AnimatableExtend"]
+      },
+      "styles": {
+        "decorator": "Styles"
+      },
+      "syntaxComponents": {
+        "paramsUICallback": ["ForEach", "LazyForEach"],
+        "attrUICallback": [
+          {
+            "name": "Repeat",
+            "attributes": ["each", "template"]
+          }
+        ]
+      }
+    }
+  }
+}
