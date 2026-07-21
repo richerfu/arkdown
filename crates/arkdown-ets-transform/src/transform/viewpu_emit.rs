@@ -442,11 +442,11 @@ impl<'a> ViewpuAstBuilder<'a> {
     }
 
     pub(crate) fn statements(&self) -> OxcVec<'a, Statement<'a>> {
-        OxcVec::new_in(self.allocator)
+        OxcVec::new_in(&self.allocator)
     }
 
     pub(crate) fn expressions(&self) -> OxcVec<'a, Expression<'a>> {
-        OxcVec::new_in(self.allocator)
+        OxcVec::new_in(&self.allocator)
     }
 
     pub(crate) fn clone_expression(&self, expression: &Expression<'_>) -> Expression<'a> {
@@ -831,7 +831,7 @@ impl<'a> ViewpuAstBuilder<'a> {
     }
 
     pub(crate) fn formal_parameters(&self) -> OxcVec<'a, FormalParameter<'a>> {
-        OxcVec::new_in(self.allocator)
+        OxcVec::new_in(&self.allocator)
     }
 
     pub(crate) fn clone_formal_parameters(

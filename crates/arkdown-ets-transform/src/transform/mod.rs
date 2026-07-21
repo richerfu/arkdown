@@ -7,7 +7,6 @@ mod declaration_emit;
 pub(crate) mod decorator;
 mod entry;
 mod global_rewrite;
-pub(crate) mod observed_v2;
 pub(crate) mod source_emit;
 mod source_text;
 mod syntax;
@@ -25,15 +24,15 @@ use arkdown_core::ModuleSource;
 use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, HvigorModulePath};
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
-    Argument, AssignmentTarget, Class, ClassElement, Declaration, Decorator,
-    ExportDefaultDeclarationKind, Expression, Function, ImportOrExportKind, MethodDefinitionKind,
-    Program, Statement, StructElement, StructStatement, TSModuleDeclarationBody,
+    Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression,
+    FormalParameterKind, Function, FunctionType, ImportOrExportKind, MethodDefinitionKind,
+    MethodDefinitionType, Program, PropertyKey, Statement, StructElement, StructStatement,
+    TSModuleDeclarationBody, TSType,
 };
 use oxc_ast::NONE;
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_span::{SourceType, SPAN};
-use oxc_syntax::operator::{AssignmentOperator, LogicalOperator};
 
 use crate::error::EtsTransformError;
 use crate::lazy_import::LazyImportTransform;
@@ -44,9 +43,10 @@ use crate::transform::component::{
     StateField, StylesMethodInfo, ViewPuClassEmitter,
 };
 use crate::transform::component_analysis::{
-    BuilderFunctionNameCollector, CustomComponentNameCollector, ImportedComponentNamesCollector,
-    ImportedCustomComponentNamesCollector, LocalComponentUpdatePropsCollector, SimpleTypeContext,
-    StructBuilderMethodNames, StructBuilderParamNames,
+    BuilderFunctionNameCollector, CustomComponentNameCollector, ExtendAttributeIndex,
+    ImportedComponentNamesCollector, ImportedCustomComponentNamesCollector,
+    LocalComponentUpdatePropsCollector, SimpleTypeContext, StructBuilderMethodNames,
+    StructBuilderParamNames,
 };
 use crate::transform::component_collection::ComponentNameCollector;
 use crate::transform::component_meta::ComponentMetadata;
@@ -139,7 +139,14 @@ impl<'a> ArkuiComponentNameCollector<'a> {
     pub fn collect(&self) -> Result<Vec<String>, EtsTransformError> {
         let allocator = Allocator::default();
         let source_type = SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ets());
-        let parsed = Parser::new(&allocator, self.content, source_type).parse();
+        let parsed = match self.options {
+            Some(options) => {
+                options
+                    .component_metadata
+                    .parse_ets(&allocator, self.content, source_type)
+            }
+            None => Parser::new(&allocator, self.content, source_type).parse(),
+        };
         if !parsed.diagnostics.is_empty() {
             return Err(EtsTransformError::Fatal {
                 file: self.id.to_string(),
@@ -212,7 +219,9 @@ impl<'a> ArktsTransformer<'a> {
         let allocator = Allocator::default();
         let source_type =
             SourceType::from_path(&source.id.id).unwrap_or_else(|_| SourceType::ets());
-        let mut parsed = Parser::new(&allocator, content, source_type).parse();
+        let mut parsed = options
+            .component_metadata
+            .parse_ets(&allocator, content, source_type);
         if !parsed.diagnostics.is_empty() {
             return Err(EtsTransformError::Fatal {
                 file: source.id.id.clone(),
@@ -274,6 +283,7 @@ impl<'a> ArktsTransformer<'a> {
             .collect::<FxHashSet<_>>();
         let builder_functions =
             BuilderFunctionNameCollector::new(&parsed.program, &source.id.id, options).collect();
+        let extend_attributes = Arc::new(ExtendAttributeIndex::from_program(&parsed.program));
 
         let statement_transformer = ArktsStatementTransformer::new(
             &allocator,
@@ -285,6 +295,7 @@ impl<'a> ArktsTransformer<'a> {
             &custom_component_update_props,
             &builder_functions,
             &hvigor_source_id,
+            extend_attributes,
         );
         let concurrent_directives_lowered =
             ConcurrentDirectiveLowerer::new(&allocator).program(&mut parsed.program);
@@ -324,7 +335,7 @@ impl<'a> ArktsTransformer<'a> {
                     .statements(&allocator)
                     .map_err(|err| EtsTransformError::Fatal {
                         file: source.id.id.clone(),
-                        message: format!("unsupported ArkUI build() DSL: {err:?}"),
+                        message: format!("unsupported ArkUI build() DSL: {err}"),
                     })?;
                     Ok(Some(StatementReplacementPlan::AstStatements(statements)))
                 } else {
@@ -341,16 +352,16 @@ impl<'a> ArktsTransformer<'a> {
             );
             drop(entry_registrations);
 
-            let mut body = OxcVec::new_in(&allocator);
-            let old_body = std::mem::replace(&mut parsed.program.body, OxcVec::new_in(&allocator));
+            let mut body = OxcVec::new_in(&&allocator);
+            let old_body = std::mem::replace(&mut parsed.program.body, OxcVec::new_in(&&allocator));
             for (statement, replacement_plan) in old_body.into_iter().zip(replacement_plans) {
                 match replacement_plan {
                     Some(StatementReplacementPlan::AstStatements(statements)) => {
                         body.extend(statements);
                     }
-                    Some(StatementReplacementPlan::LowerClassDecorators) => {
-                        let statements = ClassDecoratorLowerer::new(&allocator, &source.id.id)
-                            .statements(statement)?;
+                    Some(StatementReplacementPlan::LowerSendableClass) => {
+                        let statements =
+                            SendableClassLowerer::new(&allocator).statements(statement);
                         body.extend(statements);
                     }
                     None => body.push(statement),
@@ -447,7 +458,7 @@ impl<'a> ConcurrentDirectiveLowerer<'a> {
 
 enum StatementReplacementPlan<'a> {
     AstStatements(OxcVec<'a, Statement<'a>>),
-    LowerClassDecorators,
+    LowerSendableClass,
 }
 
 struct ArktsStatementTransformer<'a, 'b> {
@@ -459,6 +470,7 @@ struct ArktsStatementTransformer<'a, 'b> {
     custom_components: &'a FxHashSet<String>,
     custom_component_update_props: &'a CustomComponentUpdateProps,
     builder_functions: &'a FxHashSet<String>,
+    extend_attributes: Arc<ExtendAttributeIndex>,
     hvigor_source_id: Arc<str>,
     module_name: Option<Arc<str>>,
 }
@@ -474,6 +486,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         custom_component_update_props: &'a CustomComponentUpdateProps,
         builder_functions: &'a FxHashSet<String>,
         hvigor_source_id: &'a str,
+        extend_attributes: Arc<ExtendAttributeIndex>,
     ) -> Self {
         Self {
             allocator,
@@ -484,6 +497,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             custom_components,
             custom_component_update_props,
             builder_functions,
+            extend_attributes,
             hvigor_source_id: Arc::from(hvigor_source_id),
             module_name: options.module_name.as_deref().map(Arc::from),
         }
@@ -521,6 +535,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             self.builder_functions,
             self.custom_component_update_props,
             &self.options.component_metadata,
+            Arc::clone(&self.extend_attributes),
             self.options.module_name.as_deref(),
             is_exported,
             is_default,
@@ -633,9 +648,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 ))
             }
             Statement::ClassDeclaration(_)
-                if ClassDecoratorLowerer::statement_needs_lowering(statement) =>
+                if SendableClassLowerer::statement_needs_lowering(statement) =>
             {
-                Some(StatementReplacementPlan::LowerClassDecorators)
+                Some(StatementReplacementPlan::LowerSendableClass)
             }
             Statement::FunctionDeclaration(function) => self
                 .decorated_function_statement(function, false, &[])?
@@ -660,17 +675,17 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     ))
                 }
                 Some(Declaration::ClassDeclaration(_))
-                    if ClassDecoratorLowerer::statement_needs_lowering(statement) =>
+                    if SendableClassLowerer::statement_needs_lowering(statement) =>
                 {
-                    Some(StatementReplacementPlan::LowerClassDecorators)
+                    Some(StatementReplacementPlan::LowerSendableClass)
                 }
                 _ => None,
             },
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::ClassDeclaration(_)
-                    if ClassDecoratorLowerer::statement_needs_lowering(statement) =>
+                    if SendableClassLowerer::statement_needs_lowering(statement) =>
                 {
-                    Some(StatementReplacementPlan::LowerClassDecorators)
+                    Some(StatementReplacementPlan::LowerSendableClass)
                 }
                 _ => None,
             },
@@ -743,7 +758,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     &raw_object_fields,
                     None,
                     GeneratedViewpuName::VIEWPU_BASE,
-                );
+                )
+                .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
                 TopLevelFunctionEmitter::decorated_with_params_statement(
                     self.allocator,
                     exported,
@@ -904,7 +920,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         self.module_name.as_ref().map(Arc::clone),
                         is_reusable,
                         GeneratedViewpuName::VIEWPU_BASE,
-                    );
+                    )
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
                     initial_render_body = BuildBodyInfo::Plan(plan);
                 }
                 StructElement::MethodDefinition(method)
@@ -928,7 +945,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         &raw_object_fields,
                         self.module_name.as_ref().map(Arc::clone),
                         GeneratedViewpuName::VIEWPU_BASE,
-                    );
+                    )
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
                     builder_methods.push(BuilderMethodInfo {
                         name: name.into_owned(),
                         params: &method.value.params,
@@ -960,6 +978,15 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     {
                         regular_members.push(RegularMember::Method(method));
                     }
+                }
+                StructElement::StaticBlock(block) => {
+                    regular_members.push(RegularMember::StaticBlock(block));
+                }
+                StructElement::TSIndexSignature(signature) => {
+                    regular_members.push(RegularMember::TSIndexSignature(signature));
+                }
+                StructElement::AccessorProperty(property) => {
+                    regular_members.push(RegularMember::AccessorProperty(property));
                 }
             }
         }
@@ -1035,93 +1062,52 @@ impl<'a> ConcurrentFunctionEmitter<'a> {
     }
 }
 
-struct ClassDecoratorLowerer<'a, 'b> {
+/// Implements SDK `process_sendable.js::processSendableClass`.
+///
+/// `process_ui_syntax.js` leaves every ordinary class decorator intact and
+/// dispatches only classes carrying `@Sendable` to this transform. Keeping
+/// that distinction is important: ArkUI and application decorators are part
+/// of the CompileArkTS input consumed by es2abc, not TypeScript decorators for
+/// arkdown to erase or lower.
+struct SendableClassLowerer<'a> {
     allocator: &'a Allocator,
     ast: oxc_ast::AstBuilder<'a>,
-    file: &'b str,
 }
 
-impl<'a, 'b> ClassDecoratorLowerer<'a, 'b> {
-    fn new(allocator: &'a Allocator, file: &'b str) -> Self {
+impl<'a> SendableClassLowerer<'a> {
+    const DIRECTIVE: &'static str = "use sendable";
+    const SUPER_ARGS: &'static str = "args";
+
+    fn new(allocator: &'a Allocator) -> Self {
         Self {
             allocator,
             ast: oxc_ast::AstBuilder::new(allocator),
-            file,
         }
     }
 
     fn statement_needs_lowering(statement: &Statement<'_>) -> bool {
-        match statement {
-            Statement::ClassDeclaration(class) => Self::class_has_decorators(class),
+        Self::statement_has_class_decorator(statement, ArkuiDecoratorName::SENDABLE)
+    }
+
+    fn statements(&self, mut statement: Statement<'a>) -> OxcVec<'a, Statement<'a>> {
+        match &mut statement {
+            Statement::ClassDeclaration(class) => self.class(class),
             Statement::ExportNamedDeclaration(export) => {
-                !export.decorators.is_empty()
-                    || matches!(
-                        export.declaration.as_ref(),
-                        Some(Declaration::ClassDeclaration(class)) if Self::class_has_decorators(class)
-                    )
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration {
-                    Self::class_has_decorators(class)
-                } else {
-                    false
+                Self::remove_sendable_decorator(&mut export.decorators);
+                if let Some(Declaration::ClassDeclaration(class)) = &mut export.declaration {
+                    self.class(class);
                 }
             }
-            _ => false,
-        }
-    }
-
-    fn statements(
-        &self,
-        statement: Statement<'a>,
-    ) -> Result<OxcVec<'a, Statement<'a>>, EtsTransformError> {
-        if Self::statement_has_class_decorator(&statement, ArkuiDecoratorName::OBSERVED_V2) {
-            let lowered = crate::transform::observed_v2::lower_observed_v2_classes(
-                &self.ast.vec1(statement),
-                self.allocator,
-            );
-            let mut statements = self.ast.vec();
-            for statement in lowered {
-                statements.extend(self.non_observed_v2_statements(statement, true)?);
+            Statement::ExportDefaultDeclaration(export) => {
+                if let ExportDefaultDeclarationKind::ClassDeclaration(class) =
+                    &mut export.declaration
+                {
+                    self.class(class);
+                }
             }
-            return Ok(statements);
+            _ => {}
         }
-        self.non_observed_v2_statements(statement, false)
-    }
-
-    fn non_observed_v2_statements(
-        &self,
-        mut statement: Statement<'a>,
-        retain_observed_v2_track: bool,
-    ) -> Result<OxcVec<'a, Statement<'a>>, EtsTransformError> {
-        let class_name = Self::class_name(&statement).map(str::to_string);
-        let runtime_decorators = self.take_runtime_class_decorators(&mut statement);
-        self.strip_statement_syntax_decorators(&mut statement, retain_observed_v2_track);
-
-        if !runtime_decorators.is_empty() && class_name.is_none() {
-            return Err(EtsTransformError::Fatal {
-                file: self.file.to_string(),
-                message: "anonymous default export class decorators are not supported".to_string(),
-            });
-        }
-
-        let mut statements = self.ast.vec1(statement);
-        if let Some(class_name) = class_name {
-            for decorator in runtime_decorators.into_iter().rev() {
-                statements.push(self.decorator_assignment_statement(&class_name, decorator));
-            }
-        }
-        Ok(statements)
-    }
-
-    fn class_has_decorators(class: &Class<'_>) -> bool {
-        !class.decorators.is_empty()
-            || class.body.body.iter().any(|element| match element {
-                ClassElement::PropertyDefinition(property) => !property.decorators.is_empty(),
-                ClassElement::AccessorProperty(accessor) => !accessor.decorators.is_empty(),
-                ClassElement::MethodDefinition(method) => !method.decorators.is_empty(),
-                ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => false,
-            })
+        self.ast.vec1(statement)
     }
 
     fn statement_has_class_decorator(statement: &Statement<'_>, name: &str) -> bool {
@@ -1155,192 +1141,145 @@ impl<'a, 'b> ClassDecoratorLowerer<'a, 'b> {
             .any(|decorator| ArkuiDecorator::new(decorator).name() == name)
     }
 
-    fn class_name<'s>(statement: &'s Statement<'_>) -> Option<&'s str> {
-        match statement {
-            Statement::ClassDeclaration(class) => {
-                class.id.as_ref().map(|identifier| identifier.name.as_str())
-            }
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::ClassDeclaration(class)) => {
-                    class.id.as_ref().map(|identifier| identifier.name.as_str())
-                }
-                _ => None,
-            },
-            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
-                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                    class.id.as_ref().map(|identifier| identifier.name.as_str())
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn take_runtime_class_decorators(&self, statement: &mut Statement<'a>) -> Vec<Expression<'a>> {
-        match statement {
-            Statement::ClassDeclaration(class) => self.take_runtime_decorators(class),
-            Statement::ExportNamedDeclaration(export) => {
-                let mut decorators =
-                    self.take_runtime_decorator_expressions(&mut export.decorators);
-                if let Some(Declaration::ClassDeclaration(class)) = &mut export.declaration {
-                    decorators.extend(self.take_runtime_decorators(class));
-                }
-                decorators
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                if let ExportDefaultDeclarationKind::ClassDeclaration(class) =
-                    &mut export.declaration
-                {
-                    self.take_runtime_decorators(class)
-                } else {
-                    Vec::new()
-                }
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    fn take_runtime_decorators(&self, class: &mut Class<'a>) -> Vec<Expression<'a>> {
-        self.take_runtime_decorator_expressions(&mut class.decorators)
-    }
-
-    fn take_runtime_decorator_expressions(
-        &self,
-        decorators: &mut oxc_allocator::Vec<'a, Decorator<'a>>,
-    ) -> Vec<Expression<'a>> {
-        let runtime_decorators = decorators
-            .iter()
-            .filter(|decorator| !Self::is_syntax_only_class_decorator(decorator))
-            .map(|decorator| decorator.expression.clone_in(self.allocator))
-            .collect();
-        decorators.clear();
-        runtime_decorators
-    }
-
-    fn strip_statement_syntax_decorators(
-        &self,
-        statement: &mut Statement<'a>,
-        retain_observed_v2_track: bool,
-    ) {
-        match statement {
-            Statement::ClassDeclaration(class) => {
-                self.strip_member_decorators(class, retain_observed_v2_track);
-            }
-            Statement::ExportNamedDeclaration(export) => {
-                export.decorators.clear();
-                if let Some(Declaration::ClassDeclaration(class)) = &mut export.declaration {
-                    self.strip_member_decorators(class, retain_observed_v2_track);
-                }
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                if let ExportDefaultDeclarationKind::ClassDeclaration(class) =
-                    &mut export.declaration
-                {
-                    self.strip_member_decorators(class, retain_observed_v2_track);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn strip_member_decorators(&self, class: &mut Class<'a>, retain_observed_v2_track: bool) {
+    fn class(&self, class: &mut Class<'a>) {
+        Self::remove_sendable_decorator(&mut class.decorators);
+        let mut has_constructor = false;
         for element in &mut class.body.body {
             match element {
-                ClassElement::PropertyDefinition(property) => {
-                    self.strip_non_runtime_member_decorators(
-                        &mut property.decorators,
-                        retain_observed_v2_track,
-                    );
+                ClassElement::PropertyDefinition(property) if property.optional => {
+                    self.optional_property(property);
                 }
-                ClassElement::AccessorProperty(accessor) => {
-                    self.strip_non_runtime_member_decorators(
-                        &mut accessor.decorators,
-                        retain_observed_v2_track,
-                    );
+                ClassElement::MethodDefinition(method)
+                    if method.kind == MethodDefinitionKind::Constructor =>
+                {
+                    has_constructor = true;
+                    if let Some(body) = method.value.body.as_mut() {
+                        body.directives.insert(0, self.directive());
+                    }
                 }
-                ClassElement::MethodDefinition(method) => {
-                    self.strip_non_runtime_member_decorators(
-                        &mut method.decorators,
-                        retain_observed_v2_track,
-                    );
-                }
-                ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => {}
+                _ => {}
             }
+        }
+        if !has_constructor {
+            let constructor = self.constructor(class.super_class.is_some());
+            class.body.body.insert(0, constructor);
         }
     }
 
-    fn strip_non_runtime_member_decorators(
-        &self,
-        decorators: &mut oxc_allocator::Vec<'a, Decorator<'a>>,
-        retain_observed_v2_track: bool,
-    ) {
-        if decorators.is_empty() {
-            return;
+    fn optional_property(&self, property: &mut oxc_ast::ast::PropertyDefinition<'a>) {
+        property.optional = false;
+        if let Some(annotation) = property.type_annotation.as_mut() {
+            let original = annotation.type_annotation.clone_in(self.allocator);
+            annotation.type_annotation = match original {
+                TSType::TSUnionType(mut union) => {
+                    if !union
+                        .types
+                        .iter()
+                        .any(|ty| matches!(ty, TSType::TSUndefinedKeyword(_)))
+                    {
+                        union.types.push(self.ast.ts_type_undefined_keyword(SPAN));
+                    }
+                    TSType::TSUnionType(union)
+                }
+                ty => self.ast.ts_type_union_type(
+                    SPAN,
+                    self.ast
+                        .vec_from_iter([ty, self.ast.ts_type_undefined_keyword(SPAN)]),
+                ),
+            };
         }
-        if !retain_observed_v2_track {
-            decorators.clear();
-            return;
+        if property.value.is_none() {
+            property.value = Some(
+                self.ast
+                    .expression_identifier(SPAN, self.ast.str("undefined")),
+            );
         }
-        let mut retained = OxcVec::new_in(self.allocator);
-        for decorator in decorators.iter() {
-            if ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::TRACK {
-                retained.push(decorator.clone_in(self.allocator));
-            }
-        }
-        *decorators = retained;
     }
 
-    fn is_syntax_only_class_decorator(decorator: &Decorator<'_>) -> bool {
-        matches!(
-            ArkuiDecorator::new(decorator).name(),
-            ArkuiDecoratorName::COMPONENT
-                | ArkuiDecoratorName::COMPONENT_V2
-                | ArkuiDecoratorName::CUSTOM_DIALOG
-                | ArkuiDecoratorName::ENTRY
-                | ArkuiDecoratorName::OBSERVED
-                | ArkuiDecoratorName::OBSERVED_V2
-                | ArkuiDecoratorName::PREVIEW
-                | ArkuiDecoratorName::REUSABLE
-                | ArkuiDecoratorName::REUSABLE_V2
-                | ArkuiDecoratorName::SENDABLE
+    fn constructor(&self, has_super_class: bool) -> ClassElement<'a> {
+        let rest = has_super_class.then(|| {
+            self.ast.alloc_formal_parameter_rest(
+                SPAN,
+                self.ast.vec(),
+                self.ast.binding_rest_element(
+                    SPAN,
+                    self.ast
+                        .binding_pattern_binding_identifier(SPAN, self.ast.str(Self::SUPER_ARGS)),
+                ),
+                NONE,
+            )
+        });
+        let params = self.ast.alloc_formal_parameters(
+            SPAN,
+            FormalParameterKind::FormalParameter,
+            self.ast.vec(),
+            rest,
+        );
+        let mut statements = self.ast.vec();
+        if has_super_class {
+            let arguments = self.ast.vec1(
+                self.ast.argument_spread_element(
+                    SPAN,
+                    self.ast
+                        .expression_identifier(SPAN, self.ast.str(Self::SUPER_ARGS)),
+                ),
+            );
+            let call = self.ast.expression_call(
+                SPAN,
+                self.ast.expression_super(SPAN),
+                NONE,
+                arguments,
+                false,
+            );
+            statements.push(self.ast.statement_expression(SPAN, call));
+        }
+        let body = self
+            .ast
+            .function_body(SPAN, self.ast.vec1(self.directive()), statements);
+        let function = self.ast.alloc_function(
+            SPAN,
+            FunctionType::FunctionExpression,
+            None,
+            false,
+            false,
+            false,
+            NONE,
+            NONE,
+            params,
+            NONE,
+            Some(body),
+        );
+        self.ast.class_element_method_definition(
+            SPAN,
+            MethodDefinitionType::MethodDefinition,
+            self.ast.vec(),
+            PropertyKey::StaticIdentifier(
+                self.ast
+                    .alloc_identifier_name(SPAN, self.ast.str("constructor")),
+            ),
+            function,
+            MethodDefinitionKind::Constructor,
+            false,
+            false,
+            false,
+            false,
+            None,
         )
     }
 
-    fn decorator_assignment_statement(
-        &self,
-        class_name: &str,
-        decorator: Expression<'a>,
-    ) -> Statement<'a> {
-        let class_reference = self.class_reference(class_name);
-        let call = self.ast.expression_call(
+    fn directive(&self) -> oxc_ast::ast::Directive<'a> {
+        self.ast.directive(
             SPAN,
-            decorator,
-            NONE,
             self.ast
-                .vec1(Argument::from(self.class_reference(class_name))),
-            false,
-        );
-        let fallback =
-            self.ast
-                .expression_logical(SPAN, call, LogicalOperator::Or, class_reference);
-        let assignment = self.ast.expression_assignment(
-            SPAN,
-            AssignmentOperator::Assign,
-            AssignmentTarget::from(
-                self.ast
-                    .simple_assignment_target_assignment_target_identifier(
-                        SPAN,
-                        self.allocator.alloc_str(class_name),
-                    ),
-            ),
-            fallback,
-        );
-        self.ast.statement_expression(SPAN, assignment)
+                .string_literal(SPAN, self.ast.str(Self::DIRECTIVE), None),
+            self.ast.str(Self::DIRECTIVE),
+        )
     }
 
-    fn class_reference(&self, class_name: &str) -> Expression<'a> {
-        self.ast
-            .expression_identifier(SPAN, self.allocator.alloc_str(class_name))
+    fn remove_sendable_decorator(decorators: &mut OxcVec<'a, Decorator<'a>>) {
+        decorators.retain(|decorator| {
+            ArkuiDecorator::new(decorator).name() != ArkuiDecoratorName::SENDABLE
+        });
     }
 }
 

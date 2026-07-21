@@ -4,7 +4,9 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use arkdown_core::OhosModuleType;
 use arkdown_path::canonicalize_or_owned;
+use serde::Deserialize;
 
 use crate::dependency_graph::snapshot::{
     DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot, DependencyNodeSnapshot,
@@ -220,11 +222,58 @@ impl DependencyGraphBuilder {
         {
             return DependencyNodeType::BytecodeHar;
         }
+        // Mirrors hvigor-ohos-plugin's
+        // `DependencyManager.getDependencyTypeByProfile`: packaged source HARs
+        // normally declare their kind in src/main/module.json(.5), not in
+        // oh-package.json5. Legacy profiles carry the same value under
+        // module.distro.moduleType.
+        if let Some(module_type) = self.read_dependency_module_type(root) {
+            return match module_type {
+                OhosModuleType::Har => DependencyNodeType::SourceHar,
+                OhosModuleType::Shared => DependencyNodeType::SharedHsp,
+                OhosModuleType::Entry | OhosModuleType::Feature => DependencyNodeType::OhpmSource,
+            };
+        }
         match package.and_then(|package| package.package_json.package_type.as_deref()) {
             Some("shared") | Some("hsp") => DependencyNodeType::SharedHsp,
             Some("har") => DependencyNodeType::SourceHar,
             _ => DependencyNodeType::OhpmSource,
         }
+    }
+
+    fn read_dependency_module_type(&self, root: &Path) -> Option<OhosModuleType> {
+        #[derive(Deserialize)]
+        struct DependencyProfile {
+            module: DependencyProfileModule,
+        }
+
+        #[derive(Deserialize)]
+        struct DependencyProfileModule {
+            #[serde(rename = "type", default)]
+            module_type: Option<String>,
+            #[serde(default)]
+            distro: Option<DependencyProfileDistro>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DependencyProfileDistro {
+            #[serde(default)]
+            module_type: Option<String>,
+        }
+
+        ModulePathLayout::new(root)
+            .dependency_profile_candidates()
+            .into_iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .filter_map(|content| json5::from_str::<DependencyProfile>(&content).ok())
+            .find_map(|profile| {
+                profile
+                    .module
+                    .module_type
+                    .or_else(|| profile.module.distro.and_then(|distro| distro.module_type))
+                    .map(|module_type| OhosModuleType::from_type_str(&module_type))
+            })
     }
 
     fn direct_dependency_aliases(&self, package: &PackageSnapshot) -> Vec<String> {
@@ -284,6 +333,12 @@ mod tests {
             let root = self.root().join(relative);
             fs::create_dir_all(&root).expect("package root");
             fs::write(root.join("oh-package.json5"), manifest).expect("oh-package");
+        }
+
+        fn write_dependency_profile(&self, relative: &str, file_name: &str, profile: &str) {
+            let src_main = self.root().join(relative).join("src/main");
+            fs::create_dir_all(&src_main).expect("dependency src/main");
+            fs::write(src_main.join(file_name), profile).expect("dependency profile");
         }
 
         fn build_for(&self, host_module: &str) -> DependencyGraphSnapshot {
@@ -402,6 +457,66 @@ mod tests {
                 .map(|edge| edge.alias.as_str())
                 .collect::<Vec<_>>(),
             vec!["dep-b", "dep-a"]
+        );
+    }
+
+    #[test]
+    fn classifies_source_har_from_packaged_module_json() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "source-har": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/source-har",
+            r#"{ "name": "source-har", "version": "1.0.0" }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/source-har",
+            "module.json",
+            r#"{ "module": { "name": "sourcehar", "type": "har" } }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+
+        assert_eq!(
+            graph.nodes["source-har"].node_type,
+            DependencyNodeType::SourceHar
+        );
+    }
+
+    #[test]
+    fn classifies_legacy_har_from_distro_module_type() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "legacy-har": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/legacy-har",
+            r#"{ "name": "legacy-har", "version": "1.0.0" }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/legacy-har",
+            "config.json",
+            r#"{ "module": { "distro": { "moduleType": "har" } } }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+
+        assert_eq!(
+            graph.nodes["legacy-har"].node_type,
+            DependencyNodeType::SourceHar
         );
     }
 }

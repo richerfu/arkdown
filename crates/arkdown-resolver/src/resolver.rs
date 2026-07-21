@@ -407,7 +407,7 @@ impl OhosResolver {
                 })
                 .or_else(|| {
                     pkg.as_ref()
-                        .and_then(|p| p.main_field().map(str::to_string))
+                        .and_then(|p| p.hvigor_main_field().map(str::to_string))
                 })
                 .unwrap_or_else(|| "index".to_string())
         } else {
@@ -507,7 +507,12 @@ impl OhosResolver {
                 ResolveImportKind::Import => vec!["import".to_string()],
                 ResolveImportKind::Require => vec!["require".to_string()],
             },
-            main_fields: vec!["main".to_string(), "module".to_string()],
+            // hvigor-arkts-compose node-resolve `getMainFields()` prefers ESM
+            // package entries before the CommonJS fallback.
+            main_fields: ["module", "jsnext:main", "main"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             main_files: vec!["index".to_string()],
             modules,
             node_path: false,
@@ -995,6 +1000,46 @@ mod tests {
             } => {
                 assert_eq!(pkg_name, "mylib");
                 assert_eq!(pkg_version, "1.2.3");
+            }
+            _ => panic!("expected RemotePackage"),
+        }
+    }
+
+    #[test]
+    fn test_package_root_prefers_hvigor_esm_main_fields() {
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("oh_modules/dual-package");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{
+              "name": "dual-package",
+              "version": "1.0.0",
+              "module": "index.esm.js",
+              "main": "index.cjs.js"
+            }"#,
+        )
+        .unwrap();
+        let esm_entry = pkg_dir.join("index.esm.js");
+        fs::write(&esm_entry, "export const value = 1;").unwrap();
+        fs::write(
+            pkg_dir.join("index.cjs.js"),
+            "module.exports = { value: 1 };",
+        )
+        .unwrap();
+
+        let resolver = make_resolver(
+            dir.path().to_path_buf(),
+            vec![],
+            vec![],
+            pkg_index("dual-package", &pkg_dir, false),
+        );
+        let importer = dir.path().join("src/main.ets");
+        let result = resolver.resolve("dual-package", &importer).unwrap();
+
+        match result {
+            OhosResolvedModule::RemotePackage { path, .. } => {
+                assert_eq!(path, std::fs::canonicalize(&esm_entry).unwrap());
             }
             _ => panic!("expected RemotePackage"),
         }

@@ -13,7 +13,7 @@ impl<'a> StylesBodyLowerer<'a> {
     }
 
     pub(crate) fn statements<'b>(&self, allocator: &'b Allocator) -> OxcVec<'b, Statement<'b>> {
-        let mut statements = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
         let Some(body) = self.body else {
             return statements;
         };

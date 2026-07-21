@@ -302,6 +302,47 @@ struct Foo {
 }
 
 #[test]
+fn wrapped_builder_dispatch_binds_this_like_hvigor_transfer_builder_call() {
+    let source = r#"@Component
+struct Foo {
+  ctx: ESObject = {}
+
+  build() {
+    this.ctx.wrappedBuilder.builder(this.ctx)
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        out.contains("this.ctx.wrappedBuilder.builder.bind(this)(this.ctx);"),
+        "WrappedBuilder dispatch must match ets-loader transferBuilderCall; got:\n{out}"
+    );
+}
+
+#[test]
+fn create_builder_properties_follow_sdk_bind_object_metadata() {
+    let source = r#"@Component
+struct Foo {
+  @Builder Footer() {}
+
+  build() {
+    WaterFlow({ footer: this.Footer() }) {}
+  }
+}"#;
+    let out = parse_and_lower_with_visible_builder_methods(
+        source,
+        &FxHashSet::default(),
+        false,
+        &FxHashSet::from_iter(["Footer".to_string()]),
+        &FxHashSet::default(),
+    )
+    .unwrap();
+    assert!(
+        out.contains("WaterFlow.create({ footer: this.Footer.bind(this) });"),
+        "WaterFlow.create must consume SDK BIND_OBJECT_PROPERTY metadata; got:\n{out}"
+    );
+}
+
+#[test]
 fn lowers_single_leaf_component_with_string_arg() {
     let source = r#"@Component
 struct Foo {

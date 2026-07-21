@@ -43,17 +43,17 @@ arkdown-sign = { path = "crates/arkdown-sign" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
 
 # Parser — ohos-rs OXC fork with ArkTS/ArkUI support.
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e", features = ["full"] }
-oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
-oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "f2da22725d1c6508ad66fd5d60541bb3866a4a6e" }
+oxc = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd", features = ["full"] }
+oxc_allocator = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_ast = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_parser = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_semantic = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_span = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_ast_visit = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_syntax = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_transformer = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_codegen = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
+oxc_minifier = { git = "https://github.com/richerfu/oxc", rev = "5f2a398cf74e80b8c46bfc4a30d9123ab5d352cd" }
 oxc_resolver = "11.21.3"
 
 # Rolldown
@@ -91,7 +91,14 @@ serde_yaml = "0.9"
 json5 = "0.4"
 
 # HTTP client (OHPM registry integration)
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "charset",
+  "http2",
+  "json",
+  "rustls-tls-native-roots",
+  "system-proxy",
+] }
 # Tarball extraction (OHPM package download)
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"

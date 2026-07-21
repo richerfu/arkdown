@@ -42,6 +42,17 @@ impl<'a> ModulePathLayout<'a> {
         self.src_main().join("module.json5")
     }
 
+    /// Dependency profile candidates in the same precedence order used by
+    /// hvigor's `DependencyManager.getDependencyTypeByProfile`.
+    pub fn dependency_profile_candidates(&self) -> [PathBuf; 3] {
+        let src_main = self.src_main();
+        [
+            src_main.join("module.json5"),
+            src_main.join("module.json"),
+            src_main.join("config.json"),
+        ]
+    }
+
     pub fn oh_package_json5(&self) -> PathBuf {
         self.module_root.join("oh-package.json5")
     }

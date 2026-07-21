@@ -27,6 +27,7 @@ impl CustomComponentStatementEmitter {
         name: &str,
         arguments: &[Argument<'_>],
         component_info: Option<&CustomComponentInfo>,
+        builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
         reuse_id: Option<&Argument<'_>>,
         span: Span,
         chain_attrs: &[CommonAttribute<'_>],
@@ -35,8 +36,8 @@ impl CustomComponentStatementEmitter {
         context: &BuildContext,
     ) -> OxcVec<'a, Statement<'a>> {
         let ast = AstBuilder::new(allocator);
-        let mut statements = OxcVec::new_in(allocator);
-        let mut common_stmts = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
+        let mut common_stmts = OxcVec::new_in(&allocator);
         common_stmts.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_common,
@@ -46,7 +47,7 @@ impl CustomComponentStatementEmitter {
             .iter()
             .any(|attr| ComponentCallStatementEmitter::is_animation_attribute(&attr.name))
         {
-            let mut animation_segment = OxcVec::new_in(allocator);
+            let mut animation_segment = OxcVec::new_in(&allocator);
             for attr in chain_attrs {
                 if ComponentCallStatementEmitter::is_animation_attribute(&attr.name) {
                     ComponentCallStatementEmitter::push_animation_ref_segment(
@@ -101,6 +102,7 @@ impl CustomComponentStatementEmitter {
             name,
             arguments,
             component_info,
+            builder_param,
             reuse_id,
             span,
             source_metadata,
@@ -121,15 +123,16 @@ impl CustomComponentStatementEmitter {
         name: &str,
         arguments: &[Argument<'_>],
         component_info: Option<&CustomComponentInfo>,
+        builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
         reuse_id: Option<&Argument<'_>>,
         span: Span,
         source_metadata: &BuildSourceMetadata<'_>,
         context: &BuildContext,
     ) -> OxcVec<'a, Statement<'a>> {
-        let mut statements = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
         if component_info.is_some_and(|info| info.reusable) {
             let ast = AstBuilder::new(allocator);
-            let mut recycle_stmts = OxcVec::new_in(allocator);
+            let mut recycle_stmts = OxcVec::new_in(&allocator);
             recycle_stmts.push(ComponentCallStatementEmitter::empty(
                 ast,
                 &context.runtime_names().component_recycle,
@@ -149,6 +152,7 @@ impl CustomComponentStatementEmitter {
                 name,
                 arguments,
                 component_info,
+                builder_param,
                 reuse_id,
                 span,
                 source_metadata,
@@ -164,8 +168,13 @@ impl CustomComponentStatementEmitter {
 
         let (line, col) = source_metadata.source_position(span.start);
         let page = source_metadata.component_page_path();
-        let params =
-            CustomComponentParamExpressions::new(allocator, arguments, component_info, context);
+        let params = CustomComponentParamExpressions::new(
+            allocator,
+            arguments,
+            component_info,
+            builder_param,
+            context,
+        );
         statements.push(
             CustomComponentAstEmitter::new(allocator, name, &page, line, col, context)
                 .statement(params),
@@ -179,6 +188,7 @@ impl CustomComponentStatementEmitter {
         name: &str,
         arguments: &[Argument<'_>],
         component_info: Option<&CustomComponentInfo>,
+        builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
         reuse_id: Option<&Argument<'_>>,
         span: Span,
         source_metadata: &BuildSourceMetadata<'_>,
@@ -186,8 +196,13 @@ impl CustomComponentStatementEmitter {
     ) -> Statement<'a> {
         let (line, col) = source_metadata.source_position(span.start);
         let page = source_metadata.component_page_path();
-        let params =
-            CustomComponentParamExpressions::new(allocator, arguments, component_info, context);
+        let params = CustomComponentParamExpressions::new(
+            allocator,
+            arguments,
+            component_info,
+            builder_param,
+            context,
+        );
         let ast = AstBuilder::new(allocator);
         let reuse_id = reuse_id
             .and_then(|argument| argument.as_expression())
@@ -255,7 +270,7 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
         &self,
         params: CustomComponentParamExpressions<'a>,
     ) -> Expression<'a> {
-        let mut statements = OxcVec::new_in(self.allocator);
+        let mut statements = OxcVec::new_in(&self.allocator);
         statements.push(self.initial_render_if_statement(params));
         let body = self.ast.function_body(SPAN, self.ast.vec(), statements);
         self.ast.expression_arrow_function(
@@ -273,13 +288,13 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
         &self,
         params: CustomComponentParamExpressions<'a>,
     ) -> Statement<'a> {
-        let mut consequent = OxcVec::new_in(self.allocator);
+        let mut consequent = OxcVec::new_in(&self.allocator);
         consequent.push(self.component_call_declaration(params.constructor_arguments));
         consequent.push(self.viewpu_create_statement());
         consequent.push(self.params_lambda_declaration(params.lambda));
         consequent.push(self.params_generator_assignment());
 
-        let mut alternate = OxcVec::new_in(self.allocator);
+        let mut alternate = OxcVec::new_in(&self.allocator);
         alternate.push(self.update_state_vars_statement(params.update));
 
         self.ast.statement_if(
@@ -298,7 +313,7 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
         &self,
         constructor_arguments: OxcVec<'a, Argument<'a>>,
     ) -> Statement<'a> {
-        let mut arguments = OxcVec::new_in(self.allocator);
+        let mut arguments = OxcVec::new_in(&self.allocator);
         arguments.push(Argument::from(self.view_context_expression()));
         arguments.extend(constructor_arguments);
         arguments.push(Argument::from(self.ast.expression_identifier(
@@ -336,7 +351,7 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
     }
 
     fn params_lambda_declaration(&self, lambda: Expression<'a>) -> Statement<'a> {
-        let mut statements = OxcVec::new_in(self.allocator);
+        let mut statements = OxcVec::new_in(&self.allocator);
         statements.push(self.ast.statement_return(SPAN, Some(lambda)));
         let body = self.ast.function_body(SPAN, self.ast.vec(), statements);
         let arrow = self.ast.expression_arrow_function(
@@ -628,7 +643,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
         params: CustomComponentParamExpressions<'a>,
         reuse_id: Expression<'a>,
     ) -> Expression<'a> {
-        let mut statements = OxcVec::new_in(self.allocator);
+        let mut statements = OxcVec::new_in(&self.allocator);
         statements.push(self.static_call_statement(
             &self.context.runtime_names().view_stack_processor,
             &self.context.runtime_names().start_get_access_recording_for,
@@ -662,13 +677,13 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
     ) -> Statement<'a> {
         let lambda_for_recycle = params.lambda.clone_in(self.allocator);
         let lambda_for_generator = params.lambda;
-        let mut consequent = OxcVec::new_in(self.allocator);
+        let mut consequent = OxcVec::new_in(&self.allocator);
         consequent.push(self.component_call_declaration(params.constructor_arguments));
         consequent.push(self.viewpu_create_recycle_statement(lambda_for_recycle, reuse_id));
         consequent.push(self.params_lambda_declaration(lambda_for_generator));
         consequent.push(self.params_generator_assignment());
 
-        let mut alternate = OxcVec::new_in(self.allocator);
+        let mut alternate = OxcVec::new_in(&self.allocator);
         alternate.push(self.update_state_vars_statement(params.update));
 
         self.ast.statement_if(
@@ -687,7 +702,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
         &self,
         constructor_arguments: OxcVec<'a, Argument<'a>>,
     ) -> Statement<'a> {
-        let mut arguments = OxcVec::new_in(self.allocator);
+        let mut arguments = OxcVec::new_in(&self.allocator);
         arguments.push(Argument::from(self.view_context_expression()));
         arguments.extend(constructor_arguments);
         arguments.push(Argument::from(self.ast.expression_identifier(
@@ -743,7 +758,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
     }
 
     fn recycle_callback(&self, lambda: Expression<'a>) -> Expression<'a> {
-        let mut internal_consequent = OxcVec::new_in(self.allocator);
+        let mut internal_consequent = OxcVec::new_in(&self.allocator);
         internal_consequent.push(self.member_call_statement(
             self.ast.expression_identifier(
                 SPAN,
@@ -753,7 +768,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
             self.ast.vec(),
         ));
 
-        let mut about_to_reuse_consequent = OxcVec::new_in(self.allocator);
+        let mut about_to_reuse_consequent = OxcVec::new_in(&self.allocator);
         about_to_reuse_consequent.push(self.member_call_statement(
             self.ast.expression_identifier(
                 SPAN,
@@ -763,7 +778,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
             self.ast.vec1(Argument::from(lambda)),
         ));
 
-        let mut alternate = OxcVec::new_in(self.allocator);
+        let mut alternate = OxcVec::new_in(&self.allocator);
         alternate.push(self.ast.statement_if(
             SPAN,
             self.method_function_test(&self.context.runtime_names().about_to_reuse),
@@ -779,7 +794,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
             self.ast.vec(),
         ));
 
-        let mut statements = OxcVec::new_in(self.allocator);
+        let mut statements = OxcVec::new_in(&self.allocator);
         statements.push(self.ast.statement_if(
             SPAN,
             self.method_function_test(&self.context.runtime_names().about_to_reuse_internal),
@@ -843,7 +858,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
     }
 
     fn params_lambda_declaration(&self, lambda: Expression<'a>) -> Statement<'a> {
-        let mut statements = OxcVec::new_in(self.allocator);
+        let mut statements = OxcVec::new_in(&self.allocator);
         statements.push(self.ast.statement_return(SPAN, Some(lambda)));
         let arrow = self.ast.expression_arrow_function(
             SPAN,
@@ -1133,16 +1148,49 @@ impl<'a> CustomComponentParamExpressions<'a> {
         allocator: &'a Allocator,
         arguments: &[Argument<'_>],
         component_info: Option<&CustomComponentInfo>,
+        builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
         context: &BuildContext,
     ) -> Self {
         let ast = AstBuilder::new(allocator);
-        let empty_object = || ast.expression_object(SPAN, ast.vec());
+        let builder_param = builder_param.map(|(name, statements)| {
+            let body = ast.function_body(SPAN, ast.vec(), statements);
+            let expression = ast.expression_arrow_function(
+                SPAN,
+                false,
+                false,
+                NONE,
+                ast.formal_parameters(
+                    SPAN,
+                    oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
+                    ast.vec(),
+                    NONE,
+                ),
+                NONE,
+                body,
+            );
+            (name, expression)
+        });
+        let object_emitter = CustomComponentObjectEmitter::new(allocator);
         let Some(Argument::ObjectExpression(object)) = arguments.first() else {
             if arguments.is_empty() {
                 return Self {
-                    constructor_arguments: ast.vec1(Argument::from(empty_object())),
-                    lambda: empty_object(),
-                    update: empty_object(),
+                    constructor_arguments: ast.vec1(Argument::from(
+                        object_emitter.empty_expression(
+                            builder_param.as_ref().map(|(name, value)| (*name, value)),
+                            component_info,
+                            ParamMode::Ctor,
+                        ),
+                    )),
+                    lambda: object_emitter.empty_expression(
+                        builder_param.as_ref().map(|(name, value)| (*name, value)),
+                        component_info,
+                        ParamMode::Lambda,
+                    ),
+                    update: object_emitter.empty_expression(
+                        builder_param.as_ref().map(|(name, value)| (*name, value)),
+                        component_info,
+                        ParamMode::Update,
+                    ),
                 };
             }
 
@@ -1155,20 +1203,32 @@ impl<'a> CustomComponentParamExpressions<'a> {
             return Self {
                 constructor_arguments,
                 lambda,
-                update: empty_object(),
+                update: ast.expression_object(SPAN, ast.vec()),
             };
         };
 
-        let object_emitter = CustomComponentObjectEmitter::new(allocator);
         Self {
             constructor_arguments: ast.vec1(Argument::from(object_emitter.expression(
                 object,
                 component_info,
                 ParamMode::Ctor,
+                builder_param.as_ref().map(|(name, value)| (*name, value)),
                 context,
             ))),
-            lambda: object_emitter.expression(object, component_info, ParamMode::Lambda, context),
-            update: object_emitter.expression(object, component_info, ParamMode::Update, context),
+            lambda: object_emitter.expression(
+                object,
+                component_info,
+                ParamMode::Lambda,
+                builder_param.as_ref().map(|(name, value)| (*name, value)),
+                context,
+            ),
+            update: object_emitter.expression(
+                object,
+                component_info,
+                ParamMode::Update,
+                builder_param.as_ref().map(|(name, value)| (*name, value)),
+                context,
+            ),
         }
     }
 
@@ -1177,7 +1237,7 @@ impl<'a> CustomComponentParamExpressions<'a> {
         arguments: &[Argument<'_>],
     ) -> Expression<'a> {
         let ast = AstBuilder::new(allocator);
-        let mut expressions = OxcVec::new_in(allocator);
+        let mut expressions = OxcVec::new_in(&allocator);
         for argument in arguments {
             match argument {
                 Argument::SpreadElement(spread) => {
@@ -1223,10 +1283,52 @@ impl<'a> CustomComponentObjectEmitter<'a> {
         object: &ObjectExpression<'_>,
         component_info: Option<&CustomComponentInfo>,
         mode: ParamMode,
+        builder_param: Option<(&str, &Expression<'a>)>,
         context: &BuildContext,
     ) -> Expression<'a> {
-        let properties = self.properties(object, component_info, mode, context);
+        let mut properties = self.properties(object, component_info, mode, context);
+        self.push_builder_param(&mut properties, builder_param, component_info, mode);
         self.ast.expression_object(SPAN, properties)
+    }
+
+    fn empty_expression(
+        &self,
+        builder_param: Option<(&str, &Expression<'a>)>,
+        component_info: Option<&CustomComponentInfo>,
+        mode: ParamMode,
+    ) -> Expression<'a> {
+        let mut properties = OxcVec::new_in(&self.allocator);
+        self.push_builder_param(&mut properties, builder_param, component_info, mode);
+        self.ast.expression_object(SPAN, properties)
+    }
+
+    fn push_builder_param(
+        &self,
+        properties: &mut OxcVec<'a, ObjectPropertyKind<'a>>,
+        builder_param: Option<(&str, &Expression<'a>)>,
+        component_info: Option<&CustomComponentInfo>,
+        mode: ParamMode,
+    ) {
+        let Some((name, value)) = builder_param else {
+            return;
+        };
+        if mode == ParamMode::Update
+            && !component_info.is_some_and(|info| info.update_props.contains(name))
+        {
+            return;
+        }
+        properties.push(
+            self.ast.object_property_kind_object_property(
+                SPAN,
+                PropertyKind::Init,
+                self.ast
+                    .property_key_static_identifier(SPAN, self.ast.str(name)),
+                value.clone_in(self.allocator),
+                false,
+                false,
+                false,
+            ),
+        );
     }
 
     fn properties(
@@ -1236,7 +1338,7 @@ impl<'a> CustomComponentObjectEmitter<'a> {
         mode: ParamMode,
         context: &BuildContext,
     ) -> OxcVec<'a, ObjectPropertyKind<'a>> {
-        let mut properties = OxcVec::new_in(self.allocator);
+        let mut properties = OxcVec::new_in(&self.allocator);
         for property in &object.properties {
             if let Some(property) = self.property(property, component_info, mode, context) {
                 properties.push(property);

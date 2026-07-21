@@ -164,6 +164,7 @@ impl HvigorReleaseMinifier {
         MangleOptions {
             top_level: Some(true),
             keep_names: MangleOptionsKeepNames::all_false(),
+            reserved: Default::default(),
             debug: false,
         }
     }

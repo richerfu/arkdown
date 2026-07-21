@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct HvigorSourceFileFilter<'a> {
     path: &'a Path,
@@ -52,6 +52,25 @@ impl<'a> SourceFileName<'a> {
             .map(|extension| extension.eq_ignore_ascii_case("d"))
             .unwrap_or(false)
     }
+
+    /// Runtime JavaScript files that can be paired with this declaration.
+    ///
+    /// For example, `index.d.ts` describes `index.js`, `index.mjs`, or
+    /// `index.cjs`. Keeping this path derivation here avoids scattering
+    /// declaration suffix manipulation across resolvers and transforms.
+    pub fn declaration_runtime_candidates(&self) -> Option<[PathBuf; 3]> {
+        if !self.is_declaration() {
+            return None;
+        }
+        let declaration_stem = self.path.file_stem()?;
+        let runtime_stem = Path::new(declaration_stem).file_stem()?;
+        let base = self.path.with_file_name(runtime_stem);
+        Some([
+            base.with_extension("js"),
+            base.with_extension("mjs"),
+            base.with_extension("cjs"),
+        ])
+    }
 }
 
 #[cfg(test)]
@@ -76,5 +95,20 @@ mod tests {
             "oh_modules/.ohpm/pkg/oh_modules/pkg/src/main/ets/Index.ets"
         ))
         .is_ignored_macos_metadata());
+    }
+
+    #[test]
+    fn declaration_runtime_candidates_are_path_based() {
+        assert_eq!(
+            SourceFileName::new(Path::new("pkg/src/index.d.ts")).declaration_runtime_candidates(),
+            Some([
+                PathBuf::from("pkg/src/index.js"),
+                PathBuf::from("pkg/src/index.mjs"),
+                PathBuf::from("pkg/src/index.cjs"),
+            ])
+        );
+        assert!(SourceFileName::new(Path::new("pkg/src/index.ts"))
+            .declaration_runtime_candidates()
+            .is_none());
     }
 }

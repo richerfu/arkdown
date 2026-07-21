@@ -42,7 +42,7 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
         builder_methods: &FxHashSet<String>,
         context: &BuildContext,
     ) -> Result<Statement<'c>, BuildLoweringError> {
-        let mut statements = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
         statements.push(IterationAstStatement::static_call(
             ast,
             allocator,
@@ -62,7 +62,7 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
             has_animation |= ComponentCallStatementEmitter::is_animation_attribute(&name);
         }
         if has_animation {
-            let mut animation_segment = OxcVec::new_in(allocator);
+            let mut animation_segment = OxcVec::new_in(&allocator);
             for chain in &self.component.chain_expressions {
                 let name = ArkuiCallName::chain(chain)?;
                 if ComponentCallStatementEmitter::is_animation_attribute(&name) {
@@ -194,7 +194,7 @@ impl IterationFormalParameters {
         index: Option<&FormalParameter<'_>>,
         item_binding_name: &str,
     ) -> FormalParameters<'a> {
-        let mut items = OxcVec::new_in(allocator);
+        let mut items = OxcVec::new_in(&allocator);
         if item.is_some() {
             items.push(Self::for_each_item_parameter(ast, item_binding_name));
             if let Some(index) = index {
@@ -302,7 +302,7 @@ impl IterationAstStatement {
         allocator: &'a Allocator,
         context: &BuildContext,
     ) -> Statement<'a> {
-        let mut statements = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
         statements.push(Self::static_call(
             ast,
             allocator,
@@ -511,7 +511,7 @@ impl<'a, 'ctx> ForEachUpdateEmitter<'a, 'ctx> {
         item_gen_uses_index: bool,
         key: Option<ForEachKeyExpression<'a>>,
     ) -> OxcVec<'a, Argument<'a>> {
-        let mut arguments = OxcVec::new_in(self.allocator);
+        let mut arguments = OxcVec::new_in(&self.allocator);
         arguments.push(Argument::from(self.ast.expression_identifier(
             SPAN,
             self.ast.str(&self.context.runtime_names().elmt_id),
@@ -578,7 +578,7 @@ impl<'a, 'ctx> LazyForEachCreateEmitter<'a, 'ctx> {
     }
 
     fn arguments(&self, data: Expression<'a>, has_id_func: bool) -> OxcVec<'a, Argument<'a>> {
-        let mut arguments = OxcVec::new_in(self.allocator);
+        let mut arguments = OxcVec::new_in(&self.allocator);
         arguments.push(Argument::from(
             self.ast.expression_string_literal(
                 SPAN,

@@ -76,8 +76,8 @@ impl KitImportRewriter {
 
         let ast = AstBuilder::new(allocator);
         let mut changed = false;
-        let mut body = OxcVec::new_in(allocator);
-        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(allocator));
+        let mut body = OxcVec::new_in(&allocator);
+        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(&allocator));
         for (statement, replacement_plan) in old_body.into_iter().zip(replacement_plans) {
             if let Some(imports) = replacement_plan {
                 changed = true;

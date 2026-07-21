@@ -51,6 +51,7 @@
     "build:debug": "napi build --platform",
     "test": "node --test",
     "smoke": "node -e \"const arkdown = require('./index.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node bin/arkdown.js --help",
+    "publish:local": "bash scripts/publish-local.sh",
     "format": "prettier . -w",
     "format:rs": "cargo fmt",
     "prepublishOnly": "napi prepublish -t npm",
