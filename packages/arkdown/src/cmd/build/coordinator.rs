@@ -295,40 +295,67 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
 
   fn build(&self) -> Result<TransformSourceSnapshot> {
     let mut files = FxHashMap::default();
+    let mut runtime_source_paths = FxHashSet::default();
     let mut collected_roots = FxHashSet::default();
     for (_, module_root) in self.module_roots {
       self.collect_source_root(
         &ModuleSourceLayout::new(module_root).ets(),
         &mut files,
+        &mut runtime_source_paths,
         &mut collected_roots,
       )?;
     }
     for root in self.dependency_source_roots {
-      self.collect_source_root(root, &mut files, &mut collected_roots)?;
+      self.collect_source_root(
+        root,
+        &mut files,
+        &mut runtime_source_paths,
+        &mut collected_roots,
+      )?;
     }
     for root in self.native_declaration_roots {
-      self.collect_declaration_root(root, &mut files, &mut collected_roots)?;
+      self.collect_declaration_root(
+        root,
+        &mut files,
+        &mut runtime_source_paths,
+        &mut collected_roots,
+      )?;
     }
     for (base_root, target_root) in self.source_set_overlays {
-      self.collect_source_root(base_root, &mut files, &mut collected_roots)?;
-      self.collect_source_root(target_root, &mut files, &mut collected_roots)?;
+      self.collect_source_root(
+        base_root,
+        &mut files,
+        &mut runtime_source_paths,
+        &mut collected_roots,
+      )?;
+      self.collect_source_root(
+        target_root,
+        &mut files,
+        &mut runtime_source_paths,
+        &mut collected_roots,
+      )?;
     }
     let resolved_static_modules = self.collect_resolved_static_modules();
-    Ok(TransformSourceSnapshot::with_resolved_static_modules(
-      files,
-      resolved_static_modules,
-    ))
+    Ok(
+      TransformSourceSnapshot::with_resolved_static_modules_and_runtime_sources(
+        files,
+        resolved_static_modules,
+        runtime_source_paths,
+      ),
+    )
   }
 
   fn collect_source_root(
     &self,
     root: &Path,
     files: &mut FxHashMap<PathBuf, Arc<str>>,
+    runtime_source_paths: &mut FxHashSet<PathBuf>,
     collected_roots: &mut FxHashSet<PathBuf>,
   ) -> Result<()> {
     self.collect_root(
       root,
       files,
+      runtime_source_paths,
       collected_roots,
       SourceRootMode::TransformAndDeclarations,
     )
@@ -338,11 +365,13 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
     &self,
     root: &Path,
     files: &mut FxHashMap<PathBuf, Arc<str>>,
+    runtime_source_paths: &mut FxHashSet<PathBuf>,
     collected_roots: &mut FxHashSet<PathBuf>,
   ) -> Result<()> {
     self.collect_root(
       root,
       files,
+      runtime_source_paths,
       collected_roots,
       SourceRootMode::DeclarationsOnly,
     )
@@ -352,6 +381,7 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
     &self,
     root: &Path,
     files: &mut FxHashMap<PathBuf, Arc<str>>,
+    runtime_source_paths: &mut FxHashSet<PathBuf>,
     collected_roots: &mut FxHashSet<PathBuf>,
     mode: SourceRootMode,
   ) -> Result<()> {
@@ -373,6 +403,9 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
         continue;
       }
       let kind = SourceClassifier::classify_path(entry.path());
+      if matches!(mode, SourceRootMode::TransformAndDeclarations) && kind.is_javascript_runtime() {
+        runtime_source_paths.insert(canonicalize_or_owned(entry.path()));
+      }
       let accepts = match mode {
         SourceRootMode::TransformAndDeclarations => {
           kind.is_ets_transform_input() || kind.is_declaration()

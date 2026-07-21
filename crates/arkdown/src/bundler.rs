@@ -55,7 +55,7 @@ use crate::diagnostics::RolldownBuildDiagnostics;
 use crate::manual_chunks::{ChunkName, ManualChunkPolicy};
 use crate::output;
 use crate::plan::{BundlePlan, BundleRuntimePackageContext, BundleRuntimePackageInfo};
-use crate::plugins::ets_transform::EtsTransformModuleSourceMaps;
+use crate::plugins::ets_transform::EtsTransformModuleMetadata;
 use crate::plugins::module_meta::ModuleMetaPlugin;
 
 /// The top-level bundler for one OHOS module build.
@@ -123,11 +123,11 @@ impl Bundler {
         let input_plan = RolldownInputPlan::from_bundle_plan(plan);
 
         // ── 2. Pass plugins directly to rolldown ─────────────────────────────
-        let source_map_store = HvigorModuleSourceMapStore::default();
+        let transform_store = HvigorModuleTransformStore::default();
         let mut rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
-        let source_collector = Arc::new(HvigorModuleTransformCollector::new(
-            source_map_store.clone(),
-        )) as SharedPluginable;
+        let source_collector =
+            Arc::new(HvigorModuleTransformCollector::new(transform_store.clone()))
+                as SharedPluginable;
         let source_collector_index = rd_plugins
             .iter()
             .position(|plugin| plugin.call_name().as_ref() == "ets-transform")
@@ -239,7 +239,7 @@ impl Bundler {
         let module_source_start = Instant::now();
         let mut module_source_state = HvigorModuleSourceState::from_rolldown_scan(
             module_source_scan,
-            source_map_store.finish(),
+            transform_store.finish(),
         );
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump_with(
@@ -571,23 +571,43 @@ impl<'a> HvigorNormalizedOhmUrl<'a> {
 }
 
 #[derive(Debug, Clone, Default)]
-struct HvigorModuleSourceMapStore {
+struct HvigorModuleTransformStore {
     source_maps: Arc<FxDashMap<String, Arc<str>>>,
+    javascript_module_ids: Arc<FxDashMap<String, ()>>,
 }
 
-impl HvigorModuleSourceMapStore {
-    fn record(&self, module_id: String, source_map: Arc<str>) {
-        self.source_maps.insert(module_id, source_map);
+impl HvigorModuleTransformStore {
+    fn record(&self, module_id: String, source_map: Option<Arc<str>>, emits_javascript: bool) {
+        if let Some(source_map) = source_map {
+            self.source_maps.insert(module_id.clone(), source_map);
+        }
+        if emits_javascript {
+            self.javascript_module_ids.insert(module_id, ());
+        }
     }
 
-    fn finish(&self) -> FxHashMap<String, Arc<str>> {
+    fn finish(&self) -> HvigorModuleTransformSnapshot {
         let mut source_maps = FxHashMap::default();
         for item in self.source_maps.iter() {
             source_maps.insert(item.key().clone(), Arc::clone(item.value()));
         }
         self.source_maps.clear();
-        source_maps
+        let javascript_module_ids = self
+            .javascript_module_ids
+            .iter()
+            .map(|item| item.key().clone())
+            .collect();
+        self.javascript_module_ids.clear();
+        HvigorModuleTransformSnapshot {
+            source_maps,
+            javascript_module_ids,
+        }
     }
+}
+
+struct HvigorModuleTransformSnapshot {
+    source_maps: FxHashMap<String, Arc<str>>,
+    javascript_module_ids: FxHashSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -599,15 +619,17 @@ struct HvigorModuleSourceState {
     module_ids: Vec<String>,
     seen_module_ids: FxHashSet<String>,
     full_module_is_commonjs: FxHashMap<String, bool>,
+    javascript_module_ids: FxHashSet<String>,
 }
 
 impl HvigorModuleSourceState {
     fn from_rolldown_scan(
         scan: ModuleSourceScanOutput,
-        source_maps: FxHashMap<String, Arc<str>>,
+        transform: HvigorModuleTransformSnapshot,
     ) -> Self {
         let mut state = Self {
-            source_maps,
+            source_maps: transform.source_maps,
+            javascript_module_ids: transform.javascript_module_ids,
             ..Self::default()
         };
         for module in scan.modules {
@@ -764,11 +786,11 @@ impl HvigorSourceSpan {
 
 #[derive(Debug)]
 struct HvigorModuleTransformCollector {
-    store: HvigorModuleSourceMapStore,
+    store: HvigorModuleTransformStore,
 }
 
 impl HvigorModuleTransformCollector {
-    fn new(store: HvigorModuleSourceMapStore) -> Self {
+    fn new(store: HvigorModuleTransformStore) -> Self {
         Self { store }
     }
 }
@@ -789,13 +811,13 @@ impl Plugin for HvigorModuleTransformCollector {
     ) -> impl Future<Output = HookTransformReturn> + Send {
         let store = self.store.clone();
         let module_id = args.id.to_string();
-        let source_map = ctx
+        let metadata = ctx
             .meta()
-            .get::<EtsTransformModuleSourceMaps>()
-            .and_then(|source_maps| source_maps.take(&module_id));
+            .get::<EtsTransformModuleMetadata>()
+            .and_then(|metadata| metadata.take(&module_id));
         async move {
-            if let Some(source_map) = source_map {
-                store.record(module_id, source_map);
+            if let Some(metadata) = metadata {
+                store.record(module_id, metadata.source_map, metadata.emits_javascript);
             }
             Ok(None)
         }
@@ -970,6 +992,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             &imports,
         )
         .rewrite();
+        let emits_javascript = self.state.javascript_module_ids.contains(module_id);
         let path = HvigorModuleSourceOutputPath::new(
             &self.output_dir,
             self.project_root,
@@ -977,6 +1000,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             &ownership.module_name,
             &ownership.source_file,
             module_id,
+            emits_javascript,
         )
         .path()?;
         if let Some(parent) = path.parent() {
@@ -1667,6 +1691,7 @@ struct HvigorModuleSourceOutputPath<'a> {
     module_name: &'a str,
     source_file: &'a str,
     module_id: &'a str,
+    emits_javascript: bool,
 }
 
 impl<'a> HvigorModuleSourceOutputPath<'a> {
@@ -1677,6 +1702,7 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
         module_name: &'a str,
         source_file: &'a str,
         module_id: &'a str,
+        emits_javascript: bool,
     ) -> Self {
         Self {
             output_dir,
@@ -1685,13 +1711,15 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
             module_name,
             source_file,
             module_id,
+            emits_javascript,
         }
     }
 
     fn path(&self) -> Result<PathBuf, ArkdownError> {
         Ok(self.output_dir.join(match &self.ownership.kind {
             HvigorChunkSourceKind::SourceModule => Path::new(self.module_name).join(
-                HvigorModuleSourceFileAttribution::project_source_file_for(self.source_file),
+                HvigorModuleSourceFileAttribution::project_source_file_for(self.source_file)
+                    .with_extension(self.output_extension()),
             ),
             HvigorChunkSourceKind::LocalDependencyModule(_) => {
                 self.local_dependency_cache_source_file()
@@ -1719,6 +1747,9 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
     }
 
     fn output_extension(&self) -> &'static str {
+        if self.emits_javascript {
+            return "js";
+        }
         match Path::new(self.module_id)
             .extension()
             .and_then(|extension| extension.to_str())
@@ -5303,6 +5334,32 @@ export { ASYNC_OR_SYNC_MODE, INNER_SCOPE, KEY_SCOPE };"#
     }
 
     #[test]
+    fn module_source_output_path_uses_transform_language_metadata() {
+        let ownership = HvigorChunkSource::source_module(
+            "entry".to_string(),
+            "entry".to_string(),
+            String::new(),
+            "ets/Zip.ts".to_string(),
+        );
+        let output = HvigorModuleSourceOutputPath::new(
+            Path::new("/workspace/cache"),
+            Path::new("/workspace"),
+            &ownership,
+            "entry",
+            "ets/Zip.ts",
+            "/workspace/entry/src/main/ets/Zip.ts",
+            true,
+        )
+        .path()
+        .expect("output path");
+
+        assert_eq!(
+            output,
+            Path::new("/workspace/cache/entry/src/main/ets/Zip.js")
+        );
+    }
+
+    #[test]
     fn module_source_state_consumes_rolldown_compact_scan_facts() {
         let importer = "/workspace/oh_modules/@example/passport/RSAEncryptionUtils.ets";
         let resolved = "/workspace/oh_modules/@ohos/hypium/index.js";
@@ -5357,7 +5414,10 @@ const dynamicHar = import("bytecode-har-dep");"#
                     },
                 ],
             },
-            source_maps,
+            HvigorModuleTransformSnapshot {
+                source_maps,
+                javascript_module_ids: FxHashSet::from_iter([importer.to_string()]),
+            },
         );
         assert_eq!(
             state
@@ -5393,6 +5453,7 @@ const dynamicHar = import("bytecode-har-dep");"#
         assert!(state
             .source_maps
             .contains_key("/workspace/oh_modules/@example/passport/RSAEncryptionUtils.ets"));
+        assert!(state.javascript_module_ids.contains(importer));
         assert_eq!(
             state
                 .resolved_import_records

@@ -559,7 +559,7 @@ impl<'a> CoverageInstrumenter<'a> {
       .visit_program(&mut parsed.program);
 
     let ast = AstBuilder::new(&allocator);
-    let mut body = OxcVec::new_in(&allocator);
+    let mut body = OxcVec::new_in(&&allocator);
     body.extend(BjcCovRuntimeEmitter::new(&allocator).statements());
     body.extend(
       CoveragePreludeEmitter::new(
@@ -569,7 +569,7 @@ impl<'a> CoverageInstrumenter<'a> {
       )
       .statements(ast, &functions),
     );
-    body.extend(parsed.program.body.take_in(ast));
+    body.extend(parsed.program.body.take_in(&ast));
     parsed.program.body = body;
 
     Ok(Codegen::new().build(&parsed.program).code)
@@ -1185,7 +1185,7 @@ impl<'a> CoverageAstInstrumenter<'a> {
   }
 
   fn prepend_statement(&self, body: &mut OxcVec<'a, Statement<'a>>, statement: Statement<'a>) {
-    let old_body = body.take_in(self.ast);
+    let old_body = body.take_in(&self.ast);
     body.push(statement);
     body.extend(old_body);
   }
@@ -1195,7 +1195,7 @@ impl<'a> CoverageAstInstrumenter<'a> {
     body: &mut OxcVec<'a, Statement<'a>>,
     statements: [Statement<'a>; N],
   ) {
-    let old_body = body.take_in(self.ast);
+    let old_body = body.take_in(&self.ast);
     body.extend(self.ast.vec_from_iter(statements));
     body.extend(old_body);
   }
@@ -1404,7 +1404,7 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
       walk_mut::walk_conditional_expression(self, expression);
       return;
     };
-    let consequent = expression.consequent.take_in(self.ast);
+    let consequent = expression.consequent.take_in(&self.ast);
     expression.consequent = self.ast.expression_parenthesized(
       SPAN,
       self.ast.expression_sequence(
@@ -1417,7 +1417,7 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
         ]),
       ),
     );
-    let alternate = expression.alternate.take_in(self.ast);
+    let alternate = expression.alternate.take_in(&self.ast);
     expression.alternate = self.ast.expression_parenthesized(
       SPAN,
       self.ast.expression_sequence(

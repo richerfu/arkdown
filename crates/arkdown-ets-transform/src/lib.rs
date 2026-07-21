@@ -45,5 +45,6 @@ pub use rolldown_plan::{
 pub use source::{SourceClassifier, TransformResolvedStaticModule, TransformSourceSnapshot};
 pub use sys_resource::SystemResourceReferenceLoader;
 pub use transform::{ArktsTransformer, ArkuiComponentNameCollector, CheckerMode};
+pub use typescript_emit::TypeScriptDirectiveFlags;
 
 pub(crate) use module_name::ModuleExportNameText;

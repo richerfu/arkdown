@@ -165,22 +165,16 @@ export namespace FontRegister {
 }
 
 #[test]
-fn test_strips_arkui_decorators_from_regular_class() {
+fn test_preserves_arkui_decorators_on_regular_class_like_hvigor() {
     let src = "@Observed\nexport class UserModel {\n  @Trace name: string = 'guest';\n}";
     let result =
         TransformHarness::transform(&make_source("entry/src/main/ets/model/UserModel.ets", src))
             .expect("regular observed class must transform");
 
     assert!(result.contains("export class UserModel"));
-    assert!(result.contains("name: string = \"guest\";"));
-    assert!(
-        !result.contains("@Observed"),
-        "@Observed must be consumed before ABC:\n{result}"
-    );
-    assert!(
-        !result.contains("@Trace"),
-        "@Trace must be consumed before ABC:\n{result}"
-    );
+    assert!(result.contains("name: string"));
+    assert!(result.contains("@Observed"), "{result}");
+    assert!(result.contains("@Trace"), "{result}");
 
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
@@ -191,50 +185,38 @@ fn test_strips_arkui_decorators_from_regular_class() {
     .parse();
     assert!(
         parsed.diagnostics.is_empty(),
-        "decorator-stripped class must be standard TypeScript: {:?}\n{}",
+        "hvigor-compatible decorated class must remain valid ArkTS: {:?}\n{}",
         parsed.diagnostics,
         result
     );
 }
 
 #[test]
-fn test_observed_v2_class_uses_specialized_decorator_lowering() {
+fn test_preserves_observed_v2_and_trace_like_hvigor() {
     let src = "@ObservedV2\nexport class Counter {\n  @Trace count: number = 0;\n}";
     let result =
         TransformHarness::transform(&make_source("entry/src/main/ets/model/Counter.ets", src))
             .expect("ObservedV2 class must use the dedicated lowerer");
 
     assert!(result.contains("export class Counter"));
-    assert!(
-        !result.contains("@ObservedV2"),
-        "@ObservedV2 must be consumed before ABC:\n{result}"
-    );
-    assert!(
-        !result.contains("@Trace"),
-        "@Trace must be rewritten by the ObservedV2 lowerer:\n{result}"
-    );
-    assert!(
-        result.contains("@Track"),
-        "@ObservedV2 fields must keep the runtime @Track decorator:\n{result}"
-    );
+    assert!(result.contains("@ObservedV2"), "{result}");
+    assert!(result.contains("@Trace"), "{result}");
+    assert!(!result.contains("@Track"), "{result}");
 }
 
 #[test]
-fn test_strips_track_from_oh_modules_non_observed_v2_class() {
+fn test_preserves_track_from_oh_modules_regular_class_like_hvigor() {
     let src = "export class KNBWebViewStateTracker {\n  @Track showErrorView: boolean = false;\n  @Track backgroundColor?: string;\n}";
     let result = TransformHarness::transform(&make_source(
         "oh_modules/@knb/core/src/main/ets/runtime/KNBWebViewStateTracker.ets",
         src,
     ))
-    .expect("oh_modules @Track checker diagnostics are demoted but syntax must be consumed");
+    .expect("oh_modules @Track checker diagnostics are demoted and syntax is preserved");
 
     assert!(result.contains("export class KNBWebViewStateTracker"));
     assert!(result.contains("showErrorView: boolean = false;"));
     assert!(result.contains("backgroundColor?: string;"));
-    assert!(
-        !result.contains("@Track"),
-        "non-ObservedV2 @Track must not leak into runtime output:\n{result}"
-    );
+    assert!(result.contains("@Track"), "{result}");
 
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
@@ -245,32 +227,27 @@ fn test_strips_track_from_oh_modules_non_observed_v2_class() {
     .parse();
     assert!(
         parsed.diagnostics.is_empty(),
-        "non-ObservedV2 @Track output must be standard TypeScript: {:?}\n{}",
+        "non-ObservedV2 @Track output must remain valid ArkTS: {:?}\n{}",
         parsed.diagnostics,
         result
     );
 }
 
 #[test]
-fn test_lowers_custom_decorator_from_regular_class() {
+fn test_preserves_custom_decorators_on_regular_class_like_hvigor() {
     let src = "@RegisterClass(KEY)\nexport class Model {\n  @memo value: string = 'guest';\n}";
     let result =
         TransformHarness::transform(&make_source("entry/src/main/ets/model/Model.ets", src))
             .expect("regular decorated class must transform");
 
-    assert!(result.contains("export class Model"));
+    let decorator = result.find("@RegisterClass(KEY)").expect("class decorator");
+    let export = result.find("export class Model").expect("exported class");
     assert!(
-        result.contains("Model = RegisterClass(KEY)(Model) || Model;"),
-        "custom class decorator must lower to a runtime class decoration call:\n{result}"
+        decorator < export,
+        "hvigor keeps ArkTS class decorators before the export keyword:\n{result}"
     );
-    assert!(
-        !result.contains("@RegisterClass"),
-        "class decorator syntax must be consumed before ABC:\n{result}"
-    );
-    assert!(
-        !result.contains("@memo"),
-        "class member decorator must be consumed before ABC:\n{result}"
-    );
+    assert!(result.contains("@memo"), "{result}");
+    assert!(!result.contains("Model = RegisterClass"), "{result}");
 
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
@@ -281,14 +258,14 @@ fn test_lowers_custom_decorator_from_regular_class() {
     .parse();
     assert!(
         parsed.diagnostics.is_empty(),
-        "decorator-stripped class must be standard TypeScript: {:?}\n{}",
+        "custom decorated class must remain valid ArkTS: {:?}\n{}",
         parsed.diagnostics,
         result
     );
 }
 
 #[test]
-fn test_strips_arkui_decorators_from_default_export_class() {
+fn test_preserves_arkui_decorators_on_default_export_class_like_hvigor() {
     let src = "@Observed\nexport default class LazyDataSource<T> {\n  dataArray: T[] = [];\n}";
     let result = TransformHarness::transform(&make_source(
         "commons/utils/src/main/ets/utils/LazyDataSource.ets",
@@ -296,12 +273,15 @@ fn test_strips_arkui_decorators_from_default_export_class() {
     ))
     .expect("default export observed class must transform");
 
-    assert!(result.contains("export default class LazyDataSource<T>"));
-    assert!(result.contains("dataArray: T[] = [];"));
+    let decorator = result.find("@Observed").expect("class decorator");
+    let export = result
+        .find("export default class LazyDataSource<T>")
+        .expect("default exported class");
     assert!(
-        !result.contains("@Observed"),
-        "@Observed must be consumed before ABC:\n{result}"
+        decorator < export,
+        "hvigor keeps ArkTS class decorators before the default export keyword:\n{result}"
     );
+    assert!(result.contains("dataArray: T[] = [];"));
 
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
@@ -312,10 +292,65 @@ fn test_strips_arkui_decorators_from_default_export_class() {
     .parse();
     assert!(
         parsed.diagnostics.is_empty(),
-        "decorator-stripped default export class must be standard TypeScript: {:?}\n{}",
+        "decorated default export class must remain valid ArkTS: {:?}\n{}",
         parsed.diagnostics,
         result
     );
+}
+
+#[test]
+fn test_component_finalizer_preserves_regular_class_decorator_export_order_like_hvigor() {
+    let src = r#"@Observed
+export class SwitchModel {
+  @Track flag: boolean = false
+}
+
+@Component
+export struct SwitchView {
+  build() {
+    Row() {}
+  }
+}"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/SwitchView.ets",
+        src,
+    ))
+    .expect("component file with a decorated regular class must transform");
+
+    assert!(
+        result.contains("@Observed export class SwitchModel"),
+        "ViewPU finalization must retain hvigor's ArkTS decorator order:\n{result}"
+    );
+    assert!(!result.contains("export @Observed class"), "{result}");
+    assert!(result.contains("@Track flag: boolean = false;"), "{result}");
+}
+
+#[test]
+fn test_sendable_class_matches_sdk_process_sendable_class() {
+    let src = "@Sendable\nexport class Payload {\n  label?: string;\n}";
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/model/Payload.ets", src))
+            .expect("@Sendable class must follow SDK process_sendable class lowering");
+
+    assert!(!result.contains("@Sendable"), "{result}");
+    assert!(result.contains("constructor()"), "{result}");
+    assert!(result.contains("\"use sendable\";"), "{result}");
+    assert!(
+        result.contains("label: string | undefined = undefined;"),
+        "{result}"
+    );
+}
+
+#[test]
+fn test_sendable_derived_class_forwards_constructor_arguments() {
+    let src = "@Sendable\nexport class Payload extends BasePayload {}";
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/model/Payload.ets", src))
+            .expect("derived @Sendable class must get hvigor's forwarding constructor");
+
+    assert!(result.contains("constructor(...args)"), "{result}");
+    assert!(result.contains("\"use sendable\";"), "{result}");
+    assert!(result.contains("super(...args);"), "{result}");
 }
 
 #[test]
@@ -472,6 +507,60 @@ struct RecReasonComponent {
         ),
         "static property reads must continue to resolve through the class:\n{result}"
     );
+}
+
+#[test]
+fn test_component_preserves_new_oxc_struct_member_variants() {
+    let src = r#"
+@Component
+struct SyntaxMembers {
+  static { SyntaxMembers.initialized = true; }
+  [key: string]: unknown;
+  accessor current: number = 1;
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/SyntaxMembers.ets",
+        src,
+    ))
+    .expect("OXC struct member variants must lower to equivalent class members");
+
+    assert!(
+        result.contains("static {"),
+        "static blocks must survive component lowering:\n{result}"
+    );
+    assert!(
+        result.contains("[key: string]: unknown"),
+        "index signatures must survive component lowering:\n{result}"
+    );
+    assert!(
+        result.contains("accessor current: number = 1"),
+        "auto-accessor properties must survive component lowering:\n{result}"
+    );
+}
+
+#[test]
+fn test_component_v2_preserves_new_oxc_struct_member_variants() {
+    let src = r#"
+@ComponentV2
+struct SyntaxMembersV2 {
+  static { SyntaxMembersV2.initialized = true; }
+  [key: string]: unknown;
+  accessor current: number = 1;
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/SyntaxMembersV2.ets",
+        src,
+    ))
+    .expect("OXC struct member variants must lower to equivalent ViewV2 class members");
+
+    assert!(result.contains("class SyntaxMembersV2 extends ViewV2"));
+    assert!(result.contains("static {"));
+    assert!(result.contains("[key: string]: unknown"));
+    assert!(result.contains("accessor current: number = 1"));
 }
 
 #[test]
@@ -834,9 +923,20 @@ struct MyView {
   }
 }
 "#;
-    let result =
-        TransformHarness::transform(&make_source("entry/src/main/ets/pages/MyView.ets", src))
-            .expect("ComponentV2 Repeat.each must lower like hvigor processRepeatComponent");
+    let component_metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ets-loader"
+    )))
+    .expect("test ets-loader metadata");
+    let options = TransformOptions {
+        component_metadata: std::sync::Arc::new(component_metadata),
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/MyView.ets", src),
+        &options,
+    )
+    .expect("ComponentV2 Repeat.each must lower like hvigor processRepeatComponent");
 
     assert!(
         result.contains("Repeat<Item>(this.items, this).each"),
@@ -1260,6 +1360,55 @@ function primaryText() {
 }
 
 #[test]
+fn test_extend_attribute_call_uses_generated_helper_like_hvigor() {
+    let src = r#"
+@Extend(Text)
+function textExtend(action: () => void) {
+  .fontSize(13)
+  .fontColor('#575859')
+  .height('100%')
+  .onVisibleAreaChange([0], (isVisible: boolean) => {
+    if (isVisible) {
+      action()
+    }
+  })
+}
+
+@Component
+struct SearchBarItem {
+  onKeywordLxViewAction: () => void
+
+  build() {
+    Text('keyword')
+      .textExtend(this.onKeywordLxViewAction)
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/SearchBarItem.ets",
+        src,
+    ))
+    .expect("@Extend attribute invocation must transform");
+
+    assert!(
+        result.contains("__Text__textExtend(this.onKeywordLxViewAction);"),
+        "SDK process_component_build.js::isExtendFunctionNode rewrites the attribute to the generated helper:\n{result}"
+    );
+    assert!(
+        !result.contains("Text.textExtend("),
+        "@Extend attributes do not exist on the runtime component object:\n{result}"
+    );
+    assert!(
+        result.contains("Text.fontSize(13);\n    Text.fontColor(\"#575859\");\n    Text.height(\"100%\");"),
+        "SDK process_component_build.js emits each @Extend attribute as an independent component call:\n{result}"
+    );
+    assert!(
+        !result.contains("Text.fontSize(13).fontColor"),
+        "ArkUI attribute calls cannot be chained by their JavaScript return values:\n{result}"
+    );
+}
+
+#[test]
 fn test_keeps_regular_method_body_before_top_level_builder() {
     let src = r#"
 @Component
@@ -1505,7 +1654,7 @@ export struct SecureModePage {
         project_root: Some(project_root.clone()),
         module_roots: Vec::new(),
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
-        module_exports: ModuleExportIndex::build(&sources, &[]),
+        module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
         sources,
         emit_entry_registration: true,
         partial_update: true,
@@ -1537,6 +1686,175 @@ export struct SecureModePage {
         !result.contains("LaunchProtectPage.create()"),
         "resolved re-exported @ComponentV2 imports must not lower as SDK components:\n{}",
         result
+    );
+}
+
+#[test]
+fn test_default_identifier_export_is_classified_as_custom_component_like_hvigor() {
+    let temp = tempfile::tempdir().unwrap();
+    let component_path = temp.path().join("components/AiTab.ets");
+    let component_source = r#"
+@Component
+struct AiTab {
+  @Prop title: string = '';
+
+  build() {
+    Text(this.title)
+  }
+}
+
+export default AiTab;
+"#;
+    let src = r#"
+import AiTab from './components/AiTab';
+
+@Component
+struct Page {
+  build() {
+    AiTab({ title: 'AI' }).height(32)
+  }
+}
+"#;
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&component_path),
+        std::sync::Arc::<str>::from(component_source),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = ComponentMetadata::default();
+    let options = TransformOptions {
+        component_metadata: std::sync::Arc::new(metadata.clone()),
+        module_exports: ModuleExportIndex::build(&sources, &[], &metadata),
+        sources,
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(temp.path().join("Page.ets").to_str().unwrap(), src),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("new AiTab("),
+        "hvigor componentCollection follows `export default AiTab`; got:\n{result}"
+    );
+    assert!(
+        result.contains("__Common__.height(32);"),
+        "attributes on a default-exported custom component must use __Common__: got:\n{result}"
+    );
+    assert!(
+        !result.contains("AiTab.create("),
+        "default identifier exports must not fall back to inner components: got:\n{result}"
+    );
+}
+
+#[test]
+fn test_resolved_external_declaration_ui_usage_is_custom_component_like_hvigor() {
+    let temp = tempfile::tempdir().unwrap();
+    let kit_root = temp.path().join("sdk/AccountKit");
+    let declaration_path = kit_root.join("Index.d.ets");
+    let declaration_source = r#"
+export declare class LoginWithHuaweiIDButton {
+  constructor(params: object);
+}
+"#;
+    let src = r#"
+import { LoginWithHuaweiIDButton } from '@kit.AccountKit';
+
+@Component
+struct Page {
+  build() {
+    LoginWithHuaweiIDButton({ params: {} }).height(44).width('100%')
+  }
+}
+"#;
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&declaration_path),
+        std::sync::Arc::<str>::from(declaration_source),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let module_roots = vec![("@kit.AccountKit".to_string(), kit_root)];
+    let metadata = ComponentMetadata::default();
+    let options = TransformOptions {
+        module_roots: module_roots.clone(),
+        component_metadata: std::sync::Arc::new(metadata.clone()),
+        module_exports: ModuleExportIndex::build(&sources, &module_roots, &metadata),
+        sources,
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(temp.path().join("Page.ets").to_str().unwrap(), src),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("new LoginWithHuaweiIDButton("),
+        "hvigor type-checks imported SDK UI declarations as custom components: got:\n{result}"
+    );
+    assert!(
+        result.contains("__Common__.height(44);") && result.contains("__Common__.width(\"100%\");"),
+        "SDK custom component common attributes must use __Common__: got:\n{result}"
+    );
+    assert!(
+        !result.contains("LoginWithHuaweiIDButton.create("),
+        "resolved declaration-only imports must not fall back to inner components: got:\n{result}"
+    );
+}
+
+#[test]
+fn test_export_star_cycle_converges_to_complete_component_exports() {
+    let temp = tempfile::tempdir().unwrap();
+    let a_path = temp.path().join("components/A.ets");
+    let b_path = temp.path().join("components/B.ets");
+    let c_path = temp.path().join("components/C.ets");
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&a_path),
+        std::sync::Arc::<str>::from("export * from './B';\nexport * from './C';\n"),
+    );
+    source_map.insert(
+        arkdown_path::lexical_normalize(&b_path),
+        std::sync::Arc::<str>::from("export * from './A';\n"),
+    );
+    source_map.insert(
+        arkdown_path::lexical_normalize(&c_path),
+        std::sync::Arc::<str>::from(
+            "@Component\nexport struct ExportedCard {\n  build() { Text('card') }\n}\n",
+        ),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = ComponentMetadata::default();
+    let options = TransformOptions {
+        component_metadata: std::sync::Arc::new(metadata.clone()),
+        module_exports: ModuleExportIndex::build(&sources, &[], &metadata),
+        sources,
+        ..Default::default()
+    };
+    let src = r#"
+import { ExportedCard } from './components/B';
+
+@Component
+struct Page {
+  build() {
+    ExportedCard().height(40)
+  }
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source(temp.path().join("Page.ets").to_str().unwrap(), src),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("new ExportedCard("),
+        "hvigor componentCollection resolves complete exports across export-star cycles: got:\n{result}"
+    );
+    assert!(
+        result.contains("__Common__.height(40);") && !result.contains("ExportedCard.create("),
+        "cycle resolution must retain custom-component common attribute lowering: got:\n{result}"
     );
 }
 
@@ -1772,7 +2090,11 @@ struct Page {
     let sources = crate::source::TransformSourceSnapshot::new(sources);
     let module_roots = vec![("utils".to_string(), utils_root)];
     let options = TransformOptions {
-        module_exports: ModuleExportIndex::build(&sources, &module_roots),
+        module_exports: ModuleExportIndex::build(
+            &sources,
+            &module_roots,
+            &ComponentMetadata::default(),
+        ),
         module_roots,
         sources,
         ..Default::default()
@@ -2101,6 +2423,119 @@ struct Parent {
 }
 
 #[test]
+fn test_imported_custom_component_trailing_lambda_populates_sole_builder_param() {
+    // Upstream refs:
+    // - ets-loader process_component_build.js processExpressionStatementChange
+    // - ets-loader process_component_build.js processBlockToExpression
+    // A trailing UI block is passed through the target component's sole
+    // @BuilderParam in both constructor params and paramsGenerator_.
+    let temp = tempfile::tempdir().unwrap();
+    let package_path = temp.path().join("oh_modules/@scope/widgets/Index.ets");
+    let package_source = r#"
+@Component
+export struct Panel {
+  @Prop enabled: boolean;
+  @BuilderParam content: () => void;
+  build() {
+    this.content()
+  }
+}
+"#;
+    let src = r#"
+import { Panel } from '@scope/widgets'
+
+@Component
+struct Parent {
+  build() {
+    Panel({ enabled: true }) {
+      Stack() {
+        Text('child')
+      }
+    }
+  }
+}
+"#;
+    let mut sources = rustc_hash::FxHashMap::default();
+    sources.insert(
+        arkdown_path::lexical_normalize(&package_path),
+        std::sync::Arc::<str>::from(package_source),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(sources);
+    let module_roots = Vec::new();
+    let options = TransformOptions {
+        module_exports: ModuleExportIndex::build(
+            &sources,
+            &module_roots,
+            &ComponentMetadata::default(),
+        ),
+        module_roots,
+        sources,
+        ..Default::default()
+    };
+
+    let result = TransformHarness::transform_with_options(
+        &make_source(
+            temp.path()
+                .join("entry/src/main/ets/pages/Parent.ets")
+                .to_str()
+                .unwrap(),
+            src,
+        ),
+        &options,
+    )
+    .expect("sole @BuilderParam trailing lambda must lower like hvigor");
+
+    assert_eq!(
+        result.matches("content: () => {").count(),
+        2,
+        "constructor params and paramsLambda must both receive the trailing builder:\n{result}"
+    );
+    assert!(
+        result.contains("Stack.create()")
+            && result.contains("Text.create(\"child\")")
+            && result.contains("Stack.pop()"),
+        "the trailing builder must contain the lowered ArkUI child body:\n{result}"
+    );
+    assert!(
+        result.contains("this.updateStateVarsOfChildByElmtId(elmtId, { enabled: true })")
+            && !result.contains(
+                "this.updateStateVarsOfChildByElmtId(elmtId, {\n                            content:"
+            ),
+        "@BuilderParam must not be emitted as an updateStateVars @Prop payload:\n{result}"
+    );
+}
+
+#[test]
+fn test_custom_component_trailing_lambda_rejects_missing_builder_param_like_hvigor() {
+    // ets-loader processExpressionStatementChange reports 10905102 when the
+    // target does not have exactly one @BuilderParam property.
+    let src = r#"
+@Component
+struct Child {
+  build() {}
+}
+
+@Component
+struct Parent {
+  build() {
+    Child() {
+      Text('child')
+    }
+  }
+}
+"#;
+    let error =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/Parent.ets", src))
+            .expect_err("trailing lambda without a sole @BuilderParam must be rejected");
+    assert!(
+        error.to_string().contains(
+            "In the trailing lambda case, 'Child' must have one and only one property decorated with '@BuilderParam'"
+        ),
+        "expected the hvigor trailing-lambda diagnostic, got: {error}"
+    );
+}
+
+#[test]
 fn test_custom_component_callback_wraps_raw_observed_state_argument() {
     let src = r#"
 class Item {}
@@ -2236,7 +2671,11 @@ struct Parent {
     let sources = crate::source::TransformSourceSnapshot::new(sources);
     let module_roots = Vec::new();
     let options = TransformOptions {
-        module_exports: ModuleExportIndex::build(&sources, &module_roots),
+        module_exports: ModuleExportIndex::build(
+            &sources,
+            &module_roots,
+            &ComponentMetadata::default(),
+        ),
         module_roots,
         sources,
         ..Default::default()
@@ -2320,7 +2759,11 @@ struct Parent {
     let sources = crate::source::TransformSourceSnapshot::new(sources);
     let module_roots = Vec::new();
     let options = TransformOptions {
-        module_exports: ModuleExportIndex::build(&sources, &module_roots),
+        module_exports: ModuleExportIndex::build(
+            &sources,
+            &module_roots,
+            &ComponentMetadata::default(),
+        ),
         module_roots,
         sources,
         ..Default::default()
@@ -2963,7 +3406,7 @@ struct MemberForm {
     let options = TransformOptions {
         project_root: Some(project_root.clone()),
         sources: sources.clone(),
-        module_exports: ModuleExportIndex::build(&sources, &[]),
+        module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
         ..Default::default()
     };
     let names = TransformHarness::collect_component_names_with_options(

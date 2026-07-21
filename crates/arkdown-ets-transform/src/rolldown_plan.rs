@@ -23,7 +23,9 @@ use crate::source::{SourceClassifier, SourceFileKind, TransformSourceSnapshot};
 use crate::source_map;
 use crate::transform::source_emit::CodegenSourceText;
 use crate::transform::{self, CheckerMode, ModuleExportIndex, TransformOptions};
-use crate::typescript_emit::ImportedConstEnumRewriter;
+use crate::typescript_emit::{
+    ImportedConstEnumRewriter, TypeScriptDirectiveFlags, TypeScriptJavascriptEmitter,
+};
 use arkdown_core::{ModuleSource, ModuleType, ResolvedId};
 
 /// Narrow transform plan consumed by the Rolldown ETS transform adapter.
@@ -59,7 +61,7 @@ impl RolldownEtsTransformPlan {
         component_metadata: transform::component_meta::ComponentMetadata,
         sources: TransformSourceSnapshot,
     ) -> Self {
-        let module_exports = ModuleExportIndex::build(&sources, &module_roots);
+        let module_exports = ModuleExportIndex::build(&sources, &module_roots, &component_metadata);
         Self {
             bundle_name: bundle_name.into(),
             module_name: module_name.into(),
@@ -131,6 +133,7 @@ pub struct RolldownEtsTransformOutput {
     pub code: String,
     pub source_map: Option<String>,
     pub record_module_source_code: bool,
+    pub emits_javascript: bool,
 }
 
 /// Production ETS transform engine used by the Rolldown plugin adapter.
@@ -158,6 +161,7 @@ impl RolldownEtsTransformer {
                         code: final_code.into_owned(),
                         source_map: None,
                         record_module_source_code: false,
+                        emits_javascript: false,
                     }));
                 }
             }
@@ -166,22 +170,24 @@ impl RolldownEtsTransformer {
         let is_ets = matches!(source_kind, SourceFileKind::Ets);
 
         let original_source = code;
+        let directive_flags = TypeScriptDirectiveFlags::from_source(original_source, id);
+        let emits_javascript = self.plan.should_emit_js && directive_flags.should_emit_javascript();
         let pipeline = HvigorSourcePipeline::new(self, id);
         let code = pipeline.prepare_source(original_source);
 
         if !is_ets {
             let final_code = pipeline.finalize_source(code.as_ref());
-            let source_map = source_map::HvigorStandardSourceMapBuilder::new(
-                final_code.as_ref(),
-                original_source,
-                id,
-            )
-            .build()
-            .or_else(|| source_map::TokenSourceMapBuilder::new(final_code.as_ref(), id).build());
+            let final_code =
+                self.emit_javascript_if_required(final_code.as_ref(), id, directive_flags)?;
+            let source_map =
+                source_map::HvigorStandardSourceMapBuilder::new(&final_code, original_source, id)
+                    .build()
+                    .or_else(|| source_map::TokenSourceMapBuilder::new(&final_code, id).build());
             return Ok(Some(RolldownEtsTransformOutput {
-                code: final_code.into_owned(),
+                code: final_code,
                 source_map,
                 record_module_source_code: false,
+                emits_javascript,
             }));
         }
 
@@ -205,6 +211,8 @@ impl RolldownEtsTransformer {
 
         if transformed == code.as_ref() {
             let final_source = HvigorStandardTs::new(final_source.as_ref()).format();
+            let final_source =
+                self.emit_javascript_if_required(&final_source, id, directive_flags)?;
             let source_map =
                 source_map::HvigorStandardSourceMapBuilder::new(&final_source, original_source, id)
                     .build()
@@ -213,10 +221,12 @@ impl RolldownEtsTransformer {
                 code: final_source,
                 source_map,
                 record_module_source_code: false,
+                emits_javascript,
             }));
         }
 
-        let gen_code = final_source.into_owned();
+        let gen_code =
+            self.emit_javascript_if_required(final_source.as_ref(), id, directive_flags)?;
         let source_map =
             source_map::HvigorStandardSourceMapBuilder::new(&gen_code, original_source, id)
                 .build()
@@ -225,7 +235,26 @@ impl RolldownEtsTransformer {
             code: gen_code,
             source_map,
             record_module_source_code: false,
+            emits_javascript,
         }))
+    }
+
+    fn emit_javascript_if_required(
+        &self,
+        source: &str,
+        id: &str,
+        directive_flags: TypeScriptDirectiveFlags,
+    ) -> Result<String, EtsTransformError> {
+        if !self.plan.should_emit_js || !directive_flags.should_emit_javascript() {
+            return Ok(source.to_string());
+        }
+        TypeScriptJavascriptEmitter::new(source, id, &self.plan.sources)
+            .emit()
+            .ok_or_else(|| EtsTransformError::Fatal {
+                file: id.to_string(),
+                message: "failed to emit JavaScript for a TypeScript suppression pragma file"
+                    .to_string(),
+            })
     }
 
     pub fn compile_transform(
@@ -237,9 +266,9 @@ impl RolldownEtsTransformer {
             return Ok(None);
         };
         output.record_module_source_code = SourceClassifier::classify(id).is_ets_transform_input();
-        // hvigor ESMODULE/CompileArkTS writes transformed TypeScript cache files
-        // and lets es2abc compile the filesInfo/modules.cache handoff. Rolldown
-        // only needs this TS shape for graph parsing.
+        // Hvigor normally writes transformed TypeScript for es2abc, but its
+        // `hasTsNoCheckOrTsIgnoreFiles` path writes JavaScript instead. Both
+        // shapes remain graph inputs and are materialized after Rolldown scan.
         Ok(Some(output))
     }
 }
@@ -621,6 +650,46 @@ export default class ChannelManager {
             "hvigor ModuleSourceFile sidecar must preserve TS field syntax:\n{}",
             output.code
         );
+    }
+
+    #[test]
+    fn compile_transform_emits_javascript_for_ts_ignore_file_like_hvigor() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                r#"// @ts-ignore
+export namespace Zip {
+  export function gzip(data: ArrayBuffer | string): Uint8Array {
+    return runtime.gzip(data)
+  }
+}"#,
+                "/tmp/project/oh_modules/@scope/archive/src/main/ets/Zip.ts",
+            )
+            .unwrap()
+            .expect("TypeScript suppression pragma must select hvigor's JS emitter path");
+
+        assert!(
+            output.code.contains("export let Zip") || output.code.contains("export var Zip"),
+            "{}",
+            output.code
+        );
+        assert!(
+            !output.code.contains("data: ArrayBuffer"),
+            "{}",
+            output.code
+        );
+        assert!(!output.code.contains("namespace Zip"), "{}", output.code);
+        assert!(output.emits_javascript);
     }
 
     #[test]

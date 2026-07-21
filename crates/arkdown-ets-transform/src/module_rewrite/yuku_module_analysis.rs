@@ -196,13 +196,18 @@ impl<'a> YukuModuleGraphAnalyzer<'a> {
             .sources
             .resolve_static_with_declarations(importer, &import.specifier)?;
         let is_declaration = SourceClassifier::classify_path(&target.path).is_declaration();
+        let is_runtime_backed_declaration =
+            is_declaration && self.sources.declaration_has_runtime_source(&target.path);
         let exports = self.collect_source_exports_with_visited(target, visited)?;
-        exports.get(&import.imported).copied().or({
-            if declaration_fallback && is_declaration {
-                Some(ModuleBindingKind::Type)
-            } else {
-                None
+        exports.get(&import.imported).copied().or_else(|| {
+            if !declaration_fallback || !is_declaration {
+                return None;
             }
+            Some(if is_runtime_backed_declaration {
+                ModuleBindingKind::Value
+            } else {
+                ModuleBindingKind::Type
+            })
         })
     }
 }

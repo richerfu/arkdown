@@ -15,6 +15,7 @@ use oxc_syntax::operator::AssignmentOperator;
 use arkdown_path::HvigorModulePath;
 
 use crate::source_map::offset_to_line_col;
+use crate::transform::component_analysis::ExtendAttributeIndex;
 use crate::transform::component_meta::{
     ArkuiRuntimeComponentKind, ArkuiRuntimeNames, ComponentMetadata,
 };
@@ -39,6 +40,10 @@ pub enum BuildLoweringError {
     UnsupportedChild,
     UnsupportedCallee,
     UnsupportedChain,
+    InvalidTrailingLambda {
+        component: String,
+        builder_param_count: usize,
+    },
 }
 
 impl BuildLoweringError {
@@ -48,20 +53,33 @@ impl BuildLoweringError {
             Self::UnsupportedChild => "Unsupported ArkUI child syntax.",
             Self::UnsupportedCallee => "Unsupported ArkUI component callee.",
             Self::UnsupportedChain => "Unsupported ArkUI attribute chain.",
+            Self::InvalidTrailingLambda { .. } => {
+                "A custom component trailing lambda requires exactly one @BuilderParam property."
+            }
         }
     }
 }
 
 impl fmt::Display for BuildLoweringError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.hvigor_message())
+        match self {
+            Self::InvalidTrailingLambda {
+                component,
+                builder_param_count,
+            } => write!(
+                f,
+                "In the trailing lambda case, '{component}' must have one and only one property decorated with '@BuilderParam' (found {builder_param_count})."
+            ),
+            _ => f.write_str(self.hvigor_message()),
+        }
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CustomComponentInfo {
     pub update_props: FxHashSet<String>,
     pub link_props: FxHashSet<String>,
+    pub builder_params: FxHashSet<String>,
     pub reusable: bool,
     pub is_custom_dialog: bool,
 }
@@ -74,6 +92,7 @@ struct BuildContext {
     current_component_reusable: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
     component_metadata: Arc<ComponentMetadata>,
+    extend_attributes: Arc<ExtendAttributeIndex>,
     module_name: Arc<str>,
     custom_component_base_name: &'static str,
 }
@@ -85,6 +104,7 @@ impl Default for BuildContext {
             current_component_reusable: false,
             raw_object_fields: Arc::default(),
             component_metadata: Arc::new(ComponentMetadata::default()),
+            extend_attributes: Arc::new(ExtendAttributeIndex::default()),
             module_name: Arc::from(""),
             custom_component_base_name: GeneratedViewpuName::VIEWPU_BASE,
         }
@@ -138,7 +158,7 @@ impl<'a> BuildBodyInfo<'a> {
         allocator: &'b Allocator,
     ) -> Result<OxcVec<'b, Statement<'b>>, BuildLoweringError> {
         match self {
-            Self::Empty => Ok(OxcVec::new_in(allocator)),
+            Self::Empty => Ok(OxcVec::new_in(&allocator)),
             Self::Plan(plan) => plan.statements(allocator),
         }
     }
@@ -154,6 +174,7 @@ pub struct BuildBodyPlan<'a> {
     builder_param_methods: FxHashSet<String>,
     custom_component_update_props: CustomComponentUpdateProps,
     component_metadata: Arc<ComponentMetadata>,
+    extend_attributes: Arc<ExtendAttributeIndex>,
     raw_object_fields: FxHashSet<String>,
     module_name: Option<Arc<str>>,
     context_kind: BuildBodyContextKind,
@@ -305,6 +326,7 @@ impl<'a> BuildBodyPlan<'a> {
             builder_param_methods: builder_param_methods.clone(),
             custom_component_update_props: custom_component_update_props.clone(),
             component_metadata,
+            extend_attributes: Arc::new(ExtendAttributeIndex::default()),
             raw_object_fields: raw_object_fields.clone(),
             module_name,
             context_kind,
@@ -320,6 +342,14 @@ impl<'a> BuildBodyPlan<'a> {
         BuildBodyAstLowerer::new(self).statements(allocator)
     }
 
+    pub(crate) fn with_shared_extend_attributes(
+        mut self,
+        extend_attributes: Arc<ExtendAttributeIndex>,
+    ) -> Self {
+        self.extend_attributes = extend_attributes;
+        self
+    }
+
     fn context(&self) -> BuildContext {
         let mut context = match self.context_kind {
             BuildBodyContextKind::Component => BuildContext::default()
@@ -332,6 +362,7 @@ impl<'a> BuildBodyPlan<'a> {
         }
         context
             .with_shared_component_metadata(Arc::clone(&self.component_metadata))
+            .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
             .with_custom_component_base_name(self.custom_component_base_name)
     }
 
@@ -360,9 +391,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         allocator: &'b Allocator,
     ) -> Result<OxcVec<'b, Statement<'b>>, BuildLoweringError> {
         let Some(body) = self.plan.body else {
-            return Ok(OxcVec::new_in(allocator));
+            return Ok(OxcVec::new_in(&allocator));
         };
-        let mut statements = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
         let context = self.plan.context();
         for statement in &body.statements {
             self.push_statement(&mut statements, statement, allocator, &context)?;
@@ -473,6 +504,14 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         if self.plan.custom_components.contains(&name) {
             let source_metadata = self.plan.source_metadata();
             let reuse_id = CustomReuseId::from_component_attrs(component, context);
+            let component_info = self.plan.custom_component_update_props.get(&name);
+            let builder_param = self.custom_component_builder_param(
+                &name,
+                component,
+                component_info,
+                allocator,
+                context,
+            )?;
             let mut chain_attrs = Vec::new();
             for chain in &component.chain_expressions {
                 let name = ArkuiCallName::chain(chain)?;
@@ -489,7 +528,8 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     allocator,
                     &name,
                     &component.arguments,
-                    self.plan.custom_component_update_props.get(&name),
+                    component_info,
+                    builder_param,
                     reuse_id,
                     component.callee.span(),
                     &source_metadata,
@@ -500,7 +540,8 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     allocator,
                     &name,
                     &component.arguments,
-                    self.plan.custom_component_update_props.get(&name),
+                    component_info,
+                    builder_param,
                     reuse_id,
                     component.callee.span(),
                     &chain_attrs,
@@ -529,7 +570,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         }
 
         let ast = AstBuilder::new(allocator);
-        let mut creation_stmts = OxcVec::new_in(allocator);
+        let mut creation_stmts = OxcVec::new_in(&allocator);
         creation_stmts.push(ComponentCallStatementEmitter::create(
             ast,
             allocator,
@@ -569,6 +610,42 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         Ok(())
     }
 
+    fn custom_component_builder_param<'b, 'c>(
+        &'c self,
+        name: &str,
+        component: &ArkUIComponentExpression<'_>,
+        component_info: Option<&'c CustomComponentInfo>,
+        allocator: &'b Allocator,
+        context: &BuildContext,
+    ) -> Result<Option<(&'c str, OxcVec<'b, Statement<'b>>)>, BuildLoweringError> {
+        if component.children.is_empty() {
+            return Ok(None);
+        }
+        let Some(component_info) = component_info else {
+            return Err(BuildLoweringError::InvalidTrailingLambda {
+                component: name.to_string(),
+                builder_param_count: 0,
+            });
+        };
+        if component_info.builder_params.len() != 1 {
+            return Err(BuildLoweringError::InvalidTrailingLambda {
+                component: name.to_string(),
+                builder_param_count: component_info.builder_params.len(),
+            });
+        }
+        let builder_param_name = component_info
+            .builder_params
+            .iter()
+            .next()
+            .expect("single @BuilderParam name exists")
+            .as_str();
+        let mut body = OxcVec::new_in(&allocator);
+        for child in &component.children {
+            self.push_child(&mut body, child, allocator, context)?;
+        }
+        Ok(Some((builder_param_name, body)))
+    }
+
     fn push_nav_component<'b>(
         &self,
         statements: &mut OxcVec<'b, Statement<'b>>,
@@ -582,7 +659,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let children_in_create = component_kind == ArkuiRuntimeComponentKind::NavDestination
             && !component.children.is_empty();
         let builder_body = if children_in_create {
-            let mut child_stmts = OxcVec::new_in(allocator);
+            let mut child_stmts = OxcVec::new_in(&allocator);
             for child in &component.children {
                 self.push_child(&mut child_stmts, child, allocator, context)?;
             }
@@ -593,7 +670,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let module_name = context.module_name.as_ref();
         let source_metadata = self.plan.source_metadata();
         let page_path = source_metadata.nav_page_path();
-        let mut creation_stmts = OxcVec::new_in(allocator);
+        let mut creation_stmts = OxcVec::new_in(&allocator);
         creation_stmts.push(
             NavigationCreateCall::new(component, name, module_name, &page_path).statement(
                 ast,
@@ -668,6 +745,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     &lc.name,
                     &base_call.arguments,
                     self.plan.custom_component_update_props.get(&lc.name),
+                    None,
                     reuse_id,
                     base_call.span,
                     &source_metadata,
@@ -686,6 +764,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                         &lc.name,
                         &base_call.arguments,
                         self.plan.custom_component_update_props.get(&lc.name),
+                        None,
                         reuse_id,
                         base_call.span,
                         &source_metadata,
@@ -697,6 +776,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                         &lc.name,
                         &base_call.arguments,
                         self.plan.custom_component_update_props.get(&lc.name),
+                        None,
                         reuse_id,
                         base_call.span,
                         &common_attrs,
@@ -709,7 +789,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             return Ok(());
         }
         let ast = AstBuilder::new(allocator);
-        let mut creation_stmts = OxcVec::new_in(allocator);
+        let mut creation_stmts = OxcVec::new_in(&allocator);
         let component_kind = context.component_kind(&lc.name);
         creation_stmts.push(ComponentCallStatementEmitter::create_refs(
             ast,
@@ -813,7 +893,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
     ) -> Result<Option<Expression<'b>>, BuildLoweringError> {
         let ast = AstBuilder::new(allocator);
         if self.is_repeat_base_call(call, context) {
-            let mut arguments = OxcVec::new_in(allocator);
+            let mut arguments = OxcVec::new_in(&allocator);
             for argument in &call.arguments {
                 arguments.push(
                     BuildArgumentEmitter::new()
@@ -871,7 +951,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         context: &BuildContext,
     ) -> Result<OxcVec<'b, Argument<'b>>, BuildLoweringError> {
         let ast = AstBuilder::new(allocator);
-        let mut arguments = OxcVec::new_in(allocator);
+        let mut arguments = OxcVec::new_in(&allocator);
         for (index, argument) in call.arguments.iter().enumerate() {
             let should_lower_arrow = method_name == context.runtime_names().repeat_each
                 && index == 0
@@ -907,7 +987,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         context: &BuildContext,
     ) -> Result<Expression<'b>, BuildLoweringError> {
         let ast = AstBuilder::new(allocator);
-        let mut statements = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
         self.push_lazy_arrow_body(&mut statements, arrow, allocator, context)?;
         let params = IterationFormalParameters::from_source(ast, allocator, &arrow.params);
         let body = ast.function_body(SPAN, ast.vec(), statements);
@@ -951,7 +1031,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             has_animation |= ComponentCallStatementEmitter::is_animation_attribute(&name);
         }
         if has_animation {
-            let mut animation_segment = OxcVec::new_in(allocator);
+            let mut animation_segment = OxcVec::new_in(&allocator);
             for chain in &component.chain_expressions {
                 let name = ArkuiCallName::chain(chain)?;
                 if ComponentCallStatementEmitter::is_animation_attribute(&name) {
@@ -1005,7 +1085,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             );
             return Ok(());
         }
-        let mut immutable_stmts = OxcVec::new_in(allocator);
+        let mut immutable_stmts = OxcVec::new_in(&allocator);
         for chain in &component.chain_expressions {
             let name = ArkuiCallName::chain(chain)?;
             if context.is_gesture_attribute_name(&name) {
@@ -1078,7 +1158,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let item_param = item_gen.params.items.first();
         let index_param = item_gen.params.items.get(1);
         let ast = AstBuilder::new(allocator);
-        let mut item_body = OxcVec::new_in(allocator);
+        let mut item_body = OxcVec::new_in(&allocator);
         if let Some(item_param) = item_param {
             item_body.push(IterationAstStatement::item_binding_declaration(
                 ast, allocator, item_param, context,
@@ -1086,7 +1166,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         }
         self.push_lazy_arrow_body(&mut item_body, item_gen, allocator, context)?;
 
-        let mut observe_body = OxcVec::new_in(allocator);
+        let mut observe_body = OxcVec::new_in(&allocator);
         observe_body.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_for_each,
@@ -1174,7 +1254,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         };
 
         let ast = AstBuilder::new(allocator);
-        let mut item_body = OxcVec::new_in(allocator);
+        let mut item_body = OxcVec::new_in(&allocator);
         self.push_lazy_arrow_body(&mut item_body, item_gen, allocator, context)?;
         statements.push(IterationAstStatement::const_arrow_function_with_params(
             ast,
@@ -1220,7 +1300,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
         let ast = AstBuilder::new(allocator);
-        let mut block_body = OxcVec::new_in(allocator);
+        let mut block_body = OxcVec::new_in(&allocator);
         block_body.push(IterationAstStatement::lazy_list_item_creation(
             ast, allocator, context,
         ));
@@ -1233,7 +1313,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             )?,
         );
 
-        let mut deep_render_body = OxcVec::new_in(allocator);
+        let mut deep_render_body = OxcVec::new_in(&allocator);
         deep_render_body.push(IterationAstStatement::item_creation_call(ast, context));
         for child in &component.children {
             self.push_child(&mut deep_render_body, child, allocator, context)?;
@@ -1362,13 +1442,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         allocator: &'b Allocator,
         context: &BuildContext,
     ) -> bool {
-        if !ArkuiCallName::is_wrapped_builder_call(call) {
+        let emitter = BuilderDispatchCallEmitter::new(call, context);
+        if !emitter.matches() {
             return false;
         }
-        let cloned_call = AstBuilder::new(allocator).alloc(call.clone_in(allocator));
-        let expression = BuildArgumentEmitter::new()
-            .with_context(context)
-            .owned_expression_with_allocator(Expression::CallExpression(cloned_call), allocator);
+        let expression = emitter.expression(allocator);
         statements.push(AstBuilder::new(allocator).statement_expression(SPAN, expression));
         true
     }
@@ -1381,10 +1459,16 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         allocator: &'b Allocator,
         context: &BuildContext,
     ) -> bool {
-        if !ArkuiCallName::is_wrapped_builder_call(call) {
+        let emitter = BuilderDispatchCallEmitter::new(call, context);
+        if !emitter.matches() {
             return false;
         }
-        let cloned_chain = AstBuilder::new(allocator).alloc(chain.clone_in(allocator));
+        let mut cloned_chain = chain.clone_in(allocator);
+        let ChainElement::CallExpression(cloned_call) = &mut cloned_chain.expression else {
+            return false;
+        };
+        emitter.rewrite(cloned_call, allocator);
+        let cloned_chain = AstBuilder::new(allocator).alloc(cloned_chain);
         let expression = BuildArgumentEmitter::new()
             .with_context(context)
             .owned_expression_with_allocator(Expression::ChainExpression(cloned_chain), allocator);
@@ -1400,7 +1484,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
         let ast = AstBuilder::new(allocator);
-        let mut observe_stmts = OxcVec::new_in(allocator);
+        let mut observe_stmts = OxcVec::new_in(&allocator);
         observe_stmts.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_if,
@@ -1473,7 +1557,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         context: &BuildContext,
         branch_index: usize,
     ) -> Result<Statement<'b>, BuildLoweringError> {
-        let mut branch_stmts = OxcVec::new_in(allocator);
+        let mut branch_stmts = OxcVec::new_in(&allocator);
         self.push_branch_statement(&mut branch_stmts, source_statement, allocator, context)?;
         Ok(ast.statement_block(
             SPAN,
@@ -1589,6 +1673,14 @@ impl BuildContext {
         self
     }
 
+    fn with_shared_extend_attributes(
+        mut self,
+        extend_attributes: Arc<ExtendAttributeIndex>,
+    ) -> Self {
+        self.extend_attributes = extend_attributes;
+        self
+    }
+
     fn with_module_name(mut self, module_name: &str) -> Self {
         self.module_name = Arc::from(module_name);
         self
@@ -1615,6 +1707,10 @@ impl BuildContext {
     fn is_builder_attribute_method(&self, component_name: &str, method_name: &str) -> bool {
         self.component_metadata
             .is_builder_attribute_method(component_name, method_name)
+    }
+
+    fn is_extend_attribute(&self, component_name: &str, attr_name: &str) -> bool {
+        self.extend_attributes.contains(component_name, attr_name)
     }
 
     fn is_create_bind_component(&self, component_name: &str) -> bool {
@@ -1970,7 +2066,7 @@ impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
             .iter()
             .any(|attr| ComponentCallStatementEmitter::is_animation_attribute(&attr.name))
         {
-            let mut animation_segment = OxcVec::new_in(allocator);
+            let mut animation_segment = OxcVec::new_in(&allocator);
             for attr in self.attrs {
                 if ComponentCallStatementEmitter::is_animation_attribute(&attr.name) {
                     ComponentCallStatementEmitter::push_animation_ref_segment(
@@ -2112,10 +2208,12 @@ impl ArkuiCallName {
         Some(member.property.name.to_string())
     }
 
-    fn is_wrapped_builder_call(call: &CallExpression<'_>) -> bool {
+    fn is_builder_dispatch_call(call: &CallExpression<'_>, context: &BuildContext) -> bool {
         matches!(
             &call.callee,
-            Expression::StaticMemberExpression(member) if member.property.name == "builder"
+            Expression::StaticMemberExpression(member)
+                if member.property.name.as_str()
+                    == context.runtime_names().builder_property.as_str()
         )
     }
 }
@@ -2631,7 +2729,7 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
             ast.identifier_name(SPAN, ast.str(&self.context.runtime_names().method_call)),
             false,
         );
-        let mut arguments = OxcVec::new_in(allocator);
+        let mut arguments = OxcVec::new_in(&allocator);
         arguments.push(Argument::from(ast.expression_this(SPAN)));
         arguments.extend(self.builder_call_arguments(builder_name, call, allocator));
         let call = ast.expression_call(SPAN, Expression::from(call_member), NONE, arguments, false);
@@ -2729,7 +2827,7 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
             ast.identifier_name(SPAN, ast.str(&self.context.runtime_names().method_bind)),
             false,
         );
-        let mut arguments = OxcVec::new_in(allocator);
+        let mut arguments = OxcVec::new_in(&allocator);
         arguments.push(Argument::from(ast.expression_this(SPAN)));
         arguments.extend(extra_arguments);
         ast.expression_call(SPAN, Expression::from(bind_member), NONE, arguments, false)
@@ -2864,7 +2962,14 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
                         .is_some()
             })
         });
-        let needs_builder = self.context.is_create_bind_component(self.component_name);
+        // ets-loader `checkCreateArgumentBuilder` consumes both the explicit
+        // CREATE_BIND_COMPONENT set and component-specific `create` entries in
+        // BIND_OBJECT_PROPERTY. ComponentMetadata merges those SDK-owned rules
+        // behind `is_builder_attribute_method`.
+        let needs_builder = self.context.is_builder_attribute_method(
+            self.component_name,
+            &self.context.runtime_names().method_create,
+        );
         if !has_double_dollar && !needs_builder {
             return self.plain_expression(expression, allocator);
         }
@@ -2978,14 +3083,14 @@ impl<'ctx> DoubleDollarBindingEmitter<'ctx> {
         };
         let ast = AstBuilder::new(allocator);
         if style_attr && arguments.len() >= 2 {
-            let mut out = OxcVec::new_in(allocator);
+            let mut out = OxcVec::new_in(&allocator);
             out.push(Argument::from(
                 self.value_change_object_from_value(value_expression, allocator),
             ));
             out.extend(arguments.into_iter().skip(1));
             return out;
         }
-        let mut out = OxcVec::new_in(allocator);
+        let mut out = OxcVec::new_in(&allocator);
         out.push(Argument::from(value_expression.clone_in(allocator)));
         out.push(Argument::from(
             self.change_event_arrow(value_expression, allocator),
@@ -3178,6 +3283,13 @@ impl ComponentCallStatementEmitter {
             Some(context),
         )
         .arguments(arguments, allocator);
+        if context.is_extend_attribute(component_name, attr_name) {
+            return Self::raw_identifier_call(
+                ast,
+                &GeneratedViewpuName::extend_function(component_name, attr_name),
+                arguments,
+            );
+        }
         if context
             .runtime_names()
             .component_attribute_requires_bind(attr_name)
@@ -3242,7 +3354,7 @@ impl ComponentCallStatementEmitter {
         segment: &mut OxcVec<'b, Statement<'b>>,
         allocator: &'b Allocator,
     ) {
-        statements.extend(std::mem::replace(segment, OxcVec::new_in(allocator)));
+        statements.extend(std::mem::replace(segment, OxcVec::new_in(&allocator)));
     }
 
     fn push_animation_segment<'b>(
@@ -3315,6 +3427,13 @@ impl ComponentCallStatementEmitter {
             Some(context),
         )
         .argument_refs(arguments, allocator);
+        if context.is_extend_attribute(component_name, attr_name) {
+            return Self::raw_identifier_call(
+                ast,
+                &GeneratedViewpuName::extend_function(component_name, attr_name),
+                arguments,
+            );
+        }
         if context
             .runtime_names()
             .component_attribute_requires_bind(attr_name)
@@ -3357,6 +3476,16 @@ impl ComponentCallStatementEmitter {
         let property = ast.identifier_name(SPAN, ast.str(method_name));
         let member = ast.member_expression_static(SPAN, object, property, false);
         let call = ast.expression_call(SPAN, Expression::from(member), NONE, arguments, false);
+        ast.statement_expression(SPAN, call)
+    }
+
+    fn raw_identifier_call<'b>(
+        ast: AstBuilder<'b>,
+        function_name: &str,
+        arguments: OxcVec<'b, Argument<'b>>,
+    ) -> Statement<'b> {
+        let callee = ast.expression_identifier(SPAN, ast.str(function_name));
+        let call = ast.expression_call(SPAN, callee, NONE, arguments, false);
         ast.statement_expression(SPAN, call)
     }
 
@@ -3444,7 +3573,7 @@ impl<'a, 'b> NavigationCreateCall<'a, 'b> {
                 .then_some(!self.component.arguments.is_empty()),
         )
         .expression(ast, context);
-        let mut arguments = OxcVec::new_in(allocator);
+        let mut arguments = OxcVec::new_in(&allocator);
         if let Some(builder_body) = builder_body {
             arguments.push(Argument::from(self.builder_arrow(ast, builder_body)));
         } else if self.component.arguments.is_empty() {
@@ -3836,6 +3965,84 @@ impl ArkuiStateStylesObjectEmitter {
 enum BuilderMethodReceiver {
     Direct,
     This,
+}
+
+/// Emits the `transferBuilderCall` shape used by ets-loader for a
+/// `WrappedBuilder.builder(...)` expression. The dispatch and bind property
+/// names come from SDK metadata instead of being duplicated here.
+struct BuilderDispatchCallEmitter<'a, 'ctx> {
+    call: &'a CallExpression<'a>,
+    context: &'ctx BuildContext,
+}
+
+impl<'a, 'ctx> BuilderDispatchCallEmitter<'a, 'ctx> {
+    fn new(call: &'a CallExpression<'a>, context: &'ctx BuildContext) -> Self {
+        Self { call, context }
+    }
+
+    fn matches(&self) -> bool {
+        ArkuiCallName::is_builder_dispatch_call(self.call, self.context)
+    }
+
+    fn expression<'b>(&self, allocator: &'b Allocator) -> Expression<'b> {
+        let ast = AstBuilder::new(allocator);
+        let mut call = self.call.clone_in(allocator);
+        self.rewrite(&mut call, allocator);
+        Expression::CallExpression(ast.alloc(call))
+    }
+
+    fn rewrite<'b>(&self, call: &mut CallExpression<'b>, allocator: &'b Allocator) {
+        let ast = AstBuilder::new(allocator);
+        let bind_member = ast.member_expression_static(
+            SPAN,
+            self.call.callee.clone_in(allocator),
+            ast.identifier_name(SPAN, ast.str(&self.context.runtime_names().method_bind)),
+            false,
+        );
+        call.callee = ast.expression_call(
+            SPAN,
+            Expression::from(bind_member),
+            NONE,
+            ast.vec1(Argument::from(ast.expression_this(SPAN))),
+            false,
+        );
+        call.arguments = self.arguments(ast, allocator);
+    }
+
+    fn arguments<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+    ) -> OxcVec<'b, Argument<'b>> {
+        if let [argument] = self.call.arguments.as_slice() {
+            if let Some(Expression::ObjectExpression(object)) = argument.as_expression() {
+                let proxy_object = BuilderParamProxyObjectEmitter::new(self.context)
+                    .object_expression(object, allocator);
+                let arguments = ast.vec_from_iter([
+                    Argument::from(ast.expression_string_literal(
+                        SPAN,
+                        ast.str(&self.context.runtime_names().builder_property),
+                        None,
+                    )),
+                    Argument::from(proxy_object),
+                ]);
+                let proxy = ast.expression_call(
+                    SPAN,
+                    ast.expression_identifier(
+                        SPAN,
+                        ast.str(&self.context.runtime_names().builder_param_proxy),
+                    ),
+                    NONE,
+                    arguments,
+                    false,
+                );
+                return ast.vec1(Argument::from(proxy));
+            }
+        }
+        BuildArgumentEmitter::new()
+            .with_context(self.context)
+            .arguments_with_allocator(&self.call.arguments, allocator)
+    }
 }
 
 struct BuilderMethodCallEmitter<'a> {

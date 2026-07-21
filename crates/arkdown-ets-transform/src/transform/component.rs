@@ -3,10 +3,10 @@ use rustc_hash::FxHashSet;
 use oxc_allocator::Allocator;
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
-    Argument, AssignmentExpression, AssignmentTarget, ClassElement, Expression,
+    AccessorProperty, Argument, AssignmentExpression, AssignmentTarget, ClassElement, Expression,
     FormalParameterKind, FormalParameters, FunctionBody, MemberExpression, MethodDefinition,
-    ObjectPropertyKind, PropertyDefinition, Statement, TSAccessibility, TSType, TSTypeAnnotation,
-    TSTypeName, VariableDeclarationKind,
+    ObjectPropertyKind, PropertyDefinition, Statement, StaticBlock, TSAccessibility,
+    TSIndexSignature, TSType, TSTypeAnnotation, TSTypeName, VariableDeclarationKind,
 };
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
@@ -483,6 +483,9 @@ pub struct ComponentInfo<'a> {
 pub enum RegularMember<'a> {
     Method(&'a MethodDefinition<'a>),
     Property(&'a PropertyDefinition<'a>),
+    StaticBlock(&'a StaticBlock<'a>),
+    TSIndexSignature(&'a TSIndexSignature<'a>),
+    AccessorProperty(&'a AccessorProperty<'a>),
 }
 
 impl<'a> RegularMember<'a> {
@@ -511,6 +514,20 @@ impl<'a> RegularMember<'a> {
                 let mut property = property.clone_in(allocator);
                 property.decorators.clear();
                 ClassElement::PropertyDefinition(ast.alloc(property))
+            }
+            Self::StaticBlock(block) => {
+                let ast = AstBuilder::new(allocator);
+                ClassElement::StaticBlock(ast.alloc(block.clone_in(allocator)))
+            }
+            Self::TSIndexSignature(signature) => {
+                let ast = AstBuilder::new(allocator);
+                ClassElement::TSIndexSignature(ast.alloc(signature.clone_in(allocator)))
+            }
+            Self::AccessorProperty(property) => {
+                let ast = AstBuilder::new(allocator);
+                let mut property = property.clone_in(allocator);
+                property.decorators.clear();
+                ClassElement::AccessorProperty(ast.alloc(property))
             }
         }
     }

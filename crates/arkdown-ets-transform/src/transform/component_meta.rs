@@ -9,8 +9,9 @@ use oxc_ast::ast::{
     Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, Declaration,
     ExportDefaultDeclarationKind, Expression, Program, Statement, StructElement, StructStatement,
 };
-use oxc_parser::Parser;
+use oxc_parser::{ArkTsAttributeCallback, ArkTsOptions, Parser, ParserReturn};
 use oxc_span::SourceType;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::source::{SourceClassifier, SourceFileKind};
@@ -33,6 +34,7 @@ impl ComponentMapRuntimeName {
 
 #[derive(Debug, Clone, Default)]
 pub struct ComponentMetadata {
+    arkts_parser: ArkTsParserConfig,
     atomic_components: FxHashSet<String>,
     need_pop_components: FxHashSet<String>,
     bind_object_properties: FxHashMap<String, FxHashSet<String>>,
@@ -56,6 +58,15 @@ impl ComponentMetadata {
 
     pub fn needs_pop(&self, name: &str) -> bool {
         !self.atomic_components.contains(name) || self.need_pop_components.contains(name)
+    }
+
+    pub(crate) fn parse_ets<'a>(
+        &self,
+        allocator: &'a Allocator,
+        source: &'a str,
+        source_type: SourceType,
+    ) -> ParserReturn<'a> {
+        self.arkts_parser.parse(allocator, source, source_type)
     }
 
     pub fn is_known_enum(&self, name: &str) -> bool {
@@ -133,6 +144,32 @@ impl ComponentMetadata {
         self.sdk_components
             .get(specifier)
             .and_then(|components| components.get(binding))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ArkTsParserConfig {
+    options: Option<ArkTsOptions>,
+}
+
+impl ArkTsParserConfig {
+    fn from_sdk(options: ArkTsOptions) -> Self {
+        Self {
+            options: Some(options),
+        }
+    }
+
+    fn parse<'a>(
+        &self,
+        allocator: &'a Allocator,
+        source: &'a str,
+        source_type: SourceType,
+    ) -> ParserReturn<'a> {
+        let parser = Parser::new(allocator, source, source_type);
+        match &self.options {
+            Some(options) => parser.with_arkts_options(options.clone()).parse(),
+            None => parser.parse(),
+        }
     }
 }
 
@@ -492,6 +529,9 @@ impl<'a> ComponentMetadataLoader<'a> {
     }
 
     fn load(&self) -> anyhow::Result<ComponentMetadata> {
+        let arkts_parser = ArkTsParserConfig::from_sdk(
+            SdkArkTsOptionsLoader::new(self.ets_loader_path.join("tsconfig.json")).load()?,
+        );
         let atomic_components = self.load_atomic_components()?;
         let component_map_metadata = ComponentMapMetadataLoader::new(
             self.ets_loader_path.join("lib").join("component_map.js"),
@@ -512,6 +552,7 @@ impl<'a> ComponentMetadataLoader<'a> {
         }
 
         Ok(ComponentMetadata {
+            arkts_parser,
             atomic_components,
             need_pop_components: component_map_metadata.need_pop_components,
             bind_object_properties,
@@ -549,6 +590,101 @@ impl<'a> ComponentMetadataLoader<'a> {
         }
         Ok(atomic_components)
     }
+}
+
+struct SdkArkTsOptionsLoader {
+    path: PathBuf,
+}
+
+impl SdkArkTsOptionsLoader {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn load(&self) -> anyhow::Result<ArkTsOptions> {
+        let source = fs::read_to_string(&self.path)?;
+        let config: SdkTsConfig = json5::from_str(&source).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to parse SDK ArkTS options at {}: {error}",
+                self.path.display()
+            )
+        })?;
+        Ok(config.compiler_options.ets.into_oxc())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SdkTsConfig {
+    compiler_options: SdkCompilerOptions,
+}
+
+#[derive(Deserialize)]
+struct SdkCompilerOptions {
+    ets: SdkEtsOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SdkEtsOptions {
+    components: Vec<String>,
+    render: SdkRenderOptions,
+    extend: SdkExtendOptions,
+    styles: SdkStylesOptions,
+    syntax_components: SdkSyntaxComponentOptions,
+}
+
+impl SdkEtsOptions {
+    fn into_oxc(self) -> ArkTsOptions {
+        ArkTsOptions {
+            components: self.components,
+            render_methods: self.render.method,
+            render_decorators: self.render.decorator,
+            extend_decorators: self.extend.decorator,
+            styles_decorator: Some(self.styles.decorator),
+            parameter_ui_callbacks: self.syntax_components.params_ui_callback,
+            attribute_ui_callbacks: self
+                .syntax_components
+                .attr_ui_callback
+                .into_iter()
+                .map(|callback| ArkTsAttributeCallback {
+                    component: callback.name,
+                    attributes: callback.attributes,
+                })
+                .collect(),
+            annotations: true,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SdkRenderOptions {
+    method: Vec<String>,
+    decorator: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SdkExtendOptions {
+    decorator: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SdkStylesOptions {
+    decorator: String,
+}
+
+#[derive(Deserialize)]
+struct SdkSyntaxComponentOptions {
+    #[serde(rename = "paramsUICallback")]
+    params_ui_callback: Vec<String>,
+    #[serde(rename = "attrUICallback")]
+    attr_ui_callback: Vec<SdkAttributeUiCallback>,
+}
+
+#[derive(Deserialize)]
+struct SdkAttributeUiCallback {
+    name: String,
+    attributes: Vec<String>,
 }
 
 struct SdkComponentLoader<'a> {

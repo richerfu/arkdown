@@ -5,11 +5,11 @@ use std::sync::Arc;
 use arkdown_path::ModuleSpecifierText;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArkUIChild, ArkUIComponentExpression, Declaration, ExportDefaultDeclarationKind,
-    Expression, Function, FunctionBody, ImportDeclarationSpecifier, ModuleExportName, Program,
-    Statement, StructElement, StructStatement, TSLiteral, TSType, TSTypeName,
+    Argument, ArkUIChild, ArkUIComponentExpression, CallExpression, Declaration, Decorator,
+    ExportDefaultDeclarationKind, Expression, Function, FunctionBody, ImportDeclarationSpecifier,
+    ModuleExportName, Program, Statement, StructElement, StructStatement, TSLiteral, TSType,
+    TSTypeName,
 };
-use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use super::{ArkuiDecorator, ArkuiDecoratorName, ArkuiDecoratorRules, TransformOptions};
@@ -17,6 +17,62 @@ use crate::source::TransformSourceFile;
 use crate::transform::build_fn::{CustomComponentInfo, CustomComponentUpdateProps};
 use crate::transform::component_meta::SdkComponentInfo;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ExtendAttributeIndex {
+    by_component: FxHashMap<String, FxHashSet<String>>,
+}
+
+impl ExtendAttributeIndex {
+    pub(super) fn from_program(program: &Program<'_>) -> Self {
+        let mut index = Self::default();
+        for statement in &program.body {
+            match statement {
+                Statement::FunctionDeclaration(function) => {
+                    index.collect_function(function, &[]);
+                }
+                Statement::ExportNamedDeclaration(export) => {
+                    if let Some(Declaration::FunctionDeclaration(function)) =
+                        export.declaration.as_ref()
+                    {
+                        index.collect_function(function, &export.decorators);
+                    }
+                }
+                _ => {}
+            }
+        }
+        index
+    }
+
+    pub(super) fn contains(&self, component: &str, attribute: &str) -> bool {
+        self.by_component
+            .get(component)
+            .is_some_and(|attributes| attributes.contains(attribute))
+    }
+
+    fn collect_function(&mut self, function: &Function<'_>, extra_decorators: &[Decorator<'_>]) {
+        let Some(name) = function.id.as_ref() else {
+            return;
+        };
+        let Some(component) = function
+            .decorators
+            .iter()
+            .chain(extra_decorators.iter())
+            .find_map(|decorator| {
+                let decorator = ArkuiDecorator::new(decorator);
+                (decorator.name() == ArkuiDecoratorName::EXTEND)
+                    .then(|| decorator.identifier_arg())
+                    .flatten()
+            })
+        else {
+            return;
+        };
+        self.by_component
+            .entry(component)
+            .or_default()
+            .insert(name.name.to_string());
+    }
+}
 
 struct ComponentModuleExportName;
 
@@ -155,7 +211,7 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
             };
             let source = import.source.value.as_str();
             let Some(target) = resolver.resolve(source) else {
-                self.collect_unresolved_external_specifiers(
+                self.collect_external_usage_specifiers(
                     source,
                     specifiers,
                     &external_component_usages,
@@ -164,6 +220,11 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
             };
             let target_components = self.options.module_exports.component_names(&target.path);
             if target_components.is_empty() {
+                self.collect_external_usage_specifiers(
+                    source,
+                    specifiers,
+                    &external_component_usages,
+                );
                 continue;
             }
             for specifier in specifiers {
@@ -172,7 +233,7 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
         }
     }
 
-    fn collect_unresolved_external_specifiers(
+    fn collect_external_usage_specifiers(
         &mut self,
         source: &str,
         specifiers: &[ImportDeclarationSpecifier<'_>],
@@ -265,7 +326,7 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
             self.collect_sdk_specifiers(import.source.value.as_str(), specifiers);
             let source = import.source.value.as_str();
             let Some(target) = resolver.resolve(source) else {
-                self.collect_unresolved_external_specifiers(
+                self.collect_external_usage_specifiers(
                     source,
                     specifiers,
                     &external_component_usages,
@@ -274,6 +335,11 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
             };
             let target_components = self.options.module_exports.component_names(&target.path);
             if target_components.is_empty() {
+                self.collect_external_usage_specifiers(
+                    source,
+                    specifiers,
+                    &external_component_usages,
+                );
                 continue;
             }
             for specifier in specifiers {
@@ -282,7 +348,7 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
         }
     }
 
-    fn collect_unresolved_external_specifiers(
+    fn collect_external_usage_specifiers(
         &mut self,
         source: &str,
         specifiers: &[ImportDeclarationSpecifier<'_>],
@@ -465,8 +531,31 @@ impl ImportedArkuiComponentUsageCollector {
     }
 
     fn collect_expression(&mut self, expression: &Expression<'_>) {
-        if let Expression::ArkUIComponentExpression(component) = expression {
-            self.collect_component_expression(component);
+        match expression {
+            Expression::ArkUIComponentExpression(component) => {
+                self.collect_component_expression(component);
+            }
+            // OXC 0.140 keeps unresolved, non-built-in leaf calls as regular call
+            // expressions inside an ArkUI child. BuildBodyLowerer treats this same
+            // shape as a leaf component call, so import classification must mirror it.
+            Expression::CallExpression(call) => {
+                self.collect_call_expression(call);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_call_expression(&mut self, call: &CallExpression<'_>) {
+        match &call.callee {
+            Expression::Identifier(identifier) => {
+                self.names.insert(identifier.name.to_string());
+            }
+            Expression::StaticMemberExpression(member) => {
+                if let Expression::CallExpression(inner) = &member.object {
+                    self.collect_call_expression(inner);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -507,6 +596,7 @@ impl From<&SdkComponentInfo> for CustomComponentInfo {
         Self {
             update_props: info.update_props.clone(),
             link_props: info.link_props.clone(),
+            builder_params: FxHashSet::default(),
             reusable: info.reusable,
             is_custom_dialog: info.is_custom_dialog,
         }
@@ -631,6 +721,7 @@ impl<'a> ComponentInfoCollector<'a> {
         CustomComponentInfo {
             update_props: self.update_prop_names(),
             link_props: self.link_prop_names(),
+            builder_params: StructBuilderParamNames::new(self.statement).collect(),
             reusable: self.statement.decorators.iter().any(|decorator| {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REUSABLE
             }),
@@ -849,12 +940,23 @@ impl ModuleExportIndex {
     pub(crate) fn build(
         sources: &crate::source::TransformSourceSnapshot,
         module_roots: &[(String, PathBuf)],
+        component_metadata: &crate::transform::component_meta::ComponentMetadata,
     ) -> Self {
-        let mut analyzer = ModuleExportAnalyzer::new(sources, module_roots);
+        let source_files = sources.source_files();
         let mut entries = FxHashMap::default();
-        for source in sources.source_files() {
-            let path = source.path.clone();
-            entries.insert(path, analyzer.export_entry(source));
+        for _ in 0..source_files.len().saturating_add(1).max(1) {
+            let mut analyzer =
+                ModuleExportAnalyzer::new(sources, module_roots, component_metadata, &entries);
+            let mut next_entries = FxHashMap::default();
+            for source in &source_files {
+                next_entries.insert(source.path.clone(), analyzer.export_entry(source.clone()));
+            }
+            if next_entries == entries {
+                return Self {
+                    entries: Arc::new(next_entries),
+                };
+            }
+            entries = next_entries;
         }
         Self {
             entries: Arc::new(entries),
@@ -883,7 +985,7 @@ impl ModuleExportIndex {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ModuleExportEntry {
     enums: FxHashSet<String>,
     builders: FxHashSet<String>,
@@ -893,6 +995,8 @@ struct ModuleExportEntry {
 struct ModuleExportAnalyzer<'a> {
     sources: &'a crate::source::TransformSourceSnapshot,
     module_roots: &'a [(String, PathBuf)],
+    component_metadata: &'a crate::transform::component_meta::ComponentMetadata,
+    previous_entries: &'a FxHashMap<PathBuf, ModuleExportEntry>,
     active: FxHashSet<std::path::PathBuf>,
     entry_cache: FxHashMap<std::path::PathBuf, ModuleExportEntry>,
 }
@@ -901,10 +1005,14 @@ impl<'a> ModuleExportAnalyzer<'a> {
     fn new(
         sources: &'a crate::source::TransformSourceSnapshot,
         module_roots: &'a [(String, PathBuf)],
+        component_metadata: &'a crate::transform::component_meta::ComponentMetadata,
+        previous_entries: &'a FxHashMap<PathBuf, ModuleExportEntry>,
     ) -> Self {
         Self {
             sources,
             module_roots,
+            component_metadata,
+            previous_entries,
             active: FxHashSet::default(),
             entry_cache: FxHashMap::default(),
         }
@@ -916,11 +1024,15 @@ impl<'a> ModuleExportAnalyzer<'a> {
             return entry.clone();
         }
         let Some(module) = self.module(source) else {
-            return ModuleExportEntry::default();
+            return self
+                .previous_entries
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
         };
 
         let entry = module
-            .with_program(|program| {
+            .with_program(self.component_metadata, |program| {
                 let mut entry = ModuleExportEntry::default();
                 let mut local_components = CustomComponentUpdateProps::default();
                 for statement in &program.body {
@@ -1031,17 +1143,24 @@ impl<'a> ModuleExportAnalyzer<'a> {
                                 }
                             }
                         }
-                        Statement::ExportDefaultDeclaration(export) => {
-                            if let ExportDefaultDeclarationKind::StructStatement(statement) =
-                                &export.declaration
+                        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                            ExportDefaultDeclarationKind::StructStatement(statement)
+                                if ComponentExportRules::is_exported_component_struct(
+                                    statement,
+                                ) =>
                             {
-                                if ComponentExportRules::is_exported_component_struct(statement) {
+                                entry.components.has_default = true;
+                                entry.components.default_info =
+                                    ComponentInfoCollector::new(statement).collect();
+                            }
+                            ExportDefaultDeclarationKind::Identifier(identifier) => {
+                                if let Some(info) = local_components.get(identifier.name.as_str()) {
                                     entry.components.has_default = true;
-                                    entry.components.default_info =
-                                        ComponentInfoCollector::new(statement).collect();
+                                    entry.components.default_info = info.clone();
                                 }
                             }
-                        }
+                            _ => {}
+                        },
                         Statement::ExportAllDeclaration(export) => {
                             let Some(target) = module.import_target(
                                 export.source.value.as_str(),
@@ -1155,10 +1274,14 @@ impl AnalyzedModule {
         }
     }
 
-    fn with_program<R>(&self, f: impl FnOnce(&Program<'_>) -> R) -> Option<R> {
+    fn with_program<R>(
+        &self,
+        component_metadata: &crate::transform::component_meta::ComponentMetadata,
+        f: impl FnOnce(&Program<'_>) -> R,
+    ) -> Option<R> {
         let allocator = Allocator::default();
         let source_type = SourceType::from_path(&self.path).unwrap_or_else(|_| SourceType::ets());
-        let parsed = Parser::new(&allocator, &self.source, source_type).parse();
+        let parsed = component_metadata.parse_ets(&allocator, &self.source, source_type);
         if parsed.diagnostics.is_empty() {
             Some(f(&parsed.program))
         } else {
@@ -1176,7 +1299,7 @@ impl AnalyzedModule {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ExportedComponentNames {
     named: FxHashMap<String, CustomComponentInfo>,
     has_default: bool,

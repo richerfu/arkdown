@@ -1,7 +1,7 @@
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
-    AnnotationDeclaration, AnnotationElement, Expression, FormalParameters, FunctionBody,
-    Statement, TSTypeAnnotation,
+    AnnotationDeclaration, AnnotationElement, CallExpression, Expression, FormalParameters,
+    FunctionBody, Statement, TSTypeAnnotation,
 };
 use oxc_ast::AstBuilder;
 use oxc_span::SPAN;
@@ -137,7 +137,7 @@ impl ExtendBodyEmitter {
         allocator: &'b Allocator,
     ) -> OxcVec<'b, Statement<'b>> {
         let Some(body) = body else {
-            return OxcVec::new_in(allocator);
+            return OxcVec::new_in(&allocator);
         };
         ExtendBodyStatementEmitter::new(body, component).statements(allocator)
     }
@@ -154,11 +154,97 @@ impl<'a> ExtendBodyStatementEmitter<'a> {
     }
 
     fn statements<'b>(&self, allocator: &'b Allocator) -> OxcVec<'b, Statement<'b>> {
-        let mut statements = OxcVec::new_in(allocator);
+        let mut statements = OxcVec::new_in(&allocator);
         for statement in &self.body.statements {
-            statements.push(self.statement(statement, allocator));
+            self.push_statement(statement, allocator, &mut statements);
         }
         statements
+    }
+
+    fn push_statement<'b>(
+        &self,
+        statement: &Statement<'_>,
+        allocator: &'b Allocator,
+        statements: &mut OxcVec<'b, Statement<'b>>,
+    ) {
+        if let Statement::ExpressionStatement(expression_statement) = statement {
+            if let Expression::LeadingDotExpression(leading_dot) = &expression_statement.expression
+            {
+                if Self::is_attribute_chain(&leading_dot.expression) {
+                    self.push_attribute_chain(&leading_dot.expression, allocator, statements);
+                    return;
+                }
+            }
+        }
+
+        statements.push(self.statement(statement, allocator));
+    }
+
+    fn is_attribute_chain(expression: &Expression<'_>) -> bool {
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        match &call.callee {
+            Expression::Identifier(_) => true,
+            Expression::StaticMemberExpression(member) => Self::is_attribute_chain(&member.object),
+            _ => false,
+        }
+    }
+
+    fn push_attribute_chain<'b>(
+        &self,
+        expression: &Expression<'_>,
+        allocator: &'b Allocator,
+        statements: &mut OxcVec<'b, Statement<'b>>,
+    ) {
+        let Expression::CallExpression(call) = expression else {
+            return;
+        };
+        match &call.callee {
+            Expression::Identifier(identifier) => {
+                statements.push(self.attribute_statement(
+                    identifier.name.as_str(),
+                    call,
+                    allocator,
+                ));
+            }
+            Expression::StaticMemberExpression(member) => {
+                self.push_attribute_chain(&member.object, allocator, statements);
+                statements.push(self.attribute_statement(
+                    member.property.name.as_str(),
+                    call,
+                    allocator,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn attribute_statement<'b>(
+        &self,
+        attribute: &str,
+        call: &CallExpression<'_>,
+        allocator: &'b Allocator,
+    ) -> Statement<'b> {
+        let ast = AstBuilder::new(allocator);
+        let member = ast.member_expression_static(
+            call.span,
+            ast.expression_identifier(SPAN, allocator.alloc_str(self.component)),
+            ast.identifier_name(call.span, allocator.alloc_str(attribute)),
+            false,
+        );
+        let type_arguments = call
+            .type_arguments
+            .as_ref()
+            .map(|type_arguments| type_arguments.clone_in(allocator));
+        let expression = ast.expression_call(
+            call.span,
+            Expression::from(member),
+            type_arguments,
+            call.arguments.clone_in(allocator),
+            call.optional,
+        );
+        ast.statement_expression(call.span, expression)
     }
 
     fn statement<'b>(&self, statement: &Statement<'_>, allocator: &'b Allocator) -> Statement<'b> {
