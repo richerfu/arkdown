@@ -77,6 +77,12 @@ pub struct BundleInput {
     pub runtime_packages: BundleRuntimePackageInfo,
     /// ByteCode HAR package aliases from `loader.json#byteCodeHarInfo`.
     pub byte_code_har_packages: Vec<String>,
+    /// Absolute module-source roots whose reachable graph is inspected for
+    /// system/native imports when `buildOption.preloadSystemSo` is enabled.
+    ///
+    /// Mirrors hvigor `ArkCompile.needPreloadSoFileSet`: the current module's
+    /// `module.srcEntry`, home abilities, and source-HAR home abilities.
+    pub preload_system_so_entries: Vec<PathBuf>,
 }
 
 /// Package metadata required by hvigor's `SourceMapGenerator`.
@@ -416,6 +422,7 @@ mod tests {
                 },
                 runtime_packages: BundleRuntimePackageInfo::default(),
                 byte_code_har_packages: Vec::new(),
+                preload_system_so_entries: Vec::new(),
             },
             output: BundleOutputOptions::default(),
             source_map: SourceMapPolicy::None,

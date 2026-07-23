@@ -172,15 +172,8 @@ impl BuildCommand {
       .clone()
       .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
 
-    let mode = match self.args.mode.as_str() {
-      "release" => BuildMode::Release,
-      _ => BuildMode::Debug,
-    };
-    let target = match self.args.target.as_str() {
-      "hsp" => OutputTarget::Hsp,
-      "har" => OutputTarget::Har,
-      _ => OutputTarget::Hap,
-    };
+    let mode = self.args.build_mode()?;
+    let target = self.args.output_target()?;
     let module_analyzer = ModuleAnalyzerKind::from(self.args.module_analyzer);
     if !module_analyzer.is_available() {
       anyhow::bail!(
@@ -212,5 +205,26 @@ impl BuildCommand {
       "build command completed"
     );
     Ok(())
+  }
+}
+
+impl BuildArgs {
+  pub(crate) fn build_mode(&self) -> Result<arkdown_core::BuildMode> {
+    match self.mode.as_str() {
+      "debug" => Ok(arkdown_core::BuildMode::Debug),
+      "release" => Ok(arkdown_core::BuildMode::Release),
+      mode => anyhow::bail!("unsupported build mode '{mode}'; expected 'debug' or 'release'"),
+    }
+  }
+
+  pub(crate) fn output_target(&self) -> Result<arkdown_core::OutputTarget> {
+    match self.target.as_str() {
+      "hap" => Ok(arkdown_core::OutputTarget::Hap),
+      "hsp" => Ok(arkdown_core::OutputTarget::Hsp),
+      "har" => Ok(arkdown_core::OutputTarget::Har),
+      target => {
+        anyhow::bail!("unsupported build target '{target}'; expected 'hap', 'hsp', or 'har'")
+      }
+    }
   }
 }

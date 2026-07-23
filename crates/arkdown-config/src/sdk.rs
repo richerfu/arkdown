@@ -123,12 +123,9 @@ impl<'a> SdkToolResolver<'a> {
 ///
 /// Iterates the candidate list and returns the first directory that exists.
 pub fn find_sdk_root() -> Option<PathBuf> {
-    for candidate in sdk_candidates() {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    sdk_candidates()
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 /// Build [`SdkConfig`] from a known SDK root path.

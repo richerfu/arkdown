@@ -21,12 +21,12 @@
 //! ## Output path (hvigor convention)
 //!
 //! ```text
-//! <module_root>/build/default/intermediates/startup_config/default/temp-startup-config.json
+//! <module_root>/build/default/intermediates/startup/default/startup_config.json
 //! ```
 
 use indexmap::IndexMap;
 use rustc_hash::FxHashSet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use arkdown_path::{ArtifactPathSerializer, OhmUrl};
@@ -65,6 +65,95 @@ pub struct StartupConfigInput<'a> {
 pub struct StartupConfigOutput {
     /// Merged startup config, or `None` when no startup tasks were found anywhere.
     pub config: Option<MergedStartupConfig>,
+}
+
+impl StartupConfigOutput {
+    /// Produce the profile consumed by restool.
+    ///
+    /// Mirrors hvigor `CompileResource.processStartupConfig()`: build-only
+    /// ownership/path annotations are removed, while runtime fields such as
+    /// `configEntry`, `ohmurl`, matching rules, and scheduling options remain.
+    pub fn compiled_resource_profile(&self) -> Option<serde_json::Value> {
+        let profile = self.config.as_ref()?;
+        serde_json::to_value(CompiledStartupProfile::from_merged(profile)).ok()
+    }
+}
+
+/// Restool serializes app-startup profiles in this stable field order. The
+/// order is observable in packaged resource JSON and therefore part of the
+/// Hvigor artifact contract, even though JSON readers treat it as semantic
+/// noise.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompiledStartupProfile {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    startup_tasks: Vec<CompiledStartupTask>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    app_preload_hint_startup_tasks: Vec<CompiledStartupTask>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system_preload_hint_startup_tasks: Vec<CompiledStartupTask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_entry: Option<String>,
+}
+
+impl CompiledStartupProfile {
+    fn from_merged(profile: &MergedStartupConfig) -> Self {
+        Self {
+            startup_tasks: profile
+                .startup_tasks
+                .iter()
+                .map(CompiledStartupTask::from_task)
+                .collect(),
+            app_preload_hint_startup_tasks: profile
+                .app_preload_hint_startup_tasks
+                .iter()
+                .map(CompiledStartupTask::from_task)
+                .collect(),
+            system_preload_hint_startup_tasks: profile
+                .system_preload_hint_startup_tasks
+                .iter()
+                .map(CompiledStartupTask::from_task)
+                .collect(),
+            config_entry: profile.config_entry.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompiledStartupTask {
+    src_entry: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_on_thread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait_on_main_thread: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude_from_auto_start: Option<bool>,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ohmurl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependencies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    match_rules: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduler_phase: Option<String>,
+}
+
+impl CompiledStartupTask {
+    fn from_task(task: &StartupTask) -> Self {
+        Self {
+            src_entry: task.src_entry.clone(),
+            run_on_thread: task.run_on_thread.clone(),
+            wait_on_main_thread: task.wait_on_main_thread,
+            exclude_from_auto_start: task.exclude_from_auto_start,
+            name: task.name.clone(),
+            ohmurl: task.ohmurl.clone(),
+            dependencies: task.dependencies.clone(),
+            match_rules: task.match_rules.clone(),
+            scheduler_phase: task.scheduler_phase.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -229,6 +318,10 @@ impl<'a> StartupConfigInput<'a> {
     ) {
         let config_path_str = StartupConfigPathText::new(profile_path).string();
 
+        if merged.config_entry.is_none() {
+            merged.config_entry.clone_from(&profile.config_entry);
+        }
+
         let annotate = |task: &StartupTask| -> StartupTask {
             let mut t = task.clone();
             t.module_name = Some(module_name.to_string());
@@ -271,6 +364,10 @@ impl<'a> StartupConfigInput<'a> {
         for task in &profile.app_preload_hint_startup_tasks {
             merged.app_preload_hint_startup_tasks.push(annotate(task));
         }
+
+        merged
+            .system_preload_hint_startup_tasks
+            .extend(profile.system_preload_hint_startup_tasks.iter().cloned());
     }
 
     fn src_main_root_for_profile(profile_path: &Path) -> Option<PathBuf> {
@@ -534,8 +631,9 @@ impl<'a> StartupConfigPathText<'a> {
     }
 
     fn string(&self) -> String {
-        ArtifactPathSerializer::path_to_slash_string(self.path)
-            .unwrap_or_else(|_| self.path.display().to_string())
+        let path = arkdown_path::canonicalize_or_owned(self.path);
+        ArtifactPathSerializer::path_to_slash_string(&path)
+            .unwrap_or_else(|_| path.display().to_string())
     }
 }
 
@@ -636,7 +734,9 @@ mod tests {
             .join("src/main/ets/startup/MyTask.ets")
             .to_string_lossy()
             .into_owned();
-        let expected_profile = profile_path.to_string_lossy().into_owned();
+        let expected_profile = arkdown_path::canonicalize_or_owned(&profile_path)
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             task.ohmurl.as_deref(),
             Some("@bundle:com.example.app/entry/ets/startup/MyTask")
@@ -827,17 +927,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let out_path = tmp
             .path()
-            .join("intermediates/startup_config/default/temp-startup-config.json");
+            .join("intermediates/startup/default/startup_config.json");
 
         let output = StartupConfigOutput {
             config: Some(MergedStartupConfig {
+                config_entry: None,
                 startup_tasks: vec![StartupTask {
                     name: "Task1".to_string(),
                     src_entry: "./ets/startup/Task1.ets".to_string(),
+                    dependencies: None,
+                    exclude_from_auto_start: None,
                     run_on_thread: None,
                     wait_on_main_thread: None,
-                    exclude_from_auto_start: None,
-                    dependencies: vec![],
+                    match_rules: None,
+                    scheduler_phase: None,
                     module_name: Some("entry".to_string()),
                     ohmurl: None,
                     src_entry_absolute_path: None,
@@ -856,6 +959,37 @@ mod tests {
         let content = fs::read_to_string(&out_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["startupTasks"][0]["name"], "Task1");
+    }
+
+    #[test]
+    fn compiled_profile_matches_restool_field_order_and_strips_build_annotations() {
+        let config: MergedStartupConfig = serde_json::from_value(serde_json::json!({
+            "configEntry": "./ets/startup/StartupConfig.ets",
+            "startupTasks": [{
+                "name": "Task",
+                "srcEntry": "./ets/startup/Task.ets",
+                "dependencies": [],
+                "excludeFromAutoStart": false,
+                "runOnThread": "mainThread",
+                "waitOnMainThread": true,
+                "moduleName": "entry",
+                "ohmurl": "@bundle:com.example.app/entry/ets/startup/Task",
+                "srcEntryAbsolutePath": "/project/entry/src/main/ets/startup/Task.ets",
+                "startupConfigPath": "/project/entry/src/main/resources/base/profile/startup_config.json"
+            }]
+        }))
+        .expect("merged startup config");
+        let output = StartupConfigOutput {
+            config: Some(config),
+        };
+        let compiled = output
+            .compiled_resource_profile()
+            .expect("compiled startup profile");
+
+        assert_eq!(
+            serde_json::to_string(&compiled).expect("serialize compiled startup profile"),
+            r#"{"startupTasks":[{"srcEntry":"./ets/startup/Task.ets","runOnThread":"mainThread","waitOnMainThread":true,"excludeFromAutoStart":false,"name":"Task","ohmurl":"@bundle:com.example.app/entry/ets/startup/Task","dependencies":[]}],"configEntry":"./ets/startup/StartupConfig.ets"}"#
+        );
     }
 
     #[test]

@@ -7,6 +7,6 @@
   "author": "",
   "license": "",
   "dependencies": {
-    "bc-har-dep": "file:./oh_modules/bc-har-dep"
+    "bc-har-dep": "1.0.0"
   }
 }

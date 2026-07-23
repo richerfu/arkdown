@@ -30,9 +30,9 @@ use oxc_ast::ast::{
     TSModuleDeclarationBody, TSType,
 };
 use oxc_ast::NONE;
-use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
+use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::{GetSpan, SourceType, SPAN};
 
 use crate::error::EtsTransformError;
 use crate::lazy_import::LazyImportTransform;
@@ -53,10 +53,10 @@ use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::declaration_emit::{ParamsInterfaceEmitter, TopLevelFunctionEmitter};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::entry::{EntryOptions, EntryRegistrationBlock, EntryRegistrationInfo};
-use crate::transform::source_emit::CodegenSourceText;
+use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
-use crate::transform::viewpu_finalize::ViewpuOutputFinalizer;
+use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
 pub(crate) use component_analysis::ModuleExportIndex;
 
@@ -177,6 +177,11 @@ pub struct ArktsTransformer<'a> {
     options: ArktsTransformerOptions<'a>,
 }
 
+pub struct ArktsTransformOutput {
+    pub code: String,
+    pub source_map: Option<String>,
+}
+
 enum ArktsTransformerOptions<'a> {
     Owned(TransformOptions),
     Borrowed(&'a TransformOptions),
@@ -212,6 +217,10 @@ impl<'a> ArktsTransformer<'a> {
     }
 
     pub fn transform(&self) -> Result<String, EtsTransformError> {
+        self.transform_with_source_map().map(|output| output.code)
+    }
+
+    pub fn transform_with_source_map(&self) -> Result<ArktsTransformOutput, EtsTransformError> {
         let source = self.source;
         let options = self.options.as_ref();
         let content = source.content.as_str();
@@ -231,7 +240,10 @@ impl<'a> ArktsTransformer<'a> {
 
         let syntax_detector = ArktsTransformSyntaxDetector::new();
         if !syntax_detector.program(&parsed.program) {
-            return Ok(source.content.clone());
+            return Ok(ArktsTransformOutput {
+                code: source.content.clone(),
+                source_map: None,
+            });
         }
 
         if matches!(options.checker_mode, CheckerMode::Oxc) {
@@ -369,21 +381,29 @@ impl<'a> ArktsTransformer<'a> {
             }
             body.extend(entry_registration_statements);
             parsed.program.body = body;
+            ViewpuProgramFinalizer::new(&allocator, &mut parsed.program).finalize();
 
-            let code = Codegen::new()
-                .with_options(CodegenOptions {
+            let generated = HvigorTypescriptPrinter::print_with_source_map(
+                &parsed.program,
+                CodegenOptions {
+                    comments: CommentOptions::disabled(),
+                    source_map_path: Some(source.id.id.clone().into()),
                     indent_char: IndentChar::Space,
                     indent_width: 4,
                     ..CodegenOptions::default()
-                })
-                .build(&parsed.program)
-                .code;
-            let out =
-                ViewpuOutputText::new(CodegenSourceText::new(code).without_trailing_newline())
-                    .without_extra_trailing_blank_lines();
-            Ok(ViewpuOutputFinalizer::new(&out).finalize())
+                },
+                content,
+            );
+            let out = ViewpuOutputText::new(generated.code).without_extra_trailing_blank_lines();
+            Ok(ArktsTransformOutput {
+                code: out,
+                source_map: generated.source_map,
+            })
         } else {
-            Ok(content.to_string())
+            Ok(ArktsTransformOutput {
+                code: content.to_string(),
+                source_map: None,
+            })
         }
     }
 }
@@ -793,12 +813,18 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             .decorators
             .iter()
             .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY);
+        let entry_span = statement
+            .decorators
+            .iter()
+            .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY)
+            .map_or(SPAN, GetSpan::span);
         let is_reusable = statement
             .decorators
             .iter()
             .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REUSABLE);
         let mut state_fields = Vec::new();
         let mut initial_render_body = BuildBodyInfo::default();
+        let mut initial_render_method_span = SPAN;
         let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
         let builder_method_names = StructBuilderMethodNames::new(statement).collect();
         let builder_param_names = StructBuilderParamNames::new(statement).collect();
@@ -831,6 +857,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         property_order.push(name.clone());
                         params_fields.push(ParamField {
                             name,
+                            source_span: property.span,
+                            name_span: property.key.span(),
                             type_annotation_ast: property.type_annotation.as_deref(),
                         });
                     }
@@ -849,6 +877,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                                 .map(FieldExpression::from_expression);
                             regular_fields.push(RegularField {
                                 name: name.into_owned(),
+                                source_span: property.span,
+                                name_span: property.key.span(),
                                 type_annotation_ast: property.type_annotation.as_deref(),
                                 initializer,
                                 optional: property.optional,
@@ -889,6 +919,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         .map(FieldExpression::from_expression);
                     state_fields.push(StateField {
                         name: name.into_owned(),
+                        source_span: property.span,
+                        name_span: property.key.span(),
                         type_annotation_ast: property.type_annotation.as_deref(),
                         optional: property.optional,
                         decorator: decorator.to_string(),
@@ -907,6 +939,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         .static_name()
                         .is_some_and(|name| name == GeneratedViewpuName::BUILD) =>
                 {
+                    let build_method_span = method.span;
                     let plan = BuildBodyPlan::component_with_shared_inputs(
                         method.value.body.as_deref(),
                         Arc::clone(&self.source_text),
@@ -923,6 +956,10 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
                     initial_render_body = BuildBodyInfo::Plan(plan);
+                    // Preserve the original build method range on the generated
+                    // initialRender method for TypeScript-printer source maps.
+                    // There is only one valid build method per component.
+                    initial_render_method_span = build_method_span;
                 }
                 StructElement::MethodDefinition(method)
                     if method
@@ -994,6 +1031,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         Ok(Some(ComponentInfo {
             partial_update: self.options.supports_partial_update(),
             name: statement.id.name.to_string(),
+            name_span: statement.id.span,
+            entry_span,
+            build_method_span: initial_render_method_span,
             is_entry,
             is_exported,
             is_default_export,

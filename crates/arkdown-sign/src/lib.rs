@@ -16,6 +16,7 @@ mod config_material;
 pub mod digest;
 pub mod error;
 pub mod keystore;
+mod page_info;
 pub mod pkcs7;
 pub mod plan;
 mod profile_content;
@@ -93,8 +94,7 @@ impl HapSigner {
 
     fn signing_block_for_zip(&self, hap_zip: &mut zip::HapZip) -> Result<Vec<u8>, SignError> {
         // 1. Prepare ZIP
-        hap_zip.sort_entries();
-        hap_zip.align()?;
+        hap_zip.prepare_for_signing()?;
 
         // Java `SignProvider.loadOptionalBlocks` loads profile as an optional
         // block before computing the content digest; `HapUtils.computeDigests`
@@ -177,8 +177,7 @@ impl HapSigner {
     /// Sign an unsigned HAP file and write the signed output to `output`.
     pub fn sign_file(&self, input: &Path, output: &Path) -> Result<(), SignError> {
         let mut hap_zip = zip::HapZip::parse_file(input)?;
-        hap_zip.sort_entries();
-        hap_zip.align()?;
+        hap_zip.prepare_for_signing()?;
 
         let result = (|| {
             let blocks = self.optional_blocks_for_zip(&hap_zip)?;
@@ -294,7 +293,7 @@ mod tests {
         let data = vec![0xFFu8; 100];
         let block = signing_block::build_signing_block(&[(0x20000000, data)], 10);
         // total = 1*12 (headers) + 100 (data) + 4 (count) + 8 (size) + 16 (magic) + 4 (version)
-        let expected_total: u64 = (1 * 12 + 100 + 4 + 8 + 16 + 4) as u64;
+        let expected_total: u64 = (12 + 100 + 4 + 8 + 16 + 4) as u64;
         // total_size field is at: block.len() - 4 (version) - 16 (magic) - 8 (size)
         let total_start = block.len() - 4 - 16 - 8;
         let total = u64::from_le_bytes(block[total_start..total_start + 8].try_into().unwrap());

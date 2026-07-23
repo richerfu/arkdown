@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use super::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout, RestoolLayout,
 };
-use anyhow::Result;
-use arkdown_core::{ArkdownConfig, ModuleConfig};
+use anyhow::{Context, Result};
+use arkdown_core::{ArkdownConfig, ModuleConfig, OhosModuleType, OutputTarget};
 use arkdown_pack::minify_package_intermediate_module_json;
 use arkdown_path::{
   canonicalize_or_owned as canonical_or_owned, ArtifactPath, ArtifactPathSerializer,
@@ -29,20 +29,6 @@ impl<'a> RouterMapSourcePath<'a> {
       .join("main")
       .join(rel_path.as_str())
       .into_string()
-  }
-}
-
-struct HapMetadataName<'a> {
-  module_name: &'a str,
-}
-
-impl<'a> HapMetadataName<'a> {
-  fn new(module_name: &'a str) -> Self {
-    Self { module_name }
-  }
-
-  fn signed_hap(&self) -> String {
-    IntermediateText::from_parts([self.module_name, "-default-signed.hap"])
   }
 }
 
@@ -118,6 +104,59 @@ impl IntermediateArtifactWriter {
       &serde_json::to_vec(&resource_router_map)?,
     )?;
     Ok(())
+  }
+
+  /// Apply metadata owned by Hvigor's post-profile resource tasks.
+  ///
+  /// `ProcessRouterMap` and insight-intent processing run after
+  /// `ProcessProfile`: merge/process intermediates therefore omit these
+  /// derived fields, while the resource input and packaged module profile
+  /// advertise the generated resource profiles.
+  pub(super) fn apply_compile_resource_module_metadata(
+    &self,
+    module_json: &Path,
+    has_router_map_entries: bool,
+    insight_intent_profile: &Path,
+  ) -> Result<()> {
+    let content = fs_err::read_to_string(module_json)?;
+    let mut value: serde_json::Value = serde_json::from_str(&content)?;
+    let module = value
+      .get_mut("module")
+      .and_then(serde_json::Value::as_object_mut)
+      .context("resource module.json must contain a module object")?;
+    if has_router_map_entries {
+      module
+        .entry("routerMap".to_string())
+        .or_insert_with(|| serde_json::Value::String("$profile:default-router-map".to_string()));
+    }
+    if self.insight_intent_profile_has_entries(insight_intent_profile) {
+      module.insert(
+        "hasInsightIntent".to_string(),
+        serde_json::Value::Bool(true),
+      );
+    }
+    self.write_json_minified(module_json, &value)
+  }
+
+  fn insight_intent_profile_has_entries(&self, path: &Path) -> bool {
+    let Ok(content) = fs_err::read_to_string(path) else {
+      return false;
+    };
+    let Ok(profile) = json5::from_str::<serde_json::Value>(&content) else {
+      return false;
+    };
+    [
+      "insightIntents",
+      "insightIntentsSrcEntry",
+      "extractInsightIntents",
+    ]
+    .into_iter()
+    .any(|field| {
+      profile
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| !entries.is_empty())
+    })
   }
 
   fn loader_router_map_entry(&self, entry: &serde_json::Value) -> Option<serde_json::Value> {
@@ -257,27 +296,65 @@ impl IntermediateArtifactWriter {
     &self,
     module_root: &Path,
     final_module_json: &Path,
+    current_extension_ability_count: usize,
   ) -> Result<()> {
     let content = fs_err::read_to_string(final_module_json)?;
     let final_value: serde_json::Value = serde_json::from_str(&content)?;
     let module_layout = ModuleBuildLayout::new(module_root);
 
     let process_value = self.profile_without_resource_ids(final_value.clone());
-    self.write_json_pretty(&module_layout.process_profile_module_json(), &process_value)?;
-    self.write_json_minified(&module_layout.res_ark_module_json(), &process_value)?;
+    self.write_profile_json(&module_layout.process_profile_module_json(), &process_value)?;
+
+    // Restool's ark_module.json describes the current resource module. Hvigor
+    // appends dependency HAR extension abilities in ProcessProfile, after the
+    // resource compiler has produced ark_module.json, so those dependency
+    // entries must not leak back into the resource-stage artifact.
+    let mut resource_ark_value = process_value.clone();
+    self
+      .retain_current_extension_abilities(&mut resource_ark_value, current_extension_ability_count);
+    self.write_json_minified(&module_layout.res_ark_module_json(), &resource_ark_value)?;
 
     let mut merge_value = process_value;
+    self.retain_current_extension_abilities(&mut merge_value, current_extension_ability_count);
     if let Some(module) = merge_value
       .get_mut("module")
       .and_then(|value| value.as_object_mut())
     {
+      // Hvigor's MergeProfile contains only the current module's extension
+      // abilities. ProcessProfile subsequently appends dependency HAR
+      // extension abilities. ModuleJsonWriter has already produced the latter
+      // shape, with current entries first, so restore the earlier stage by
+      // retaining exactly the source module's typed entry count.
       module.remove("virtualMachine");
       module.remove("compileMode");
       module.remove("dependencies");
     }
-    self.write_json_pretty(&module_layout.merge_profile_module_json(), &merge_value)?;
+    self.write_profile_json(&module_layout.merge_profile_module_json(), &merge_value)?;
 
     Ok(())
+  }
+
+  fn retain_current_extension_abilities(
+    &self,
+    value: &mut serde_json::Value,
+    current_extension_ability_count: usize,
+  ) {
+    let Some(module) = value
+      .get_mut("module")
+      .and_then(serde_json::Value::as_object_mut)
+    else {
+      return;
+    };
+    let Some(extension_abilities) = module
+      .get_mut("extensionAbilities")
+      .and_then(serde_json::Value::as_array_mut)
+    else {
+      return;
+    };
+    extension_abilities.truncate(current_extension_ability_count);
+    if extension_abilities.is_empty() {
+      module.remove("extensionAbilities");
+    }
   }
 
   fn profile_without_resource_ids(&self, mut value: serde_json::Value) -> serde_json::Value {
@@ -373,66 +450,470 @@ impl IntermediateArtifactWriter {
         .join(",")
     };
 
+    let mut all_resource_dirs = module_res_dirs.to_vec();
+    all_resource_dirs.extend_from_slice(dependency_res_dirs);
+    let include_app_resource = !matches!(config.output_target, OutputTarget::Har)
+      && (!matches!(module.module_type, OhosModuleType::Shared)
+        || config
+          .product
+          .build_option
+          .res_options
+          .as_ref()
+          .map(|options| options.include_app_scope_res)
+          .unwrap_or(true));
+    if include_app_resource {
+      all_resource_dirs.push(project_layout.app_scope_resources());
+    }
+    let compression = self.opt_compression_config(config, &extension_path, &all_resource_dirs)?;
+    self.write_json_minified_newline(&resource_layout.opt_compression_json(), &compression)?;
+
+    // Restool consumes resource roots in JSON property order. Hvigor's
+    // RestoolConfigBuilder declares applicationResource before moduleResources
+    // and dependencies, so duplicate resources are owned by AppScope first.
+    // Keep this insertion order identical to
+    // hvigor-ohos-plugin/src/builder/restool-file-config-builder.js.
+    let mut res_config = serde_json::Map::new();
+    res_config.insert(
+      "configPath".to_string(),
+      serde_json::Value::String(IntermediateArtifactWriter::path_string(
+        &module_layout.process_profile_module_json(),
+      )),
+    );
+    res_config.insert(
+      "packageName".to_string(),
+      serde_json::Value::String(config.product.bundle_name.clone()),
+    );
+    res_config.insert(
+      "output".to_string(),
+      serde_json::Value::String(IntermediateArtifactWriter::path_string(&res_out)),
+    );
+    res_config.insert(
+      "moduleNames".to_string(),
+      serde_json::Value::String(module_names),
+    );
+    res_config.insert(
+      "ResourceTable".to_string(),
+      serde_json::Value::Array(vec![serde_json::Value::String(
+        IntermediateArtifactWriter::path_string(&module_layout.generated_resource_table_header()),
+      )]),
+    );
+    if include_app_resource {
+      res_config.insert(
+        "applicationResource".to_string(),
+        serde_json::Value::String(IntermediateArtifactWriter::path_string(
+          &project_layout.app_scope_resources(),
+        )),
+      );
+    }
+    res_config.insert(
+      "moduleResources".to_string(),
+      serde_json::Value::Array(
+        module_res_dirs
+          .iter()
+          .map(|dir| {
+            serde_json::Value::String(IntermediateArtifactWriter::path_string(
+              &canonical_or_owned(dir),
+            ))
+          })
+          .collect(),
+      ),
+    );
+    res_config.insert(
+      "dependencies".to_string(),
+      serde_json::Value::Array(
+        dependencies
+          .into_iter()
+          .map(serde_json::Value::String)
+          .collect(),
+      ),
+    );
+    res_config.insert(
+      "iconCheck".to_string(),
+      serde_json::Value::Bool(
+        config.sdk_config.compile_api_version >= 10
+          && matches!(
+            module.module_type,
+            OhosModuleType::Entry | OhosModuleType::Feature
+          ),
+      ),
+    );
+    res_config.insert(
+      "compression".to_string(),
+      serde_json::Value::String(IntermediateArtifactWriter::path_string(
+        &resource_layout.opt_compression_json(),
+      )),
+    );
+    let defined_sys_ids = self.restool_layout.defined_sys_ids();
+    if let Some(options) = config.product.build_option.res_options.as_ref() {
+      if let Some(threads) = options.res_compile_threads.filter(|threads| *threads > 0) {
+        let max_threads = std::thread::available_parallelism()
+          .map(|parallelism| parallelism.get())
+          .unwrap_or(threads);
+        res_config.insert(
+          "thread".to_string(),
+          serde_json::json!(threads.min(max_threads)),
+        );
+      }
+      if !options.ignore_resource_pattern.is_empty() {
+        let patterns = options
+          .ignore_resource_pattern
+          .iter()
+          .map(|pattern| self.resource_ignore_regex(pattern))
+          .collect::<Result<Vec<_>>>()?;
+        res_config.insert(
+          "ignoreResourcePattern".to_string(),
+          serde_json::json!(patterns),
+        );
+      }
+      if !matches!(config.output_target, OutputTarget::Har) {
+        if let Some(qualifiers) = options.qualifiers_config.as_ref() {
+          let mut qualifiers = qualifiers.clone();
+          if let Some(object) = qualifiers.as_object_mut() {
+            if let Some(mcc_mnc) = object.remove("Mcc&Mnc") {
+              object.insert("MccMnc".to_string(), mcc_mnc);
+            }
+          }
+          res_config.insert("qualifiersConfig".to_string(), qualifiers);
+        }
+      }
+    }
+    res_config.insert(
+      "ids".to_string(),
+      serde_json::Value::String(IntermediateArtifactWriter::path_string(
+        &resource_layout.ids_map(),
+      )),
+    );
+    res_config.insert(
+      "definedIds".to_string(),
+      serde_json::Value::String(IntermediateArtifactWriter::path_string(
+        &resource_layout.id_defined_json(),
+      )),
+    );
+    if let Some(defined_sys_ids) = defined_sys_ids {
+      res_config.insert(
+        "definedSysIds".to_string(),
+        serde_json::Value::String(IntermediateArtifactWriter::path_string(&defined_sys_ids)),
+      );
+    }
     self.write_json_minified_newline(
-      &resource_layout.opt_compression_json(),
-      &serde_json::json!({
-          "context": {
-              "extensionPath": extension_path,
-          },
-          "compression": {
-              "media": {
-                  "enable": false,
-              },
-              "filters": [],
-          },
-      }),
+      &resource_layout.res_config_json(),
+      &serde_json::Value::Object(res_config),
     )?;
 
-    let mut res_config = serde_json::json!({
-        "configPath": IntermediateArtifactWriter::path_string(&module_layout.process_profile_module_json()),
-        "packageName": config.product.bundle_name,
-        "output": IntermediateArtifactWriter::path_string(&res_out),
-        "moduleNames": module_names,
-        "ResourceTable": [
-            IntermediateArtifactWriter::path_string(&module_layout.generated_resource_table_header()),
-        ],
-        "applicationResource": IntermediateArtifactWriter::path_string(&project_layout.app_scope_resources()),
-        "moduleResources": module_res_dirs.iter().map(|d| {
-            serde_json::Value::String(IntermediateArtifactWriter::path_string(&canonical_or_owned(d)))
-        }).collect::<Vec<_>>(),
-        "dependencies": dependencies,
-        "iconCheck": true,
-        "compression": IntermediateArtifactWriter::path_string(&resource_layout.opt_compression_json()),
-        "ids": IntermediateArtifactWriter::path_string(&resource_layout.ids_map()),
-        "definedIds": IntermediateArtifactWriter::path_string(&resource_layout.id_defined_json()),
-    });
-    if let Some(defined_sys_ids) = self.restool_layout.defined_sys_ids() {
-      res_config["definedSysIds"] =
-        serde_json::Value::String(IntermediateArtifactWriter::path_string(&defined_sys_ids));
-    }
-    self.write_json_minified_newline(&resource_layout.res_config_json(), &res_config)?;
-
     Ok(())
+  }
+
+  fn opt_compression_config(
+    &self,
+    config: &ArkdownConfig,
+    extension_path: &str,
+    resource_dirs: &[PathBuf],
+  ) -> Result<serde_json::Value> {
+    let mut output = serde_json::json!({
+      "context": { "extensionPath": extension_path },
+      "compression": {
+        "media": { "enable": false },
+        "filters": [],
+      },
+    });
+    let Some(input) = config
+      .product
+      .build_option
+      .res_options
+      .as_ref()
+      .and_then(|options| options.compression.as_ref())
+    else {
+      return Ok(output);
+    };
+    let Some(input_object) = input.as_object() else {
+      anyhow::bail!("resOptions.compression must be an object");
+    };
+    if let Some(media) = input_object.get("media") {
+      output["compression"]["media"] = media.clone();
+    }
+    if input_object
+      .get("sizeLimit")
+      .and_then(|value| value.get("ratio"))
+      .is_some()
+    {
+      output["compression"]["sizeLimit"] = input_object["sizeLimit"].clone();
+    }
+    let mut resource_files = Vec::new();
+    for resource_dir in resource_dirs.iter().filter(|path| path.is_dir()) {
+      for entry in walkdir::WalkDir::new(resource_dir)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+      {
+        resource_files.push(IntermediateArtifactWriter::path_string(entry.path()));
+      }
+    }
+    resource_files.sort();
+    resource_files.dedup();
+    let filters = input_object
+      .get("filters")
+      .and_then(|value| value.as_array())
+      .map(|filters| {
+        filters
+          .iter()
+          .map(|filter| self.compression_filter(filter, &resource_files))
+          .collect::<Result<Vec<_>>>()
+      })
+      .transpose()?
+      .unwrap_or_default();
+    output["compression"]["filters"] = serde_json::Value::Array(filters);
+    let media_enabled = output["compression"]["media"]
+      .get("enable")
+      .and_then(serde_json::Value::as_bool)
+      .unwrap_or(false);
+    if media_enabled
+      && output["compression"]["filters"]
+        .as_array()
+        .is_some_and(Vec::is_empty)
+    {
+      output["compression"]["filters"] = serde_json::json!([{
+        "method": { "type": "sut", "blocks": "4x4" }
+      }]);
+    }
+    Ok(output)
+  }
+
+  fn compression_filter(
+    &self,
+    filter: &serde_json::Value,
+    resource_files: &[String],
+  ) -> Result<serde_json::Value> {
+    let object = filter
+      .as_object()
+      .context("resOptions.compression.filters entries must be objects")?;
+    let mut output = serde_json::Map::new();
+    output.insert(
+      "method".to_string(),
+      object
+        .get("method")
+        .cloned()
+        .context("resource compression filter is missing method")?,
+    );
+    self.insert_compression_side(
+      &mut output,
+      "files",
+      "path",
+      "rules_origin",
+      object,
+      resource_files,
+    )?;
+    self.insert_compression_side(
+      &mut output,
+      "exclude",
+      "exclude_path",
+      "rules_exclude",
+      object,
+      resource_files,
+    )?;
+    if object
+      .get("exclude")
+      .and_then(serde_json::Value::as_object)
+      .map(|exclude| {
+        exclude.contains_key("path")
+          || exclude.contains_key("size")
+          || exclude.contains_key("resolution")
+      })
+      != Some(true)
+    {
+      output.insert("exclude_path".to_string(), serde_json::json!([]));
+    }
+    Ok(serde_json::Value::Object(output))
+  }
+
+  fn insert_compression_side(
+    &self,
+    output: &mut serde_json::Map<String, serde_json::Value>,
+    input_key: &str,
+    path_key: &str,
+    rules_key: &str,
+    filter: &serde_json::Map<String, serde_json::Value>,
+    resource_files: &[String],
+  ) -> Result<()> {
+    let Some(side) = filter.get(input_key).and_then(serde_json::Value::as_object) else {
+      return Ok(());
+    };
+    if let Some(patterns) = side.get("path").and_then(serde_json::Value::as_array) {
+      let patterns = patterns
+        .iter()
+        .map(|pattern| {
+          pattern
+            .as_str()
+            .map(|pattern| pattern.replace('\\', "/"))
+            .context("resource compression paths must be strings")
+        })
+        .collect::<Result<Vec<_>>>()?;
+      let matches = resource_files
+        .iter()
+        .filter(|path| {
+          patterns
+            .iter()
+            .any(|pattern| fast_glob::glob_match(pattern, *path))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+      output.insert(path_key.to_string(), serde_json::json!(matches));
+    }
+    let mut rules = serde_json::Map::new();
+    if let Some(size) = side.get("size") {
+      rules.insert("size".to_string(), self.compression_size_ranges(size)?);
+    }
+    if let Some(resolution) = side.get("resolution") {
+      rules.insert(
+        "resolution".to_string(),
+        self.valid_compression_resolution_ranges(resolution)?,
+      );
+    }
+    if !rules.is_empty() {
+      output.insert(rules_key.to_string(), serde_json::Value::Object(rules));
+    }
+    Ok(())
+  }
+
+  fn compression_size_ranges(&self, value: &serde_json::Value) -> Result<serde_json::Value> {
+    let ranges = value
+      .as_array()
+      .context("resource compression size must be an array")?;
+    let mut parsed = Vec::new();
+    for range in ranges {
+      let values = range
+        .as_array()
+        .context("resource compression size range must be an array")?;
+      if values.is_empty() || values.len() > 2 {
+        anyhow::bail!("resource compression size ranges must contain one or two values");
+      }
+      let start = self.compression_size_value(&values[0])?;
+      let end = values
+        .get(1)
+        .map(|value| self.compression_size_value(value))
+        .transpose()?;
+      if end.is_some_and(|end| start > end) {
+        continue;
+      }
+      parsed.push((start, end));
+    }
+    parsed.sort_by_key(|range| range.0);
+    let mut merged: Vec<(u64, Option<u64>)> = Vec::new();
+    for (start, end) in parsed {
+      let Some(previous) = merged.last_mut() else {
+        merged.push((start, end));
+        continue;
+      };
+      match previous.1 {
+        None => continue,
+        Some(previous_end) if previous_end.saturating_add(1) >= start => {
+          previous.1 = match (previous.1, end) {
+            (_, None) => None,
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (None, _) => None,
+          };
+        }
+        _ => merged.push((start, end)),
+      }
+    }
+    Ok(serde_json::Value::Array(
+      merged
+        .into_iter()
+        .map(|(start, end)| match end {
+          Some(end) => serde_json::json!([start, end]),
+          None => serde_json::json!([start]),
+        })
+        .collect(),
+    ))
+  }
+
+  fn compression_size_value(&self, value: &serde_json::Value) -> Result<u64> {
+    if let Some(number) = value.as_u64() {
+      return Ok(number);
+    }
+    let text = value
+      .as_str()
+      .context("resource compression size must be a positive integer or unit string")?;
+    let (number, multiplier) = match text.as_bytes().last().copied() {
+      Some(b'k' | b'K') => (&text[..text.len() - 1], 1024u64),
+      Some(b'm' | b'M') => (&text[..text.len() - 1], 1024u64.pow(2)),
+      Some(b'g' | b'G') => (&text[..text.len() - 1], 1024u64.pow(3)),
+      Some(b't' | b'T') => (&text[..text.len() - 1], 1024u64.pow(4)),
+      _ => (text, 1),
+    };
+    number
+      .parse::<u64>()
+      .map(|number| number.saturating_mul(multiplier))
+      .with_context(|| format!("invalid resource compression size '{text}'"))
+  }
+
+  fn valid_compression_resolution_ranges(
+    &self,
+    value: &serde_json::Value,
+  ) -> Result<serde_json::Value> {
+    let ranges = value
+      .as_array()
+      .context("resource compression resolution must be an array")?;
+    let valid = ranges
+      .iter()
+      .filter(|range| {
+        let Some(values) = range.as_array() else {
+          return false;
+        };
+        let Some(minimum) = values.first() else {
+          return false;
+        };
+        let Some(maximum) = values.get(1) else {
+          return true;
+        };
+        let min_width = minimum.get("width").and_then(serde_json::Value::as_u64);
+        let min_height = minimum.get("height").and_then(serde_json::Value::as_u64);
+        let max_width = maximum.get("width").and_then(serde_json::Value::as_u64);
+        let max_height = maximum.get("height").and_then(serde_json::Value::as_u64);
+        matches!(
+          (min_width, min_height, max_width, max_height),
+          (Some(min_width), Some(min_height), Some(max_width), Some(max_height))
+            if min_width <= max_width && min_height <= max_height
+        )
+      })
+      .cloned()
+      .collect::<Vec<_>>();
+    Ok(serde_json::Value::Array(valid))
+  }
+
+  fn resource_ignore_regex(&self, pattern: &str) -> Result<String> {
+    let glob = globset::GlobBuilder::new(pattern)
+      .literal_separator(false)
+      .backslash_escape(false)
+      .build()
+      .with_context(|| format!("invalid ignoreResourcePattern '{pattern}'"))?;
+    Ok(glob.regex().to_string())
   }
 }
 
 impl IntermediateArtifactWriter {
   pub(super) fn write_static_intermediate_files(&self, module_root: &Path) -> Result<()> {
     let module_layout = ModuleBuildLayout::new(module_root);
-    self.write_bytes(
-      &module_layout.base_native_libs_json(),
-      br#"{"libs":{},"stripped":{}}"#,
-    )?;
     self.write_bytes_if_missing(&module_layout.router_map_loader(), br#"{"routerMap":[]}"#)?;
     self.write_bytes_if_missing(&module_layout.router_map_temp(), br#"{"routerMap":[]}"#)?;
     // Router/share config files are written by their owning processors before
-    // this placeholder pass. Missing-only writes preserve real hvigor outputs.
+    // this default pass. Missing-only writes preserve real hvigor outputs.
     Ok(())
   }
 
   pub(super) fn write_json_pretty(&self, path: &Path, value: &serde_json::Value) -> Result<()> {
     let content = serde_json::to_string_pretty(value)?;
     self.write_bytes(path, content.as_bytes())
+  }
+
+  fn write_profile_json(&self, path: &Path, value: &serde_json::Value) -> Result<()> {
+    let mut content = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"\t");
+    let mut serializer = serde_json::Serializer::with_formatter(&mut content, formatter);
+    serde::Serialize::serialize(value, &mut serializer)?;
+    content.push(b'\n');
+    self.write_bytes(path, &content)
   }
 
   pub(super) fn rewrite_package_intermediate_module_json(&self, path: &Path) -> Result<()> {
@@ -443,13 +924,26 @@ impl IntermediateArtifactWriter {
     Ok(())
   }
 
-  pub(super) fn write_hap_metadata(
+  /// Write the package output metadata produced by hvigor's
+  /// `AbstractGenerateMetadata`. HAP and HSP use distinct directories and
+  /// artifact-name keys, while optional remote-HSP metadata is omitted when
+  /// no remote HSPs are signed.
+  pub(super) fn write_package_metadata(
     &self,
     module_root: &Path,
-    module_name: &str,
+    output_target: &OutputTarget,
+    artifact_name: &str,
     device_types: &[String],
+    is_signed: bool,
   ) -> Result<()> {
-    let metadata_path = ModuleBuildLayout::new(module_root).hap_metadata_output_json();
+    let module_layout = ModuleBuildLayout::new(module_root);
+    let (metadata_path, name_key) = match output_target {
+      OutputTarget::Hsp => (module_layout.hsp_metadata_output_json(), "hspName"),
+      OutputTarget::Hap | OutputTarget::Preview | OutputTarget::Test => {
+        (module_layout.hap_metadata_output_json(), "hapName")
+      }
+      OutputTarget::Har => anyhow::bail!("HAR builds do not generate HAP/HSP output metadata"),
+    };
     if let Some(parent) = metadata_path.parent() {
       fs_err::create_dir_all(parent)?;
     }
@@ -458,12 +952,17 @@ impl IntermediateArtifactWriter {
     } else {
       device_types.to_vec()
     };
-    let metadata = serde_json::json!([{
-        "hapName": HapMetadataName::new(module_name).signed_hap(),
-        "deviceTypes": device_types,
-        "isSigned": true,
-        "dependRemoteHsps": [],
-    }]);
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+      name_key.to_string(),
+      serde_json::Value::String(artifact_name.to_string()),
+    );
+    entry.insert(
+      "deviceTypes".to_string(),
+      serde_json::to_value(device_types)?,
+    );
+    entry.insert("isSigned".to_string(), serde_json::Value::Bool(is_signed));
+    let metadata = serde_json::Value::Array(vec![serde_json::Value::Object(entry)]);
     let mut content = serde_json::to_string(&metadata)?;
     content.push('\n');
     fs_err::write(metadata_path, content.as_bytes())?;
@@ -498,6 +997,32 @@ impl IntermediateArtifactWriter {
     Ok(())
   }
 
+  /// Materialize the source-map handoff consumed by `PackageHap` and
+  /// `CollectDebugSymbol`. Hvigor writes release maps outside `loader_out`, so
+  /// remove Arkdown's temporary loader copy after the intermediate is safe.
+  pub(super) fn stage_source_maps(
+    &self,
+    origin: &Path,
+    intermediate: &Path,
+    build_mode: &arkdown_core::BuildMode,
+  ) -> Result<()> {
+    if !origin.is_file() {
+      return Ok(());
+    }
+    if origin != intermediate {
+      self.copy_if_exists(origin, intermediate)?;
+      if matches!(build_mode, arkdown_core::BuildMode::Release) {
+        fs_err::remove_file(origin).with_context(|| {
+          format!(
+            "failed to remove release source map from loader output {}",
+            origin.display()
+          )
+        })?;
+      }
+    }
+    Ok(())
+  }
+
   fn write_bytes(&self, path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
       fs_err::create_dir_all(parent)?;
@@ -513,7 +1038,7 @@ impl IntermediateArtifactWriter {
     self.write_bytes(path, bytes)
   }
 
-  fn write_json_minified(&self, path: &Path, value: &serde_json::Value) -> Result<()> {
+  pub(super) fn write_json_minified(&self, path: &Path, value: &serde_json::Value) -> Result<()> {
     let content = serde_json::to_string(value)?;
     self.write_bytes(path, content.as_bytes())
   }

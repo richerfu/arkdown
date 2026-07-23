@@ -1,8 +1,13 @@
 {
+  "configEntry": "./ets/startup/StartupConfig.ets",
   "startupTasks": [
     {
       "name": "MyStartupTask",
-      "srcEntry": "./ets/startup/MyStartupTask.ets"
+      "srcEntry": "./ets/startup/MyStartupTask.ets",
+      "dependencies": [],
+      "excludeFromAutoStart": false,
+      "runOnThread": "mainThread",
+      "waitOnMainThread": true
     }
   ]
 }

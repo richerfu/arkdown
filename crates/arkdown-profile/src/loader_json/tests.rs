@@ -19,6 +19,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
             bundle_name: "com.example.app".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
             compatible_sdk_version_stage: None,
+            target_sdk_version: None,
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
@@ -31,11 +32,14 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 source_option: None,
                 preload_system_so: false,
                 preload_so: vec![],
+                deduplicate_har: false,
                 remove_permissions: vec![],
                 aot_compile_mode: None,
                 host_pgo: None,
                 ap_path: None,
                 abi_filters: vec![],
+                external_native_options: None,
+                har_artifact_type: arkdown_core::HarArtifactType::Original,
                 native_lib: NativeLibOption::default(),
             },
             version_code: None,
@@ -51,6 +55,37 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
             compile_sdk_version: "6.0.0.47".to_string(),
         },
     }
+}
+
+#[test]
+fn collect_compile_files_matches_hvigor_breadth_first_directory_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("ets");
+    fs::create_dir_all(root.join("components/tasks")).expect("nested source directory");
+    fs::write(root.join("Index.ets"), "export {};\n").expect("root Index");
+    fs::write(root.join("Root.ts"), "export {};\n").expect("root source");
+    fs::write(root.join("components/Component.ets"), "export {};\n").expect("component source");
+    fs::write(root.join("components/tasks/Task.ets"), "export {};\n").expect("task source");
+
+    let files = LoaderJson::collect_code_files(&root);
+    let relative = files
+        .iter()
+        .map(|path| {
+            arkdown_path::ArtifactPathSerializer::rel_to_slash(
+                path.strip_prefix(&root).expect("source below root"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        relative,
+        [
+            "Index.ets",
+            "Root.ts",
+            "components/Component.ets",
+            "components/tasks/Task.ets",
+        ]
+    );
 }
 
 fn make_module_cfg() -> ModuleConfig {
@@ -1793,8 +1828,8 @@ fn test_loader_json_compile_entry_includes_startup_config_and_tasks() {
     std::fs::write(&startup_task, "export default class StartupTask {}")
         .expect("write startup task");
 
-    let temp_startup = module_root
-        .join("build/default/intermediates/startup_config/default/temp-startup-config.json");
+    let temp_startup =
+        module_root.join("build/default/intermediates/startup/default/startup_config.json");
     std::fs::create_dir_all(temp_startup.parent().unwrap()).expect("create temp startup dir");
     std::fs::write(
         &temp_startup,
@@ -2225,6 +2260,54 @@ fn test_har_uses_oh_package_main_as_internal_entry() {
         vec![to_absolute_path_string(&module_root.join("Index.ets"))]
     );
     assert!(loader.hvigor_compile_entry.is_empty());
+
+    // GenerateLoaderJson serializes a source HAR's package main only when the
+    // HAR itself is the build target. Consumer HAP builds keep this entry in
+    // arkdown's internal compile plan without leaking it into loader.json.
+    let mut har_config = make_config(false);
+    har_config.project_root = tmp.path().to_path_buf();
+    har_config.output_target = OutputTarget::Har;
+    let har_loader = LoaderJson::generate(&har_config, &module_cfg, &manifest);
+    let expected_main = to_absolute_path_string(&module_root.join("Index.ets"));
+    assert_eq!(har_loader.hvigor_compile_entry, vec![expected_main]);
+    assert!(har_loader.source_roots.is_empty());
+}
+
+#[test]
+fn test_hsp_full_compilation_serializes_all_module_ets_sources() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let module_root = tmp.path().join("shared");
+    let ets_root = module_root.join("src/main/ets");
+    std::fs::create_dir_all(ets_root.join("model")).unwrap();
+    std::fs::write(ets_root.join("Index.ets"), "export {};").unwrap();
+    std::fs::write(ets_root.join("model/User.ts"), "export interface User {}").unwrap();
+    std::fs::write(ets_root.join("model/User.d.ts"), "export interface User {}").unwrap();
+
+    let mut config = make_config(false);
+    config.project_root = tmp.path().to_path_buf();
+    config.output_target = OutputTarget::Hsp;
+    let module_cfg = ModuleConfig {
+        name: "shared".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Shared,
+    };
+    let mut manifest = make_manifest();
+    manifest.module_name = "shared".to_string();
+    manifest.module_type = OhosModuleType::Shared;
+    manifest.abilities.clear();
+    manifest.main_element = None;
+    manifest.pages = None;
+    manifest.src_entry = Some("./ets/Index.ets".to_string());
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+    let index = to_absolute_path_string(&ets_root.join("Index.ets"));
+    let user = to_absolute_path_string(&ets_root.join("model/User.ts"));
+    assert!(loader.hvigor_compile_entry.contains(&index));
+    assert!(loader.hvigor_compile_entry.contains(&user));
+    assert!(loader
+        .hvigor_compile_entry
+        .iter()
+        .all(|entry| !entry.ends_with("User.d.ts")));
 }
 
 #[test]
@@ -2365,7 +2448,7 @@ fn test_loader_json_collects_workers_from_ohpm_source_har_metadata() {
     )
     .expect("write dep package");
     fs::write(
-        dep_root.join("meat-build-profile.json5"),
+        dep_root.join("build-profile.json5"),
         r#"{
           buildOption: {
             sourceOption: { workers: ["./src/main/ets/workers/ProfileWorker.ets"] }
@@ -2415,12 +2498,14 @@ fn test_loader_json_collects_workers_from_ohpm_source_har_metadata() {
             "missing worker {worker}: {:?}",
             loader.workers
         );
+    }
+    for metadata_only_worker in ["MetaWorker.ets", "ProfileWorker.ets", "SchedulerWorker.ets"] {
         assert!(
-            loader
+            !loader
                 .hvigor_compile_entry
                 .iter()
-                .any(|entry| entry.ends_with(&format!("src/main/ets/workers/{worker}"))),
-            "missing worker compile entry {worker}: {:?}",
+                .any(|entry| entry.ends_with(metadata_only_worker)),
+            "HAP compileEntry must not include dependency metadata worker {metadata_only_worker}: {:?}",
             loader.hvigor_compile_entry
         );
     }
@@ -2521,6 +2606,9 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
             sources: vec![],
         }),
         support_chunks: false,
+        byte_code_har: false,
+        bundled_dependencies: false,
+        integrated_hsp: None,
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -2572,6 +2660,9 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
             sources: vec!["src/main/ets/runtime".to_string()],
         }),
         support_chunks: false,
+        byte_code_har: false,
+        bundled_dependencies: false,
+        integrated_hsp: None,
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -2816,7 +2907,11 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
     std::fs::write(pkg_dir.join("index.abc"), b"PANDA\x00\x00\x00").expect("write index.abc");
     std::fs::write(
         pkg_dir.join("oh-package.json5"),
-        r#"{ name: "@ohos/abc-lib", compatibleSdkVersion: "5.0.0(12)" }"#,
+        r#"{
+          name: "@ohos/abc-lib",
+          compatibleSdkVersion: "5.0.0(12)",
+          metadata: { byteCodeHar: true }
+        }"#,
     )
     .expect("write oh-package.json5");
 
@@ -2836,7 +2931,12 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
         "byteCodeHarInfo must contain @ohos/abc-lib"
     );
     let entry = &loader.byte_code_har_info["@ohos/abc-lib"];
-    assert_eq!(entry.compatible_sdk_version, "5.0.0(12)");
+    assert_eq!(
+        entry.compatible_sdk_version,
+        Some(crate::bytecode_har::CompatibleSdkVersionValue::Str(
+            "5.0.0(12)".to_string()
+        ))
+    );
     assert!(entry.abc_path.ends_with("index.abc"));
     assert!(entry.source_maps_path.is_none());
 }

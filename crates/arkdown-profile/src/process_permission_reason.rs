@@ -801,8 +801,8 @@ mod tests {
         )
         .build();
         assert!(
-            graph.edges.iter().any(|edge| edge.alias == "file-dep"),
-            "session graph should resolve the file dependency edge"
+            graph.edges.iter().all(|edge| edge.alias != "file-dep"),
+            "Hvigor only resolves installed oh_modules aliases, not the raw file spec"
         );
 
         let output = PermissionReasonProcessor::new()

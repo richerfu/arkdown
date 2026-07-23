@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::ArkdownError;
-use arkdown_path::ArtifactPathSerializer;
+use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +37,11 @@ pub struct PkgContextDependencyInput {
     pub alias: String,
     pub package_name: String,
     pub version_spec: Option<String>,
+    /// Resolved package root captured by the build-session dependency graph.
+    pub package_root: Option<PathBuf>,
+    /// First entry selected by hvigor-arkts-compose `findNodeEntryFiles()`.
+    pub node_entry: Option<String>,
+    /// `main`/`types` fallback selected by hvigor's `getEntryPath()`.
     pub main: Option<String>,
     pub kind: PkgContextDependencyKind,
     pub module_name: Option<String>,
@@ -139,6 +144,10 @@ impl PkgContextInfoGenerator {
             bundle_name: self.dependency_bundle_name(current, dependency)?,
             module_name: self.dependency_module_name(dependency)?,
             version: self.dependency_version(dependency)?,
+            // `getDependenciesPkgContextInfo` preserves the resolved entry for
+            // declared SO dependencies. Only standalone native libraries added
+            // by `initLibsSoPkgContextInfo` use `getSoDefaultContextInfo` and
+            // therefore have an empty entry path.
             entry_path: self.dependency_entry_path(dependency),
             is_so: dependency.kind == PkgContextDependencyKind::So,
             dependency_alias: if dependency.alias == dependency.package_name {
@@ -186,11 +195,34 @@ impl PkgContextInfoGenerator {
     }
 
     fn dependency_entry_path(&self, dependency: &PkgContextDependencyInput) -> String {
-        dependency
+        let Some(package_root) = dependency.package_root.as_deref() else {
+            return String::new();
+        };
+        let package_root = lexical_normalize(package_root);
+        let node_entry = dependency.node_entry.as_deref().unwrap_or("index.js");
+        if let Some(path) = self.existing_dependency_entry(&package_root, node_entry) {
+            return path;
+        }
+        let fallback = dependency
             .main
             .as_deref()
-            .map(Self::trim_declaration_suffix)
+            .filter(|entry| !entry.is_empty())
+            .unwrap_or("index.ets");
+        self.existing_dependency_entry(&package_root, fallback)
             .unwrap_or_default()
+    }
+
+    /// Match `dependency-manager.ts#getEntryMainFilePath`: only an entry that
+    /// exists on disk is written to `pkgContextInfo.json`.
+    fn existing_dependency_entry(&self, package_root: &Path, entry: &str) -> Option<String> {
+        let path = lexical_normalize(&package_root.join(entry));
+        if !path.exists() {
+            return None;
+        }
+        let relative = path.strip_prefix(package_root).ok()?;
+        Some(Self::trim_declaration_suffix(
+            &ArtifactPathSerializer::rel_to_slash(relative),
+        ))
     }
 
     fn dependency_module_name(
@@ -200,12 +232,11 @@ impl PkgContextInfoGenerator {
         if dependency.kind != PkgContextDependencyKind::Hsp {
             return Ok(String::new());
         }
-        dependency.module_name.clone().ok_or_else(|| {
-            ArkdownError::Io(std::io::Error::other(format!(
-                "GeneratePkgContextInfo requires moduleName for HSP dependency '{}'",
-                dependency.package_name
-            )))
-        })
+        // `GeneratePkgContextInfo.getDependenciesPkgContextInfo()` uses
+        // `dependency.getModuleJsonObj()?.module.name ?? ""`. A malformed or
+        // profile-less HSP therefore remains representable in pkgContextInfo;
+        // profile validation is owned by the dependency/profile stages.
+        Ok(dependency.module_name.clone().unwrap_or_default())
     }
 
     fn dependency_version(
@@ -305,12 +336,18 @@ mod tests {
 
     #[test]
     fn hap_and_source_har_match_hvigor_runtime_shape() {
+        let temp = tempfile::tempdir().unwrap();
+        let dependency_root = temp.path().join("audioplayer");
+        fs_err::create_dir_all(&dependency_root).unwrap();
+        fs_err::write(dependency_root.join("Index.ets"), "export default 1;\n").unwrap();
         let input = PkgContextInfoInput {
             current: current_hap(),
             dependencies: vec![PkgContextDependencyInput {
                 alias: "@ohos/audioplayer".to_string(),
                 package_name: "audioplayer".to_string(),
                 version_spec: Some("file:../../commons/audioplayer".to_string()),
+                package_root: Some(dependency_root),
+                node_entry: Some("Index.ets".to_string()),
                 main: Some("Index.ets".to_string()),
                 kind: PkgContextDependencyKind::Har,
                 module_name: None,
@@ -340,12 +377,18 @@ mod tests {
 
     #[test]
     fn dependency_alias_is_empty_when_alias_matches_package_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let dependency_root = temp.path().join("utils");
+        fs_err::create_dir_all(&dependency_root).unwrap();
+        fs_err::write(dependency_root.join("Index.d.ets"), "export {};\n").unwrap();
         let input = PkgContextInfoInput {
             current: current_hap(),
             dependencies: vec![PkgContextDependencyInput {
                 alias: "utils".to_string(),
                 package_name: "utils".to_string(),
                 version_spec: Some("1.0.0".to_string()),
+                package_root: Some(dependency_root),
+                node_entry: Some("Index.d.ets".to_string()),
                 main: Some("Index.d.ets".to_string()),
                 kind: PkgContextDependencyKind::Other,
                 module_name: None,
@@ -358,5 +401,55 @@ mod tests {
         let entries = PkgContextInfoGenerator::new().generate(&input).unwrap();
         assert_eq!(entries["utils"].dependency_alias, "");
         assert_eq!(entries["utils"].entry_path, "Index");
+    }
+
+    #[test]
+    fn missing_dependency_entry_is_not_forwarded_to_pkg_context_info() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = PkgContextInfoInput {
+            current: current_hap(),
+            dependencies: vec![PkgContextDependencyInput {
+                alias: "bc-har".to_string(),
+                package_name: "bc-har".to_string(),
+                version_spec: Some("1.0.0".to_string()),
+                package_root: Some(temp.path().to_path_buf()),
+                node_entry: Some("index".to_string()),
+                main: Some("index".to_string()),
+                kind: PkgContextDependencyKind::Har,
+                module_name: None,
+                bundle_name: None,
+                bundle_type: None,
+            }],
+            native_libraries: Vec::new(),
+        };
+
+        let entries = PkgContextInfoGenerator::new().generate(&input).unwrap();
+        assert_eq!(entries["bc-har"].entry_path, "");
+    }
+
+    #[test]
+    fn declared_so_dependency_preserves_its_resolved_entry_path() {
+        let temp = tempfile::tempdir().unwrap();
+        fs_err::write(temp.path().join("Index.ets"), "export default 1;\n").unwrap();
+        let input = PkgContextInfoInput {
+            current: current_hap(),
+            dependencies: vec![PkgContextDependencyInput {
+                alias: "libvad.so".to_string(),
+                package_name: "libvad.so".to_string(),
+                version_spec: Some("1.0.0".to_string()),
+                package_root: Some(temp.path().to_path_buf()),
+                node_entry: Some("Index.ets".to_string()),
+                main: Some("Index.ets".to_string()),
+                kind: PkgContextDependencyKind::So,
+                module_name: None,
+                bundle_name: None,
+                bundle_type: None,
+            }],
+            native_libraries: Vec::new(),
+        };
+
+        let entries = PkgContextInfoGenerator::new().generate(&input).unwrap();
+        assert!(entries["libvad.so"].is_so);
+        assert_eq!(entries["libvad.so"].entry_path, "Index.ets");
     }
 }

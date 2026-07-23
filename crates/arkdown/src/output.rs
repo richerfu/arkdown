@@ -113,6 +113,35 @@ struct ChunkSourceMap<'a> {
     raw_map: &'a str,
 }
 
+struct IndentedJsonValueWriter<'a, W> {
+    writer: &'a mut W,
+    indent: &'static [u8],
+}
+
+impl<'a, W> IndentedJsonValueWriter<'a, W> {
+    fn new(writer: &'a mut W, indent: &'static [u8]) -> Self {
+        Self { writer, indent }
+    }
+}
+
+impl<W: Write> Write for IndentedJsonValueWriter<'_, W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let mut consumed = 0;
+        for segment in buffer.split_inclusive(|byte| *byte == b'\n') {
+            self.writer.write_all(segment)?;
+            consumed += segment.len();
+            if segment.last() == Some(&b'\n') {
+                self.writer.write_all(self.indent)?;
+            }
+        }
+        Ok(consumed)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 impl WrittenOutput {
     fn source_maps_path(loader_out_ets_dir: &Path) -> PathBuf {
         loader_out_ets_dir.join(SOURCE_MAPS_FILE_NAME)
@@ -260,7 +289,8 @@ impl WrittenOutput {
                     ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}"))
                 })?;
                 writer.write_all(b": ").map_err(ArkdownError::Io)?;
-                serde_json::to_writer_pretty(&mut writer, &value).map_err(|e| {
+                let mut value_writer = IndentedJsonValueWriter::new(&mut writer, b"  ");
+                serde_json::to_writer_pretty(&mut value_writer, &value).map_err(|e| {
                     ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}"))
                 })?;
             }

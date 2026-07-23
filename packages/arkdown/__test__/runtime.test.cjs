@@ -438,7 +438,7 @@ test('parsePluginContext returns parsed object for valid JSON', () => {
 
 test('buildPluginContext exposes getModuleIds from hookCtx.moduleIds', () => {
   const ctx = buildPluginContext({ moduleIds: ['entry/index', 'lib/util'] })
-  assert.deepEqual(ctx.getModuleIds(), ['entry/index', 'lib/util'])
+  assert.deepEqual(Array.from(ctx.getModuleIds()), ['entry/index', 'lib/util'])
 })
 
 test('buildPluginContext exposes getModuleInfo from hookCtx.moduleInfoMap', () => {
@@ -449,6 +449,23 @@ test('buildPluginContext exposes getModuleInfo from hookCtx.moduleInfoMap', () =
   const info = ctx.getModuleInfo('entry/index')
   assert.deepEqual(info.importedIds, ['lib/util'])
   assert.equal(ctx.getModuleInfo('missing'), null)
+})
+
+test('buildPluginContext parse returns an ESTree program', () => {
+  const ctx = buildPluginContext({})
+  const program = ctx.parse('export const answer = 42')
+  assert.equal(program.type, 'Program')
+  assert.equal(program.sourceType, 'module')
+  assert.equal(program.body[0].type, 'ExportNamedDeclaration')
+})
+
+test('buildPluginContext getFileName resolves known refs and rejects unknown refs', () => {
+  const ctx = buildPluginContext({ fileNames: { asset123: 'assets/icon.png' } })
+  assert.equal(ctx.getFileName('asset123'), 'assets/icon.png')
+  assert.throws(
+    () => ctx.getFileName('missing'),
+    (error) => error.code === 'FILE_NAME_NOT_FOUND',
+  )
 })
 
 test('normalizeHookArguments binds this.share for beforeBuild', () => {
@@ -500,6 +517,90 @@ test('share context is propagated from beforeBuild to subsequent hooks', () => {
   assert.equal(captured.beforeBuild.bundleName, share.bundleName)
   assert.equal(captured.afterBuildStart.bundleName, share.bundleName)
   assert.equal(captured.buildStart.bundleName, share.bundleName)
+})
+
+test('share context is bound for resolveId load transform and cache hooks', () => {
+  const share = { projectConfig: { bundleName: 'com.example.hooks' } }
+  const captured = []
+  const plugin = normalizePluginList({
+    name: 'all-hook-contexts',
+    beforeBuild() {},
+    resolveId() { captured.push(this.share) },
+    load() { captured.push(this.share) },
+    transform() { captured.push(this.share) },
+    shouldInvalidCache() { captured.push(this.share); return false },
+  })[0]
+  plugin.beforeBuild(JSON.stringify({ share }))
+  plugin.resolveId('dep', '/entry.ets')
+  plugin.load('/entry.ets')
+  plugin.transform('export {}', '/entry.ets')
+  plugin.shouldInvalidCache('{}')
+  assert.equal(captured.length, 4)
+  for (const contextShare of captured) {
+    assert.equal(contextShare.projectConfig.bundleName, 'com.example.hooks')
+  }
+})
+
+test('resolveId preserves hvigor options and structured hook results', () => {
+  const expected = {
+    id: '/virtual/entry.ets',
+    external: false,
+    moduleSideEffects: 'no-treeshake',
+  }
+  let receivedOptions
+  const [plugin] = normalizePluginList({
+    name: 'resolve-contract',
+    resolveId(id, importer, options) {
+      assert.equal(id, '@virtual/entry')
+      assert.equal(importer, '/entry.ets')
+      receivedOptions = options
+      return expected
+    },
+  })
+  const options = { attributes: { type: 'json' }, isEntry: false }
+  assert.equal(plugin.resolveId('@virtual/entry', '/entry.ets', options), expected)
+  assert.equal(receivedOptions, options)
+})
+
+test('load and transform preserve SourceDescription object results', () => {
+  const loadResult = {
+    code: 'export const loaded = true',
+    moduleType: 'js',
+    moduleSideEffects: false,
+    map: { version: 3, sources: ['input.ets'], names: [], mappings: '' },
+  }
+  const transformResult = {
+    code: 'export const transformed = true',
+    map: null,
+  }
+  const [plugin] = normalizePluginList({
+    name: 'source-description-contract',
+    load() { return loadResult },
+    transform() { return transformResult },
+  })
+  assert.equal(plugin.load('/entry.ets'), loadResult)
+  assert.equal(plugin.transform('source', '/entry.ets'), transformResult)
+})
+
+test('moduleParsed receives structured ModuleInfo and bound graph lookup', () => {
+  let received
+  let lookedUp
+  const plugin = normalizePluginList({
+    name: 'module-info-context',
+    moduleParsed(info) {
+      received = info
+      lookedUp = this.getModuleInfo(info.id)
+    },
+  })[0]
+  plugin.moduleParsed(JSON.stringify({
+    id: '/entry.ets',
+    importedIds: ['/dep.ets'],
+    dynamicallyImportedIds: ['/lazy.ets'],
+    isEntry: true,
+  }))
+  assert.equal(received.id, '/entry.ets')
+  assert.deepEqual(lookedUp.importedIds, ['/dep.ets'])
+  assert.deepEqual(lookedUp.dynamicallyImportedIds, ['/lazy.ets'])
 })
 
 test('resolveDynamicImport is recognized as a Rolldown hook', () => {

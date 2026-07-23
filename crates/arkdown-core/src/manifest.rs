@@ -109,8 +109,10 @@ pub struct ExtensionAbilityEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HspDependency {
-    pub bundle_name: String,
     pub module_name: String,
+    pub version_code: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_name: Option<String>,
 }
 
 /// Raw parsed `module.json5` (before processing).
@@ -148,7 +150,7 @@ pub struct ModuleJson5Module {
     /// Used by `ProcessStartupConfig` to locate the startup task list for this module.
     #[serde(default)]
     pub app_startup: Option<String>,
-    /// Cross-app shared component config exported by this HSP module.
+    /// Cross-app shared component config exported by this module.
     ///
     /// Hvigor accepts either a `$profile:<name>` reference string or an inline
     /// array. Keep the two shapes distinct so ProcessShareConfig can read the
@@ -256,21 +258,30 @@ pub struct MetadataEntry {
     pub resource: Option<String>,
 }
 
-/// One entry in the `crossAppSharedConfig` array from an HSP dep's `module.json5`.
+/// One entry in the `crossAppSharedConfig` array from a HAR dependency's profile.
 ///
-/// Hvigor merges these from all HSP dependencies into the consuming module's
-/// `temp-share-config.json` intermediate.
+/// Hvigor merges these from `getHarDependencies()` into the consuming module's
+/// `temp-share-config.json` intermediate. `moduleNodeDir` and `packageName` are
+/// build-time ownership metadata and are removed by `CompileResource` before
+/// the profile is packaged.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CrossAppSharedConfigEntry {
-    /// Package name of the HSP that exports this shared component.
-    #[serde(default)]
-    pub package_name: String,
     /// URI identifying the shared component (must be unique across all deps).
     pub uri: String,
     /// Source entry path for the shared component, e.g. `"./ets/components/Foo.ets"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src_entry: Option<String>,
+    /// SDK-version-specific share fields such as `name`, `value`, `allowList`,
+    /// and `originalSuffix`. Hvigor forwards these fields unchanged.
+    #[serde(flatten)]
+    pub additional_fields: serde_json::Map<String, serde_json::Value>,
+    /// Package root used only by the build pipeline to resolve the source entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_node_dir: Option<std::path::PathBuf>,
+    /// Package name of the HAR that exports this shared component.
+    #[serde(default)]
+    pub package_name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -347,7 +358,8 @@ impl<'de> Deserialize<'de> for CrossAppSharedConfig {
 
 /// Startup task entry from a module's `appStartup` profile JSON.
 ///
-/// Written to `temp-startup-config.json` after merging all HAR/HSP dep startup tasks.
+/// Written to `intermediates/startup/<target>/startup_config.json` after merging
+/// all HAR/HSP dependency startup tasks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupTask {
@@ -355,18 +367,24 @@ pub struct StartupTask {
     pub name: String,
     /// Relative source entry path, e.g. `"./ets/startup/MyTask.ets"`.
     pub src_entry: String,
-    /// Whether this task runs before the ability window is ready.
+    /// Explicit dependencies on other startup task names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_on_thread: Option<String>,
-    /// Whether this task waits for all preceding tasks to finish.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait_on_main_thread: Option<bool>,
+    pub dependencies: Option<Vec<String>>,
     /// Whether the startup entry is excluded from automatic startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_from_auto_start: Option<bool>,
-    /// Explicit dependencies on other startup task names.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dependencies: Vec<String>,
+    /// Thread used to run the task (`mainThread` or `taskPool`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_on_thread: Option<String>,
+    /// Whether this task blocks the main thread until completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_on_main_thread: Option<bool>,
+    /// Conditional startup matching rules from the SDK app-startup schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_rules: Option<serde_json::Value>,
+    /// Scheduler phase (`preAbilityStageLoad` or `postAbilityStageLoad`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_phase: Option<String>,
     /// Module name populated during merging (not in the source JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module_name: Option<String>,
@@ -384,13 +402,17 @@ pub struct StartupTask {
     pub is_remote_byte_code_har: Option<bool>,
 }
 
-/// Merged startup config written to `temp-startup-config.json`.
+/// Merged startup config written to Hvigor's startup intermediate.
 ///
 /// Aggregates `startupTasks` and `appPreloadHintStartupTasks` from the current
 /// module and all its HAR/HSP dependencies.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MergedStartupConfig {
+    /// Module startup configuration entry. Hvigor keeps this field when it
+    /// annotates and merges the source startup profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_entry: Option<String>,
     /// Regular startup tasks (run at app startup).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub startup_tasks: Vec<StartupTask>,
@@ -406,13 +428,15 @@ pub struct MergedStartupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppStartupProfile {
+    /// Configuration entry path referenced by the startup profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_entry: Option<String>,
     #[serde(default)]
     pub startup_tasks: Vec<StartupTask>,
     #[serde(default)]
     pub app_preload_hint_startup_tasks: Vec<StartupTask>,
-    /// Optional config entry path referenced by the startup config.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_entry: Option<String>,
+    #[serde(default)]
+    pub system_preload_hint_startup_tasks: Vec<StartupTask>,
 }
 
 /// Raw parsed `oh-package.json5`.

@@ -14,7 +14,7 @@ use oxc_ast::ast::{
     Statement, TSAccessibility, TSSignature, TSType, TSTypeAnnotation,
 };
 use oxc_ast::{AstBuilder, NONE};
-use oxc_span::SPAN;
+use oxc_span::{Span, SPAN};
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
 
 use crate::transform::component_meta::ArkuiRuntimeNames;
@@ -231,6 +231,8 @@ pub(crate) struct ParamsInterfaceField<'a> {
     name: Cow<'a, str>,
     optional: bool,
     type_annotation: Option<ParamsInterfaceFieldType<'a>>,
+    source_span: Span,
+    name_span: Span,
 }
 
 impl<'a> ParamsInterfaceField<'a> {
@@ -246,6 +248,27 @@ impl<'a> ParamsInterfaceField<'a> {
             name: name.into(),
             optional,
             type_annotation,
+            source_span: SPAN,
+            name_span: SPAN,
+        }
+    }
+
+    pub(crate) fn with_source<T>(
+        name: T,
+        optional: bool,
+        type_annotation: Option<ParamsInterfaceFieldType<'a>>,
+        source_span: Span,
+        name_span: Span,
+    ) -> Self
+    where
+        T: Into<Cow<'a, str>>,
+    {
+        Self {
+            name: name.into(),
+            optional,
+            type_annotation,
+            source_span,
+            name_span,
         }
     }
 }
@@ -320,11 +343,11 @@ impl<'a> ParamsInterfaceAstEmitter<'a> {
         allocator: &'b Allocator,
     ) -> TSSignature<'b> {
         ast.ts_signature_property_signature(
-            SPAN,
+            field.source_span,
             false,
             field.optional,
             false,
-            ast.property_key_static_identifier(SPAN, ast.str(field.name.as_ref())),
+            ast.property_key_static_identifier(field.name_span, ast.str(field.name.as_ref())),
             field
                 .type_annotation
                 .as_ref()
@@ -1010,14 +1033,37 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         is_static: bool,
         accessibility: Option<TSAccessibility>,
     ) -> ClassElement<'a> {
-        self.method_with_type_annotation(
+        self.method_with_params_and_source_span(
+            name,
+            params_items,
+            body_stmts,
+            is_static,
+            accessibility,
+            SPAN,
+            SPAN,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn method_with_params_and_source_span(
+        &self,
+        name: &'a str,
+        params_items: OxcVec<'a, FormalParameter<'a>>,
+        body_stmts: OxcVec<'a, Statement<'a>>,
+        is_static: bool,
+        accessibility: Option<TSAccessibility>,
+        source_span: Span,
+        name_span: Span,
+    ) -> ClassElement<'a> {
+        let element = self.method_with_type_annotation(
             name,
             params_items,
             None,
             body_stmts,
             is_static,
             accessibility,
-        )
+        );
+        self.method_source_span(element, source_span, name_span)
     }
 
     pub(crate) fn method_with_type_annotation(
@@ -1070,13 +1116,18 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         );
         let key =
             PropertyKey::StaticIdentifier(self.ast.alloc(self.ast.identifier_name(SPAN, name)));
+        let method_kind = if name == GeneratedViewpuName::CONSTRUCTOR {
+            MethodDefinitionKind::Constructor
+        } else {
+            MethodDefinitionKind::Method
+        };
         self.ast.class_element_method_definition(
             SPAN,
             MethodDefinitionType::MethodDefinition,
             self.ast.vec(),
             key,
             func,
-            MethodDefinitionKind::Method,
+            method_kind,
             false,
             is_static,
             false,
@@ -1085,12 +1136,38 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         )
     }
 
-    pub(crate) fn getter_with_type_annotation(
+    fn method_source_span(
+        &self,
+        mut element: ClassElement<'a>,
+        source_span: Span,
+        name_span: Span,
+    ) -> ClassElement<'a> {
+        let ClassElement::MethodDefinition(method) = &mut element else {
+            return element;
+        };
+        method.span = source_span;
+        if let PropertyKey::StaticIdentifier(identifier) = &mut method.key {
+            identifier.span = name_span;
+        }
+        element
+    }
+
+    pub(crate) fn getter(
         &self,
         name: &'a str,
-        return_type: Option<oxc_allocator::Box<'a, TSTypeAnnotation<'a>>>,
         body_stmts: OxcVec<'a, Statement<'a>>,
         accessibility: Option<TSAccessibility>,
+    ) -> ClassElement<'a> {
+        self.getter_with_source_span(name, body_stmts, accessibility, SPAN, SPAN)
+    }
+
+    pub(crate) fn getter_with_source_span(
+        &self,
+        name: &'a str,
+        body_stmts: OxcVec<'a, Statement<'a>>,
+        accessibility: Option<TSAccessibility>,
+        source_span: Span,
+        name_span: Span,
     ) -> ClassElement<'a> {
         let formal_params = self.ast.alloc_formal_parameters(
             SPAN,
@@ -1099,6 +1176,7 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
             NONE,
         );
         let body = self.ast.function_body(SPAN, self.ast.vec(), body_stmts);
+        let no_return_type: Option<oxc_allocator::Box<'a, TSTypeAnnotation<'a>>> = None;
         let func = self.ast.alloc_function(
             SPAN,
             oxc_ast::ast::FunctionType::FunctionExpression,
@@ -1109,13 +1187,14 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
             NONE,
             NONE,
             formal_params,
-            return_type,
+            no_return_type,
             Some(body),
         );
-        let key =
-            PropertyKey::StaticIdentifier(self.ast.alloc(self.ast.identifier_name(SPAN, name)));
+        let key = PropertyKey::StaticIdentifier(
+            self.ast.alloc(self.ast.identifier_name(name_span, name)),
+        );
         self.ast.class_element_method_definition(
-            SPAN,
+            source_span,
             MethodDefinitionType::MethodDefinition,
             self.ast.vec(),
             key,
@@ -1135,6 +1214,18 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         param: FormalParameter<'a>,
         body_stmts: OxcVec<'a, Statement<'a>>,
         accessibility: Option<TSAccessibility>,
+    ) -> ClassElement<'a> {
+        self.setter_with_param_and_source_span(name, param, body_stmts, accessibility, SPAN, SPAN)
+    }
+
+    pub(crate) fn setter_with_param_and_source_span(
+        &self,
+        name: &'a str,
+        param: FormalParameter<'a>,
+        body_stmts: OxcVec<'a, Statement<'a>>,
+        accessibility: Option<TSAccessibility>,
+        source_span: Span,
+        name_span: Span,
     ) -> ClassElement<'a> {
         let formal_params = self.ast.alloc_formal_parameters(
             SPAN,
@@ -1158,10 +1249,11 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
             no_return_type,
             Some(body),
         );
-        let key =
-            PropertyKey::StaticIdentifier(self.ast.alloc(self.ast.identifier_name(SPAN, name)));
+        let key = PropertyKey::StaticIdentifier(
+            self.ast.alloc(self.ast.identifier_name(name_span, name)),
+        );
         self.ast.class_element_method_definition(
-            SPAN,
+            source_span,
             MethodDefinitionType::MethodDefinition,
             self.ast.vec(),
             key,
@@ -1183,8 +1275,31 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         is_private: bool,
         optional: bool,
     ) -> ClassElement<'a> {
-        let key =
-            PropertyKey::StaticIdentifier(self.ast.alloc(self.ast.identifier_name(SPAN, name)));
+        self.property_with_type_annotation_and_source_span(
+            name,
+            type_annotation,
+            value,
+            is_private,
+            optional,
+            SPAN,
+            SPAN,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn property_with_type_annotation_and_source_span(
+        &self,
+        name: &'a str,
+        type_annotation: Option<oxc_allocator::Box<'a, TSTypeAnnotation<'a>>>,
+        value: Option<Expression<'a>>,
+        is_private: bool,
+        optional: bool,
+        source_span: Span,
+        name_span: Span,
+    ) -> ClassElement<'a> {
+        let key = PropertyKey::StaticIdentifier(
+            self.ast.alloc(self.ast.identifier_name(name_span, name)),
+        );
         let accessibility = if is_private {
             Some(TSAccessibility::Private)
         } else {
@@ -1192,7 +1307,7 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         };
 
         self.ast.class_element_property_definition(
-            SPAN,
+            source_span,
             PropertyDefinitionType::PropertyDefinition,
             self.ast.vec(),
             key,
@@ -1217,8 +1332,28 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         is_exported: bool,
         is_default_export: bool,
     ) -> Statement<'a> {
-        self.class_declaration_statement_with_decorators(
+        self.class_declaration_statement_with_name_span(
             name,
+            SPAN,
+            super_class_name,
+            elements,
+            is_exported,
+            is_default_export,
+        )
+    }
+
+    pub(crate) fn class_declaration_statement_with_name_span(
+        &self,
+        name: &'a str,
+        name_span: Span,
+        super_class_name: &'a str,
+        elements: OxcVec<'a, ClassElement<'a>>,
+        is_exported: bool,
+        is_default_export: bool,
+    ) -> Statement<'a> {
+        self.class_declaration_statement_with_decorators_and_name_span(
+            name,
+            name_span,
             super_class_name,
             elements,
             self.ast.vec(),
@@ -1236,13 +1371,34 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         is_exported: bool,
         is_default_export: bool,
     ) -> Statement<'a> {
+        self.class_declaration_statement_with_decorators_and_name_span(
+            name,
+            SPAN,
+            super_class_name,
+            elements,
+            decorators,
+            is_exported,
+            is_default_export,
+        )
+    }
+
+    fn class_declaration_statement_with_decorators_and_name_span(
+        &self,
+        name: &'a str,
+        name_span: Span,
+        super_class_name: &'a str,
+        elements: OxcVec<'a, ClassElement<'a>>,
+        decorators: OxcVec<'a, Decorator<'a>>,
+        is_exported: bool,
+        is_default_export: bool,
+    ) -> Statement<'a> {
         let super_class = Some(self.ast.expression_identifier(SPAN, super_class_name));
         let body = self.ast.alloc_class_body(SPAN, elements);
         let class = self.ast.alloc_class(
             SPAN,
             ClassType::ClassDeclaration,
             decorators,
-            Some(self.ast.binding_identifier(SPAN, name)),
+            Some(self.ast.binding_identifier(name_span, name)),
             NONE,
             super_class,
             NONE,

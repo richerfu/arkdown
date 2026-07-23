@@ -124,6 +124,13 @@ pub struct ProductConfig {
     pub bundle_name: String,
     pub compatible_sdk_version: String,
     pub compatible_sdk_version_stage: Option<String>,
+    /// Product-level `targetSdkVersion` from `build-profile.json5`.
+    ///
+    /// Hvigor uses the complete version text (for example `5.0.5(17)`) when
+    /// encoding `targetAPIVersion`; the selected SDK only supplies the compile
+    /// toolchain and must not replace these version components.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub target_sdk_version: Option<String>,
     pub runtime_os: String,
     pub signing_config: Option<SigningConfig>,
     pub build_option: BuildOption,
@@ -157,6 +164,9 @@ pub struct BuildOption {
     /// HAP under `libs/arm64-v8a/`.
     #[serde(default)]
     pub preload_so: Vec<PathBuf>,
+    /// `buildOption.packOptions.deduplicateHar`.
+    #[serde(default)]
+    pub deduplicate_har: bool,
     /// Permissions to remove from HAR/HSP dependency `requestPermissions`.
     /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
     #[serde(default)]
@@ -178,12 +188,43 @@ pub struct BuildOption {
     /// Empty means default: `["arm64-v8a"]`.
     #[serde(default)]
     pub abi_filters: Vec<String>,
+    /// Native CMake configuration from `buildOption.externalNativeOptions`.
+    /// `None` means hvigor's native configure/build tasks must not run.
+    #[serde(default)]
+    pub external_native_options: Option<ExternalNativeOptions>,
+    /// HAR artifact representation selected by `buildOption.artifactType`.
+    #[serde(default)]
+    pub har_artifact_type: HarArtifactType,
     /// Native library collection options from `buildOption.nativeLib`.
     #[serde(default)]
     pub native_lib: NativeLibOption,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HarArtifactType {
+    #[default]
+    Original,
+    Obfuscation,
+    Bytecode,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalNativeOptions {
+    /// Absolute path to the configured `CMakeLists.txt`; `None` selects the
+    /// conventional script when the option object is present.
+    pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    #[serde(default)]
+    pub abi_filters: Vec<String>,
+    pub cpp_flags: Option<String>,
+    pub c_flags: Option<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeLibOption {
     /// `buildOption.nativeLib.collectAllLibs`; when true hvigor scans `**/*`
     /// instead of `**/*.so*(.*[0-9])`.
@@ -193,6 +234,50 @@ pub struct NativeLibOption {
     /// `napiLibFilterOption` and `nativeLib.filter`.
     #[serde(default)]
     pub filter: NativeLibFilterOption,
+    /// Native C/C++ header directories exported under `include/` in HARs.
+    #[serde(default)]
+    pub header_paths: Vec<PathBuf>,
+    /// Whether transitive HAR runtime libraries are excluded from HAR output.
+    #[serde(default = "default_true")]
+    pub exclude_from_har: bool,
+    /// Whether HSP native libraries are omitted from the generated interface
+    /// HAR. Hvigor ignores this switch when `headerPath` is configured because
+    /// consumers need both headers and link libraries in that case.
+    #[serde(default)]
+    pub exclude_so_from_interface_har: bool,
+    /// Native debug-symbol/strip policy.
+    #[serde(default)]
+    pub debug_symbol: NativeDebugSymbolOption,
+}
+
+impl Default for NativeLibOption {
+    fn default() -> Self {
+        Self {
+            collect_all_libs: false,
+            filter: NativeLibFilterOption::default(),
+            header_paths: Vec::new(),
+            exclude_from_har: true,
+            exclude_so_from_interface_har: false,
+            debug_symbol: NativeDebugSymbolOption::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeDebugSymbolOption {
+    #[serde(default = "default_true")]
+    pub strip: bool,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+impl Default for NativeDebugSymbolOption {
+    fn default() -> Self {
+        Self {
+            strip: true,
+            exclude: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -265,6 +350,19 @@ pub struct ArkOptions {
     /// (`buildOption.arkOptions.supportChunks` in `build-profile.json5`).
     #[serde(default)]
     pub support_chunks: bool,
+    /// Whether this HAR is emitted as a ByteCode HAR. Hvigor owns this switch
+    /// at `buildOption.arkOptions.byteCodeHar`; `artifactType` alone is not a
+    /// reliable ByteCode HAR discriminator.
+    #[serde(default)]
+    pub byte_code_har: bool,
+    /// Whether a ByteCode HAR embeds and compiles its source-HAR dependencies
+    /// (`buildOption.arkOptions.bundledDependencies` in hvigor).
+    #[serde(default)]
+    pub bundled_dependencies: bool,
+    /// HSP dependencies are embedded into the host package only when this
+    /// hvigor switch is explicitly enabled.
+    #[serde(default)]
+    pub integrated_hsp: Option<bool>,
 }
 
 /// Obfuscation configuration (from `buildOption.arkOptions.obfuscation` in
@@ -305,6 +403,36 @@ pub struct ResOptions {
     /// Additional resource directories to include (from `buildOption.resOptions.directories`).
     #[serde(default)]
     pub resource_directories: Vec<PathBuf>,
+    #[serde(default)]
+    pub compression: Option<serde_json::Value>,
+    #[serde(default)]
+    pub copy_code_resource: CopyCodeResource,
+    #[serde(default)]
+    pub res_compile_threads: Option<usize>,
+    #[serde(default)]
+    pub ignore_resource_pattern: Vec<String>,
+    #[serde(default)]
+    pub qualifiers_config: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyCodeResource {
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    #[serde(default)]
+    pub excludes: Vec<String>,
+    #[serde(default)]
+    pub includes: Option<Vec<String>>,
+}
+
+impl Default for CopyCodeResource {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            excludes: Vec::new(),
+            includes: None,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -425,6 +553,79 @@ impl SdkConfig {
         self.ets_root()
             .map(|ets_root| vec![ets_root.join("arkts")])
             .unwrap_or_default()
+    }
+
+    /// SDK declaration roots passed to ArkGuard by the SDK loader's
+    /// `globalModulePaths` contract.
+    ///
+    /// `ets-loader/main.js::readSystemModules` contributes `ets/api`,
+    /// `ets/arkts`, and `ets/kits`. HarmonyOS builds additionally load sibling
+    /// SDK components through their `ets/sdkConfig.json` `apiPath` metadata
+    /// (for example the HMS component), instead of relying on component names.
+    pub fn arkguard_api_dirs(&self, runtime_os: &str) -> Vec<std::path::PathBuf> {
+        let Some(ets_root) = self.ets_root() else {
+            return vec![];
+        };
+        let mut paths = ["api", "arkts", "kits"]
+            .into_iter()
+            .map(|directory| ets_root.join(directory))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        if self.compile_api_version <= 9 || !runtime_os.eq_ignore_ascii_case("HarmonyOS") {
+            return paths;
+        }
+        let Some(sdk_root) = self.component_root().and_then(std::path::Path::parent) else {
+            return paths;
+        };
+        let Ok(entries) = std::fs::read_dir(sdk_root) else {
+            return paths;
+        };
+        let mut component_roots = entries
+            .flatten()
+            .map(|entry| entry.path().join("ets"))
+            .filter(|path| path != ets_root && path.join("sdkConfig.json").is_file())
+            .collect::<Vec<_>>();
+        component_roots.sort();
+        for component_root in component_roots {
+            let config_path = component_root.join("sdkConfig.json");
+            let Ok(content) = std::fs::read(&config_path) else {
+                continue;
+            };
+            let Ok(config) = serde_json::from_slice::<SdkApiPathConfig>(&content) else {
+                continue;
+            };
+            paths.extend(
+                config
+                    .api_path
+                    .into_paths()
+                    .into_iter()
+                    .map(|path| component_root.join(path))
+                    .filter(|path| path.is_dir()),
+            );
+        }
+        paths
+    }
+}
+
+#[derive(Deserialize)]
+struct SdkApiPathConfig {
+    #[serde(rename = "apiPath")]
+    api_path: SdkApiPath,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SdkApiPath {
+    One(PathBuf),
+    Many(Vec<PathBuf>),
+}
+
+impl SdkApiPath {
+    fn into_paths(self) -> Vec<PathBuf> {
+        match self {
+            Self::One(path) => vec![path],
+            Self::Many(paths) => paths,
+        }
     }
 }
 

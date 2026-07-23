@@ -10,7 +10,7 @@
         buildOption: {
           strictMode: {
             caseSensitiveCheck: false,
-            useNormalizedOHMUrl: false
+            useNormalizedOHMUrl: true
           }
         }
       }

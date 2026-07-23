@@ -6,6 +6,8 @@
   "main": "index",
   "author": "",
   "license": "Apache-2.0",
-  "byteCodeHar": true,
+  "metadata": {
+    "byteCodeHar": true
+  },
   "dependencies": {}
 }

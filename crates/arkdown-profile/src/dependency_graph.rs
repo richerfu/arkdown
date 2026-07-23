@@ -252,8 +252,6 @@ fn is_bytecode_har(pkg_root: &Path) -> bool {
     #[serde(rename_all = "camelCase")]
     struct PkgMinimal {
         #[serde(default)]
-        byte_code_har: bool,
-        #[serde(default)]
         metadata: PkgMeta,
     }
     #[derive(Default, serde::Deserialize)]
@@ -263,7 +261,7 @@ fn is_bytecode_har(pkg_root: &Path) -> bool {
         byte_code_har: bool,
     }
     json5::from_str::<PkgMinimal>(&content)
-        .map(|p| p.byte_code_har || p.metadata.byte_code_har)
+        .map(|p| p.metadata.byte_code_har)
         .unwrap_or(false)
 }
 
@@ -532,7 +530,11 @@ mod tests {
         fs::create_dir_all(&pkg).unwrap();
         fs::write(
             pkg.join("oh-package.json5"),
-            r#"{ "name": "bc-har", "byteCodeHar": true, "dependencies": {} }"#,
+            r#"{
+              "name": "bc-har",
+              "metadata": { "byteCodeHar": true },
+              "dependencies": {}
+            }"#,
         )
         .unwrap();
         fs::create_dir_all(pkg.join("ets")).unwrap();

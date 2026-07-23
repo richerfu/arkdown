@@ -334,25 +334,22 @@ impl<'a> RuntimeOnlyCollector<'a> {
         if ets_root.is_dir() {
             files.extend(self.collect_dynamic_import_source_files(&ets_root));
         }
-        files.sort_by_key(|path| {
-            path.strip_prefix(pkg_dir)
-                .map(ArtifactPathSerializer::rel_to_slash)
-                .unwrap_or_else(|_| ArtifactPathSerializer::rel_to_slash(path))
-        });
         files
     }
 
     fn collect_dynamic_import_source_files(&self, root: &Path) -> Vec<PathBuf> {
-        let mut stack = vec![root.to_path_buf()];
+        let mut directories = VecDeque::from([root.to_path_buf()]);
         let mut files = Vec::new();
-        while let Some(dir) = stack.pop() {
+        while let Some(dir) = directories.pop_front() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            for entry in entries.flatten() {
+            let mut entries = entries.flatten().collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
                 let path = entry.path();
                 if path.is_dir() {
-                    stack.push(path);
+                    directories.push_back(path);
                     continue;
                 }
                 if self.is_dynamic_import_source_file(&path) {
@@ -360,8 +357,6 @@ impl<'a> RuntimeOnlyCollector<'a> {
                 }
             }
         }
-
-        files.sort_by_key(|path| ArtifactPathSerializer::rel_to_slash(path));
         files
     }
 

@@ -42,8 +42,8 @@ pub mod validate_permissions;
 
 pub use arkdown_core::PkgBriefInfo;
 pub use bytecode_har::{
-    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, DynamicImportLibEntry, HostModuleInfo,
-    LoaderByteCodeHarFields,
+    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CompatibleSdkVersionValue,
+    DynamicImportLibEntry, HostModuleInfo, LoaderByteCodeHarFields,
 };
 pub use form_profile::{
     FormProfileEntry, FormProfileInput, FormProfileProcessor, FormSourceEntry,
@@ -63,7 +63,9 @@ pub use process_privacy_profile::{
     ProjectPrivacyProfileOutput,
 };
 pub use process_profile::ProcessProfileProcessor;
-pub use process_share_config::{ShareConfigInput, ShareConfigOutput, ShareConfigProcessor};
+pub use process_share_config::{
+    ShareConfigDependencyInput, ShareConfigInput, ShareConfigOutput, ShareConfigProcessor,
+};
 pub use process_shortcut_profile::{ShortcutProfileInput, ShortcutProfileProcessor};
 pub use process_startup_config::{StartupConfigInput, StartupConfigOutput, StartupConfigProcessor};
 pub use router_map::{RouterMapEntry, RouterMapProcessor};
@@ -102,15 +104,22 @@ pub struct ProfileProcessor {
 
 pub struct ProfileDependencyContext {
     graph: dependency_graph::LocalDependencyGraph,
+    hsp_dependencies: Vec<arkdown_core::HspDependency>,
+    app_version_code: u64,
 }
 
 impl ProfileDependencyContext {
     fn build(config: &ArkdownConfig, module_cfg: &ModuleConfig) -> Self {
+        let graph = dependency_graph::LocalDependencyGraph::build(
+            &module_cfg.src_path,
+            &config.project_root,
+        );
+        let app_version_code = config.product.version_code.unwrap_or_default();
+        let hsp_dependencies = Self::hsp_dependencies_from_local_graph(&graph, app_version_code);
         Self {
-            graph: dependency_graph::LocalDependencyGraph::build(
-                &module_cfg.src_path,
-                &config.project_root,
-            ),
+            graph,
+            hsp_dependencies,
+            app_version_code,
         }
     }
 
@@ -118,6 +127,7 @@ impl ProfileDependencyContext {
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
         session_graph: &arkdown_session::DependencyGraphSnapshot,
+        app_version_code: u64,
     ) -> Self {
         let mut graph = dependency_graph::LocalDependencyGraph {
             nodes: indexmap::IndexMap::new(),
@@ -133,13 +143,112 @@ impl ProfileDependencyContext {
                 },
             );
         }
-        let mut context = Self { graph };
+        let hsp_dependencies = session_graph
+            .nodes
+            .values()
+            .filter(|node| {
+                matches!(
+                    node.node_type,
+                    arkdown_session::dependency_graph::snapshot::DependencyNodeType::SharedHsp
+                        | arkdown_session::dependency_graph::snapshot::DependencyNodeType::IntegratedHsp
+                )
+            })
+            .map(|node| {
+                let profile = node.module_profile.as_ref();
+                let has_common_app_identity = profile
+                    .and_then(|profile| profile.bundle_type.as_deref())
+                    == Some("shared");
+                arkdown_core::HspDependency {
+                    module_name: profile
+                        .and_then(|profile| profile.module_name.clone())
+                        .unwrap_or_default(),
+                    version_code: profile
+                        .and_then(|profile| {
+                            profile
+                                .bundle_name
+                                .as_deref()
+                                .filter(|bundle_name| !bundle_name.is_empty())
+                                .and(profile.version_code)
+                        })
+                        .unwrap_or(app_version_code),
+                    bundle_name: has_common_app_identity
+                        .then(|| profile.and_then(|profile| profile.bundle_name.clone()))
+                        .flatten(),
+                }
+            })
+            .collect();
+        let mut context = Self {
+            graph,
+            hsp_dependencies,
+            app_version_code,
+        };
         context.apply_root_runtime_only_packages(config, module_cfg);
         context
     }
 
     pub(crate) fn graph(&self) -> &dependency_graph::LocalDependencyGraph {
         &self.graph
+    }
+
+    fn hsp_dependencies(&self) -> &[arkdown_core::HspDependency] {
+        &self.hsp_dependencies
+    }
+
+    fn hsp_dependencies_from_local_graph(
+        graph: &dependency_graph::LocalDependencyGraph,
+        app_version_code: u64,
+    ) -> Vec<arkdown_core::HspDependency> {
+        graph
+            .shared_hsps()
+            .into_iter()
+            .filter_map(|node| {
+                let profile_path = [
+                    node.pkg_root.join("src/main/module.json"),
+                    node.pkg_root.join("src/main/module.json5"),
+                ]
+                .into_iter()
+                .find(|path| path.is_file())?;
+                let content = fs_err::read_to_string(profile_path).ok()?;
+                let profile: serde_json::Value = json5::from_str(&content).ok()?;
+                let module_name = profile.pointer("/module/name")?.as_str()?.to_string();
+                let common_app =
+                    profile.pointer("/app/bundleType").and_then(|v| v.as_str()) == Some("shared");
+                Some(arkdown_core::HspDependency {
+                    module_name,
+                    version_code: profile
+                        .pointer("/app/bundleName")
+                        .and_then(|value| value.as_str())
+                        .filter(|bundle_name| !bundle_name.is_empty())
+                        .and_then(|_| profile.pointer("/app/versionCode"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(app_version_code),
+                    bundle_name: common_app
+                        .then(|| {
+                            profile
+                                .pointer("/app/bundleName")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                        })
+                        .flatten(),
+                })
+            })
+            .collect()
+    }
+
+    /// Remove dependency records owned by the selected package roots.
+    ///
+    /// Hvigor applies this to HSP profile processing when `deduplicateHar` is
+    /// enabled so abilities and other HAR-contributed module metadata are
+    /// emitted by the merged HAP only.
+    pub fn excluding_package_roots(mut self, roots: &[PathBuf]) -> Self {
+        let roots = roots
+            .iter()
+            .map(|root| arkdown_path::canonicalize_or_owned(root))
+            .collect::<rustc_hash::FxHashSet<_>>();
+        self.graph.nodes.retain(|_, node| {
+            !roots.contains(&arkdown_path::canonicalize_or_owned(&node.pkg_root))
+        });
+        self
     }
 
     fn session_node_type(
@@ -329,6 +438,11 @@ impl ProfileProcessor {
             }
         };
 
+        // `ProcessProfile` replaces source `module.dependencies` with the HSP
+        // set returned by `mergeHspLibs()`. The dependency session is the
+        // authoritative source for installed HSP module identity.
+        manifest.dependencies = dependency_context.hsp_dependencies().to_vec();
+
         // Auto-derive HSP dependencies from workspace modules.
         //
         // hvigor's ProcessProfile.addModuleDependencies() automatically collects
@@ -358,8 +472,9 @@ impl ProfileProcessor {
                 }
                 // Workspace SharedHsp: bundleName = app bundleName (same project)
                 manifest.dependencies.push(arkdown_core::HspDependency {
-                    bundle_name: self.config.product.bundle_name.clone(),
                     module_name: workspace_module.name.clone(),
+                    version_code: dependency_context.app_version_code,
+                    bundle_name: None,
                 });
             }
         }
@@ -373,9 +488,6 @@ impl ProfileProcessor {
                 dependency_context.graph(),
             )?
         };
-        if manifest.router_map.is_none() && !loader.router_map.is_empty() {
-            manifest.router_map = Some("$profile:default-router-map".to_string());
-        }
         Ok((manifest, loader))
     }
 
@@ -468,6 +580,7 @@ mod tests {
                 bundle_name: "com.example.testapp".to_string(),
                 compatible_sdk_version: "5.0.0(12)".to_string(),
                 compatible_sdk_version_stage: None,
+                target_sdk_version: None,
                 runtime_os: "HarmonyOS".to_string(),
                 signing_config: None,
                 build_option: BuildOption {
@@ -480,11 +593,14 @@ mod tests {
                     source_option: None,
                     preload_system_so: false,
                     preload_so: vec![],
+                    deduplicate_har: false,
                     remove_permissions: vec![],
                     aot_compile_mode: None,
                     host_pgo: None,
                     ap_path: None,
                     abi_filters: vec![],
+                    external_native_options: None,
+                    har_artifact_type: arkdown_core::HarArtifactType::Original,
                     native_lib: NativeLibOption::default(),
                 },
                 version_code: None,
@@ -596,7 +712,7 @@ fi
     }
 
     #[test]
-    fn test_process_module_derives_default_router_map_ref() {
+    fn test_process_module_does_not_advertise_dependency_only_router_map() {
         let temp_dir = tempfile::tempdir().expect("create temp project");
         let project_root = temp_dir.path().to_path_buf();
         let entry_root = project_root.join("entry");
@@ -641,10 +757,7 @@ fi
             .expect("process_module failed");
 
         assert!(!loader.router_map.is_empty());
-        assert_eq!(
-            manifest.router_map.as_deref(),
-            Some("$profile:default-router-map")
-        );
+        assert_eq!(manifest.router_map, None);
     }
 
     #[test]
@@ -1006,6 +1119,6 @@ fi
             .iter()
             .find(|d| d.module_name == "mySharedHsp")
             .unwrap();
-        assert_eq!(hsp_dep.bundle_name, "com.example.testapp");
+        assert_eq!(hsp_dep.bundle_name, None);
     }
 }

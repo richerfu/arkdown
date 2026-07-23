@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{HvigorModuleSourceFile, HvigorNpmEntry};
+use arkdown_path::lexical_normalize;
+use rustc_hash::FxHashSet;
 
 use crate::cmd::build::bytecode::backend::{BytecodeBackend, SdkEs2abcBackend};
 use crate::cmd::build::bytecode::compile_context::CompileContextInfo;
@@ -50,6 +52,35 @@ pub struct RolldownBytecodeCompileInput {
 pub struct BytecodeAbcInput {
   pub path: PathBuf,
   pub package_name: String,
+  pub cache_file: PathBuf,
+}
+
+impl BytecodeAbcInput {
+  /// Build the cache path used by SDK `ModuleMode.genAbcCacheFilePath()`:
+  /// preserve the ABC path relative to `projectTopDir` below CompileArkTS'
+  /// cache directory and replace `.abc` with `.protoBin`.
+  pub fn from_project_cache(
+    path: PathBuf,
+    package_name: impl Into<String>,
+    project_root: &Path,
+    cache_dir: &Path,
+  ) -> Result<Self, Ts2abcError> {
+    let path = lexical_normalize(&path);
+    let project_root = lexical_normalize(project_root);
+    let relative = path.strip_prefix(&project_root).map_err(|_| {
+      Ts2abcError::InvalidPlan(format!(
+        "ByteCode HAR ABC '{}' is outside projectTopDir '{}'",
+        path.display(),
+        project_root.display()
+      ))
+    })?;
+    let cache_file = cache_dir.join(relative).with_extension("protoBin");
+    Ok(Self {
+      path,
+      package_name: package_name.into(),
+      cache_file,
+    })
+  }
 }
 
 /// Compiles Rolldown output chunks through the typed ts2abc backend pipeline.
@@ -127,7 +158,7 @@ impl RolldownBytecodeCompiler {
         Some(source.source_file.clone()),
         source.package_name.clone(),
         source.is_commonjs,
-        false,
+        source.is_shared_module,
         source.origin_source_lang.as_str(),
         Some(source.path.with_extension("protoBin")),
       );
@@ -135,7 +166,8 @@ impl RolldownBytecodeCompiler {
     if !input.abc_input_files.is_empty() {
       builder = builder.with_abc_input().with_remove_redundant_file();
       for abc_input in input.abc_input_files {
-        builder = builder.with_abc_input_file(abc_input.path, abc_input.package_name);
+        builder =
+          builder.with_abc_input_file(abc_input.path, abc_input.package_name, abc_input.cache_file);
       }
     }
 
@@ -161,21 +193,17 @@ impl NpmModuleEntryManifest {
         build_path: entry.build_path,
       })
       .collect::<Vec<_>>();
+    // SDK `ModuleMode.getNativeModuleEntryInfo` inserts this fixed list
+    // before graph-derived system requests. `Map.set` then keeps the first
+    // insertion when the same request was already observed in module imports.
+    entries.extend(HvigorNpmModuleRequest::native_module_entries());
     entries.extend(
       requests
         .iter()
         .filter_map(|request| HvigorNpmModuleRequest::new(request).entry()),
     );
-    entries.extend(HvigorNpmModuleRequest::native_module_entries());
-    entries.sort_by(|left, right| {
-      left
-        .entry_path
-        .cmp(&right.entry_path)
-        .then_with(|| left.build_path.cmp(&right.build_path))
-    });
-    entries.dedup_by(|left, right| {
-      left.entry_path == right.entry_path && left.build_path == right.build_path
-    });
+    let mut seen = FxHashSet::default();
+    entries.retain(|entry| seen.insert((entry.entry_path.clone(), entry.build_path.clone())));
     Self { entries }
   }
 
@@ -552,6 +580,7 @@ mod tests {
           source_file: "src/main/ets/pages/Index.ets".to_string(),
           package_name: Some("com.example.hmosworld".to_string()),
           is_commonjs: false,
+          is_shared_module: false,
           origin_source_lang: "ets".to_string(),
           imported_record_names: vec![],
         }],
@@ -589,13 +618,14 @@ mod tests {
   #[test]
   fn npm_entries_match_hvigor_native_module_mapping() {
     let tmp = tempfile::tempdir().unwrap();
+    let external_requests = vec![
+      "@ohos.matrix4".to_string(),
+      "@ohos.curves".to_string(),
+      "@system.app".to_string(),
+    ];
     let manifest = NpmModuleEntryManifest::from_hvigor_entries_and_external_requests(
       Vec::new(),
-      &[
-        "@ohos:data.preferences".to_string(),
-        "@ohos.app".to_string(),
-        "@ohos:system.router".to_string(),
-      ],
+      &external_requests,
     );
     let path = tmp.path().join("npmEntries.txt");
     manifest.write_at(&path).unwrap();
@@ -603,7 +633,7 @@ mod tests {
     let content = fs::read_to_string(path).unwrap();
     assert_eq!(
             content,
-            "@ohos.app:@native.ohos.app\n@ohos.curves:@native.ohos.curves\n@ohos.matrix4:@native.ohos.matrix4\n@system.app:@native.system.app\n@system.curves:@native.system.curves\n@system.matrix4:@native.system.matrix4\n@system.router:@native.system.router\n"
+            "@system.app:@native.system.app\n@ohos.app:@native.ohos.app\n@system.router:@native.system.router\n@system.curves:@native.system.curves\n@ohos.curves:@native.ohos.curves\n@system.matrix4:@native.system.matrix4\n@ohos.matrix4:@native.ohos.matrix4\n"
         );
   }
 }

@@ -102,7 +102,11 @@ impl ModuleJsonWriter {
         let min_numeric_api =
             Self::compute_numeric_api_version(&config.product.compatible_sdk_version);
         let target_numeric_api = Self::compute_numeric_target_api_version(
-            &config.sdk_config.compile_sdk_version,
+            config
+                .product
+                .target_sdk_version
+                .as_deref()
+                .unwrap_or(&config.sdk_config.compile_sdk_version),
             config.sdk_config.compile_api_version,
         );
         let is_debug = matches!(config.build_mode, arkdown_core::BuildMode::Debug);
@@ -129,10 +133,9 @@ impl ModuleJsonWriter {
             raw_module5.as_ref(),
             dependency_graph,
         )?;
-        let has_insight_intent =
-            Self::read_module_has_insight_intent(manifest, config, raw_module5.as_ref());
+        let has_insight_intent = Self::read_module_has_insight_intent(raw_module5.as_ref());
 
-        let app_section = Self::build_app_section(
+        let mut app_section = Self::build_app_section(
             &app_json5_fields,
             min_numeric_api,
             target_numeric_api,
@@ -144,7 +147,14 @@ impl ModuleJsonWriter {
             config.product.version_code,
             config.product.version_name.as_deref(),
         );
-        let module_section = Self::manifest_to_json(
+        // MergeProfile.computeAppJsonOpt keeps only the HAR app whitelist.
+        // `vendor` is retained for HAP/HSP but is not legal in a HAR's
+        // processed package profile (except the ohosTest target).
+        if matches!(manifest.module_type, arkdown_core::OhosModuleType::Har) {
+            app_section.remove("vendor");
+            app_section = Self::order_har_app_section(app_section);
+        }
+        let mut module_section = Self::manifest_to_json(
             manifest,
             raw_module5.as_ref(),
             resource_ids,
@@ -154,6 +164,13 @@ impl ModuleJsonWriter {
             &dependency_profile_merge,
             has_insight_intent,
         );
+        if matches!(
+            manifest.module_type,
+            arkdown_core::OhosModuleType::Har | arkdown_core::OhosModuleType::Shared
+        ) {
+            module_section =
+                Self::order_library_module_section(module_section, raw_module5.as_ref());
+        }
 
         let mut combined = serde_json::Map::new();
         combined.insert("app".into(), serde_json::Value::Object(app_section));
@@ -162,11 +179,73 @@ impl ModuleJsonWriter {
         if let Some(parent) = output_path.parent() {
             fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Io(e.into()))?;
         }
-        let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(combined))
+        let mut json = Vec::new();
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(b"\t");
+        let mut serializer = serde_json::Serializer::with_formatter(&mut json, formatter);
+        serde::Serialize::serialize(&serde_json::Value::Object(combined), &mut serializer)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
-        fs_err::write(output_path, json_str.as_bytes()).map_err(|e| ArkdownError::Io(e.into()))?;
+        fs_err::write(output_path, &json).map_err(|e| ArkdownError::Io(e.into()))?;
 
         Ok(())
+    }
+
+    fn order_har_app_section(
+        mut app: serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut ordered = serde_json::Map::new();
+        for key in [
+            "bundleName",
+            "debug",
+            "versionCode",
+            "versionName",
+            "minCompatibleVersionCode",
+            "minAPIVersion",
+            "targetAPIVersion",
+            "apiReleaseType",
+            "targetMinorAPIVersion",
+            "targetPatchAPIVersion",
+            "compileSdkVersion",
+            "compileSdkType",
+            "appEnvironments",
+            "bundleType",
+            "buildMode",
+        ] {
+            if let Some(value) = app.remove(key) {
+                ordered.insert(key.to_string(), value);
+            }
+        }
+        ordered.extend(app);
+        ordered
+    }
+
+    fn order_library_module_section(
+        module: serde_json::Value,
+        raw_module5: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
+        let Some(mut module) = module.as_object().cloned() else {
+            return module;
+        };
+        let mut ordered = serde_json::Map::new();
+        if let Some(raw) = raw_module5.and_then(serde_json::Value::as_object) {
+            for key in raw.keys() {
+                if let Some(value) = module.remove(key) {
+                    ordered.insert(key.clone(), value);
+                }
+            }
+        }
+        for key in [
+            "packageName",
+            "installationFree",
+            "virtualMachine",
+            "compileMode",
+            "dependencies",
+        ] {
+            if let Some(value) = module.remove(key) {
+                ordered.insert(key.to_string(), value);
+            }
+        }
+        ordered.extend(module);
+        serde_json::Value::Object(ordered)
     }
 
     pub(crate) fn annotate_resource_ids(
@@ -569,12 +648,15 @@ impl ModuleJsonWriter {
                 obj.insert("atomicService".into(), atomic.clone());
             }
         }
-        // deliveryWithInstall: respect value from module.json5; default true.
-        let delivery_with_install = raw_module5
-            .and_then(|v| v.get("deliveryWithInstall"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        obj.insert("deliveryWithInstall".into(), delivery_with_install.into());
+        // HAR's stage schema does not allow deliveryWithInstall. Hvigor's
+        // MergeProfile only synthesizes this HAP/HSP distro field outside HAR.
+        if !matches!(manifest.module_type, arkdown_core::OhosModuleType::Har) {
+            let delivery_with_install = raw_module5
+                .and_then(|v| v.get("deliveryWithInstall"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            obj.insert("deliveryWithInstall".into(), delivery_with_install.into());
+        }
         if let Some(desc) = &manifest.description {
             obj.insert("description".into(), desc.clone().into());
         }
@@ -589,8 +671,11 @@ impl ModuleJsonWriter {
             .iter()
             .map(|d| {
                 let mut dep = serde_json::Map::new();
-                dep.insert("bundleName".into(), d.bundle_name.clone().into());
                 dep.insert("moduleName".into(), d.module_name.clone().into());
+                dep.insert("versionCode".into(), d.version_code.into());
+                if let Some(bundle_name) = d.bundle_name.as_ref() {
+                    dep.insert("bundleName".into(), bundle_name.clone().into());
+                }
                 serde_json::Value::Object(dep)
             })
             .collect();
@@ -627,7 +712,9 @@ impl ModuleJsonWriter {
                 obj.insert("definePermissions".into(), defs.clone());
             }
         }
-        obj.insert("abilities".into(), serde_json::Value::Array(abilities));
+        if !abilities.is_empty() {
+            obj.insert("abilities".into(), serde_json::Value::Array(abilities));
+        }
         let extension_abilities = if let Some(dependency_extensions) =
             dependency_profile_merge.extension_abilities.as_ref()
         {
@@ -674,6 +761,9 @@ impl ModuleJsonWriter {
                 obj.insert("descriptionId".into(), (id as u64).into());
             }
         }
+        if let Some(app_startup) = raw_module5.and_then(|value| value.get("appStartup")) {
+            obj.insert("appStartup".into(), app_startup.clone());
+        }
         obj.insert("name".into(), manifest.module_name.clone().into());
         // packageName from oh-package.json5#name (hvigor: Object.assign using
         // packageJsonObj.name); falls back to module_name when file is absent.
@@ -711,27 +801,10 @@ impl ModuleJsonWriter {
         serde_json::Value::Object(obj)
     }
 
-    fn read_module_has_insight_intent(
-        manifest: &HapManifest,
-        config: &ArkdownConfig,
-        raw_module5: Option<&serde_json::Value>,
-    ) -> bool {
-        if raw_module5
+    fn read_module_has_insight_intent(raw_module5: Option<&serde_json::Value>) -> bool {
+        raw_module5
             .and_then(|module| module.get("hasInsightIntent"))
             .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        config
-            .modules
-            .iter()
-            .find(|module| module.name == manifest.module_name)
-            .map(|module| {
-                ProfileModuleLayout::new(&module.src_path)
-                    .insight_intent_profile_json()
-                    .is_file()
-            })
             .unwrap_or(false)
     }
 

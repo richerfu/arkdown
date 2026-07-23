@@ -64,7 +64,7 @@ impl SdkToolKind {
             Self::PackageTool => "package-tool",
             Self::HapSignToolV2 => "hap-sign-tool.jar",
             Self::HapToBin => "hap-to-bin",
-            Self::SyscapTool => "syscap-tool",
+            Self::SyscapTool => "syscap_tool",
             Self::VerifySignConfigTool => "verify-sign-config",
             Self::Cmake => "cmake",
             Self::NativeNinja => "ninja",
@@ -195,11 +195,16 @@ impl SdkToolResolver {
         self.tool_at("hap-to-bin", SdkToolKind::HapToBin)
     }
 
-    /// Path to `syscap-tool`.
+    /// Path to `syscap_tool`.
     ///
     /// Upstream: `DefaultSdk.getSysCapTool`.
     pub fn syscap_tool(&self) -> Option<SdkToolPath> {
-        self.tool_at("syscap-tool", SdkToolKind::SyscapTool)
+        let binary = if cfg!(windows) {
+            "syscap_tool.exe"
+        } else {
+            "syscap_tool"
+        };
+        self.tool_at(binary, SdkToolKind::SyscapTool)
     }
 
     /// Path to `verify-sign-config`.

@@ -53,7 +53,7 @@ use crate::plugins::ets_transform::{
     CheckerMode, ComponentMetadata, EtsTransformPlugin, RolldownEtsTransformPlan,
     TransformEntrySourceId, TransformSourceSnapshot,
 };
-use crate::plugins::har_dedup::{CollectFilePath, HarDedupPlugin};
+use crate::plugins::har_dedup::HarDedupPlugin;
 use crate::plugins::import_check::ImportCheckPlugin;
 use crate::plugins::json5::Json5Plugin;
 use crate::plugins::minify::MinifyPlugin;
@@ -69,6 +69,7 @@ use crate::ShouldInvalidCacheRequest;
 /// layer and are passed down to the factory. Once `BundlePlan` is extended to
 /// carry full session data (SPEC-048 Phase 5+), this struct can be collapsed
 /// into `BundlePlan`.
+#[derive(Clone)]
 pub struct PluginFactoryInput {
     /// SDK `api/` directories for `@ohos/*` resolution.
     pub sdk_api_dirs: Vec<PathBuf>,
@@ -108,11 +109,10 @@ pub struct PluginFactoryInput {
     pub source_set_overlays: Vec<(PathBuf, PathBuf)>,
     /// ArkTS checker mode forwarded from package/CLI config.
     pub checker_mode: CheckerMode,
-    /// HAR dedup collect-file path (used for HSP builds).
-    ///
-    /// If `None`, the factory falls back to
-    /// `<module_root>/build/default/intermediates/har_files/default/har_files.json`.
-    pub har_dedup_collect_file: Option<PathBuf>,
+    /// Whether import path casing must match the filesystem exactly.
+    pub case_sensitive_check: bool,
+    /// Explicit phase for hvigor-compatible HSP HAR deduplication.
+    pub har_dedup: HarDedupFactoryMode,
     /// Built-in plugin names to disable for this build.
     ///
     /// Populated from `arkdown.config.json` `plugins.disabled` via the coordinator.
@@ -147,11 +147,29 @@ impl PluginFactoryInput {
             pkg_name_to_pkg_info: FxHashMap::default(),
             source_set_overlays: vec![],
             checker_mode: CheckerMode::Oxc,
-            har_dedup_collect_file: None,
+            case_sensitive_check: false,
+            har_dedup: HarDedupFactoryMode::Disabled,
             disabled_plugins: vec![],
             package_plugins: vec![],
         }
     }
+}
+
+/// HAR deduplication phase selected by the CLI coordinator.
+///
+/// The plugin factory never infers a phase from stale files on disk. Hvigor
+/// schedules both tasks explicitly in one build, so arkdown does the same.
+#[derive(Debug, Clone, Default)]
+pub enum HarDedupFactoryMode {
+    #[default]
+    Disabled,
+    Collect {
+        collect_file: PathBuf,
+        source_har_roots: Vec<PathBuf>,
+    },
+    RealBuild {
+        collect_file: PathBuf,
+    },
 }
 
 /// A package-supplied plugin plus its hvigor insertion order.
@@ -516,7 +534,7 @@ impl<'a> PluginFactory<'a> {
             ],
             pkg_name_to_pkg_info: self.input.pkg_name_to_pkg_info,
             use_normalized_ohm_url: self.plan.use_normalized_ohm_url,
-            case_sensitive_check: false,
+            case_sensitive_check: self.input.case_sensitive_check,
             source_set_overlays: self.input.source_set_overlays,
         };
         let ohos_resolver = Arc::new(OhosResolver::new(resolver_config));
@@ -524,7 +542,7 @@ impl<'a> PluginFactory<'a> {
             ohos_resolver,
             project_root.clone(),
             self.plan.use_normalized_ohm_url,
-            false,
+            self.input.case_sensitive_check,
         ));
 
         // ── 4. ImportCheckPlugin (hvigor: sensitiveCheck) ────────────────────
@@ -579,28 +597,22 @@ impl<'a> PluginFactory<'a> {
 
         // ── 8. HarDedupPlugin (hvigor: HarDedup, HSP only) ───────────────────
         if matches!(self.plan.output_target, OutputTarget::Hsp) {
-            let collect_file = self
-                .input
-                .har_dedup_collect_file
-                .unwrap_or_else(|| CollectFilePath::default_for_module(&module_root));
-            if let Some(parent) = collect_file.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            let har_plugin: SharedPluginable = if collect_file.exists() {
-                match HarDedupPlugin::real_build(collect_file.clone()) {
-                    Ok(plugin) => Arc::new(plugin),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "plugin-factory: HAR dedup real_build failed, falling back to collect_pass"
-                        );
-                        Arc::new(HarDedupPlugin::collect_pass(collect_file))
-                    }
+            let har_plugin: Option<SharedPluginable> = match self.input.har_dedup {
+                HarDedupFactoryMode::Disabled => None,
+                HarDedupFactoryMode::Collect {
+                    collect_file,
+                    source_har_roots,
+                } => Some(Arc::new(HarDedupPlugin::collect_pass(
+                    collect_file,
+                    source_har_roots,
+                ))),
+                HarDedupFactoryMode::RealBuild { collect_file } => {
+                    Some(Arc::new(HarDedupPlugin::real_build(collect_file)?))
                 }
-            } else {
-                Arc::new(HarDedupPlugin::collect_pass(collect_file))
             };
-            plugins.push(har_plugin);
+            if let Some(har_plugin) = har_plugin {
+                plugins.push(har_plugin);
+            }
         }
 
         // ── 9. MinifyPlugin ───────────────────────────────────────────────────
@@ -691,6 +703,7 @@ mod tests {
                 },
                 runtime_packages: crate::plan::BundleRuntimePackageInfo::default(),
                 byte_code_har_packages: Vec::new(),
+                preload_system_so_entries: Vec::new(),
             },
             output: BundleOutputOptions::default(),
             source_map: SourceMapPolicy::None,

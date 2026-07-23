@@ -63,6 +63,7 @@ pub(super) fn make_bundle_plan(
       source_map_packages,
       runtime_packages,
       byte_code_har_packages: loader_json.byte_code_har_info.keys().cloned().collect(),
+      preload_system_so_entries: Vec::new(),
     },
     output: BundleOutputOptions {
       output_dir: output_dir.into(),
@@ -339,8 +340,16 @@ pub(super) struct BundleStageInput {
 pub(super) struct BundleStageOutput {
   /// Rolldown scan and CompileArkTS handoff output.
   pub(super) bundle_output: BundleOutput,
-  /// Whether this result was served from the task-inputs cache (no re-bundle).
-  pub(super) from_cache: bool,
+  pub(super) state: BundleStageState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BundleStageState {
+  Executed,
+  CacheHit,
+  /// Hvigor's original source HAR task graph runs ArkTS linting but does not
+  /// run HarCompileArkTS/CompileArkTS or es2abc.
+  SkippedOriginalHar,
 }
 
 pub(super) struct BundlePackageOutput {
@@ -362,12 +371,23 @@ impl BundleStageOutput {
         entry_module_ids: vec![],
         module_imports: rustc_hash::FxHashMap::default(),
         external_module_requests: vec![],
+        preload_system_so_tasks: vec![],
         npm_entries: vec![],
         modules_abc_path,
         source_maps_path: None,
       },
-      from_cache: true,
+      state: BundleStageState::CacheHit,
     }
+  }
+
+  pub(super) fn skipped_original_har(modules_abc_path: PathBuf, output_dir: PathBuf) -> Self {
+    let mut output = Self::from_cache(modules_abc_path, output_dir);
+    output.state = BundleStageState::SkippedOriginalHar;
+    output
+  }
+
+  pub(super) fn bypasses_compilation(&self) -> bool {
+    self.state != BundleStageState::Executed
   }
 
   pub(super) fn release_chunk_graph(&mut self) {
@@ -398,7 +418,7 @@ impl BundleStage {
       .map_err(|e| anyhow::anyhow!("bundle stage failed: {}", e))?;
     Ok(BundleStageOutput {
       bundle_output,
-      from_cache: false,
+      state: BundleStageState::Executed,
     })
   }
 }

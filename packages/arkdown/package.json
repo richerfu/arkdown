@@ -2,7 +2,7 @@
   "name": "@ohos-rs/arkdown",
   "version": "0.0.1-beta.0",
   "description": "Node.js bindings for arkdown — OHOS build tool with Rolldown-aligned plugin support",
-  "main": "index.js",
+  "main": "runtime-entry.js",
   "types": "index.d.ts",
   "bin": {
     "arkdown": "bin/arkdown.js"
@@ -25,6 +25,7 @@
     "bin/arkdown.js",
     "index.d.ts",
     "index.js",
+    "runtime-entry.js",
     "runtime.js",
     "README.md",
     "*.node"
@@ -59,6 +60,7 @@
     "version": "napi version"
   },
   "dependencies": {
+    "acorn": "^8.15.0",
     "typescript": "^5.8.3"
   },
   "devDependencies": {

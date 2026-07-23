@@ -1,12 +1,12 @@
-//! `ProcessShareConfig` — merge `crossAppSharedConfig` from HSP dependencies.
+//! `ProcessShareConfig` — merge `crossAppSharedConfig` from HAR dependencies.
 //!
 //! Mirrors the hvigor `ProcessShareConfig` task
 //! (`hvigor-ohos-plugin/src/tasks/process-share-config.js`).
 //!
 //! ## What it does
 //!
-//! 1. Walks host/project declared dependencies for installed HSP packages.
-//! 2. Reads each HSP's `module.json5` (or the pre-processed `module.json`) and
+//! 1. Consumes the HAR dependency roots selected by the build session.
+//! 2. Reads each HAR's `module.json5` (or the pre-processed `module.json`) and
 //!    extracts its `module.crossAppSharedConfig` array.
 //! 3. Fills in `packageName` from the package directory name when the entry
 //!    does not already carry one.
@@ -21,10 +21,7 @@
 //! <module_root>/build/default/intermediates/share_config/default/temp-share-config.json
 //! ```
 
-use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::Deserialize;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownError, CrossAppSharedConfigEntry};
@@ -38,37 +35,38 @@ use crate::resource_ref::ProfileResourceRef;
 
 /// Input for the share-config merge pass.
 pub struct ShareConfigInput<'a> {
-    /// Root directory of the project containing the consuming module.
-    pub project_root: &'a Path,
     /// Root directory of the consuming module (e.g. `/project/entry`).
     pub module_root: &'a Path,
+    /// HAR dependencies returned by hvigor's `getHarDependencies()` equivalent.
+    /// HSP dependencies are intentionally absent: `ProcessShareConfig` does
+    /// not collect share config from `getHspDependencies()`.
+    pub dependency_packages: Vec<ShareConfigDependencyInput>,
     /// `crossAppSharedConfig` entries declared by the module itself (may be empty
-    /// for HAP/HAR consumers; non-empty for HSP modules that export shared components).
+    /// for HAP/HAR consumers; non-empty for modules that export shared components).
     pub self_entries: Vec<CrossAppSharedConfigEntry>,
     /// Optional `$profile:<name>` reference declared by the module itself.
     /// Hvigor reads this profile and merges its `crossAppSharedConfig` array
-    /// before collecting dependency HSP entries.
+    /// before collecting dependency HAR entries.
     pub self_profile_name: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ShareDependencyPackageJson {
-    #[serde(default)]
-    dependencies: IndexMap<String, String>,
+#[derive(Debug, Clone)]
+pub struct ShareConfigDependencyInput {
+    pub package_name: String,
+    pub package_root: PathBuf,
 }
 
 impl ShareConfigInput<'_> {
-    /// Walk declared dependencies, collect `crossAppSharedConfig` entries from
-    /// every HSP dependency, merge them with `self_entries`, validate for
+    /// Collect `crossAppSharedConfig` entries from the session-selected HAR
+    /// dependencies, merge them with `self_entries`, validate for
     /// duplicate URIs, and return the merged list.
     ///
     /// Errors are returned for I/O failures only; missing or malformed `module.json5`
-    /// files in individual dependencies are silently skipped (matching hvigor behaviour
-    /// where non-HSP packages simply have no `crossAppSharedConfig`).
+    /// files in individual dependencies are silently skipped (matching hvigor behaviour).
     pub fn merge(self) -> Result<ShareConfigOutput, ArkdownError> {
         let mut all_entries: Vec<CrossAppSharedConfigEntry> = Vec::new();
 
-        // Include the module's own entries first (for HSP modules that export shared components).
+        // Include the module's own entries first.
         all_entries.extend(self.self_entries);
         if let Some(profile_name) = self.self_profile_name.as_deref() {
             all_entries.extend(Self::read_profile_entries_from_module_root(
@@ -81,17 +79,16 @@ impl ShareConfigInput<'_> {
             if entry.package_name.is_empty() {
                 entry.package_name = self_package_name.clone();
             }
+            if entry.module_node_dir.is_none() {
+                entry.module_node_dir = Some(self.module_root.to_path_buf());
+            }
         }
 
-        // Walk declared dependencies to find installed HSP packages.
-        for pkg_dir in Self::collect_declared_dependency_roots(self.project_root, self.module_root)
-        {
-            let pkg_name = pkg_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            let entries = Self::read_cross_app_shared_config_from_pkg(&pkg_dir, &pkg_name);
+        for dependency in self.dependency_packages {
+            let entries = Self::read_cross_app_shared_config_from_pkg(
+                &dependency.package_root,
+                &dependency.package_name,
+            );
             all_entries.extend(entries);
         }
 
@@ -113,11 +110,46 @@ pub struct ShareConfigOutput {
     pub entries: Vec<CrossAppSharedConfigEntry>,
 }
 
-/// Processes `crossAppSharedConfig` entries from HSP dependencies.
+impl ShareConfigOutput {
+    /// Produce the runtime resource written by hvigor's
+    /// `CompileResource.processShareConfig()`. Build-only ownership fields are
+    /// deliberately excluded from the packaged profile.
+    pub fn compiled_resource_profile(&self) -> serde_json::Value {
+        serde_json::json!({
+            "crossAppSharedConfig": self
+                .entries
+                .iter()
+                .map(CompiledCrossAppSharedConfigEntry::from_entry)
+                .collect::<Vec<_>>()
+        })
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompiledCrossAppSharedConfigEntry<'a> {
+    uri: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    src_entry: Option<&'a str>,
+    #[serde(flatten)]
+    additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+}
+
+impl<'a> CompiledCrossAppSharedConfigEntry<'a> {
+    fn from_entry(entry: &'a CrossAppSharedConfigEntry) -> Self {
+        Self {
+            uri: &entry.uri,
+            src_entry: entry.src_entry.as_deref(),
+            additional_fields: &entry.additional_fields,
+        }
+    }
+}
+
+/// Processes `crossAppSharedConfig` entries from HAR dependencies.
 ///
 /// Mirrors the hvigor `ProcessShareConfig` task
 /// (`hvigor-ohos-plugin/src/tasks/process-share-config.js`):
-/// walks declared dependencies, collects entries from HSP packages,
+/// consumes typed dependency roots, collects entries from HAR packages,
 /// validates for duplicate URIs, and writes the result to intermediates.
 pub struct ShareConfigProcessor;
 
@@ -127,8 +159,8 @@ impl ShareConfigProcessor {
         ShareConfigProcessor
     }
 
-    /// Walk declared dependencies, collect `crossAppSharedConfig` entries from
-    /// every HSP dependency, merge them with `self_entries`, validate for
+    /// Collect `crossAppSharedConfig` entries from every supplied HAR
+    /// dependency, merge them with `self_entries`, validate for
     /// duplicate URIs, and return the merged list.
     ///
     /// Returns `Err` when two packages declare the same URI.
@@ -157,6 +189,52 @@ impl ShareConfigProcessor {
         std::fs::write(output_path, json)?;
         Ok(())
     }
+
+    /// Apply hvigor's `CompileResource.writeShareConfig()` handoff: write the
+    /// runtime-only profile and point the compiled `module.json` at it.
+    pub fn write_compiled_share_config(
+        &self,
+        output: &ShareConfigOutput,
+        profile_name: &str,
+        profile_path: &Path,
+        module_json_path: &Path,
+    ) -> Result<(), ArkdownError> {
+        if let Some(parent) = profile_path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+        let profile = output.compiled_resource_profile();
+        let profile_json =
+            serde_json::to_vec(&profile).map_err(|error| ArkdownError::ParseError {
+                file: profile_path.display().to_string(),
+                message: error.to_string(),
+            })?;
+        fs_err::write(profile_path, profile_json)?;
+
+        let content = fs_err::read_to_string(module_json_path)?;
+        let mut module_json: serde_json::Value =
+            serde_json::from_str(&content).map_err(|error| ArkdownError::ParseError {
+                file: module_json_path.display().to_string(),
+                message: error.to_string(),
+            })?;
+        let module = module_json
+            .get_mut("module")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| ArkdownError::ParseError {
+                file: module_json_path.display().to_string(),
+                message: "missing object field 'module'".to_string(),
+            })?;
+        module.insert(
+            "crossAppSharedConfig".to_string(),
+            serde_json::Value::String(format!("$profile:{profile_name}")),
+        );
+        let module_json =
+            serde_json::to_vec(&module_json).map_err(|error| ArkdownError::ParseError {
+                file: module_json_path.display().to_string(),
+                message: error.to_string(),
+            })?;
+        fs_err::write(module_json_path, module_json)?;
+        Ok(())
+    }
 }
 
 impl Default for ShareConfigProcessor {
@@ -170,61 +248,6 @@ impl Default for ShareConfigProcessor {
 // ---------------------------------------------------------------------------
 
 impl ShareConfigInput<'_> {
-    fn collect_declared_dependency_roots(project_root: &Path, module_root: &Path) -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        let mut queue = VecDeque::new();
-        let mut seen = FxHashSet::default();
-        queue.push_back(module_root.to_path_buf());
-        if project_root != module_root {
-            queue.push_back(project_root.to_path_buf());
-        }
-
-        while let Some(pkg_root) = queue.pop_front() {
-            let Some(pkg) = Self::read_dependency_package_json(&pkg_root) else {
-                continue;
-            };
-            for dep_name in pkg.dependencies.keys() {
-                let Some(dep_root) =
-                    Self::resolve_dependency_root(&pkg_root, project_root, dep_name)
-                else {
-                    continue;
-                };
-                if !seen.insert(dep_root.clone()) {
-                    continue;
-                }
-                queue.push_back(dep_root.clone());
-                roots.push(dep_root);
-            }
-        }
-
-        roots
-    }
-
-    fn read_dependency_package_json(pkg_root: &Path) -> Option<ShareDependencyPackageJson> {
-        let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
-        json5::from_str::<ShareDependencyPackageJson>(&content).ok()
-    }
-
-    fn resolve_dependency_root(
-        issuer_root: &Path,
-        project_root: &Path,
-        dep_name: &str,
-    ) -> Option<PathBuf> {
-        let mut current = Some(issuer_root);
-        while let Some(root) = current {
-            let candidate = root.join("oh_modules").join(dep_name);
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-            if root == project_root {
-                break;
-            }
-            current = root.parent();
-        }
-        let candidate = project_root.join("oh_modules").join(dep_name);
-        candidate.is_dir().then_some(candidate)
-    }
-
     /// Read `crossAppSharedConfig` from a single installed package directory.
     ///
     /// Tries `src/main/module.json5` first (source layout), then `module.json`
@@ -253,15 +276,6 @@ impl ShareConfigInput<'_> {
                 continue;
             };
 
-            // Only process HSP modules (type == "shared").
-            let module_type = raw
-                .pointer("/module/type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if module_type != "shared" {
-                return vec![];
-            }
-
             let Some(cross_app_shared_config) = raw.pointer("/module/crossAppSharedConfig") else {
                 return vec![];
             };
@@ -279,6 +293,7 @@ impl ShareConfigInput<'_> {
                 if entry.package_name.is_empty() {
                     entry.package_name = pkg_name.to_string();
                 }
+                entry.module_node_dir = Some(pkg_dir.to_path_buf());
             }
 
             return entries;
@@ -406,13 +421,20 @@ mod tests {
         fs::write(src_main.join("module.json5"), content).unwrap();
     }
 
+    fn dependency(package_name: &str, package_root: &Path) -> ShareConfigDependencyInput {
+        ShareConfigDependencyInput {
+            package_name: package_name.to_string(),
+            package_root: package_root.to_path_buf(),
+        }
+    }
+
     #[test]
     fn test_merge_share_config_no_oh_modules() {
         let tmp = tempfile::tempdir().unwrap();
         let output = ShareConfigProcessor::new()
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![],
                 self_entries: vec![],
                 self_profile_name: None,
             })
@@ -421,44 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_share_config_collects_hsp_entries() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(
-            tmp.path().join("oh-package.json5"),
-            r#"{ dependencies: { "my-hsp": "1.0.0" } }"#,
-        )
-        .unwrap();
-        let oh_modules = tmp.path().join("oh_modules");
-        let hsp_pkg = oh_modules.join("my-hsp");
-        write_module_json5(
-            &hsp_pkg,
-            r#"{
-                "module": {
-                    "name": "my-hsp",
-                    "type": "shared",
-                    "crossAppSharedConfig": [
-                        { "uri": "myapp://shared/Foo", "srcEntry": "./ets/Foo.ets" }
-                    ]
-                }
-            }"#,
-        );
-
-        let output = ShareConfigProcessor::new()
-            .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
-                module_root: tmp.path(),
-                self_entries: vec![],
-                self_profile_name: None,
-            })
-            .unwrap();
-
-        assert_eq!(output.entries.len(), 1);
-        assert_eq!(output.entries[0].uri, "myapp://shared/Foo");
-        assert_eq!(output.entries[0].package_name, "my-hsp");
-    }
-
-    #[test]
-    fn test_merge_share_config_skips_non_hsp() {
+    fn test_merge_share_config_collects_har_entries() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("oh-package.json5"),
@@ -474,6 +459,43 @@ mod tests {
                     "name": "my-har",
                     "type": "har",
                     "crossAppSharedConfig": [
+                        { "uri": "myapp://shared/Foo", "srcEntry": "./ets/Foo.ets" }
+                    ]
+                }
+            }"#,
+        );
+
+        let output = ShareConfigProcessor::new()
+            .merge_share_config(ShareConfigInput {
+                module_root: tmp.path(),
+                dependency_packages: vec![dependency("my-har", &har_pkg)],
+                self_entries: vec![],
+                self_profile_name: None,
+            })
+            .unwrap();
+
+        assert_eq!(output.entries.len(), 1);
+        assert_eq!(output.entries[0].uri, "myapp://shared/Foo");
+        assert_eq!(output.entries[0].package_name, "my-har");
+    }
+
+    #[test]
+    fn test_merge_share_config_does_not_rediscover_hsp_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "my-hsp": "1.0.0" } }"#,
+        )
+        .unwrap();
+        let oh_modules = tmp.path().join("oh_modules");
+        let hsp_pkg = oh_modules.join("my-hsp");
+        write_module_json5(
+            &hsp_pkg,
+            r#"{
+                "module": {
+                    "name": "my-hsp",
+                    "type": "shared",
+                    "crossAppSharedConfig": [
                         { "uri": "myapp://shared/Bar", "srcEntry": "./ets/Bar.ets" }
                     ]
                 }
@@ -482,8 +504,8 @@ mod tests {
 
         let output = ShareConfigProcessor::new()
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![],
                 self_entries: vec![],
                 self_profile_name: None,
             })
@@ -491,7 +513,7 @@ mod tests {
 
         assert!(
             output.entries.is_empty(),
-            "HAR packages must not contribute crossAppSharedConfig"
+            "HSP packages are not part of hvigor ProcessShareConfig's HAR dependency input"
         );
     }
 
@@ -499,20 +521,28 @@ mod tests {
     fn test_merge_share_config_includes_self_entries() {
         let tmp = tempfile::tempdir().unwrap();
         let self_entry = CrossAppSharedConfigEntry {
-            package_name: "self-hsp".to_string(),
             uri: "myapp://shared/Self".to_string(),
             src_entry: Some("./ets/Self.ets".to_string()),
+            additional_fields: serde_json::Map::new(),
+            module_node_dir: None,
+            package_name: "self-har".to_string(),
         };
         let output = ShareConfigProcessor::new()
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![],
                 self_entries: vec![self_entry.clone()],
                 self_profile_name: None,
             })
             .unwrap();
         assert_eq!(output.entries.len(), 1);
-        assert_eq!(output.entries[0], self_entry);
+        assert_eq!(output.entries[0].uri, self_entry.uri);
+        assert_eq!(output.entries[0].src_entry, self_entry.src_entry);
+        assert_eq!(output.entries[0].package_name, self_entry.package_name);
+        assert_eq!(
+            output.entries[0].module_node_dir.as_deref(),
+            Some(tmp.path())
+        );
     }
 
     #[test]
@@ -520,7 +550,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("oh-package.json5"),
-            r#"{ name: "self-hsp" }"#,
+            r#"{ name: "self-har" }"#,
         )
         .unwrap();
 
@@ -538,8 +568,8 @@ mod tests {
 
         let output = ShareConfigProcessor::new()
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![],
                 self_entries: vec![],
                 self_profile_name: Some("cross_app_shared_config".to_string()),
             })
@@ -551,7 +581,7 @@ mod tests {
             output.entries[0].src_entry.as_deref(),
             Some("./ets/Profile.ets")
         );
-        assert_eq!(output.entries[0].package_name, "self-hsp");
+        assert_eq!(output.entries[0].package_name, "self-har");
     }
 
     #[test]
@@ -559,22 +589,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("oh-package.json5"),
-            r#"{ dependencies: { "profile-hsp": "1.0.0" } }"#,
+            r#"{ dependencies: { "profile-har": "1.0.0" } }"#,
         )
         .unwrap();
         let oh_modules = tmp.path().join("oh_modules");
-        let hsp_pkg = oh_modules.join("profile-hsp");
+        let har_pkg = oh_modules.join("profile-har");
         write_module_json5(
-            &hsp_pkg,
+            &har_pkg,
             r#"{
                 "module": {
-                    "name": "profile-hsp",
-                    "type": "shared",
+                    "name": "profile-har",
+                    "type": "har",
                     "crossAppSharedConfig": "$profile:cross_app_shared_config"
                 }
             }"#,
         );
-        let profile_dir = hsp_pkg.join("src/main/resources/base/profile");
+        let profile_dir = har_pkg.join("src/main/resources/base/profile");
         fs::create_dir_all(&profile_dir).unwrap();
         fs::write(
             profile_dir.join("cross_app_shared_config.json"),
@@ -588,8 +618,8 @@ mod tests {
 
         let output = ShareConfigProcessor::new()
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![dependency("profile-har", &har_pkg)],
                 self_entries: vec![],
                 self_profile_name: None,
             })
@@ -597,7 +627,7 @@ mod tests {
 
         assert_eq!(output.entries.len(), 1);
         assert_eq!(output.entries[0].uri, "myapp://shared/DepProfile");
-        assert_eq!(output.entries[0].package_name, "profile-hsp");
+        assert_eq!(output.entries[0].package_name, "profile-har");
     }
 
     #[test]
@@ -609,9 +639,11 @@ mod tests {
 
         let output = ShareConfigOutput {
             entries: vec![CrossAppSharedConfigEntry {
-                package_name: "pkg-a".to_string(),
                 uri: "myapp://shared/Comp".to_string(),
                 src_entry: None,
+                additional_fields: serde_json::Map::new(),
+                module_node_dir: Some(PathBuf::from("/workspace/oh_modules/pkg-a")),
+                package_name: "pkg-a".to_string(),
             }],
         };
         ShareConfigProcessor::new()
@@ -625,6 +657,68 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["uri"], "myapp://shared/Comp");
         assert_eq!(arr[0]["packageName"], "pkg-a");
+        assert_eq!(
+            arr[0]["moduleNodeDir"],
+            serde_json::Value::String("/workspace/oh_modules/pkg-a".to_string())
+        );
+    }
+
+    #[test]
+    fn test_write_compiled_share_config_strips_ownership_and_updates_module_profile_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile_path = tmp
+            .path()
+            .join("resources/base/profile/default_share_config.json");
+        let module_json_path = tmp.path().join("module.json");
+        fs::write(
+            &module_json_path,
+            r#"{"module":{"name":"entry","type":"entry"}}"#,
+        )
+        .unwrap();
+        let output = ShareConfigOutput {
+            entries: vec![CrossAppSharedConfigEntry {
+                uri: "myapp://shared/Comp".to_string(),
+                src_entry: Some("./ets/Comp.ets".to_string()),
+                additional_fields: serde_json::Map::from_iter([(
+                    "allowList".to_string(),
+                    serde_json::json!(["com.example.consumer"]),
+                )]),
+                module_node_dir: Some(PathBuf::from("/workspace/oh_modules/pkg-a")),
+                package_name: "pkg-a".to_string(),
+            }],
+        };
+
+        ShareConfigProcessor::new()
+            .write_compiled_share_config(
+                &output,
+                "default_share_config",
+                &profile_path,
+                &module_json_path,
+            )
+            .unwrap();
+
+        let profile: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(profile_path).unwrap()).unwrap();
+        assert_eq!(
+            profile,
+            serde_json::json!({
+                "crossAppSharedConfig": [{
+                    "uri": "myapp://shared/Comp",
+                    "srcEntry": "./ets/Comp.ets",
+                    "allowList": ["com.example.consumer"]
+                }]
+            })
+        );
+        let entry = profile["crossAppSharedConfig"][0].as_object().unwrap();
+        assert!(!entry.contains_key("moduleNodeDir"));
+        assert!(!entry.contains_key("packageName"));
+
+        let module_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(module_json_path).unwrap()).unwrap();
+        assert_eq!(
+            module_json["module"]["crossAppSharedConfig"],
+            "$profile:default_share_config"
+        );
     }
 
     #[test]
@@ -645,17 +739,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("oh-package.json5"),
-            r#"{ dependencies: { "auto-named-hsp": "1.0.0" } }"#,
+            r#"{ dependencies: { "auto-named-har": "1.0.0" } }"#,
         )
         .unwrap();
         let oh_modules = tmp.path().join("oh_modules");
-        let hsp_pkg = oh_modules.join("auto-named-hsp");
+        let har_pkg = oh_modules.join("auto-named-har");
         write_module_json5(
-            &hsp_pkg,
+            &har_pkg,
             r#"{
                 "module": {
-                    "name": "auto-named-hsp",
-                    "type": "shared",
+                    "name": "auto-named-har",
+                    "type": "har",
                     "crossAppSharedConfig": [
                         { "uri": "myapp://shared/X" }
                     ]
@@ -665,8 +759,8 @@ mod tests {
 
         let output = ShareConfigProcessor::new()
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![dependency("auto-named-har", &har_pkg)],
                 self_entries: vec![],
                 self_profile_name: None,
             })
@@ -674,8 +768,8 @@ mod tests {
 
         assert_eq!(output.entries.len(), 1);
         assert_eq!(
-            output.entries[0].package_name, "auto-named-hsp",
-            "packageName must be filled from the oh_modules directory name"
+            output.entries[0].package_name, "auto-named-har",
+            "packageName must come from the typed dependency input"
         );
     }
 
@@ -705,13 +799,13 @@ mod tests {
             }"#,
         );
 
-        let scoped_hsp = source_har.join("oh_modules/@scope/shared-hsp");
+        let scoped_har = source_har.join("oh_modules/@scope/shared-har");
         write_module_json5(
-            &scoped_hsp,
+            &scoped_har,
             r#"{
                 "module": {
-                    "name": "shared-hsp",
-                    "type": "shared",
+                    "name": "shared-har",
+                    "type": "har",
                     "crossAppSharedConfig": [
                         { "uri": "myapp://shared/Scoped", "srcEntry": "./ets/Scoped.ets" }
                     ]
@@ -735,8 +829,8 @@ mod tests {
 
         let output = ShareConfigProcessor::new()
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![dependency("@scope/shared-har", &scoped_har)],
                 self_entries: vec![],
                 self_profile_name: None,
             })
@@ -744,7 +838,7 @@ mod tests {
 
         assert_eq!(output.entries.len(), 1);
         assert_eq!(output.entries[0].uri, "myapp://shared/Scoped");
-        assert_eq!(output.entries[0].package_name, "shared-hsp");
+        assert_eq!(output.entries[0].package_name, "@scope/shared-har");
     }
 
     #[test]
@@ -759,8 +853,8 @@ mod tests {
         let processor = ShareConfigProcessor::new();
         let output = processor
             .merge_share_config(ShareConfigInput {
-                project_root: tmp.path(),
                 module_root: tmp.path(),
+                dependency_packages: vec![],
                 self_entries: vec![],
                 self_profile_name: None,
             })

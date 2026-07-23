@@ -106,6 +106,7 @@ pub fn run(args: DumpConfigArgs) -> anyhow::Result<()> {
                 .collect::<Vec<_>>(),
             "distribution_filter": t.distribution_filter,
             "source_abilities_count": t.source_abilities.len(),
+            "source_roots": t.source_roots,
         })),
         "applicable_target_count": applicable_count,
         "multi_target_warning": applicable_count > 1,

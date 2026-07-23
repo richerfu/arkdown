@@ -106,11 +106,17 @@ impl ProcessProfileProcessor {
                 .dependencies
                 .iter()
                 .filter_map(|dep| {
-                    let bundle = dep.get("bundleName").and_then(|v| v.as_str())?;
                     let module_n = dep.get("moduleName").and_then(|v| v.as_str())?;
                     Some(HspDependency {
-                        bundle_name: bundle.to_string(),
                         module_name: module_n.to_string(),
+                        version_code: dep
+                            .get("versionCode")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or_default(),
+                        bundle_name: dep
+                            .get("bundleName")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
                     })
                 })
                 .collect(),
@@ -334,7 +340,10 @@ mod tests {
         );
 
         assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].bundle_name, "com.example.shared");
+        assert_eq!(
+            manifest.dependencies[0].bundle_name.as_deref(),
+            Some("com.example.shared")
+        );
         assert_eq!(manifest.dependencies[0].module_name, "shared_hsp");
     }
 

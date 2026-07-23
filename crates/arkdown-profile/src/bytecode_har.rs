@@ -21,7 +21,9 @@ struct OhPkgMinimal {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
-    compatible_sdk_version: Option<CompatibleSdkVersionField>,
+    compatible_sdk_version: Option<CompatibleSdkVersionValue>,
+    #[serde(default)]
+    compatible_sdk_version_stage: Option<String>,
     #[serde(default)]
     main: Option<String>,
     #[serde(default, alias = "typings")]
@@ -34,10 +36,6 @@ struct OhPkgMinimal {
     dynamic_dependencies: IndexMap<String, String>,
     #[serde(default)]
     metadata: Option<OhPkgMetadata>,
-    /// Root-level `byteCodeHar: true` — older hvigor format used before the
-    /// field was moved inside `metadata`.  Both forms are supported.
-    #[serde(default)]
-    byte_code_har: bool,
 }
 
 impl OhPkgMinimal {
@@ -51,18 +49,19 @@ impl OhPkgMinimal {
     }
 
     fn resolve_abc_path(&self, pkg_dir: &Path) -> Option<PathBuf> {
-        // Support both root-level `byteCodeHar: true` (older hvigor format) and
-        // the newer `metadata.byteCodeHar: true` form.
-        let is_bytecode_har = self.byte_code_har
-            || self
-                .metadata
-                .as_ref()
-                .is_some_and(|metadata| metadata.byte_code_har);
-        if is_bytecode_har {
-            let abc_path = ProfileModuleLayout::new(pkg_dir).ets_modules_abc();
-            if abc_path.exists() {
-                return Some(abc_path);
-            }
+        // `DefaultNpmDependency.isByteCodeHarDependency()` reads the current
+        // SDK marker exclusively from `metadata.byteCodeHar`.
+        if !self
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.byte_code_har)
+        {
+            return None;
+        }
+
+        let abc_path = ProfileModuleLayout::new(pkg_dir).ets_modules_abc();
+        if abc_path.exists() {
+            return Some(abc_path);
         }
 
         if let Some(path) = self
@@ -184,20 +183,11 @@ impl<'a> PackageDependencySpec<'a> {
 }
 
 /// `compatibleSdkVersion` can be a plain integer (`12`) or a string (`"5.0.0(12)"`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-enum CompatibleSdkVersionField {
+pub enum CompatibleSdkVersionValue {
     Int(u32),
     Str(String),
-}
-
-impl CompatibleSdkVersionField {
-    fn as_string(&self) -> String {
-        match self {
-            CompatibleSdkVersionField::Int(n) => n.to_string(),
-            CompatibleSdkVersionField::Str(s) => s.clone(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,8 +203,11 @@ pub struct ByteCodeHarScanEntry {
     pub package_root: PathBuf,
     /// Absolute path to the pre-compiled `.abc` file.
     pub abc_path: PathBuf,
-    /// Compatible SDK version string, e.g. `"5.0.0(12)"` or `"12"`.
-    pub compatible_sdk_version: String,
+    /// Compatible SDK version in its source scalar form. Hvigor preserves
+    /// numeric API levels as JSON numbers and named versions as strings.
+    pub compatible_sdk_version: Option<CompatibleSdkVersionValue>,
+    /// Optional compatible SDK stage from `oh-package.json5`.
+    pub compatible_sdk_version_stage: Option<String>,
     /// Optional path to the `sourceMaps.map` file alongside the `.abc`.
     pub source_maps_path: Option<PathBuf>,
     /// Optional path to the ByteCode HAR insight intent metadata.
@@ -253,9 +246,9 @@ impl ByteCodeHarScanEntry {
     /// Convert into the [`ByteCodeHarEntry`] written to `loader.json`.
     pub fn into_loader_entry(self) -> (String, ByteCodeHarEntry) {
         let entry = ByteCodeHarEntry {
-            package_name: self.package_name.clone(),
             abc_path: ByteCodeHarPathText::new(&self.abc_path).string(),
             compatible_sdk_version: self.compatible_sdk_version,
+            compatible_sdk_version_stage: self.compatible_sdk_version_stage,
             source_maps_path: self
                 .source_maps_path
                 .map(|p| ByteCodeHarPathText::new(&p).string()),
@@ -373,11 +366,8 @@ impl ByteCodeHarScanEntry {
             return;
         };
 
-        let compatible_sdk_version = pkg
-            .compatible_sdk_version
-            .as_ref()
-            .map(CompatibleSdkVersionField::as_string)
-            .unwrap_or_default();
+        let compatible_sdk_version = pkg.compatible_sdk_version.clone();
+        let compatible_sdk_version_stage = pkg.compatible_sdk_version_stage.clone();
         let source_maps_path = pkg.resolve_source_maps_path(&pkg_dir);
         let insight_intent = pkg
             .metadata
@@ -402,6 +392,7 @@ impl ByteCodeHarScanEntry {
             package_root: pkg_dir,
             abc_path,
             compatible_sdk_version,
+            compatible_sdk_version_stage,
             source_maps_path,
             insight_intent,
             declaration_entry,
@@ -600,16 +591,12 @@ impl ByteCodeHarScanEntry {
         deps: &[ByteCodeHarScanEntry],
         module_root: &Path,
         project_root: &Path,
-    ) -> FxHashMap<String, serde_json::Value> {
-        let mut info = FxHashMap::default();
+    ) -> IndexMap<String, serde_json::Value> {
+        let mut info = IndexMap::new();
 
         for dep in deps {
             let mut version_info = serde_json::Map::new();
             let Some(pkg) = OhPkgMinimal::load(&dep.package_root) else {
-                info.insert(
-                    dep.package_name.clone(),
-                    serde_json::Value::Object(version_info),
-                );
                 continue;
             };
 
@@ -646,6 +633,10 @@ impl ByteCodeHarScanEntry {
                 }
             }
 
+            // `GenerateLoaderJson.processUpdateVersionInfo()` creates the
+            // package key before filtering version mismatches. Consequently a
+            // ByteCode HAR with no mismatches is serialized as `{}` rather
+            // than being omitted from `updateVersionInfo`.
             info.insert(
                 dep.package_name.clone(),
                 serde_json::Value::Object(version_info),
@@ -734,14 +725,13 @@ impl LoaderByteCodeHarFields {
             };
 
             let is_local = DynamicImportLibEntry::is_local_dependency(dep_name, module_root);
-            let pkg_dir = if is_local {
-                std::fs::canonicalize(&pkg_dir).unwrap_or(pkg_dir)
-            } else {
-                pkg_dir
-            };
+            // Hvigor's `processOtherDynamicImport` always resolves the
+            // selected `oh_modules` entry through `realpathSync`.  This is
+            // observable for registry packages because OHPM exposes them as
+            // symlinks into its content-addressed store.
+            let pkg_dir = std::fs::canonicalize(&pkg_dir).unwrap_or(pkg_dir);
             let entry_file = DynamicImportLibEntry::find_entry_file(&pkg_dir);
-            let pkg_module_name =
-                DynamicImportLibEntry::read_module_name_from_pkg(&pkg_dir, dep_name);
+            let pkg_module_name = DynamicImportLibEntry::read_module_name(&pkg_dir, dep_name);
 
             let entry = DynamicImportLibEntry {
                 entry_file_path: entry_file,
@@ -919,8 +909,8 @@ impl LoaderByteCodeHarFields {
 
     fn collect_code_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
+        let mut directories = std::collections::VecDeque::from([root.to_path_buf()]);
+        while let Some(dir) = directories.pop_front() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -929,7 +919,7 @@ impl LoaderByteCodeHarFields {
             for entry in entries {
                 let path = entry.path();
                 if path.is_dir() {
-                    stack.push(path);
+                    directories.push_back(path);
                 } else if path.is_file() && Self::is_code_file(&path) {
                     files.push(path);
                 }
@@ -1103,8 +1093,21 @@ impl DynamicImportLibEntry {
         String::new()
     }
 
-    fn read_module_name_from_pkg(pkg_dir: &Path, fallback: &str) -> String {
-        // Try module.json first (compiled HAR), then module.json5 (source HAR).
+    fn read_module_name(pkg_dir: &Path, fallback: &str) -> String {
+        #[derive(Deserialize)]
+        struct PackageJson {
+            name: Option<String>,
+        }
+        let package_name =
+            std::fs::read_to_string(ProfileModuleLayout::new(pkg_dir).oh_package_json5())
+                .ok()
+                .and_then(|content| json5::from_str::<PackageJson>(&content).ok())
+                .and_then(|package| package.name)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| fallback.to_string());
+
+        // `generate-loader-json.ts::processOtherDynamicImport` retains the
+        // package name for HARs and only substitutes `module.name` for HSPs.
         let layout = ProfileModuleLayout::new(pkg_dir);
         for path in [layout.module_json(), layout.module_json5()] {
             if let Ok(content) = std::fs::read_to_string(&path) {
@@ -1115,20 +1118,19 @@ impl DynamicImportLibEntry {
                 #[derive(Deserialize)]
                 struct ModuleSection {
                     name: Option<String>,
+                    #[serde(rename = "type")]
+                    module_type: Option<String>,
                 }
                 if let Ok(parsed) = json5::from_str::<ModuleJson>(&content) {
-                    if let Some(name) = parsed.module.name.filter(|s| !s.is_empty()) {
-                        return name;
+                    if parsed.module.module_type.as_deref() == Some("shared") {
+                        if let Some(name) = parsed.module.name.filter(|s| !s.is_empty()) {
+                            return name;
+                        }
                     }
                 }
             }
         }
-
-        // Fallback: use the module-name candidate from the package specifier.
-        ModuleSpecifierText::new(fallback)
-            .package_module_name_candidate()
-            .unwrap_or(fallback)
-            .to_string()
+        package_name
     }
 }
 
@@ -1183,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_bytecode_har_finds_abc_package() {
+    fn test_scan_bytecode_har_ignores_unmarked_abc_package() {
         let tmp = make_temp_dir();
         let oh_modules = tmp.path().join("oh_modules");
         let pkg_dir = oh_modules.join("@ohos").join("test-har");
@@ -1196,10 +1198,7 @@ mod tests {
 
         let results =
             ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].package_name, "@ohos/test-har");
-        assert_eq!(results[0].compatible_sdk_version, "5.0.0(12)");
-        assert!(results[0].source_maps_path.is_none());
+        assert!(results.is_empty());
     }
 
     #[test]
@@ -1248,13 +1247,20 @@ mod tests {
         write_file(&pkg_dir.join("src").join("sourceMaps.map"), "{}");
         write_file(
             &pkg_dir.join("oh-package.json5"),
-            r#"{ name: "my-har", compatibleSdkVersion: 12 }"#,
+            r#"{
+              name: "my-har",
+              compatibleSdkVersion: 12,
+              metadata: { byteCodeHar: true }
+            }"#,
         );
 
         let results =
             ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].compatible_sdk_version, "12");
+        assert_eq!(
+            results[0].compatible_sdk_version,
+            Some(CompatibleSdkVersionValue::Int(12))
+        );
         assert!(results[0].source_maps_path.is_some());
     }
 
@@ -1273,6 +1279,7 @@ mod tests {
               name: "metadata-har",
               compatibleSdkVersion: "5.0.0(12)",
               metadata: {
+                byteCodeHar: true,
                 abcPath: "dist/metadata.abc",
                 sourceMapsPath: "maps/sourceMaps.map",
                 insightIntentPath: "insight/intent.json"
@@ -1339,7 +1346,10 @@ mod tests {
         ] {
             let pkg = base.join("shared-har");
             write_abc(&pkg.join("index.abc"));
-            write_file(&pkg.join("oh-package.json5"), r#"{ name: "shared-har" }"#);
+            write_file(
+                &pkg.join("oh-package.json5"),
+                r#"{ name: "shared-har", metadata: { byteCodeHar: true } }"#,
+            );
         }
 
         let results =
@@ -1502,6 +1512,39 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_update_version_info_keeps_empty_bytecode_har_entry() {
+        let tmp = make_temp_dir();
+        let bytecode_har = tmp.path().join("oh_modules").join("bytecode-har");
+
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "bytecode-har": "1.0.0" } }"#,
+        );
+        write_abc(&bytecode_har.join("ets").join("modules.abc"));
+        write_file(
+            &bytecode_har.join("oh-package.json5"),
+            r#"{
+              name: "bytecode-har",
+              metadata: { byteCodeHar: true, dependencyPkgVersion: {} }
+            }"#,
+        );
+
+        let deps =
+            ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
+        let info = ByteCodeHarScanEntry::collect_bytecode_har_update_version_info(
+            &deps,
+            tmp.path(),
+            tmp.path(),
+        );
+
+        assert_eq!(
+            info.get("bytecode-har"),
+            Some(&serde_json::json!({})),
+            "Hvigor initializes every ByteCode HAR updateVersionInfo entry before filtering"
+        );
+    }
+
+    #[test]
     fn test_collect_update_version_info_uses_declared_dependency_versions() {
         let tmp = make_temp_dir();
         let oh_modules = tmp.path().join("oh_modules");
@@ -1653,6 +1696,19 @@ mod tests {
                 .any(|path| path.ends_with("src/main/ets/index.d.ts")),
             "declaration files must be filtered like hvigor processCodeFiles"
         );
+        let source_files = files
+            .iter()
+            .filter_map(|path| {
+                path.strip_prefix(&source_har)
+                    .ok()
+                    .map(ArtifactPathSerializer::rel_to_slash)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_files,
+            ["src/main/ets/index.ets", "src/main/ets/pages/Page.ets",],
+            "GenerateLoaderJson.collectCompileFiles uses a breadth-first queue"
+        );
     }
 
     #[test]
@@ -1691,10 +1747,11 @@ mod tests {
             package_name: "bytecode-har".to_string(),
             package_root: bytecode_har.clone(),
             abc_path: bytecode_har.join("ets").join("modules.abc"),
-            compatible_sdk_version: "12".to_string(),
+            compatible_sdk_version: Some(CompatibleSdkVersionValue::Int(12)),
+            compatible_sdk_version_stage: None,
             source_maps_path: None,
             insight_intent: None,
-            declaration_entry: vec![],
+            declaration_entry: vec!["@normalized:N&&&@scope/pkg/index&1.0.0".to_string()],
             extra_importees: vec![],
             main_entry: None,
         }];
@@ -1740,7 +1797,8 @@ mod tests {
             package_name: "@scope/pkg".to_string(),
             package_root: PathBuf::from("/project/oh_modules/@scope/pkg"),
             abc_path: PathBuf::from("/project/oh_modules/@scope/pkg/index.abc"),
-            compatible_sdk_version: "5.0.0(12)".to_string(),
+            compatible_sdk_version: Some(CompatibleSdkVersionValue::Str("5.0.0(12)".to_string())),
+            compatible_sdk_version_stage: Some("beta1".to_string()),
             source_maps_path: Some(PathBuf::from(
                 "/project/oh_modules/@scope/pkg/src/sourceMaps.map",
             )),
@@ -1753,12 +1811,18 @@ mod tests {
         };
         let (key, loader_entry) = entry.into_loader_entry();
         assert_eq!(key, "@scope/pkg");
-        assert_eq!(loader_entry.package_name, "@scope/pkg");
         assert_eq!(
             loader_entry.abc_path,
             "/project/oh_modules/@scope/pkg/index.abc"
         );
-        assert_eq!(loader_entry.compatible_sdk_version, "5.0.0(12)");
+        assert_eq!(
+            loader_entry.compatible_sdk_version,
+            Some(CompatibleSdkVersionValue::Str("5.0.0(12)".to_string()))
+        );
+        assert_eq!(
+            loader_entry.compatible_sdk_version_stage.as_deref(),
+            Some("beta1")
+        );
         assert!(loader_entry.source_maps_path.is_some());
         assert!(loader_entry.insight_intent.is_some());
         let json = serde_json::to_value(&loader_entry).expect("serialize bytecode har entry");
@@ -1766,6 +1830,7 @@ mod tests {
             json.get("insightIntent").and_then(|value| value.as_str()),
             Some("/project/oh_modules/@scope/pkg/insight/intent.json")
         );
+        assert!(json.get("declarationEntry").is_none());
     }
 
     #[test]
@@ -1795,6 +1860,10 @@ mod tests {
             &pkg_dir.join("oh-package.json5"),
             r#"{ name: "@remote/shared" }"#,
         );
+        write_file(
+            &pkg_dir.join("src/main/module.json"),
+            r#"{ module: { name: "internalHarName", type: "har" } }"#,
+        );
 
         let deps = vec!["@remote/shared".to_string()];
         let results = LoaderByteCodeHarFields::collect_dynamic_import_lib_info(
@@ -1813,6 +1882,7 @@ mod tests {
             entry.host_modules_info[0].host_dependency_name,
             "@remote/shared"
         );
+        assert_eq!(entry.module_name, "@remote/shared");
     }
 
     #[test]
@@ -1837,7 +1907,8 @@ mod tests {
             abc_path: PathBuf::from("/oh_modules")
                 .join(pkg)
                 .join("ets/modules.abc"),
-            compatible_sdk_version: "12".to_string(),
+            compatible_sdk_version: Some(CompatibleSdkVersionValue::Int(12)),
+            compatible_sdk_version_stage: None,
             source_maps_path: None,
             insight_intent: None,
             declaration_entry: vec![],
@@ -1885,11 +1956,10 @@ mod tests {
         assert_eq!(entry.ohm_url("com.example"), None);
     }
 
-    // ── root-level byteCodeHar detection ─────────────────────────────────────
+    // ── current hvigor metadata.byteCodeHar detection ────────────────────────
 
     #[test]
-    fn test_scan_bytecode_har_detects_root_level_bytecodehar() {
-        // Fixture mirrors tests/fixtures/minimal-hap-with-bc-har/entry/oh_modules/bc-har-dep
+    fn test_scan_bytecode_har_ignores_root_level_bytecodehar() {
         let tmp = make_temp_dir();
         let oh_modules = tmp.path().join("oh_modules");
         let pkg_dir = oh_modules.join("bc-har-dep");
@@ -1908,18 +1978,11 @@ mod tests {
 
         let results =
             ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
-        assert_eq!(results.len(), 1, "root-level byteCodeHar must be detected");
-        assert_eq!(results[0].package_name, "bc-har-dep");
-        assert!(results[0].abc_path.ends_with("ets/modules.abc"));
-        assert_eq!(
-            results[0].main_entry.as_deref(),
-            Some("index"),
-            "main_entry must be populated from oh-package.json5#main"
-        );
+        assert!(results.is_empty());
     }
 
     #[test]
-    fn test_scan_bytecode_har_root_level_ohm_url() {
+    fn test_scan_bytecode_har_metadata_marker_ohm_url() {
         let tmp = make_temp_dir();
         let oh_modules = tmp.path().join("oh_modules");
         let pkg_dir = oh_modules.join("bc-har-dep");
@@ -1930,7 +1993,7 @@ mod tests {
             r#"{
               "name": "bc-har-dep",
               "main": "index",
-              "byteCodeHar": true
+              "metadata": { "byteCodeHar": true }
             }"#,
         );
 
@@ -1944,11 +2007,11 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_bytecode_har_metadata_and_root_level_equivalent() {
+    fn test_scan_bytecode_har_only_accepts_metadata_marker() {
         let tmp = make_temp_dir();
         let oh_modules = tmp.path().join("oh_modules");
 
-        // Package A: root-level byteCodeHar
+        // Package A: unsupported root-level byteCodeHar.
         let pkg_a = oh_modules.join("pkg-a");
         write_abc(&pkg_a.join("ets").join("modules.abc"));
         write_file(
@@ -1968,12 +2031,12 @@ mod tests {
             ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
         assert_eq!(
             results.len(),
-            2,
-            "both forms of byteCodeHar must be detected"
+            1,
+            "current hvigor only accepts metadata.byteCodeHar"
         );
         let names: std::collections::HashSet<&str> =
             results.iter().map(|e| e.package_name.as_str()).collect();
-        assert!(names.contains("pkg-a"));
+        assert!(!names.contains("pkg-a"));
         assert!(names.contains("pkg-b"));
     }
 

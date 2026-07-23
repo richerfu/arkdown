@@ -25,6 +25,7 @@ pub mod progress;
 pub mod task_cache;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
@@ -32,12 +33,14 @@ use napi::threadsafe_function::{ThreadsafeCallContext, ThreadsafeFunction};
 use napi_derive::napi;
 use tracing_subscriber::EnvFilter;
 
-use rolldown_common::{ModuleInfo, NormalModule};
+use rolldown_common::{
+  side_effects::HookSideEffects, ModuleInfo, ModuleType, NormalModule, ResolvedExternal,
+};
 use rolldown_plugin::{
   HookBuildEndArgs, HookBuildStartArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn,
   HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs,
-  HookTransformOutput, HookTransformReturn, HookUsage, Plugin, PluginContext,
-  SharedLoadPluginContext, SharedTransformPluginContext,
+  HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin,
+  PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 
 use arkdown::plugins::external::PluginOrder;
@@ -49,21 +52,209 @@ use arkdown::ShouldInvalidCacheRequest;
 // ---------------------------------------------------------------------------
 
 // CalleeHandled=false: build_callback returns this variant; call_async(value) not call_async(Ok(value))
+#[napi(transparent)]
+pub struct JsHookSideEffects(Either<bool, String>);
+
+impl TryFrom<JsHookSideEffects> for HookSideEffects {
+  type Error = anyhow::Error;
+
+  fn try_from(value: JsHookSideEffects) -> std::result::Result<Self, Self::Error> {
+    match value.0 {
+      Either::A(true) => Ok(Self::True),
+      Either::A(false) => Ok(Self::False),
+      Either::B(value) if value == "no-treeshake" => Ok(Self::NoTreeshake),
+      Either::B(value) => anyhow::bail!(
+        "invalid moduleSideEffects value '{value}'; expected a boolean or 'no-treeshake'"
+      ),
+    }
+  }
+}
+
+#[napi(transparent)]
+pub struct JsResolvedExternal(Either<bool, String>);
+
+impl TryFrom<JsResolvedExternal> for ResolvedExternal {
+  type Error = anyhow::Error;
+
+  fn try_from(value: JsResolvedExternal) -> std::result::Result<Self, Self::Error> {
+    match value.0 {
+      Either::A(value) => Ok(Self::Bool(value)),
+      Either::B(value) if value == "absolute" => Ok(Self::Absolute),
+      Either::B(value) if value == "relative" => Ok(Self::Relative),
+      Either::B(value) => anyhow::bail!(
+        "invalid external value '{value}'; expected a boolean, 'absolute', or 'relative'"
+      ),
+    }
+  }
+}
+
+#[napi(object)]
+pub struct JsResolveIdOptions {
+  pub attributes: HashMap<String, String>,
+  pub is_entry: bool,
+}
+
+#[napi(object)]
+pub struct JsResolveIdOutput {
+  pub id: String,
+  pub external: Option<JsResolvedExternal>,
+  pub normalize_external_id: Option<bool>,
+  #[napi(ts_type = "boolean | 'no-treeshake'")]
+  pub module_side_effects: Option<JsHookSideEffects>,
+  pub package_json_path: Option<String>,
+}
+
+impl TryFrom<JsResolveIdOutput> for HookResolveIdOutput {
+  type Error = anyhow::Error;
+
+  fn try_from(value: JsResolveIdOutput) -> std::result::Result<Self, Self::Error> {
+    Ok(Self {
+      id: value.id.into(),
+      external: value.external.map(TryInto::try_into).transpose()?,
+      normalize_external_id: value.normalize_external_id,
+      side_effects: value
+        .module_side_effects
+        .map(TryInto::try_into)
+        .transpose()?,
+      package_json_path: value.package_json_path,
+    })
+  }
+}
+
+#[napi(object)]
+pub struct JsJsonSourceMap {
+  pub file: Option<String>,
+  pub source_root: Option<String>,
+  pub sources: Option<Vec<Option<String>>>,
+  pub sources_content: Option<Vec<Option<String>>>,
+  pub names: Option<Vec<String>>,
+  pub mappings: Option<String>,
+  pub debug_id: Option<String>,
+  #[napi(js_name = "x_google_ignoreList")]
+  pub x_google_ignore_list: Option<Vec<u32>>,
+}
+
+impl TryFrom<JsJsonSourceMap> for rolldown_sourcemap::SourceMap {
+  type Error = anyhow::Error;
+
+  fn try_from(value: JsJsonSourceMap) -> std::result::Result<Self, Self::Error> {
+    rolldown_sourcemap::SourceMap::from_json(rolldown_sourcemap::JSONSourceMap {
+      version: 3,
+      file: value.file,
+      mappings: value.mappings.unwrap_or_default(),
+      source_root: value.source_root,
+      sources: value
+        .sources
+        .unwrap_or_default()
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect(),
+      sources_content: value.sources_content,
+      names: value.names.unwrap_or_default(),
+      debug_id: value.debug_id,
+      x_google_ignore_list: value.x_google_ignore_list,
+    })
+    .map_err(|error| anyhow::anyhow!("invalid source map: {error}"))
+  }
+}
+
+#[napi(transparent)]
+pub struct JsSourceMap(Either<String, JsJsonSourceMap>);
+
+impl TryFrom<JsSourceMap> for rolldown_sourcemap::SourceMap {
+  type Error = anyhow::Error;
+
+  fn try_from(value: JsSourceMap) -> std::result::Result<Self, Self::Error> {
+    match value.0 {
+      Either::A(value) => rolldown_sourcemap::OwnedSourceMap::from_json_string(&value)
+        .map(rolldown_sourcemap::OwnedSourceMap::into_inner)
+        .map_err(|error| anyhow::anyhow!("invalid source map: {error}")),
+      Either::B(value) => value.try_into(),
+    }
+  }
+}
+
+#[napi(object)]
+pub struct JsLoadOutput {
+  pub code: String,
+  pub map: Option<JsSourceMap>,
+  #[napi(ts_type = "boolean | 'no-treeshake'")]
+  pub module_side_effects: Option<JsHookSideEffects>,
+  pub module_type: Option<String>,
+}
+
+impl TryFrom<JsLoadOutput> for HookLoadOutput {
+  type Error = anyhow::Error;
+
+  fn try_from(value: JsLoadOutput) -> std::result::Result<Self, Self::Error> {
+    Ok(Self {
+      code: value.code.into(),
+      map: value.map.map(TryInto::try_into).transpose()?,
+      side_effects: value
+        .module_side_effects
+        .map(TryInto::try_into)
+        .transpose()?,
+      module_type: value
+        .module_type
+        .map(|value| ModuleType::from_str_with_fallback(&value)),
+    })
+  }
+}
+
+#[napi(object)]
+pub struct JsTransformOutput {
+  pub code: Option<String>,
+  pub map: Option<Either<JsSourceMap, Null>>,
+  #[napi(ts_type = "boolean | 'no-treeshake'")]
+  pub module_side_effects: Option<JsHookSideEffects>,
+  pub module_type: Option<String>,
+}
+
+impl TryFrom<JsTransformOutput> for HookTransformOutput {
+  type Error = anyhow::Error;
+
+  fn try_from(value: JsTransformOutput) -> std::result::Result<Self, Self::Error> {
+    let map = match value.map {
+      Some(Either::A(map)) => HookTransformOutputMap::Sourcemap(Box::new(map.try_into()?)),
+      Some(Either::B(_)) => HookTransformOutputMap::Null,
+      None => HookTransformOutputMap::Omitted,
+    };
+    Ok(Self {
+      code: value.code,
+      map,
+      side_effects: value
+        .module_side_effects
+        .map(TryInto::try_into)
+        .transpose()?,
+      module_type: value
+        .module_type
+        .map(|value| ModuleType::from_str_with_fallback(&value)),
+    })
+  }
+}
+
 type ResolveIdTsfn = Arc<
   ThreadsafeFunction<
-    (String, Option<String>),
-    Option<String>,
-    FnArgs<(String, Option<String>)>,
+    (String, Option<String>, JsResolveIdOptions),
+    Option<Either3<String, JsResolveIdOutput, bool>>,
+    FnArgs<(String, Option<String>, JsResolveIdOptions)>,
     napi::Status,
     false,
   >,
 >;
-type LoadTsfn =
-  Arc<ThreadsafeFunction<String, Option<String>, FnArgs<(String,)>, napi::Status, false>>;
+type LoadTsfn = Arc<
+  ThreadsafeFunction<
+    String,
+    Option<Either<String, JsLoadOutput>>,
+    FnArgs<(String,)>,
+    napi::Status,
+    false,
+  >,
+>;
 type TransformTsfn = Arc<
   ThreadsafeFunction<
     (String, String),
-    Option<String>,
+    Option<Either<String, JsTransformOutput>>,
     FnArgs<(String, String)>,
     napi::Status,
     false,
@@ -130,6 +321,64 @@ impl std::fmt::Debug for JsPlugin {
 }
 
 impl JsPlugin {
+  fn resolve_output(
+    output: Either3<String, JsResolveIdOutput, bool>,
+    specifier: String,
+  ) -> anyhow::Result<HookResolveIdOutput> {
+    match output {
+      Either3::A(id) => Ok(HookResolveIdOutput::from_id(id)),
+      Either3::B(output) => output.try_into(),
+      Either3::C(false) => Ok(HookResolveIdOutput {
+        id: specifier.into(),
+        external: Some(ResolvedExternal::Bool(true)),
+        ..Default::default()
+      }),
+      Either3::C(true) => anyhow::bail!(
+        "resolve hook returned true; expected a string, an object, false, null, or undefined"
+      ),
+    }
+  }
+
+  fn module_info_value(module_info: &ModuleInfo) -> serde_json::Value {
+    let exports = module_info
+      .exports
+      .iter()
+      .map(ToString::to_string)
+      .collect::<Vec<_>>();
+    serde_json::json!({
+      "id": module_info.id.to_string(),
+      "code": module_info.code.as_ref().map(ToString::to_string),
+      "ast": serde_json::Value::Null,
+      "originalCode": serde_json::Value::Null,
+      "importedIds": module_info
+        .imported_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>(),
+      "importers": module_info
+        .importers
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>(),
+      "isEntry": module_info.is_entry,
+      "isExternal": false,
+      "isIncluded": serde_json::Value::Null,
+      "hasDefaultExport": exports.iter().any(|name| name == "default"),
+      "exports": exports,
+      "dynamicallyImportedIds": module_info
+        .dynamically_imported_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>(),
+      "exportedBindings": serde_json::Value::Null,
+      "dynamicImporters": module_info
+        .dynamic_importers
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>(),
+    })
+  }
+
   fn from_js_object(obj: Object<'_>) -> napi::Result<(Arc<Self>, PluginOrder)> {
     let name: String = obj
       .get::<String>("name")?
@@ -159,21 +408,27 @@ impl JsPlugin {
       None
     };
 
-    let resolve_id_fn = if let Some(js_fn) =
-      obj.get::<Function<(String, Option<String>), Option<String>>>("resolveId")?
+    let resolve_id_fn = if let Some(js_fn) = obj.get::<Function<
+      (String, Option<String>, JsResolveIdOptions),
+      Option<Either3<String, JsResolveIdOutput, bool>>,
+    >>("resolveId")?
     {
       let tsfn = js_fn
-        .build_threadsafe_function::<(String, Option<String>)>()
-        .build_callback(|ctx: ThreadsafeCallContext<(String, Option<String>)>| {
-          Ok(FnArgs { data: ctx.value })
-        })?;
+        .build_threadsafe_function::<(String, Option<String>, JsResolveIdOptions)>()
+        .build_callback(
+          |ctx: ThreadsafeCallContext<(String, Option<String>, JsResolveIdOptions)>| {
+            Ok(FnArgs { data: ctx.value })
+          },
+        )?;
       usage |= HookUsage::ResolveId;
       Some(Arc::new(tsfn))
     } else {
       None
     };
 
-    let load_fn = if let Some(js_fn) = obj.get::<Function<(String,), Option<String>>>("load")? {
+    let load_fn = if let Some(js_fn) =
+      obj.get::<Function<(String,), Option<Either<String, JsLoadOutput>>>>("load")?
+    {
       let tsfn = js_fn
         .build_threadsafe_function::<String>()
         .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
@@ -183,18 +438,19 @@ impl JsPlugin {
       None
     };
 
-    let transform_fn =
-      if let Some(js_fn) = obj.get::<Function<(String, String), Option<String>>>("transform")? {
-        let tsfn = js_fn
-          .build_threadsafe_function::<(String, String)>()
-          .build_callback(|ctx: ThreadsafeCallContext<(String, String)>| {
-            Ok(FnArgs { data: ctx.value })
-          })?;
-        usage |= HookUsage::Transform;
-        Some(Arc::new(tsfn))
-      } else {
-        None
-      };
+    let transform_fn = if let Some(js_fn) = obj
+      .get::<Function<(String, String), Option<Either<String, JsTransformOutput>>>>("transform")?
+    {
+      let tsfn = js_fn
+        .build_threadsafe_function::<(String, String)>()
+        .build_callback(|ctx: ThreadsafeCallContext<(String, String)>| {
+          Ok(FnArgs { data: ctx.value })
+        })?;
+      usage |= HookUsage::Transform;
+      Some(Arc::new(tsfn))
+    } else {
+      None
+    };
 
     let module_parsed_fn =
       if let Some(js_fn) = obj.get::<Function<(String,), ()>>("moduleParsed")? {
@@ -248,14 +504,18 @@ impl JsPlugin {
       };
 
     // ── resolveDynamicImport — same TSFN shape as resolveId ─────────────────
-    let resolve_dynamic_import_fn = if let Some(js_fn) =
-      obj.get::<Function<(String, Option<String>), Option<String>>>("resolveDynamicImport")?
+    let resolve_dynamic_import_fn = if let Some(js_fn) = obj.get::<Function<
+      (String, Option<String>, JsResolveIdOptions),
+      Option<Either3<String, JsResolveIdOutput, bool>>,
+    >>("resolveDynamicImport")?
     {
       let tsfn = js_fn
-        .build_threadsafe_function::<(String, Option<String>)>()
-        .build_callback(|ctx: ThreadsafeCallContext<(String, Option<String>)>| {
-          Ok(FnArgs { data: ctx.value })
-        })?;
+        .build_threadsafe_function::<(String, Option<String>, JsResolveIdOptions)>()
+        .build_callback(
+          |ctx: ThreadsafeCallContext<(String, Option<String>, JsResolveIdOptions)>| {
+            Ok(FnArgs { data: ctx.value })
+          },
+        )?;
       usage |= HookUsage::ResolveDynamicImport;
       Some(Arc::new(tsfn))
     } else {
@@ -387,14 +647,15 @@ impl Plugin for JsPlugin {
   ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
     let specifier = args.specifier.to_string();
     let importer = args.importer.map(|s| s.to_string());
+    let options = JsResolveIdOptions {
+      attributes: HashMap::new(),
+      is_entry: args.is_entry,
+    };
     let tsfn = self.resolve_id_fn.clone();
     async move {
       let Some(f) = tsfn else { return Ok(None) };
-      match f.call_async((specifier, importer)).await {
-        Ok(Some(id)) => Ok(Some(HookResolveIdOutput {
-          id: id.into(),
-          ..Default::default()
-        })),
+      match f.call_async((specifier.clone(), importer, options)).await {
+        Ok(Some(output)) => Ok(Some(Self::resolve_output(output, specifier)?)),
         Ok(None) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("resolveId JS error: {e}")),
       }
@@ -412,14 +673,15 @@ impl Plugin for JsPlugin {
   ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
     let specifier = args.specifier.to_string();
     let importer = args.importer.map(|s| s.to_string());
+    let options = JsResolveIdOptions {
+      attributes: HashMap::new(),
+      is_entry: args.is_entry,
+    };
     let tsfn = self.resolve_dynamic_import_fn.clone();
     async move {
       let Some(f) = tsfn else { return Ok(None) };
-      match f.call_async((specifier, importer)).await {
-        Ok(Some(id)) => Ok(Some(HookResolveIdOutput {
-          id: id.into(),
-          ..Default::default()
-        })),
+      match f.call_async((specifier.clone(), importer, options)).await {
+        Ok(Some(output)) => Ok(Some(Self::resolve_output(output, specifier)?)),
         Ok(None) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("resolveDynamicImport JS error: {e}")),
       }
@@ -436,10 +698,11 @@ impl Plugin for JsPlugin {
     async move {
       let Some(f) = tsfn else { return Ok(None) };
       match f.call_async(id).await {
-        Ok(Some(code)) => Ok(Some(HookLoadOutput {
+        Ok(Some(Either::A(code))) => Ok(Some(HookLoadOutput {
           code: code.into(),
           ..Default::default()
         })),
+        Ok(Some(Either::B(output))) => Ok(Some(output.try_into()?)),
         Ok(None) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("load JS error: {e}")),
       }
@@ -457,10 +720,11 @@ impl Plugin for JsPlugin {
     async move {
       let Some(f) = tsfn else { return Ok(None) };
       match f.call_async((code, id)).await {
-        Ok(Some(new_code)) => Ok(Some(HookTransformOutput {
+        Ok(Some(Either::A(new_code))) => Ok(Some(HookTransformOutput {
           code: Some(new_code),
           ..Default::default()
         })),
+        Ok(Some(Either::B(output))) => Ok(Some(output.try_into()?)),
         Ok(None) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("transform JS error: {e}")),
       }
@@ -473,11 +737,11 @@ impl Plugin for JsPlugin {
     module_info: Arc<ModuleInfo>,
     _normal_module: &NormalModule,
   ) -> impl std::future::Future<Output = rolldown_plugin::HookNoopReturn> + Send {
-    let id = module_info.id.to_string();
+    let module_info_json = Self::module_info_value(&module_info).to_string();
     let tsfn = self.module_parsed_fn.clone();
     async move {
       let Some(f) = tsfn else { return Ok(()) };
-      f.call_async(id)
+      f.call_async(module_info_json)
         .await
         .map_err(|e| anyhow::anyhow!("moduleParsed JS error: {e}"))?;
       Ok(())
@@ -509,32 +773,19 @@ impl Plugin for JsPlugin {
     // The serialized map is passed to JS as `{ moduleInfoMap: { id: { importedIds, dynamicallyImportedIds } } }`.
     let module_info_json: String = {
       let mut map = serde_json::Map::new();
+      let mut module_ids = Vec::new();
       for module_id in ctx.get_module_ids() {
         let id_str = module_id.as_str();
-        let (imported, dyn_imported): (Vec<String>, Vec<String>) =
-          if let Some(info) = ctx.get_module_info(id_str) {
-            let imported = info.imported_ids.iter().map(|id| id.to_string()).collect();
-            let dyn_imported = info
-              .dynamically_imported_ids
-              .iter()
-              .map(|id| id.to_string())
-              .collect();
-            (imported, dyn_imported)
-          } else {
-            (vec![], vec![])
-          };
-        map.insert(
-          id_str.to_string(),
-          serde_json::json!({
-            "importedIds": imported,
-            "dynamicallyImportedIds": dyn_imported,
-          }),
-        );
+        module_ids.push(id_str.to_string());
+        if let Some(info) = ctx.get_module_info(id_str) {
+          map.insert(id_str.to_string(), Self::module_info_value(&info));
+        }
       }
       // Serialise the context object that hvigor's buildEnd plugin receives.
       // JS side: buildEnd(ctx) where ctx.errorCount and ctx.moduleInfoMap are available.
       serde_json::to_string(&serde_json::json!({
         "errorCount": &error_count,
+        "moduleIds": module_ids,
         "moduleInfoMap": serde_json::Value::Object(map),
       }))
       .unwrap_or_else(|_| error_count.clone())
@@ -798,8 +1049,20 @@ pub struct HvigorShareContext {
 /// Dependency info returned by `this.getModuleInfo(id)` inside plugin hooks.
 #[napi(object)]
 pub struct HvigorModuleInfo {
+  pub id: String,
+  pub code: Either<String, Null>,
+  pub ast: Null,
+  pub original_code: Either<String, Null>,
   pub imported_ids: Vec<String>,
+  pub importers: Vec<String>,
+  pub is_entry: bool,
+  pub is_external: bool,
+  pub is_included: Either<bool, Null>,
+  pub has_default_export: Either<bool, Null>,
+  pub exports: Either<Vec<String>, Null>,
   pub dynamically_imported_ids: Vec<String>,
+  pub exported_bindings: Either<HashMap<String, Vec<String>>, Null>,
+  pub dynamic_importers: Vec<String>,
 }
 
 /// Compile plugin context — the `this` value inside user plugin hooks.
@@ -810,13 +1073,13 @@ pub struct HvigorModuleInfo {
 #[napi(object)]
 pub struct HvigorPluginContext {
   pub share: Option<HvigorShareContext>,
-  #[napi(ts_type = "() => string[]")]
+  #[napi(ts_type = "() => IterableIterator<string>")]
   pub get_module_ids: Option<String>,
   #[napi(ts_type = "(id: string) => HvigorModuleInfo | null")]
   pub get_module_info: Option<String>,
   #[napi(ts_type = "(source: string, options?: unknown) => unknown")]
   pub parse: Option<String>,
-  #[napi(ts_type = "(moduleRef: string) => string | null")]
+  #[napi(ts_type = "(moduleRef: string) => string")]
   pub get_file_name: Option<String>,
 }
 
@@ -858,21 +1121,21 @@ pub struct ArkdownPlugin {
   #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
   pub after_build_start: Option<String>,
   #[napi(
-    ts_type = "(id: string, importer?: string | null) => string | null | undefined | Promise<string | null | undefined>"
+    ts_type = "(id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>"
   )]
   pub resolve_id: Option<String>,
   #[napi(
-    ts_type = "(id: string) => string | null | undefined | Promise<string | null | undefined>"
+    ts_type = "(id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>"
   )]
   pub load: Option<String>,
   #[napi(
-    ts_type = "(code: string, id: string) => string | null | undefined | Promise<string | null | undefined>"
+    ts_type = "(code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>"
   )]
   pub transform: Option<String>,
-  #[napi(ts_type = "(id: string) => void | Promise<void>")]
+  #[napi(ts_type = "(moduleInfo: HvigorModuleInfo) => void | Promise<void>")]
   pub module_parsed: Option<String>,
   #[napi(
-    ts_type = "(id: string, importer?: string | null) => string | null | undefined | Promise<string | null | undefined>"
+    ts_type = "(id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>"
   )]
   pub resolve_dynamic_import: Option<String>,
   #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
@@ -1111,13 +1374,15 @@ async fn run_build(
 
   let project_path = std::path::PathBuf::from(&project);
   let output_target = match target.as_str() {
+    "hap" => OutputTarget::Hap,
     "hsp" => OutputTarget::Hsp,
     "har" => OutputTarget::Har,
-    _ => OutputTarget::Hap,
+    other => anyhow::bail!("unsupported build target '{other}'; expected 'hap', 'hsp', or 'har'"),
   };
   let build_mode = match mode.as_str() {
+    "debug" => BuildMode::Debug,
     "release" => BuildMode::Release,
-    _ => BuildMode::Debug,
+    other => anyhow::bail!("unsupported build mode '{other}'; expected 'debug' or 'release'"),
   };
 
   let config = std::sync::Arc::new(

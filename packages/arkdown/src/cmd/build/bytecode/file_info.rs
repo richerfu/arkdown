@@ -357,8 +357,16 @@ impl CacheFileManifestWriter {
     let path = self.cache_file_path();
     fs_err::create_dir_all(&self.output_dir).map_err(|e| Ts2abcError::Io(e.into()))?;
     let mut content = String::new();
-    for unit in units {
+    for unit in units.iter().filter(|unit| {
+      !matches!(
+        &unit.source,
+        crate::cmd::build::bytecode::plan::ModuleSourceInput::AbcFile { .. }
+      )
+    }) {
       if let Some(cache_file) = &unit.cache_file {
+        if let Some(parent) = cache_file.parent() {
+          fs_err::create_dir_all(parent).map_err(|e| Ts2abcError::Io(e.into()))?;
+        }
         let source_path = unit.source_path_str()?;
         let cache_path = Ts2abcPathText::new(cache_file).string()?;
         content.push_str(&CacheManifestLine::new(&source_path, &cache_path).to_upstream_line());
@@ -371,6 +379,25 @@ impl CacheFileManifestWriter {
         Ts2abcPathText::new(&npm_entries_path.with_extension("protoBin")).string()?;
       content.push_str(&CacheManifestLine::new(&source_path, &cache_path).to_upstream_line());
       content.push('\n');
+    }
+    // The SDK appends cached ByteCode HAR inputs after npmEntries.protoBin.
+    // See ets-loader `module_mode.js#generateAbcCacheFilesInfo` and
+    // `genAbcCacheFilePath`.
+    for unit in units.iter().filter(|unit| {
+      matches!(
+        &unit.source,
+        crate::cmd::build::bytecode::plan::ModuleSourceInput::AbcFile { .. }
+      )
+    }) {
+      if let Some(cache_file) = &unit.cache_file {
+        if let Some(parent) = cache_file.parent() {
+          fs_err::create_dir_all(parent).map_err(|e| Ts2abcError::Io(e.into()))?;
+        }
+        let source_path = unit.source_path_str()?;
+        let cache_path = Ts2abcPathText::new(cache_file).string()?;
+        content.push_str(&CacheManifestLine::new(&source_path, &cache_path).to_upstream_line());
+        content.push('\n');
+      }
     }
     fs_err::write(&path, &content).map_err(|e| Ts2abcError::Io(e.into()))?;
     Ok(path)
@@ -455,18 +482,43 @@ mod tests {
     let cache_file = dir.path().join("Index.protoBin");
     unit.cache_file = Some(cache_file.clone());
     let npm_entries = dir.path().join("npmEntries.txt");
+    let abc_path = PathBuf::from("/project/entry/oh_modules/bytecode-har/ets/modules.abc");
+    let abc_cache = dir
+      .path()
+      .join("entry/oh_modules/bytecode-har/ets/modules.protoBin");
+    let abc_unit = CompileUnitPlan {
+      source: ModuleSourceInput::AbcFile {
+        path: abc_path.clone(),
+      },
+      record_name: RecordNamePlan::Explicit(String::new()),
+      source_file: None,
+      package_name: Some("bytecode-har".to_string()),
+      is_commonjs: false,
+      is_shared_module: false,
+      origin_source_lang: String::new(),
+      output_path: None,
+      cache_file: Some(abc_cache.clone()),
+    };
 
     let writer = CacheFileManifestWriter::new(dir.path(), "modules.cache");
     let manifest = writer
-      .write_with_npm_entries(&[unit], Some(&npm_entries))
+      .write_with_npm_entries(&[unit, abc_unit], Some(&npm_entries))
       .unwrap();
     let content = fs_err::read_to_string(&manifest).unwrap();
     let npm_entries_proto = npm_entries.with_extension("protoBin");
     let npm_entries_key = Ts2abcPathText::new(&npm_entries).string().unwrap();
     let cache_file_text = Ts2abcPathText::new(&cache_file).string().unwrap();
     let npm_entries_proto_text = Ts2abcPathText::new(&npm_entries_proto).string().unwrap();
+    let abc_path_text = Ts2abcPathText::new(&abc_path).string().unwrap();
+    let abc_cache_text = Ts2abcPathText::new(&abc_cache).string().unwrap();
 
     assert!(content.contains(&format!("/src/main/ets/pages/Index.ets;{cache_file_text}")));
     assert!(content.contains(&format!("{npm_entries_key};{npm_entries_proto_text}")));
+    assert!(content.contains(&format!("{abc_path_text};{abc_cache_text}")));
+    assert!(
+      content.find(&npm_entries_key).unwrap() < content.find(&abc_path_text).unwrap(),
+      "SDK generateAbcCacheFilesInfo appends ByteCode HAR cache rows after npm entries"
+    );
+    assert!(abc_cache.parent().unwrap().is_dir());
   }
 }
