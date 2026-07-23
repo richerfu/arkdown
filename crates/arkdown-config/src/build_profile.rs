@@ -227,7 +227,7 @@ pub struct RawProduct {
     /// Real OHOS projects use targetSdkVersion; takes priority over compatibleSdkVersion.
     #[serde(default)]
     pub target_sdk_version: Option<String>,
-    #[serde(default)]
+    #[serde(rename = "runtimeOS", alias = "runtimeOs", default)]
     pub runtime_os: String,
     /// Reference to a signing config by name (looks up `app.signingConfigs`).
     #[serde(default)]
@@ -293,6 +293,9 @@ pub struct RawBuildOption {
     /// Optional copyFrom when the same shape is used inside module `buildOptionSet`.
     #[serde(default)]
     pub copy_from: Option<String>,
+    /// HAR representation: original, obfuscation, or bytecode.
+    #[serde(default)]
+    pub artifact_type: Option<String>,
     #[serde(default)]
     pub strict_mode: Option<RawStrictMode>,
     #[serde(default)]
@@ -305,6 +308,9 @@ pub struct RawBuildOption {
     /// SO file paths listed under `buildOption.preloadSo` in `build-profile.json5`.
     #[serde(default)]
     pub preload_so: Vec<std::path::PathBuf>,
+    /// HSP/source-HAR deduplication policy.
+    #[serde(rename = "packOptions", default)]
+    pub pack_options: Option<RawPackOptions>,
     /// Resource options from `buildOption.resOptions` in `build-profile.json5`.
     #[serde(rename = "resOptions", default)]
     pub res_options: Option<RawResOptions>,
@@ -336,14 +342,32 @@ pub struct RawBuildOption {
     pub native_lib: Option<RawNativeLibOption>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawPackOptions {
+    #[serde(default)]
+    pub deduplicate_har: bool,
+}
+
 /// `buildOption.externalNativeOptions` — controls native/CMake build settings.
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RawExternalNativeOptions {
+    /// CMake script path. Hvigor requires the basename to be `CMakeLists.txt`.
+    #[serde(default)]
+    pub path: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub arguments: Option<StringList>,
     /// ABI filter list (e.g. `["arm64-v8a", "armeabi-v7a", "x86_64"]`).
     /// When empty, defaults to `["arm64-v8a"]` (hvigor default).
     #[serde(default)]
     pub abi_filters: Vec<String>,
+    #[serde(default)]
+    pub cpp_flags: Option<String>,
+    #[serde(default)]
+    pub c_flags: Option<String>,
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
 }
 
 /// `buildOption.nativeLib` — controls hvigor ProcessLibs collection/filtering.
@@ -356,6 +380,23 @@ pub struct RawNativeLibOption {
     /// `nativeLib.filter`, merged over `napiLibFilterOption`.
     #[serde(default)]
     pub filter: Option<RawNativeLibFilterOption>,
+    #[serde(default)]
+    pub header_path: Option<StringList>,
+    #[serde(default)]
+    pub exclude_from_har: Option<bool>,
+    #[serde(default)]
+    pub exclude_so_from_interface_har: Option<bool>,
+    #[serde(default)]
+    pub debug_symbol: Option<RawNativeDebugSymbolOption>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawNativeDebugSymbolOption {
+    #[serde(default)]
+    pub strip: Option<bool>,
+    #[serde(default)]
+    pub exclude: Option<StringList>,
 }
 
 /// `NapiLibFilterOpt` from hvigor `options/build/build-opt.d.ts`.
@@ -431,6 +472,42 @@ pub struct RawResOptions {
     /// Additional resource directories to include.
     #[serde(default)]
     pub directories: Vec<std::path::PathBuf>,
+    /// Resource compression configuration forwarded to opt-compression.json.
+    #[serde(default)]
+    pub compression: Option<serde_json::Value>,
+    /// Static files copied from the ArkTS source roots into loader_out.
+    #[serde(default)]
+    pub copy_code_resource: RawCopyCodeResource,
+    /// Maximum resource compiler worker count.
+    #[serde(default)]
+    pub res_compile_threads: Option<usize>,
+    /// Resource globs ignored by restool.
+    #[serde(default)]
+    pub ignore_resource_pattern: Vec<String>,
+    /// Resource qualifier restrictions; not supported for HAR by hvigor.
+    #[serde(default)]
+    pub qualifiers_config: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawCopyCodeResource {
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    #[serde(default)]
+    pub excludes: Vec<String>,
+    #[serde(default)]
+    pub includes: Option<Vec<String>>,
+}
+
+impl Default for RawCopyCodeResource {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            excludes: Vec::new(),
+            includes: None,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -481,6 +558,12 @@ pub struct RawArkOptions {
     pub runtime_only: Option<RawRuntimeOnly>,
     #[serde(default)]
     pub support_chunks: Option<bool>,
+    #[serde(default)]
+    pub byte_code_har: Option<bool>,
+    #[serde(default)]
+    pub bundled_dependencies: Option<bool>,
+    #[serde(default)]
+    pub integrated_hsp: Option<bool>,
     #[serde(rename = "aotCompileMode", default)]
     pub aot_compile_mode: Option<String>,
     #[serde(rename = "apPath", default)]
@@ -602,6 +685,10 @@ pub struct RawTargetConfig {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RawTargetSource {
+    /// Additional source roots copied into interface-HAR metadata before the
+    /// module's standard and generated roots.
+    #[serde(default)]
+    pub source_roots: Vec<String>,
     /// Per-target ability overrides (icon, label, launchType).
     #[serde(default)]
     pub abilities: Vec<RawTargetAbility>,
@@ -639,6 +726,8 @@ pub struct EffectiveTargetConfig {
     /// Source ability overrides for this target.
     /// Empty when the target has no `source.abilities`.
     pub source_abilities: Vec<RawTargetAbility>,
+    /// Target-specific source roots, preserved as manifest-relative strings.
+    pub source_roots: Vec<String>,
     /// Distribution/distro filter configuration from `target.config`.
     /// `None` when the target has no filter configured.
     pub distribution_filter: Option<serde_json::Value>,
@@ -680,7 +769,12 @@ pub fn select_effective_target(
         source_abilities: target
             .source
             .as_ref()
-            .map(|s| s.abilities.iter().cloned().collect())
+            .map(|s| s.abilities.to_vec())
+            .unwrap_or_default(),
+        source_roots: target
+            .source
+            .as_ref()
+            .map(|source| source.source_roots.clone())
             .unwrap_or_default(),
         distribution_filter: target.config.as_ref().and_then(|c| {
             c.distribution_filter
@@ -851,7 +945,12 @@ pub fn enumerate_applicable_targets_for_module(
             source_abilities: target
                 .source
                 .as_ref()
-                .map(|s| s.abilities.iter().cloned().collect())
+                .map(|s| s.abilities.to_vec())
+                .unwrap_or_default(),
+            source_roots: target
+                .source
+                .as_ref()
+                .map(|source| source.source_roots.clone())
                 .unwrap_or_default(),
             distribution_filter: target.config.as_ref().and_then(|c| {
                 c.distribution_filter
@@ -903,7 +1002,136 @@ fn enumerate_applicable_raw_targets<'a>(
 #[derive(Debug, Clone)]
 pub struct EffectiveNativeBuildOption {
     pub abi_filters: Vec<String>,
+    pub external_native_options: Option<arkdown_core::ExternalNativeOptions>,
     pub native_lib: arkdown_core::NativeLibOption,
+}
+
+impl EffectiveNativeBuildOption {
+    fn normalize_module_paths(&mut self, module_root: &Path) {
+        if let Some(path) = self
+            .external_native_options
+            .as_mut()
+            .and_then(|options| options.path.as_mut())
+        {
+            if path.is_relative() {
+                *path = module_root.join(&*path);
+            }
+        }
+        for path in &mut self.native_lib.header_paths {
+            if path.is_relative() {
+                *path = module_root.join(&*path);
+            }
+        }
+    }
+}
+
+pub fn resolve_effective_har_artifact_type(
+    module_root: &Path,
+    product_artifact_type: arkdown_core::HarArtifactType,
+    build_mode_name: &str,
+    target_name: &str,
+) -> Result<arkdown_core::HarArtifactType, ConfigError> {
+    let module_profile_path = module_root.join("build-profile.json5");
+    if !module_profile_path.is_file() {
+        return Ok(product_artifact_type);
+    }
+    let content = std::fs::read_to_string(&module_profile_path)?;
+    let profile: RawModuleBuildProfile =
+        json5::from_str(&content).map_err(|error| ConfigError::ParseError {
+            file: module_profile_path.clone(),
+            message: error.to_string(),
+        })?;
+    let mut artifact_type = product_artifact_type;
+    let mut apply = |build_option: &RawBuildOption| -> Result<(), ConfigError> {
+        if let Some(value) = build_option.artifact_type.as_deref() {
+            artifact_type = HarArtifactTypeParser::new(value, &module_profile_path).parse()?;
+        }
+        if let Some(byte_code_har) = build_option
+            .ark_options
+            .as_ref()
+            .and_then(|options| options.byte_code_har)
+        {
+            artifact_type = if byte_code_har {
+                arkdown_core::HarArtifactType::Bytecode
+            } else if matches!(artifact_type, arkdown_core::HarArtifactType::Bytecode) {
+                arkdown_core::HarArtifactType::Original
+            } else {
+                artifact_type
+            };
+        }
+        Ok(())
+    };
+    if let Some(build_option) = profile.build_option.as_ref() {
+        apply(build_option)?;
+    }
+    let build_option_name =
+        ModuleBuildOptionSelector::new(&profile).build_option_name(build_mode_name, target_name);
+    let mut names = Vec::new();
+    let mut current = Some(build_option_name.as_str());
+    while let Some(name) = current {
+        if names.iter().any(|visited| visited == name) {
+            return Err(ConfigError::ValidationError {
+                file: module_profile_path.clone(),
+                message: format!(
+                    "circular buildOptionSet copyFrom chain: {}",
+                    names.join(" -> ")
+                ),
+            });
+        }
+        let Some(build_option) = profile
+            .build_option_set
+            .iter()
+            .find(|build_option| build_option.name.as_deref() == Some(name))
+        else {
+            break;
+        };
+        names.push(name.to_string());
+        current = build_option.copy_from.as_deref();
+    }
+    for name in names.iter().rev() {
+        if let Some(build_option) = profile
+            .build_option_set
+            .iter()
+            .find(|build_option| build_option.name.as_deref() == Some(name.as_str()))
+        {
+            apply(build_option)?;
+        }
+    }
+    if let Some(build_option) = profile
+        .targets
+        .iter()
+        .find(|target| target.name == target_name)
+        .and_then(|target| target.config.as_ref())
+        .and_then(|config| config.build_option.as_ref())
+    {
+        apply(build_option)?;
+    }
+    Ok(artifact_type)
+}
+
+struct HarArtifactTypeParser<'a> {
+    value: &'a str,
+    file: &'a Path,
+}
+
+impl<'a> HarArtifactTypeParser<'a> {
+    fn new(value: &'a str, file: &'a Path) -> Self {
+        Self { value, file }
+    }
+
+    fn parse(&self) -> Result<arkdown_core::HarArtifactType, ConfigError> {
+        match self.value {
+            "original" => Ok(arkdown_core::HarArtifactType::Original),
+            "obfuscation" => Ok(arkdown_core::HarArtifactType::Obfuscation),
+            "bytecode" => Ok(arkdown_core::HarArtifactType::Bytecode),
+            value => Err(ConfigError::ValidationError {
+                file: self.file.to_path_buf(),
+                message: format!(
+                    "unsupported buildOption.artifactType '{value}'; expected original, obfuscation, or bytecode"
+                ),
+            }),
+        }
+    }
 }
 
 pub fn resolve_product_native_build_option(
@@ -911,6 +1139,7 @@ pub fn resolve_product_native_build_option(
 ) -> EffectiveNativeBuildOption {
     let mut effective = EffectiveNativeBuildOption {
         abi_filters: vec!["arm64-v8a".to_string()],
+        external_native_options: None,
         native_lib: arkdown_core::NativeLibOption::default(),
     };
     if let Some(build_option) = build_option {
@@ -932,16 +1161,19 @@ pub fn resolve_product_native_build_option(
 pub fn resolve_effective_native_build_option(
     module_root: &Path,
     product_abi_filters: &[String],
+    product_external_native_options: Option<&arkdown_core::ExternalNativeOptions>,
     product_native_lib: &arkdown_core::NativeLibOption,
     build_mode_name: &str,
     target_name: &str,
 ) -> Result<EffectiveNativeBuildOption, ConfigError> {
     let mut effective = EffectiveNativeBuildOption {
         abi_filters: product_abi_filters.to_vec(),
+        external_native_options: product_external_native_options.cloned(),
         native_lib: product_native_lib.clone(),
     };
     let module_profile_path = module_root.join("build-profile.json5");
     if !module_profile_path.is_file() {
+        effective.normalize_module_paths(module_root);
         return Ok(effective);
     }
     let content = std::fs::read_to_string(&module_profile_path)?;
@@ -980,6 +1212,7 @@ pub fn resolve_effective_native_build_option(
     if effective.abi_filters.is_empty() {
         effective.abi_filters.push("arm64-v8a".to_string());
     }
+    effective.normalize_module_paths(module_root);
     Ok(effective)
 }
 
@@ -1008,6 +1241,185 @@ impl<'a> ModuleBuildOptionSelector<'a> {
             "release" => "release".to_string(),
             _ => "default".to_string(),
         }
+    }
+}
+
+/// Resolves the effective ArkGuard configuration for one module target.
+///
+/// Hvigor merges module `buildOption`, the selected `buildOptionSet`
+/// `copyFrom` chain, and target-local `config.buildOption` over the product
+/// option. Rule paths declared by a module are relative to that module rather
+/// than the project root.
+pub struct EffectiveObfuscationConfigResolver<'a> {
+    module_root: &'a Path,
+    product_config: Option<&'a arkdown_core::ObfuscationConfig>,
+    build_mode_name: &'a str,
+    target_name: &'a str,
+}
+
+impl<'a> EffectiveObfuscationConfigResolver<'a> {
+    pub fn new(
+        module_root: &'a Path,
+        product_config: Option<&'a arkdown_core::ObfuscationConfig>,
+        build_mode_name: &'a str,
+        target_name: &'a str,
+    ) -> Self {
+        Self {
+            module_root,
+            product_config,
+            build_mode_name,
+            target_name,
+        }
+    }
+
+    pub fn resolve(&self) -> Result<Option<arkdown_core::ObfuscationConfig>, ConfigError> {
+        let module_profile_path = self.module_root.join("build-profile.json5");
+        if !module_profile_path.is_file() {
+            return Ok(self.product_config.cloned());
+        }
+        let content = std::fs::read_to_string(&module_profile_path)?;
+        let profile: RawModuleBuildProfile =
+            json5::from_str(&content).map_err(|error| ConfigError::ParseError {
+                file: module_profile_path.clone(),
+                message: error.to_string(),
+            })?;
+        let mut effective = self.product_config.cloned();
+        let mut merger = ObfuscationConfigMerger::new(self.module_root, &mut effective);
+
+        if let Some(build_option) = profile.build_option.as_ref() {
+            merger.apply_build_option(build_option);
+        }
+        let build_option_name = ModuleBuildOptionSelector::new(&profile)
+            .build_option_name(self.build_mode_name, self.target_name);
+        ObfuscationBuildOptionSetResolver::new(&profile, &module_profile_path).apply_named(
+            &build_option_name,
+            &mut merger,
+            &mut Vec::new(),
+        )?;
+        if let Some(build_option) = profile
+            .targets
+            .iter()
+            .find(|target| target.name == self.target_name)
+            .and_then(|target| target.config.as_ref())
+            .and_then(|config| config.build_option.as_ref())
+        {
+            merger.apply_build_option(build_option);
+        }
+        Ok(effective)
+    }
+}
+
+struct ObfuscationBuildOptionSetResolver<'a> {
+    profile: &'a RawModuleBuildProfile,
+    file: &'a Path,
+}
+
+impl<'a> ObfuscationBuildOptionSetResolver<'a> {
+    fn new(profile: &'a RawModuleBuildProfile, file: &'a Path) -> Self {
+        Self { profile, file }
+    }
+
+    fn apply_named(
+        &self,
+        name: &str,
+        merger: &mut ObfuscationConfigMerger<'_>,
+        stack: &mut Vec<String>,
+    ) -> Result<(), ConfigError> {
+        let Some(build_option) = self
+            .profile
+            .build_option_set
+            .iter()
+            .find(|build_option| build_option.name.as_deref() == Some(name))
+        else {
+            return Ok(());
+        };
+        if stack.iter().any(|visited| visited == name) {
+            return Err(ConfigError::ValidationError {
+                file: self.file.to_path_buf(),
+                message: format!(
+                    "circular buildOptionSet copyFrom chain: {} -> {name}",
+                    stack.join(" -> ")
+                ),
+            });
+        }
+        stack.push(name.to_string());
+        if let Some(copy_from) = build_option.copy_from.as_deref() {
+            self.apply_named(copy_from, merger, stack)?;
+        }
+        merger.apply_build_option(build_option);
+        stack.pop();
+        Ok(())
+    }
+}
+
+struct ObfuscationConfigMerger<'a> {
+    module_root: &'a Path,
+    effective: &'a mut Option<arkdown_core::ObfuscationConfig>,
+}
+
+impl<'a> ObfuscationConfigMerger<'a> {
+    fn new(
+        module_root: &'a Path,
+        effective: &'a mut Option<arkdown_core::ObfuscationConfig>,
+    ) -> Self {
+        Self {
+            module_root,
+            effective,
+        }
+    }
+
+    fn apply_build_option(&mut self, build_option: &RawBuildOption) {
+        let Some(raw) = build_option
+            .ark_options
+            .as_ref()
+            .and_then(|options| options.obfuscation.as_ref())
+        else {
+            return;
+        };
+        let resolve_paths = |paths: &[String]| {
+            paths
+                .iter()
+                .map(|path| {
+                    let path = Path::new(path);
+                    if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        self.module_root.join(path)
+                    }
+                })
+                .collect()
+        };
+        let rule_files = raw
+            .rule_options
+            .as_ref()
+            .map(|options| {
+                if options.rules.is_empty() {
+                    options
+                        .files
+                        .as_ref()
+                        .map(|files| resolve_paths(files.as_slice()))
+                        .unwrap_or_default()
+                } else {
+                    resolve_paths(&options.rules)
+                }
+            })
+            .unwrap_or_default();
+        let consumer_rule_files = if raw.consumer_rules.is_empty() {
+            raw.consumer_files
+                .as_ref()
+                .map(|files| resolve_paths(files.as_slice()))
+                .unwrap_or_default()
+        } else {
+            resolve_paths(&raw.consumer_rules)
+        };
+        *self.effective = Some(arkdown_core::ObfuscationConfig {
+            enable_obfuscation: raw
+                .rule_options
+                .as_ref()
+                .is_some_and(|options| options.enable),
+            rule_files,
+            consumer_rule_files,
+        });
     }
 }
 
@@ -1065,8 +1477,28 @@ impl<'a> NativeBuildOptionMerger<'a> {
 
     fn apply_build_option(&mut self, build_option: &RawBuildOption) {
         if let Some(external_native_options) = build_option.external_native_options.as_ref() {
+            let effective_external = self
+                .effective
+                .external_native_options
+                .get_or_insert_with(arkdown_core::ExternalNativeOptions::default);
+            if external_native_options.path.is_some() {
+                effective_external.path = external_native_options.path.clone();
+            }
+            if let Some(arguments) = external_native_options.arguments.as_ref() {
+                effective_external.arguments = arguments.as_slice().to_vec();
+            }
             if !external_native_options.abi_filters.is_empty() {
                 self.effective.abi_filters = external_native_options.abi_filters.clone();
+                effective_external.abi_filters = external_native_options.abi_filters.clone();
+            }
+            if external_native_options.cpp_flags.is_some() {
+                effective_external.cpp_flags = external_native_options.cpp_flags.clone();
+            }
+            if external_native_options.c_flags.is_some() {
+                effective_external.c_flags = external_native_options.c_flags.clone();
+            }
+            if let Some(targets) = external_native_options.targets.as_ref() {
+                effective_external.targets = targets.clone();
             }
         }
         if let Some(filter) = build_option.napi_lib_filter_option.as_ref() {
@@ -1078,6 +1510,25 @@ impl<'a> NativeBuildOptionMerger<'a> {
             }
             if let Some(filter) = native_lib.filter.as_ref() {
                 self.apply_filter(filter);
+            }
+            if let Some(header_paths) = native_lib.header_path.as_ref() {
+                self.effective.native_lib.header_paths =
+                    header_paths.as_slice().iter().map(PathBuf::from).collect();
+            }
+            if let Some(exclude_from_har) = native_lib.exclude_from_har {
+                self.effective.native_lib.exclude_from_har = exclude_from_har;
+            }
+            if let Some(exclude_so_from_interface_har) = native_lib.exclude_so_from_interface_har {
+                self.effective.native_lib.exclude_so_from_interface_har =
+                    exclude_so_from_interface_har;
+            }
+            if let Some(debug_symbol) = native_lib.debug_symbol.as_ref() {
+                if let Some(strip) = debug_symbol.strip {
+                    self.effective.native_lib.debug_symbol.strip = strip;
+                }
+                if let Some(exclude) = debug_symbol.exclude.as_ref() {
+                    self.effective.native_lib.debug_symbol.exclude = exclude.as_slice().to_vec();
+                }
             }
         }
     }
@@ -1167,6 +1618,7 @@ mod tests {
         assert_eq!(profile.app.products.len(), 1);
         assert_eq!(profile.app.products[0].name, "default");
         assert_eq!(profile.app.products[0].bundle_name, "com.example.app");
+        assert_eq!(profile.app.products[0].runtime_os, "HarmonyOS");
         assert_eq!(
             parse_api_version(&profile.app.products[0].compatible_sdk_version),
             Some(12)
@@ -1820,6 +2272,69 @@ mod tests {
     }
 
     #[test]
+    fn test_hsp_interface_options_and_target_source_roots_are_parsed() {
+        let json = r#"{
+            app: {
+              products: [{
+                name: "default",
+                buildOption: {
+                  arkOptions: { integratedHsp: true },
+                  nativeLib: { excludeSoFromInterfaceHar: true }
+                }
+              }]
+            },
+            modules: [{
+              name: "entry",
+              srcPath: "./entry",
+              targets: [{
+                name: "default",
+                source: { sourceRoots: ["./src/shared", "./generated/contracts"] }
+              }]
+            }]
+        }"#;
+
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let build_option = profile.app.products[0].build_option.as_ref().unwrap();
+        assert_eq!(
+            build_option
+                .ark_options
+                .as_ref()
+                .and_then(|options| options.integrated_hsp),
+            Some(true)
+        );
+        assert_eq!(
+            build_option
+                .native_lib
+                .as_ref()
+                .and_then(|options| options.exclude_so_from_interface_har),
+            Some(true)
+        );
+        assert_eq!(
+            profile.modules[0].targets[0]
+                .source
+                .as_ref()
+                .unwrap()
+                .source_roots,
+            vec!["./src/shared", "./generated/contracts"]
+        );
+
+        let project_root = std::env::temp_dir().join(format!(
+            "arkdown-target-source-roots-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(project_root.join("build-profile.json5"), json).unwrap();
+        let targets =
+            enumerate_applicable_targets_for_module(&project_root, "entry", "default", "debug");
+        assert_eq!(
+            targets[0].source_roots,
+            vec!["./src/shared", "./generated/contracts"]
+        );
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[test]
     fn test_resolve_effective_native_build_option_reads_module_build_option_set() {
         let tmp = std::env::temp_dir().join(format!(
             "arkdown-config-native-{}",
@@ -1843,6 +2358,7 @@ mod tests {
                 },
                 nativeLib: {
                   collectAllLibs: false,
+                  excludeSoFromInterfaceHar: true,
                   filter: {
                     select: [{
                       package: "native_pkg",
@@ -1860,6 +2376,7 @@ mod tests {
         let effective = resolve_effective_native_build_option(
             &tmp,
             &["armeabi-v7a".to_string()],
+            None,
             &product_native,
             "release",
             "default",
@@ -1867,6 +2384,7 @@ mod tests {
         .expect("module build option");
         assert_eq!(effective.abi_filters, vec!["arm64-v8a"]);
         assert!(!effective.native_lib.collect_all_libs);
+        assert!(effective.native_lib.exclude_so_from_interface_har);
         assert_eq!(
             effective.native_lib.filter.excludes,
             vec!["**/armeabi-v7a/*.so", "**/x86_64/*.so"]
@@ -1876,6 +2394,55 @@ mod tests {
             effective.native_lib.filter.select[0].include,
             Some(vec!["libkeep.so".to_string()])
         );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn effective_obfuscation_uses_module_release_option_and_module_relative_rules() {
+        let tmp = std::env::temp_dir().join(format!(
+            "arkdown-config-obfuscation-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("build-profile.json5"),
+            r#"{
+              buildOptionSet: [{
+                name: "release-base",
+                arkOptions: { obfuscation: {
+                  ruleOptions: { enable: true, files: ["./base-rules.txt"] }
+                } }
+              }, {
+                name: "release",
+                copyFrom: "release-base",
+                arkOptions: { obfuscation: {
+                  ruleOptions: { enable: true, files: ["./release-rules.txt"] },
+                  consumerFiles: "./consumer-rules.txt"
+                } }
+              }],
+              targets: [{ name: "default" }]
+            }"#,
+        )
+        .unwrap();
+
+        let release = EffectiveObfuscationConfigResolver::new(&tmp, None, "release", "default")
+            .resolve()
+            .expect("release obfuscation")
+            .expect("configured obfuscation");
+        assert!(release.enable_obfuscation);
+        assert_eq!(release.rule_files, vec![tmp.join("release-rules.txt")]);
+        assert_eq!(
+            release.consumer_rule_files,
+            vec![tmp.join("consumer-rules.txt")]
+        );
+
+        let debug = EffectiveObfuscationConfigResolver::new(&tmp, None, "debug", "default")
+            .resolve()
+            .expect("debug obfuscation");
+        assert!(debug.is_none());
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
@@ -2007,6 +2574,7 @@ mod tests {
                 .map(|r| r.directories.clone())
                 .unwrap_or_default(),
             source_abilities: vec![],
+            source_roots: vec![],
             distribution_filter: None,
             build_mode_set: vec![],
         };

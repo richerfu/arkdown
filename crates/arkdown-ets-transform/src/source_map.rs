@@ -202,10 +202,75 @@ mod tests {
         assert_eq!(semicolons, 2);
         assert!(line_two_has_segment, "line 2 must have a segment");
     }
+
+    #[test]
+    fn standard_export_class_final_brace_maps_only_printer_end_position() {
+        let source = "export default class Example {\n    run(): void {\n    }\n}\n";
+        let source_map = HvigorStandardSourceMapBuilder::new(source, source, "Example.ets")
+            .build()
+            .expect("standard source map");
+        let value: serde_json::Value = serde_json::from_str(&source_map).expect("source map JSON");
+        let mappings = value["mappings"].as_str().expect("mappings");
+        let final_line = mappings.rsplit(';').next().expect("final mapping line");
+
+        assert!(
+            !final_line.contains(','),
+            "TypeScript printer maps only the end of a top-level class closing brace: {mappings}"
+        );
+    }
+
+    #[test]
+    fn standard_direct_ohos_imports_map_local_bindings_like_typescript_printer() {
+        let original = r#"import StartupConfigEntry from '@ohos.app.appstartup.StartupConfigEntry';
+import StartupConfig from '@ohos.app.appstartup.StartupConfig';
+
+export default class ArkdownStartupConfig extends StartupConfigEntry {
+  onConfig(): StartupConfig {
+    return { timeoutMs: 1 };
+  }
+}
+"#;
+        let generated = r#"import StartupConfigEntry from "@ohos:app.appstartup.StartupConfigEntry";
+import type StartupConfig from "@ohos:app.appstartup.StartupConfig";
+export default class ArkdownStartupConfig extends StartupConfigEntry {
+    onConfig(): StartupConfig {
+        return { timeoutMs: 1 };
+    }
+}
+"#;
+        let source_map =
+            HvigorStandardSourceMapBuilder::new(generated, original, "StartupConfig.ets")
+                .build()
+                .expect("standard source map");
+        let value: serde_json::Value = serde_json::from_str(&source_map).expect("source map JSON");
+
+        assert_eq!(
+            value["mappings"],
+            "OAAO,kBAAkB;YAClB,aAAa;AAEpB,MAAM,CAAC,OAAO,OAAO,oBAAqB,SAAQ,kBAAkB;IAClE,QAAQ,IAAI,aAAa;QACvB,OAAO,EAAE,SAAS,EAAE,CAAC,EAAE,CAAC;IAC1B,CAAC;CACF"
+        );
+    }
+
+    #[test]
+    fn standard_async_method_maps_modifier_end_and_method_start() {
+        let original = "export default class MyStartupTask {\n  async init() {\n  }\n}\n";
+        let generated = "export default class MyStartupTask {\n    async init() {\n    }\n}\n";
+        let source_map =
+            HvigorStandardSourceMapBuilder::new(generated, original, "MyStartupTask.ets")
+                .build()
+                .expect("standard source map");
+        let value: serde_json::Value = serde_json::from_str(&source_map).expect("source map JSON");
+
+        assert_eq!(
+            value["mappings"],
+            "AAAA,MAAM,CAAC,OAAO,OAAO,aAAa;IAChC,KAAK,CAAC,IAAI;IACV,CAAC;CACF"
+        );
+    }
 }
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{ImportDeclarationSpecifier, Statement};
+use oxc_ast::ast::{
+    Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier, Statement,
+};
 use oxc_parser::config::TokensParserConfig;
 use oxc_parser::Kind;
 use oxc_parser::Parser;
@@ -267,7 +332,8 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
         let generated_import_end =
             SourceMapImportPrefix::new(self.generated, self.id).generated_end();
         let original_import_end = SourceMapImportPrefix::new(self.original, self.id).original_end();
-        let original_bindings = OriginalKitBindingCollector::new(self.original, self.id).collect();
+        let original_bindings =
+            OriginalImportBindingCollector::new(self.original, self.id).collect();
         let mut entries = MapEntryCollector::default();
 
         for token in generated_tokens
@@ -292,6 +358,7 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
             .unwrap_or(original_tokens.len());
         let generated_text = GeneratedSourceMapText::new(self.generated);
         let final_generated_line = generated_text.final_line();
+        let final_statement_is_class = self.final_statement_is_class();
 
         for (index, token) in body_tokens.iter().enumerate() {
             while original_index < original_tokens.len()
@@ -320,7 +387,7 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
                 neighbors.previous(),
                 neighbors.next(),
                 line_facts,
-                token.line == final_generated_line,
+                token.line == final_generated_line && final_statement_is_class,
             );
 
             if decision.should_map_start() {
@@ -333,9 +400,21 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
             }
 
             if decision.should_map_end() {
-                let source_col_adjust = if neighbors
+                let class_heritage_source_adjust = if neighbors
                     .previous()
                     .is_some_and(SourceMapTokenInfo::is_class_keyword)
+                    && neighbors
+                        .next()
+                        .is_some_and(SourceMapTokenInfo::is_class_heritage_keyword)
+                {
+                    1
+                } else {
+                    0
+                };
+                let return_object_trailing_space_adjust = if token.is_return_keyword()
+                    && neighbors
+                        .next()
+                        .is_some_and(SourceMapTokenInfo::is_open_brace)
                 {
                     1
                 } else {
@@ -343,15 +422,41 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
                 };
                 entries.push(
                     token.end_line,
-                    token.end_col,
+                    token.end_col + return_object_trailing_space_adjust,
                     original_token.end_line,
-                    original_token.end_col + source_col_adjust,
+                    original_token.end_col
+                        + class_heritage_source_adjust
+                        + return_object_trailing_space_adjust,
                 );
             }
         }
 
         let entries = entries.into_vec();
         Some(EtsSourceMapBuilder::new(self.id, generated_text.line_count(), &entries).build())
+    }
+
+    fn final_statement_is_class(&self) -> bool {
+        let allocator = Allocator::default();
+        let source_type =
+            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let parsed = Parser::new(&allocator, self.generated, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return false;
+        }
+        let Some(statement) = parsed.program.body.last() else {
+            return false;
+        };
+        match statement {
+            Statement::ClassDeclaration(_) => true,
+            Statement::ExportDefaultDeclaration(export) => matches!(
+                &export.declaration,
+                ExportDefaultDeclarationKind::ClassDeclaration(_)
+            ),
+            Statement::ExportNamedDeclaration(export) => {
+                matches!(&export.declaration, Some(Declaration::ClassDeclaration(_)))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -461,12 +566,12 @@ impl<'a> SourceMapImportPrefix<'a> {
     }
 }
 
-struct OriginalKitBindingCollector<'a> {
+struct OriginalImportBindingCollector<'a> {
     source: &'a str,
     id: &'a str,
 }
 
-impl<'a> OriginalKitBindingCollector<'a> {
+impl<'a> OriginalImportBindingCollector<'a> {
     fn new(source: &'a str, id: &'a str) -> Self {
         Self { source, id }
     }
@@ -485,18 +590,21 @@ impl<'a> OriginalKitBindingCollector<'a> {
             let Statement::ImportDeclaration(import) = statement else {
                 continue;
             };
-            if !crate::kit_map::is_kit_specifier(import.source.value.as_str()) {
-                continue;
-            }
             let Some(specifiers) = import.specifiers.as_ref() else {
                 continue;
             };
             for specifier in specifiers {
-                let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                    continue;
+                let local = match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => &specifier.local,
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        &specifier.local
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        &specifier.local
+                    }
                 };
-                let name = specifier.local.name.as_str();
-                let span = specifier.local.span;
+                let name = local.name.as_str();
+                let span = local.span;
                 bindings.insert(name.to_string(), (span.start, span.end));
             }
         }
@@ -533,6 +641,7 @@ impl<'a, 'b, 'source> TokenLineNeighbors<'a, 'b, 'source> {
         let mut first = None;
         let mut count = 0usize;
         let mut contains_if = false;
+        let mut contains_return = false;
         for token in self
             .tokens
             .iter()
@@ -544,20 +653,28 @@ impl<'a, 'b, 'source> TokenLineNeighbors<'a, 'b, 'source> {
             }
             count += 1;
             contains_if |= token.is_if_keyword();
+            contains_return |= token.is_return_keyword();
         }
 
         let standalone_close_brace =
             count == 1 && first.is_some_and(SourceMapTokenInfo::is_close_brace);
-        Self::line_facts_from_first_token(first, contains_if, standalone_close_brace)
+        Self::line_facts_from_first_token(
+            first,
+            contains_if,
+            contains_return,
+            standalone_close_brace,
+        )
     }
 
     fn line_facts_from_first_token(
         first: Option<&TokenInfo<'_>>,
         contains_if: bool,
+        contains_return: bool,
         standalone_close_brace: bool,
     ) -> StandardTokenLineFacts {
         StandardTokenLineFacts {
             contains_if,
+            contains_return,
             standalone_close_brace,
             deep_standalone_close_brace: standalone_close_brace
                 && first.is_some_and(|token| token.col >= 12),
@@ -570,6 +687,7 @@ impl<'a, 'b, 'source> TokenLineNeighbors<'a, 'b, 'source> {
 #[derive(Clone, Copy)]
 struct StandardTokenLineFacts {
     contains_if: bool,
+    contains_return: bool,
     standalone_close_brace: bool,
     deep_standalone_close_brace: bool,
     starts_const_declaration: bool,
@@ -580,7 +698,7 @@ struct StandardTokenMappingDecision<'a> {
     previous: Option<&'a TokenInfo<'a>>,
     next: Option<&'a TokenInfo<'a>>,
     line_facts: StandardTokenLineFacts,
-    is_final_line: bool,
+    suppress_final_close_brace_start: bool,
 }
 
 impl<'a> StandardTokenMappingDecision<'a> {
@@ -589,20 +707,24 @@ impl<'a> StandardTokenMappingDecision<'a> {
         previous: Option<&'a TokenInfo<'a>>,
         next: Option<&'a TokenInfo<'a>>,
         line_facts: StandardTokenLineFacts,
-        is_final_line: bool,
+        suppress_final_close_brace_start: bool,
     ) -> Self {
         Self {
             token,
             previous,
             next,
             line_facts,
-            is_final_line,
+            suppress_final_close_brace_start,
         }
     }
 
     fn should_map_start(&self) -> bool {
         let context = StandardTokenMapContext::new(self.previous, self.line_facts);
-        if self.is_final_line && self.token.is_close_brace() {
+        if self.token.is_function_keyword()
+            && self
+                .previous
+                .is_some_and(SourceMapTokenInfo::is_export_modifier)
+        {
             return false;
         }
         if self.token.is_standard_start_suppressed() {
@@ -621,6 +743,13 @@ impl<'a> StandardTokenMappingDecision<'a> {
         if self.token.is_colon() && self.next.is_some_and(SourceMapTokenInfo::is_void_keyword) {
             return false;
         }
+        if self.token.is_colon()
+            && self
+                .previous
+                .is_some_and(SourceMapTokenInfo::is_close_paren)
+        {
+            return false;
+        }
         if self.token.is_open_brace() && !context.is_conditional_block_open() {
             return false;
         }
@@ -632,6 +761,15 @@ impl<'a> StandardTokenMappingDecision<'a> {
             return false;
         }
         if self.token.is_close_brace() && self.line_facts.deep_standalone_close_brace {
+            return false;
+        }
+        if self.token.is_close_brace()
+            && self.line_facts.contains_return
+            && !self.line_facts.standalone_close_brace
+        {
+            return false;
+        }
+        if self.token.is_close_brace() && self.suppress_final_close_brace_start {
             return false;
         }
         true
@@ -661,6 +799,11 @@ impl<'a> StandardTokenMappingDecision<'a> {
         {
             return true;
         }
+        if self.token.is_identifier_name()
+            && self.next.is_some_and(SourceMapTokenInfo::is_open_brace)
+        {
+            return true;
+        }
         false
     }
 }
@@ -686,7 +829,10 @@ impl<'a> StandardTokenMapContext<'a> {
 }
 
 trait SourceMapTokenInfo {
+    fn is_function_keyword(&self) -> bool;
+    fn is_export_modifier(&self) -> bool;
     fn is_class_keyword(&self) -> bool;
+    fn is_class_heritage_keyword(&self) -> bool;
     fn is_if_keyword(&self) -> bool;
     fn is_return_keyword(&self) -> bool;
     fn is_void_keyword(&self) -> bool;
@@ -706,8 +852,20 @@ trait SourceMapTokenInfo {
 }
 
 impl SourceMapTokenInfo for TokenInfo<'_> {
+    fn is_function_keyword(&self) -> bool {
+        self.kind == Kind::Function
+    }
+
+    fn is_export_modifier(&self) -> bool {
+        matches!(self.kind, Kind::Export | Kind::Default)
+    }
+
     fn is_class_keyword(&self) -> bool {
         self.kind == Kind::Class
+    }
+
+    fn is_class_heritage_keyword(&self) -> bool {
+        matches!(self.kind, Kind::Extends | Kind::Implements)
     }
 
     fn is_if_keyword(&self) -> bool {
@@ -757,8 +915,8 @@ impl SourceMapTokenInfo for TokenInfo<'_> {
     fn should_map_end_directly(&self) -> bool {
         matches!(
             self.kind,
-            Kind::Export | Kind::Default | Kind::Void | Kind::Arrow
-        )
+            Kind::Export | Kind::Default | Kind::Async | Kind::Void | Kind::Arrow
+        ) || self.kind.is_number()
     }
 
     fn starts_const_initializer(&self) -> bool {

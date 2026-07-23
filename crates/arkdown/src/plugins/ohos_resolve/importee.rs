@@ -5,8 +5,9 @@
 //   • non-entry importees  — modules pulled in by entries but not entry chunks themselves
 //   • compiled importees   — source files compiled by CompileArkTS (relative paths)
 //
-// The results are written to loader.json and to an importee cache JSON file under
-// `intermediates/importee/default/{module_name}/importee.json`.
+// The result is consumed by loader.json generation. Hvigor persists its
+// incremental importee sets in the CompileArkTS cache as three conditional
+// files; it does not emit a combined intermediates/importee JSON artifact.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
@@ -15,8 +16,6 @@ use arkdown_core::HvigorModuleSourceFile;
 use arkdown_path::{
     lexical_normalize, ArtifactPathSerializer, ModuleSpecifier, OhmUrl, SpecifierKind,
 };
-use serde::{Deserialize, Serialize};
-
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -27,17 +26,9 @@ pub struct ProcessImporteeConfig {
     pub bundle_name: String,
     /// Module name, e.g. `"entry"`.
     pub module_name: String,
-    /// Module version string.  Empty string is acceptable.
-    pub module_version: String,
-    /// Absolute path to the project root.
-    pub project_root: PathBuf,
     /// Absolute path to the module's `src/main` directory (used to derive
     /// relative source paths for `compiled_importees`).
     pub module_src_main: PathBuf,
-    /// Absolute path to the module's `build/default/intermediates` directory.
-    /// The importee cache JSON is written to
-    /// `{output_dir}/importee/default/{module_name}/importee.json`.
-    pub output_dir: PathBuf,
 }
 
 /// Result of the post-bundle importee processing pass.
@@ -48,19 +39,6 @@ pub struct ProcessImporteeResult {
     /// Source paths relative to the module `src/main` directory, e.g.
     /// `"./ets/entryability/EntryAbility.ets"`.
     pub compiled_importees: Vec<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Internal cache file schema
-// ---------------------------------------------------------------------------
-
-/// Cache file persisted to
-/// `intermediates/importee/default/{module_name}/importee.json`.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ImporteeCache {
-    non_entry_importees: Vec<String>,
-    compiled_importees: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,8 +68,7 @@ impl<'a> ProcessImporteeRunner<'a> {
         }
     }
 
-    /// Categorize all imported modules and write
-    /// `{config.output_dir}/importee/default/{config.module_name}/importee.json`.
+    /// Categorize all imported modules for loader generation.
     ///
     /// ## Algorithm
     ///
@@ -101,7 +78,7 @@ impl<'a> ProcessImporteeRunner<'a> {
     ///    to OHM URL format from their module ID.
     /// 4. Compiled importees = all non-external module source files converted
     ///    to paths relative to `config.module_src_main`.
-    pub fn process(&self) -> std::io::Result<ProcessImporteeResult> {
+    pub fn process(&self) -> ProcessImporteeResult {
         let compiled_module_ids = self
             .module_source_files
             .iter()
@@ -156,13 +133,10 @@ impl<'a> ProcessImporteeRunner<'a> {
         compiled_importees.sort();
         compiled_importees.dedup();
 
-        // ── 6. Write importee cache JSON ─────────────────────────────────────
-        ImporteeCacheWriter::new(self.config).write(&non_entry_importees, &compiled_importees)?;
-
-        Ok(ProcessImporteeResult {
+        ProcessImporteeResult {
             non_entry_importees,
             compiled_importees,
-        })
+        }
     }
 }
 
@@ -308,40 +282,6 @@ impl<'a> ImporteePathRelativizer<'a> {
     }
 }
 
-struct ImporteeCacheWriter<'a> {
-    config: &'a ProcessImporteeConfig,
-}
-
-impl<'a> ImporteeCacheWriter<'a> {
-    fn new(config: &'a ProcessImporteeConfig) -> Self {
-        Self { config }
-    }
-
-    /// Write the importee cache JSON to the intermediates directory.
-    fn write(
-        &self,
-        non_entry_importees: &[String],
-        compiled_importees: &[String],
-    ) -> std::io::Result<()> {
-        let cache_dir = self
-            .config
-            .output_dir
-            .join("importee")
-            .join("default")
-            .join(&self.config.module_name);
-        std::fs::create_dir_all(&cache_dir)?;
-
-        let cache = ImporteeCache {
-            non_entry_importees: non_entry_importees.to_vec(),
-            compiled_importees: compiled_importees.to_vec(),
-        };
-        let json = serde_json::to_string_pretty(&cache)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(cache_dir.join("importee.json"), json.as_bytes())?;
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -352,14 +292,11 @@ mod tests {
 
     use super::*;
 
-    fn make_config(tmp_dir: &Path) -> ProcessImporteeConfig {
+    fn make_config() -> ProcessImporteeConfig {
         ProcessImporteeConfig {
             bundle_name: "com.example.app".to_string(),
             module_name: "entry".to_string(),
-            module_version: "1.0.0".to_string(),
-            project_root: PathBuf::from("/project"),
             module_src_main: PathBuf::from("/project/entry/src/main"),
-            output_dir: tmp_dir.to_path_buf(),
         }
     }
 
@@ -371,6 +308,7 @@ mod tests {
             source_file: module_id.to_string(),
             package_name: Some("entry".to_string()),
             is_commonjs: false,
+            is_shared_module: false,
             origin_source_lang: "ets".to_string(),
             imported_record_names: Vec::new(),
         }
@@ -451,37 +389,23 @@ mod tests {
 
     #[test]
     fn test_process_importees_empty_graph() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = make_config(tmp.path());
+        let config = make_config();
         let files = Vec::new();
         let entries = Vec::new();
         let imports = FxHashMap::default();
-        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config)
-            .process()
-            .unwrap();
+        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config).process();
         assert!(result.non_entry_importees.is_empty());
         assert!(result.compiled_importees.is_empty());
-
-        // Cache file should still be written.
-        let cache_path = tmp.path().join("importee/default/entry/importee.json");
-        assert!(cache_path.exists());
-        let content = std::fs::read_to_string(&cache_path).unwrap();
-        let parsed: ImporteeCache = serde_json::from_str(&content).unwrap();
-        assert!(parsed.non_entry_importees.is_empty());
-        assert!(parsed.compiled_importees.is_empty());
     }
 
     #[test]
     fn test_process_importees_single_entry_no_imports() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = make_config(tmp.path());
+        let config = make_config();
         let entry = "/project/entry/src/main/ets/entryability/EntryAbility.ets".to_string();
         let files = vec![module_source(&entry)];
         let entries = vec![entry];
         let imports = FxHashMap::default();
-        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config)
-            .process()
-            .unwrap();
+        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config).process();
 
         // No non-entry importees (the entry imports no compiled module).
         assert!(result.non_entry_importees.is_empty());
@@ -494,17 +418,14 @@ mod tests {
 
     #[test]
     fn test_process_importees_entry_with_shared_chunk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = make_config(tmp.path());
+        let config = make_config();
         let entry = "/project/entry/src/main/ets/entryability/EntryAbility.ets".to_string();
         let utils = "/project/entry/src/main/ets/utils/Helpers.ets".to_string();
         let files = vec![module_source(&entry), module_source(&utils)];
         let entries = vec![entry.clone()];
         let imports = module_imports(&[(&entry, &[&utils])]);
 
-        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config)
-            .process()
-            .unwrap();
+        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config).process();
 
         assert_eq!(
             result.non_entry_importees,
@@ -522,59 +443,29 @@ mod tests {
 
     #[test]
     fn test_process_importees_external_facade_excluded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = make_config(tmp.path());
+        let config = make_config();
         let external = "@bundle:com.example.har/lib/index".to_string();
         let files = vec![module_source(&external)];
         let entries = vec![external];
         let imports = FxHashMap::default();
-        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config)
-            .process()
-            .unwrap();
+        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config).process();
 
         assert!(result.compiled_importees.is_empty());
     }
 
     #[test]
     fn test_process_importees_unreachable_chunk_excluded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = make_config(tmp.path());
+        let config = make_config();
         let entry = "/project/entry/src/main/ets/entryability/EntryAbility.ets".to_string();
         let orphan = "/project/entry/src/main/ets/orphan/Orphan.ets".to_string();
         let files = vec![module_source(&entry), module_source(&orphan)];
         let entries = vec![entry];
         let imports = FxHashMap::default();
-        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config)
-            .process()
-            .unwrap();
+        let result = ProcessImporteeRunner::new(&files, &entries, &imports, &config).process();
 
         // Orphan module is not reachable from an entry → not in non_entry_importees.
         assert!(result.non_entry_importees.is_empty());
         // But it still appears in compiled_importees because CompileArkTS compiled it.
         assert_eq!(result.compiled_importees.len(), 2);
-    }
-
-    #[test]
-    fn test_cache_file_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = make_config(tmp.path());
-        let entry = "/project/entry/src/main/ets/entryability/EntryAbility.ets".to_string();
-        let utils = "/project/entry/src/main/ets/utils/Helpers.ets".to_string();
-        let files = vec![module_source(&entry), module_source(&utils)];
-        let entries = vec![entry.clone()];
-        let imports = module_imports(&[(&entry, &[&utils])]);
-
-        ProcessImporteeRunner::new(&files, &entries, &imports, &config)
-            .process()
-            .unwrap();
-
-        let cache_path = tmp.path().join("importee/default/entry/importee.json");
-        let content = std::fs::read_to_string(&cache_path).unwrap();
-        let parsed: ImporteeCache = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            parsed.non_entry_importees,
-            vec!["@bundle:com.example.app/entry/ets/utils/Helpers".to_string()]
-        );
-        assert_eq!(parsed.compiled_importees.len(), 2);
     }
 }

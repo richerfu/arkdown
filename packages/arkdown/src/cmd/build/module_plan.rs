@@ -9,7 +9,12 @@ impl ModuleSelectionPlanner {
   pub(super) fn build_modules_for_target<'a>(
     config: &'a ArkdownConfig,
     selected_module: Option<&str>,
-  ) -> Vec<&'a ModuleConfig> {
+  ) -> anyhow::Result<Vec<&'a ModuleConfig>> {
+    if let Some(selected) = selected_module {
+      if !config.modules.iter().any(|module| module.name == selected) {
+        anyhow::bail!("selected module '{selected}' does not exist in build-profile.json5");
+      }
+    }
     let matching: Vec<&ModuleConfig> = config
       .modules
       .iter()
@@ -25,18 +30,15 @@ impl ModuleSelectionPlanner {
       })
       .collect();
     if matching.is_empty() {
-      config
-        .modules
-        .iter()
-        .filter(|module| {
-          selected_module
-            .map(|selected| module.name == selected)
-            .unwrap_or(true)
-        })
-        .collect()
-    } else {
-      matching
+      let scope = selected_module
+        .map(|name| format!("module '{name}'"))
+        .unwrap_or_else(|| "configured modules".to_string());
+      anyhow::bail!(
+        "{scope} cannot produce the requested {:?} target; module type fallback is not permitted",
+        config.output_target
+      );
     }
+    Ok(matching)
   }
 
   pub(super) fn resource_modules_for_build<'a>(

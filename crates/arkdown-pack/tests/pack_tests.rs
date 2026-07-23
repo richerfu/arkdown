@@ -5,11 +5,12 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 use arkdown_core::{
-    ArkdownConfig, BuildMode, BuildOption, NativeLibOption, OutputTarget, ProductConfig, SdkConfig,
-    StrictModeConfig,
+    ArkdownConfig, BuildMode, BuildOption, HarArtifactType, NativeLibOption, OutputTarget,
+    ProductConfig, SdkConfig, StrictModeConfig,
 };
 use arkdown_pack::{
-    normalize_integrated_hsps, HarPackInput, IntegratedHspEntry, PackError, PackInput, Packager,
+    normalize_integrated_hsps, HarPackInput, HarVariantInput, HspInterfaceHarInput,
+    IntegratedHspEntry, PackError, PackInput, Packager,
 };
 use flate2::write::DeflateEncoder;
 
@@ -27,16 +28,20 @@ fn make_config() -> Arc<ArkdownConfig> {
             bundle_name: "com.test.packtest".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
             compatible_sdk_version_stage: None,
+            target_sdk_version: None,
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
                 preload_system_so: false,
                 preload_so: vec![],
+                deduplicate_har: false,
                 remove_permissions: vec![],
                 aot_compile_mode: None,
                 host_pgo: None,
                 ap_path: None,
                 abi_filters: vec![],
+                external_native_options: None,
+                har_artifact_type: arkdown_core::HarArtifactType::Original,
                 native_lib: NativeLibOption::default(),
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
@@ -80,6 +85,27 @@ fn rawzip_deflated_len_for_level(content: &[u8], level: flate2::Compression) -> 
     encoder.finish().unwrap().len()
 }
 
+fn read_har_entries(path: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let file = fs::File::open(path).expect("open HAR");
+    let gzip = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gzip);
+    archive
+        .entries()
+        .expect("valid TAR entries")
+        .map(|entry| {
+            let mut entry = entry.expect("valid TAR entry");
+            let path = entry
+                .path()
+                .expect("valid TAR path")
+                .to_string_lossy()
+                .into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read TAR entry");
+            (path, bytes)
+        })
+        .collect()
+}
+
 fn minimal_pack_input(
     abc: std::path::PathBuf,
     res: std::path::PathBuf,
@@ -91,6 +117,7 @@ fn minimal_pack_input(
         abc_path: abc,
         resources_index: res,
         module_json: modj,
+        pack_info_module_json: None,
         native_libs: vec![],
         compress_native_libs: false,
         output_path: out,
@@ -103,6 +130,7 @@ fn minimal_pack_input(
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
+        syscap_path: None,
         device_types: vec![],
         installation_free: false,
         delivery_with_install: true,
@@ -343,6 +371,38 @@ fn test_pack_info_splits_api_versions_and_includes_form_extensions() {
                 "name": "ohos.extension.form",
                 "resource": "$profile:form_config"
               }]
+            }, {
+              "name": "DependencyExtensionAbility",
+              "type": "workScheduler"
+            }]
+          }
+        }"#,
+    )
+    .unwrap();
+    let pack_info_module_json = tmp.path().join("current-module.json");
+    fs::write(
+        &pack_info_module_json,
+        r#"{
+          "module": {
+            "name": "entry",
+            "type": "entry",
+            "extensionAbilities": [{
+              "name": "EntryFormAbility",
+              "type": "form",
+              "metadata": [{
+                "name": "ohos.extension.form",
+                "resource": "$profile:form_config"
+              }]
+            }, {
+              "name": "BackupExtensionAbility",
+              "type": "backup",
+              "metadata": [{
+                "name": "ohos.extension.backup",
+                "resource": "$profile:backup_config"
+              }]
+            }, {
+              "name": "LiveViewExtensionAbility",
+              "type": "liveViewLockScreen"
             }]
           }
         }"#,
@@ -373,6 +433,7 @@ fn test_pack_info_splits_api_versions_and_includes_form_extensions() {
 
     let mut input = minimal_pack_input(abc, res, modj, out.clone());
     input.resources_src_dir = Some(tmp.path().join("compiled/resources"));
+    input.pack_info_module_json = Some(pack_info_module_json);
 
     Packager::new(Arc::new(config))
         .pack_hap(input)
@@ -406,6 +467,24 @@ fn test_pack_info_splits_api_versions_and_includes_form_extensions() {
             .is_none(),
         "pack.info form summary must not include source-only fields"
     );
+    assert_eq!(
+        module["extensionAbilities"][1]["name"],
+        "BackupExtensionAbility"
+    );
+    assert_eq!(
+        module["extensionAbilities"][1]["forms"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        module["extensionAbilities"][2]["name"],
+        "LiveViewExtensionAbility"
+    );
+    assert!(module["extensionAbilities"][2].get("forms").is_none());
+    assert!(module["extensionAbilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|ability| ability["name"] != "DependencyExtensionAbility"));
 }
 
 #[test]
@@ -456,7 +535,13 @@ fn test_hap_packages_pkg_context_info_when_provided_like_hvigor() {
     entry.read_to_string(&mut content).unwrap();
     assert!(
         content.contains(r#""entryPath":"ets/modules.abc""#),
-        "pkgContextInfo.json content must be preserved, got: {content}"
+        "pkgContextInfo.json content must survive package-tool normalization, got: {content}"
+    );
+    drop(entry);
+    assert_eq!(
+        archive.file_names().last(),
+        Some("pkgContextInfo.json"),
+        "SDK app_packing_tool writes pkgContextInfo.json after pack.info"
     );
 }
 
@@ -538,6 +623,39 @@ fn test_hap_rawzip_entries_use_dos_creator_metadata() {
 }
 
 #[test]
+fn test_hap_stored_local_headers_match_sdk_packing_tool_shape() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("local_header.hap");
+
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
+        .expect("pack_hap must succeed");
+
+    // SDK app_packing_tool.jar emits stored entries with extract version 1.0,
+    // concrete CRC/sizes in the local header, and no data descriptor flag.
+    let bytes = fs::read(out).expect("read HAP");
+    let read_u16 = |offset| u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+    let read_u32 = |offset| {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    };
+    assert_eq!(&bytes[..4], b"PK\x03\x04");
+    assert_eq!(read_u16(4), 10);
+    assert_eq!(read_u16(6), 0x0800);
+    assert_ne!(read_u32(14), 0);
+    assert_eq!(read_u32(18), read_u32(22));
+
+    let next_header =
+        30 + usize::from(read_u16(26)) + usize::from(read_u16(28)) + read_u32(18) as usize;
+    assert_eq!(&bytes[next_header..next_header + 4], b"PK\x03\x04");
+}
+
+#[test]
 fn test_hap_contains_profile_guided_ap_from_hvigor_intermediate() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let module_root = tmp.path().join("entry");
@@ -607,6 +725,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             abc_path: abc,
             resources_index: res,
             module_json: modj,
+            pack_info_module_json: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -619,6 +738,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            syscap_path: None,
             device_types: vec![],
             installation_free: false,
             delivery_with_install: true,
@@ -670,6 +790,7 @@ fn test_missing_abc_returns_missing_input_error() {
         abc_path: tmp.path().join("missing.abc"), // does not exist
         resources_index: res,
         module_json: modj,
+        pack_info_module_json: None,
         native_libs: vec![],
         compress_native_libs: false,
         output_path: tmp.path().join("out.hap"),
@@ -682,6 +803,7 @@ fn test_missing_abc_returns_missing_input_error() {
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
+        syscap_path: None,
         device_types: vec![],
         installation_free: false,
         delivery_with_install: true,
@@ -701,6 +823,7 @@ fn test_missing_module_json_returns_missing_input_error() {
         abc_path: tmp.path().join("m.abc"),
         resources_index: tmp.path().join("m.index"),
         module_json: tmp.path().join("m.json"), // does not exist
+        pack_info_module_json: None,
         native_libs: vec![],
         compress_native_libs: false,
         output_path: tmp.path().join("out.hap"),
@@ -713,6 +836,7 @@ fn test_missing_module_json_returns_missing_input_error() {
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
+        syscap_path: None,
         device_types: vec![],
         installation_free: false,
         delivery_with_install: true,
@@ -739,6 +863,7 @@ fn test_hsp_output_is_valid_zip() {
             abc_path: abc,
             resources_index: res,
             module_json: modj,
+            pack_info_module_json: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -751,6 +876,7 @@ fn test_hsp_output_is_valid_zip() {
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            syscap_path: None,
             device_types: vec![],
             installation_free: false,
             delivery_with_install: true,
@@ -762,7 +888,7 @@ fn test_hsp_output_is_valid_zip() {
 }
 
 #[test]
-fn test_hsp_pack_info_uses_shared_bundle_type() {
+fn test_hsp_pack_info_keeps_app_bundle_type_and_uses_shared_module_type() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
     let out = tmp.path().join("shared_pack_info.hsp");
@@ -774,6 +900,7 @@ fn test_hsp_pack_info_uses_shared_bundle_type() {
             abc_path: abc,
             resources_index: res,
             module_json: modj,
+            pack_info_module_json: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -786,6 +913,7 @@ fn test_hsp_pack_info_uses_shared_bundle_type() {
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            syscap_path: None,
             device_types: vec!["phone".to_string()],
             installation_free: false,
             delivery_with_install: true,
@@ -799,12 +927,113 @@ fn test_hsp_pack_info_uses_shared_bundle_type() {
     entry.read_to_string(&mut content).unwrap();
     let pack_info: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-    assert_eq!(pack_info["summary"]["app"]["bundleType"], "shared");
+    assert_eq!(pack_info["summary"]["app"]["bundleType"], "app");
+    assert!(pack_info["summary"]["modules"][0]
+        .get("mainAbility")
+        .is_none());
+    assert!(pack_info["summary"]["modules"][0]
+        .get("abilities")
+        .is_none());
     assert_eq!(
         pack_info["summary"]["modules"][0]["distro"]["moduleType"],
         "shared"
     );
     assert_eq!(pack_info["packages"][0]["moduleType"], "shared");
+}
+
+#[test]
+fn test_hsp_interface_har_matches_prepare_shared_har_resource_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let declarations = module_root.join("build/default/intermediates/loader_out/default/etsFortgz");
+    let declaration = declarations.join("entry/src/main/ets/Index.d.ets");
+    let processed_module =
+        module_root.join("build/default/intermediates/process_profile/default/module.json");
+    let resource_table =
+        module_root.join("build/default/intermediates/res/default/ResourceTable.txt");
+    let native_lib =
+        module_root.join("build/default/intermediates/stripped_native_libs/arm64-v8a/libshared.so");
+    fs::create_dir_all(declaration.parent().unwrap()).unwrap();
+    fs::create_dir_all(processed_module.parent().unwrap()).unwrap();
+    fs::create_dir_all(resource_table.parent().unwrap()).unwrap();
+    fs::create_dir_all(native_lib.parent().unwrap()).unwrap();
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{
+  "modelVersion": "6.0.0",
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "Shared module",
+  "main": "",
+  "dependencies": {}
+}"#,
+    )
+    .unwrap();
+    fs::write(&declaration, "export declare const value: string;\r\n").unwrap();
+    fs::write(&resource_table, "string app_name 0x01000000\n").unwrap();
+    fs::write(&native_lib, b"ELF").unwrap();
+    fs::write(
+        &processed_module,
+        r#"{"app":{"bundleName":"com.example.shared","bundleType":"app","debug":true,"versionCode":1000000,"versionName":"1.0.0","minAPIVersion":50005017,"targetAPIVersion":50005017,"apiReleaseType":"Release","targetMinorAPIVersion":0,"targetPatchAPIVersion":0,"compileSdkVersion":"ignored"},"module":{"name":"entry","packageName":"entry","type":"shared","deliveryWithInstall":true,"deviceTypes":["phone"],"dependencies":[],"srcEntry":"./ets/Index.ets"}}"#,
+    )
+    .unwrap();
+
+    let output = module_root.join("build/default/outputs/default/entry.har");
+    Packager::new(make_config())
+        .pack_hsp_interface_har(HspInterfaceHarInput {
+            module_name: "entry".to_string(),
+            module_root: module_root.clone(),
+            target_name: "default".to_string(),
+            oh_package_json: module_root.join("oh-package.json5"),
+            processed_module_json: processed_module,
+            declarations_dir: declarations,
+            resource_table_path: Some(resource_table),
+            resource_str_dir: None,
+            privacy_profile_path: None,
+            obfuscation_rules_path: None,
+            native_libs: vec![native_lib],
+            native_header_dirs: Vec::new(),
+            exclude_so_from_interface_har: true,
+            output_path: output.clone(),
+            compatible_sdk_version: 17,
+            compatible_sdk_type: "HarmonyOS".to_string(),
+            use_normalized_ohm_url: false,
+            integrated_hsp: None,
+            source_roots: Vec::new(),
+            dependencies: std::collections::BTreeMap::new(),
+            dynamic_dependencies: std::collections::BTreeMap::new(),
+            debug: true,
+            obfuscated: false,
+        })
+        .expect("PackageSharedHar must succeed");
+
+    let entries = read_har_entries(&output);
+    assert_eq!(
+        entries.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "package/ResourceTable.txt",
+            "package/oh-package.json5",
+            "package/src/",
+            "package/src/main/",
+            "package/src/main/ets/",
+            "package/src/main/ets/Index.d.ets",
+            "package/src/main/module.json",
+        ]
+    );
+    assert_eq!(
+        std::str::from_utf8(&entries["package/src/main/module.json"]).unwrap(),
+        r#"{"app":{"bundleName":"com.example.shared","bundleType":"app","debug":true,"versionCode":1000000,"versionName":"1.0.0","minAPIVersion":50005017,"targetAPIVersion":50005017,"apiReleaseType":"Release","targetMinorAPIVersion":0,"targetPatchAPIVersion":0},"module":{"name":"entry","packageName":"entry","type":"shared","deliveryWithInstall":true,"deviceTypes":["phone"],"dependencies":[]}}
+"#
+    );
+    let package: serde_json::Value =
+        serde_json::from_slice(&entries["package/oh-package.json5"]).unwrap();
+    assert_eq!(package["types"], "index.d.ets");
+    assert_eq!(package["packageType"], "InterfaceHar");
+    assert_eq!(package["compatibleSdkVersion"], 17);
+    assert_eq!(
+        package["metadata"]["sourceRoots"],
+        serde_json::json!(["./src/main", "./build/default/generated/profile/default"])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -836,9 +1065,8 @@ fn test_har_contains_ets_source_files() {
         })
         .expect("pack_har must succeed");
 
-    let file = fs::File::open(&out).expect("open HAR");
-    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
-    let names: Vec<_> = archive.file_names().collect();
+    let entries = read_har_entries(&out);
+    let names: Vec<_> = entries.keys().collect();
     assert!(
         names.iter().any(|n| n.ends_with("Index.ets")),
         "HAR must contain Index.ets; entries: {:?}",
@@ -875,11 +1103,12 @@ fn test_har_contains_oh_package_json5() {
         })
         .expect("pack_har must succeed");
 
-    let file = fs::File::open(&out).expect("open HAR");
-    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
-    let names: Vec<_> = archive.file_names().collect();
+    let entries = read_har_entries(&out);
+    let names: Vec<_> = entries.keys().collect();
     assert!(
-        names.iter().any(|n| *n == "oh-package.json5"),
+        names
+            .iter()
+            .any(|n| n.as_str() == "package/oh-package.json5"),
         "HAR must contain oh-package.json5; entries: {:?}",
         names
     );
@@ -917,23 +1146,22 @@ fn test_har_contains_permission_reason_resource_str() {
         })
         .expect("pack_har must succeed");
 
-    let file = fs::File::open(&out).expect("open HAR");
-    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
-    let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+    let entries = read_har_entries(&out);
+    let names: Vec<_> = entries.keys().collect();
     assert!(
         names
             .iter()
-            .any(|n| n == "src/main/resource/base/element/string.json"),
+            .any(|n| n.as_str() == "package/src/main/resource/base/element/string.json"),
         "HAR must contain permission reason resource_str; entries: {:?}",
         names
     );
 
-    let mut content = String::new();
-    archive
-        .by_name("src/main/resource/base/element/string.json")
-        .expect("resource_str entry")
-        .read_to_string(&mut content)
-        .unwrap();
+    let content = std::str::from_utf8(
+        entries
+            .get("package/src/main/resource/base/element/string.json")
+            .expect("resource_str entry"),
+    )
+    .unwrap();
     assert_eq!(
         content,
         r#"{"string":[{"name":"camera_reason","value":"Need camera"}]}"#
@@ -1051,6 +1279,7 @@ fn test_pack_hap_embeds_integrated_hsp() {
             abc_path: abc,
             resources_index: res,
             module_json: modj,
+            pack_info_module_json: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -1063,6 +1292,7 @@ fn test_pack_hap_embeds_integrated_hsp() {
             abilities: vec![],
             integrated_hsps: vec![integrated_entry],
             privacy_profile_path: None,
+            syscap_path: None,
             device_types: vec![],
             installation_free: false,
             delivery_with_install: true,
@@ -1112,14 +1342,12 @@ fn test_pack_hap_empty_integrated_hsps_no_libs_entry() {
     );
 }
 
-/// Verify that declaration stubs (`index.d.ts`, `index.d.ets`) from the
-/// declarations directory are included in the HAR archive at the root level.
-///
-/// hvigor calls `processDeclarationEntry()` before packing and places the
-/// resulting stubs at the archive root so consumers can use `types` to
-/// resolve type information without running `tsc`.
+/// Original source HARs retain ArkTS sources and do not copy generated
+/// declaration intermediates. Hvigor only copies declarations for customized
+/// or bytecode layouts in `ProcessHarArtifacts.copyDeclareFileToTempDir` /
+/// `copyCompiledSourceFileToTempDir`.
 #[test]
-fn test_har_includes_declaration_stubs() {
+fn test_original_har_omits_generated_declaration_stubs() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let src_dir = tmp.path().join("src/main/ets");
     fs::create_dir_all(&src_dir).unwrap();
@@ -1157,22 +1385,21 @@ fn test_har_includes_declaration_stubs() {
         })
         .expect("pack_har must succeed");
 
-    let file = fs::File::open(&out).expect("open HAR");
-    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
-    let names: Vec<_> = archive.file_names().collect();
+    let entries = read_har_entries(&out);
+    let names: Vec<_> = entries.keys().collect();
 
     assert!(
-        names.iter().any(|n| *n == "index.d.ts"),
-        "HAR must contain index.d.ts declaration stub; entries: {:?}",
+        !names.iter().any(|n| n.as_str() == "package/index.d.ts"),
+        "original HAR must omit generated index.d.ts; entries: {:?}",
         names
     );
     assert!(
-        names.iter().any(|n| *n == "index.d.ets"),
-        "HAR must contain index.d.ets declaration stub; entries: {:?}",
+        !names.iter().any(|n| n.as_str() == "package/index.d.ets"),
+        "original HAR must omit generated index.d.ets; entries: {:?}",
         names
     );
     assert!(
-        !names.iter().any(|n| *n == "other.json"),
+        !names.iter().any(|n| n.as_str() == "package/other.json"),
         "HAR must not contain non-declaration files from declarations dir; entries: {:?}",
         names
     );
@@ -1210,22 +1437,23 @@ fn test_har_includes_consumer_rules() {
         })
         .expect("pack_har must succeed");
 
-    let file = fs::File::open(&out).expect("open HAR");
-    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
-    let names: Vec<_> = archive.file_names().map(str::to_string).collect();
+    let entries = read_har_entries(&out);
+    let names: Vec<_> = entries.keys().collect();
 
     assert!(
-        names.iter().any(|n| n == "obfuscation.txt"),
+        names
+            .iter()
+            .any(|n| n.as_str() == "package/obfuscation.txt"),
         "HAR must contain obfuscation.txt; entries: {:?}",
         names
     );
 
-    let mut content = String::new();
-    archive
-        .by_name("obfuscation.txt")
-        .expect("obfuscation.txt entry")
-        .read_to_string(&mut content)
-        .expect("read obfuscation.txt");
+    let content = std::str::from_utf8(
+        entries
+            .get("package/obfuscation.txt")
+            .expect("obfuscation.txt entry"),
+    )
+    .expect("read obfuscation.txt");
     assert!(
         content.contains("-keep public class"),
         "obfuscation.txt must contain keep rules; got: {:?}",
@@ -1233,13 +1461,10 @@ fn test_har_includes_consumer_rules() {
     );
 }
 
-/// Verify that when declaration stubs exist, `oh-package.json5` in the HAR
-/// archive has a `"types": "index.d.ts"` field added.
-///
-/// hvigor's `processDeclarationEntry()` writes this so downstream consumers can
-/// locate TypeScript declaration stubs without guessing the path.
+/// Merely producing declaration intermediates must not mutate an original
+/// source HAR's package manifest.
 #[test]
-fn test_har_oh_package_json5_has_types_field_when_declarations_present() {
+fn test_original_har_does_not_invent_types_field() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let src_dir = tmp.path().join("src/main/ets");
     fs::create_dir_all(&src_dir).unwrap();
@@ -1281,22 +1506,19 @@ fn test_har_oh_package_json5_has_types_field_when_declarations_present() {
         })
         .expect("pack_har must succeed");
 
-    let file = fs::File::open(&out).expect("open HAR");
-    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
-
-    // Read the oh-package.json5 from the archive.
-    let mut content = String::new();
-    archive
-        .by_name("oh-package.json5")
-        .expect("oh-package.json5 entry")
-        .read_to_string(&mut content)
-        .expect("read oh-package.json5");
+    let entries = read_har_entries(&out);
+    let content = std::str::from_utf8(
+        entries
+            .get("package/oh-package.json5")
+            .expect("oh-package.json5 entry"),
+    )
+    .expect("read oh-package.json5");
 
     let pkg: serde_json::Value = serde_json::from_str(&content).expect("parse oh-package.json5");
     assert_eq!(
         pkg.get("types").and_then(|v| v.as_str()),
-        Some("index.d.ts"),
-        "oh-package.json5 must have types: 'index.d.ts' when declarations are present; got: {}",
+        None,
+        "original HAR must not invent a types field from generated intermediates; got: {}",
         content
     );
     assert_eq!(
@@ -1360,4 +1582,100 @@ fn test_clean_har_sources_removes_ets_adds_declarations() {
         !output_dir.join("ets/Utils.ts").exists(),
         "original .ts source must be removed (cleanEtsForTgz)"
     );
+}
+
+#[test]
+fn test_bytecode_har_uses_compiled_layout_and_does_not_mutate_source_manifest() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_root = tmp.path().join("library");
+    let source_dir = module_root.join("src/main/ets");
+    let resources_dir = module_root.join("src/main/resources");
+    let compiled_dir = module_root.join("build/default/intermediates/loader_out/default");
+    let declarations_dir = module_root.join("build/default/intermediates/har/default");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::create_dir_all(resources_dir.join("base/element")).unwrap();
+    fs::create_dir_all(compiled_dir.join("ets")).unwrap();
+    fs::create_dir_all(declarations_dir.join("types")).unwrap();
+    fs::write(source_dir.join("Index.ets"), "export class Index {}").unwrap();
+    fs::write(
+        resources_dir.join("base/element/string.json"),
+        r#"{"string":[]}"#,
+    )
+    .unwrap();
+    fs::write(compiled_dir.join("ets/modules.abc"), b"abc").unwrap();
+    fs::write(
+        declarations_dir.join("types/index.d.ts"),
+        "export declare class Index {}",
+    )
+    .unwrap();
+    let processed_module = module_root.join("processed-module.json");
+    let resource_table = module_root.join("ResourceTable.txt");
+    fs::write(&processed_module, r#"{"module":{"name":"library"}}"#).unwrap();
+    fs::write(&resource_table, "resource table").unwrap();
+    let manifest_path = module_root.join("oh-package.json5");
+    let source_manifest = r#"{
+      name: "library",
+      version: "1.0.0",
+      main: "src/main/ets/Index.ets",
+      metadata: { workers: ["src/main/ets/Worker.ets"], runtimeOnly: { sources: ["src/main/ets/Runtime.ets"], packages: ["dep"] } }
+    }"#;
+    fs::write(&manifest_path, source_manifest).unwrap();
+    let output = tmp.path().join("library.har");
+
+    Packager::new(make_config())
+        .pack_har_variant(
+            HarPackInput {
+                module_name: "library".into(),
+                source_dir,
+                resources_dir,
+                resource_str_dir: None,
+                oh_package_json: manifest_path.clone(),
+                output_path: output.clone(),
+                declarations_dir: Some(declarations_dir),
+                consumer_rules_path: None,
+            },
+            HarVariantInput {
+                artifact_type: HarArtifactType::Bytecode,
+                module_root,
+                compiled_output_dir: compiled_dir,
+                processed_module_json: Some(processed_module),
+                resource_table_path: Some(resource_table),
+                native_libs: Vec::new(),
+                native_header_dirs: Vec::new(),
+                preload_system_so_json: None,
+                source_maps_path: None,
+                declaration_entries: vec![
+                    "@normalized:N&&library&library/src/main/ets/Index&1.0.0".into(),
+                ],
+                ignore_resource_patterns: Vec::new(),
+                debug: true,
+                target_name: "default".into(),
+            },
+        )
+        .expect("pack bytecode HAR");
+
+    assert_eq!(fs::read_to_string(&manifest_path).unwrap(), source_manifest);
+    let entries = read_har_entries(&output);
+    assert!(entries.contains_key("package/ets/modules.abc"));
+    assert!(!entries.contains_key("package/src/main/ets/Index.ets"));
+    assert!(entries.contains_key("package/src/main/module.json"));
+    assert!(entries.contains_key("package/ResourceTable.txt"));
+    assert!(entries.contains_key("package/types/index.d.ts"));
+    let manifest: serde_json::Value = serde_json::from_slice(
+        entries
+            .get("package/oh-package.json5")
+            .expect("oh-package.json5"),
+    )
+    .unwrap();
+    assert_eq!(manifest["metadata"]["byteCodeHar"], true);
+    assert_eq!(
+        manifest["metadata"]["declarationEntry"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(manifest.get("main").is_none());
+    assert!(manifest["metadata"].get("workers").is_none());
+    assert!(manifest["metadata"]["runtimeOnly"].get("sources").is_none());
 }

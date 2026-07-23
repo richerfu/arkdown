@@ -17,7 +17,8 @@ use arkdown_path::{
 };
 
 use crate::bytecode_har::{
-    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, LoaderByteCodeHarFields,
+    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CompatibleSdkVersionValue,
+    LoaderByteCodeHarFields,
 };
 use crate::form_profile::{FormProfileProcessor, ModuleFormProfileInput};
 use crate::layout::ProfileModuleLayout;
@@ -51,7 +52,7 @@ pub struct LoaderJson {
     /// hvigor node_modules sandbox path under `intermediates/loader_out`.
     pub node_modules_path: String,
     /// ByteCode HAR dependency metadata.
-    pub byte_code_har_info: FxHashMap<String, ByteCodeHarEntry>,
+    pub byte_code_har_info: IndexMap<String, ByteCodeHarEntry>,
     /// ByteCode HAR declaration entries. Empty for the minimal HAP fixture.
     pub declaration_entry: Vec<String>,
     /// The OHOS module name (e.g. `"entry"`).
@@ -74,7 +75,7 @@ pub struct LoaderJson {
     /// HSP resource table map. Empty for the minimal fixture.
     pub hsp_resources_map: FxHashMap<String, String>,
     /// Incremental update metadata. Empty for the minimal fixture.
-    pub update_version_info: FxHashMap<String, serde_json::Value>,
+    pub update_version_info: IndexMap<String, serde_json::Value>,
     /// Ark Native output path emitted by hvigor when AOT is enabled for this module.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub an_build_out_put: Option<String>,
@@ -93,15 +94,15 @@ pub struct LoaderJson {
     /// Non-entry importees in OHM URL format, populated after bundling by
     /// `process_importees`.  Empty until the post-bundle pass runs.
     ///
-    /// Not serialized to `loader.json`: hvigor does not write these fields and
-    /// the importee data is persisted separately in `importee/default/.../importee.json`.
+    /// Not serialized to `loader.json`: hvigor keeps the corresponding
+    /// incremental sets in conditional CompileArkTS cache files.
     #[serde(skip)]
     pub non_entry_importees: Vec<String>,
     /// Compiled importee source paths (relative to `src/main`), populated
     /// after bundling by `process_importees`.  Empty until that pass runs.
     ///
-    /// Not serialized to `loader.json`: hvigor does not write these fields and
-    /// the importee data is persisted separately in `importee/default/.../importee.json`.
+    /// Not serialized to `loader.json`: hvigor keeps the corresponding
+    /// incremental sets in conditional CompileArkTS cache files.
     #[serde(skip)]
     pub compiled_importees: Vec<String>,
 
@@ -791,8 +792,13 @@ impl LoaderJson {
         for path in &dependency_worker_files {
             let abs = to_absolute_path_string(path);
             if !discovered_workers.contains(&abs) {
-                discovered_workers.push(abs);
+                discovered_workers.push(abs.clone());
             }
+            // The SDK loader consumes `workers` as a separate compiler entry
+            // surface. Arkdown's in-process bundler has one input list, so keep
+            // every dependency worker reachable internally without leaking it
+            // into serialized HAP/HSP `compileEntry` below.
+            compile_entry.push(abs);
         }
 
         // Merge in explicit sourceOption.workers entries from build-profile.json5.
@@ -819,6 +825,13 @@ impl LoaderJson {
             .build_option
             .strict_mode
             .use_normalized_ohm_url;
+        let bundles_bytecode_har_dependencies = matches!(config.output_target, OutputTarget::Har)
+            && config
+                .product
+                .build_option
+                .ark_options
+                .as_ref()
+                .is_some_and(|options| options.byte_code_har && options.bundled_dependencies);
         let pkg_contexts = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "dependency_pkg_contexts");
             use_normalized_ohm_url
@@ -836,10 +849,21 @@ impl LoaderJson {
             )
         };
 
-        let mut serialized_compile_entry = {
+        // Full HSP compilation starts from every code file below
+        // `src/main/ets`. This mirrors GenerateLoaderJson's
+        // allowToCollectEtsFolder()/collectCompileFiles contract and ensures
+        // exported shared-library files participate even without abilities.
+        let mut serialized_compile_entry = if matches!(config.output_target, OutputTarget::Hsp)
+            && matches!(module_cfg.module_type, OhosModuleType::Shared)
+        {
+            Self::collect_code_files(&ets_root)
+        } else {
+            Vec::new()
+        };
+        serialized_compile_entry.extend({
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "insight_intent_compile_entries");
             Self::collect_insight_intent_src_entries(module_cfg)
-        };
+        });
         serialized_compile_entry.extend({
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "mock_compile_entries");
             Self::collect_mock_compile_entries(config, module_cfg)
@@ -862,7 +886,13 @@ impl LoaderJson {
                 LoaderTimingProbe::new(&module_cfg.name, "runtime_only_package_source_files");
             runtime_only_collector.collect_package_source_files()
         });
-        serialized_compile_entry.extend(dependency_worker_files);
+        // `GenerateLoaderJson.processBundledDependencies` adds dependency
+        // workers only while producing a bundled ByteCode HAR. HAP/HSP builds
+        // still expose them through `workers`, but compile dependency abilities
+        // through `collectDepAbilitySrcEntryArr` below.
+        if bundles_bytecode_har_dependencies {
+            serialized_compile_entry.extend(dependency_worker_files);
+        }
         serialized_compile_entry.extend({
             let _timer =
                 LoaderTimingProbe::new(&module_cfg.name, "dependency_router_map_source_files");
@@ -887,7 +917,7 @@ impl LoaderJson {
             runtime_only_collector.dedupe_paths(&mut serialized_compile_entry);
         }
 
-        let hvigor_compile_entry: Vec<String> = serialized_compile_entry
+        let mut hvigor_compile_entry: Vec<String> = serialized_compile_entry
             .iter()
             .map(|path| to_absolute_path_string(path))
             .collect();
@@ -925,6 +955,19 @@ impl LoaderJson {
             let mut seen = FxHashSet::default();
             compile_entry.retain(|e| seen.insert(e.clone()));
         }
+        if matches!(config.output_target, OutputTarget::Har) {
+            for entry in &compile_entry {
+                let path = Path::new(entry);
+                let absolute = if path.is_absolute() {
+                    to_absolute_path_string(path)
+                } else {
+                    to_absolute_path_string(&src_main_root.join(entry.trim_start_matches("./")))
+                };
+                if !hvigor_compile_entry.contains(&absolute) {
+                    hvigor_compile_entry.push(absolute);
+                }
+            }
+        }
 
         let module_root = to_absolute_path_string(&module_cfg.src_path);
         let project_root = to_absolute_path_string(&config.project_root);
@@ -952,7 +995,7 @@ impl LoaderJson {
             module_path_map.insert(module_cfg.name.clone(), module_root.clone());
         }
 
-        let byte_code_har_info: FxHashMap<String, ByteCodeHarEntry> = bytecode_har_deps
+        let byte_code_har_info: IndexMap<String, ByteCodeHarEntry> = bytecode_har_deps
             .iter()
             .cloned()
             .map(|e| e.into_loader_entry())
@@ -1114,11 +1157,10 @@ impl LoaderJson {
             fallback_an_build: aot_fields.fallback_an_build,
             pkg_name_to_pkg_brief_info,
             workers: discovered_workers,
-            source_roots: if matches!(manifest.module_type, OhosModuleType::Har) {
-                vec!["./src/main/ets".to_string()]
-            } else {
-                Vec::new()
-            },
+            // GenerateLoaderJson does not serialize sourceRoots. HAR package
+            // source roots belong to oh-package.json5 metadata and are added
+            // later by ProcessHarArtifacts.processPackageJson.
+            source_roots: Vec::new(),
             bundle_dependencies: {
                 use crate::dependency_graph::DependencyNodeType;
                 dep_graph
@@ -1154,33 +1196,25 @@ impl LoaderJson {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ByteCodeHarEntry {
-    /// Package name of the HAR.
-    pub package_name: String,
     /// Absolute path to the compiled `.abc` file.
     pub abc_path: String,
-    /// Compatible SDK version string (e.g. `"5.0.0(12)"`).
-    pub compatible_sdk_version: String,
+    /// Compatible SDK version, preserving whether the package declared a JSON
+    /// number (for example `12`) or string (for example `"5.0.0(12)"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compatible_sdk_version: Option<CompatibleSdkVersionValue>,
+    /// Compatible SDK stage (for example `"beta1"`), if declared by the HAR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compatible_sdk_version_stage: Option<String>,
     /// Absolute path to the `sourceMaps.map` file, if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_maps_path: Option<String>,
     /// Absolute path to the insight intent metadata, if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insight_intent: Option<String>,
-    /// OHM URLs for reachable module entry points in this ByteCode HAR:
-    /// workers, runtimeOnly sources/packages, ability, startup tasks, and
-    /// insight intent source entries.
-    ///
-    /// Written by hvigor's `processDeclarationEntry()` into
-    /// `oh-package.json5#metadata.declarationEntry`.  The consuming
-    /// HAP/HSP's `loader.json` reads these OHM URLs from the HAR's
-    /// package metadata and propagates them here.
-    ///
-    /// # Upstream correspondence
-    ///
-    /// Corresponds to `metadata.declarationEntry` in
-    /// `process-har-artifacts.ts` and `byteCodeHarInfo[pkg].declarationEntry`
-    /// in `generate-loader-json.ts`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// ByteCode HAR package metadata consumed to build the top-level loader
+    /// `declarationEntry`. Hvigor does not serialize this field inside each
+    /// `byteCodeHarInfo` object.
+    #[serde(skip)]
     pub declaration_entry: Vec<String>,
 }
 
@@ -1596,7 +1630,7 @@ impl LoaderJson {
     }
 
     fn read_dependency_build_profile_workers(dep_root: &Path) -> Vec<String> {
-        let path = dep_root.join("meat-build-profile.json5");
+        let path = dep_root.join("build-profile.json5");
         let Ok(content) = std::fs::read_to_string(path) else {
             return vec![];
         };
@@ -1886,9 +1920,13 @@ impl LoaderJson {
             return vec![];
         }
 
+        Self::collect_code_files(&test_ets_root)
+    }
+
+    fn collect_code_files(root: &Path) -> Vec<PathBuf> {
         let mut entries = Vec::new();
-        let mut stack = vec![test_ets_root];
-        while let Some(dir) = stack.pop() {
+        let mut directories = std::collections::VecDeque::from([root.to_path_buf()]);
+        while let Some(dir) = directories.pop_front() {
             let Ok(read_dir) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -1897,7 +1935,7 @@ impl LoaderJson {
             for entry in dir_entries {
                 let path = entry.path();
                 if path.is_dir() {
-                    stack.push(path);
+                    directories.push_back(path);
                 } else if Self::is_existing_loader_code_file(&path) {
                     entries.push(path);
                 }
@@ -2198,6 +2236,11 @@ impl LoaderJson {
                 alias: node.package_name.clone(),
                 package_name: node.package_name.clone(),
                 version_spec: package.as_ref().map(|pkg| pkg.version.clone()),
+                package_root: Some(node.pkg_root.clone()),
+                node_entry: package
+                    .as_ref()
+                    .and_then(|pkg| pkg.main.clone())
+                    .or_else(|| Some("index.js".to_string())),
                 main: package
                     .as_ref()
                     .and_then(|pkg| pkg.main.clone().or_else(|| pkg.types.clone())),

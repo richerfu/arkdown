@@ -1,4 +1,4 @@
 export default class MyStartupTask {
-  async init(): Promise<void> {
+  async init() {
   }
 }

@@ -1,16 +1,20 @@
 //! Hvigor-aligned obfuscation rule handling for arkdown release builds.
 //!
 //! The SDK implementation delegates source and bytecode obfuscation to
-//! `arkguard`.  This crate parses and merges arkguard rule files, exports HAR
-//! consumer `obfuscation.txt` files, and rejects source/bytecode options whose
-//! full arkguard semantics have not been ported to Rust.  It intentionally does
-//! not generate a local approximation for those options.
+//! `arkguard`. This crate parses and merges arkguard rule files, exports HAR
+//! consumer `obfuscation.txt` files, and invokes the SDK ArkGuard package for
+//! module-scoped source obfuscation. Bytecode-only options remain explicitly
+//! unsupported until the matching SDK bytecode pipeline is integrated.
 
+mod arkguard;
 mod consumer;
 pub mod plan;
 mod rules;
 mod transform;
 
+pub use arkguard::{
+    ArkguardAdapterOptions, ObfuscationModuleFile, ObfuscationModuleInput, ObfuscationModuleOutput,
+};
 pub use consumer::ConsumerObfuscationFileWriter;
 pub use plan::{
     ConsumerObfuscationPlan, ObfuscationOutputPaths, ObfuscationPlan, ObfuscationRuleInput,
@@ -36,6 +40,21 @@ pub enum ObfuscationError {
     CodegenError(String),
     #[error("Unsupported arkguard obfuscation options require full hvigor parity: {features}")]
     UnsupportedArkguardObfuscationOptions { features: String },
+    #[error("SDK ArkGuard package does not exist: {0}")]
+    ArkguardPackageNotFound(PathBuf),
+    #[error("SDK ArkGuard API declaration roots do not exist: {0:?}")]
+    ArkguardSdkApisNotFound(Vec<PathBuf>),
+    #[error("active ArkGuard source obfuscation requires a complete module input")]
+    ArkguardModuleContextRequired,
+    #[error("failed to start ArkGuard process '{executable}': {source}")]
+    ArkguardProcessStart {
+        executable: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("ArkGuard process failed with status {status:?}: {stderr}")]
+    ArkguardProcessFailed { status: Option<i32>, stderr: String },
+    #[error("ArkGuard request/response JSON error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Path(#[from] arkdown_path::serializer::SerializerError),
 }
@@ -59,6 +78,9 @@ pub struct ObfuscationOptions {
     pub cache_dir: PathBuf,
     /// Export rule path (consumer rules for HAR publishing).
     pub export_rule_path: Option<PathBuf>,
+    /// Typed adapter configuration for the SDK ArkGuard implementation.
+    /// Required only when source obfuscation is enabled.
+    pub arkguard: Option<ArkguardAdapterOptions>,
 }
 
 // ── Obfuscator ────────────────────────────────────────────────────────────────
@@ -66,10 +88,12 @@ pub struct ObfuscationOptions {
 /// Hvigor-aligned obfuscation rule executor.
 ///
 /// Create once per build (rules are parsed at construction time) and reuse
-/// across all files in the same build. Active arkguard source/bytecode options
-/// are rejected during construction until their full semantics are ported.
+/// across all files in the same module. Active source options are delegated to
+/// the SDK ArkGuard implementation; bytecode-only options are rejected during
+/// construction.
 pub struct Obfuscator {
     rules: ObfuscationRules,
+    options: ObfuscationOptions,
 }
 
 impl Obfuscator {
@@ -113,26 +137,41 @@ impl Obfuscator {
         };
         merged.disable_obfuscation = merged.disable_obfuscation || dependency_disables_obfuscation;
         merged.enable_obfuscation = options.enable_obfuscation && !merged.disable_obfuscation;
-        if merged.enable_obfuscation {
-            let mut unsupported = vec!["arkguard-source-name-obfuscation"];
-            unsupported.extend(merged.unsupported_arkguard_obfuscation_options());
+        if merged.enable_obfuscation
+            && (merged.enable_bytecode_obfuscation
+                || merged.enable_bytecode_obfuscation_debugging
+                || merged.enable_bytecode_obfuscation_enhanced
+                || merged.enable_bytecode_obfuscation_arkui)
+        {
+            let unsupported = merged
+                .unsupported_arkguard_obfuscation_options()
+                .into_iter()
+                .filter(|feature| feature.contains("bytecode"))
+                .collect::<Vec<_>>();
             return Err(ObfuscationError::UnsupportedArkguardObfuscationOptions {
                 features: unsupported.join(", "),
             });
         }
 
-        Ok(Obfuscator { rules: merged })
+        Ok(Obfuscator {
+            rules: merged,
+            options,
+        })
     }
 
     /// Process JavaScript source text in memory.
     ///
-    /// This returns source unchanged after construction has rejected unsupported
-    /// arkguard source/bytecode options.
+    /// Disabled configurations return source unchanged. Active source
+    /// obfuscation requires [`Self::obfuscate_module`] so ArkGuard receives the
+    /// full module inventory, source maps, SDK APIs, and shared name cache.
     pub fn obfuscate_source(
         &self,
         source: &str,
         filename: &str,
     ) -> Result<ObfuscationOutput, ObfuscationError> {
+        if self.rules.enable_obfuscation {
+            return Err(ObfuscationError::ArkguardModuleContextRequired);
+        }
         self.rules.apply(source, filename)
     }
 
@@ -146,6 +185,31 @@ impl Obfuscator {
         let result = self.obfuscate_source(&source, filename.as_str())?;
         std::fs::write(output, &result.code)?;
         Ok(output.to_path_buf())
+    }
+
+    /// Obfuscate all CompileArkTS sources for one module in a single ArkGuard
+    /// process so the SDK's ordered name generator and global caches are shared
+    /// across files exactly as they are in hvigor.
+    pub fn obfuscate_module(
+        &self,
+        input: ObfuscationModuleInput,
+    ) -> Result<ObfuscationModuleOutput, ObfuscationError> {
+        if !self.rules.enable_obfuscation {
+            return Ok(ObfuscationModuleOutput {
+                name_cache_path: self.options.cache_dir.join("nameCache.json"),
+                output_files: input
+                    .files
+                    .into_iter()
+                    .map(|file| file.build_path)
+                    .collect(),
+            });
+        }
+        let adapter = self
+            .options
+            .arkguard
+            .as_ref()
+            .ok_or_else(|| ObfuscationError::ArkguardPackageNotFound(PathBuf::new()))?;
+        arkguard::ArkguardModuleRunner::new(&self.options, adapter).run(input)
     }
 
     /// Process all `.js` files found up to 2 levels deep in `dir`, in-place.
@@ -323,6 +387,7 @@ mod tests {
             dependency_rule_files: vec![],
             cache_dir: tmp.path().to_path_buf(),
             export_rule_path: None,
+            arkguard: None,
         })
     }
 
@@ -335,6 +400,7 @@ mod tests {
             dependency_rule_files: vec![],
             cache_dir: tmp.path().to_path_buf(),
             export_rule_path: None,
+            arkguard: None,
         };
         let ob = Obfuscator::new(opts).expect("new");
         // With no rules, obfuscation is disabled — source passes through unchanged.
@@ -344,36 +410,30 @@ mod tests {
     }
 
     #[test]
-    fn build_profile_enable_requires_arkguard_source_obfuscation() {
+    fn active_source_obfuscation_requires_complete_module_context() {
         let tmp = tempdir().expect("tempdir");
-        let err = match make_obfuscator("-keep-global-name\nKeptName\n", &tmp) {
-            Ok(_) => panic!("expected unsupported arkguard source obfuscation error"),
-            Err(err) => err,
-        };
+        let obfuscator = make_obfuscator("-keep-global-name\nKeptName\n", &tmp)
+            .expect("active source rules should initialize");
+        let err = obfuscator
+            .obfuscate_source("const SourceName = 1;", "Index.ts")
+            .expect_err("single-file API lacks ArkGuard module context");
         assert!(
-            matches!(
-                err,
-                ObfuscationError::UnsupportedArkguardObfuscationOptions { ref features }
-                    if features.contains("arkguard-source-name-obfuscation")
-            ),
-            "expected source name obfuscation error, got {err:?}"
+            matches!(err, ObfuscationError::ArkguardModuleContextRequired),
+            "expected module-context error, got {err:?}"
         );
     }
 
     #[test]
-    fn unsupported_source_obfuscation_option_is_rejected() {
+    fn property_obfuscation_is_delegated_to_sdk_arkguard() {
         let tmp = tempdir().expect("tempdir");
-        let err = match make_obfuscator("-enable-property-obfuscation\n", &tmp) {
-            Ok(_) => panic!("expected unsupported arkguard option error"),
-            Err(err) => err,
-        };
+        let obfuscator = make_obfuscator("-enable-property-obfuscation\n", &tmp)
+            .expect("SDK ArkGuard supports property obfuscation");
+        let err = obfuscator
+            .obfuscate_source("const SourceName = 1;", "Index.ts")
+            .expect_err("single-file API must not approximate module semantics");
         assert!(
-            matches!(
-                err,
-                ObfuscationError::UnsupportedArkguardObfuscationOptions { ref features }
-                    if features.contains("-enable-property-obfuscation")
-            ),
-            "expected unsupported arkguard option error, got {err:?}"
+            matches!(err, ObfuscationError::ArkguardModuleContextRequired),
+            "expected module-context error, got {err:?}"
         );
     }
 
@@ -391,6 +451,7 @@ mod tests {
             dependency_rule_files: vec![],
             cache_dir: tmp.path().to_path_buf(),
             export_rule_path: None,
+            arkguard: None,
         })
         .expect("new");
         let result_path = ob.obfuscate_file(&input, &output).expect("obfuscate_file");
@@ -407,6 +468,7 @@ mod tests {
             dependency_rule_files: vec![],
             cache_dir: PathBuf::from("/tmp"),
             export_rule_path: None,
+            arkguard: None,
         };
         let result = Obfuscator::new(opts);
         assert!(matches!(result, Err(ObfuscationError::RuleFileNotFound(_))));
@@ -426,6 +488,7 @@ mod tests {
             dependency_rule_files: vec![dep_rule_file],
             cache_dir: tmp.path().to_path_buf(),
             export_rule_path: None,
+            arkguard: None,
         })
         .expect("dependency disable should match arkguard ConfigResolver");
         let src = "var longName = 1;";

@@ -3,72 +3,45 @@ use oxc_ast::ast::{
     Argument, Declaration, ExportDefaultDeclarationKind, Expression, Program, Statement,
 };
 use oxc_ast::{AstBuilder, NONE};
-use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
-use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
-use crate::transform::source_emit::CodegenSourceText;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 
-pub(super) struct ViewpuOutputFinalizer<'a> {
-    source: &'a str,
+/// Applies the final ViewPU statement ordering and compatibility shim to the
+/// transformed program before it is printed.
+///
+/// The SDK performs these updates in its TypeScript transformer and only then
+/// calls `printSourceFile`. Keeping the finalization on the same AST preserves
+/// original node spans and ensures generated source-map locations describe the
+/// final emitted layout.
+pub(super) struct ViewpuProgramFinalizer<'a, 'program> {
+    allocator: &'a Allocator,
+    program: &'program mut Program<'a>,
 }
 
-impl<'a> ViewpuOutputFinalizer<'a> {
-    pub(super) fn new(source: &'a str) -> Self {
-        Self { source }
+impl<'a, 'program> ViewpuProgramFinalizer<'a, 'program> {
+    pub(super) fn new(allocator: &'a Allocator, program: &'program mut Program<'a>) -> Self {
+        Self { allocator, program }
     }
 
-    pub(super) fn finalize(&self) -> String {
-        let allocator = Allocator::default();
-        // The lowered source no longer contains `struct` declarations, but it
-        // can still contain ArkUI class/member decorators. Keep the ArkUI
-        // source goal through this final AST pass so OXC applies the same
-        // decorator/export ordering as the SDK's TypeScript emitter.
-        let mut parsed = Parser::new(&allocator, self.source, SourceType::ets()).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
-            return self.source.to_owned();
-        };
-
-        let mut pass = ViewpuFinalizePass::new(&allocator, &mut parsed.program);
+    pub(super) fn finalize(self) {
+        let mut pass = ViewpuFinalizePass::new(self.allocator, self.program);
         pass.run();
-        if !pass.changed {
-            return self.source.to_owned();
-        }
-
-        CodegenSourceText::new(
-            Codegen::new()
-                .with_options(CodegenOptions {
-                    comments: CommentOptions::disabled(),
-                    indent_char: IndentChar::Space,
-                    indent_width: 4,
-                    ..CodegenOptions::default()
-                })
-                .build(&parsed.program)
-                .code,
-        )
-        .without_trailing_newline()
     }
 }
 
 struct ViewpuFinalizePass<'a, 'program> {
     allocator: &'a Allocator,
     program: &'program mut Program<'a>,
-    changed: bool,
 }
 
 impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
     fn new(allocator: &'a Allocator, program: &'program mut Program<'a>) -> Self {
-        Self {
-            allocator,
-            program,
-            changed: false,
-        }
+        Self { allocator, program }
     }
 
     fn run(&mut self) {
-        self.changed |= self.first_statement_start().is_some_and(|start| start > 0);
         if !self.has_view_class() {
             return;
         }
@@ -78,7 +51,6 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
         let params_interfaces = self.params_interface_indices();
         if needs_shim || !params_interfaces.is_empty() {
             self.rebuild_body(needs_shim, has_leading_shim, &params_interfaces);
-            self.changed = true;
         }
     }
 
@@ -135,13 +107,6 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
         while let Some(statement) = params.pop() {
             body.push(statement);
         }
-    }
-
-    fn first_statement_start(&self) -> Option<usize> {
-        self.program
-            .body
-            .first()
-            .map(|statement| statement.span().start as usize)
     }
 
     fn has_view_class(&self) -> bool {

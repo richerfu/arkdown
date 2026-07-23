@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arkdown_path::ModuleSpecifierText;
 use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
+use oxc_codegen::{CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
@@ -13,7 +13,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::api_transform;
 use crate::api_transform::event_emitter::EventEmitterImportRewriter;
 use crate::error::EtsTransformError;
-use crate::hvigor_format::HvigorStandardTs;
 use crate::module_rewrite::{
     DefaultImportReexportRewriter, ModuleAnalyzerKind, TypeOnlyNamedImportSplitter,
     TypeOnlyReexportSplitter,
@@ -21,7 +20,7 @@ use crate::module_rewrite::{
 use crate::resource_transform::{ResourceReference, ResourceReferenceRewriter};
 use crate::source::{SourceClassifier, SourceFileKind, TransformSourceSnapshot};
 use crate::source_map;
-use crate::transform::source_emit::CodegenSourceText;
+use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::{self, CheckerMode, ModuleExportIndex, TransformOptions};
 use crate::typescript_emit::{
     ImportedConstEnumRewriter, TypeScriptDirectiveFlags, TypeScriptJavascriptEmitter,
@@ -134,6 +133,7 @@ pub struct RolldownEtsTransformOutput {
     pub source_map: Option<String>,
     pub record_module_source_code: bool,
     pub emits_javascript: bool,
+    pub is_shared_module: bool,
 }
 
 /// Production ETS transform engine used by the Rolldown plugin adapter.
@@ -162,6 +162,7 @@ impl RolldownEtsTransformer {
                         source_map: None,
                         record_module_source_code: false,
                         emits_javascript: false,
+                        is_shared_module: false,
                     }));
                 }
             }
@@ -172,6 +173,7 @@ impl RolldownEtsTransformer {
         let original_source = code;
         let directive_flags = TypeScriptDirectiveFlags::from_source(original_source, id);
         let emits_javascript = self.plan.should_emit_js && directive_flags.should_emit_javascript();
+        let is_shared_module = directive_flags.is_shared_module();
         let pipeline = HvigorSourcePipeline::new(self, id);
         let code = pipeline.prepare_source(original_source);
 
@@ -188,6 +190,7 @@ impl RolldownEtsTransformer {
                 source_map,
                 record_module_source_code: false,
                 emits_javascript,
+                is_shared_module,
             }));
         }
 
@@ -204,15 +207,19 @@ impl RolldownEtsTransformer {
 
         let options = self.plan.transform_options_for(id);
 
-        let transformed =
-            transform::ArktsTransformer::with_options(&source, &options).transform()?;
+        let transformed = transform::ArktsTransformer::with_options(&source, &options)
+            .transform_with_source_map()?;
 
-        let final_source = pipeline.finalize_source(&transformed);
+        let final_source = pipeline.finalize_source(&transformed.code);
 
-        if transformed == code.as_ref() {
-            let final_source = HvigorStandardTs::new(final_source.as_ref()).format();
+        if transformed.code == code.as_ref() {
+            // The SDK etsTransform printer still formats a plain `.ets` file
+            // even when no ArkUI syntax was lowered. Its TypeScript output uses
+            // four-space indentation before ModuleMode writes the CompileArkTS
+            // cache source consumed by es2abc.
+            let formatted_source = pipeline.format_source(final_source.as_ref());
             let final_source =
-                self.emit_javascript_if_required(&final_source, id, directive_flags)?;
+                self.emit_javascript_if_required(formatted_source.as_str(), id, directive_flags)?;
             let source_map =
                 source_map::HvigorStandardSourceMapBuilder::new(&final_source, original_source, id)
                     .build()
@@ -222,20 +229,23 @@ impl RolldownEtsTransformer {
                 source_map,
                 record_module_source_code: false,
                 emits_javascript,
+                is_shared_module,
             }));
         }
 
         let gen_code =
             self.emit_javascript_if_required(final_source.as_ref(), id, directive_flags)?;
-        let source_map =
+        let source_map = transformed.source_map.or_else(|| {
             source_map::HvigorStandardSourceMapBuilder::new(&gen_code, original_source, id)
                 .build()
-                .or_else(|| source_map::TokenSourceMapBuilder::new(&gen_code, id).build());
+                .or_else(|| source_map::TokenSourceMapBuilder::new(&gen_code, id).build())
+        });
         Ok(Some(RolldownEtsTransformOutput {
             code: gen_code,
             source_map,
             record_module_source_code: false,
             emits_javascript,
+            is_shared_module,
         }))
     }
 
@@ -311,6 +321,24 @@ impl<'a> HvigorSourcePipeline<'a> {
 
     fn finalize_source<'s>(&self, source: &'s str) -> Cow<'s, str> {
         HvigorFinalizeSourcePass::new(self).run(source)
+    }
+
+    fn format_source(&self, source: &str) -> String {
+        let allocator = Allocator::default();
+        let source_type =
+            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let parsed = Parser::new(&allocator, source, source_type).parse();
+        if parsed.panicked || !parsed.diagnostics.is_empty() {
+            return source.to_string();
+        }
+        HvigorTypescriptPrinter::print(
+            &parsed.program,
+            CodegenOptions {
+                indent_char: IndentChar::Space,
+                indent_width: 4,
+                ..CodegenOptions::default()
+            },
+        )
     }
 
     fn should_finalize_unclassified_source(&self, source: &str) -> bool {
@@ -470,17 +498,14 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
 }
 
 fn hvigor_stage_codegen(program: &oxc_ast::ast::Program<'_>) -> String {
-    CodegenSourceText::new(
-        Codegen::new()
-            .with_options(CodegenOptions {
-                indent_char: IndentChar::Space,
-                indent_width: 4,
-                ..CodegenOptions::default()
-            })
-            .build(program)
-            .code,
+    HvigorTypescriptPrinter::print(
+        program,
+        CodegenOptions {
+            indent_char: IndentChar::Space,
+            indent_width: 4,
+            ..CodegenOptions::default()
+        },
     )
-    .without_trailing_newline()
 }
 
 #[cfg(test)]
@@ -653,6 +678,40 @@ export default class ChannelManager {
     }
 
     #[test]
+    fn compile_transform_formats_plain_ets_with_sdk_indentation() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "export function sharedGreet(name: string): string {\n  return `Hello from HSP, ${name}!`;\n}\n",
+                "/tmp/project/shared/src/main/ets/Index.ets",
+            )
+            .unwrap()
+            .expect("plain ETS must produce ModuleMode source");
+
+        assert_eq!(
+            output.code,
+            "export function sharedGreet(name: string): string {\n    return `Hello from HSP, ${name}!`;\n}\n"
+        );
+        let source_map: serde_json::Value =
+            serde_json::from_str(output.source_map.as_deref().expect("plain ETS source map"))
+                .expect("valid source map");
+        assert_eq!(
+            source_map["mappings"],
+            "AAAA,MAAM,UAAU,WAAW,CAAC,IAAI,EAAE,MAAM,GAAG,MAAM;IAC/C,OAAO,mBAAmB,IAAI,GAAG,CAAC;AACpC,CAAC"
+        );
+    }
+
+    #[test]
     fn compile_transform_emits_javascript_for_ts_ignore_file_like_hvigor() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
@@ -690,6 +749,30 @@ export namespace Zip {
         );
         assert!(!output.code.contains("namespace Zip"), "{}", output.code);
         assert!(output.emits_javascript);
+    }
+
+    #[test]
+    fn compile_transform_propagates_sdk_shared_module_directive_fact() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "import collections from '@ohos:arkts.collections';\n\"use shared\";\nexport class SharedState {}",
+                "/tmp/project/oh_modules/shared-state/SharedState.ts",
+            )
+            .unwrap()
+            .expect("TypeScript input participates in CompileArkTS");
+
+        assert!(output.is_shared_module);
     }
 
     #[test]

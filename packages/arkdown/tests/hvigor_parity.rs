@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -23,6 +23,7 @@ const ENV_ARKDOWN_BIN: &str = "ARKDOWN_PARITY_ARKDOWN_BIN";
 const ENV_REPORT: &str = "ARKDOWN_PARITY_REPORT";
 const ENV_RUN: &str = "ARKDOWN_PARITY_RUN";
 const ENV_STRICT: &str = "ARKDOWN_PARITY_STRICT";
+const ENV_KEEP_WORKDIR: &str = "ARKDOWN_PARITY_KEEP_WORKDIR";
 /// Path to the JSON allowlist file for known parity deviations.
 ///
 /// Section 3.9: "增加 SDK 可用时运行的 parity job + allowlist".
@@ -120,7 +121,7 @@ fn minimal_hsp_hvigor_parity_report() {
 }
 
 /// Parity test for ByteCode HAR dependency — validates that BC HAR packages
-/// with root-level `byteCodeHar: true` are detected, their OHM URLs appear
+/// with `metadata.byteCodeHar: true` are detected, their OHM URLs appear
 /// in `compiledImportees`, and `byteCodeHarInfo` references the correct .abc path.
 ///
 /// Covers the section 3.8 gap:
@@ -136,7 +137,9 @@ fn bc_har_dep_hap_hvigor_parity_report() {
 }
 
 /// Parity test for share config — validates that crossAppSharedConfig entries
-/// survive profile processing and are written to the correct resource profile.
+/// exported by a HAR dependency survive profile processing and are written to
+/// the correct resource profile. Hvigor's ProcessShareConfig consumes
+/// `getHarDependencies()`, not HSP dependencies.
 /// Covers the P0 fix: share config was being overwritten by static intermediate files.
 #[test]
 fn share_config_hap_hvigor_parity_report() {
@@ -363,11 +366,29 @@ fn print_report_summary(report: &Value) {
 fn parity_command_args_include_selected_build_mode() {
   assert_eq!(
     hvigor_args(ArtifactType::Hap, ParityBuildMode::Debug),
-    vec!["assembleHap", "--mode", "debug"]
+    vec![
+      "--mode",
+      "module",
+      "-p",
+      "product=default",
+      "-p",
+      "buildMode=debug",
+      "assembleHap",
+      "--no-daemon"
+    ]
   );
   assert_eq!(
     hvigor_args(ArtifactType::Hap, ParityBuildMode::Release),
-    vec!["assembleHap", "--mode", "release"]
+    vec![
+      "--mode",
+      "module",
+      "-p",
+      "product=default",
+      "-p",
+      "buildMode=release",
+      "assembleHap",
+      "--no-daemon"
+    ]
   );
   assert_eq!(
     arkdown_args(ArtifactType::Hap, ParityBuildMode::Release),
@@ -413,6 +434,7 @@ fn parity_for_fixture(
   let temp = tempfile::Builder::new()
     .prefix("arkdown-hvigor-parity-")
     .tempdir()?;
+  let temp_root = temp.path().to_path_buf();
   let hvigor_root = temp.path().join(format!("hvigor/{fixture_name}"));
   let arkdown_root = temp.path().join(format!("arkdown/{fixture_name}"));
   copy_clean_fixture(&fixture_abs, &hvigor_root)?;
@@ -450,7 +472,9 @@ fn parity_for_fixture(
           "ARKDOWN_PARITY_HVIGORW": std::env::var(ENV_HVIGORW).ok(),
           "ARKDOWN_PARITY_ARKDOWN_BIN": std::env::var(ENV_ARKDOWN_BIN).ok(),
           "ARKDOWN_PARITY_REPORT": std::env::var(ENV_REPORT).ok(),
+          "ARKDOWN_PARITY_KEEP_WORKDIR": std::env::var(ENV_KEEP_WORKDIR).ok(),
       },
+      "workdir": env_truthy(ENV_KEEP_WORKDIR).then(|| temp_root.to_string_lossy().into_owned()),
       "builds": {
           "hvigor": hvigor.to_json(),
           "arkdown": arkdown.to_json(),
@@ -461,11 +485,26 @@ fn parity_for_fixture(
   let pretty = serde_json::to_string_pretty(&report)?;
   fs::write(&report_path, pretty)?;
   report["report_path"] = json!(report_path.to_string_lossy());
+  if env_truthy(ENV_KEEP_WORKDIR) {
+    let _ = temp.keep();
+  }
   Ok(report)
 }
 
 fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
-  vec![artifact_type.hvigor_task(), "--mode", build_mode.as_str()]
+  vec![
+    "--mode",
+    "module",
+    "-p",
+    "product=default",
+    "-p",
+    match build_mode {
+      ParityBuildMode::Debug => "buildMode=debug",
+      ParityBuildMode::Release => "buildMode=release",
+    },
+    artifact_type.hvigor_task(),
+    "--no-daemon",
+  ]
 }
 
 fn arkdown_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
@@ -704,7 +743,7 @@ fn collect_build(
   artifact_type: ArtifactType,
 ) -> Result<BuildSnapshot, Box<dyn std::error::Error>> {
   let archive = find_archive(root, artifact_type.ext(), tool)
-    .map(|path| read_archive_snapshot(&path, root))
+    .map(|path| read_archive_snapshot(&path, root, artifact_type))
     .transpose()?;
   let mut artifacts = BTreeMap::new();
 
@@ -833,7 +872,7 @@ fn collect_build(
         root,
         archive.as_ref(),
         "oh-package.json5",
-        Some("oh-package.json5"),
+        Some("package/oh-package.json5"),
         &["outputs/har", "build/default/outputs"],
         false,
       )?;
@@ -843,7 +882,7 @@ fn collect_build(
         root,
         archive.as_ref(),
         "index.d.ts",
-        Some("index.d.ts"),
+        Some("package/index.d.ts"),
         &["intermediates/har", "build/default/outputs/har"],
         false,
       )?;
@@ -852,7 +891,7 @@ fn collect_build(
         root,
         archive.as_ref(),
         "index.d.ets",
-        Some("index.d.ets"),
+        Some("package/index.d.ets"),
         &["intermediates/har", "build/default/outputs/har"],
         false,
       )?;
@@ -871,7 +910,7 @@ fn collect_build(
         root,
         archive.as_ref(),
         "index.abc",
-        Some("index.abc"),
+        Some("package/index.abc"),
         &["intermediates/ets", "intermediates/loader_out"],
         true,
       )?;
@@ -880,7 +919,7 @@ fn collect_build(
         root,
         archive.as_ref(),
         "sourceMaps.map",
-        Some("sourceMaps.map"),
+        Some("package/sourceMaps.map"),
         &["intermediates/source_map", "intermediates/loader_out"],
         false,
       )?;
@@ -980,7 +1019,11 @@ impl ArchiveSnapshot {
 fn read_archive_snapshot(
   path: &Path,
   root: &Path,
+  artifact_type: ArtifactType,
 ) -> Result<ArchiveSnapshot, Box<dyn std::error::Error>> {
+  if artifact_type == ArtifactType::Har {
+    return read_har_archive_snapshot(path, root);
+  }
   let file = fs::File::open(path)?;
   let mut archive = ZipArchive::new(file)?;
   let mut entries = BTreeMap::new();
@@ -1021,6 +1064,46 @@ fn read_archive_snapshot(
   })
 }
 
+fn read_har_archive_snapshot(
+  path: &Path,
+  root: &Path,
+) -> Result<ArchiveSnapshot, Box<dyn std::error::Error>> {
+  let file = fs::File::open(path)?;
+  let gzip = flate2::read::GzDecoder::new(file);
+  let mut archive = tar::Archive::new(gzip);
+  let mut entries = BTreeMap::new();
+  let mut contents = BTreeMap::new();
+
+  for entry in archive.entries()? {
+    let mut entry = entry?;
+    let name = entry.path()?.to_string_lossy().into_owned();
+    let size = entry.size();
+    let mut bytes = Vec::new();
+    if entry.header().entry_type().is_file() {
+      entry.read_to_end(&mut bytes)?;
+      contents.insert(name.clone(), bytes.clone());
+    }
+    let normalized = normalize_project_bytes(&bytes, root);
+    entries.insert(
+      name,
+      ZipEntrySnapshot {
+        size,
+        // TAR does not expose a meaningful per-entry compressed size.
+        // Content size still detects truncation while the raw container
+        // normalization below validates that the artifact remains gzip+tar.
+        compressed_size: size,
+        content_hash: stable_hash_hex(&normalized),
+      },
+    );
+  }
+
+  Ok(ArchiveSnapshot {
+    path: path.to_path_buf(),
+    entries,
+    contents,
+  })
+}
+
 fn collect_named_artifact(
   artifacts: &mut BTreeMap<String, ArtifactSnapshot>,
   root: &Path,
@@ -1030,11 +1113,18 @@ fn collect_named_artifact(
   preferred_path_fragments: &[&str],
   binary: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+  let normalization = ArtifactNormalization::for_file_name(OsStr::new(artifact_name));
   if let (Some(archive), Some(entry_name)) = (archive, archive_entry) {
     if let Some(bytes) = archive.contents.get(entry_name) {
       artifacts.insert(
         artifact_name.to_string(),
-        ArtifactSnapshot::from_bytes(format!("archive:{entry_name}"), bytes.clone(), root, binary),
+        ArtifactSnapshot::from_bytes_with_normalization(
+          format!("archive:{entry_name}"),
+          bytes.clone(),
+          root,
+          binary,
+          normalization,
+        ),
       );
       return Ok(());
     }
@@ -1044,7 +1134,13 @@ fn collect_named_artifact(
     let bytes = fs::read(&path)?;
     artifacts.insert(
       artifact_name.to_string(),
-      ArtifactSnapshot::from_bytes(rel_source(root, &path), bytes, root, binary),
+      ArtifactSnapshot::from_bytes_with_normalization(
+        rel_source(root, &path),
+        bytes,
+        root,
+        binary,
+        normalization,
+      ),
     );
   }
   Ok(())
@@ -1094,11 +1190,12 @@ fn collect_build_default_files(
     }
     files.insert(
       unique_key,
-      ArtifactSnapshot::from_bytes(
+      ArtifactSnapshot::from_bytes_with_normalization(
         rel_source(root, entry.path()),
         bytes,
         root,
         is_binary_build_file(entry.path()),
+        ArtifactNormalization::for_path(entry.path()),
       ),
     );
   }
@@ -1206,20 +1303,145 @@ enum ArtifactKind {
   Binary(Vec<u8>),
 }
 
+#[derive(Clone, Copy)]
+enum ArtifactNormalization {
+  PreserveOrder,
+  UnorderedLineManifest,
+  ZipContainerTimestamps,
+  TarContainerMetadata,
+}
+
+impl ArtifactNormalization {
+  fn for_path(path: &Path) -> Self {
+    match path.extension().and_then(OsStr::to_str) {
+      Some("hap" | "hsp") => return Self::ZipContainerTimestamps,
+      Some("har") => return Self::TarContainerMetadata,
+      _ => {}
+    }
+    path
+      .file_name()
+      .map_or(Self::PreserveOrder, Self::for_file_name)
+  }
+
+  fn for_file_name(file_name: &OsStr) -> Self {
+    if matches!(file_name.to_str(), Some("filesInfo.txt" | "modules.cache")) {
+      Self::UnorderedLineManifest
+    } else {
+      Self::PreserveOrder
+    }
+  }
+
+  fn normalize_text(self, text: String) -> String {
+    match self {
+      Self::PreserveOrder => text,
+      Self::UnorderedLineManifest => {
+        let has_trailing_newline = text.ends_with('\n');
+        let mut lines = text.split_terminator('\n').collect::<Vec<_>>();
+        lines.sort_unstable();
+        let mut normalized = lines.join("\n");
+        if has_trailing_newline {
+          normalized.push('\n');
+        }
+        normalized
+      }
+      Self::ZipContainerTimestamps | Self::TarContainerMetadata => text,
+    }
+  }
+
+  fn normalize_binary(self, mut bytes: Vec<u8>) -> Vec<u8> {
+    if matches!(self, Self::TarContainerMetadata) {
+      return Self::normalize_tar_container(&bytes).unwrap_or(bytes);
+    }
+    if !matches!(self, Self::ZipContainerTimestamps) {
+      return bytes;
+    }
+
+    let header_offsets = {
+      let Ok(mut archive) = ZipArchive::new(Cursor::new(bytes.as_slice())) else {
+        return bytes;
+      };
+      let mut offsets = Vec::with_capacity(archive.len());
+      for index in 0..archive.len() {
+        let Ok(file) = archive.by_index(index) else {
+          return bytes;
+        };
+        offsets.push((file.header_start(), file.central_header_start()));
+      }
+      offsets
+    };
+
+    for (local_header, central_header) in header_offsets {
+      for (header, timestamp_offset) in [(local_header, 10u64), (central_header, 12u64)] {
+        let Some(start) = header
+          .checked_add(timestamp_offset)
+          .and_then(|offset| usize::try_from(offset).ok())
+        else {
+          return bytes;
+        };
+        let Some(timestamp) = bytes.get_mut(start..start + 4) else {
+          return bytes;
+        };
+        timestamp.fill(0);
+      }
+    }
+    bytes
+  }
+
+  fn normalize_tar_container(bytes: &[u8]) -> Option<Vec<u8>> {
+    let gzip = flate2::read::GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(gzip);
+    let mut members = BTreeMap::new();
+    for entry in archive.entries().ok()? {
+      let mut entry = entry.ok()?;
+      let path = entry.path().ok()?.to_string_lossy().into_owned();
+      let entry_type = entry.header().entry_type().as_byte();
+      let mut content = Vec::new();
+      entry.read_to_end(&mut content).ok()?;
+      members.insert(path, (entry_type, content));
+    }
+
+    let mut normalized = Vec::new();
+    for (path, (entry_type, content)) in members {
+      normalized.extend_from_slice(&(path.len() as u64).to_le_bytes());
+      normalized.extend_from_slice(path.as_bytes());
+      normalized.push(entry_type);
+      normalized.extend_from_slice(&(content.len() as u64).to_le_bytes());
+      normalized.extend_from_slice(&content);
+    }
+    Some(normalized)
+  }
+}
+
 impl ArtifactSnapshot {
   fn from_bytes(source: String, bytes: Vec<u8>, root: &Path, force_binary: bool) -> Self {
+    Self::from_bytes_with_normalization(
+      source,
+      bytes,
+      root,
+      force_binary,
+      ArtifactNormalization::PreserveOrder,
+    )
+  }
+
+  fn from_bytes_with_normalization(
+    source: String,
+    bytes: Vec<u8>,
+    root: &Path,
+    force_binary: bool,
+    normalization: ArtifactNormalization,
+  ) -> Self {
     let original_len = bytes.len();
     if force_binary {
       return ArtifactSnapshot {
         source,
-        kind: ArtifactKind::Binary(bytes),
+        kind: ArtifactKind::Binary(normalization.normalize_binary(bytes)),
         original_len,
       };
     }
 
     match String::from_utf8(bytes) {
       Ok(text) => {
-        let normalized = normalize_project_text(&text, root);
+        let normalized = normalization.normalize_text(normalize_project_text(&text, root));
         match serde_json::from_str::<Value>(&normalized) {
           Ok(value) => ArtifactSnapshot {
             source,
@@ -1302,6 +1524,108 @@ fn path_spellings(path: &Path) -> Vec<String> {
   spellings
 }
 
+#[test]
+fn compile_arkts_line_manifests_compare_as_unordered_records() {
+  let root = tempfile::tempdir().expect("tempdir");
+  for file_name in ["filesInfo.txt", "modules.cache"] {
+    let normalization = ArtifactNormalization::for_file_name(OsStr::new(file_name));
+    let hvigor = ArtifactSnapshot::from_bytes_with_normalization(
+      file_name.to_string(),
+      b"entry/pages/Index.ts\nentry/entryability/EntryAbility.ts\n".to_vec(),
+      root.path(),
+      false,
+      normalization,
+    );
+    let arkdown = ArtifactSnapshot::from_bytes_with_normalization(
+      file_name.to_string(),
+      b"entry/entryability/EntryAbility.ts\nentry/pages/Index.ts\n".to_vec(),
+      root.path(),
+      false,
+      normalization,
+    );
+
+    assert_eq!(
+      compare_artifact(file_name, &hvigor, &arkdown)["equal"],
+      true
+    );
+  }
+}
+
+#[test]
+fn ordered_compile_arkts_text_keeps_record_order_significant() {
+  let root = tempfile::tempdir().expect("tempdir");
+  let hvigor = ArtifactSnapshot::from_bytes(
+    "npmEntries.txt".to_string(),
+    b"entry-a\nentry-b\n".to_vec(),
+    root.path(),
+    false,
+  );
+  let arkdown = ArtifactSnapshot::from_bytes(
+    "npmEntries.txt".to_string(),
+    b"entry-b\nentry-a\n".to_vec(),
+    root.path(),
+    false,
+  );
+
+  assert_eq!(
+    compare_artifact("npmEntries.txt", &hvigor, &arkdown)["equal"],
+    false
+  );
+}
+
+#[test]
+fn archive_comparison_ignores_only_sdk_generated_dos_timestamps() {
+  let archive_bytes = |timestamp: zip::DateTime| {
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+      .compression_method(zip::CompressionMethod::Stored)
+      .last_modified_time(timestamp);
+    writer
+      .start_file("module.json", options)
+      .expect("start entry");
+    writer.write_all(b"{}").expect("write entry");
+    writer.finish().expect("finish archive").into_inner()
+  };
+  let first =
+    archive_bytes(zip::DateTime::from_date_and_time(2026, 7, 22, 10, 0, 0).expect("timestamp"));
+  let second =
+    archive_bytes(zip::DateTime::from_date_and_time(2026, 7, 22, 10, 5, 0).expect("timestamp"));
+  let root = tempfile::tempdir().expect("tempdir");
+  let normalization = ArtifactNormalization::for_path(Path::new("entry.hap"));
+  let hvigor = ArtifactSnapshot::from_bytes_with_normalization(
+    "entry.hap".to_string(),
+    first,
+    root.path(),
+    true,
+    normalization,
+  );
+  let arkdown = ArtifactSnapshot::from_bytes_with_normalization(
+    "entry.hap".to_string(),
+    second,
+    root.path(),
+    true,
+    normalization,
+  );
+  assert_eq!(
+    compare_artifact("entry.hap", &hvigor, &arkdown)["equal"],
+    true
+  );
+
+  let mut structurally_different = arkdown.normalized_bytes();
+  structurally_different[6] ^= 0x08;
+  let structurally_different = ArtifactSnapshot::from_bytes_with_normalization(
+    "entry.hap".to_string(),
+    structurally_different,
+    root.path(),
+    true,
+    normalization,
+  );
+  assert_eq!(
+    compare_artifact("entry.hap", &hvigor, &structurally_different)["equal"],
+    false
+  );
+}
+
 fn compare_builds(left: &BuildSnapshot, right: &BuildSnapshot) -> Vec<Value> {
   let mut diffs = Vec::new();
 
@@ -1361,16 +1685,19 @@ fn compare_archive_entries(
         let left_entry = &left.entries[name];
         let right_entry = &right.entries[name];
         if left_entry.size != right_entry.size
+          || left_entry.compressed_size != right_entry.compressed_size
           || left_entry.content_hash != right_entry.content_hash
         {
           changed.push(json!({
               "name": name,
               "left": {
                   "size": left_entry.size,
+                  "compressed_size": left_entry.compressed_size,
                   "content_hash": left_entry.content_hash,
               },
               "right": {
                   "size": right_entry.size,
+                  "compressed_size": right_entry.compressed_size,
                   "content_hash": right_entry.content_hash,
               },
           }));
@@ -1643,7 +1970,13 @@ fn collect_all_cache_root_files(
       if let Ok(bytes) = fs::read(path) {
         artifacts.insert(
           rel.clone(),
-          ArtifactSnapshot::from_bytes(rel, bytes, root, is_binary),
+          ArtifactSnapshot::from_bytes_with_normalization(
+            rel,
+            bytes,
+            root,
+            is_binary,
+            ArtifactNormalization::for_path(path),
+          ),
         );
       }
     }

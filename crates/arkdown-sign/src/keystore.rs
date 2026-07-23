@@ -90,7 +90,7 @@ impl SigningKey {
             let body = &after_begin[..end_index];
             let encoded = body.lines().map(str::trim).collect::<String>();
             let cert_der =
-                base64_decode(&encoded).map_err(|e| SignError::PemError(format!("{e}")))?;
+                base64_decode(&encoded).map_err(|e| SignError::PemError(e.to_string()))?;
             Self::validate_certificate_der(&cert_der)?;
             certs.push(cert_der);
             rest = &after_begin[end_index + END.len()..];
@@ -634,6 +634,55 @@ impl SigningKey {
     }
 }
 
+/// Minimal base64 decoder (standard alphabet).
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut lookup = [0xFFu8; 256];
+    for (i, &c) in TABLE.iter().enumerate() {
+        lookup[c as usize] = i as u8;
+    }
+
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|&b| b != b'\n' && b != b'\r' && b != b' ')
+        .collect();
+
+    let mut output = Vec::with_capacity((bytes.len() * 3) / 4);
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes.get(i).copied().unwrap_or(b'=');
+        let b1 = bytes.get(i + 1).copied().unwrap_or(b'=');
+        let b2 = bytes.get(i + 2).copied().unwrap_or(b'=');
+        let b3 = bytes.get(i + 3).copied().unwrap_or(b'=');
+
+        let v0 = if b0 == b'=' { 0u8 } else { lookup[b0 as usize] };
+        let v1 = if b1 == b'=' { 0u8 } else { lookup[b1 as usize] };
+        let v2 = if b2 == b'=' { 0u8 } else { lookup[b2 as usize] };
+        let v3 = if b3 == b'=' { 0u8 } else { lookup[b3 as usize] };
+
+        if v0 == 0xFF || v1 == 0xFF {
+            return Err(format!("invalid base64 char at position {i}"));
+        }
+
+        output.push((v0 << 2) | (v1 >> 4));
+        if b2 != b'=' {
+            if v2 == 0xFF {
+                return Err(format!("invalid base64 char at position {}", i + 2));
+            }
+            output.push((v1 << 4) | (v2 >> 2));
+        }
+        if b3 != b'=' {
+            if v3 == 0xFF {
+                return Err(format!("invalid base64 char at position {}", i + 3));
+            }
+            output.push((v2 << 6) | v3);
+        }
+        i += 4;
+    }
+    Ok(output)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -786,63 +835,11 @@ mod tests {
         let result = SigningKey::from_pem(&pem, cert_pem);
         // Result will be Err(PemError) because "hello" is not valid PKCS#8,
         // but the error must NOT be from base64 decode.
-        match &result {
-            Err(crate::error::SignError::PemError(msg)) => {
-                assert!(
-                    !msg.contains("base64 decode"),
-                    "base64 decode of 'aGVsbG8=' must succeed; got PemError: {msg}"
-                );
-            }
-            _ => {}
+        if let Err(crate::error::SignError::PemError(msg)) = &result {
+            assert!(
+                !msg.contains("base64 decode"),
+                "base64 decode of 'aGVsbG8=' must succeed; got PemError: {msg}"
+            );
         }
     }
-}
-
-/// Minimal base64 decoder (standard alphabet).
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut lookup = [0xFFu8; 256];
-    for (i, &c) in TABLE.iter().enumerate() {
-        lookup[c as usize] = i as u8;
-    }
-
-    let bytes: Vec<u8> = input
-        .bytes()
-        .filter(|&b| b != b'\n' && b != b'\r' && b != b' ')
-        .collect();
-
-    let mut output = Vec::with_capacity((bytes.len() * 3) / 4);
-    let mut i = 0;
-    while i < bytes.len() {
-        let b0 = bytes.get(i).copied().unwrap_or(b'=');
-        let b1 = bytes.get(i + 1).copied().unwrap_or(b'=');
-        let b2 = bytes.get(i + 2).copied().unwrap_or(b'=');
-        let b3 = bytes.get(i + 3).copied().unwrap_or(b'=');
-
-        let v0 = if b0 == b'=' { 0u8 } else { lookup[b0 as usize] };
-        let v1 = if b1 == b'=' { 0u8 } else { lookup[b1 as usize] };
-        let v2 = if b2 == b'=' { 0u8 } else { lookup[b2 as usize] };
-        let v3 = if b3 == b'=' { 0u8 } else { lookup[b3 as usize] };
-
-        if v0 == 0xFF || v1 == 0xFF {
-            return Err(format!("invalid base64 char at position {i}"));
-        }
-
-        output.push((v0 << 2) | (v1 >> 4));
-        if b2 != b'=' {
-            if v2 == 0xFF {
-                return Err(format!("invalid base64 char at position {}", i + 2));
-            }
-            output.push((v1 << 4) | (v2 >> 2));
-        }
-        if b3 != b'=' {
-            if v3 == 0xFF {
-                return Err(format!("invalid base64 char at position {}", i + 3));
-            }
-            output.push((v2 << 6) | v3);
-        }
-        i += 4;
-    }
-    Ok(output)
 }

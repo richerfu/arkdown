@@ -1,8 +1,8 @@
 {
   "modelVersion": "6.0.0",
-  "name": "shared-hsp",
+  "name": "share-config-har",
   "version": "1.0.0",
-  "description": "Shared HSP dependency for crossAppSharedConfig parity",
+  "description": "Source HAR dependency for crossAppSharedConfig parity",
   "main": "",
   "author": "",
   "license": "",

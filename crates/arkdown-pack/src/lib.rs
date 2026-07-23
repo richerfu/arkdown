@@ -9,7 +9,8 @@ pub use integrated_hsp::{
     normalize_integrated_hsps, IntegratedHspCandidate, IntegratedHspCollector, IntegratedHspEntry,
 };
 pub use packager::{
-    minify_package_intermediate_module_json, HarPackInput, PackAbility, PackInput, Packager,
+    minify_package_intermediate_module_json, HarPackInput, HarVariantInput, HspInterfaceHarInput,
+    PackAbility, PackInput, Packager,
 };
 pub use plan::{
     PackageEntry, PackageEntrySource, PackageKind, PackageOutput, PackagePlan, PackageToolMode,
@@ -38,16 +39,20 @@ mod tests {
                 bundle_name: "com.test.app".to_string(),
                 compatible_sdk_version: "5.0.0(12)".to_string(),
                 compatible_sdk_version_stage: None,
+                target_sdk_version: None,
                 runtime_os: "HarmonyOS".to_string(),
                 signing_config: None,
                 build_option: BuildOption {
                     preload_system_so: false,
                     preload_so: vec![],
+                    deduplicate_har: false,
                     remove_permissions: vec![],
                     aot_compile_mode: None,
                     host_pgo: None,
                     ap_path: None,
                     abi_filters: vec![],
+                    external_native_options: None,
+                    har_artifact_type: arkdown_core::HarArtifactType::Original,
                     native_lib: NativeLibOption::default(),
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
@@ -90,6 +95,7 @@ mod tests {
             abc_path: abc,
             resources_index: res,
             module_json: modj,
+            pack_info_module_json: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -99,6 +105,7 @@ mod tests {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            syscap_path: None,
             device_types: vec![],
             installation_free: false,
             delivery_with_install: true,
@@ -114,7 +121,7 @@ mod tests {
         let archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<_> = archive.file_names().collect();
         assert!(
-            names.iter().any(|n| *n == "module.json"),
+            names.contains(&"module.json"),
             "missing module.json; got: {:?}",
             names
         );
@@ -144,6 +151,7 @@ mod tests {
                 abc_path: abc,
                 resources_index: res,
                 module_json: modj,
+                pack_info_module_json: None,
                 native_libs: vec![],
                 compress_native_libs: false,
                 output_path: out.clone(),
@@ -156,6 +164,7 @@ mod tests {
                 abilities: vec![],
                 integrated_hsps: vec![],
                 privacy_profile_path: None,
+                syscap_path: None,
                 device_types: vec![],
                 installation_free: false,
                 delivery_with_install: true,
@@ -166,7 +175,7 @@ mod tests {
         let archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<_> = archive.file_names().collect();
         assert!(
-            names.iter().any(|n| *n == "ets/modules.abc"),
+            names.contains(&"ets/modules.abc"),
             "expected ets/modules.abc for API 12; got: {:?}",
             names
         );
@@ -181,6 +190,7 @@ mod tests {
             abc_path: tmp.path().join("missing.abc"),
             resources_index: tmp.path().join("missing.index"),
             module_json: tmp.path().join("missing.json"),
+            pack_info_module_json: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: tmp.path().join("out.hap"),
@@ -190,6 +200,7 @@ mod tests {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            syscap_path: None,
             device_types: vec![],
             installation_free: false,
             delivery_with_install: true,
@@ -233,15 +244,27 @@ mod tests {
         assert!(out.exists());
 
         let file = fs::File::open(&out).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let names: Vec<_> = archive.file_names().collect();
+        let gzip = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(gzip);
+        let names = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
         assert!(
             names.iter().any(|n| n.ends_with("Index.ets")),
             "missing Index.ets; got: {:?}",
             names
         );
         assert!(
-            names.iter().any(|n| *n == "oh-package.json5"),
+            names.iter().any(|n| n == "package/oh-package.json5"),
             "missing oh-package.json5; got: {:?}",
             names
         );
@@ -265,6 +288,7 @@ mod tests {
             abc_path: abc,
             resources_index: res,
             module_json: modj,
+            pack_info_module_json: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -274,6 +298,7 @@ mod tests {
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
+            syscap_path: None,
             device_types: vec![],
             installation_free: false,
             delivery_with_install: true,
@@ -309,6 +334,7 @@ mod tests {
                 abc_path: abc,
                 resources_index: res,
                 module_json: modj,
+                pack_info_module_json: None,
                 native_libs: vec![],
                 compress_native_libs: false,
                 output_path: out.clone(),
@@ -320,6 +346,7 @@ mod tests {
                 pkg_context_info_path: None,
                 abilities: vec![],
                 privacy_profile_path: None,
+                syscap_path: None,
                 device_types: vec![],
                 installation_free: false,
                 delivery_with_install: true,
@@ -331,7 +358,7 @@ mod tests {
         let archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<_> = archive.file_names().collect();
         assert!(
-            !names.iter().any(|n| *n == "libs/arm64-v8a/libpreload.so"),
+            !names.contains(&"libs/arm64-v8a/libpreload.so"),
             "buildOption.preloadSo must not be treated as a native lib; got: {:?}",
             names
         );
@@ -358,6 +385,7 @@ mod tests {
                 abc_path: abc,
                 resources_index: res,
                 module_json: modj,
+                pack_info_module_json: None,
                 native_libs: vec![],
                 compress_native_libs: false,
                 output_path: out.clone(),
@@ -370,6 +398,7 @@ mod tests {
                 pkg_context_info_path: None,
                 abilities: vec![],
                 privacy_profile_path: Some(privacy),
+                syscap_path: None,
                 integrated_hsps: vec![],
                 device_types: vec![],
                 installation_free: false,

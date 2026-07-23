@@ -391,7 +391,7 @@ impl ProfileStore {
                     .path()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| profile_root.clone()),
-                source: std::io::Error::new(std::io::ErrorKind::Other, error.to_string()),
+                source: std::io::Error::other(error.to_string()),
             })?;
             if !entry.file_type().is_file() {
                 continue;

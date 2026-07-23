@@ -11,7 +11,7 @@ use oxc_ast::ast::{
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast_visit::{walk_mut, VisitMut};
-use oxc_span::SPAN;
+use oxc_span::{Span, SPAN};
 use oxc_syntax::operator::AssignmentOperator;
 use oxc_syntax::scope::ScopeFlags;
 
@@ -62,6 +62,10 @@ pub struct StylesMethodInfo<'a> {
 /// A state/prop/link field extracted from a `@Component` struct.
 #[derive(Debug, Clone)]
 pub struct StateField<'a> {
+    /// Original property/decorator range used by the TypeScript source-map emitter.
+    pub source_span: Span,
+    /// Original property key range.
+    pub name_span: Span,
     /// Field name (without leading `__`).
     pub name: String,
     /// Original TypeScript annotation AST when the field came from parsed source.
@@ -92,12 +96,16 @@ pub struct StateField<'a> {
 #[derive(Debug, Clone)]
 pub struct ParamField<'a> {
     pub name: String,
+    pub source_span: Span,
+    pub name_span: Span,
     pub type_annotation_ast: Option<&'a TSTypeAnnotation<'a>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RegularField<'a> {
     pub name: String,
+    pub source_span: Span,
+    pub name_span: Span,
     pub type_annotation_ast: Option<&'a TSTypeAnnotation<'a>>,
     pub initializer: Option<FieldExpression<'a>>,
     pub optional: bool,
@@ -446,6 +454,9 @@ pub struct ComponentInfo<'a> {
     /// `validate_compile_mode()` in `arkdown-profile` rejects such builds.
     pub partial_update: bool,
     pub name: String,
+    pub name_span: Span,
+    pub entry_span: Span,
+    pub build_method_span: Span,
     pub is_entry: bool,
     pub is_exported: bool,
     pub is_default_export: bool,
@@ -600,6 +611,9 @@ impl Default for ComponentInfo<'_> {
         Self {
             partial_update: true,
             name: Default::default(),
+            name_span: SPAN,
+            entry_span: SPAN,
+            build_method_span: SPAN,
             is_entry: Default::default(),
             is_exported: Default::default(),
             is_default_export: Default::default(),
@@ -641,6 +655,8 @@ impl ComponentInfo<'_> {
                 .iter()
                 .map(|f| ParamField {
                     name: f.name.clone(),
+                    source_span: f.source_span,
+                    name_span: f.name_span,
                     type_annotation_ast: f.type_annotation_ast,
                 })
                 .collect()
@@ -690,13 +706,15 @@ impl<'a> ViewPuClassEmitter<'a> {
         let ast = oxc_ast::AstBuilder::new(allocator);
         let interface_statement = self.build_params_interface_statement(ast, allocator);
         let elements = self.build_class_elements(allocator)?;
-        let class_statement = ViewpuMemberAstEmitter::new(allocator).class_declaration_statement(
-            allocator.alloc_str(&self.info.name),
-            GeneratedViewpuName::VIEWPU_BASE,
-            elements,
-            self.info.is_exported,
-            self.info.is_default_export,
-        );
+        let class_statement = ViewpuMemberAstEmitter::new(allocator)
+            .class_declaration_statement_with_name_span(
+                allocator.alloc_str(&self.info.name),
+                self.info.name_span,
+                GeneratedViewpuName::VIEWPU_BASE,
+                elements,
+                self.info.is_exported,
+                self.info.is_default_export,
+            );
         Ok(ast.vec_from_iter([interface_statement, class_statement]))
     }
 
@@ -713,7 +731,13 @@ impl<'a> ViewPuClassEmitter<'a> {
                 let type_annotation = field
                     .type_annotation_ast
                     .map(ParamsInterfaceFieldType::Annotation);
-                ParamsInterfaceField::new(field.name.as_str(), true, type_annotation)
+                ParamsInterfaceField::with_source(
+                    field.name.as_str(),
+                    true,
+                    type_annotation,
+                    field.source_span,
+                    field.name_span,
+                )
             })
             .collect();
         ParamsInterfaceAstEmitter::new(&self.params_type, fields, false).statement(ast, allocator)
@@ -852,12 +876,14 @@ impl<'a> ViewPuClassEmitter<'a> {
             ),
             builder.formal_parameter(GeneratedViewpuName::EXTRA_INFO),
         ]);
-        ViewpuMemberAstEmitter::new(allocator).method_with_params(
+        ViewpuMemberAstEmitter::new(allocator).method_with_params_and_source_span(
             GeneratedViewpuName::CONSTRUCTOR,
             params,
             stmts,
             false,
             None,
+            self.info.entry_span,
+            SPAN,
         )
     }
 
@@ -1118,13 +1144,17 @@ impl<'a> ViewPuClassEmitter<'a> {
             GeneratedViewpuName::RENDER
         };
         let builder = ViewpuAstBuilder::new(allocator);
-        Ok(ViewpuMemberAstEmitter::new(allocator).method_with_params(
-            method_name,
-            builder.formal_parameters(),
-            stmts,
-            false,
-            None,
-        ))
+        Ok(
+            ViewpuMemberAstEmitter::new(allocator).method_with_params_and_source_span(
+                method_name,
+                builder.formal_parameters(),
+                stmts,
+                false,
+                None,
+                self.info.build_method_span,
+                SPAN,
+            ),
+        )
     }
 
     fn build_builder_methods<'b>(
@@ -1243,12 +1273,14 @@ impl<'a> ViewPuClassEmitter<'a> {
             .map(|annotation| builder.state_property_type_annotation(backing, Some(annotation)))
             .unwrap_or_else(|| builder.state_property_type_annotation(backing, None));
         elements.push(
-            ViewpuMemberAstEmitter::new(allocator).property_with_type_annotation(
+            ViewpuMemberAstEmitter::new(allocator).property_with_type_annotation_and_source_span(
                 backing_name,
                 Some(type_annotation),
                 initializer,
                 true,
                 field.optional,
+                field.source_span,
+                SPAN,
             ),
         );
 
@@ -1272,25 +1304,15 @@ impl<'a> ViewPuClassEmitter<'a> {
                 builder.expressions(),
             ),
         ));
-        if let Some(type_annotation) = field.type_annotation_ast {
-            elements.push(
-                ViewpuMemberAstEmitter::new(allocator).getter_with_type_annotation(
-                    allocator.alloc_str(&field.name),
-                    Some(builder.clone_type_annotation(type_annotation)),
-                    getter_stmts,
-                    None,
-                ),
-            );
-        } else {
-            elements.push(
-                ViewpuMemberAstEmitter::new(allocator).getter_with_type_annotation(
-                    allocator.alloc_str(&field.name),
-                    Some(builder.unknown_type_annotation()),
-                    getter_stmts,
-                    None,
-                ),
-            );
-        }
+        elements.push(
+            ViewpuMemberAstEmitter::new(allocator).getter_with_source_span(
+                allocator.alloc_str(&field.name),
+                getter_stmts,
+                None,
+                SPAN,
+                field.name_span,
+            ),
+        );
 
         let mut setter_stmts = builder.statements();
         setter_stmts.push(builder.this_backing_field_call_statement(
@@ -1310,12 +1332,16 @@ impl<'a> ViewPuClassEmitter<'a> {
                 None,
             )
         };
-        elements.push(ViewpuMemberAstEmitter::new(allocator).setter_with_param(
-            allocator.alloc_str(&field.name),
-            param,
-            setter_stmts,
-            None,
-        ));
+        elements.push(
+            ViewpuMemberAstEmitter::new(allocator).setter_with_param_and_source_span(
+                allocator.alloc_str(&field.name),
+                param,
+                setter_stmts,
+                None,
+                SPAN,
+                field.name_span,
+            ),
+        );
     }
 
     fn push_state_constructor_init<'b>(

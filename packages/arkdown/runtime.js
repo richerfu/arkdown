@@ -6,6 +6,7 @@ const Module = require('node:module')
 const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const acorn = require('acorn')
 
 // Hooks routed from JS runtime into Rolldown / BuildCoordinator.
 // Lifecycle hooks not in this set (e.g. beforeBuild, cleanUp) are
@@ -518,24 +519,33 @@ function buildPluginContext(hookCtx) {
   const share = hookCtx.share || _pluginShareContext
   const moduleIds = hookCtx.moduleIds || []
   const moduleInfoMap = hookCtx.moduleInfoMap || {}
+  const fileNames = hookCtx.fileNames || {}
   return {
     // hvigor share context
     share,
-    // getModuleIds() — returns collected module IDs
+    // Hvigor forwards Rollup's IterableIterator-returning getModuleIds().
     getModuleIds() {
-      return moduleIds
+      return moduleIds.values()
     },
     // getModuleInfo(id) — returns { importedIds, dynamicallyImportedIds }
     getModuleInfo(id) {
       return moduleInfoMap[id] || null
     },
-    // parse() — stub; use OXC directly for actual parsing
-    parse(_source, _options) {
-      return null
+    // Hvigor forwards this to Rollup's Acorn-compatible parser.
+    parse(source, options = {}) {
+      return acorn.parse(source, {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        ...options,
+      })
     },
-    // getFileName() — not yet implemented
-    getFileName(_ref) {
-      return null
+    getFileName(referenceId) {
+      if (Object.prototype.hasOwnProperty.call(fileNames, referenceId)) {
+        return fileNames[referenceId]
+      }
+      const error = new Error(`Unable to get file name for unknown reference ID "${referenceId}"`)
+      error.code = 'FILE_NAME_NOT_FOUND'
+      throw error
     },
   }
 }
@@ -573,19 +583,64 @@ function normalizeHookArguments(plugin) {
     }
   }
 
+  // NAPI does not supply a JavaScript receiver for Rolldown hook calls.
+  // Hvigor wraps every compile hook with getCompilePluginContext, so bind the
+  // same context here while retaining the original hook arguments.
+  for (const hookName of ['resolveId', 'resolveDynamicImport', 'load', 'transform']) {
+    if (typeof plugin[hookName] === 'function') {
+      const original = plugin[hookName]
+      patches[hookName] = function(...args) {
+        return original.apply(buildPluginContext({}), args)
+      }
+    }
+  }
+
+  if (typeof plugin.moduleParsed === 'function') {
+    const original = plugin.moduleParsed
+    patches.moduleParsed = function(moduleInfo) {
+      let parsedModuleInfo = moduleInfo
+      if (typeof moduleInfo === 'string') {
+        try {
+          parsedModuleInfo = JSON.parse(moduleInfo)
+        } catch {
+          parsedModuleInfo = {
+            id: moduleInfo,
+            code: null,
+            ast: null,
+            originalCode: null,
+            importedIds: [],
+            importers: [],
+            isEntry: false,
+            isExternal: false,
+            isIncluded: null,
+            hasDefaultExport: null,
+            exports: null,
+            dynamicallyImportedIds: [],
+            exportedBindings: null,
+            dynamicImporters: [],
+          }
+        }
+      }
+      const moduleInfoMap = parsedModuleInfo && parsedModuleInfo.id
+        ? { [parsedModuleInfo.id]: parsedModuleInfo }
+        : {}
+      return original.call(buildPluginContext({ moduleInfoMap }), parsedModuleInfo)
+    }
+  }
+
   // ── Cache/transform hooks: parse request JSON ────────────────────────────
 
   if (typeof plugin.shouldInvalidCache === 'function') {
     const original = plugin.shouldInvalidCache
     patches.shouldInvalidCache = function shouldInvalidCache(request) {
-      return original.call(this, parseShouldInvalidCacheRequest(request))
+      return original.call(buildPluginContext({}), parseShouldInvalidCacheRequest(request))
     }
   }
 
   if (typeof plugin.shouldTransformCachedModule === 'function') {
     const original = plugin.shouldTransformCachedModule
     patches.shouldTransformCachedModule = function shouldTransformCachedModule(request) {
-      return original.call(this, parseShouldInvalidCacheRequest(request))
+      return original.call(buildPluginContext({}), parseShouldInvalidCacheRequest(request))
     }
   }
 

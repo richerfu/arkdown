@@ -21,7 +21,6 @@
 mod api_transform;
 mod checker;
 pub mod error;
-mod hvigor_format;
 mod kit_map;
 mod lazy_import;
 mod module_emit;

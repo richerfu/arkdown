@@ -3,7 +3,7 @@
   "name": "entry",
   "version": "1.0.0",
   "description": "Minimal HAR library module",
-  "main": "",
+  "main": "src/main/ets/Index.ets",
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {}

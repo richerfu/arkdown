@@ -24,6 +24,7 @@ fn default_config() -> Arc<ArkdownConfig> {
             bundle_name: "com.example.profiletest".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
             compatible_sdk_version_stage: None,
+            target_sdk_version: None,
             runtime_os: "HarmonyOS".to_string(),
             signing_config: None,
             build_option: BuildOption {
@@ -36,11 +37,14 @@ fn default_config() -> Arc<ArkdownConfig> {
                 source_option: None,
                 preload_system_so: false,
                 preload_so: vec![],
+                deduplicate_har: false,
                 remove_permissions: vec![],
                 aot_compile_mode: None,
                 host_pgo: None,
                 ap_path: None,
                 abi_filters: vec![],
+                external_native_options: None,
+                har_artifact_type: arkdown_core::HarArtifactType::Original,
                 native_lib: NativeLibOption::default(),
             },
             version_code: None,
@@ -370,6 +374,8 @@ fn test_write_module_json_emits_virtual_machine_and_compile_mode() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut config = (*default_config()).clone();
     config.project_root = tmp.path().to_path_buf();
+    config.product.target_sdk_version = Some("5.0.5(17)".to_string());
+    config.sdk_config.compile_api_version = 17;
     let processor = ProfileProcessor::new(Arc::new(config));
 
     let manifest = HapManifest {
@@ -410,6 +416,11 @@ fn test_write_module_json_emits_virtual_machine_and_compile_mode() {
         serde_json::from_str(&content).expect("module.json must be valid JSON");
 
     let module = &parsed["module"];
+    assert_eq!(
+        parsed["app"]["targetAPIVersion"].as_u64(),
+        Some(50_005_017),
+        "targetAPIVersion must retain product targetSdkVersion components"
+    );
     assert_eq!(
         module["virtualMachine"].as_str(),
         Some("ark12.0.6.0"),
@@ -503,7 +514,7 @@ fn test_write_module_json_preserves_raw_skill_fields() {
 }
 
 #[test]
-fn test_write_module_json_sets_has_insight_intent_from_profile() {
+fn test_write_module_json_does_not_infer_has_insight_intent_from_profile_file() {
     use arkdown_core::{CompileMode, HapManifest, ModuleConfig, OhosModuleType};
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -545,7 +556,7 @@ fn test_write_module_json_sets_has_insight_intent_from_profile() {
     let parsed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out_path).expect("read module.json"))
             .expect("valid module.json");
-    assert_eq!(parsed["module"]["hasInsightIntent"].as_bool(), Some(true));
+    assert!(parsed["module"].get("hasInsightIntent").is_none());
 }
 
 #[test]

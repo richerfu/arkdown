@@ -31,6 +31,9 @@ tracing        = { workspace = true }
 bytes          = { workspace = true }
 serde_json     = { workspace = true }
 flate2         = { workspace = true }
+crc32fast      = { workspace = true }
+object         = { workspace = true }
+time           = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }

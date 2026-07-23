@@ -9,7 +9,7 @@ use oxc_ast::ast::{
     ObjectProperty, ObjectPropertyKind, PropertyKind, Statement,
 };
 use oxc_ast::{AstBuilder, NONE};
-use oxc_span::{GetSpan, SPAN};
+use oxc_span::{GetSpan, Span, SPAN};
 use oxc_syntax::operator::AssignmentOperator;
 
 use arkdown_path::HvigorModulePath;
@@ -579,6 +579,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             &component.arguments,
             &self.plan.builder_methods,
             context,
+            component.callee.span(),
         ));
         self.push_component_chain_attrs(
             &mut creation_stmts,
@@ -601,10 +602,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             self.push_child(statements, child, allocator, context)?;
         }
         if self.plan.component_metadata.needs_pop(&name) {
-            statements.push(ComponentCallStatementEmitter::empty(
+            statements.push(ComponentCallStatementEmitter::empty_with_source(
                 ast,
                 &name,
                 &context.runtime_names().method_pop,
+                component.callee.span(),
             ));
         }
         Ok(())
@@ -1068,7 +1070,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                         continue;
                     }
                 }
-                animation_segment.push(ComponentCallStatementEmitter::attribute(
+                animation_segment.push(ComponentCallStatementEmitter::attribute_with_source(
                     ast,
                     allocator,
                     component_name,
@@ -1076,6 +1078,8 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     &chain.arguments,
                     &self.plan.builder_methods,
                     context,
+                    component.callee.span(),
+                    ArkuiCallName::chain_span(chain),
                 ));
             }
             ComponentCallStatementEmitter::flush_animation_segment(
@@ -1106,7 +1110,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     continue;
                 }
             }
-            let attr_statement = ComponentCallStatementEmitter::attribute(
+            let attr_statement = ComponentCallStatementEmitter::attribute_with_source(
                 ast,
                 allocator,
                 component_name,
@@ -1114,6 +1118,8 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 &chain.arguments,
                 &self.plan.builder_methods,
                 context,
+                component.callee.span(),
+                ArkuiCallName::chain_span(chain),
             );
             if context.current_component_reusable
                 && RegularAttributeExpression::new(&self.plan.component_metadata)
@@ -2190,6 +2196,13 @@ impl ArkuiCallName {
         }
     }
 
+    fn chain_span(call: &CallExpression<'_>) -> Span {
+        match &call.callee {
+            Expression::StaticMemberExpression(member) => member.property.span,
+            _ => SPAN,
+        }
+    }
+
     fn builder_method_member(
         expression: &Expression<'_>,
         builder_methods: &FxHashSet<String>,
@@ -3261,10 +3274,18 @@ impl ComponentCallStatementEmitter {
         arguments: &[Argument<'_>],
         builder_methods: &FxHashSet<String>,
         context: &BuildContext,
+        component_span: Span,
     ) -> Statement<'b> {
         let arguments = CreateArgumentEmitter::new(component_name, builder_methods, context, false)
             .arguments(arguments, allocator);
-        Self::raw_call(ast, component_name, create_method, arguments)
+        Self::raw_call_with_source(
+            ast,
+            component_name,
+            create_method,
+            arguments,
+            component_span,
+            SPAN,
+        )
     }
 
     fn attribute<'b>(
@@ -3275,6 +3296,31 @@ impl ComponentCallStatementEmitter {
         arguments: &[Argument<'_>],
         builder_methods: &FxHashSet<String>,
         context: &BuildContext,
+    ) -> Statement<'b> {
+        Self::attribute_with_source(
+            ast,
+            allocator,
+            component_name,
+            attr_name,
+            arguments,
+            builder_methods,
+            context,
+            SPAN,
+            SPAN,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attribute_with_source<'b>(
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        component_name: &str,
+        attr_name: &str,
+        arguments: &[Argument<'_>],
+        builder_methods: &FxHashSet<String>,
+        context: &BuildContext,
+        component_span: Span,
+        attribute_span: Span,
     ) -> Statement<'b> {
         let arguments = AttributeArgumentEmitter::new(
             component_name,
@@ -3296,7 +3342,14 @@ impl ComponentCallStatementEmitter {
         {
             return Self::raw_bound_call(ast, component_name, attr_name, arguments, context);
         }
-        Self::raw_call(ast, component_name, attr_name, arguments)
+        Self::raw_call_with_source(
+            ast,
+            component_name,
+            attr_name,
+            arguments,
+            component_span,
+            attribute_span,
+        )
     }
 
     fn is_animation_attribute(attr_name: &str) -> bool {
@@ -3447,6 +3500,22 @@ impl ComponentCallStatementEmitter {
         Self::raw_call(ast, component_name, method_name, ast.vec())
     }
 
+    fn empty_with_source<'b>(
+        ast: AstBuilder<'b>,
+        component_name: &str,
+        method_name: &str,
+        component_span: Span,
+    ) -> Statement<'b> {
+        Self::raw_call_with_source(
+            ast,
+            component_name,
+            method_name,
+            ast.vec(),
+            component_span,
+            SPAN,
+        )
+    }
+
     fn gesture_low_priority<'b>(ast: AstBuilder<'b>, context: &BuildContext) -> Statement<'b> {
         let runtime_names = context.runtime_names();
         let gesture_priority =
@@ -3472,8 +3541,19 @@ impl ComponentCallStatementEmitter {
         method_name: &str,
         arguments: OxcVec<'b, Argument<'b>>,
     ) -> Statement<'b> {
-        let object = ast.expression_identifier(SPAN, ast.str(component_name));
-        let property = ast.identifier_name(SPAN, ast.str(method_name));
+        Self::raw_call_with_source(ast, component_name, method_name, arguments, SPAN, SPAN)
+    }
+
+    fn raw_call_with_source<'b>(
+        ast: AstBuilder<'b>,
+        component_name: &str,
+        method_name: &str,
+        arguments: OxcVec<'b, Argument<'b>>,
+        component_span: Span,
+        method_span: Span,
+    ) -> Statement<'b> {
+        let object = ast.expression_identifier(component_span, ast.str(component_name));
+        let property = ast.identifier_name(method_span, ast.str(method_name));
         let member = ast.member_expression_static(SPAN, object, property, false);
         let call = ast.expression_call(SPAN, Expression::from(member), NONE, arguments, false);
         ast.statement_expression(SPAN, call)

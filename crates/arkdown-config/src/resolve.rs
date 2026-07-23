@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use arkdown_core::{
-    ArkOptions, ArkdownConfig, BuildMode, BuildOption, ModuleConfig, ObfuscationConfig,
-    OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig, SigningConfig,
-    StrictModeConfig,
+    ArkOptions, ArkdownConfig, BuildMode, BuildOption, HarArtifactType, ModuleConfig,
+    ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig,
+    SigningConfig, StrictModeConfig,
 };
 
 use crate::build_profile::{
@@ -192,6 +192,9 @@ pub fn load_config(
             types: Vec::new(),
             runtime_only,
             support_chunks: ao.support_chunks.unwrap_or(false),
+            byte_code_har: ao.byte_code_har.unwrap_or(false),
+            bundled_dependencies: ao.bundled_dependencies.unwrap_or(false),
+            integrated_hsp: ao.integrated_hsp,
         }
     });
 
@@ -202,6 +205,9 @@ pub fn load_config(
     let preload_system_so = raw_build_option
         .map(|bo| bo.preload_system_so)
         .unwrap_or(false);
+    let deduplicate_har = raw_build_option
+        .and_then(|bo| bo.pack_options.as_ref())
+        .is_some_and(|options| options.deduplicate_har);
 
     let remove_permissions = raw_build_option
         .map(|bo| bo.remove_permissions.clone())
@@ -240,8 +246,33 @@ pub fn load_config(
             }
         });
 
-    let native_build_option =
+    let har_artifact_type = if raw_ark_options.and_then(|options| options.byte_code_har)
+        == Some(true)
+    {
+        HarArtifactType::Bytecode
+    } else {
+        match raw_build_option.and_then(|option| option.artifact_type.as_deref()) {
+                None | Some("original") => HarArtifactType::Original,
+                Some("obfuscation") => HarArtifactType::Obfuscation,
+                Some("bytecode") => HarArtifactType::Bytecode,
+                Some(value) => {
+                    return Err(ConfigError::ValidationError {
+                        file: root.join("build-profile.json5"),
+                        message: format!(
+                            "unsupported buildOption.artifactType '{value}'; expected original, obfuscation, or bytecode"
+                        ),
+                    })
+                }
+            }
+    };
+
+    let mut native_build_option =
         resolve_product_native_build_option(raw_product.build_option.as_ref());
+    for path in &mut native_build_option.native_lib.header_paths {
+        if path.is_relative() {
+            *path = root.join(&*path);
+        }
+    }
 
     let build_option = BuildOption {
         strict_mode,
@@ -264,15 +295,36 @@ pub fn load_config(
                         }
                     })
                     .collect(),
+                compression: ro.compression.clone(),
+                copy_code_resource: arkdown_core::CopyCodeResource {
+                    enable: ro.copy_code_resource.enable,
+                    excludes: ro.copy_code_resource.excludes.clone(),
+                    includes: ro.copy_code_resource.includes.clone(),
+                },
+                res_compile_threads: ro.res_compile_threads,
+                ignore_resource_pattern: ro.ignore_resource_pattern.clone(),
+                qualifiers_config: ro.qualifiers_config.clone(),
             }),
         source_option,
         preload_system_so,
         preload_so,
+        deduplicate_har,
         remove_permissions,
         aot_compile_mode,
         host_pgo,
         ap_path,
         abi_filters: native_build_option.abi_filters,
+        external_native_options: native_build_option
+            .external_native_options
+            .map(|mut options| {
+                if let Some(path) = options.path.as_mut() {
+                    if path.is_relative() {
+                        *path = root.join(&*path);
+                    }
+                }
+                options
+            }),
+        har_artifact_type,
         native_lib: native_build_option.native_lib,
     };
 
@@ -281,6 +333,7 @@ pub fn load_config(
         bundle_name,
         compatible_sdk_version: raw_product.compatible_sdk_version.clone(),
         compatible_sdk_version_stage: raw_product.compatible_sdk_version_stage.clone(),
+        target_sdk_version: raw_product.target_sdk_version.clone(),
         runtime_os: raw_product.runtime_os,
         signing_config,
         build_option,
@@ -548,6 +601,7 @@ mod tests {
                 assert_eq!(sc.cert_path.to_str().unwrap(), "/test/cert.cer");
                 // targetSdkVersion used for compile_api_version
                 assert_eq!(cfg.sdk_config.compile_api_version, 17);
+                assert_eq!(cfg.product.target_sdk_version.as_deref(), Some("5.0.5(17)"));
             }
             Err(ConfigError::SdkNotFound) => {
                 // Acceptable on machines without DevEco Studio
@@ -576,6 +630,7 @@ mod tests {
                     runtimeOS: "HarmonyOS",
                     buildOption: {
                         arkOptions: {
+                            integratedHsp: true,
                             obfuscation: {
                                 ruleOptions: {
                                     enable: true,
@@ -619,6 +674,7 @@ mod tests {
                 let runtime_only = ark_opts.runtime_only.as_ref().expect("runtimeOnly present");
                 assert_eq!(runtime_only.packages, vec!["@ohos/runtime-only"]);
                 assert_eq!(runtime_only.sources, vec!["src/main/ets/runtime"]);
+                assert_eq!(ark_opts.integrated_hsp, Some(true));
             }
             Err(ConfigError::SdkNotFound) => {
                 // Acceptable on machines without DevEco Studio

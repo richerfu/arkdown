@@ -47,14 +47,29 @@ pub struct IntegratedHspCandidate {
 /// Converts dependency graph candidates into normalized HSP package entries.
 pub struct IntegratedHspCollector<'a> {
     candidates: &'a [IntegratedHspCandidate],
+    enabled: bool,
 }
 
 impl<'a> IntegratedHspCollector<'a> {
     pub fn new(candidates: &'a [IntegratedHspCandidate]) -> Self {
-        Self { candidates }
+        Self {
+            candidates,
+            enabled: true,
+        }
     }
 
-    pub fn collect(&self) -> Vec<IntegratedHspEntry> {
+    /// Apply hvigor's `buildOption.arkOptions.integratedHsp` gate. Keeping the
+    /// gate on the collector prevents disabled integrated-HSP candidates from
+    /// reaching normalization or archive construction.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn collect(&self) -> Result<Vec<IntegratedHspEntry>, PackError> {
+        if !self.enabled {
+            return Ok(Vec::new());
+        }
         let mut entries = Vec::new();
         for candidate in self.candidates {
             let package_name = IntegratedHspPackageName::new(&candidate.alias);
@@ -62,11 +77,10 @@ impl<'a> IntegratedHspCollector<'a> {
             let hsp_file_name = archive_name.hsp_file_name();
             let hsp_path = candidate.package_root.join(&hsp_file_name);
             if !hsp_path.exists() {
-                tracing::warn!(
-                    dep = candidate.alias,
-                    "K5: integrated HSP dependency has no pre-built .hsp file; skipping"
-                );
-                continue;
+                return Err(PackError::MissingIntegratedHsp {
+                    alias: candidate.alias.clone(),
+                    path: hsp_path.display().to_string(),
+                });
             }
             entries.push(IntegratedHspEntry {
                 hsp_dir_name: archive_name.versioned_dir(&candidate.version),
@@ -74,7 +88,7 @@ impl<'a> IntegratedHspCollector<'a> {
                 hsp_path,
             });
         }
-        entries
+        Ok(entries)
     }
 
     pub fn collect_normalized(
@@ -83,7 +97,7 @@ impl<'a> IntegratedHspCollector<'a> {
         version_code: u64,
         output_dir: &Path,
     ) -> Result<Vec<IntegratedHspEntry>, PackError> {
-        let entries = self.collect();
+        let entries = self.collect()?;
         if entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -223,7 +237,7 @@ impl IntegratedHspEntry {
         Ok(out)
     }
 
-    fn write_normalized_entry<W: std::io::Write>(
+    fn write_normalized_entry<W: std::io::Write + std::io::Seek>(
         writer: &mut zip_writer::RawZipWriter<W>,
         name: &str,
         compression: zip::CompressionMethod,
@@ -418,5 +432,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = normalize_integrated_hsps(&[], "com.host", 1, tmp.path()).unwrap();
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn collector_does_not_resolve_candidates_when_integrated_hsp_is_disabled() {
+        let candidates = vec![IntegratedHspCandidate {
+            alias: "remote".to_string(),
+            package_root: PathBuf::from("/path/that/must/not/be-read"),
+            version: "1.0.0".to_string(),
+        }];
+
+        let entries = IntegratedHspCollector::new(&candidates)
+            .with_enabled(false)
+            .collect()
+            .expect("disabled integratedHsp must skip dependency artifacts");
+
+        assert!(entries.is_empty());
     }
 }

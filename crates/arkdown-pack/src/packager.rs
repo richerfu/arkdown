@@ -1,7 +1,8 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arkdown_core::ArkdownConfig;
+use arkdown_core::{ArkdownConfig, HarArtifactType};
 use arkdown_path::{ArtifactPath, ArtifactPathSerializer};
 
 use crate::error::PackError;
@@ -11,52 +12,6 @@ use crate::zip_writer;
 pub fn minify_package_intermediate_module_json(content: &str) -> Result<String, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(content)?;
     serde_json::to_string(&order_package_module_json(value))
-}
-
-fn order_hap_module_json(value: serde_json::Value) -> serde_json::Value {
-    let Some(root) = value.as_object() else {
-        return value;
-    };
-
-    let mut out = serde_json::Map::new();
-    if let Some(app) = root.get("app") {
-        out.insert(
-            "app".to_string(),
-            order_object(
-                app,
-                &[
-                    "iconId",
-                    "debug",
-                    "targetPatchAPIVersion",
-                    "minAPIVersion",
-                    "icon",
-                    "buildMode",
-                    "label",
-                    "bundleType",
-                    "versionName",
-                    "versionCode",
-                    "appEnvironments",
-                    "compileSdkType",
-                    "labelId",
-                    "compileSdkVersion",
-                    "targetAPIVersion",
-                    "vendor",
-                    "bundleName",
-                    "apiReleaseType",
-                    "targetMinorAPIVersion",
-                ],
-            ),
-        );
-    }
-    if let Some(module) = root.get("module") {
-        out.insert("module".to_string(), order_hap_module(module));
-    }
-    for (key, value) in root {
-        if !out.contains_key(key) {
-            out.insert(key.clone(), value.clone());
-        }
-    }
-    serde_json::Value::Object(out)
 }
 
 fn order_package_module_json(value: serde_json::Value) -> serde_json::Value {
@@ -105,56 +60,6 @@ fn order_package_module_json(value: serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
-fn order_hap_module(module: &serde_json::Value) -> serde_json::Value {
-    let Some(object) = module.as_object() else {
-        return module.clone();
-    };
-    let mut out = serde_json::Map::new();
-    for key in [
-        "virtualMachine",
-        "mainElement",
-        "metadata",
-        "installationFree",
-        "deliveryWithInstall",
-        "requestPermissions",
-        "description",
-        "extensionAbilities",
-        "compileMode",
-        "type",
-        "dependencies",
-    ] {
-        if let Some(value) = object.get(key) {
-            let value = match key {
-                "requestPermissions" => order_hap_request_permissions(value),
-                "extensionAbilities" => order_hap_extension_abilities(value),
-                _ => value.clone(),
-            };
-            out.insert(key.to_string(), value);
-        }
-    }
-    if let Some(abilities) = object.get("abilities") {
-        out.insert("abilities".to_string(), order_hap_abilities(abilities));
-    }
-    for key in [
-        "deviceTypes",
-        "pages",
-        "descriptionId",
-        "name",
-        "routerMap",
-        "packageName",
-    ] {
-        if let Some(value) = object.get(key) {
-            out.insert(key.to_string(), value.clone());
-        }
-    }
-    for (key, value) in object {
-        if !out.contains_key(key) {
-            out.insert(key.clone(), value.clone());
-        }
-    }
-    serde_json::Value::Object(out)
-}
-
 fn order_module(module: &serde_json::Value) -> serde_json::Value {
     let Some(object) = module.as_object() else {
         return module.clone();
@@ -163,6 +68,7 @@ fn order_module(module: &serde_json::Value) -> serde_json::Value {
     for key in [
         "name",
         "type",
+        "srcEntry",
         "description",
         "mainElement",
         "deviceTypes",
@@ -195,119 +101,6 @@ fn order_module(module: &serde_json::Value) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(out)
-}
-
-fn order_hap_abilities(abilities: &serde_json::Value) -> serde_json::Value {
-    let Some(array) = abilities.as_array() else {
-        return abilities.clone();
-    };
-    serde_json::Value::Array(
-        array
-            .iter()
-            .map(|ability| {
-                let ordered = order_object(
-                    ability,
-                    &[
-                        "exported",
-                        "iconId",
-                        "continuable",
-                        "startWindowIconId",
-                        "minWindowHeight",
-                        "backgroundModes",
-                        "icon",
-                        "startWindowIcon",
-                        "startWindowBackgroundId",
-                        "description",
-                        "label",
-                        "skills",
-                        "minWindowWidth",
-                        "srcEntry",
-                        "descriptionId",
-                        "labelId",
-                        "startWindowBackground",
-                        "name",
-                    ],
-                );
-                let serde_json::Value::Object(mut object) = ordered else {
-                    return ordered;
-                };
-                if let Some(skills) = object.get("skills").cloned() {
-                    object.insert("skills".to_string(), order_skills(&skills));
-                }
-                serde_json::Value::Object(object)
-            })
-            .collect(),
-    )
-}
-
-fn order_hap_request_permissions(permissions: &serde_json::Value) -> serde_json::Value {
-    let Some(array) = permissions.as_array() else {
-        return permissions.clone();
-    };
-    serde_json::Value::Array(
-        array
-            .iter()
-            .map(|permission| {
-                let ordered =
-                    order_object(permission, &["reason", "reasonId", "usedScene", "name"]);
-                let serde_json::Value::Object(mut object) = ordered else {
-                    return ordered;
-                };
-                if let Some(used_scene) = object.get("usedScene").cloned() {
-                    object.insert(
-                        "usedScene".to_string(),
-                        order_object(&used_scene, &["abilities", "when"]),
-                    );
-                }
-                serde_json::Value::Object(object)
-            })
-            .collect(),
-    )
-}
-
-fn order_hap_extension_abilities(abilities: &serde_json::Value) -> serde_json::Value {
-    let Some(array) = abilities.as_array() else {
-        return abilities.clone();
-    };
-    serde_json::Value::Array(
-        array
-            .iter()
-            .map(|ability| {
-                let ordered = order_object(
-                    ability,
-                    &[
-                        "metadata",
-                        "srcEntry",
-                        "descriptionId",
-                        "labelId",
-                        "name",
-                        "description",
-                        "label",
-                        "type",
-                    ],
-                );
-                let serde_json::Value::Object(mut object) = ordered else {
-                    return ordered;
-                };
-                if let Some(metadata) = object.get("metadata").cloned() {
-                    object.insert("metadata".to_string(), order_hap_metadata(&metadata));
-                }
-                serde_json::Value::Object(object)
-            })
-            .collect(),
-    )
-}
-
-fn order_hap_metadata(metadata: &serde_json::Value) -> serde_json::Value {
-    let Some(array) = metadata.as_array() else {
-        return metadata.clone();
-    };
-    serde_json::Value::Array(
-        array
-            .iter()
-            .map(|entry| order_object(entry, &["resourceId", "resource", "name", "value"]))
-            .collect(),
-    )
 }
 
 fn order_abilities(abilities: &serde_json::Value) -> serde_json::Value {
@@ -397,6 +190,12 @@ pub struct PackInput {
     pub resources_index: PathBuf,
     /// Path to the processed `module.json` produced by arkdown-profile.
     pub module_json: PathBuf,
+    /// Current-module profile used by Hvigor's MakePackInfo task.
+    ///
+    /// This is deliberately separate from `module_json`: ProcessProfile may
+    /// append dependency HAR abilities before packaging, while MakePackInfo
+    /// reads the current module model and must not report dependency entries.
+    pub pack_info_module_json: Option<PathBuf>,
     /// Optional native `.so` libraries to bundle.
     pub native_libs: Vec<PathBuf>,
     /// Whether native `.so` libraries should be deflated in the package.
@@ -431,6 +230,9 @@ pub struct PackInput {
     /// Pass an empty vec for HAPs without integrated HSPs (the common case).
     pub integrated_hsps: Vec<IntegratedHspEntry>,
     pub privacy_profile_path: Option<std::path::PathBuf>,
+    /// `rpcid.sc` emitted by the SDK `syscap_tool` for OpenHarmony targets.
+    /// HarmonyOS targets and HAR modules do not provide this input.
+    pub syscap_path: Option<PathBuf>,
     /// Device types from the module manifest (e.g. `["phone", "tablet"]`).
     /// Used in pack.info `deviceType` field.  Defaults to `["phone"]` when empty.
     pub device_types: Vec<String>,
@@ -457,10 +259,10 @@ pub struct HarPackInput {
     pub output_path: PathBuf,
     /// Directory containing declaration stubs (`index.d.ts`, `index.d.ets`).
     ///
-    /// hvigor writes `processDeclarationEntry()` output to the HAR intermediates
-    /// directory and then includes the generated stubs in the final archive so
-    /// downstream consumers can resolve type information without full tsc.
-    /// When `None` (or the directory does not exist), declaration stubs are omitted.
+    /// Hvigor copies these intermediates for compiled HAR variants. Original
+    /// source HARs retain their ArkTS sources and deliberately omit generated
+    /// declarations. When `None` (or the directory does not exist), declaration
+    /// stubs are omitted.
     pub declarations_dir: Option<PathBuf>,
     /// Path to the consumer obfuscation rules file (`obfuscation.txt`).
     ///
@@ -469,6 +271,62 @@ pub struct HarPackInput {
     /// own obfuscation for packages that depend on this HAR.
     /// When `None` (or the file does not exist), consumer rules are omitted.
     pub consumer_rules_path: Option<PathBuf>,
+}
+
+/// Variant-specific HAR intermediates produced by the compile, profile,
+/// resource, and native stages. `AbstractProcessHarArtifacts` assembles these
+/// into one temporary directory before calling ohpm; arkdown models the same
+/// inputs explicitly so no source manifest has to be mutated.
+#[derive(Debug, Clone)]
+pub struct HarVariantInput {
+    pub artifact_type: HarArtifactType,
+    pub module_root: PathBuf,
+    /// `intermediates/loader_out/<target>`; obfuscated HAR copies the complete
+    /// tree while ByteCode HAR copies only its `ets/` child.
+    pub compiled_output_dir: PathBuf,
+    pub processed_module_json: Option<PathBuf>,
+    pub resource_table_path: Option<PathBuf>,
+    pub native_libs: Vec<PathBuf>,
+    pub native_header_dirs: Vec<PathBuf>,
+    pub preload_system_so_json: Option<PathBuf>,
+    pub source_maps_path: Option<PathBuf>,
+    pub declaration_entries: Vec<String>,
+    pub ignore_resource_patterns: Vec<String>,
+    pub debug: bool,
+    /// Effective module target selected by hvigor's target service.
+    /// Used by `HarBuildProfileTask` for `TARGET_NAME`.
+    pub target_name: String,
+}
+
+/// Inputs consumed by hvigor's `PrepareSharedHarRes` and `PackageSharedHar`
+/// tasks. The resulting interface HAR is emitted beside the HSP and exposes
+/// declarations, resources, and native link inputs to consumers without
+/// shipping the HSP implementation sources.
+#[derive(Debug, Clone)]
+pub struct HspInterfaceHarInput {
+    pub module_name: String,
+    pub module_root: PathBuf,
+    pub target_name: String,
+    pub oh_package_json: PathBuf,
+    pub processed_module_json: PathBuf,
+    pub declarations_dir: PathBuf,
+    pub resource_table_path: Option<PathBuf>,
+    pub resource_str_dir: Option<PathBuf>,
+    pub privacy_profile_path: Option<PathBuf>,
+    pub obfuscation_rules_path: Option<PathBuf>,
+    pub native_libs: Vec<PathBuf>,
+    pub native_header_dirs: Vec<PathBuf>,
+    pub exclude_so_from_interface_har: bool,
+    pub output_path: PathBuf,
+    pub compatible_sdk_version: u32,
+    pub compatible_sdk_type: String,
+    pub use_normalized_ohm_url: bool,
+    pub integrated_hsp: Option<bool>,
+    pub source_roots: Vec<String>,
+    pub dependencies: BTreeMap<String, String>,
+    pub dynamic_dependencies: BTreeMap<String, String>,
+    pub debug: bool,
+    pub obfuscated: bool,
 }
 
 impl Packager {
@@ -480,12 +338,11 @@ impl Packager {
     ///
     /// Layout:
     /// ```text
-    /// module.json           (deflated)
+    /// module.json           (stored)
     /// resources.index       (stored)
     /// ets/modules.abc       (stored, API >= 9)  or  modules.abc  (stored, API < 9)
     /// libs/arm64-v8a/*.so   (stored, optional)
     /// ```
-
     fn generate_pack_info(
         &self,
         input: &PackInput,
@@ -503,23 +360,18 @@ impl Packager {
             })
             .collect();
 
-        let main_ability = input
-            .abilities
-            .first()
-            .map(|a| a.name.as_str())
-            .unwrap_or("EntryAbility");
         let extension_abilities = Self::pack_info_extension_abilities(input, module_json);
         let compatible_api_version =
             compatible_api_version(&self.config.product.compatible_sdk_version)
                 .unwrap_or(self.config.sdk_config.compile_api_version);
 
-        // HSP uses bundle_type "shared"; all other module types use "entry" as the
-        // distro moduleType (HAP entry modules) unless extended in future.
-        let module_type = if input.bundle_type == "shared" {
-            "shared"
-        } else {
-            "entry"
-        };
+        // MakePackInfo keeps the application bundle type independent from the
+        // module type. In particular an HSP normally belongs to an `app`
+        // bundle while its module/package type is `shared`.
+        let module_type = module_json
+            .and_then(|value| value.pointer("/module/type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("entry");
 
         let device_types = if input.device_types.is_empty() {
             vec!["phone".to_string()]
@@ -528,15 +380,22 @@ impl Packager {
         };
 
         let mut module = serde_json::Map::new();
-        module.insert("mainAbility".to_string(), main_ability.into());
+        if let Some(main_ability) = module_json
+            .and_then(|value| value.pointer("/module/mainElement"))
+            .and_then(serde_json::Value::as_str)
+        {
+            module.insert("mainAbility".to_string(), main_ability.into());
+        }
         module.insert(
             "deviceType".to_string(),
             serde_json::json!(device_types.clone()),
         );
-        module.insert(
-            "abilities".to_string(),
-            serde_json::Value::Array(abilities_json),
-        );
+        if !abilities_json.is_empty() {
+            module.insert(
+                "abilities".to_string(),
+                serde_json::Value::Array(abilities_json),
+            );
+        }
         if !extension_abilities.is_empty() {
             module.insert(
                 "extensionAbilities".to_string(),
@@ -589,9 +448,6 @@ impl Packager {
         input: &PackInput,
         module_json: Option<&serde_json::Value>,
     ) -> Vec<serde_json::Value> {
-        let Some(resources_src_dir) = input.resources_src_dir.as_deref() else {
-            return Vec::new();
-        };
         let Some(extension_abilities) = module_json
             .and_then(|value| value.pointer("/module/extensionAbilities"))
             .and_then(|value| value.as_array())
@@ -604,20 +460,22 @@ impl Packager {
             let Some(ability_object) = ability.as_object() else {
                 continue;
             };
-            if ability_object.get("type").and_then(|value| value.as_str()) != Some("form") {
-                continue;
-            }
             let Some(name) = ability_object.get("name").and_then(|value| value.as_str()) else {
                 continue;
             };
-            let forms = Self::pack_info_forms(resources_src_dir, ability_object);
-            if forms.is_empty() {
-                continue;
-            }
 
             let mut entry = serde_json::Map::new();
             entry.insert("name".to_string(), name.into());
-            entry.insert("forms".to_string(), serde_json::Value::Array(forms));
+            if ability_object.contains_key("metadata") {
+                let forms = input
+                    .resources_src_dir
+                    .as_deref()
+                    .map(|resources_src_dir| {
+                        Self::pack_info_forms(resources_src_dir, ability_object)
+                    })
+                    .unwrap_or_default();
+                entry.insert("forms".to_string(), serde_json::Value::Array(forms));
+            }
             out.push(serde_json::Value::Object(entry));
         }
         out
@@ -633,7 +491,10 @@ impl Packager {
             .into_iter()
             .flatten()
             .filter(|metadata| {
-                metadata.get("name").and_then(|value| value.as_str()) == Some("ohos.extension.form")
+                metadata
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|name| name.contains("form"))
             })
             .filter_map(|metadata| {
                 metadata
@@ -697,15 +558,28 @@ impl Packager {
         if input.module_json.exists() {
             let module_json = fs_err::read_to_string(&input.module_json)?;
             let parsed_module_json = serde_json::from_str::<serde_json::Value>(&module_json).ok();
-            let module_json_entry = parsed_module_json
-                .as_ref()
-                .and_then(|value| serde_json::to_string(&order_hap_module_json(value.clone())).ok())
-                .unwrap_or(module_json);
+            let module_json_entry =
+                PackageToolJson::from_bytes(module_json.as_bytes()).into_bytes();
             module_json_value = parsed_module_json;
-            zip_writer::add_bytes_stored(&mut writer, "module.json", module_json_entry.as_bytes())?;
+            zip_writer::add_bytes_stored(&mut writer, "module.json", &module_json_entry)?;
         } else {
             return Err(PackError::MissingInput("module.json".to_string()));
         }
+        let pack_info_module_json_value = if let Some(path) = &input.pack_info_module_json {
+            if !path.is_file() {
+                return Err(PackError::MissingInput(format!(
+                    "pack.info module.json ({})",
+                    path.display()
+                )));
+            }
+            let content = fs_err::read_to_string(path)?;
+            Some(
+                serde_json::from_str::<serde_json::Value>(&content)
+                    .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?,
+            )
+        } else {
+            module_json_value.clone()
+        };
 
         // resources.index — stored (binary resource table)
         if input.resources_index.exists() {
@@ -714,14 +588,26 @@ impl Packager {
             return Err(PackError::MissingInput("resources.index".to_string()));
         }
 
-        if let Some(pkg_context_info_path) = &input.pkg_context_info_path {
+        let pkg_context = if let Some(pkg_context_info_path) = &input.pkg_context_info_path {
             if !pkg_context_info_path.exists() {
                 return Err(PackError::MissingInput(format!(
                     "pkgContextInfo.json ({})",
                     pkg_context_info_path.display()
                 )));
             }
-            zip_writer::add_file_stored(&mut writer, "pkgContextInfo.json", pkg_context_info_path)?;
+            Some(PackageToolJson::read(pkg_context_info_path)?.into_bytes())
+        } else {
+            None
+        };
+
+        if let Some(syscap_path) = &input.syscap_path {
+            if !syscap_path.is_file() {
+                return Err(PackError::MissingInput(format!(
+                    "rpcid.sc ({})",
+                    syscap_path.display()
+                )));
+            }
+            zip_writer::add_file_stored(&mut writer, "rpcid.sc", syscap_path)?;
         }
 
         // Resource files — copy from src/main/resources/ into resources/ in the HAP.
@@ -742,8 +628,6 @@ impl Packager {
                         .unwrap_or("");
                     if ext == "json" {
                         add_json_resource_stored(&mut writer, &dest, entry.path())?;
-                    } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
-                        zip_writer::add_file_stored(&mut writer, &dest, entry.path())?;
                     } else {
                         zip_writer::add_file_stored(&mut writer, &dest, entry.path())?;
                     }
@@ -833,11 +717,18 @@ impl Packager {
             }
         }
 
-        // pack.info — bundle metadata (stored JSON), written last by hvigor
-        // for a normal HAP.
-        let mut pack_info = self.generate_pack_info(&input, module_json_value.as_ref());
+        // pack.info — the last regular bundle-metadata entry; the SDK appends
+        // optional pkgContextInfo.json after it.
+        let mut pack_info = self.generate_pack_info(&input, pack_info_module_json_value.as_ref());
         pack_info.push('\n');
         zip_writer::add_bytes_stored(&mut writer, "pack.info", pack_info.as_bytes())?;
+
+        // The SDK package tool writes pkgContextInfo after its regular HAP
+        // entries (including pack.info), even though the CLI option is supplied
+        // alongside the other input paths.
+        if let Some(pkg_context) = pkg_context {
+            zip_writer::add_bytes_stored(&mut writer, "pkgContextInfo.json", &pkg_context)?;
+        }
 
         writer.finish()?;
         Ok(input.output_path)
@@ -847,9 +738,72 @@ impl Packager {
     ///
     /// HSP (Harmony Shared Package) has the same on-disk layout as HAP; the
     /// `module.type` field in `module.json` distinguishes them at runtime.
-    pub fn pack_hsp(&self, mut input: PackInput) -> Result<PathBuf, PackError> {
-        input.bundle_type = "shared".to_string();
+    pub fn pack_hsp(&self, input: PackInput) -> Result<PathBuf, PackError> {
         self.pack_hap(input)
+    }
+
+    /// Package the declaration-only interface HAR emitted alongside an HSP.
+    ///
+    /// This follows hvigor `PrepareSharedHarRes`/`PackageSharedHar`: the
+    /// processed profile is reduced to its consumer-visible fields, the
+    /// package manifest is converted to `InterfaceHar`, and declarations are
+    /// copied from the HSP-specific `<module>/src/main/ets` tree.
+    pub fn pack_hsp_interface_har(
+        &self,
+        input: HspInterfaceHarInput,
+    ) -> Result<PathBuf, PackError> {
+        if let Some(parent) = input.output_path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+
+        let manifest = HspInterfaceHarManifest::load(&input)?;
+        let module_json = HspInterfaceModuleJson::load(&input.processed_module_json)?;
+        let mut entries = HarArchiveEntries::new(&input.output_path);
+        entries.collect_hsp_special_files(&input.module_root)?;
+        entries.collect_hsp_local_dependencies(&input.module_root, &manifest.local_dependencies)?;
+
+        let declaration_root = input.declarations_dir.join(&input.module_name);
+        if !HarArchiveEntries::contains_declarations(&declaration_root) {
+            return Err(PackError::MissingInput(format!(
+                "HSP interface declarations do not exist below {}",
+                declaration_root.display()
+            )));
+        }
+        entries.collect_required_tree(&declaration_root, Path::new(""))?;
+
+        if let Some(resource_table) = input.resource_table_path.as_ref() {
+            entries.insert_required("ResourceTable.txt", resource_table)?;
+        }
+        if let Some(resource_str) = input.resource_str_dir.as_ref() {
+            entries.collect_tree_if_exists(resource_str, Path::new("src/main/resource"))?;
+        }
+        if let Some(privacy_profile) = input.privacy_profile_path.as_ref() {
+            entries.insert_if_exists("pac.json5", privacy_profile)?;
+        }
+        if let Some(obfuscation_rules) = input.obfuscation_rules_path.as_ref() {
+            entries.insert_if_exists("obfuscation.txt", obfuscation_rules)?;
+        }
+        let include_native_libs =
+            !input.exclude_so_from_interface_har || !input.native_header_dirs.is_empty();
+        if input.exclude_so_from_interface_har && !input.native_header_dirs.is_empty() {
+            tracing::warn!(
+                module = %input.module_name,
+                "excludeSoFromInterfaceHar is ignored when native headerPath is configured"
+            );
+        }
+        if include_native_libs {
+            for native_lib in &input.native_libs {
+                entries.insert_required(ArchivePath::native_lib(native_lib), native_lib)?;
+            }
+        }
+        for header_dir in &input.native_header_dirs {
+            entries.collect_required_tree(header_dir, Path::new("include"))?;
+        }
+
+        entries.insert_bytes("oh-package.json5", manifest.serialize()?);
+        entries.insert_bytes("src/main/module.json", module_json.serialize()?);
+        entries.write_archive()?;
+        Ok(input.output_path)
     }
 
     /// Produce a "cleaned" source HAR for tgz publishing.
@@ -877,18 +831,22 @@ impl Packager {
         if let Some(decl_dir) = declarations_dir {
             for entry in walkdir::WalkDir::new(decl_dir)
                 .min_depth(1)
-                .max_depth(1)
                 .into_iter()
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().is_file())
             {
-                let file_name = entry
-                    .path()
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
                 if ArchivePath::is_declaration_file(entry.path()) {
-                    fs_err::copy(entry.path(), cleaned_ets.join(file_name))?;
+                    let relative = entry.path().strip_prefix(decl_dir).map_err(|error| {
+                        PackError::MissingInput(format!(
+                            "invalid HAR declaration path {}: {error}",
+                            entry.path().display()
+                        ))
+                    })?;
+                    let destination = cleaned_ets.join(relative);
+                    if let Some(parent) = destination.parent() {
+                        fs_err::create_dir_all(parent)?;
+                    }
+                    fs_err::copy(entry.path(), destination)?;
                 }
             }
         }
@@ -923,206 +881,980 @@ impl Packager {
         Ok(cleaned_ets)
     }
 
-    /// Package a source HAR archive.
-    ///
-    /// Layout:
-    /// ```text
-    /// oh-package.json5          (deflated, optional)
-    /// src/main/ets/**           (deflated, source ETS files)
-    /// ```
+    /// Package an original source HAR. Call [`Self::pack_har_variant`] when
+    /// the effective target requests obfuscation or ByteCode HAR output.
     pub fn pack_har(&self, input: HarPackInput) -> Result<PathBuf, PackError> {
+        let module_root = input
+            .source_dir
+            .ancestors()
+            .nth(3)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                PackError::MissingInput(format!(
+                    "cannot derive HAR module root from {}",
+                    input.source_dir.display()
+                ))
+            })?;
+        self.pack_har_variant(
+            input,
+            HarVariantInput {
+                artifact_type: HarArtifactType::Original,
+                module_root,
+                compiled_output_dir: PathBuf::new(),
+                processed_module_json: None,
+                resource_table_path: None,
+                native_libs: Vec::new(),
+                native_header_dirs: Vec::new(),
+                preload_system_so_json: None,
+                source_maps_path: None,
+                declaration_entries: Vec::new(),
+                ignore_resource_patterns: Vec::new(),
+                debug: true,
+                target_name: "default".to_string(),
+            },
+        )
+    }
+
+    /// Assemble the three HAR artifact shapes owned by hvigor's
+    /// `AbstractProcessHarArtifacts` and `ProcessHarArtifacts` tasks.
+    pub fn pack_har_variant(
+        &self,
+        input: HarPackInput,
+        variant: HarVariantInput,
+    ) -> Result<PathBuf, PackError> {
         if let Some(parent) = input.output_path.parent() {
             fs_err::create_dir_all(parent)?;
         }
-        let mut writer = zip_writer::create_zip(&input.output_path)?;
-
-        // oh-package.json5 — deflate.
-        //
-        // When declaration stubs are present, add `"types": "index.d.ts"` to
-        // the package manifest so downstream consumers can locate declarations
-        // without guessing the path (mirrors hvigor processDeclarationEntry).
-        if input.oh_package_json.exists() {
-            let has_declarations = input.declarations_dir.as_ref().map_or(false, |dir| {
-                dir.exists() && dir.join("index.d.ts").is_file()
-            });
-            if has_declarations {
-                // Read, parse (json5), add types field, and write modified JSON.
-                let modified =
-                    Self::inject_types_field(&input.oh_package_json).unwrap_or_else(|_| {
-                        // Fall back to the original file on any error.
-                        std::fs::read(input.oh_package_json.as_path()).unwrap_or_default()
-                    });
-                zip_writer::add_bytes_deflate(&mut writer, "oh-package.json5", &modified)?;
-            } else {
-                zip_writer::add_file_deflate(
-                    &mut writer,
-                    "oh-package.json5",
-                    &input.oh_package_json,
+        let manifest = HarManifest::load(&input, &variant, &self.config)?;
+        let mut entries = HarArchiveEntries::new(&input.output_path);
+        match variant.artifact_type {
+            HarArtifactType::Original => entries.collect_original_sources(
+                &variant.module_root,
+                &input.oh_package_json,
+                manifest.main.as_deref(),
+            )?,
+            HarArtifactType::Obfuscation => {
+                entries
+                    .collect_resources(&input.resources_dir, &variant.ignore_resource_patterns)?;
+                entries.collect_required_tree(&variant.compiled_output_dir, Path::new(""))?;
+            }
+            HarArtifactType::Bytecode => {
+                entries
+                    .collect_resources(&input.resources_dir, &variant.ignore_resource_patterns)?;
+                entries.collect_required_tree(
+                    &variant.compiled_output_dir.join("ets"),
+                    Path::new("ets"),
                 )?;
             }
         }
-
-        // Source .ets files from source_dir/
-        if input.source_dir.exists() {
-            for entry in walkdir::WalkDir::new(&input.source_dir)
-                .min_depth(1)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let rel = entry
-                    .path()
-                    .strip_prefix(&input.source_dir)
-                    .unwrap_or(entry.path());
-                let dest = ArchivePath::har_ets(rel);
-                zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
-            }
-        }
-
-        // src/main/resources/ — embed resources in the source HAR so consumers
-        // can use the HAR's resource entries. Matches hvigor's HAR layout.
-        if input.resources_dir.exists() {
-            for entry in walkdir::WalkDir::new(&input.resources_dir)
-                .min_depth(1)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let rel = entry
-                    .path()
-                    .strip_prefix(&input.resources_dir)
-                    .unwrap_or(entry.path());
-                let dest = ArchivePath::har_resources(rel);
-                zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
-            }
-        }
-
-        // src/main/resource/ — permission reason string resources for HSP/HAR.
         if let Some(resource_str_dir) = input.resource_str_dir.as_ref() {
-            if resource_str_dir.exists() {
-                for entry in walkdir::WalkDir::new(resource_str_dir)
-                    .min_depth(1)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                {
-                    let rel = entry
-                        .path()
-                        .strip_prefix(resource_str_dir)
-                        .unwrap_or(entry.path());
-                    let dest = ArchivePath::har_resource_str(rel);
-                    zip_writer::add_file_deflate(&mut writer, &dest, entry.path())?;
+            entries.collect_tree_if_exists(resource_str_dir, Path::new("src/main/resource"))?;
+        }
+        if let Some(processed_module_json) = variant.processed_module_json.as_ref() {
+            entries.insert_required("src/main/module.json", processed_module_json)?;
+        }
+        if let Some(resource_table) = variant.resource_table_path.as_ref() {
+            entries.insert_required("ResourceTable.txt", resource_table)?;
+        }
+        if !matches!(variant.artifact_type, HarArtifactType::Original) {
+            if let Some(declarations_dir) = input.declarations_dir.as_ref() {
+                entries.collect_declarations(declarations_dir)?;
+            }
+        }
+        for native_lib in &variant.native_libs {
+            entries.insert_required(ArchivePath::native_lib(native_lib), native_lib)?;
+        }
+        for header_dir in &variant.native_header_dirs {
+            entries.collect_required_tree(header_dir, Path::new("include"))?;
+        }
+        if matches!(variant.artifact_type, HarArtifactType::Bytecode) {
+            if let Some(preload) = variant.preload_system_so_json.as_ref() {
+                let name = preload
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("preload.json");
+                entries.insert_required(format!("META-INF/{name}"), preload)?;
+            }
+            if variant.debug {
+                if let Some(source_maps) = variant.source_maps_path.as_ref() {
+                    entries.insert_required("ets/sourceMaps.map", source_maps)?;
                 }
             }
         }
-
-        // Declaration stubs (index.d.ts, index.d.ets) — packaged at the HAR root.
-        //
-        // hvigor's source HAR layout places declaration stubs generated by
-        // `processDeclarationEntry()` directly at the archive root so
-        // downstream consumers can locate them via `oh-package.json5#types`.
-        if let Some(declarations_dir) = input.declarations_dir.as_ref() {
-            if declarations_dir.exists() {
-                for entry in walkdir::WalkDir::new(declarations_dir)
-                    .min_depth(1)
-                    .max_depth(1) // only top-level stubs
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                {
-                    let file_name = entry
-                        .path()
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default();
-                    // Include only declaration stubs.
-                    if ArchivePath::is_declaration_file(entry.path()) {
-                        zip_writer::add_file_deflate(&mut writer, file_name, entry.path())?;
-                    }
-                }
-            }
-        }
-
-        // Consumer obfuscation rules (`obfuscation.txt`) — packaged at the HAR root.
-        //
-        // hvigor's `generateConsumerObConfigFile()` writes the HAR's obfuscation rules
-        // so that downstream consumers can extend their own obfuscation config.
         if let Some(consumer_rules) = input.consumer_rules_path.as_ref() {
-            if consumer_rules.exists() {
-                zip_writer::add_file_deflate(&mut writer, "obfuscation.txt", consumer_rules)?;
-            }
+            entries.insert_if_exists("obfuscation.txt", consumer_rules)?;
         }
 
-        writer.finish()?;
-
-        // Write normalized package.json for HAR publishing (P15: mirrors hvigor
-        // generatePackageJson step).  The file is placed next to the HAR archive
-        // so registry tooling can consume standard npm-compatible metadata.
-        if input.oh_package_json.exists() {
-            if let Ok(content) = std::fs::read_to_string(&input.oh_package_json) {
-                if let Ok(pkg) = json5::from_str::<serde_json::Value>(&content) {
-                    let name = pkg
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let version = pkg
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("1.0.0");
-                    let description = pkg.get("description").cloned();
-                    let mut normalized = serde_json::Map::new();
-                    normalized.insert(
-                        "name".to_string(),
-                        serde_json::Value::String(name.to_string()),
-                    );
-                    normalized.insert(
-                        "version".to_string(),
-                        serde_json::Value::String(version.to_string()),
-                    );
-                    if let Some(desc) = description {
-                        normalized.insert("description".to_string(), desc);
-                    }
-                    let pkg_json_path = input
-                        .output_path
-                        .parent()
-                        .unwrap_or(std::path::Path::new("."))
-                        .join("package.json");
-                    if let Ok(serialized) =
-                        serde_json::to_string_pretty(&serde_json::Value::Object(normalized))
-                    {
-                        let _ = std::fs::write(&pkg_json_path, serialized);
-                    }
-                }
-            }
-        }
+        entries.insert_bytes("oh-package.json5", manifest.serialize()?);
+        entries.insert_bytes(
+            "BuildProfile.ets",
+            manifest.build_profile(&self.config, &variant),
+        );
+        // CacheNativeLibs creates this directory even when the HAR has no
+        // native libraries. ohpm retains it in the package tarball.
+        entries.ensure_directory("libs");
+        entries.write_archive()?;
 
         Ok(input.output_path)
     }
 }
 
-// Private helpers for HAR assembly
-impl Packager {
-    /// Read `oh-package.json5`, add/update `"types": "index.d.ts"`, and return the
-    /// modified JSON bytes.
-    ///
-    /// hvigor's `processDeclarationEntry()` writes this field so downstream consumers
-    /// can locate the TypeScript/ArkTS declaration stubs without guessing.
-    fn inject_types_field(path: &std::path::Path) -> Result<Vec<u8>, PackError> {
-        let content = fs_err::read_to_string(path)?;
-        let mut pkg: serde_json::Value =
-            json5::from_str(&content).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
-        if let Some(obj) = pkg.as_object_mut() {
-            // Only add if not already set; preserve existing value if present.
-            obj.entry("types")
-                .or_insert_with(|| serde_json::Value::String("index.d.ts".to_string()));
+struct HspInterfaceHarManifest {
+    value: serde_json::Value,
+    local_dependencies: Vec<PathBuf>,
+}
+
+impl HspInterfaceHarManifest {
+    fn load(input: &HspInterfaceHarInput) -> Result<Self, PackError> {
+        if !input.oh_package_json.is_file() {
+            return Err(PackError::MissingInput(format!(
+                "HSP package manifest does not exist: {}",
+                input.oh_package_json.display()
+            )));
         }
-        serde_json::to_vec_pretty(&pkg).map_err(|e| PackError::MalformedPackInfo(e.to_string()))
+        let content = fs_err::read_to_string(&input.oh_package_json)?;
+        let mut value: serde_json::Value = json5::from_str(&content)
+            .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?;
+        let package = value.as_object_mut().ok_or_else(|| {
+            PackError::MalformedPackInfo(format!(
+                "{} must contain a JSON object",
+                input.oh_package_json.display()
+            ))
+        })?;
+        let local_dependencies = Self::local_dependencies(package);
+        let main = package
+            .shift_remove("main")
+            .and_then(|value| value.as_str().map(str::to_string));
+        package.insert(
+            "types".to_string(),
+            serde_json::Value::String(Self::types_from_main(main.as_deref())),
+        );
+        package
+            .entry("packageType")
+            .or_insert_with(|| serde_json::Value::String("InterfaceHar".to_string()));
+
+        if package.contains_key("dependencies") || !input.dependencies.is_empty() {
+            package.insert(
+                "dependencies".to_string(),
+                serde_json::to_value(&input.dependencies)
+                    .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?,
+            );
+        }
+        if package.contains_key("dynamicDependencies") || !input.dynamic_dependencies.is_empty() {
+            package.insert(
+                "dynamicDependencies".to_string(),
+                serde_json::to_value(&input.dynamic_dependencies)
+                    .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?,
+            );
+        }
+        package.shift_remove("devDependencies");
+
+        let metadata = package
+            .entry("metadata")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                PackError::MalformedPackInfo("oh-package.json5 metadata must be an object".into())
+            })?;
+        metadata.insert(
+            "useNormalizedOHMUrl".to_string(),
+            serde_json::Value::Bool(input.use_normalized_ohm_url),
+        );
+        if let Some(integrated_hsp) = input.integrated_hsp {
+            metadata.insert(
+                "integratedHsp".to_string(),
+                serde_json::Value::Bool(integrated_hsp),
+            );
+        }
+        let mut source_roots = input.source_roots.clone();
+        source_roots.push("./src/main".to_string());
+        source_roots.push(format!(
+            "./build/default/generated/profile/{}",
+            input.target_name
+        ));
+        metadata.insert("sourceRoots".to_string(), serde_json::json!(source_roots));
+        metadata.insert("debug".to_string(), serde_json::Value::Bool(input.debug));
+
+        package.insert(
+            "compatibleSdkVersion".to_string(),
+            serde_json::Value::Number(input.compatible_sdk_version.into()),
+        );
+        package.insert(
+            "compatibleSdkType".to_string(),
+            serde_json::Value::String(input.compatible_sdk_type.clone()),
+        );
+        package.insert(
+            "obfuscated".to_string(),
+            serde_json::Value::Bool(input.obfuscated),
+        );
+        Ok(Self {
+            value,
+            local_dependencies,
+        })
+    }
+
+    fn local_dependencies(package: &serde_json::Map<String, serde_json::Value>) -> Vec<PathBuf> {
+        package
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flat_map(|dependencies| dependencies.values())
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|dependency| {
+                let path = dependency.strip_prefix("file:").unwrap_or(dependency);
+                let is_path = dependency.starts_with("file:")
+                    || path.starts_with('.')
+                    || path.starts_with('/')
+                    || path.contains('/')
+                    || path.contains('\\');
+                is_path.then(|| PathBuf::from(path))
+            })
+            .collect()
+    }
+
+    fn types_from_main(main: Option<&str>) -> String {
+        let Some(main) = main.filter(|main| !main.is_empty()) else {
+            return "index.d.ets".to_string();
+        };
+        if let Some(stem) = main.strip_suffix(".ets") {
+            return format!("{stem}.d.ets");
+        }
+        if let Some(stem) = main.strip_suffix(".ts") {
+            return format!("{stem}.d.ts");
+        }
+        if main.ends_with(".d") {
+            return main.to_string();
+        }
+        format!("{main}.d")
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, PackError> {
+        let mut bytes = serde_json::to_vec_pretty(&self.value)
+            .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+}
+
+struct HspInterfaceModuleJson {
+    value: serde_json::Value,
+}
+
+impl HspInterfaceModuleJson {
+    fn load(path: &Path) -> Result<Self, PackError> {
+        if !path.is_file() {
+            return Err(PackError::MissingInput(format!(
+                "processed HSP module.json does not exist: {}",
+                path.display()
+            )));
+        }
+        let content = fs_err::read_to_string(path)?;
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?;
+        let root = value.as_object().ok_or_else(|| {
+            PackError::MalformedPackInfo(format!("{} must contain a JSON object", path.display()))
+        })?;
+        let mut output = serde_json::Map::new();
+        if let Some(app) = root.get("app") {
+            output.insert(
+                "app".to_string(),
+                Self::consumer_fields(
+                    app,
+                    &[
+                        "bundleName",
+                        "bundleType",
+                        "debug",
+                        "versionCode",
+                        "versionName",
+                        "minCompatibleVersionCode",
+                        "minAPIVersion",
+                        "targetAPIVersion",
+                        "apiReleaseType",
+                        "targetMinorAPIVersion",
+                        "targetPatchAPIVersion",
+                    ],
+                ),
+            );
+        }
+        if let Some(module) = root.get("module") {
+            output.insert(
+                "module".to_string(),
+                Self::consumer_fields(
+                    module,
+                    &[
+                        "name",
+                        "packageName",
+                        "type",
+                        "deliveryWithInstall",
+                        "deviceTypes",
+                        "requestPermissions",
+                        "dependencies",
+                        "libIsolation",
+                    ],
+                ),
+            );
+        }
+        Ok(Self {
+            value: serde_json::Value::Object(output),
+        })
+    }
+
+    fn consumer_fields(value: &serde_json::Value, fields: &[&str]) -> serde_json::Value {
+        let Some(object) = value.as_object() else {
+            return value.clone();
+        };
+        let mut output = serde_json::Map::new();
+        for field in fields {
+            if let Some(value) = object.get(*field).filter(|value| !value.is_null()) {
+                output.insert((*field).to_string(), value.clone());
+            }
+        }
+        serde_json::Value::Object(output)
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, PackError> {
+        let mut bytes = serde_json::to_vec(&self.value)
+            .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+}
+
+struct HarManifest {
+    value: serde_json::Value,
+    main: Option<String>,
+}
+
+impl HarManifest {
+    fn load(
+        input: &HarPackInput,
+        variant: &HarVariantInput,
+        config: &ArkdownConfig,
+    ) -> Result<Self, PackError> {
+        if !input.oh_package_json.is_file() {
+            return Err(PackError::MissingInput(format!(
+                "HAR manifest does not exist: {}",
+                input.oh_package_json.display()
+            )));
+        }
+        let content = fs_err::read_to_string(&input.oh_package_json)?;
+        let mut value: serde_json::Value = json5::from_str(&content)
+            .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?;
+        let package = value.as_object_mut().ok_or_else(|| {
+            PackError::MalformedPackInfo(format!(
+                "{} must contain a JSON object",
+                input.oh_package_json.display()
+            ))
+        })?;
+        let main = package
+            .get("main")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if !matches!(variant.artifact_type, HarArtifactType::Original)
+            && input
+                .declarations_dir
+                .as_ref()
+                .is_some_and(|dir| HarArchiveEntries::contains_declarations(dir))
+        {
+            let types = main
+                .as_deref()
+                .map(Self::declaration_path_for_main)
+                .unwrap_or_else(|| "index.d.ets".to_string());
+            package
+                .entry("types")
+                .or_insert_with(|| serde_json::Value::String(types));
+        }
+        if matches!(variant.artifact_type, HarArtifactType::Obfuscation) {
+            package.insert(
+                "artifactType".to_string(),
+                serde_json::Value::String("obfuscation".to_string()),
+            );
+        }
+        if matches!(variant.artifact_type, HarArtifactType::Bytecode) {
+            package.remove("main");
+        }
+        let metadata = package
+            .entry("metadata")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                PackError::MalformedPackInfo("oh-package.json5 metadata must be an object".into())
+            })?;
+        metadata.insert("sourceRoots".to_string(), serde_json::json!(["./src/main"]));
+        metadata.insert("debug".to_string(), serde_json::Value::Bool(variant.debug));
+        metadata.insert(
+            "useNormalizedOHMUrl".to_string(),
+            serde_json::Value::Bool(
+                config
+                    .product
+                    .build_option
+                    .strict_mode
+                    .use_normalized_ohm_url,
+            ),
+        );
+        if matches!(variant.artifact_type, HarArtifactType::Bytecode) {
+            metadata.insert("byteCodeHar".to_string(), serde_json::Value::Bool(true));
+            metadata.remove("workers");
+            if let Some(runtime_only) = metadata
+                .get_mut("runtimeOnly")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                runtime_only.remove("sources");
+            }
+            let declarations = variant
+                .declaration_entries
+                .iter()
+                .filter(|entry| !entry.is_empty())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            metadata.insert(
+                "declarationEntry".to_string(),
+                serde_json::Value::Array(
+                    declarations
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        package.insert(
+            "compatibleSdkVersion".to_string(),
+            serde_json::Value::from(Self::compatible_api_version(config)),
+        );
+        package.insert(
+            "compatibleSdkType".to_string(),
+            serde_json::Value::String(config.product.runtime_os.clone()),
+        );
+        package.insert(
+            "obfuscated".to_string(),
+            serde_json::Value::Bool(matches!(
+                variant.artifact_type,
+                HarArtifactType::Obfuscation
+            )),
+        );
+        Ok(Self { value, main })
+    }
+
+    fn declaration_path_for_main(main: &str) -> String {
+        for extension in [".d.ets", ".d.ts", ".ets", ".ts", ".js"] {
+            if let Some(stem) = main.strip_suffix(extension) {
+                return format!(
+                    "{stem}.d.{}",
+                    if extension.ends_with("ets") {
+                        "ets"
+                    } else {
+                        "ts"
+                    }
+                );
+            }
+        }
+        format!("{main}.d.ets")
+    }
+
+    fn compatible_api_version(config: &ArkdownConfig) -> u32 {
+        config
+            .product
+            .compatible_sdk_version
+            .rsplit_once('(')
+            .and_then(|(_, version)| version.strip_suffix(')'))
+            .and_then(|version| version.parse().ok())
+            .unwrap_or(config.sdk_config.compile_api_version)
+    }
+
+    /// Mirrors hvigor `HarBuildProfileTask` and
+    /// `build-profile-utils.normalizedFileData` for the built-in fields.
+    fn build_profile(&self, config: &ArkdownConfig, variant: &HarVariantInput) -> Vec<u8> {
+        let version = self
+            .value
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let mode = match config.build_mode {
+            arkdown_core::BuildMode::Debug => "debug",
+            arkdown_core::BuildMode::Release => "release",
+        };
+        format!(
+            "/**\n * Use these variables when you tailor your ArkTS code. They must be of the const type.\n */\n\
+export const HAR_VERSION = '{version}';\n\
+export const BUILD_MODE_NAME = '{mode}';\n\
+export const DEBUG = {};\n\
+export const TARGET_NAME = '{}';\n\n\
+/**\n * BuildProfile Class is used only for compatibility purposes.\n */\n\
+export default class BuildProfile {{ \n\
+\tstatic readonly HAR_VERSION = HAR_VERSION;\n\
+\tstatic readonly BUILD_MODE_NAME = BUILD_MODE_NAME;\n\
+\tstatic readonly DEBUG = DEBUG;\n\
+\tstatic readonly TARGET_NAME = TARGET_NAME;\n\
+}}",
+            variant.debug, variant.target_name
+        )
+        .into_bytes()
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, PackError> {
+        let mut bytes = serde_json::to_vec(&self.value)
+            .map_err(|error| PackError::MalformedPackInfo(error.to_string()))?;
+        // fs-extra.outputJSONSync, used by hvigor before `ohpm pack`, writes a
+        // trailing newline even when the package object is otherwise minified.
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+}
+
+struct HarArchiveEntries<'a> {
+    output_path: &'a Path,
+    files: BTreeMap<String, PathBuf>,
+    inline_files: BTreeMap<String, Vec<u8>>,
+    directories: BTreeSet<String>,
+}
+
+impl<'a> HarArchiveEntries<'a> {
+    const INVALID_TOP_LEVEL: [&'static str; 9] = [
+        "libs",
+        "build",
+        "node_modules",
+        "oh_modules",
+        ".cxx",
+        ".previewer",
+        ".hvigor",
+        ".gitignore",
+        ".ohpmignore",
+    ];
+
+    fn new(output_path: &'a Path) -> Self {
+        Self {
+            output_path,
+            files: BTreeMap::new(),
+            inline_files: BTreeMap::new(),
+            directories: BTreeSet::new(),
+        }
+    }
+
+    fn collect_original_sources(
+        &mut self,
+        module_root: &Path,
+        package_manifest: &Path,
+        main: Option<&str>,
+    ) -> Result<(), PackError> {
+        if !module_root.is_dir() {
+            return Err(PackError::MissingInput(format!(
+                "HAR module root does not exist: {}",
+                module_root.display()
+            )));
+        }
+        let ignore_rules = HarIgnoreRules::load(module_root)?;
+        let main = main.map(|path| path.trim_start_matches("./").replace('\\', "/"));
+        let mut files = Self::files_under(module_root)?;
+        files.sort();
+        for path in files {
+            let rel = path.strip_prefix(module_root).map_err(|error| {
+                PackError::MissingInput(format!(
+                    "failed to relativize {} to {}: {error}",
+                    path.display(),
+                    module_root.display()
+                ))
+            })?;
+            let rel_text = ArtifactPathSerializer::rel_to_slash(rel);
+            let top = rel.components().next().and_then(|part| match part {
+                std::path::Component::Normal(name) => name.to_str(),
+                _ => None,
+            });
+            if top.is_some_and(|name| Self::INVALID_TOP_LEVEL.contains(&name))
+                || path == package_manifest
+                || rel == Path::new("src/main/module.json5")
+                || rel_text.starts_with("src/test/")
+                || rel_text.starts_with("src/ohosTest/")
+            {
+                continue;
+            }
+            if main.as_deref() != Some(rel_text.as_str()) && ignore_rules.is_ignored(&rel_text) {
+                continue;
+            }
+            self.files.insert(rel_text, path);
+        }
+        Ok(())
+    }
+
+    fn collect_hsp_special_files(&mut self, module_root: &Path) -> Result<(), PackError> {
+        if !module_root.is_dir() {
+            return Err(PackError::MissingInput(format!(
+                "HSP module root does not exist: {}",
+                module_root.display()
+            )));
+        }
+        for entry in fs_err::read_dir(module_root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let lower = name.to_ascii_lowercase();
+            let stem = lower.split('.').next().unwrap_or_default();
+            let is_readme = lower == "readme.opensource"
+                || matches!(
+                    lower.as_str(),
+                    "readme.md" | "readme-cn.md" | "readme_cn.md" | "readme-en.md" | "readme_en.md"
+                );
+            let is_changelog = matches!(
+                lower.as_str(),
+                "changelog.md"
+                    | "changelog-cn.md"
+                    | "changelog_cn.md"
+                    | "changelog-en.md"
+                    | "changelog_en.md"
+            );
+            if stem == "license" || is_readme || is_changelog {
+                self.files.insert(name, entry.path());
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_hsp_local_dependencies(
+        &mut self,
+        module_root: &Path,
+        dependencies: &[PathBuf],
+    ) -> Result<(), PackError> {
+        let canonical_root = module_root.canonicalize()?;
+        for dependency in dependencies {
+            let source = if dependency.is_absolute() {
+                dependency.clone()
+            } else {
+                module_root.join(dependency)
+            };
+            if !source.exists() {
+                continue;
+            }
+            let canonical_source = source.canonicalize()?;
+            if !canonical_source.starts_with(&canonical_root) || canonical_source == canonical_root
+            {
+                continue;
+            }
+            let relative = canonical_source
+                .strip_prefix(&canonical_root)
+                .map_err(|error| {
+                    PackError::MissingInput(format!(
+                        "invalid local HSP dependency {}: {error}",
+                        source.display()
+                    ))
+                })?;
+            if canonical_source.is_file() {
+                self.files.insert(
+                    ArtifactPathSerializer::rel_to_slash(relative),
+                    canonical_source,
+                );
+            } else if canonical_source.is_dir() {
+                self.collect_tree(&canonical_source, relative)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_resources(&mut self, root: &Path, patterns: &[String]) -> Result<(), PackError> {
+        let filter = HarResourceFilter::new(patterns)?;
+        for path in Self::files_under_if_exists(root)? {
+            if filter.is_ignored(&path) {
+                continue;
+            }
+            let rel = path.strip_prefix(root).map_err(|error| {
+                PackError::MissingInput(format!("invalid HAR resource path: {error}"))
+            })?;
+            self.files.insert(ArchivePath::har_resources(rel), path);
+        }
+        Ok(())
+    }
+
+    fn collect_required_tree(&mut self, root: &Path, destination: &Path) -> Result<(), PackError> {
+        if !root.is_dir() {
+            return Err(PackError::MissingInput(format!(
+                "required HAR intermediate directory does not exist: {}",
+                root.display()
+            )));
+        }
+        self.collect_tree(root, destination)
+    }
+
+    fn collect_tree_if_exists(&mut self, root: &Path, destination: &Path) -> Result<(), PackError> {
+        if root.is_dir() {
+            self.collect_tree(root, destination)?;
+        }
+        Ok(())
+    }
+
+    fn collect_tree(&mut self, root: &Path, destination: &Path) -> Result<(), PackError> {
+        for path in Self::files_under(root)? {
+            let rel = path.strip_prefix(root).map_err(|error| {
+                PackError::MissingInput(format!("invalid HAR intermediate path: {error}"))
+            })?;
+            let archive = destination.join(rel);
+            self.files
+                .insert(ArtifactPathSerializer::rel_to_slash(&archive), path);
+        }
+        Ok(())
+    }
+
+    fn collect_declarations(&mut self, root: &Path) -> Result<(), PackError> {
+        for path in Self::files_under_if_exists(root)? {
+            if !ArchivePath::is_declaration_file(&path) {
+                continue;
+            }
+            let rel = path.strip_prefix(root).map_err(|error| {
+                PackError::MissingInput(format!("invalid HAR declaration path: {error}"))
+            })?;
+            self.files
+                .insert(ArtifactPathSerializer::rel_to_slash(rel), path);
+        }
+        Ok(())
+    }
+
+    fn contains_declarations(root: &Path) -> bool {
+        walkdir::WalkDir::new(root)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry.file_type().is_file() && ArchivePath::is_declaration_file(entry.path())
+            })
+    }
+
+    fn insert_required(
+        &mut self,
+        archive_path: impl Into<String>,
+        source: &Path,
+    ) -> Result<(), PackError> {
+        if !source.is_file() {
+            return Err(PackError::MissingInput(format!(
+                "required HAR input does not exist: {}",
+                source.display()
+            )));
+        }
+        self.files.insert(archive_path.into(), source.to_path_buf());
+        Ok(())
+    }
+
+    fn insert_if_exists(
+        &mut self,
+        archive_path: impl Into<String>,
+        source: &Path,
+    ) -> Result<(), PackError> {
+        if source.exists() && !source.is_file() {
+            return Err(PackError::MissingInput(format!(
+                "HAR input is not a file: {}",
+                source.display()
+            )));
+        }
+        if source.is_file() {
+            self.files.insert(archive_path.into(), source.to_path_buf());
+        }
+        Ok(())
+    }
+
+    fn insert_bytes(&mut self, archive_path: impl Into<String>, bytes: Vec<u8>) {
+        self.inline_files.insert(archive_path.into(), bytes);
+    }
+
+    fn ensure_directory(&mut self, archive_path: impl Into<String>) {
+        self.directories.insert(archive_path.into());
+    }
+
+    fn files_under(root: &Path) -> Result<Vec<PathBuf>, PackError> {
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(root).min_depth(1) {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                files.push(entry.into_path());
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+
+    fn files_under_if_exists(root: &Path) -> Result<Vec<PathBuf>, PackError> {
+        if root.is_dir() {
+            Self::files_under(root)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Write the OHPM package shape used by hvigor `execOhpmPack`: a gzip
+    /// compressed tar archive whose members live below `package/`.
+    fn write_archive(mut self) -> Result<(), PackError> {
+        use std::io::Cursor;
+
+        let output_canonical = self.output_path.canonicalize().ok();
+        self.collect_parent_directories();
+
+        let output = fs_err::File::create(self.output_path)?;
+        let gzip = flate2::GzBuilder::new()
+            .mtime(0)
+            .write(output, flate2::Compression::default());
+        let mut archive = tar::Builder::new(gzip);
+
+        for directory in &self.directories {
+            let archive_path = format!("package/{directory}/");
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_cksum();
+            archive.append_data(&mut header, archive_path, std::io::empty())?;
+        }
+
+        for (archive_path, bytes) in &self.inline_files {
+            let mut header = Self::file_header(bytes.len() as u64);
+            archive.append_data(
+                &mut header,
+                format!("package/{archive_path}"),
+                Cursor::new(bytes),
+            )?;
+        }
+
+        for (archive_path, source) in &self.files {
+            if source == self.output_path
+                || output_canonical.as_ref().is_some_and(|output| {
+                    source
+                        .canonicalize()
+                        .ok()
+                        .as_ref()
+                        .is_some_and(|path| path == output)
+                })
+            {
+                continue;
+            }
+            let mut input = fs_err::File::open(source)?;
+            let mut header = Self::file_header(input.metadata()?.len());
+            archive.append_data(&mut header, format!("package/{archive_path}"), &mut input)?;
+        }
+        archive.finish()?;
+        archive.into_inner()?.finish()?;
+        Ok(())
+    }
+
+    fn collect_parent_directories(&mut self) {
+        let paths = self
+            .files
+            .keys()
+            .chain(self.inline_files.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in paths {
+            let mut parent = Path::new(&path).parent();
+            while let Some(directory) = parent.filter(|directory| !directory.as_os_str().is_empty())
+            {
+                self.directories
+                    .insert(ArtifactPathSerializer::rel_to_slash(directory));
+                parent = directory.parent();
+            }
+        }
+    }
+
+    fn file_header(size: u64) -> tar::Header {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(size);
+        header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        header
+    }
+}
+
+struct HarIgnoreRules {
+    rules: Vec<(bool, globset::GlobMatcher)>,
+}
+
+impl HarIgnoreRules {
+    fn load(module_root: &Path) -> Result<Self, PackError> {
+        let mut rules = Vec::new();
+        for file_name in [".gitignore", ".ohpmignore"] {
+            let path = module_root.join(file_name);
+            if !path.is_file() {
+                continue;
+            }
+            for line in fs_err::read_to_string(path)?.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (negated, pattern) = line
+                    .strip_prefix('!')
+                    .map_or((false, line), |pattern| (true, pattern));
+                for matcher in Self::matchers(pattern)? {
+                    rules.push((negated, matcher));
+                }
+            }
+        }
+        Ok(Self { rules })
+    }
+
+    fn matchers(pattern: &str) -> Result<Vec<globset::GlobMatcher>, PackError> {
+        let pattern = pattern.trim_start_matches('/').replace('\\', "/");
+        let mut patterns = vec![pattern.clone()];
+        if !pattern.contains('/') {
+            patterns.push(format!("**/{pattern}"));
+        }
+        if !pattern.ends_with("/**") {
+            patterns.push(format!("{pattern}/**"));
+        }
+        patterns
+            .into_iter()
+            .map(|pattern| {
+                globset::Glob::new(&pattern)
+                    .map(|glob| glob.compile_matcher())
+                    .map_err(|error| PackError::InvalidPattern {
+                        pattern,
+                        message: error.to_string(),
+                    })
+            })
+            .collect()
+    }
+
+    fn is_ignored(&self, relative_path: &str) -> bool {
+        let mut ignored = false;
+        for (negated, matcher) in &self.rules {
+            if matcher.is_match(relative_path) {
+                ignored = !negated;
+            }
+        }
+        ignored
+    }
+}
+
+struct HarResourceFilter {
+    patterns: Vec<globset::GlobMatcher>,
+}
+
+impl HarResourceFilter {
+    fn new(patterns: &[String]) -> Result<Self, PackError> {
+        let patterns = patterns
+            .iter()
+            .map(|pattern| {
+                globset::Glob::new(pattern)
+                    .map(|glob| glob.compile_matcher())
+                    .map_err(|error| PackError::InvalidPattern {
+                        pattern: pattern.clone(),
+                        message: error.to_string(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { patterns })
+    }
+
+    fn is_ignored(&self, path: &Path) -> bool {
+        path.file_name()
+            .is_some_and(|name| self.patterns.iter().any(|pattern| pattern.is_match(name)))
     }
 }
 
 // Private helpers for HAP/HSP assembly
 impl Packager {
-    fn add_loader_out_ets_assets<W: std::io::Write>(
+    fn add_loader_out_ets_assets<W: std::io::Write + std::io::Seek>(
         writer: &mut zip_writer::RawZipWriter<W>,
         ets_dir: &std::path::Path,
         output_path: &std::path::Path,
@@ -1146,8 +1878,6 @@ impl Packager {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext == "json" {
                 add_json_resource_stored(writer, &dest, path)?;
-            } else if matches!(ext, "json5" | "xml" | "txt" | "html") {
-                zip_writer::add_file_stored(writer, &dest, path)?;
             } else {
                 zip_writer::add_file_stored(writer, &dest, path)?;
             }
@@ -1155,7 +1885,7 @@ impl Packager {
         Ok(())
     }
 
-    fn add_profile_guided_ap<W: std::io::Write>(
+    fn add_profile_guided_ap<W: std::io::Write + std::io::Seek>(
         writer: &mut zip_writer::RawZipWriter<W>,
         input: &PackInput,
     ) -> Result<(), PackError> {
@@ -1277,16 +2007,8 @@ impl ArchivePath {
         ArtifactPathSerializer::rel_to_slash(&PathBuf::from("libs").join(dir_name).join(file_name))
     }
 
-    fn har_ets(rel: &Path) -> String {
-        Self::prefixed_path("src/main/ets", rel)
-    }
-
     fn har_resources(rel: &Path) -> String {
         Self::prefixed_path("src/main/resources", rel)
-    }
-
-    fn har_resource_str(rel: &Path) -> String {
-        Self::prefixed_path("src/main/resource", rel)
     }
 
     fn ets(rel_text: &str) -> String {
@@ -1342,17 +2064,80 @@ impl<'a> ProfileGuidedApFileName<'a> {
     }
 }
 
-fn add_json_resource_stored<W: std::io::Write>(
+fn add_json_resource_stored<W: std::io::Write + std::io::Seek>(
     writer: &mut zip_writer::RawZipWriter<W>,
     archive_path: &str,
     file_path: &std::path::Path,
 ) -> Result<(), PackError> {
     let bytes = fs_err::read(file_path)?;
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-        let minified = serde_json::to_vec(&value).expect("serializing parsed JSON should not fail");
-        zip_writer::add_bytes_stored(writer, archive_path, &minified)
-    } else {
-        zip_writer::add_bytes_stored(writer, archive_path, &bytes)
+    let normalized = PackageToolJson::from_bytes(bytes).into_bytes();
+    zip_writer::add_bytes_stored(writer, archive_path, &normalized)
+}
+
+/// JSON normalization performed by `app_packing_tool.jar` for ordinary JSON
+/// inputs. The SDK parses them into Fastjson `JSONObject`, whose default
+/// backing map is `java.util.HashMap(16)`, and serializes that map without the
+/// ordered-field feature. Reproducing HashMap bucket iteration keeps packaged
+/// JSON byte-compatible without encoding schema field lists.
+struct PackageToolJson {
+    bytes: Vec<u8>,
+}
+
+impl PackageToolJson {
+    fn read(path: &Path) -> Result<Self, PackError> {
+        Ok(Self {
+            bytes: fs_err::read(path)?,
+        })
+    }
+
+    fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            bytes: bytes.into(),
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&self.bytes) else {
+            return self.bytes;
+        };
+        serde_json::to_vec(&Self::into_fastjson_order(value))
+            .expect("serializing parsed JSON should not fail")
+    }
+
+    fn into_fastjson_order(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(object) => {
+                let capacity = Self::java_hash_map_capacity(object.len());
+                let mut entries = object.into_iter().collect::<Vec<_>>();
+                entries.sort_by_key(|(key, _)| Self::java_hash_bucket(key, capacity));
+                let mut ordered = serde_json::Map::with_capacity(entries.len());
+                for (key, value) in entries {
+                    ordered.insert(key, Self::into_fastjson_order(value));
+                }
+                serde_json::Value::Object(ordered)
+            }
+            serde_json::Value::Array(values) => serde_json::Value::Array(
+                values.into_iter().map(Self::into_fastjson_order).collect(),
+            ),
+            value => value,
+        }
+    }
+
+    fn java_hash_map_capacity(size: usize) -> u32 {
+        const MAXIMUM_CAPACITY: u32 = 1 << 30;
+        let mut capacity = 16_u32;
+        while size > (capacity as usize * 3 / 4) && capacity < MAXIMUM_CAPACITY {
+            capacity *= 2;
+        }
+        capacity
+    }
+
+    fn java_hash_bucket(key: &str, capacity: u32) -> u32 {
+        let hash = key.encode_utf16().fold(0_u32, |hash, code_unit| {
+            hash.wrapping_mul(31).wrapping_add(u32::from(code_unit))
+        });
+        let spread = hash ^ (hash >> 16);
+        spread & (capacity - 1)
     }
 }
 
@@ -1368,6 +2153,57 @@ fn compatible_api_version(version: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_resource_json_orders_share_entries_like_sdk_packing_tool() {
+        let value = serde_json::json!({
+            "crossAppSharedConfig": [{
+                "uri": "arkdown://shared/ProfileCard",
+                "allowList": ["com.example.consumer"],
+                "srcEntry": "./ets/components/ProfileCard.ets"
+            }]
+        });
+
+        assert_eq!(
+            String::from_utf8(
+                PackageToolJson::from_bytes(serde_json::to_vec(&value).unwrap()).into_bytes()
+            )
+            .unwrap(),
+            r#"{"crossAppSharedConfig":[{"srcEntry":"./ets/components/ProfileCard.ets","uri":"arkdown://shared/ProfileCard","allowList":["com.example.consumer"]}]}"#
+        );
+    }
+
+    #[test]
+    fn package_tool_json_matches_fastjson_hash_map_order_for_pkg_context() {
+        let input = br#"{"bc-har-dep":{"packageName":"bc-har-dep","bundleName":"","moduleName":"","version":"1.0.0","entryPath":"","isSO":false,"dependencyAlias":""},"entry":{"packageName":"entry","bundleName":"","moduleName":"","version":"","entryPath":"src/main/","isSO":false,"dependencyAlias":""}}"#;
+        let output = PackageToolJson::from_bytes(input.as_slice()).into_bytes();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            r#"{"entry":{"isSO":false,"moduleName":"","bundleName":"","dependencyAlias":"","packageName":"entry","entryPath":"src/main/","version":""},"bc-har-dep":{"isSO":false,"moduleName":"","bundleName":"","dependencyAlias":"","packageName":"bc-har-dep","entryPath":"","version":"1.0.0"}}"#
+        );
+    }
+
+    #[test]
+    fn hap_module_json_orders_app_startup_like_package_hap() {
+        let value = serde_json::json!({
+            "module": {
+                "packageName": "entry",
+                "name": "entry",
+                "appStartup": "$profile:startup_config",
+                "descriptionId": 16_777_222,
+                "pages": "$profile:main_pages",
+                "deviceTypes": ["phone"]
+            }
+        });
+
+        assert_eq!(
+            String::from_utf8(
+                PackageToolJson::from_bytes(serde_json::to_vec(&value).unwrap()).into_bytes()
+            )
+            .unwrap(),
+            r#"{"module":{"descriptionId":16777222,"pages":"$profile:main_pages","deviceTypes":["phone"],"appStartup":"$profile:startup_config","name":"entry","packageName":"entry"}}"#
+        );
+    }
 
     #[test]
     fn native_lib_archive_path_preserves_relative_path_after_abi() {

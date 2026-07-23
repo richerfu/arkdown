@@ -4,8 +4,6 @@
     type: "har",
     deviceTypes: [
       "phone"
-    ],
-    deliveryWithInstall: true,
-    installationFree: false
+    ]
   }
 }

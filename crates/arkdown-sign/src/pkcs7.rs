@@ -90,7 +90,7 @@ struct CmsSigningContext {
 
 enum CmsPrivateKey {
     Ecdsa(p256::ecdsa::SigningKey),
-    RsaPss(rsa::pss::SigningKey<Sha256>),
+    RsaPss(Box<rsa::pss::SigningKey<Sha256>>),
 }
 
 enum SignatureVerifier {
@@ -386,9 +386,11 @@ impl CmsSigningContext {
 
                 let rsa_key = rsa::RsaPrivateKey::from_pkcs8_der(private_key_der)
                     .map_err(|e| SignError::Pkcs8Error(format!("RSA key load: {e}")))?;
-                Ok(CmsPrivateKey::RsaPss(rsa::pss::SigningKey::<Sha256>::new(
-                    rsa_key,
-                )))
+                Ok(CmsPrivateKey::RsaPss(Box::new(rsa::pss::SigningKey::<
+                    Sha256,
+                >::new(
+                    rsa_key
+                ))))
             }
             _ => Err(SignError::Config(format!(
                 "unsupported HAP signature algorithm id: 0x{alg_id:x}"
@@ -647,7 +649,7 @@ fn build_cms_signed_data_internal(
         &Der::integer_one(), // version
         &digest_algorithms,  // digestAlgorithms
         &encap_content_info, // encapContentInfo
-        &certificates,       // [0] IMPLICIT certs
+        certificates,        // [0] IMPLICIT certs
         &signer_infos,       // signerInfos
     ]);
     let signed_data = Der::sequence(&signed_data_inner);

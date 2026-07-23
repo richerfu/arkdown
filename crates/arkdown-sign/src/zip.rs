@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use flate2::read::DeflateDecoder;
 
-use crate::{digest, error::SignError};
+use crate::{digest, error::SignError, page_info::PageInfoGenerator};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -26,6 +26,8 @@ const DATA_DESCRIPTOR_SIG: u32 = 0x08074b50;
 const DATA_DESCRIPTOR_LEN: usize = 16;
 const METHOD_STORED: u16 = 0;
 const METHOD_DEFLATE: u16 = 8;
+const UTF8_FLAG: u16 = 0x0800;
+const PAGES_INFO_NAME: &str = ".pages.info";
 
 /// Alignment for runnable files (.abc, .so): 4096 bytes.
 pub const ALIGNMENT_RUNNABLE: usize = 4096;
@@ -73,6 +75,10 @@ impl ZipEntryData {
             Self::Memory(bytes) => bytes.len(),
             Self::FileRange { len, .. } => *len,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn memory_bytes(&self) -> Option<&[u8]> {
@@ -208,7 +214,7 @@ impl<'a> ZipEntryName<'a> {
     }
 
     fn is_bitmap(&self) -> bool {
-        self.raw == ".pages.info"
+        self.raw == PAGES_INFO_NAME
     }
 
     fn entry_type(&self) -> ZipEntryType {
@@ -625,6 +631,98 @@ impl HapZip {
             current_offset += total_entry_size;
         }
         Ok(())
+    }
+
+    /// Prepare an archive exactly like `developtools_hapsigner`
+    /// `SignProvider.copyFileAndAlignment`: align runnable entries, derive the
+    /// executable-page bitmap from those aligned offsets, replace the bitmap
+    /// entry, then sort and align once more before signing.
+    pub(crate) fn prepare_for_signing(&mut self) -> Result<(), SignError> {
+        self.sort_entries();
+        self.align()?;
+
+        let bitmap = PageInfoGenerator::new(self)?.generate_bitmap()?;
+        if !bitmap.is_empty() {
+            self.replace_page_info(bitmap)?;
+            self.sort_entries();
+            self.align()?;
+        }
+        Ok(())
+    }
+
+    fn replace_page_info(&mut self, bitmap: Vec<u8>) -> Result<(), SignError> {
+        let bitmap_len = u32::try_from(bitmap.len())
+            .map_err(|_| SignError::InvalidZip("page-info bitmap is too large"))?;
+        let filename = PAGES_INFO_NAME.as_bytes().to_vec();
+        let filename_len = u16::try_from(filename.len())
+            .map_err(|_| SignError::InvalidZip("page-info filename is too long"))?;
+        let crc32 = crc32fast::hash(&bitmap);
+        let (dos_time, dos_date) = Self::current_dos_timestamp();
+
+        let mut local_header_fixed = [0u8; LOCAL_HEADER_FIXED];
+        local_header_fixed[0..4].copy_from_slice(&LOCAL_FILE_HEADER_SIG.to_le_bytes());
+        local_header_fixed[4..6].copy_from_slice(&10u16.to_le_bytes());
+        local_header_fixed[6..8].copy_from_slice(&UTF8_FLAG.to_le_bytes());
+        local_header_fixed[8..10].copy_from_slice(&METHOD_STORED.to_le_bytes());
+        local_header_fixed[10..12].copy_from_slice(&dos_time.to_le_bytes());
+        local_header_fixed[12..14].copy_from_slice(&dos_date.to_le_bytes());
+        local_header_fixed[14..18].copy_from_slice(&crc32.to_le_bytes());
+        local_header_fixed[18..22].copy_from_slice(&bitmap_len.to_le_bytes());
+        local_header_fixed[22..26].copy_from_slice(&bitmap_len.to_le_bytes());
+        local_header_fixed[26..28].copy_from_slice(&filename_len.to_le_bytes());
+
+        let mut cd_entry = Vec::with_capacity(46 + filename.len());
+        cd_entry.extend_from_slice(&CENTRAL_DIR_SIG.to_le_bytes());
+        cd_entry.extend_from_slice(&10u16.to_le_bytes());
+        cd_entry.extend_from_slice(&10u16.to_le_bytes());
+        cd_entry.extend_from_slice(&UTF8_FLAG.to_le_bytes());
+        cd_entry.extend_from_slice(&METHOD_STORED.to_le_bytes());
+        cd_entry.extend_from_slice(&dos_time.to_le_bytes());
+        cd_entry.extend_from_slice(&dos_date.to_le_bytes());
+        cd_entry.extend_from_slice(&crc32.to_le_bytes());
+        cd_entry.extend_from_slice(&bitmap_len.to_le_bytes());
+        cd_entry.extend_from_slice(&bitmap_len.to_le_bytes());
+        cd_entry.extend_from_slice(&filename_len.to_le_bytes());
+        cd_entry.extend_from_slice(&0u16.to_le_bytes());
+        cd_entry.extend_from_slice(&0u16.to_le_bytes());
+        cd_entry.extend_from_slice(&0u16.to_le_bytes());
+        cd_entry.extend_from_slice(&0u16.to_le_bytes());
+        cd_entry.extend_from_slice(&0u32.to_le_bytes());
+        cd_entry.extend_from_slice(&0u32.to_le_bytes());
+        cd_entry.extend_from_slice(&filename);
+
+        self.entries.retain(|entry| !entry.is_bitmap());
+        self.entries.push(ZipEntry {
+            original_offset: 0,
+            local_header_fixed,
+            filename,
+            extra: Vec::new(),
+            data: ZipEntryData::Memory(Bytes::from(bitmap)),
+            name: PAGES_INFO_NAME.to_string(),
+            method: METHOD_STORED,
+            is_runnable: false,
+            cd_entry,
+        });
+        Ok(())
+    }
+
+    fn current_dos_timestamp() -> (u16, u16) {
+        use time::{Date, Month, OffsetDateTime, Time};
+
+        let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+        let date = Date::from_calendar_date(
+            now.year().clamp(1980, 2107),
+            Month::try_from(now.month() as u8).unwrap_or(Month::January),
+            now.day(),
+        )
+        .unwrap_or(Date::MIN);
+        let time = Time::from_hms(now.hour(), now.minute(), now.second()).unwrap_or(Time::MIDNIGHT);
+        let dos_time = ((time.hour() as u16) << 11)
+            | ((time.minute() as u16) << 5)
+            | (time.second() as u16 / 2);
+        let dos_date =
+            (((date.year() - 1980) as u16) << 9) | ((date.month() as u16) << 5) | date.day() as u16;
+        (dos_time, dos_date)
     }
 
     /// Returns the three byte sections needed for the content digest:
@@ -1053,7 +1151,7 @@ impl HapZip {
         Ok(())
     }
 
-    fn write_entry_data<W: Write>(&self, writer: &mut W, entry: &ZipEntry) -> Result<(), SignError>
+    fn write_entry_data<W>(&self, writer: &mut W, entry: &ZipEntry) -> Result<(), SignError>
     where
         W: Write,
     {
@@ -1081,7 +1179,7 @@ impl HapZip {
         }
     }
 
-    fn write_entry_data_and_push<W: Write>(
+    fn write_entry_data_and_push<W>(
         &self,
         writer: &mut W,
         entry: &ZipEntry,
@@ -1175,6 +1273,47 @@ impl HapZip {
 // ---------------------------------------------------------------------------
 // EOCD finding
 // ---------------------------------------------------------------------------
+
+/// Locate and parse the End of Central Directory record.
+fn find_eocd(bytes: &[u8]) -> Result<EocdRecord, SignError> {
+    // EOCD is at minimum 22 bytes, and comment can be up to 65535 bytes.
+    // Scan backwards for the EOCD signature.
+    if bytes.len() < 22 {
+        return Err(SignError::InvalidZip("file too small to be a ZIP"));
+    }
+
+    let search_start = bytes.len().saturating_sub(22 + 65535);
+    for i in (search_start..bytes.len() - 21).rev() {
+        if bytes[i] == 0x50 && bytes[i + 1] == 0x4b && bytes[i + 2] == 0x05 && bytes[i + 3] == 0x06
+        {
+            // Found potential EOCD.
+            let comment_len = u16::from_le_bytes([bytes[i + 20], bytes[i + 21]]) as usize;
+            if i + 22 + comment_len == bytes.len() {
+                let total_entries = u16::from_le_bytes([bytes[i + 8], bytes[i + 9]]);
+                let cd_size = u32::from_le_bytes([
+                    bytes[i + 12],
+                    bytes[i + 13],
+                    bytes[i + 14],
+                    bytes[i + 15],
+                ]);
+                let cd_offset = u32::from_le_bytes([
+                    bytes[i + 16],
+                    bytes[i + 17],
+                    bytes[i + 18],
+                    bytes[i + 19],
+                ]);
+                let comment = bytes[i + 22..i + 22 + comment_len].to_vec();
+                return Ok(EocdRecord {
+                    total_entries,
+                    cd_size,
+                    cd_offset,
+                    comment,
+                });
+            }
+        }
+    }
+    Err(SignError::InvalidZip("EOCD record not found"))
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1355,6 +1494,32 @@ mod tests {
         panic!("entry not found: {}", String::from_utf8_lossy(filename));
     }
 
+    fn make_elf64_with_executable_segment() -> Vec<u8> {
+        let mut elf = vec![0u8; 0x2100];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2; // ELFCLASS64
+        elf[5] = 1; // ELFDATA2LSB
+        elf[6] = 1; // EV_CURRENT
+        elf[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        elf[18..20].copy_from_slice(&183u16.to_le_bytes()); // EM_AARCH64
+        elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+        elf[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+
+        let ph = 64;
+        elf[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        elf[ph + 4..ph + 8].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+        elf[ph + 8..ph + 16].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf[ph + 16..ph + 24].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf[ph + 24..ph + 32].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf[ph + 32..ph + 40].copy_from_slice(&0x1100u64.to_le_bytes());
+        elf[ph + 40..ph + 48].copy_from_slice(&0x1100u64.to_le_bytes());
+        elf[ph + 48..ph + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf
+    }
+
     // ── HapZip::parse ────────────────────────────────────────────────────
 
     #[test]
@@ -1429,6 +1594,79 @@ mod tests {
             descriptor_signature_after_entry_data(&signed, b"resources.index"),
             DATA_DESCRIPTOR_SIG,
             "every bit-3 entry must keep its descriptor after alignment and signing block insertion"
+        );
+    }
+
+    #[test]
+    fn prepare_for_signing_adds_hapsigner_compatible_abc_page_info() {
+        // `PageInfoGenerator.generateBitMap`: four bits per 4K page, with bit
+        // one set for every page occupied by an ABC file.
+        let abc = make_zip_bytes(b"ets/modules.abc", &[0xAB; 8193]);
+        let resource = make_zip_bytes(b"module.json", b"{}");
+        let mut hap = HapZip::parse(&abc).expect("ABC ZIP");
+        hap.entries
+            .extend(HapZip::parse(&resource).expect("resource ZIP").entries);
+
+        hap.prepare_for_signing().expect("prepare HAP");
+
+        assert_eq!(
+            hap.entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ets/modules.abc", ".pages.info", "module.json"]
+        );
+        let bitmap = hap
+            .read_uncompressed_entry(PAGES_INFO_NAME)
+            .expect("page-info bitmap");
+        assert_eq!(bitmap, [0x20, 0x22, 0, 0, 0, 0, 0, 0]);
+        let page_info_index = hap
+            .entries
+            .iter()
+            .position(ZipEntry::is_bitmap)
+            .expect("page-info entry");
+        assert_eq!(
+            hap.entry_data_offset(page_info_index).expect("data offset") % ALIGNMENT_RUNNABLE,
+            0
+        );
+    }
+
+    #[test]
+    fn prepare_for_signing_marks_only_executable_elf_segments() {
+        // `ElfFile.filterExecPHeaders` contributes PF_X file ranges, rather
+        // than marking every page of a native library executable.
+        let native = make_zip_bytes(
+            b"libs/arm64-v8a/libfixture.so",
+            &make_elf64_with_executable_segment(),
+        );
+        let resource = make_zip_bytes(b"module.json", b"{}");
+        let mut hap = HapZip::parse(&native).expect("native ZIP");
+        hap.entries
+            .extend(HapZip::parse(&resource).expect("resource ZIP").entries);
+
+        hap.prepare_for_signing().expect("prepare HAP");
+
+        let bitmap = hap
+            .read_uncompressed_entry(PAGES_INFO_NAME)
+            .expect("page-info bitmap");
+        assert_eq!(bitmap, [0, 0x11, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn prepare_for_signing_replaces_existing_page_info() {
+        let abc = make_zip_bytes(b"ets/modules.abc", &[0xAB; 4096]);
+        let resource = make_zip_bytes(b"module.json", b"{}");
+        let mut hap = HapZip::parse(&abc).expect("ABC ZIP");
+        hap.entries
+            .extend(HapZip::parse(&resource).expect("resource ZIP").entries);
+
+        hap.prepare_for_signing().expect("first preparation");
+        hap.prepare_for_signing().expect("second preparation");
+
+        assert_eq!(
+            hap.entries.iter().filter(|entry| entry.is_bitmap()).count(),
+            1,
+            "Zip.addBitMap removes the previous .pages.info entry before insertion"
         );
     }
 
@@ -1673,45 +1911,4 @@ mod tests {
 
         assert_ne!(without_optional, with_optional);
     }
-}
-
-/// Locate and parse the End of Central Directory record.
-fn find_eocd(bytes: &[u8]) -> Result<EocdRecord, SignError> {
-    // EOCD is at minimum 22 bytes, and comment can be up to 65535 bytes.
-    // Scan backwards for the EOCD signature.
-    if bytes.len() < 22 {
-        return Err(SignError::InvalidZip("file too small to be a ZIP"));
-    }
-
-    let search_start = bytes.len().saturating_sub(22 + 65535);
-    for i in (search_start..bytes.len() - 21).rev() {
-        if bytes[i] == 0x50 && bytes[i + 1] == 0x4b && bytes[i + 2] == 0x05 && bytes[i + 3] == 0x06
-        {
-            // Found potential EOCD.
-            let comment_len = u16::from_le_bytes([bytes[i + 20], bytes[i + 21]]) as usize;
-            if i + 22 + comment_len == bytes.len() {
-                let total_entries = u16::from_le_bytes([bytes[i + 8], bytes[i + 9]]);
-                let cd_size = u32::from_le_bytes([
-                    bytes[i + 12],
-                    bytes[i + 13],
-                    bytes[i + 14],
-                    bytes[i + 15],
-                ]);
-                let cd_offset = u32::from_le_bytes([
-                    bytes[i + 16],
-                    bytes[i + 17],
-                    bytes[i + 18],
-                    bytes[i + 19],
-                ]);
-                let comment = bytes[i + 22..i + 22 + comment_len].to_vec();
-                return Ok(EocdRecord {
-                    total_entries,
-                    cd_size,
-                    cd_offset,
-                    comment,
-                });
-            }
-        }
-    }
-    Err(SignError::InvalidZip("EOCD record not found"))
 }

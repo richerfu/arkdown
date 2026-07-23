@@ -135,12 +135,16 @@ impl<'a> ModuleBuildLayout<'a> {
     self.default_intermediate_file("preload_so", "preload_so_list.json")
   }
 
+  pub(super) fn preload_system_so_json(&self) -> PathBuf {
+    self.default_intermediate_file("preload", "preload.json")
+  }
+
   pub(super) fn share_config_temp_json(&self) -> PathBuf {
     self.default_intermediate_file("share_config", "temp-share-config.json")
   }
 
   pub(super) fn startup_config_temp_json(&self) -> PathBuf {
-    self.default_intermediate_file("startup_config", "temp-startup-config.json")
+    self.default_intermediate_file("startup", "startup_config.json")
   }
 
   pub(super) fn loader_json(&self) -> PathBuf {
@@ -148,7 +152,7 @@ impl<'a> ModuleBuildLayout<'a> {
   }
 
   pub(super) fn pkg_context_info_json(&self) -> PathBuf {
-    self.default_intermediate_file("pkgContextInfo", "pkgContextInfo.json")
+    self.default_intermediate_file("loader", "pkgContextInfo.json")
   }
 
   pub(super) fn router_map_loader(&self) -> PathBuf {
@@ -157,13 +161,6 @@ impl<'a> ModuleBuildLayout<'a> {
 
   pub(super) fn router_map_temp(&self) -> PathBuf {
     self.default_intermediate_file("router_map", "temp-router-map.json")
-  }
-
-  pub(super) fn router_map_hash_cache(&self) -> PathBuf {
-    self
-      .intermediates()
-      .join("cache")
-      .join("router_map_hash.txt")
   }
 
   pub(super) fn importer_map_dir(&self) -> PathBuf {
@@ -199,6 +196,10 @@ impl<'a> ModuleBuildLayout<'a> {
     self.default_intermediate_file("hap_metadata", "output_metadata.json")
   }
 
+  pub(super) fn hsp_metadata_output_json(&self) -> PathBuf {
+    self.default_intermediate_file("hsp_metadata", "output_metadata.json")
+  }
+
   pub(super) fn source_maps_intermediate(&self) -> PathBuf {
     self.default_intermediate_file("source_map", "sourceMaps.map")
   }
@@ -207,12 +208,44 @@ impl<'a> ModuleBuildLayout<'a> {
     self.default_intermediate_nested_file("loader_out", ["ets", "sourceMaps.map"])
   }
 
+  pub(super) fn loader_out_dir(&self) -> PathBuf {
+    self.default_intermediate_dir("loader_out")
+  }
+
+  pub(super) fn declarations_dir(&self) -> PathBuf {
+    self.loader_out_dir().join("etsFortgz")
+  }
+
+  pub(super) fn resource_table_txt(&self) -> PathBuf {
+    self.default_intermediate_file("res", "ResourceTable.txt")
+  }
+
+  pub(super) fn syscap_dir(&self) -> PathBuf {
+    self.default_intermediate_dir("syscap")
+  }
+
   pub(super) fn har_dir(&self) -> PathBuf {
     self.default_intermediate_dir("har")
   }
 
   pub(super) fn har_extend_info_json(&self) -> PathBuf {
     self.default_intermediate_file("har", "har-extend-info.json")
+  }
+
+  pub(super) fn har_duplicate_dir(&self) -> PathBuf {
+    self.default_intermediate_dir("har_duplicate")
+  }
+
+  pub(super) fn source_har_duplicate_files_info(&self) -> PathBuf {
+    self
+      .har_duplicate_dir()
+      .join("sourceHarDuplicateFilesInfo.txt")
+  }
+
+  pub(super) fn bytecode_har_duplicate_files_info(&self) -> PathBuf {
+    self
+      .har_duplicate_dir()
+      .join("byteCodeHarDuplicateFilesInfo.txt")
   }
 
   pub(super) fn integrated_hsp_dir(&self) -> PathBuf {
@@ -280,15 +313,6 @@ impl<'a> ProjectBuildLayout<'a> {
 
   pub(super) fn app_scope_resources(&self) -> PathBuf {
     self.project_root.join("AppScope").join("resources")
-  }
-
-  pub(super) fn obfuscate_cache_dir(&self) -> PathBuf {
-    self
-      .project_root
-      .join("build")
-      .join("default")
-      .join("cache")
-      .join("obfuscate")
   }
 
   pub(super) fn obfuscation_default_dir(&self) -> PathBuf {

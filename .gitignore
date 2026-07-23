@@ -1,6 +1,7 @@
 .DS_Store
 target
 *.abc
+!tests/fixtures/minimal-hap-with-bc-har/entry/oh_modules/bc-har-dep/ets/modules.abc
 tests/fixtures/minimal-hap/entry/build
 tests/fixtures/minimal-hap/build
 .worktrees/

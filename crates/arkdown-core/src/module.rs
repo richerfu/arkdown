@@ -61,6 +61,11 @@ pub struct HvigorModuleSourceFile {
     pub package_name: Option<String>,
     /// Whether rolldown classified the module as CommonJS.
     pub is_commonjs: bool,
+    /// Whether the first non-import statement is the `"use shared"` directive.
+    ///
+    /// SDK `check_shared_module.ts::collectSharedModule` records this fact
+    /// before `ModuleMode.generateCompileFilesInfo` writes column 6.
+    pub is_shared_module: bool,
     /// Source language before ETS/TS transform.
     pub origin_source_lang: String,
     /// ABC record names for static imports/re-exports resolved from this module.

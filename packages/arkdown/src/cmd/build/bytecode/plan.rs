@@ -353,7 +353,12 @@ impl Ts2abcPlanBuilder {
   }
 
   /// Add an existing `.abc` file to the es2abc input list.
-  pub fn with_abc_input_file(mut self, path: PathBuf, package_name: impl Into<String>) -> Self {
+  pub fn with_abc_input_file(
+    mut self,
+    path: PathBuf,
+    package_name: impl Into<String>,
+    cache_file: PathBuf,
+  ) -> Self {
     self.compile_units.push(CompileUnitPlan {
       source: ModuleSourceInput::AbcFile { path },
       record_name: RecordNamePlan::Explicit(String::new()),
@@ -363,7 +368,7 @@ impl Ts2abcPlanBuilder {
       is_shared_module: false,
       origin_source_lang: String::new(),
       output_path: None,
-      cache_file: None,
+      cache_file: Some(cache_file),
     });
     self
   }

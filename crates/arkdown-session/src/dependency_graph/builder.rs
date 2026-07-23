@@ -9,8 +9,8 @@ use arkdown_path::canonicalize_or_owned;
 use serde::Deserialize;
 
 use crate::dependency_graph::snapshot::{
-    DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot, DependencyNodeSnapshot,
-    DependencyNodeType,
+    DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot,
+    DependencyModuleProfileSnapshot, DependencyNodeSnapshot, DependencyNodeType,
 };
 use crate::package::snapshot::PackageSnapshot;
 use crate::paths::ModulePathLayout;
@@ -48,12 +48,12 @@ impl DependencyGraphBuilder {
     fn collect_dependencies(&self, graph: &mut DependencyGraphSnapshot) {
         let mut queue = VecDeque::new();
         let mut seen_roots = std::collections::BTreeSet::new();
-        queue.push_back(self.host_root.clone());
+        queue.push_back((self.host_root.clone(), 0usize));
         if self.project_root != self.host_root {
-            queue.push_back(self.project_root.clone());
+            queue.push_back((self.project_root.clone(), 0usize));
         }
 
-        while let Some(package_root) = queue.pop_front() {
+        while let Some((package_root, depth)) = queue.pop_front() {
             let Some(package) = self.read_package(&package_root) else {
                 continue;
             };
@@ -95,12 +95,12 @@ impl DependencyGraphBuilder {
                         spec,
                         &dep_root,
                         dep_package.clone(),
-                        false,
+                        depth > 0,
                         is_dynamic,
                     );
                     graph.roots_by_alias.insert(alias.clone(), dep_root.clone());
                     graph.nodes.insert(node.package_name.clone(), node);
-                    queue.push_back(dep_root);
+                    queue.push_back((dep_root, depth + 1));
                 }
             }
         }
@@ -132,17 +132,12 @@ impl DependencyGraphBuilder {
             .map(Arc::new)
     }
 
-    fn resolve_dep_root(&self, issuer_root: &Path, spec: &str, alias: &str) -> Option<PathBuf> {
-        if let Some(file_path) = DependencySpec::new(spec).file_relative_path() {
-            let path = issuer_root.join(file_path);
-            if path.is_dir() {
-                return Some(canonicalize_or_owned(&path));
-            }
-        }
-        let direct_path = issuer_root.join(spec);
-        if direct_path.is_dir() {
-            return Some(canonicalize_or_owned(&direct_path));
-        }
+    fn resolve_dep_root(&self, issuer_root: &Path, _spec: &str, alias: &str) -> Option<PathBuf> {
+        // Hvigor's `BasePackageResolver.resolvePackagePath()` deliberately
+        // resolves the dependency alias through the installed `oh_modules`
+        // hierarchy. The raw version specifier (including `file:`) is not a
+        // fallback package root: an absent alias link means the dependency is
+        // not installed and must not enter the dependency graph.
         let mut current = Some(issuer_root);
         while let Some(root) = current {
             let candidate = root.join("oh_modules").join(alias);
@@ -170,6 +165,7 @@ impl DependencyGraphBuilder {
         is_dynamic: bool,
     ) -> DependencyNodeSnapshot {
         let package_name = self.package_name(alias, package.as_deref());
+        let module_profile = self.read_dependency_module_profile(root);
         let direct_deps = package
             .as_ref()
             .map(|package| self.direct_dependency_aliases(package))
@@ -179,8 +175,9 @@ impl DependencyGraphBuilder {
             package_name,
             version_spec: Some(spec.to_string()),
             package_root: Some(root.to_path_buf()),
-            node_type: self.classify_package(root, package.as_deref()),
+            node_type: self.classify_package(package.as_deref(), module_profile.as_ref()),
             package,
+            module_profile,
             is_runtime_only: false,
             is_dynamic,
             is_transitive,
@@ -197,8 +194,8 @@ impl DependencyGraphBuilder {
 
     fn classify_package(
         &self,
-        root: &Path,
         package: Option<&PackageSnapshot>,
+        module_profile: Option<&DependencyModuleProfileSnapshot>,
     ) -> DependencyNodeType {
         if package.is_some_and(|package| {
             Path::new(&package.name)
@@ -215,10 +212,11 @@ impl DependencyGraphBuilder {
         {
             return DependencyNodeType::IntegratedHsp;
         }
-        if ModulePathLayout::new(root)
-            .bytecode_har_abc_candidates()
-            .iter()
-            .any(|path| path.is_file())
+        if package
+            .and_then(|package| package.package_json.extra.get("metadata"))
+            .and_then(|metadata| metadata.get("byteCodeHar"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
         {
             return DependencyNodeType::BytecodeHar;
         }
@@ -227,7 +225,7 @@ impl DependencyGraphBuilder {
         // normally declare their kind in src/main/module.json(.5), not in
         // oh-package.json5. Legacy profiles carry the same value under
         // module.distro.moduleType.
-        if let Some(module_type) = self.read_dependency_module_type(root) {
+        if let Some(module_type) = module_profile.and_then(|profile| profile.module_type.as_ref()) {
             return match module_type {
                 OhosModuleType::Har => DependencyNodeType::SourceHar,
                 OhosModuleType::Shared => DependencyNodeType::SharedHsp,
@@ -241,14 +239,21 @@ impl DependencyGraphBuilder {
         }
     }
 
-    fn read_dependency_module_type(&self, root: &Path) -> Option<OhosModuleType> {
+    fn read_dependency_module_profile(
+        &self,
+        root: &Path,
+    ) -> Option<DependencyModuleProfileSnapshot> {
         #[derive(Deserialize)]
         struct DependencyProfile {
+            #[serde(default)]
+            app: Option<DependencyProfileApp>,
             module: DependencyProfileModule,
         }
 
         #[derive(Deserialize)]
         struct DependencyProfileModule {
+            #[serde(default)]
+            name: Option<String>,
             #[serde(rename = "type", default)]
             module_type: Option<String>,
             #[serde(default)]
@@ -262,17 +267,36 @@ impl DependencyGraphBuilder {
             module_type: Option<String>,
         }
 
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DependencyProfileApp {
+            #[serde(default)]
+            bundle_name: Option<String>,
+            #[serde(default)]
+            bundle_type: Option<String>,
+            #[serde(default)]
+            version_code: Option<u64>,
+        }
+
         ModulePathLayout::new(root)
             .dependency_profile_candidates()
             .into_iter()
             .filter_map(|path| std::fs::read_to_string(path).ok())
             .filter_map(|content| json5::from_str::<DependencyProfile>(&content).ok())
-            .find_map(|profile| {
-                profile
-                    .module
-                    .module_type
-                    .or_else(|| profile.module.distro.and_then(|distro| distro.module_type))
-                    .map(|module_type| OhosModuleType::from_type_str(&module_type))
+            .next()
+            .map(|profile| {
+                let app = profile.app;
+                DependencyModuleProfileSnapshot {
+                    module_name: profile.module.name,
+                    module_type: profile
+                        .module
+                        .module_type
+                        .or_else(|| profile.module.distro.and_then(|distro| distro.module_type))
+                        .map(|module_type| OhosModuleType::from_type_str(&module_type)),
+                    bundle_name: app.as_ref().and_then(|app| app.bundle_name.clone()),
+                    bundle_type: app.as_ref().and_then(|app| app.bundle_type.clone()),
+                    version_code: app.and_then(|app| app.version_code),
+                }
             })
     }
 
@@ -288,22 +312,6 @@ impl DependencyGraphBuilder {
         aliases.sort();
         aliases.dedup();
         aliases
-    }
-}
-
-struct DependencySpec<'a> {
-    raw: &'a str,
-}
-
-impl<'a> DependencySpec<'a> {
-    const FILE_PROTOCOL: &'static str = "file:";
-
-    fn new(raw: &'a str) -> Self {
-        Self { raw }
-    }
-
-    fn file_relative_path(&self) -> Option<&'a str> {
-        self.raw.strip_prefix(Self::FILE_PROTOCOL)
     }
 }
 
@@ -427,6 +435,68 @@ mod tests {
     }
 
     #[test]
+    fn marks_only_nested_dependencies_as_transitive() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "direct-har": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-har",
+            r#"{
+              "name": "direct-har",
+              "version": "1.0.0",
+              "dependencies": { "nested-har": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-har/oh_modules/nested-har",
+            r#"{ "name": "nested-har", "version": "1.0.0" }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+
+        assert!(!graph.nodes["direct-har"].is_transitive);
+        assert!(graph.nodes["nested-har"].is_transitive);
+    }
+
+    #[test]
+    fn file_dependency_requires_installed_oh_modules_alias_like_hvigor() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "native-types.so": "file:./types/native" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/types/native",
+            r#"{ "name": "native-types.so", "version": "1.0.0", "types": "Index.d.ts" }"#,
+        );
+
+        let graph_without_install = fixture.build_for("entry");
+        assert!(
+            !graph_without_install.nodes.contains_key("native-types.so"),
+            "a declared file path is not an installed OHPM package alias"
+        );
+
+        fixture.write_package(
+            "entry/oh_modules/native-types.so",
+            r#"{ "name": "native-types.so", "version": "1.0.0", "types": "Index.d.ts" }"#,
+        );
+        let graph_with_install = fixture.build_for("entry");
+        assert!(graph_with_install.nodes.contains_key("native-types.so"));
+    }
+
+    #[test]
     fn preserves_dependency_edge_declaration_order() {
         let fixture = DependencyGraphFixture::new();
         fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
@@ -457,6 +527,41 @@ mod tests {
                 .map(|edge| edge.alias.as_str())
                 .collect::<Vec<_>>(),
             vec!["dep-b", "dep-a"]
+        );
+    }
+
+    #[test]
+    fn bytecode_har_artifact_view_preserves_manifest_traversal_order() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": {
+                "z-bytecode": "1.0.0",
+                "a-bytecode": "1.0.0"
+              }
+            }"#,
+        );
+        for name in ["a-bytecode", "z-bytecode"] {
+            fixture.write_package(
+                &format!("entry/oh_modules/{name}"),
+                &format!(
+                    r#"{{ "name": "{name}", "version": "1.0.0", "metadata": {{ "byteCodeHar": true }} }}"#
+                ),
+            );
+        }
+
+        let graph = fixture.build_for("entry");
+        assert_eq!(
+            graph
+                .bytecode_har_nodes_in_traversal_order()
+                .into_iter()
+                .map(|node| node.package_name.as_str())
+                .collect::<Vec<_>>(),
+            ["z-bytecode", "a-bytecode"]
         );
     }
 

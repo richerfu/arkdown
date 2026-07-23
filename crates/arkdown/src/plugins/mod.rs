@@ -29,6 +29,8 @@ pub mod ets_transform;
 pub mod external;
 pub mod factory;
 pub mod har_dedup;
+#[cfg(test)]
+mod har_dedup_tests;
 pub mod import_check;
 pub mod json5;
 pub mod minify;

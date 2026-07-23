@@ -36,6 +36,7 @@ arkdown-watcher = { workspace = true }
 
 rolldown_plugin = { workspace = true }
 rolldown_common = { workspace = true }
+rolldown_sourcemap = { workspace = true }
 
 clap = { workspace = true }
 fs-err = { workspace = true }
@@ -50,6 +51,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 walkdir = { workspace = true }
+fast-glob = { workspace = true }
+globset = { workspace = true }
 zip = { workspace = true }
 oxc_index = { workspace = true }
 oxc_allocator = { workspace = true }
@@ -57,9 +60,11 @@ oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
 oxc_codegen = { workspace = true }
 oxc_parser = { workspace = true }
+oxc_isolated_declarations = { workspace = true }
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 rustc-hash = { workspace = true }
+sha2 = { workspace = true }
 dhat = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -92,6 +97,8 @@ tempfile = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 walkdir = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
 sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }

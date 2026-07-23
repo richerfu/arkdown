@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use arkdown_core::ArkdownConfig;
+use arkdown_core::{ArkdownConfig, BuildMode, ObfuscationConfig};
 use arkdown_ets_transform::ModuleAnalyzerKind;
 use arkdown_path::ArtifactPathSerializer;
 use arkdown_profile::LoaderJson;
@@ -109,6 +109,26 @@ impl TaskInputs {
 
   pub fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
     self.module_analyzer = module_analyzer.as_str().to_string();
+    self
+  }
+
+  /// Replace the product-level obfuscation input with the module's effective
+  /// build-option result. Hvigor resolves module build-option sets and target
+  /// overrides before declaring `ArkCompile` inputs, so the cache key must use
+  /// that same resolved configuration.
+  pub fn with_effective_obfuscation(
+    mut self,
+    obfuscation: Option<&ObfuscationConfig>,
+    build_mode: &BuildMode,
+  ) -> Self {
+    self.obfuscation_hash = Self::compute_obfuscation_config_hash(obfuscation, build_mode);
+    self
+  }
+
+  /// Use the exact per-module compile environment passed to the bundler and
+  /// bytecode cache bridge.
+  pub fn with_compile_env(mut self, compile_env: String) -> Self {
+    self.compile_env = compile_env;
     self
   }
 
@@ -223,13 +243,24 @@ impl TaskInputs {
   ///
   /// Returns 0 when obfuscation is disabled or no rule files are configured.
   fn compute_obfuscation_hash(config: &ArkdownConfig) -> u64 {
-    let Some(ark) = config.product.build_option.ark_options.as_ref() else {
+    let obfuscation = config
+      .product
+      .build_option
+      .ark_options
+      .as_ref()
+      .and_then(|options| options.obfuscation.as_ref());
+    Self::compute_obfuscation_config_hash(obfuscation, &config.build_mode)
+  }
+
+  fn compute_obfuscation_config_hash(
+    obfuscation: Option<&ObfuscationConfig>,
+    build_mode: &BuildMode,
+  ) -> u64 {
+    let Some(obf) = obfuscation else {
       return 0;
     };
-    let Some(obf) = ark.obfuscation.as_ref() else {
-      return 0;
-    };
-    if !obf.enable_obfuscation || (obf.rule_files.is_empty() && obf.consumer_rule_files.is_empty())
+    if !obf.is_enabled_for_mode(build_mode)
+      || (obf.rule_files.is_empty() && obf.consumer_rule_files.is_empty())
     {
       return 0;
     }
@@ -325,16 +356,20 @@ mod tests {
         bundle_name: "com.example.test".to_string(),
         compatible_sdk_version: "12".to_string(),
         compatible_sdk_version_stage: None,
+        target_sdk_version: None,
         runtime_os: "OpenHarmony".to_string(),
         signing_config: None,
         build_option: BuildOption {
           preload_system_so: false,
           preload_so: vec![],
+          deduplicate_har: false,
           remove_permissions: vec![],
           aot_compile_mode: None,
           host_pgo: None,
           ap_path: None,
           abi_filters: vec![],
+          external_native_options: None,
+          har_artifact_type: arkdown_core::HarArtifactType::Original,
           native_lib: NativeLibOption::default(),
           strict_mode: StrictModeConfig {
             case_sensitive_check: false,
@@ -481,5 +516,34 @@ mod tests {
     let changed = base.with_additional_obfuscation_rule_files(std::slice::from_ref(&dep_rules));
 
     assert_ne!(with_dep.obfuscation_hash, changed.obfuscation_hash);
+  }
+
+  #[test]
+  fn effective_module_obfuscation_replaces_product_cache_inputs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_rules = tmp.path().join("module-rules.txt");
+    std::fs::write(&module_rules, "-enable-property-obfuscation\n").unwrap();
+    let mut config = make_config();
+    config.build_mode = BuildMode::Release;
+    let loader = make_loader(vec!["./ets/Index.ets".to_string()], "/tmp/cache");
+    let module_obfuscation = ObfuscationConfig {
+      enable_obfuscation: true,
+      rule_files: vec![module_rules.clone()],
+      consumer_rule_files: vec![],
+    };
+
+    let product_only = TaskInputs::compute(&config, &loader);
+    let effective = product_only
+      .clone()
+      .with_effective_obfuscation(Some(&module_obfuscation), &config.build_mode)
+      .with_compile_env("module-release-obfuscation".to_string());
+    assert_eq!(product_only.obfuscation_hash, 0);
+    assert_ne!(effective.obfuscation_hash, 0);
+    assert_eq!(effective.compile_env, "module-release-obfuscation");
+
+    std::fs::write(&module_rules, "-enable-toplevel-obfuscation\n").unwrap();
+    let changed =
+      product_only.with_effective_obfuscation(Some(&module_obfuscation), &config.build_mode);
+    assert_ne!(effective.obfuscation_hash, changed.obfuscation_hash);
   }
 }

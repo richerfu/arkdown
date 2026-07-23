@@ -318,11 +318,14 @@ export struct SwitchView {
     .expect("component file with a decorated regular class must transform");
 
     assert!(
-        result.contains("@Observed export class SwitchModel"),
-        "ViewPU finalization must retain hvigor's ArkTS decorator order:\n{result}"
+        result.contains("@Observed\nexport class SwitchModel"),
+        "ViewPU finalization must retain hvigor's line-oriented ArkTS decorator order:\n{result}"
     );
     assert!(!result.contains("export @Observed class"), "{result}");
-    assert!(result.contains("@Track flag: boolean = false;"), "{result}");
+    assert!(
+        result.contains("@Track\n    flag: boolean = false;"),
+        "{result}"
+    );
 }
 
 #[test]
@@ -2395,7 +2398,7 @@ struct Parent {
     assert!(
         result.contains("let componentCall = new Child(this,")
             && result.contains("itemData: this.value")
-            && result.contains("undefined, elmtId, () => {}"),
+            && result.contains("undefined, elmtId, () => { }"),
         "expected custom component constructor path, got:\n{}",
         result
     );
@@ -3163,7 +3166,7 @@ struct Host {
     );
     assert!(
         result.contains(
-            "let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => {});"
+            "let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => { });"
         ),
         "lazy builder should instantiate the dialog with ViewPU constructor args:\n{}",
         result
@@ -3247,7 +3250,7 @@ struct Host {
         result
     );
     assert!(
-        result.contains("let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => {});"),
+        result.contains("let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => { });"),
         "method assignment lazy builder should instantiate the dialog with ViewPU constructor args:\n{}",
         result
     );

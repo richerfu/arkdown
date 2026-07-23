@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 function createPackageBuild() {
-  const nativeBinding = require('../index.js')
-  return nativeBinding.build
+  return require('..').build
 }
 
 function writeStdout(message) {

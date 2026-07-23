@@ -39,21 +39,26 @@
 //! - Running the native build automatically from the active SDK toolchain.
 //! - Failing with a structured diagnostic when required native tools are absent.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 use arkdown_core::{
-  ModuleConfig, NativeLibFilterOption, NativeLibOption, NativeLibPackageSelection,
+  BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibFilterOption, NativeLibOption,
+  NativeLibPackageSelection,
 };
 use arkdown_path::{ArtifactPathSerializer, HvigorNativeLibraryPattern};
 use arkdown_session::dependency_graph::snapshot::{
   DependencyGraphSnapshot, DependencyNodeSnapshot,
 };
 use rustc_hash::FxHashSet;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// The set of ABI directories that hvigor's native pipeline produces under
 /// the CMake / NDK build intermediates.
@@ -80,6 +85,8 @@ pub struct NativeBuildConfig {
   pub abi_filters: Vec<String>,
   /// Whether to attempt an actual CMake build.
   pub enable_cmake_build: bool,
+  /// Effective `externalNativeOptions` after product/build-mode/target merge.
+  pub external_native_options: Option<ExternalNativeOptions>,
   /// Sanitizer mode to pass into CMake. Mirrors hvigor extra native args.
   pub sanitizer: NativeBuildSanitizer,
   /// Build mode passed to CMake. Mirrors hvigor `targetService.getBuildMode()`.
@@ -117,6 +124,7 @@ pub struct NativeLibCollectionPolicy {
   build_mode: String,
   sdk_toolchain: NativeSdkToolchain,
   native_lib: NativeLibOption,
+  external_native_options: Option<ExternalNativeOptions>,
   self_package: Option<NativeLibPackageInfo>,
 }
 
@@ -128,6 +136,7 @@ impl NativeLibCollectionPolicy {
       build_mode: String::new(),
       sdk_toolchain: NativeSdkToolchain::default(),
       native_lib: NativeLibOption::default(),
+      external_native_options: None,
       self_package: None,
     }
   }
@@ -139,6 +148,7 @@ impl NativeLibCollectionPolicy {
       build_mode: String::new(),
       sdk_toolchain: NativeSdkToolchain::default(),
       native_lib: NativeLibOption::default(),
+      external_native_options: None,
       self_package: None,
     }
   }
@@ -158,13 +168,18 @@ impl NativeLibCollectionPolicy {
     self
   }
 
+  pub fn with_external_native_options(mut self, options: Option<ExternalNativeOptions>) -> Self {
+    self.external_native_options = options;
+    self
+  }
+
   pub fn with_self_package(mut self, package: NativeLibPackageInfo) -> Self {
     self.self_package = Some(package);
     self
   }
 
   fn enable_cmake_build(&self) -> bool {
-    false
+    self.external_native_options.is_some()
   }
 
   fn validate_packaged_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<()> {
@@ -280,6 +295,18 @@ impl NativeSdkToolchain {
       toolchain_file,
     })
   }
+
+  fn llvm_strip_path(&self) -> Option<PathBuf> {
+    let executable = if cfg!(windows) {
+      "llvm-strip.exe"
+    } else {
+      "llvm-strip"
+    };
+    self
+      .native_dir
+      .as_ref()
+      .map(|native_dir| native_dir.join("llvm").join("bin").join(executable))
+  }
 }
 
 struct ResolvedNativeSdkToolchain<'a> {
@@ -314,9 +341,21 @@ pub enum NativeBuildError {
     path: PathBuf,
     message: String,
   },
+  InvalidNativePattern {
+    pattern: String,
+    message: String,
+  },
+  NativePostProcessFailed {
+    path: PathBuf,
+    message: String,
+  },
   DuplicatedFilesFoundInLibPath {
     module_name: String,
     libs: Vec<PathBuf>,
+  },
+  DebugSymbolCollectionFailed {
+    path: PathBuf,
+    message: String,
   },
 }
 
@@ -372,6 +411,17 @@ impl fmt::Display for NativeBuildError {
         path.display(),
         message
       ),
+      Self::InvalidNativePattern { pattern, message } => write!(
+        f,
+        "invalid buildOption.nativeLib.debugSymbol.exclude pattern '{}': {}",
+        pattern, message
+      ),
+      Self::NativePostProcessFailed { path, message } => write!(
+        f,
+        "failed to post-process native library '{}': {}",
+        path.display(),
+        message
+      ),
       Self::DuplicatedFilesFoundInLibPath { module_name, libs } => {
         writeln!(
           f,
@@ -383,6 +433,12 @@ impl fmt::Display for NativeBuildError {
         }
         write!(f, "remove the duplicate native libraries or configure hvigor-compatible nativeLib.filter rules")
       }
+      Self::DebugSymbolCollectionFailed { path, message } => write!(
+        f,
+        "failed to collect debug symbols at '{}': {}",
+        path.display(),
+        message
+      ),
     }
   }
 }
@@ -525,6 +581,31 @@ impl<'a> NativeModuleLayout<'a> {
     self.cmake_intermediate_dir().join("obj")
   }
 
+  fn stripped_libs_dir(&self) -> PathBuf {
+    self
+      .build_default()
+      .join("intermediates")
+      .join("stripped_native_libs")
+      .join("default")
+  }
+
+  fn process_libs_dir(&self) -> PathBuf {
+    self
+      .build_default()
+      .join("intermediates")
+      .join("libs")
+      .join("default")
+  }
+
+  fn native_lib_cache_file(&self) -> PathBuf {
+    self
+      .build_default()
+      .join("intermediates")
+      .join("patch")
+      .join("default")
+      .join("base_native_libs.json")
+  }
+
   fn cangjie_intermediate_dir(&self) -> PathBuf {
     self
       .build_default()
@@ -550,6 +631,177 @@ impl<'a> NativeModuleLayout<'a> {
       return true;
     }
     false
+  }
+}
+
+/// Files materialized by hvigor's `CollectDebugSymbol` task.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DebugSymbolOutput {
+  pub source_map: Option<PathBuf>,
+  pub name_cache: Option<PathBuf>,
+  pub native_lib_links: Vec<PathBuf>,
+}
+
+/// Owns release debug-symbol collection after package/sign stages complete.
+///
+/// Source selection and output names mirror
+/// `hvigor-ohos-plugin/src/tasks/collect-debug-symbol.ts`: prefer the
+/// intermediate source map, fall back to the compiler source map, copy the
+/// obfuscation name cache when it exists, and link ABI directories from the
+/// `ProcessLibs` output.
+pub struct DebugSymbolCollector {
+  module_root: PathBuf,
+  module_name: String,
+  build_mode: BuildMode,
+  source_map_intermediate: PathBuf,
+  source_map_origin: Option<PathBuf>,
+  name_cache: PathBuf,
+}
+
+impl DebugSymbolCollector {
+  pub fn new(
+    module_root: PathBuf,
+    module_name: String,
+    build_mode: BuildMode,
+    source_map_intermediate: PathBuf,
+    source_map_origin: Option<PathBuf>,
+    name_cache: PathBuf,
+  ) -> Self {
+    Self {
+      module_root,
+      module_name,
+      build_mode,
+      source_map_intermediate,
+      source_map_origin,
+      name_cache,
+    }
+  }
+
+  pub fn collect(&self) -> NativeBuildResult<DebugSymbolOutput> {
+    if !matches!(self.build_mode, BuildMode::Release) {
+      return Ok(DebugSymbolOutput::default());
+    }
+
+    let destination = NativeModuleLayout::new(&self.module_root)
+      .build_default()
+      .join("outputs")
+      .join("default")
+      .join("symbol")
+      .join("release");
+    std::fs::create_dir_all(&destination).map_err(|error| {
+      NativeBuildError::DebugSymbolCollectionFailed {
+        path: destination.clone(),
+        message: error.to_string(),
+      }
+    })?;
+
+    let source_map = self
+      .source_map_input()
+      .map(|source| {
+        let output = destination.join(format!("{}-sourceMaps.map", self.module_name));
+        self.copy_artifact(source, &output)?;
+        Ok(output)
+      })
+      .transpose()?;
+    let name_cache = self
+      .name_cache
+      .is_file()
+      .then(|| {
+        let output = destination.join(format!("{}-nameCache.json", self.module_name));
+        self.copy_artifact(&self.name_cache, &output)?;
+        Ok(output)
+      })
+      .transpose()?;
+    let native_lib_links = self.link_native_lib_directories(&destination)?;
+
+    Ok(DebugSymbolOutput {
+      source_map,
+      name_cache,
+      native_lib_links,
+    })
+  }
+
+  fn source_map_input(&self) -> Option<&Path> {
+    if self.source_map_intermediate.is_file() {
+      Some(&self.source_map_intermediate)
+    } else {
+      self
+        .source_map_origin
+        .as_deref()
+        .filter(|path| path.is_file())
+    }
+  }
+
+  fn copy_artifact(&self, source: &Path, destination: &Path) -> NativeBuildResult<()> {
+    std::fs::copy(source, destination)
+      .map(|_| ())
+      .map_err(|error| NativeBuildError::DebugSymbolCollectionFailed {
+        path: source.to_path_buf(),
+        message: error.to_string(),
+      })
+  }
+
+  fn link_native_lib_directories(&self, destination: &Path) -> NativeBuildResult<Vec<PathBuf>> {
+    let process_libs = NativeModuleLayout::new(&self.module_root).process_libs_dir();
+    if !process_libs.is_dir() {
+      return Ok(Vec::new());
+    }
+    let mut abi_directories = std::fs::read_dir(&process_libs)
+      .map_err(|error| NativeBuildError::DebugSymbolCollectionFailed {
+        path: process_libs.clone(),
+        message: error.to_string(),
+      })?
+      .filter_map(Result::ok)
+      .filter_map(|entry| {
+        entry
+          .file_type()
+          .ok()
+          .filter(|file_type| file_type.is_dir())
+          .map(|_| entry.path())
+      })
+      .collect::<Vec<_>>();
+    abi_directories.sort();
+
+    let mut links = Vec::with_capacity(abi_directories.len());
+    for source in abi_directories {
+      let Some(file_name) = source.file_name() else {
+        continue;
+      };
+      let link = destination.join(file_name);
+      if link.exists() {
+        links.push(link);
+        continue;
+      }
+      match self.symlink_directory(&source, &link) {
+        Ok(()) => links.push(link),
+        Err(error) => tracing::warn!(
+          source = %source.display(),
+          destination = %link.display(),
+          error = %error,
+          "failed to create native debug-symbol directory link"
+        ),
+      }
+    }
+    Ok(links)
+  }
+
+  fn symlink_directory(&self, source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+      std::os::unix::fs::symlink(source, destination)
+    }
+    #[cfg(windows)]
+    {
+      std::os::windows::fs::symlink_dir(source, destination)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+      let _ = (source, destination);
+      Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "directory symlinks are unsupported on this platform",
+      ))
+    }
   }
 }
 
@@ -629,6 +881,7 @@ pub struct NativeLibCollector<'a> {
   abi_filters: &'a [String],
   deps: &'a DependencyGraphSnapshot,
   policy: NativeLibCollectionPolicy,
+  excluded_dependency_roots: FxHashSet<PathBuf>,
 }
 
 impl<'a> NativeLibCollector<'a> {
@@ -642,11 +895,20 @@ impl<'a> NativeLibCollector<'a> {
       abi_filters,
       deps,
       policy: NativeLibCollectionPolicy::default(),
+      excluded_dependency_roots: FxHashSet::default(),
     }
   }
 
   pub fn with_policy(mut self, policy: NativeLibCollectionPolicy) -> Self {
     self.policy = policy;
+    self
+  }
+
+  pub fn excluding_dependency_roots(mut self, roots: &[PathBuf]) -> Self {
+    self.excluded_dependency_roots = roots
+      .iter()
+      .map(|root| arkdown_path::canonicalize_or_owned(root))
+      .collect();
     self
   }
 
@@ -658,6 +920,7 @@ impl<'a> NativeLibCollector<'a> {
       module_root: self.module.src_path.clone(),
       abi_filters: self.abi_filters.to_vec(),
       enable_cmake_build: self.policy.enable_cmake_build(),
+      external_native_options: self.policy.external_native_options.clone(),
       sanitizer: self.policy.sanitizer,
       build_mode: self.policy.build_mode.clone(),
       sdk_toolchain: self.policy.sdk_toolchain.clone(),
@@ -684,8 +947,12 @@ impl<'a> NativeLibCollector<'a> {
       }
     }
 
-    for dep_libs_dir in self.dependency_default_lib_dirs() {
-      self.collect_from_libs_dir(&dep_libs_dir, &mut seen, &mut candidates)?;
+    if !(self.module.module_type == arkdown_core::OhosModuleType::Har
+      && self.policy.native_lib.exclude_from_har)
+    {
+      for dep_libs_dir in self.dependency_default_lib_dirs() {
+        self.collect_from_libs_dir(&dep_libs_dir, &mut seen, &mut candidates)?;
+      }
     }
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
     NativeLibFilterApplier::new(&self.policy.native_lib.filter).apply(&mut candidates);
@@ -693,6 +960,15 @@ impl<'a> NativeLibCollector<'a> {
     let result_libs =
       NativeLibSelectionResolver::new(&self.module.name, &self.policy.native_lib.filter)
         .resolve(candidates)?;
+    let result_libs =
+      NativeProcessLibWriter::new(&self.module.src_path).materialize(&result_libs)?;
+    let result_libs = NativeStripProcessor::new(
+      &self.module.src_path,
+      self.policy.sdk_toolchain.llvm_strip_path(),
+      &self.policy.native_lib,
+    )
+    .process(&result_libs)?;
+    NativeLibCacheWriter::new(&self.module.src_path, &self.policy.native_lib).write()?;
     self.policy.validate_packaged_libs(&result_libs)?;
     Ok(result_libs)
   }
@@ -765,6 +1041,12 @@ impl<'a> NativeLibCollector<'a> {
       let Some(root) = node.package_root.as_deref() else {
         continue;
       };
+      if self
+        .excluded_dependency_roots
+        .contains(&arkdown_path::canonicalize_or_owned(root))
+      {
+        continue;
+      }
       push_default_libs_dir(root, NativeLibPackageInfo::dependency(node));
     }
     dirs
@@ -839,9 +1121,347 @@ impl<'a> NativeLibCollector<'a> {
   }
 }
 
+/// Owns hvigor's `ProcessLibs` output materialization. The selected source
+/// files are hard-linked into `intermediates/libs/default`; copying is used
+/// only when the source and build directories are on different filesystems.
+struct NativeProcessLibWriter<'a> {
+  module_root: &'a Path,
+}
+
+impl<'a> NativeProcessLibWriter<'a> {
+  fn new(module_root: &'a Path) -> Self {
+    Self { module_root }
+  }
+
+  fn materialize(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
+    let output_root = NativeModuleLayout::new(self.module_root).process_libs_dir();
+    if output_root.exists() {
+      std::fs::remove_dir_all(&output_root).map_err(|error| {
+        NativeBuildError::NativePostProcessFailed {
+          path: output_root.clone(),
+          message: error.to_string(),
+        }
+      })?;
+    }
+    std::fs::create_dir_all(&output_root).map_err(|error| {
+      NativeBuildError::NativePostProcessFailed {
+        path: output_root.clone(),
+        message: error.to_string(),
+      }
+    })?;
+
+    let mut outputs = Vec::with_capacity(libs.len());
+    for source in libs {
+      let relative = NativeLibCollector::native_lib_identity(source);
+      if relative.is_empty() {
+        return Err(NativeBuildError::NativeLibRelativePath {
+          path: source.clone(),
+          message: "missing ABI-relative path".to_string(),
+        });
+      }
+      let destination = output_root.join(relative);
+      if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+          NativeBuildError::NativePostProcessFailed {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
+          }
+        })?;
+      }
+      if let Err(link_error) = std::fs::hard_link(source, &destination) {
+        std::fs::copy(source, &destination).map_err(|copy_error| {
+          NativeBuildError::NativePostProcessFailed {
+            path: source.clone(),
+            message: format!(
+              "hard link failed ({link_error}); copy fallback failed ({copy_error})"
+            ),
+          }
+        })?;
+      }
+      outputs.push(destination);
+    }
+    outputs.sort();
+    Ok(outputs)
+  }
+}
+
+#[derive(Serialize)]
+struct NativeLibCache<'a> {
+  libs: BTreeMap<String, String>,
+  stripped: BTreeMap<String, String>,
+  #[serde(rename = "debugSymbol", skip_serializing_if = "Option::is_none")]
+  debug_symbol: Option<&'a arkdown_core::NativeDebugSymbolOption>,
+}
+
+/// Mirrors hvigor `CacheNativeLibs` and `LibsFileCacheUtil`. Hashes are
+/// SHA-256 over the decimal string `size + mtimeMs`, not file contents.
+struct NativeLibCacheWriter<'a> {
+  module_root: &'a Path,
+  option: &'a NativeLibOption,
+}
+
+impl<'a> NativeLibCacheWriter<'a> {
+  fn new(module_root: &'a Path, option: &'a NativeLibOption) -> Self {
+    Self {
+      module_root,
+      option,
+    }
+  }
+
+  fn write(&self) -> NativeBuildResult<()> {
+    let layout = NativeModuleLayout::new(self.module_root);
+    let cache = NativeLibCache {
+      libs: self.hash_directory(&layout.process_libs_dir())?,
+      stripped: self.hash_directory(&layout.stripped_libs_dir())?,
+      debug_symbol: self.explicit_debug_symbol(),
+    };
+    let cache_file = layout.native_lib_cache_file();
+    if let Some(parent) = cache_file.parent() {
+      std::fs::create_dir_all(parent).map_err(|error| {
+        NativeBuildError::NativePostProcessFailed {
+          path: parent.to_path_buf(),
+          message: error.to_string(),
+        }
+      })?;
+    }
+    let bytes =
+      serde_json::to_vec(&cache).map_err(|error| NativeBuildError::NativePostProcessFailed {
+        path: cache_file.clone(),
+        message: error.to_string(),
+      })?;
+    std::fs::write(&cache_file, bytes).map_err(|error| NativeBuildError::NativePostProcessFailed {
+      path: cache_file,
+      message: error.to_string(),
+    })
+  }
+
+  fn explicit_debug_symbol(&self) -> Option<&arkdown_core::NativeDebugSymbolOption> {
+    let debug_symbol = &self.option.debug_symbol;
+    (!debug_symbol.strip || !debug_symbol.exclude.is_empty()).then_some(debug_symbol)
+  }
+
+  fn hash_directory(&self, root: &Path) -> NativeBuildResult<BTreeMap<String, String>> {
+    if !root.exists() {
+      return Ok(BTreeMap::new());
+    }
+    let mut files = walkdir::WalkDir::new(root)
+      .into_iter()
+      .filter_map(Result::ok)
+      .filter(|entry| entry.file_type().is_file())
+      .map(|entry| entry.into_path())
+      .collect::<Vec<_>>();
+    files.sort();
+
+    let mut hashes = BTreeMap::new();
+    for path in files {
+      let metadata =
+        std::fs::metadata(&path).map_err(|error| NativeBuildError::NativePostProcessFailed {
+          path: path.clone(),
+          message: error.to_string(),
+        })?;
+      let modified =
+        metadata
+          .modified()
+          .map_err(|error| NativeBuildError::NativePostProcessFailed {
+            path: path.clone(),
+            message: error.to_string(),
+          })?;
+      let modified_ms = modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| NativeBuildError::NativePostProcessFailed {
+          path: path.clone(),
+          message: error.to_string(),
+        })?
+        .as_millis();
+      let fingerprint = (u128::from(metadata.len()) + modified_ms).to_string();
+      let hash = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
+      let absolute = arkdown_path::canonicalize_or_owned(&path);
+      hashes.insert(absolute.to_string_lossy().into_owned(), hash);
+    }
+    Ok(hashes)
+  }
+}
+
 struct NativeDependencyLibDir {
   libs_dir: PathBuf,
   package: NativeLibPackageInfo,
+}
+
+/// Mirrors hvigor's `DoNativeStrip` and `tasks/worker/native-strip.ts`.
+///
+/// The debug-symbol `exclude` list is evaluated relative to the processed
+/// native-library root (the first ABI component). With `strip: true`, matching
+/// files are copied and all others are stripped; with `strip: false`, the
+/// matching files are stripped and all others are copied.
+struct NativeStripProcessor<'a> {
+  module_root: &'a Path,
+  llvm_strip: Option<PathBuf>,
+  option: &'a NativeLibOption,
+}
+
+impl<'a> NativeStripProcessor<'a> {
+  fn new(module_root: &'a Path, llvm_strip: Option<PathBuf>, option: &'a NativeLibOption) -> Self {
+    Self {
+      module_root,
+      llvm_strip,
+      option,
+    }
+  }
+
+  fn process(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
+    let output_root = NativeModuleLayout::new(self.module_root).stripped_libs_dir();
+    std::fs::create_dir_all(&output_root).map_err(|error| {
+      NativeBuildError::NativePostProcessFailed {
+        path: output_root.clone(),
+        message: error.to_string(),
+      }
+    })?;
+    let exclude_matchers = self.exclude_matchers()?;
+    let mut outputs = Vec::with_capacity(libs.len());
+    let mut expected = FxHashSet::default();
+
+    for source in libs {
+      let relative = NativeLibCollector::native_lib_identity(source);
+      if relative.is_empty() {
+        return Err(NativeBuildError::NativeLibRelativePath {
+          path: source.clone(),
+          message: "missing ABI-relative path".to_string(),
+        });
+      }
+      let destination = output_root.join(Path::new(&relative));
+      expected.insert(destination.clone());
+      if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+          NativeBuildError::NativePostProcessFailed {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
+          }
+        })?;
+      }
+
+      let excluded = exclude_matchers
+        .iter()
+        .any(|matcher| matcher.is_match(relative.as_str()));
+      let should_strip = self.should_strip(excluded);
+      if should_strip {
+        self.strip_or_copy(source, &destination)?;
+      } else {
+        self.copy(source, &destination)?;
+      }
+      outputs.push(destination);
+    }
+
+    self.remove_stale_outputs(&output_root, &expected)?;
+    outputs.sort();
+    Ok(outputs)
+  }
+
+  fn exclude_matchers(&self) -> NativeBuildResult<Vec<globset::GlobMatcher>> {
+    self
+      .option
+      .debug_symbol
+      .exclude
+      .iter()
+      .map(|pattern| {
+        let normalized = pattern.replace('\\', "/");
+        globset::GlobBuilder::new(&normalized)
+          .literal_separator(false)
+          .build()
+          .map(|glob| glob.compile_matcher())
+          .map_err(|error| NativeBuildError::InvalidNativePattern {
+            pattern: pattern.clone(),
+            message: error.to_string(),
+          })
+      })
+      .collect()
+  }
+
+  fn should_strip(&self, excluded: bool) -> bool {
+    if self.option.debug_symbol.strip {
+      !excluded
+    } else {
+      excluded
+    }
+  }
+
+  fn strip_or_copy(&self, source: &Path, destination: &Path) -> NativeBuildResult<()> {
+    let Some(llvm_strip) = self.llvm_strip.as_deref() else {
+      tracing::warn!(
+        source = %source.display(),
+        "SDK llvm-strip is unavailable; preserving the unstripped native library"
+      );
+      return self.copy(source, destination);
+    };
+    let output = Command::new(llvm_strip)
+      .arg("--keep-section=.permission")
+      .arg(format!("-o{}", destination.display()))
+      .arg(source)
+      .output();
+    match output {
+      Ok(output) if output.status.success() => Ok(()),
+      Ok(output) => {
+        tracing::warn!(
+          source = %source.display(),
+          stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+          "llvm-strip failed; preserving the unstripped native library"
+        );
+        self.copy(source, destination)
+      }
+      Err(error) => {
+        tracing::warn!(
+          source = %source.display(),
+          error = %error,
+          "llvm-strip could not be started; preserving the unstripped native library"
+        );
+        self.copy(source, destination)
+      }
+    }
+  }
+
+  fn copy(&self, source: &Path, destination: &Path) -> NativeBuildResult<()> {
+    if destination.exists() {
+      std::fs::remove_file(destination).map_err(|error| {
+        NativeBuildError::NativePostProcessFailed {
+          path: destination.to_path_buf(),
+          message: error.to_string(),
+        }
+      })?;
+    }
+    if std::fs::hard_link(source, destination).is_ok() {
+      return Ok(());
+    }
+    std::fs::copy(source, destination)
+      .map(|_| ())
+      .map_err(|error| NativeBuildError::NativePostProcessFailed {
+        path: source.to_path_buf(),
+        message: error.to_string(),
+      })
+  }
+
+  fn remove_stale_outputs(
+    &self,
+    output_root: &Path,
+    expected: &FxHashSet<PathBuf>,
+  ) -> NativeBuildResult<()> {
+    if !output_root.is_dir() {
+      return Ok(());
+    }
+    let mut stale_files = walkdir::WalkDir::new(output_root)
+      .contents_first(true)
+      .into_iter()
+      .filter_map(Result::ok)
+      .map(|entry| entry.into_path())
+      .filter(|path| path.is_file() && !expected.contains(path))
+      .collect::<Vec<_>>();
+    stale_files.sort();
+    for stale in stale_files {
+      std::fs::remove_file(&stale).map_err(|error| NativeBuildError::NativePostProcessFailed {
+        path: stale,
+        message: error.to_string(),
+      })?;
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1193,10 +1813,28 @@ impl NativeBuildConfig {
     let abi_filters = NativeAbiFilters::new(&self.abi_filters).package_abis();
 
     // ── Step 1: detect CMakeLists.txt ──────────────────────────────────
-    let cmake_file = layout.cmake_lists();
+    let cmake_file = self.cmake_lists_path();
     let has_cmake = cmake_file.is_file();
 
-    if has_cmake && self.enable_cmake_build {
+    if self.enable_cmake_build {
+      if cmake_file.file_name() != Some(OsStr::new("CMakeLists.txt")) {
+        return Err(NativeBuildError::CmakeFailed {
+          module_root: self.module_root.clone(),
+          message: format!(
+            "externalNativeOptions.path must name CMakeLists.txt: {}",
+            cmake_file.display()
+          ),
+        });
+      }
+      if !has_cmake {
+        return Err(NativeBuildError::CmakeFailed {
+          module_root: self.module_root.clone(),
+          message: format!(
+            "configured CMake script does not exist: {}",
+            cmake_file.display()
+          ),
+        });
+      }
       match self.run_cmake_build() {
         Ok(()) => {
           tracing::info!(
@@ -1211,13 +1849,6 @@ impl NativeBuildConfig {
           });
         }
       }
-    } else if has_cmake && !self.enable_cmake_build {
-      output.warnings.push(format!(
-        "native: CMakeLists.txt found in '{}' but --enable-cmake-build is not set. \
-                 Run `hvigorw assembleNative` first, or set enable_cmake_build=true. \
-                 Collecting pre-built .so files only.",
-        self.module_root.display()
-      ));
     }
 
     // ── Step 2: collect pre-built native shared libraries ──────────────
@@ -1275,7 +1906,10 @@ impl NativeBuildConfig {
   fn run_cmake_build(&self) -> Result<(), String> {
     let toolchain = self.sdk_toolchain.require()?;
     let layout = NativeModuleLayout::new(&self.module_root);
-    let source_dir = layout.cpp_source_dir();
+    let cmake_lists = self.cmake_lists_path();
+    let source_dir = cmake_lists
+      .parent()
+      .ok_or_else(|| format!("CMake script has no parent: {}", cmake_lists.display()))?;
     for abi in NativeAbiFilters::new(&self.abi_filters).build_abis() {
       let build_dir = layout.cmake_intermediate_dir().join(&abi);
       let output_dir = layout.cmake_obj_dir().join(&abi);
@@ -1314,6 +1948,30 @@ impl NativeBuildConfig {
       if let Some(arg) = self.sanitizer.cmake_arg_for_abi(&abi) {
         configure_cmd.arg(arg);
       }
+      if let Some(options) = self.external_native_options.as_ref() {
+        if let Some(c_flags) = options
+          .c_flags
+          .as_deref()
+          .filter(|flags| !flags.trim().is_empty())
+        {
+          configure_cmd.arg(format!("-DCMAKE_C_FLAGS={c_flags}"));
+        }
+        if let Some(cpp_flags) = options
+          .cpp_flags
+          .as_deref()
+          .filter(|flags| !flags.trim().is_empty())
+        {
+          configure_cmd.arg(format!("-DCMAKE_CXX_FLAGS={cpp_flags}"));
+        }
+        for argument in &options.arguments {
+          for argument in argument
+            .split_whitespace()
+            .filter(|argument| argument.starts_with('-'))
+          {
+            configure_cmd.arg(argument);
+          }
+        }
+      }
 
       tracing::info!(
           abi = %abi,
@@ -1332,16 +1990,18 @@ impl NativeBuildConfig {
       }
 
       let mut build_cmd = std::process::Command::new(toolchain.cmake);
-      build_cmd
-        .arg("--build")
-        .arg(&build_dir)
-        .arg("--")
-        .arg(format!(
-          "-j{}",
-          std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-        ));
+      build_cmd.arg("--build").arg(&build_dir);
+      if let Some(options) = self.external_native_options.as_ref() {
+        if !options.targets.is_empty() {
+          build_cmd.arg("--target").args(&options.targets);
+        }
+      }
+      build_cmd.arg("--").arg(format!(
+        "-j{}",
+        std::thread::available_parallelism()
+          .map(|n| n.get())
+          .unwrap_or(4)
+      ));
 
       tracing::info!(
           abi = %abi,
@@ -1370,6 +2030,14 @@ impl NativeBuildConfig {
       _ => "Debug",
     }
   }
+
+  fn cmake_lists_path(&self) -> PathBuf {
+    self
+      .external_native_options
+      .as_ref()
+      .and_then(|options| options.path.clone())
+      .unwrap_or_else(|| NativeModuleLayout::new(&self.module_root).cmake_lists())
+  }
 }
 
 #[cfg(test)]
@@ -1393,6 +2061,7 @@ mod tests {
         version_spec: Some(version.to_string()),
         package_root: Some(root),
         package: None,
+        module_profile: None,
         node_type: arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar,
         is_runtime_only: false,
         is_dynamic: false,
@@ -1400,6 +2069,73 @@ mod tests {
         direct_deps: Vec::new(),
       },
     );
+  }
+
+  #[test]
+  fn collect_debug_symbol_prefers_intermediate_map_and_copies_name_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let source_map_intermediate = tmp.path().join("source_map/sourceMaps.map");
+    let source_map_origin = tmp.path().join("cache/sourceMaps.map");
+    let name_cache = tmp.path().join("cache/obfuscation/nameCache.json");
+    let process_libs = NativeModuleLayout::new(&module_root)
+      .process_libs_dir()
+      .join("arm64-v8a");
+    for directory in [
+      source_map_intermediate.parent().unwrap(),
+      source_map_origin.parent().unwrap(),
+      name_cache.parent().unwrap(),
+      process_libs.as_path(),
+    ] {
+      fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(&source_map_intermediate, b"intermediate-map").unwrap();
+    fs::write(&source_map_origin, b"origin-map").unwrap();
+    fs::write(&name_cache, b"name-cache").unwrap();
+    fs::write(process_libs.join("libentry.so"), b"symbol").unwrap();
+
+    let output = DebugSymbolCollector::new(
+      module_root,
+      "entry".to_string(),
+      BuildMode::Release,
+      source_map_intermediate,
+      Some(source_map_origin),
+      name_cache,
+    )
+    .collect()
+    .expect("CollectDebugSymbol must materialize release artifacts");
+
+    assert_eq!(
+      fs::read(output.source_map.unwrap()).unwrap(),
+      b"intermediate-map"
+    );
+    assert_eq!(fs::read(output.name_cache.unwrap()).unwrap(), b"name-cache");
+    #[cfg(unix)]
+    assert!(fs::symlink_metadata(&output.native_lib_links[0])
+      .unwrap()
+      .file_type()
+      .is_symlink());
+  }
+
+  #[test]
+  fn collect_debug_symbol_is_disabled_by_default_for_debug_builds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let output = DebugSymbolCollector::new(
+      module_root.clone(),
+      "entry".to_string(),
+      BuildMode::Debug,
+      tmp.path().join("sourceMaps.map"),
+      None,
+      tmp.path().join("nameCache.json"),
+    )
+    .collect()
+    .expect("debug CollectDebugSymbol should be skipped");
+
+    assert_eq!(output, DebugSymbolOutput::default());
+    assert!(!module_root
+      .join("build/default/outputs/default/symbol")
+      .exists());
   }
 
   #[test]
@@ -1450,6 +2186,7 @@ mod tests {
       module_root: tmp.path().to_path_buf(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
+      external_native_options: None,
       sanitizer: NativeBuildSanitizer::None,
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
@@ -1472,6 +2209,7 @@ mod tests {
       module_root: tmp.path().to_path_buf(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
+      external_native_options: None,
       sanitizer: NativeBuildSanitizer::None,
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
@@ -1501,6 +2239,7 @@ mod tests {
       module_root: tmp.path().to_path_buf(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
+      external_native_options: None,
       sanitizer: NativeBuildSanitizer::None,
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
@@ -1527,6 +2266,7 @@ mod tests {
       module_root: tmp.path().to_path_buf(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
+      external_native_options: None,
       sanitizer: NativeBuildSanitizer::None,
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
@@ -1548,6 +2288,7 @@ mod tests {
       module_root: tmp.path().to_path_buf(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
+      external_native_options: None,
       sanitizer: NativeBuildSanitizer::None,
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
@@ -1636,6 +2377,7 @@ mod tests {
       module_root: tmp.path().to_path_buf(),
       abi_filters: vec![],
       enable_cmake_build: false,
+      external_native_options: None,
       sanitizer: NativeBuildSanitizer::None,
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
@@ -1654,6 +2396,88 @@ mod tests {
       .collect()
       .expect("collect native libs");
     assert_eq!(libs.len(), 2);
+  }
+
+  #[test]
+  fn test_native_collector_materializes_and_caches_hvigor_native_stages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let source = module_root.join("libs/arm64-v8a/libnative.so");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"ELF native").unwrap();
+
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root.clone(),
+      module_type: arkdown_core::OhosModuleType::Entry,
+    };
+    let deps = DependencyGraphSnapshot::default();
+    let packaged = NativeLibCollector::new(&module, &[], &deps)
+      .collect()
+      .expect("native stages must succeed");
+
+    let layout = NativeModuleLayout::new(&module_root);
+    let processed = layout.process_libs_dir().join("arm64-v8a/libnative.so");
+    let stripped = layout.stripped_libs_dir().join("arm64-v8a/libnative.so");
+    assert_eq!(packaged, vec![stripped.clone()]);
+    assert_eq!(fs::read(processed).unwrap(), b"ELF native");
+    assert_eq!(fs::read(stripped).unwrap(), b"ELF native");
+
+    let cache: serde_json::Value =
+      serde_json::from_slice(&fs::read(layout.native_lib_cache_file()).unwrap()).unwrap();
+    assert_eq!(cache["libs"].as_object().unwrap().len(), 1);
+    assert_eq!(cache["stripped"].as_object().unwrap().len(), 1);
+    assert!(cache.get("debugSymbol").is_none());
+    for hash in cache["libs"]
+      .as_object()
+      .unwrap()
+      .values()
+      .chain(cache["stripped"].as_object().unwrap().values())
+    {
+      let hash = hash.as_str().unwrap();
+      assert_eq!(hash.len(), 64);
+      assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+  }
+
+  #[test]
+  fn test_native_collector_removes_stale_process_and_stripped_outputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let libs_dir = module_root.join("libs/arm64-v8a");
+    fs::create_dir_all(&libs_dir).unwrap();
+    let stale_source = libs_dir.join("libstale.so");
+    fs::write(&stale_source, b"stale").unwrap();
+
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root.clone(),
+      module_type: arkdown_core::OhosModuleType::Entry,
+    };
+    let deps = DependencyGraphSnapshot::default();
+    NativeLibCollector::new(&module, &[], &deps)
+      .collect()
+      .expect("first native collection must succeed");
+
+    fs::remove_file(stale_source).unwrap();
+    fs::write(libs_dir.join("libcurrent.so"), b"current").unwrap();
+    NativeLibCollector::new(&module, &[], &deps)
+      .collect()
+      .expect("second native collection must succeed");
+
+    let layout = NativeModuleLayout::new(&module_root);
+    assert!(!layout
+      .process_libs_dir()
+      .join("arm64-v8a/libstale.so")
+      .exists());
+    assert!(!layout
+      .stripped_libs_dir()
+      .join("arm64-v8a/libstale.so")
+      .exists());
+    assert!(layout
+      .stripped_libs_dir()
+      .join("arm64-v8a/libcurrent.so")
+      .is_file());
   }
 
   #[test]
@@ -1740,6 +2564,7 @@ mod tests {
         NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
           collect_all_libs: true,
           filter: NativeLibFilterOption::default(),
+          ..Default::default()
         }),
       )
       .collect()
@@ -1772,6 +2597,7 @@ mod tests {
             excludes: vec!["**/libexcluded.so".to_string()],
             ..Default::default()
           },
+          ..Default::default()
         }),
       )
       .collect()
@@ -1820,6 +2646,7 @@ mod tests {
             }],
             ..Default::default()
           },
+          ..Default::default()
         }),
       )
       .collect()
@@ -1848,6 +2675,7 @@ mod tests {
             pick_firsts: vec!["**/libdup.so".to_string()],
             ..Default::default()
           },
+          ..Default::default()
         }),
       )
       .collect()
@@ -1917,5 +2745,68 @@ mod tests {
       .expect("same-content duplicate native libs must collapse like hvigor ProcessLibs");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libdup.so");
+  }
+
+  #[test]
+  fn test_native_strip_debug_symbol_exclude_inverts_with_strip_flag_like_hvigor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let option = NativeLibOption {
+      debug_symbol: arkdown_core::NativeDebugSymbolOption {
+        strip: true,
+        exclude: vec!["**/libkeep-symbols.so".to_string()],
+      },
+      ..Default::default()
+    };
+    let processor = NativeStripProcessor::new(tmp.path(), None, &option);
+    let matchers = processor.exclude_matchers().expect("valid glob");
+    assert!(matchers[0].is_match("arm64-v8a/libkeep-symbols.so"));
+    assert!(!processor.should_strip(true));
+    assert!(processor.should_strip(false));
+
+    let inverted = NativeLibOption {
+      debug_symbol: arkdown_core::NativeDebugSymbolOption {
+        strip: false,
+        exclude: vec!["**/libstrip-symbols.so".to_string()],
+      },
+      ..Default::default()
+    };
+    let processor = NativeStripProcessor::new(tmp.path(), None, &inverted);
+    assert!(processor.should_strip(true));
+    assert!(!processor.should_strip(false));
+  }
+
+  #[test]
+  fn test_har_excludes_dependency_native_libs_by_default_like_hvigor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("library");
+    let dep_root = tmp.path().join("oh_modules/native_pkg");
+    fs::create_dir_all(&module_root).unwrap();
+    fs::create_dir_all(dep_root.join("libs/arm64-v8a")).unwrap();
+    fs::write(dep_root.join("libs/arm64-v8a/libdependency.so"), b"ELF").unwrap();
+
+    let module = ModuleConfig {
+      name: "library".to_string(),
+      src_path: module_root,
+      module_type: arkdown_core::OhosModuleType::Har,
+    };
+    let mut deps = DependencyGraphSnapshot::default();
+    add_dependency_node(&mut deps, "native_pkg", "native_pkg", "1.0.0", dep_root);
+
+    let libs = NativeLibCollector::new(&module, &[], &deps)
+      .collect()
+      .expect("HAR dependency native libraries should be excluded by default");
+    assert!(libs.is_empty());
+
+    let libs = NativeLibCollector::new(&module, &[], &deps)
+      .with_policy(
+        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+          exclude_from_har: false,
+          ..Default::default()
+        }),
+      )
+      .collect()
+      .expect("excludeFromHar=false should include dependency native libraries");
+    assert_eq!(libs.len(), 1);
+    assert_eq!(libs[0].file_name().unwrap(), "libdependency.so");
   }
 }

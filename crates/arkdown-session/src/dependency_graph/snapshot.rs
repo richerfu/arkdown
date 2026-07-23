@@ -6,6 +6,25 @@ use std::sync::Arc;
 
 use crate::package::snapshot::PackageSnapshot;
 
+/// Stable module/profile identity loaded from an installed dependency.
+///
+/// Hvigor exposes these fields through `DependencyInterface.getModuleJsonObj()`
+/// to `GeneratePkgContextInfo` and `ProcessProfile`. Keeping them on the
+/// session node prevents those stages from re-reading dependency profiles.
+#[derive(Debug, Clone, Default)]
+pub struct DependencyModuleProfileSnapshot {
+    /// `module.name` from `src/main/module.json[5]`.
+    pub module_name: Option<String>,
+    /// `module.type` (or legacy `module.distro.moduleType`).
+    pub module_type: Option<arkdown_core::OhosModuleType>,
+    /// `app.bundleName` for common-app remote HSP packages.
+    pub bundle_name: Option<String>,
+    /// `app.bundleType` for common-app remote HSP packages.
+    pub bundle_type: Option<String>,
+    /// `app.versionCode` when it is embedded in a packaged HSP profile.
+    pub version_code: Option<u64>,
+}
+
 /// Classification of a dependency node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DependencyNodeType {
@@ -66,6 +85,8 @@ pub struct DependencyNodeSnapshot {
     pub package_root: Option<PathBuf>,
     /// Parsed package metadata.
     pub package: Option<Arc<PackageSnapshot>>,
+    /// Parsed dependency module/profile identity, when the package ships one.
+    pub module_profile: Option<DependencyModuleProfileSnapshot>,
     /// Dependency node classification.
     pub node_type: DependencyNodeType,
     /// Whether this is a runtime-only (not bundled) dependency.
@@ -117,6 +138,25 @@ impl DependencyGraphSnapshot {
         self.nodes
             .values()
             .filter(|n| matches!(n.node_type, DependencyNodeType::BytecodeHar))
+    }
+
+    /// Return ByteCode HAR nodes in declared dependency traversal order.
+    ///
+    /// Hvigor's `DependencyManager` preserves manifest insertion order when
+    /// `GenerateLoaderJson.processByteCodeHar` builds its maps. The node index
+    /// is a `BTreeMap` for lookup stability, so artifact writers must recover
+    /// semantic order from the edge inventory instead of serializing key order.
+    pub fn bytecode_har_nodes_in_traversal_order(&self) -> Vec<&DependencyNodeSnapshot> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.edges
+            .iter()
+            .filter_map(|edge| {
+                let node = self.nodes.get(&edge.package_name)?;
+                (matches!(node.node_type, DependencyNodeType::BytecodeHar)
+                    && seen.insert(node.package_name.as_str()))
+                .then_some(node)
+            })
+            .collect()
     }
 
     /// Return an iterator over integrated HSP nodes.

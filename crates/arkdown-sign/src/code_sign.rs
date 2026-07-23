@@ -156,11 +156,11 @@ impl<'a> CodeSignBlockBuilder<'a> {
 
         let native_sign_infos = self.native_sign_infos(&signed_data_builder)?;
         let fs_verity_info_segment = FsVerityInfoSegment.to_bytes();
-        let hap_info_segment = HapInfoSegment { hap_sign_info }.to_bytes();
+        let hap_info_segment = HapInfoSegment { hap_sign_info }.into_bytes();
         let native_lib_info_segment = NativeLibInfoSegment {
             entries: native_sign_infos,
         }
-        .to_bytes();
+        .into_bytes();
 
         let segment_start = CODE_SIGN_BLOCK_HEADER_SIZE
             + CODE_SIGN_SEGMENT_COUNT * CODE_SIGN_SEGMENT_HEADER_SIZE
@@ -476,7 +476,7 @@ struct HapInfoSegment {
 }
 
 impl HapInfoSegment {
-    fn to_bytes(self) -> Vec<u8> {
+    fn into_bytes(self) -> Vec<u8> {
         let sign_info = self.hap_sign_info.to_bytes();
         let mut output = Vec::with_capacity(4 + sign_info.len());
         output.extend_from_slice(&HAP_INFO_MAGIC.to_le_bytes());
@@ -490,7 +490,7 @@ struct NativeLibInfoSegment {
 }
 
 impl NativeLibInfoSegment {
-    fn to_bytes(self) -> Vec<u8> {
+    fn into_bytes(self) -> Vec<u8> {
         let names = self
             .entries
             .iter()

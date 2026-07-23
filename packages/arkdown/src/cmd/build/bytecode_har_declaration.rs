@@ -15,12 +15,6 @@
 //! | `declarationEntry` field | `metadata.declarationEntry` in `oh-package.json5` |
 //! | loader consumer | `generate-loader-json.ts#setByteCodeHarInfoAndOtherCompileFiles` |
 //!
-//! # Architecture
-//!
-//! The collector takes the current module's [`LoaderJson`] (which already
-//! contains the resolved `compile_entry`, `workers`, and ability lists) and
-//! extracts the OHM URL entry points that belong in `declarationEntry`.
-//!
 //! In hvigor's model, `declarationEntry` is populated by
 //! `processDeclarationEntry()` which calls:
 //! - `collectConfigOhmurl(workers, ...)` — worker ability OHM URLs
@@ -29,13 +23,20 @@
 //! - `collectByteCodeHarStartupTasks(...)` — startup task OHM URLs
 //! - `collectByteCodeHarInsightIntentSrcEntry(...)` — insight intent OHM URLs
 //!
-//! In arkdown, `LoaderJson::compile_entry` already contains the union of these
-//! entry points for the current module.  With `useNormalizedOHMUrl` enabled
-//! (the only supported mode), these are already OHM URLs.
+//! Arkdown reads those same typed sources and resolves every source through
+//! the package's `pkgContextInfo`. It intentionally does not infer declaration
+//! entries from loader `compileEntry`, whose set is broader.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use arkdown_core::{ArkdownConfig, HapManifest, ModuleConfig};
+use arkdown_path::{ArtifactPathSerializer, OhmUrl};
+use arkdown_profile::{PkgContextInfoInput, PkgContextInfoOpt};
+use serde::Deserialize;
+
+use super::layout::{ModuleBuildLayout, ModuleSourceLayout};
 
 // ---------------------------------------------------------------------------
 // ByteCodeHarDeclarationEntry
@@ -56,207 +57,510 @@ pub struct ByteCodeHarDeclarationEntry {
   pub ohm_urls: Vec<String>,
 }
 
-impl ByteCodeHarDeclarationEntry {
-  /// Return `true` when there are no entry points to declare.
-  pub fn is_empty(&self) -> bool {
-    self.ohm_urls.is_empty()
-  }
-}
-
 // ---------------------------------------------------------------------------
 // ByteCodeHarDeclarationCollector
 // ---------------------------------------------------------------------------
 
 /// Collects `declarationEntry` for a HAR being built by arkdown.
 ///
-/// Reads entry points from the module's processed [`LoaderJson`] (which
-/// already contains the resolved OHM URLs when `useNormalizedOHMUrl` is
-/// enabled) and returns them as the HAR's `declarationEntry`.
+/// Reads entry points from the same source profiles and build options used by
+/// Hvigor and returns them as the HAR's `declarationEntry`.
 ///
 /// # Usage
 ///
 /// Call [`ByteCodeHarDeclarationCollector::collect`] after the profile stage
-/// produces a [`LoaderJson`] for the HAR module.  If the result is non-empty,
-/// write it to `oh-package.json5#metadata.declarationEntry` via
-/// [`ByteCodeHarDeclarationCollector::write_to_package_metadata`].
-pub struct ByteCodeHarDeclarationCollector;
+/// produces a [`LoaderJson`] for the HAR module. The package assembler writes
+/// the result into its in-memory manifest; the module's source
+/// `oh-package.json5` is never modified.
+pub struct ByteCodeHarDeclarationCollector<'a> {
+  config: &'a ArkdownConfig,
+  module: &'a ModuleConfig,
+  manifest: &'a HapManifest,
+  package_input: &'a PkgContextInfoInput,
+  package_contexts: &'a std::collections::BTreeMap<String, PkgContextInfoOpt>,
+}
 
-impl ByteCodeHarDeclarationCollector {
-  /// Collect the `declarationEntry` OHM URLs from ability/module entry
-  /// points and worker entry points.
-  ///
-  /// # Arguments
-  ///
-  /// - `compile_entry`: `LoaderJson::compile_entry` — ability, extension-ability,
-  ///   and module srcEntry OHM URLs (with `useNormalizedOHMUrl`, already in OHM format).
-  /// - `workers`: `LoaderJson::workers` — WebWorker entry OHM URLs.
-  ///
-  /// De-duplicates and sorts for deterministic output.
-  pub fn collect(compile_entry: &[String], workers: &[String]) -> ByteCodeHarDeclarationEntry {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-
-    for entry in compile_entry {
-      if !entry.trim().is_empty() {
-        seen.insert(entry.clone());
-      }
-    }
-    for worker in workers {
-      if !worker.trim().is_empty() {
-        seen.insert(worker.clone());
-      }
-    }
-
-    ByteCodeHarDeclarationEntry {
-      ohm_urls: seen.into_iter().collect(),
+impl<'a> ByteCodeHarDeclarationCollector<'a> {
+  pub fn new(
+    config: &'a ArkdownConfig,
+    module: &'a ModuleConfig,
+    manifest: &'a HapManifest,
+    package_input: &'a PkgContextInfoInput,
+    package_contexts: &'a std::collections::BTreeMap<String, PkgContextInfoOpt>,
+  ) -> Self {
+    Self {
+      config,
+      module,
+      manifest,
+      package_input,
+      package_contexts,
     }
   }
 
-  /// Convenience wrapper that collects from a `LoaderJson`.
-  pub fn collect_from_loader(
-    loader_json: &arkdown_profile::LoaderJson,
-  ) -> ByteCodeHarDeclarationEntry {
-    Self::collect(&loader_json.compile_entry, &loader_json.workers)
+  /// Collect the exact inputs used by
+  /// `process-har-artifacts.ts::processDeclarationEntry`.
+  ///
+  /// This deliberately does not consume loader `compileEntry`: pages, module
+  /// mains, forms, startup configEntry, and dependency abilities are compiler
+  /// entrances but are not ByteCode HAR declaration entrances.
+  pub fn collect(&self) -> Result<ByteCodeHarDeclarationEntry> {
+    let mut entries = BTreeSet::new();
+    let current_context = self
+      .package_contexts
+      .get(&self.package_input.current.package_name)
+      .with_context(|| {
+        format!(
+          "pkgContextInfo for ByteCode HAR package '{}' was not generated",
+          self.package_input.current.package_name
+        )
+      })?;
+
+    let current_metadata = self.read_package_declaration_config(&self.module.src_path);
+    let configured_workers = self
+      .config
+      .product
+      .build_option
+      .source_option
+      .as_ref()
+      .map(|source| source.workers.clone())
+      .filter(|workers| !workers.is_empty())
+      .unwrap_or_else(|| {
+        current_metadata
+          .as_ref()
+          .and_then(|metadata| metadata.workers.clone())
+          .unwrap_or_default()
+          .into_iter()
+          .map(PathBuf::from)
+          .collect()
+      });
+    for worker in configured_workers {
+      self.insert_source_path(
+        &mut entries,
+        current_context,
+        &self.module.src_path,
+        &worker,
+      )?;
+    }
+
+    let configured_runtime_sources = self
+      .config
+      .product
+      .build_option
+      .ark_options
+      .as_ref()
+      .and_then(|options| options.runtime_only.as_ref())
+      .map(|runtime_only| runtime_only.sources.clone())
+      .filter(|sources| !sources.is_empty())
+      .unwrap_or_else(|| {
+        current_metadata
+          .as_ref()
+          .and_then(|metadata| metadata.runtime_only.as_ref())
+          .and_then(|runtime_only| runtime_only.sources.clone())
+          .unwrap_or_default()
+      });
+    for source in configured_runtime_sources {
+      self.insert_source(
+        &mut entries,
+        current_context,
+        &self.module.src_path,
+        &source,
+      )?;
+    }
+
+    self.collect_current_ability_sources(current_context, &mut entries)?;
+    self.collect_startup_tasks(current_context, &mut entries)?;
+    self.collect_insight_intent_sources(current_context, &mut entries)?;
+
+    if self.bundles_dependencies() {
+      self.collect_bundled_dependency_sources(&mut entries)?;
+    }
+
+    Ok(ByteCodeHarDeclarationEntry {
+      ohm_urls: entries.into_iter().collect(),
+    })
   }
 
-  /// Write the collected `declarationEntry` into
-  /// `oh-package.json5#metadata.declarationEntry`.
-  ///
-  /// If `entry.is_empty()` this is a no-op (empty `declarationEntry` is
-  /// valid and means the HAR has no specially tracked entry points).
-  ///
-  /// # File format
-  ///
-  /// Reads the existing `oh-package.json5` (or creates a minimal skeleton
-  /// if absent), merges the `declarationEntry` list into
-  /// `metadata.declarationEntry`, and writes back as JSON5.
-  pub fn write_to_package_metadata(
-    entry: &ByteCodeHarDeclarationEntry,
-    oh_package_json5_path: &std::path::Path,
+  fn bundles_dependencies(&self) -> bool {
+    self
+      .config
+      .product
+      .build_option
+      .ark_options
+      .as_ref()
+      .is_some_and(|options| options.byte_code_har && options.bundled_dependencies)
+  }
+
+  fn collect_current_ability_sources(
+    &self,
+    context: &PkgContextInfoOpt,
+    entries: &mut BTreeSet<String>,
   ) -> Result<()> {
-    use serde_json::Value;
-
-    // Read existing file (may not exist for newly-generated HARs).
-    let existing = if oh_package_json5_path.exists() {
-      let text = fs_err::read_to_string(oh_package_json5_path)?;
-      json5::from_str::<Value>(&text).unwrap_or(Value::Object(serde_json::Map::new()))
-    } else {
-      Value::Object(serde_json::Map::new())
-    };
-
-    let Value::Object(mut obj) = existing else {
-      anyhow::bail!(
-        "oh-package.json5 at {} is not a JSON object",
-        oh_package_json5_path.display()
-      );
-    };
-
-    // Ensure `metadata` object exists.
-    let metadata = obj
-      .entry("metadata")
-      .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    let Value::Object(meta_obj) = metadata else {
-      anyhow::bail!(
-        "oh-package.json5 'metadata' field at {} is not an object",
-        oh_package_json5_path.display()
-      );
-    };
-
-    // Write declarationEntry as a JSON array.
-    let declaration_value: Value = entry
-      .ohm_urls
+    let src_main = ModuleSourceLayout::new(&self.module.src_path).src_main();
+    for source in self
+      .manifest
+      .abilities
       .iter()
-      .map(|s| Value::String(s.clone()))
-      .collect::<Vec<_>>()
-      .into();
-    meta_obj.insert("declarationEntry".to_string(), declaration_value);
-
-    // Write back as pretty JSON (JSON5-compatible).
-    let out = serde_json::to_string_pretty(&Value::Object(obj))
-      .map_err(|e| anyhow::anyhow!("serialize oh-package.json5 failed: {e}"))?;
-    if let Some(parent) = oh_package_json5_path.parent() {
-      std::fs::create_dir_all(parent)?;
+      .map(|ability| ability.src_entry.as_str())
+      .chain(
+        self
+          .manifest
+          .extension_abilities
+          .iter()
+          .map(|ability| ability.src_entry.as_str()),
+      )
+    {
+      if source.ends_with(".so") {
+        continue;
+      }
+      let path = src_main.join(arkdown_path::strip_relative_prefix(source));
+      if path.is_file() {
+        self.insert_source_path(entries, context, &self.module.src_path, &path)?;
+      }
     }
-    fs_err::write(oh_package_json5_path, out)?;
-
     Ok(())
+  }
+
+  fn collect_startup_tasks(
+    &self,
+    context: &PkgContextInfoOpt,
+    entries: &mut BTreeSet<String>,
+  ) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StartupConfig {
+      #[serde(default)]
+      startup_tasks: Vec<StartupTask>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StartupTask {
+      ohmurl: Option<String>,
+      src_entry: Option<String>,
+      src_entry_absolute_path: Option<PathBuf>,
+    }
+
+    let path = ModuleBuildLayout::new(&self.module.src_path).startup_config_temp_json();
+    let Some(config) = self.read_json5::<StartupConfig>(&path) else {
+      return Ok(());
+    };
+    for task in config.startup_tasks {
+      if let Some(ohmurl) = task.ohmurl.filter(|url| OhmUrl::parse(url.clone()).is_ok()) {
+        entries.insert(ohmurl);
+      } else if let Some(path) = task.src_entry_absolute_path {
+        self.insert_source_path(entries, context, &self.module.src_path, &path)?;
+      } else if let Some(source) = task.src_entry {
+        self.insert_source(entries, context, &self.module.src_path, &source)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn collect_insight_intent_sources(
+    &self,
+    context: &PkgContextInfoOpt,
+    entries: &mut BTreeSet<String>,
+  ) -> Result<()> {
+    let profile = ModuleSourceLayout::new(&self.module.src_path)
+      .resources()
+      .join("base/profile/insight_intent.json");
+    let Some(profile) = self.read_json5::<InsightIntentProfile>(&profile) else {
+      return Ok(());
+    };
+    for intent in profile.insight_intents_src_entry {
+      if let Some(source) = intent.src_entry {
+        let path = self
+          .module
+          .src_path
+          .join("src")
+          .join("main")
+          .join(arkdown_path::strip_relative_prefix(&source));
+        self.insert_source_path(entries, context, &self.module.src_path, &path)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn collect_bundled_dependency_sources(&self, entries: &mut BTreeSet<String>) -> Result<()> {
+    for dependency in self
+      .package_input
+      .dependencies
+      .iter()
+      .filter(|dependency| dependency.kind == arkdown_profile::PkgContextDependencyKind::Har)
+    {
+      let Some(root) = dependency.package_root.as_deref() else {
+        continue;
+      };
+      let Some(context) = self.package_contexts.get(&dependency.package_name) else {
+        continue;
+      };
+      let package_config = self.read_package_declaration_config(root);
+      let build_config = self.read_dependency_build_config(root);
+
+      let workers = build_config
+        .as_ref()
+        .and_then(|config| config.workers.clone())
+        .filter(|workers| !workers.is_empty())
+        .or_else(|| {
+          package_config
+            .as_ref()
+            .and_then(|config| config.workers.clone())
+        })
+        .unwrap_or_default();
+      for worker in workers {
+        self.insert_source(entries, context, root, &worker)?;
+      }
+
+      let runtime_only = build_config
+        .as_ref()
+        .and_then(|config| config.runtime_only.clone())
+        .or_else(|| {
+          package_config
+            .as_ref()
+            .and_then(|config| config.runtime_only.clone())
+        })
+        .unwrap_or_default();
+      for source in runtime_only.sources.unwrap_or_default() {
+        self.insert_source(entries, context, root, &source)?;
+      }
+      for package in runtime_only.packages.unwrap_or_default() {
+        let Some(runtime_dependency) = self
+          .package_input
+          .dependencies
+          .iter()
+          .find(|candidate| candidate.alias == package || candidate.package_name == package)
+        else {
+          continue;
+        };
+        let Some(runtime_root) = runtime_dependency.package_root.as_deref() else {
+          continue;
+        };
+        let Some(runtime_context) = self.package_contexts.get(&runtime_dependency.package_name)
+        else {
+          continue;
+        };
+        if let Some(main) = runtime_dependency.main.as_deref() {
+          self.insert_source(entries, runtime_context, runtime_root, main)?;
+        }
+      }
+
+      self.collect_dependency_router_sources(root, context, entries)?;
+      self.collect_dependency_insight_sources(root, context, entries)?;
+    }
+    Ok(())
+  }
+
+  fn collect_dependency_router_sources(
+    &self,
+    root: &Path,
+    context: &PkgContextInfoOpt,
+    entries: &mut BTreeSet<String>,
+  ) -> Result<()> {
+    #[derive(Deserialize)]
+    struct ModuleProfile {
+      module: ModuleRouterMap,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleRouterMap {
+      router_map: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RouterProfile {
+      #[serde(default)]
+      router_map: Vec<RouterEntry>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RouterEntry {
+      page_source_file: Option<String>,
+    }
+
+    let module_profile = [
+      ModuleSourceLayout::new(root).module_json5(),
+      ModuleSourceLayout::new(root).src_main().join("module.json"),
+    ]
+    .into_iter()
+    .find_map(|path| self.read_json5::<ModuleProfile>(&path));
+    let Some(profile_name) = module_profile
+      .and_then(|profile| profile.module.router_map)
+      .and_then(|reference| reference.strip_prefix("$profile:").map(str::to_string))
+    else {
+      return Ok(());
+    };
+    let profile = ModuleSourceLayout::new(root)
+      .resources()
+      .join("base/profile")
+      .join(profile_name)
+      .with_extension("json");
+    let Some(profile) = self.read_json5::<RouterProfile>(&profile) else {
+      return Ok(());
+    };
+    for route in profile.router_map {
+      if let Some(source) = route.page_source_file {
+        self.insert_source(entries, context, root, &source)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn collect_dependency_insight_sources(
+    &self,
+    root: &Path,
+    context: &PkgContextInfoOpt,
+    entries: &mut BTreeSet<String>,
+  ) -> Result<()> {
+    let profile = ModuleSourceLayout::new(root)
+      .resources()
+      .join("base/profile/insight_intent.json");
+    let Some(profile) = self.read_json5::<InsightIntentProfile>(&profile) else {
+      return Ok(());
+    };
+    for intent in profile.insight_intents_src_entry {
+      if let Some(source) = intent.src_entry {
+        let path = root
+          .join("src")
+          .join("main")
+          .join(arkdown_path::strip_relative_prefix(&source));
+        self.insert_source_path(entries, context, root, &path)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn insert_source(
+    &self,
+    entries: &mut BTreeSet<String>,
+    context: &PkgContextInfoOpt,
+    package_root: &Path,
+    source: &str,
+  ) -> Result<()> {
+    if source.trim().is_empty() {
+      return Ok(());
+    }
+    if OhmUrl::parse(source.to_string()).is_ok() {
+      entries.insert(source.to_string());
+      return Ok(());
+    }
+    self.insert_source_path(entries, context, package_root, Path::new(source))
+  }
+
+  fn insert_source_path(
+    &self,
+    entries: &mut BTreeSet<String>,
+    context: &PkgContextInfoOpt,
+    package_root: &Path,
+    source: &Path,
+  ) -> Result<()> {
+    let relative = if source.is_absolute() {
+      source.strip_prefix(package_root).with_context(|| {
+        format!(
+          "ByteCode HAR declaration source '{}' is outside package root '{}'",
+          source.display(),
+          package_root.display()
+        )
+      })?
+    } else {
+      source
+    };
+    let relative = ArtifactPathSerializer::rel_to_slash(relative);
+    let relative = Self::remove_source_suffix(&relative);
+    let normalized_import = if relative.is_empty() {
+      context.package_name.clone()
+    } else {
+      format!("{}/{}", context.package_name, relative)
+    };
+    entries.insert(
+      OhmUrl::normalized_non_so(
+        &context.module_name,
+        &context.bundle_name,
+        &normalized_import,
+        &context.version,
+      )
+      .into_string(),
+    );
+    Ok(())
+  }
+
+  fn read_package_declaration_config(&self, root: &Path) -> Option<DeclarationConfig> {
+    #[derive(Deserialize)]
+    struct PackageJson {
+      metadata: Option<DeclarationConfig>,
+    }
+    self
+      .read_json5::<PackageJson>(&root.join("oh-package.json5"))
+      .and_then(|package| package.metadata)
+  }
+
+  fn read_dependency_build_config(&self, root: &Path) -> Option<DeclarationConfig> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BuildProfile {
+      build_option: Option<BuildOption>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BuildOption {
+      source_option: Option<SourceOption>,
+      ark_options: Option<ArkOptions>,
+    }
+    #[derive(Deserialize)]
+    struct SourceOption {
+      workers: Option<Vec<String>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ArkOptions {
+      runtime_only: Option<RuntimeOnlyConfig>,
+    }
+
+    let profile = self.read_json5::<BuildProfile>(&root.join("build-profile.json5"))?;
+    let build_option = profile.build_option?;
+    Some(DeclarationConfig {
+      workers: build_option.source_option.and_then(|source| source.workers),
+      runtime_only: build_option.ark_options.and_then(|ark| ark.runtime_only),
+    })
+  }
+
+  fn read_json5<T: for<'de> Deserialize<'de>>(&self, path: &Path) -> Option<T> {
+    let content = fs_err::read_to_string(path).ok()?;
+    json5::from_str(&content).ok()
+  }
+
+  fn remove_source_suffix(path: &str) -> &str {
+    for suffix in [
+      ".d.ets", ".d.ts", ".d.mjs", ".d.cjs", ".d.js", ".ets", ".ts", ".mjs", ".cjs", ".js", ".so",
+    ] {
+      if let Some(path) = path.strip_suffix(suffix) {
+        return path;
+      }
+    }
+    path
   }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeclarationConfig {
+  workers: Option<Vec<String>>,
+  runtime_only: Option<RuntimeOnlyConfig>,
+}
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use tempfile::TempDir;
+#[derive(Clone, Default, Deserialize)]
+struct RuntimeOnlyConfig {
+  sources: Option<Vec<String>>,
+  packages: Option<Vec<String>>,
+}
 
-  #[test]
-  fn collect_deduplicates_and_sorts() {
-    let compile_entry = vec![
-      "@bundle:com.example/entry/pages/Index".to_string(),
-      "@bundle:com.example/entry/EntryAbility".to_string(),
-    ];
-    let workers = vec!["@bundle:com.example/entry/workers/Worker".to_string()];
-    let entry = ByteCodeHarDeclarationCollector::collect(&compile_entry, &workers);
-    assert_eq!(entry.ohm_urls.len(), 3);
-    // sorted
-    assert!(entry.ohm_urls.windows(2).all(|w| w[0] <= w[1]));
-  }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InsightIntentProfile {
+  #[serde(default)]
+  insight_intents_src_entry: Vec<InsightIntentEntry>,
+}
 
-  #[test]
-  fn collect_deduplicates_overlap_between_compile_entry_and_workers() {
-    let url = "@bundle:com.example/entry/WorkerAbility".to_string();
-    let entry = ByteCodeHarDeclarationCollector::collect(&[url.clone()], &[url.clone()]);
-    assert_eq!(entry.ohm_urls, vec![url]);
-  }
-
-  #[test]
-  fn collect_empty_gives_empty_entry() {
-    let entry = ByteCodeHarDeclarationCollector::collect(&[], &[]);
-    assert!(entry.is_empty());
-  }
-
-  #[test]
-  fn write_and_read_back_declaration_entry() {
-    let tmp = TempDir::new().unwrap();
-    let pkg_path = tmp.path().join("oh-package.json5");
-
-    // Write initial content
-    std::fs::write(&pkg_path, r#"{"name": "my-har", "version": "1.0.0"}"#).unwrap();
-
-    let entry = ByteCodeHarDeclarationEntry {
-      ohm_urls: vec![
-        "@bundle:com.example/entry/EntryAbility".to_string(),
-        "@bundle:com.example/entry/workers/Worker".to_string(),
-      ],
-    };
-    ByteCodeHarDeclarationCollector::write_to_package_metadata(&entry, &pkg_path).unwrap();
-
-    // Read back and verify
-    let text = std::fs::read_to_string(&pkg_path).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let decl = parsed["metadata"]["declarationEntry"].as_array().unwrap();
-    assert_eq!(decl.len(), 2);
-    assert_eq!(
-      decl[0].as_str().unwrap(),
-      "@bundle:com.example/entry/EntryAbility"
-    );
-  }
-
-  #[test]
-  fn write_creates_metadata_when_absent() {
-    let tmp = TempDir::new().unwrap();
-    let pkg_path = tmp.path().join("oh-package.json5");
-    std::fs::write(&pkg_path, r#"{"name": "no-metadata"}"#).unwrap();
-
-    let entry = ByteCodeHarDeclarationEntry {
-      ohm_urls: vec!["@bundle:com.example/entry/Ability".to_string()],
-    };
-    ByteCodeHarDeclarationCollector::write_to_package_metadata(&entry, &pkg_path).unwrap();
-
-    let text = std::fs::read_to_string(&pkg_path).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert!(parsed["metadata"]["declarationEntry"].is_array());
-  }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InsightIntentEntry {
+  src_entry: Option<String>,
 }

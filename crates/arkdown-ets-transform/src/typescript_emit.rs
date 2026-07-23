@@ -134,6 +134,7 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
 pub struct TypeScriptDirectiveFlags {
     suppress_type_check: bool,
     keep_typescript: bool,
+    shared_module: bool,
 }
 
 impl TypeScriptDirectiveFlags {
@@ -147,6 +148,12 @@ impl TypeScriptDirectiveFlags {
 
     pub fn should_emit_javascript(self) -> bool {
         self.suppress_type_check && !self.keep_typescript
+    }
+
+    /// Match SDK `check_shared_module.ts::collectSharedModule`: imports may
+    /// precede `"use shared"`, but any other statement ends directive lookup.
+    pub fn is_shared_module(self) -> bool {
+        self.shared_module
     }
 
     fn from_program(program: &oxc_ast::ast::Program<'_>) -> Self {
@@ -168,6 +175,20 @@ impl TypeScriptDirectiveFlags {
                     .is_some_and(|prefix| prefix.trim().is_empty())
                 && directive.is_keep_typescript();
         }
+        flags.shared_module = program
+            .body
+            .iter()
+            .find(|statement| !matches!(statement, oxc_ast::ast::Statement::ImportDeclaration(_)))
+            .is_some_and(|statement| {
+                let oxc_ast::ast::Statement::ExpressionStatement(statement) = statement else {
+                    return false;
+                };
+                matches!(
+                    &statement.expression,
+                    oxc_ast::ast::Expression::StringLiteral(literal)
+                        if literal.value == "use shared"
+                )
+            });
         flags
     }
 }
@@ -839,6 +860,25 @@ mod tests {
             "Index.ts",
         )
         .should_emit_javascript());
+    }
+
+    #[test]
+    fn shared_module_directive_matches_sdk_first_non_import_statement_contract() {
+        assert!(TypeScriptDirectiveFlags::from_source(
+            "import collections from '@ohos:arkts.collections';\nimport emitter from '@ohos:events.emitter';\n\"use shared\";\nexport class ResourceWatcher {}",
+            "ResourceWatcher.ts",
+        )
+        .is_shared_module());
+        assert!(!TypeScriptDirectiveFlags::from_source(
+            "const marker = 'not an import';\n\"use shared\";",
+            "NotShared.ts",
+        )
+        .is_shared_module());
+        assert!(!TypeScriptDirectiveFlags::from_source(
+            "import value from './value';\nconst marker = \"use shared\";",
+            "StringValue.ts",
+        )
+        .is_shared_module());
     }
 
     #[test]

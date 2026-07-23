@@ -185,7 +185,7 @@ impl<'a> ProfileModuleLayout<'a> {
     }
 
     pub(crate) fn startup_config_temp_json(&self) -> PathBuf {
-        self.default_intermediate_file("startup_config", "temp-startup-config.json")
+        self.default_intermediate_file("startup", "startup_config.json")
     }
 
     pub(crate) fn resource_table_txt(&self) -> PathBuf {
