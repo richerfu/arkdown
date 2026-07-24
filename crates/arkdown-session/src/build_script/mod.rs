@@ -19,10 +19,12 @@
 //! SPEC-007 §`arkdown-session` for the migration rationale.
 
 pub mod effects;
+pub mod inventory;
 pub mod parse;
 pub mod snapshot;
 
 // Narrow re-exports for callers that only need the primary types.
 pub use effects::BuildScriptEffect;
+pub use inventory::{BuildScriptOverrideError, BuildScriptOverrideInventory};
 pub use parse::{BuildScriptParser, ParseBuildScriptError};
 pub use snapshot::{BuildScriptFingerprint, BuildScriptKind, BuildScriptSnapshot};

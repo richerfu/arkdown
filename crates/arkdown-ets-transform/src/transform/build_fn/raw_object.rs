@@ -1,10 +1,11 @@
 use oxc_allocator::{Allocator, CloneIn, TakeIn};
-use oxc_ast::ast::{Argument, CallExpression, Expression, MemberExpression};
+use oxc_ast::ast::{Argument, CallExpression, ChainElement, Expression, MemberExpression};
 use oxc_ast::{AstBuilder, NONE};
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_span::SPAN;
 
 use super::BuildContext;
+use crate::transform::viewpu_emit::GeneratedViewpuName;
 
 pub(super) struct RawObjectArgumentTransform<'ctx> {
     context: &'ctx BuildContext,
@@ -115,6 +116,10 @@ impl<'a, 'ctx> Visit<'a> for RawObjectArgumentDetector<'ctx> {
         if self.found {
             return;
         }
+        if !RawObjectCallRules::allows_argument_rewrite(call, self.context) {
+            walk::walk_call_expression(self, call);
+            return;
+        }
         for argument in &call.arguments {
             let Some(expression) = argument.as_expression() else {
                 continue;
@@ -146,6 +151,10 @@ impl<'a, 'ctx> RawObjectArgumentMutator<'a, 'ctx> {
 
 impl<'a, 'ctx> VisitMut<'a> for RawObjectArgumentMutator<'a, 'ctx> {
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
+        if !RawObjectCallRules::allows_argument_rewrite(call, self.context) {
+            walk_mut::walk_call_expression(self, call);
+            return;
+        }
         for argument in &mut call.arguments {
             let Some(expression) = argument.as_expression_mut() else {
                 self.visit_argument(argument);
@@ -165,6 +174,31 @@ impl<'a, 'ctx> VisitMut<'a> for RawObjectArgumentMutator<'a, 'ctx> {
     }
 }
 
+struct RawObjectCallRules;
+
+impl RawObjectCallRules {
+    /// Mirrors SDK `process_component_class.js::isNeedGetRawObject`: only
+    /// arguments of property-access calls are candidates. Identifier callees
+    /// such as `helper(this.value)` deliberately keep the observed value.
+    fn allows_argument_rewrite(call: &CallExpression<'_>, context: &BuildContext) -> bool {
+        let method_name = match &call.callee {
+            Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::StaticMemberExpression(member) => member.property.name.as_str(),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        method_name != context.runtime_names().get_raw_object
+            && !matches!(
+                method_name,
+                GeneratedViewpuName::ENABLE_V2_COMPATIBILITY
+                    | GeneratedViewpuName::MAKE_V1_OBSERVED
+                    | GeneratedViewpuName::CAN_BE_OBSERVED
+            )
+    }
+}
+
 struct RawObjectExpression<'a> {
     expression: &'a Expression<'a>,
     context: &'a BuildContext,
@@ -179,8 +213,13 @@ impl<'a> RawObjectExpression<'a> {
     }
 
     fn is_raw_object_field(&self) -> bool {
-        let Expression::StaticMemberExpression(member) = self.expression else {
-            return false;
+        let member = match self.expression {
+            Expression::StaticMemberExpression(member) => member.as_ref(),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::StaticMemberExpression(member) => member.as_ref(),
+                _ => return false,
+            },
+            _ => return false,
         };
         if !matches!(&member.object, Expression::ThisExpression(_)) {
             return false;

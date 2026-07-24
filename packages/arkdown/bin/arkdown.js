@@ -77,6 +77,9 @@ class ArkdownPackageCli {
         case '--build-target-name':
           config.buildTargetName = nextValue()
           break
+        case '--build-version':
+          config.buildVersion = nextValue()
+          break
         case '--watch':
           config.watch = true
           break
@@ -143,6 +146,8 @@ Options:
   --product <name>    Product name from build-profile.json5.
   --build-target-name <name>
                       Named build-profile target.
+  --build-version <value>
+                      Override buildVersion for this invocation.
   --watch             Rebuild on changes.
   --preview           Preview resource rebuild mode.
   --coverage          Instrument generated JavaScript for coverage.

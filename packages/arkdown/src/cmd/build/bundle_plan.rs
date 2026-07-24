@@ -28,6 +28,11 @@ use super::custom_config::ArkdownCustomConfig;
 // BundlePlan construction
 // ---------------------------------------------------------------------------
 
+pub(super) struct BundlePlanPackageInfo {
+  pub(super) source_map: BundleSourceMapPackageInfo,
+  pub(super) runtime: BundleRuntimePackageInfo,
+}
+
 /// Build a [`BundlePlan`] from a `loader.json` and the active config.
 ///
 /// Called by [`BundleStage::run`] and directly from coordinator cache-miss
@@ -39,12 +44,15 @@ pub(super) fn make_bundle_plan(
   config: &ArkdownConfig,
   custom_cfg: Option<&ArkdownCustomConfig>,
   module_analyzer: ModuleAnalyzerKind,
-  mut source_map_packages: BundleSourceMapPackageInfo,
-  mut runtime_packages: BundleRuntimePackageInfo,
+  package_info: BundlePlanPackageInfo,
 ) -> BundlePlan {
-  add_runtime_package_versions(&runtime_packages, &mut source_map_packages);
-  add_loader_ohm_package_versions(loader_json, &mut source_map_packages);
-  LoaderRuntimePackageContextCollector::new(loader_json).extend(&mut runtime_packages);
+  let BundlePlanPackageInfo {
+    mut source_map,
+    mut runtime,
+  } = package_info;
+  add_runtime_package_versions(&runtime, &mut source_map);
+  add_loader_ohm_package_versions(loader_json, &mut source_map);
+  LoaderRuntimePackageContextCollector::new(loader_json).extend(&mut runtime);
   BundlePlan {
     input: BundleInput {
       loader_json_path: loader_json_path.as_ref().to_path_buf(),
@@ -58,10 +66,11 @@ pub(super) fn make_bundle_plan(
         .collect(),
       module_record_roots: Vec::new(),
       entries: ordered_compile_entries(loader_json),
+      form_entry_sources: loader_json.form_entry_sources.clone(),
       runtime_entry_sources: loader_json.runtime_entry_sources.clone(),
       support_chunks: loader_json.support_chunks,
-      source_map_packages,
-      runtime_packages,
+      source_map_packages: source_map,
+      runtime_packages: runtime,
       byte_code_har_packages: loader_json.byte_code_har_info.keys().cloned().collect(),
       preload_system_so_entries: Vec::new(),
     },

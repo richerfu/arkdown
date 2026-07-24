@@ -18,7 +18,8 @@ use crate::cmd::build::bytecode::file_info::{
   CacheFileManifestWriter, FileInfoColumnPolicy, FileInfoLine, FileInfoManifestText,
 };
 use crate::cmd::build::bytecode::plan::{
-  ModuleSourceInput, RecordNamePlan, Ts2abcOutputPlan, Ts2abcPlan, Ts2abcPlanBuilder,
+  CompileUnitPlan, ModuleSourceInput, RecordNamePlan, Ts2abcOutputPlan, Ts2abcPlan,
+  Ts2abcPlanBuilder,
 };
 use crate::cmd::build::bytecode::Ts2abcOutput;
 
@@ -152,16 +153,17 @@ impl RolldownBytecodeCompiler {
       let source_input = ModuleSourceInput::File {
         path: source.path.clone(),
       };
-      builder = builder.with_compile_unit_cache(
-        source_input,
-        RecordNamePlan::Explicit(source.record_name.clone()),
-        Some(source.source_file.clone()),
-        source.package_name.clone(),
-        source.is_commonjs,
-        source.is_shared_module,
-        source.origin_source_lang.as_str(),
-        Some(source.path.with_extension("protoBin")),
-      );
+      builder = builder.with_compile_unit(CompileUnitPlan {
+        source: source_input,
+        record_name: RecordNamePlan::Explicit(source.record_name.clone()),
+        source_file: Some(source.source_file.clone()),
+        package_name: source.package_name.clone(),
+        is_commonjs: source.is_commonjs,
+        is_shared_module: source.is_shared_module,
+        origin_source_lang: source.origin_source_lang.clone(),
+        output_path: None,
+        cache_file: Some(source.path.with_extension("protoBin")),
+      });
     }
     if !input.abc_input_files.is_empty() {
       builder = builder.with_abc_input().with_remove_redundant_file();

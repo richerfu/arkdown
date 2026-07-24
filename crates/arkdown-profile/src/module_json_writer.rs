@@ -142,10 +142,12 @@ impl ModuleJsonWriter {
             is_debug,
             &config.sdk_config.compile_sdk_version,
             &config.product.bundle_name,
+            &config.product.app_options,
             project_multi_projects,
             resource_ids,
             config.product.version_code,
             config.product.version_name.as_deref(),
+            config.product.build_version.as_deref(),
         );
         // MergeProfile.computeAppJsonOpt keeps only the HAR app whitelist.
         // `vendor` is retained for HAP/HSP but is not legal in a HAR's
@@ -331,16 +333,22 @@ impl ModuleJsonWriter {
         is_debug: bool,
         compile_sdk_version: &str,
         bundle_name_fallback: &str,
+        app_options: &arkdown_core::AppOptionOverride,
         project_multi_projects: bool,
         resource_ids: Option<&FxHashMap<String, u32>>,
         version_code_override: Option<u64>,
         version_name_override: Option<&str>,
+        build_version_override: Option<&str>,
     ) -> serde_json::Map<String, serde_json::Value> {
-        let icon_ref = src.get("icon").and_then(|v| v.as_str()).map(str::to_string);
-        let label_ref = src
-            .get("label")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let icon_ref = app_options
+            .icon
+            .clone()
+            .or_else(|| src.get("icon").and_then(|v| v.as_str()).map(str::to_string));
+        let label_ref = app_options.label.clone().or_else(|| {
+            src.get("label")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
 
         let icon_id = resource_ids
             .zip(icon_ref.as_deref())
@@ -356,20 +364,23 @@ impl ModuleJsonWriter {
         obj.insert("debug".into(), is_debug.into());
         obj.insert("targetPatchAPIVersion".into(), 0u64.into());
         obj.insert("minAPIVersion".into(), min_numeric_api.into());
-        if let Some(v) = src.get("icon") {
-            obj.insert("icon".into(), v.clone());
+        if let Some(v) = icon_ref.as_ref() {
+            obj.insert("icon".into(), v.clone().into());
         }
         obj.insert(
             "buildMode".into(),
             if is_debug { "debug" } else { "release" }.into(),
         );
-        if let Some(v) = src.get("label") {
-            obj.insert("label".into(), v.clone());
+        if let Some(v) = label_ref.as_ref() {
+            obj.insert("label".into(), v.clone().into());
         }
         obj.insert(
             "bundleType".into(),
-            src.get("bundleType")
-                .cloned()
+            app_options
+                .bundle_type
+                .clone()
+                .map(Into::into)
+                .or_else(|| src.get("bundleType").cloned())
                 .unwrap_or_else(|| "app".into()),
         );
         // versionName: product override takes priority over app.json5.
@@ -396,14 +407,21 @@ impl ModuleJsonWriter {
         }
         obj.insert("compileSdkVersion".into(), compile_sdk_version.into());
         obj.insert("targetAPIVersion".into(), target_numeric_api.into());
-        if let Some(v) = src.get("vendor") {
-            obj.insert("vendor".into(), v.clone());
+        if let Some(v) = app_options
+            .vendor
+            .clone()
+            .map(Into::into)
+            .or_else(|| src.get("vendor").cloned())
+        {
+            obj.insert("vendor".into(), v);
         }
         obj.insert(
             "bundleName".into(),
-            src.get("bundleName")
-                .cloned()
-                .unwrap_or_else(|| bundle_name_fallback.into()),
+            if bundle_name_fallback.is_empty() {
+                src.get("bundleName").cloned().unwrap_or_default()
+            } else {
+                bundle_name_fallback.into()
+            },
         );
         obj.insert("apiReleaseType".into(), "Release".into());
         obj.insert("targetMinorAPIVersion".into(), 0u64.into());
@@ -420,7 +438,7 @@ impl ModuleJsonWriter {
         // `multiProjects` is special: hvigor ignores it from AppScope/app.json5
         // and only writes the build-profile top-level `app.multiProjects`.
         for (key, value) in src {
-            if key == "multiProjects" {
+            if key == "multiProjects" || key == "buildVersion" {
                 continue;
             }
             if !obj.contains_key(key.as_str()) {
@@ -432,6 +450,14 @@ impl ModuleJsonWriter {
                 }
                 obj.insert(key.clone(), value.clone());
             }
+        }
+        if let Some(build_version) = build_version_override
+            .or_else(|| src.get("buildVersion").and_then(serde_json::Value::as_str))
+        {
+            // MergeProfile.getMergedAppOptObj assigns buildVersion after the
+            // source app object has been cloned, so a newly supplied product
+            // or invocation value is appended to the generated app object.
+            obj.insert("buildVersion".into(), build_version.into());
         }
 
         obj
@@ -1822,10 +1848,12 @@ mod tests {
             true,
             "5.0.0",
             "com.example.app",
+            &arkdown_core::AppOptionOverride::default(),
             false,
             None,
             None, // no version_code override
             None, // no version_name override
+            None, // no build_version override
         );
         assert_eq!(
             obj.get("versionCode"),
@@ -1850,10 +1878,12 @@ mod tests {
             true,
             "5.0.0",
             "com.example.app",
+            &arkdown_core::AppOptionOverride::default(),
             false,
             None,
             Some(2_000_000),     // product override: versionCode
             Some("2.0.0-alpha"), // product override: versionName
+            None,
         );
         assert_eq!(
             obj.get("versionCode"),
@@ -1863,6 +1893,41 @@ mod tests {
             obj.get("versionName"),
             Some(&serde_json::Value::String("2.0.0-alpha".to_string()))
         );
+    }
+
+    #[test]
+    fn test_build_app_section_applies_hvigor_app_option_overlay() {
+        let mut src = make_app_json5_src(1_000_000, "1.0.0");
+        src.insert("vendor".into(), "source-vendor".into());
+        src.insert("bundleType".into(), "app".into());
+        src.insert("icon".into(), "$media:source".into());
+        src.insert("label".into(), "$string:source".into());
+        let app_options = arkdown_core::AppOptionOverride {
+            vendor: Some("script-vendor".to_string()),
+            bundle_type: Some("atomicService".to_string()),
+            icon: Some("$media:script".to_string()),
+            label: Some("$string:script".to_string()),
+        };
+        let obj = ModuleJsonWriter::build_app_section(
+            &src,
+            12,
+            20,
+            true,
+            "5.0.0",
+            "com.example.script",
+            &app_options,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(obj["bundleName"], "com.example.script");
+        assert_eq!(obj["vendor"], "script-vendor");
+        assert_eq!(obj["bundleType"], "atomicService");
+        assert_eq!(obj["icon"], "$media:script");
+        assert_eq!(obj["label"], "$string:script");
     }
 
     /// When a product override is present for only one field, the other field
@@ -1878,9 +1943,11 @@ mod tests {
             false,
             "5.0.0",
             "com.example.app",
+            &arkdown_core::AppOptionOverride::default(),
             false,
             None,
             Some(1_500_000),
+            None,
             None,
         );
         assert_eq!(
@@ -1903,7 +1970,9 @@ mod tests {
             false,
             "6.0.1.112",
             "com.example.app",
+            &arkdown_core::AppOptionOverride::default(),
             false,
+            None,
             None,
             None,
             None,
@@ -1916,6 +1985,48 @@ mod tests {
         assert_eq!(
             obj.get("targetAPIVersion"),
             Some(&serde_json::Value::Number(60001021u64.into()))
+        );
+    }
+
+    #[test]
+    fn test_build_app_section_build_version_uses_product_then_app_precedence() {
+        let mut src = make_app_json5_src(1_000_000, "1.0.0");
+        src.insert("buildVersion".into(), "app-build".into());
+        let from_app = ModuleJsonWriter::build_app_section(
+            &src,
+            12,
+            20,
+            true,
+            "5.0.0",
+            "com.example.app",
+            &arkdown_core::AppOptionOverride::default(),
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        let from_product = ModuleJsonWriter::build_app_section(
+            &src,
+            12,
+            20,
+            true,
+            "5.0.0",
+            "com.example.app",
+            &arkdown_core::AppOptionOverride::default(),
+            false,
+            None,
+            None,
+            None,
+            Some("product-build"),
+        );
+
+        assert_eq!(from_app["buildVersion"], "app-build");
+        assert_eq!(from_product["buildVersion"], "product-build");
+        assert_eq!(
+            from_product.keys().last().map(String::as_str),
+            Some("buildVersion"),
+            "MergeProfile appends a newly assigned buildVersion"
         );
     }
 }

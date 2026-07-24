@@ -14,8 +14,8 @@ use crate::transform::viewpu_emit::{GeneratedViewpuName, ViewpuStatementAstEmitt
 
 use super::raw_object::RawObjectArgumentTransform;
 use super::{
-    ArkuiCallName, BuildContext, BuildSourceMetadata, CommonAttribute,
-    ComponentCallStatementEmitter, CustomComponentInfo, LeafAttribute,
+    ArkuiCallName, BuildContext, BuildSourceMetadata, ComponentCallStatementEmitter,
+    CustomComponentInfo, LeafAttribute, LeafAttributeStatementEmitter,
 };
 
 pub(super) struct CustomComponentStatementEmitter;
@@ -30,7 +30,7 @@ impl CustomComponentStatementEmitter {
         builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
         reuse_id: Option<&Argument<'_>>,
         span: Span,
-        chain_attrs: &[CommonAttribute<'_>],
+        chain_attrs: &[LeafAttribute<'_>],
         builder_methods: &FxHashSet<String>,
         source_metadata: &BuildSourceMetadata<'_>,
         context: &BuildContext,
@@ -43,55 +43,19 @@ impl CustomComponentStatementEmitter {
             &context.runtime_names().component_common,
             &context.runtime_names().method_create,
         ));
-        if chain_attrs
-            .iter()
-            .any(|attr| ComponentCallStatementEmitter::is_animation_attribute(&attr.name))
-        {
-            let mut animation_segment = OxcVec::new_in(&allocator);
-            for attr in chain_attrs {
-                if ComponentCallStatementEmitter::is_animation_attribute(&attr.name) {
-                    ComponentCallStatementEmitter::push_animation_ref_segment(
-                        &mut common_stmts,
-                        &mut animation_segment,
-                        ast,
-                        allocator,
-                        &attr.arguments,
-                        context,
-                    );
-                    continue;
-                }
-                animation_segment.push(ComponentCallStatementEmitter::attribute_refs(
-                    ast,
-                    allocator,
-                    &context.runtime_names().component_common,
-                    &attr.name,
-                    &attr.arguments,
-                    builder_methods,
-                    context,
-                ));
-            }
-            ComponentCallStatementEmitter::flush_animation_segment(
-                &mut common_stmts,
-                &mut animation_segment,
-                allocator,
-            );
-        } else {
-            for attr in chain_attrs {
-                common_stmts.push(ComponentCallStatementEmitter::attribute_refs(
-                    ast,
-                    allocator,
-                    &context.runtime_names().component_common,
-                    &attr.name,
-                    &attr.arguments,
-                    builder_methods,
-                    context,
-                ));
-            }
-        }
+        LeafAttributeStatementEmitter::new(
+            &context.runtime_names().component_common,
+            chain_attrs,
+            builder_methods,
+            context,
+        )
+        .without_reusable_immutable_guard()
+        .push_statements(&mut common_stmts, ast, allocator);
         statements.push(
             ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
                 ast,
                 context.use_parent_context,
+                context.global_builder_parameter.as_deref(),
                 &context.runtime_names().component_common,
                 context.runtime_names(),
                 common_stmts,
@@ -108,7 +72,11 @@ impl CustomComponentStatementEmitter {
             source_metadata,
             context,
         );
-        statements.push(ast.statement_block(SPAN, custom_component_stmts));
+        // SDK process_custom_component.js::processCustomComponent appends the block
+        // returned by createCustomComponent() directly after the __Common__ observer.
+        // Self::custom already returns that block, so wrapping it again changes the
+        // generated tree and source map.
+        statements.extend(custom_component_stmts);
         statements.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_common,
@@ -130,6 +98,24 @@ impl CustomComponentStatementEmitter {
         context: &BuildContext,
     ) -> OxcVec<'a, Statement<'a>> {
         let mut statements = OxcVec::new_in(&allocator);
+        if component_info.is_some_and(|info| info.reusable_v2) {
+            let (line, col) = source_metadata.source_position(span.start);
+            let page = source_metadata.component_page_path();
+            let params = CustomComponentParamExpressions::new(
+                allocator,
+                arguments,
+                component_info,
+                builder_param,
+                context,
+            );
+            statements.push(
+                ReusableV2CustomComponentAstEmitter::new(
+                    allocator, name, &page, line, col, context,
+                )
+                .statement(params.lambda, reuse_id),
+            );
+            return statements;
+        }
         if component_info.is_some_and(|info| info.reusable) {
             let ast = AstBuilder::new(allocator);
             let mut recycle_stmts = OxcVec::new_in(&allocator);
@@ -142,6 +128,7 @@ impl CustomComponentStatementEmitter {
                 ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
                     ast,
                     context.use_parent_context,
+                    context.global_builder_parameter.as_deref(),
                     &context.runtime_names().component_recycle,
                     context.runtime_names(),
                     recycle_stmts,
@@ -175,9 +162,20 @@ impl CustomComponentStatementEmitter {
             builder_param,
             context,
         );
+        let runtime_base_name = component_info
+            .map(CustomComponentInfo::runtime_base_name)
+            .unwrap_or_else(|| context.custom_component_base_name());
         statements.push(
-            CustomComponentAstEmitter::new(allocator, name, &page, line, col, context)
-                .statement(params),
+            CustomComponentAstEmitter::new(
+                allocator,
+                name,
+                &page,
+                line,
+                col,
+                runtime_base_name,
+                context,
+            )
+            .statement(params),
         );
         statements
     }
@@ -208,12 +206,23 @@ impl CustomComponentStatementEmitter {
             .and_then(|argument| argument.as_expression())
             .map(|expression| expression.clone_in(allocator))
             .unwrap_or_else(|| ast.expression_string_literal(SPAN, ast.str(name), None));
-        ReusableCustomComponentAstEmitter::new(allocator, name, &page, line, col, context)
-            .statement(params, reuse_id)
+        let runtime_base_name = component_info
+            .map(CustomComponentInfo::runtime_base_name)
+            .unwrap_or_else(|| context.custom_component_base_name());
+        ReusableCustomComponentAstEmitter::new(
+            allocator,
+            name,
+            &page,
+            line,
+            col,
+            runtime_base_name,
+            context,
+        )
+        .statement(params, reuse_id)
     }
 }
 
-struct CustomComponentAstEmitter<'a, 'b> {
+struct ReusableV2CustomComponentAstEmitter<'a, 'b> {
     allocator: &'a Allocator,
     ast: AstBuilder<'a>,
     name: &'b str,
@@ -223,7 +232,7 @@ struct CustomComponentAstEmitter<'a, 'b> {
     context: &'b BuildContext,
 }
 
-impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
+impl<'a, 'b> ReusableV2CustomComponentAstEmitter<'a, 'b> {
     fn new(
         allocator: &'a Allocator,
         name: &'b str,
@@ -239,6 +248,175 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
             page,
             line,
             col,
+            context,
+        }
+    }
+
+    fn statement(&self, params: Expression<'a>, reuse_id: Option<&Argument<'_>>) -> Statement<'a> {
+        let reuse_id = reuse_id
+            .and_then(Argument::as_expression)
+            .map(|expression| expression.clone_in(self.allocator))
+            .unwrap_or_else(|| {
+                self.ast
+                    .expression_string_literal(SPAN, self.ast.str(self.name), None)
+            });
+        let options = self.object_expression([
+            self.object_property(
+                GeneratedViewpuName::COMPONENT_CLASS,
+                self.ast
+                    .expression_identifier(SPAN, self.ast.str(self.name)),
+            ),
+            self.object_property(
+                GeneratedViewpuName::GET_PARAMS,
+                self.arrow_expression(params),
+            ),
+            self.object_property(
+                GeneratedViewpuName::GET_REUSE_ID,
+                self.arrow_expression(reuse_id),
+            ),
+            self.object_property(
+                GeneratedViewpuName::EXTRA_INFO,
+                self.source_info_expression(),
+            ),
+        ]);
+        let callee = Expression::from(
+            self.ast.member_expression_static(
+                SPAN,
+                self.view_context_expression(),
+                self.ast.identifier_name(
+                    SPAN,
+                    self.ast
+                        .str(GeneratedViewpuName::REUSE_OR_CREATE_NEW_COMPONENT),
+                ),
+                false,
+            ),
+        );
+        let call =
+            self.ast
+                .expression_call(SPAN, callee, NONE, self.ast.vec1(options.into()), false);
+        self.ast.statement_block(
+            SPAN,
+            self.ast.vec1(self.ast.statement_expression(SPAN, call)),
+        )
+    }
+
+    fn arrow_expression(&self, body: Expression<'a>) -> Expression<'a> {
+        self.ast.expression_arrow_function(
+            SPAN,
+            true,
+            false,
+            NONE,
+            self.ast.formal_parameters(
+                SPAN,
+                oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
+                self.ast.vec(),
+                NONE,
+            ),
+            NONE,
+            self.ast.function_body(
+                SPAN,
+                self.ast.vec(),
+                self.ast.vec1(self.ast.statement_expression(SPAN, body)),
+            ),
+        )
+    }
+
+    fn source_info_expression(&self) -> Expression<'a> {
+        self.object_expression([
+            self.object_property(
+                GeneratedViewpuName::SOURCE_PAGE,
+                self.ast
+                    .expression_string_literal(SPAN, self.ast.str(self.page), None),
+            ),
+            self.object_property(
+                GeneratedViewpuName::SOURCE_LINE,
+                self.ast.expression_numeric_literal(
+                    SPAN,
+                    self.line as f64,
+                    None,
+                    NumberBase::Decimal,
+                ),
+            ),
+            self.object_property(
+                GeneratedViewpuName::SOURCE_COL,
+                self.ast.expression_numeric_literal(
+                    SPAN,
+                    self.col as f64,
+                    None,
+                    NumberBase::Decimal,
+                ),
+            ),
+        ])
+    }
+
+    fn view_context_expression(&self) -> Expression<'a> {
+        if !self.context.use_parent_context {
+            return self.ast.expression_this(SPAN);
+        }
+        self.ast.expression_parenthesized(
+            SPAN,
+            self.ast.expression_conditional(
+                SPAN,
+                self.ast
+                    .expression_identifier(SPAN, GeneratedViewpuName::PARENT),
+                self.ast
+                    .expression_identifier(SPAN, GeneratedViewpuName::PARENT),
+                self.ast.expression_this(SPAN),
+            ),
+        )
+    }
+
+    fn object_expression<I>(&self, properties: I) -> Expression<'a>
+    where
+        I: IntoIterator<Item = ObjectPropertyKind<'a>>,
+    {
+        self.ast
+            .expression_object(SPAN, self.ast.vec_from_iter(properties))
+    }
+
+    fn object_property(&self, name: &str, value: Expression<'a>) -> ObjectPropertyKind<'a> {
+        self.ast.object_property_kind_object_property(
+            SPAN,
+            PropertyKind::Init,
+            self.ast
+                .property_key_static_identifier(SPAN, self.ast.str(name)),
+            value,
+            false,
+            false,
+            false,
+        )
+    }
+}
+
+struct CustomComponentAstEmitter<'a, 'b> {
+    allocator: &'a Allocator,
+    ast: AstBuilder<'a>,
+    name: &'b str,
+    page: &'b str,
+    line: usize,
+    col: usize,
+    runtime_base_name: &'static str,
+    context: &'b BuildContext,
+}
+
+impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
+    fn new(
+        allocator: &'a Allocator,
+        name: &'b str,
+        page: &'b str,
+        line: usize,
+        col: usize,
+        runtime_base_name: &'static str,
+        context: &'b BuildContext,
+    ) -> Self {
+        Self {
+            allocator,
+            ast: AstBuilder::new(allocator),
+            name,
+            page,
+            line,
+            col,
+            runtime_base_name,
             context,
         }
     }
@@ -339,8 +517,7 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
     fn viewpu_create_statement(&self) -> Statement<'a> {
         self.call_statement(
             self.member_expression(
-                self.ast
-                    .expression_identifier(SPAN, self.context.custom_component_base_name()),
+                self.ast.expression_identifier(SPAN, self.runtime_base_name),
                 &self.context.runtime_names().method_create,
             ),
             self.ast.vec1(Argument::from(self.ast.expression_identifier(
@@ -494,10 +671,31 @@ impl<'a, 'b> CustomComponentAstEmitter<'a, 'b> {
     }
 
     fn render_callback_formal_parameters(&self) -> oxc_ast::ast::FormalParameters<'a> {
-        self.formal_parameters([
+        let mut params = self.formal_parameters([
             self.context.runtime_names().elmt_id.as_str(),
             self.context.runtime_names().is_initial_render.as_str(),
-        ])
+        ]);
+        if let Some(parameter) = &self.context.global_builder_parameter {
+            let capture_name = format!("__{parameter}__");
+            params.items.push(
+                self.ast.formal_parameter(
+                    SPAN,
+                    self.ast.vec(),
+                    self.ast
+                        .binding_pattern_binding_identifier(SPAN, self.ast.str(parameter)),
+                    NONE,
+                    Some(
+                        self.ast
+                            .expression_identifier(SPAN, self.ast.str(&capture_name)),
+                    ),
+                    false,
+                    None,
+                    false,
+                    false,
+                ),
+            );
+        }
+        params
     }
 
     fn formal_parameters<const N: usize>(
@@ -583,6 +781,7 @@ struct ReusableCustomComponentAstEmitter<'a, 'b> {
     page: &'b str,
     line: usize,
     col: usize,
+    runtime_base_name: &'static str,
     context: &'b BuildContext,
 }
 
@@ -593,6 +792,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
         page: &'b str,
         line: usize,
         col: usize,
+        runtime_base_name: &'static str,
         context: &'b BuildContext,
     ) -> Self {
         Self {
@@ -602,6 +802,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
             page,
             line,
             col,
+            runtime_base_name,
             context,
         }
     }
@@ -743,7 +944,7 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
         reuse_id: Expression<'a>,
     ) -> Statement<'a> {
         self.static_call_statement(
-            self.context.custom_component_base_name(),
+            self.runtime_base_name,
             &self.context.runtime_names().method_create_recycle,
             self.ast.vec_from_iter([
                 Argument::from(self.ast.expression_identifier(
@@ -1418,12 +1619,10 @@ impl<'a> CustomComponentObjectEmitter<'a> {
                 return self.backing_member_expression(&name);
             }
         }
-        if matches!(mode, ParamMode::Ctor | ParamMode::Lambda) {
-            if let Some(expression) = RawObjectArgumentTransform::new(context)
-                .expression_with_call_args(value, self.allocator)
-            {
-                return expression;
-            }
+        if let Some(expression) = RawObjectArgumentTransform::new(context)
+            .expression_with_call_args(value, self.allocator)
+        {
+            return expression;
         }
         value.clone_in(self.allocator)
     }

@@ -70,6 +70,8 @@ impl WatchEvent {
 pub struct WatchInput {
     /// Directories to watch recursively, from `SourceStore` root dirs.
     pub watch_dirs: Vec<PathBuf>,
+    /// Configuration and manifest files to watch non-recursively.
+    pub watch_files: Vec<PathBuf>,
     /// File extensions to accept, from `SdkSnapshot` support extensions.
     /// Empty means "accept all extensions".
     pub watch_extensions: Vec<String>,
@@ -87,6 +89,12 @@ impl WatchInput {
     /// Set the directories to watch.
     pub fn with_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.watch_dirs = dirs;
+        self
+    }
+
+    /// Set individual configuration and manifest files to watch.
+    pub fn with_files(mut self, files: Vec<PathBuf>) -> Self {
+        self.watch_files = files;
         self
     }
 
@@ -179,14 +187,22 @@ impl SessionWatcher {
                 );
             }
         }
+        for file in &self.input.watch_files {
+            if file.is_file() {
+                watcher.watch(file, RecursiveMode::NonRecursive)?;
+                tracing::debug!(file = %file.display(), "session-watcher: watching file");
+            }
+        }
 
         tracing::info!(
             dir_count = self.input.watch_dirs.iter().filter(|d| d.exists()).count(),
+            file_count = self.input.watch_files.iter().filter(|p| p.is_file()).count(),
             ext_filter = ?self.input.watch_extensions,
             "session-watcher started"
         );
 
-        let debounce = Duration::from_millis(150);
+        // hvigor-arkts-compose/arkts-pack.ts::getWatchConfig.
+        let debounce = Duration::from_millis(100);
 
         loop {
             // Check for stop signal (non-blocking).
@@ -386,9 +402,11 @@ mod tests {
     fn test_watch_input_builder_chaining() {
         let input = WatchInput::new()
             .with_dirs(vec![PathBuf::from("/project/entry/src/main/ets")])
+            .with_files(vec![PathBuf::from("/project/build-profile.json5")])
             .with_extensions(vec!["ets".to_string(), "ts".to_string()])
             .with_fingerprints(HashMap::new());
         assert_eq!(input.watch_dirs.len(), 1);
+        assert_eq!(input.watch_files.len(), 1);
         assert_eq!(input.watch_extensions.len(), 2);
     }
 }

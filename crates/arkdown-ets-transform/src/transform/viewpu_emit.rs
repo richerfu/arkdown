@@ -25,6 +25,13 @@ impl GeneratedViewpuName {
     pub(crate) const VIEWPU_BASE: &'static str = "ViewPU";
     pub(crate) const VIEW_V2_BASE: &'static str = "ViewV2";
     pub(crate) const REUSABLE_V2_INNER_DECORATOR: &'static str = "__ReusableV2_Inner_Decorator__";
+    pub(crate) const REUSE_OR_CREATE_NEW_COMPONENT: &'static str = "reuseOrCreateNewComponent";
+    pub(crate) const COMPONENT_CLASS: &'static str = "componentClass";
+    pub(crate) const GET_PARAMS: &'static str = "getParams";
+    pub(crate) const GET_REUSE_ID: &'static str = "getReuseId";
+    pub(crate) const ENABLE_V2_COMPATIBILITY: &'static str = "enableV2Compatibility";
+    pub(crate) const MAKE_V1_OBSERVED: &'static str = "makeV1Observed";
+    pub(crate) const CAN_BE_OBSERVED: &'static str = "canBeObserved";
     pub(crate) const BASE_CLASS: &'static str = "BaseClass";
     pub(crate) const PARENT: &'static str = "parent";
     pub(crate) const PARAMS: &'static str = "params";
@@ -121,6 +128,7 @@ impl ViewpuStatementAstEmitter {
     pub(crate) fn observe_component_creation_ast_statement<'b>(
         ast: AstBuilder<'b>,
         use_parent_context: bool,
+        global_builder_parameter: Option<&str>,
         component_name: &str,
         runtime_names: &ArkuiRuntimeNames,
         body_stmts: OxcVec<'b, Statement<'b>>,
@@ -133,6 +141,7 @@ impl ViewpuStatementAstEmitter {
         let arrow = ViewpuAstEmitter::observe_arrow_function_with_statements(
             ast,
             runtime_names,
+            global_builder_parameter,
             body_stmts,
         );
         let component = ast.expression_identifier(SPAN, ast.str(component_name));
@@ -166,6 +175,7 @@ impl ViewpuAstEmitter {
     fn observe_arrow_function_with_statements<'b>(
         ast: AstBuilder<'b>,
         runtime_names: &ArkuiRuntimeNames,
+        global_builder_parameter: Option<&str>,
         statements: OxcVec<'b, Statement<'b>>,
     ) -> Expression<'b> {
         let mut params = ast.formal_parameters(
@@ -181,6 +191,20 @@ impl ViewpuAstEmitter {
             ast,
             &runtime_names.is_initial_render,
         ));
+        if let Some(parameter) = global_builder_parameter {
+            let capture_name = format!("__{parameter}__");
+            params.items.push(ast.formal_parameter(
+                SPAN,
+                ast.vec(),
+                ast.binding_pattern_binding_identifier(SPAN, ast.str(parameter)),
+                NONE,
+                Some(ast.expression_identifier(SPAN, ast.str(&capture_name))),
+                false,
+                None,
+                false,
+                false,
+            ));
+        }
         let body = ast.function_body(SPAN, ast.vec(), statements);
         ast.expression_arrow_function(SPAN, false, false, NONE, params, NONE, body)
     }

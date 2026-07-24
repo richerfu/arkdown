@@ -17,11 +17,14 @@ test('package CLI parses repeated hvigor plugin path flags', () => {
     './compile-b.js',
     '--hvigor-plugin-file',
     './hvigor-plugin.js',
+    '--build-version',
+    '2026.07.23',
   ])
 
   assert.deepEqual(config, {
     project: '/tmp/app',
     compilePluginPath: ['./compile-a.js', './compile-b.js'],
     hvigorPluginFile: './hvigor-plugin.js',
+    buildVersion: '2026.07.23',
   })
 })

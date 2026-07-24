@@ -108,7 +108,10 @@ impl ArkuiDecoratorName {
     }
 
     pub(crate) fn contributes_update_state_vars(name: &str) -> bool {
-        matches!(name, Self::PROP | Self::PARAM | Self::ONCE | Self::PROP_REF)
+        matches!(
+            name,
+            Self::PROP | Self::OBJECT_LINK | Self::PARAM | Self::ONCE | Self::PROP_REF
+        )
     }
 
     pub(crate) fn has_initially_provided_value_slot(name: &str) -> bool {
@@ -533,6 +536,6 @@ mod tests {
         assert!(!ArkuiStateDecorator::new("Link").has_update_state_vars_slot());
         assert!(!ArkuiStateDecorator::new("Provide").has_update_state_vars_slot());
         assert!(!ArkuiStateDecorator::new("Consume").has_update_state_vars_slot());
-        assert!(!ArkuiStateDecorator::new("ObjectLink").has_update_state_vars_slot());
+        assert!(ArkuiStateDecorator::new("ObjectLink").has_update_state_vars_slot());
     }
 }

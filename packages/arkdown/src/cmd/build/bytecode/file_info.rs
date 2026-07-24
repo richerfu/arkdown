@@ -355,7 +355,7 @@ impl CacheFileManifestWriter {
     npm_entries_path: Option<&Path>,
   ) -> Result<PathBuf, Ts2abcError> {
     let path = self.cache_file_path();
-    fs_err::create_dir_all(&self.output_dir).map_err(|e| Ts2abcError::Io(e.into()))?;
+    fs_err::create_dir_all(&self.output_dir).map_err(Ts2abcError::Io)?;
     let mut content = String::new();
     for unit in units.iter().filter(|unit| {
       !matches!(
@@ -365,7 +365,7 @@ impl CacheFileManifestWriter {
     }) {
       if let Some(cache_file) = &unit.cache_file {
         if let Some(parent) = cache_file.parent() {
-          fs_err::create_dir_all(parent).map_err(|e| Ts2abcError::Io(e.into()))?;
+          fs_err::create_dir_all(parent).map_err(Ts2abcError::Io)?;
         }
         let source_path = unit.source_path_str()?;
         let cache_path = Ts2abcPathText::new(cache_file).string()?;
@@ -391,7 +391,7 @@ impl CacheFileManifestWriter {
     }) {
       if let Some(cache_file) = &unit.cache_file {
         if let Some(parent) = cache_file.parent() {
-          fs_err::create_dir_all(parent).map_err(|e| Ts2abcError::Io(e.into()))?;
+          fs_err::create_dir_all(parent).map_err(Ts2abcError::Io)?;
         }
         let source_path = unit.source_path_str()?;
         let cache_path = Ts2abcPathText::new(cache_file).string()?;
@@ -399,7 +399,7 @@ impl CacheFileManifestWriter {
         content.push('\n');
       }
     }
-    fs_err::write(&path, &content).map_err(|e| Ts2abcError::Io(e.into()))?;
+    fs_err::write(&path, &content).map_err(Ts2abcError::Io)?;
     Ok(path)
   }
 }

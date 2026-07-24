@@ -145,4 +145,15 @@ impl BuildScriptSnapshot {
             }
         })
     }
+
+    /// Return the statically evaluated `config.ohos.overrides` object.
+    pub fn ohos_overrides(&self) -> Option<&serde_json::Value> {
+        self.effects.iter().find_map(|effect| {
+            if let BuildScriptEffect::OhosOverrides(value) = effect {
+                Some(value)
+            } else {
+                None
+            }
+        })
+    }
 }

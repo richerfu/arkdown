@@ -47,6 +47,8 @@ pub struct ProjectSnapshot {
     pub version_code: u64,
     /// Version name from `AppScope/app.json5`.
     pub version_name: String,
+    /// Effective build version using hvigor's invocation → product → app precedence.
+    pub build_version: Option<String>,
     /// Bundle type from `AppScope/app.json5`.
     pub bundle_type: String,
     /// Selected product name.
@@ -66,7 +68,13 @@ impl ProjectSnapshot {
     pub fn from_config(config: &ArkdownConfig) -> Result<Self, ProjectSnapshotError> {
         let root = &config.project_root;
         let app_json_path = ProjectPathLayout::new(root).app_scope_app_json5();
-        let (bundle_name, version_code, version_name, bundle_type) = if app_json_path.is_file() {
+        let (
+            app_bundle_name,
+            app_version_code,
+            app_version_name,
+            app_build_version,
+            app_bundle_type,
+        ) = if app_json_path.is_file() {
             let content = std::fs::read_to_string(&app_json_path)?;
             let app: arkdown_ohos_schema::RawAppJson5 =
                 json5::from_str(&content).map_err(|e| ProjectSnapshotError::Parse {
@@ -77,16 +85,33 @@ impl ProjectSnapshot {
                 app.app.bundle_name,
                 app.app.version_code,
                 app.app.version_name,
+                app.app.build_version,
                 app.app.bundle_type.unwrap_or_else(|| "app".to_string()),
             )
         } else {
-            (
-                config.product.bundle_name.clone(),
-                config.product.version_code.unwrap_or_default(),
-                config.product.version_name.clone().unwrap_or_default(),
-                "app".to_string(),
-            )
+            (String::new(), 0, String::new(), None, "app".to_string())
         };
+        // Hvigor MergeProfile.getMergedAppOptObj applies product/build-script
+        // values after AppScope/app.json5. `load_config` has already folded
+        // hvigorfile appOpt into ProductConfig at the highest precedence.
+        let bundle_name = if config.product.bundle_name.is_empty() {
+            app_bundle_name
+        } else {
+            config.product.bundle_name.clone()
+        };
+        let version_code = config.product.version_code.unwrap_or(app_version_code);
+        let version_name = config
+            .product
+            .version_name
+            .clone()
+            .unwrap_or(app_version_name);
+        let build_version = config.product.build_version.clone().or(app_build_version);
+        let bundle_type = config
+            .product
+            .app_options
+            .bundle_type
+            .clone()
+            .unwrap_or(app_bundle_type);
 
         let mut module_order = Vec::with_capacity(config.modules.len());
         let mut modules = IndexMap::with_capacity(config.modules.len());
@@ -119,6 +144,7 @@ impl ProjectSnapshot {
             bundle_name,
             version_code,
             version_name,
+            build_version,
             bundle_type,
             product_name: config.product.name.clone(),
             module_order,

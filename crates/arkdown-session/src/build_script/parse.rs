@@ -35,9 +35,10 @@
 //! subset of hvigor script effects.
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, ObjectPropertyKind, PropertyKey, Statement};
+use oxc_ast::ast::{Expression, ObjectExpression, ObjectPropertyKind, PropertyKey, Statement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use oxc_syntax::operator::UnaryOperator;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -67,6 +68,16 @@ pub enum ParseBuildScriptError {
     /// The script file name does not match a known build script kind.
     #[error("unrecognized build script file name: {0}")]
     UnrecognizedKind(String),
+
+    /// OXC could not parse the build script.
+    #[error("failed to parse build script {path:?}: {message}")]
+    Parse { path: PathBuf, message: String },
+
+    /// A config override requires JavaScript execution.
+    #[error(
+        "build script {path:?} uses a dynamic expression at {option_path}; use the Node package runtime or replace it with a literal object"
+    )]
+    DynamicOverride { path: PathBuf, option_path: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +92,27 @@ impl BuildScriptParser {
     /// [`BuildScriptSnapshot`] containing the declarative effects extracted by
     /// OXC static analysis.
     pub fn parse(path: &AbsPath) -> Result<BuildScriptSnapshot, ParseBuildScriptError> {
+        Self::parse_scoped(path, true, None)
+    }
+
+    /// Parse a project-level build script.
+    pub fn parse_project(path: &AbsPath) -> Result<BuildScriptSnapshot, ParseBuildScriptError> {
+        Self::parse_scoped(path, false, None)
+    }
+
+    /// Parse a module-level build script.
+    pub fn parse_module(
+        path: &AbsPath,
+        module_name: &str,
+    ) -> Result<BuildScriptSnapshot, ParseBuildScriptError> {
+        Self::parse_scoped(path, true, Some(module_name.to_string()))
+    }
+
+    fn parse_scoped(
+        path: &AbsPath,
+        is_module_level: bool,
+        module_name: Option<String>,
+    ) -> Result<BuildScriptSnapshot, ParseBuildScriptError> {
         let file_name = path
             .as_path()
             .file_name()
@@ -102,13 +134,13 @@ impl BuildScriptParser {
         let source = String::from_utf8_lossy(&bytes);
 
         // Walk the AST to extract declarative effects.
-        let effects = Self::extract_effects(&source, path.as_path(), kind);
+        let effects = Self::extract_effects(&source, path.as_path(), kind)?;
 
         Ok(BuildScriptSnapshot {
             script_path: path.clone(),
             kind,
-            is_module_level: matches!(kind, BuildScriptKind::HvigorFile),
-            module_name: None,
+            is_module_level,
+            module_name,
             fingerprint,
             effects,
         })
@@ -118,29 +150,33 @@ impl BuildScriptParser {
         source: &str,
         script_path: &Path,
         _kind: BuildScriptKind,
-    ) -> Vec<BuildScriptEffect> {
+    ) -> Result<Vec<BuildScriptEffect>, ParseBuildScriptError> {
         let allocator = Allocator::default();
         let source_type = SourceType::ts().with_module(true);
         let parsed = Parser::new(&allocator, source, source_type).parse();
 
-        // If parse fails, return empty effects (build will fail later with a better error).
         if !parsed.diagnostics.is_empty() {
-            tracing::debug!(
-                path = %script_path.display(),
-                errors = parsed.diagnostics.len(),
-                "build script parse errors — skipping effect extraction"
-            );
-            return vec![];
+            return Err(ParseBuildScriptError::Parse {
+                path: script_path.to_path_buf(),
+                message: parsed.diagnostics[0].to_string(),
+            });
         }
 
         let mut visitor = ScriptVisitor {
             script_path,
             hvigor_plugin_imports: vec![],
             effects: vec![],
+            dynamic_override_path: None,
         };
 
         visitor.visit_program(&parsed.program.body);
-        visitor.effects
+        if let Some(option_path) = visitor.dynamic_override_path {
+            return Err(ParseBuildScriptError::DynamicOverride {
+                path: script_path.to_path_buf(),
+                option_path,
+            });
+        }
+        Ok(visitor.effects)
     }
 }
 
@@ -153,6 +189,7 @@ struct ScriptVisitor<'src> {
     /// Names imported from `"@ohos/hvigor-ohos-plugin"` (e.g. `appTasks`).
     hvigor_plugin_imports: Vec<String>,
     effects: Vec<BuildScriptEffect>,
+    dynamic_override_path: Option<String>,
 }
 
 impl<'src> ScriptVisitor<'src> {
@@ -218,10 +255,126 @@ impl<'src> ScriptVisitor<'src> {
 
             if key_name == "plugins" {
                 self.analyze_plugins_property(&p.value);
+            } else if key_name == "config" {
+                self.analyze_config_property(&p.value);
             }
             // We don't need to analyze `system` — it's always a reference to
             // one of the imported standard tasks (appTasks/hapTasks/etc.).
         }
+    }
+
+    fn analyze_config_property(&mut self, value: &Expression<'_>) {
+        let Expression::ObjectExpression(config) = value else {
+            self.dynamic_override_path = Some("config".to_string());
+            return;
+        };
+        let Some(ohos) = self.object_property(config, "ohos") else {
+            return;
+        };
+        let Expression::ObjectExpression(ohos) = ohos else {
+            self.dynamic_override_path = Some("config.ohos".to_string());
+            return;
+        };
+        let Some(overrides) = self.object_property(ohos, "overrides") else {
+            return;
+        };
+        match self.static_json_value(overrides, "config.ohos.overrides") {
+            Ok(value) => self.effects.push(BuildScriptEffect::OhosOverrides(value)),
+            Err(option_path) => self.dynamic_override_path = Some(option_path),
+        }
+    }
+
+    fn object_property<'a>(
+        &self,
+        object: &'a ObjectExpression<'a>,
+        name: &str,
+    ) -> Option<&'a Expression<'a>> {
+        object.properties.iter().rev().find_map(|property| {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                return None;
+            };
+            (self.property_name(&property.key).as_deref() == Some(name)).then_some(&property.value)
+        })
+    }
+
+    fn property_name(&self, key: &PropertyKey<'_>) -> Option<String> {
+        match key {
+            PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+            PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn static_json_value(
+        &self,
+        expression: &Expression<'_>,
+        option_path: &str,
+    ) -> Result<serde_json::Value, String> {
+        match expression {
+            Expression::ObjectExpression(object) => {
+                let mut value = serde_json::Map::new();
+                for property in &object.properties {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        return Err(option_path.to_string());
+                    };
+                    let Some(name) = self.property_name(&property.key) else {
+                        return Err(option_path.to_string());
+                    };
+                    value.insert(
+                        name.clone(),
+                        self.static_json_value(&property.value, &format!("{option_path}.{name}"))?,
+                    );
+                }
+                Ok(serde_json::Value::Object(value))
+            }
+            Expression::ArrayExpression(array) => {
+                let mut value = Vec::with_capacity(array.elements.len());
+                for (index, element) in array.elements.iter().enumerate() {
+                    let Some(element) = element.as_expression() else {
+                        return Err(format!("{option_path}[{index}]"));
+                    };
+                    value
+                        .push(self.static_json_value(element, &format!("{option_path}[{index}]"))?);
+                }
+                Ok(serde_json::Value::Array(value))
+            }
+            Expression::StringLiteral(literal) => {
+                Ok(serde_json::Value::String(literal.value.to_string()))
+            }
+            Expression::NumericLiteral(literal) => self
+                .json_number(literal.value)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| option_path.to_string()),
+            Expression::BooleanLiteral(literal) => Ok(serde_json::Value::Bool(literal.value)),
+            Expression::NullLiteral(_) => Ok(serde_json::Value::Null),
+            Expression::UnaryExpression(unary) => {
+                let Expression::NumericLiteral(literal) = &unary.argument else {
+                    return Err(option_path.to_string());
+                };
+                let value = match unary.operator {
+                    UnaryOperator::UnaryPlus => literal.value,
+                    UnaryOperator::UnaryNegation => -literal.value,
+                    _ => return Err(option_path.to_string()),
+                };
+                self.json_number(value)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| option_path.to_string())
+            }
+            Expression::ParenthesizedExpression(parenthesized) => {
+                self.static_json_value(&parenthesized.expression, option_path)
+            }
+            _ => Err(option_path.to_string()),
+        }
+    }
+
+    fn json_number(&self, value: f64) -> Option<serde_json::Number> {
+        if value.fract() == 0.0 && value >= 0.0 && value <= u64::MAX as f64 {
+            return Some(serde_json::Number::from(value as u64));
+        }
+        if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+            return Some(serde_json::Number::from(value as i64));
+        }
+        serde_json::Number::from_f64(value)
     }
 
     fn analyze_plugins_property(&mut self, value: &Expression<'_>) {
@@ -401,5 +554,74 @@ impl fmt::Display for PluginExpressionName {
                 write!(f, "{object}.{property}()")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_literal_project_ohos_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("hvigorfile.ts");
+        std::fs::write(
+            &path,
+            r#"
+                import { appTasks } from "@ohos/hvigor-ohos-plugin";
+                export default {
+                    system: appTasks,
+                    plugins: [],
+                    config: {
+                        ohos: {
+                            overrides: {
+                                appOpt: {
+                                    vendor: "example",
+                                    versionCode: 200,
+                                    bundleName: "com.example.script"
+                                }
+                            }
+                        }
+                    }
+                };
+            "#,
+        )
+        .unwrap();
+        let path = AbsPath::from_absolute(path).unwrap();
+
+        let snapshot = BuildScriptParser::parse_project(&path).unwrap();
+        assert!(!snapshot.is_module_level);
+        let overrides = snapshot.ohos_overrides().unwrap();
+        assert_eq!(overrides["appOpt"]["versionCode"], 200);
+        assert_eq!(overrides["appOpt"]["bundleName"], "com.example.script");
+    }
+
+    #[test]
+    fn rejects_dynamic_override_in_pure_rust_parser() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("hvigorfile.ts");
+        std::fs::write(
+            &path,
+            r#"
+                export default {
+                    config: {
+                        ohos: {
+                            overrides: {
+                                appOpt: { versionCode: getVersionCode() }
+                            }
+                        }
+                    }
+                };
+            "#,
+        )
+        .unwrap();
+        let path = AbsPath::from_absolute(path).unwrap();
+
+        let error = BuildScriptParser::parse_project(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            ParseBuildScriptError::DynamicOverride { ref option_path, .. }
+                if option_path == "config.ohos.overrides.appOpt.versionCode"
+        ));
     }
 }

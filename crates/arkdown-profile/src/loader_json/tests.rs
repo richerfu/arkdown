@@ -44,6 +44,8 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
             },
             version_code: None,
             version_name: None,
+            build_version: None,
+            app_options: Default::default(),
         },
         modules: vec![],
         sdk_config: SdkConfig {
@@ -264,6 +266,11 @@ fn test_loader_json_form_profile_sources_feed_internal_compile_entries() {
             .contains(&"./ets/forms/Card.ets".to_string()),
         "referenced form sources must feed arkdown's Rolldown input: {:?}",
         loader.compile_entry
+    );
+    assert_eq!(
+        loader.form_entry_sources,
+        vec!["./ets/forms/Card.ets".to_string()],
+        "SDK readCardForm preserves referenced form sources in cardObj for ETS entry lowering"
     );
     assert!(
         !loader
@@ -620,7 +627,9 @@ fn test_loader_json_hvigor_keys() {
     let module_cfg = make_module_cfg();
     let manifest = make_manifest();
 
-    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+    let mut loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+    loader.compiler_types = vec!["./types/runtime".to_string()];
+    loader.compiler_type_declaration_inputs = vec![PathBuf::from("/project/types/runtime.d.ts")];
     let value = serde_json::to_value(&loader).expect("serialization failed");
     // serde_json::to_value produces a BTreeMap (alphabetical) without the
     // preserve_order feature, so compare key *sets* rather than ordered vecs.
@@ -662,6 +671,11 @@ fn test_loader_json_hvigor_keys() {
     assert!(value.get("useNormalizedOHMUrl").is_none());
     assert!(value.get("pkgNameToPkgBriefInfo").is_none());
     assert!(value.get("workers").is_none());
+    assert!(
+        value.get("compilerTypes").is_none(),
+        "hvigor forwards arkOptions.types in compiler memory, not loader.json"
+    );
+    assert!(value.get("compilerTypeDeclarationInputs").is_none());
 }
 
 #[test]
@@ -2604,7 +2618,9 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
         runtime_only: Some(RuntimeOnlyConfig {
             packages: vec!["@runtime/feature".to_string()],
             sources: vec![],
+            exclude_packages: vec![],
         }),
+        build_profile_fields: serde_json::Map::new(),
         support_chunks: false,
         byte_code_har: false,
         bundled_dependencies: false,
@@ -2658,7 +2674,9 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
         runtime_only: Some(RuntimeOnlyConfig {
             packages: vec![],
             sources: vec!["src/main/ets/runtime".to_string()],
+            exclude_packages: vec![],
         }),
+        build_profile_fields: serde_json::Map::new(),
         support_chunks: false,
         byte_code_har: false,
         bundled_dependencies: false,
@@ -2762,6 +2780,88 @@ fn test_loader_json_dynamic_import_lib_info_uses_dependency_runtime_only_package
             .dynamic_import_lib_info
             .contains_key("@runtime/indirect"),
         "dependency metadata.runtimeOnly.packages must feed dynamicImportLibInfo"
+    );
+}
+
+#[test]
+fn runtime_only_exclude_packages_skips_only_remote_source_har_code() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    std::fs::create_dir_all(&module_root).expect("create module dir");
+    std::fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{
+          name: "entry",
+          dependencies: {
+            "remote-har": "1.0.0",
+            "local-har": "file:../local-har"
+          }
+        }"#,
+    )
+    .expect("write host package");
+
+    let create_har = |name: &str| {
+        let root = project_root.join("oh_modules").join(name);
+        let source = root.join("src/main/ets/Index.ets");
+        std::fs::create_dir_all(source.parent().unwrap()).expect("create HAR source");
+        std::fs::write(
+            root.join("oh-package.json5"),
+            format!(r#"{{ name: "{name}", main: "src/main/ets/Index.ets" }}"#),
+        )
+        .expect("write HAR package");
+        std::fs::write(
+            root.join("src/main/module.json5"),
+            r#"{ module: { name: "library", type: "har" } }"#,
+        )
+        .expect("write HAR profile");
+        std::fs::write(
+            &source,
+            format!("export class {} {{}}", name.replace('-', "_")),
+        )
+        .expect("write HAR entry");
+        source
+    };
+    let remote_source = create_har("remote-har");
+    let local_source = create_har("local-har");
+
+    let mut config = make_config(false);
+    config.project_root = project_root;
+    config.product.build_option.ark_options = Some(ArkOptions {
+        obfuscation: None,
+        types: vec![],
+        runtime_only: Some(RuntimeOnlyConfig {
+            packages: vec!["remote-har".into(), "local-har".into()],
+            sources: vec![],
+            exclude_packages: vec!["remote-har".into(), "local-har".into()],
+        }),
+        build_profile_fields: serde_json::Map::new(),
+        support_chunks: false,
+        byte_code_har: false,
+        bundled_dependencies: false,
+        integrated_hsp: None,
+    });
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Entry,
+    };
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert!(loader.dynamic_import_lib_info.contains_key("remote-har"));
+    assert!(loader.dynamic_import_lib_info.contains_key("local-har"));
+    assert!(
+        !loader
+            .hvigor_compile_entry
+            .contains(&to_absolute_path_string(&remote_source)),
+        "remote source HAR code must be excluded"
+    );
+    assert!(
+        loader
+            .hvigor_compile_entry
+            .contains(&to_absolute_path_string(&local_source)),
+        "local file: HAR code must remain a compile input"
     );
 }
 

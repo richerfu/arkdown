@@ -13,9 +13,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::api_transform;
 use crate::api_transform::event_emitter::EventEmitterImportRewriter;
 use crate::error::EtsTransformError;
+use crate::lazy_import::LazyImportRolldownAdapter;
 use crate::module_rewrite::{
-    DefaultImportReexportRewriter, ModuleAnalyzerKind, TypeOnlyNamedImportSplitter,
-    TypeOnlyReexportSplitter,
+    ModuleAnalyzerKind, TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
 };
 use crate::resource_transform::{ResourceReference, ResourceReferenceRewriter};
 use crate::source::{SourceClassifier, SourceFileKind, TransformSourceSnapshot};
@@ -23,7 +23,8 @@ use crate::source_map;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::{self, CheckerMode, ModuleExportIndex, TransformOptions};
 use crate::typescript_emit::{
-    ImportedConstEnumRewriter, TypeScriptDirectiveFlags, TypeScriptJavascriptEmitter,
+    ConstEnumExportCache, ImportedConstEnumRewriter, TypeScriptDirectiveFlags,
+    TypeScriptJavascriptEmitter,
 };
 use arkdown_core::{ModuleSource, ModuleType, ResolvedId};
 
@@ -42,8 +43,9 @@ pub struct RolldownEtsTransformPlan {
     pub resource_refs: Arc<FxHashMap<String, ResourceReference>>,
     pub component_metadata: Arc<transform::component_meta::ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
+    const_enum_exports: Arc<ConstEnumExportCache>,
     pub(crate) module_exports: ModuleExportIndex,
-    entry_source_ids: Option<Arc<FxHashSet<String>>>,
+    form_entry_source_ids: Arc<FxHashSet<String>>,
     pub checker_mode: CheckerMode,
     pub should_emit_js: bool,
     pub module_analyzer: ModuleAnalyzerKind,
@@ -61,6 +63,7 @@ impl RolldownEtsTransformPlan {
         sources: TransformSourceSnapshot,
     ) -> Self {
         let module_exports = ModuleExportIndex::build(&sources, &module_roots, &component_metadata);
+        let const_enum_exports = Arc::new(ConstEnumExportCache::new(sources.clone()));
         Self {
             bundle_name: bundle_name.into(),
             module_name: module_name.into(),
@@ -70,8 +73,9 @@ impl RolldownEtsTransformPlan {
             resource_refs: Arc::new(resource_refs),
             component_metadata: Arc::new(component_metadata),
             sources,
+            const_enum_exports,
             module_exports,
-            entry_source_ids: None,
+            form_entry_source_ids: Arc::default(),
             checker_mode: CheckerMode::Oxc,
             should_emit_js: true,
             module_analyzer: ModuleAnalyzerKind::default(),
@@ -93,8 +97,8 @@ impl RolldownEtsTransformPlan {
         self
     }
 
-    pub fn with_entry_source_ids(mut self, entry_source_ids: FxHashSet<String>) -> Self {
-        self.entry_source_ids = Some(Arc::new(entry_source_ids));
+    pub fn with_form_entry_source_ids(mut self, form_entry_source_ids: FxHashSet<String>) -> Self {
+        self.form_entry_source_ids = Arc::new(form_entry_source_ids);
         self
     }
 
@@ -107,29 +111,27 @@ impl RolldownEtsTransformPlan {
             component_metadata: Arc::clone(&self.component_metadata),
             sources: self.sources.clone(),
             module_exports: self.module_exports.clone(),
-            emit_entry_registration: self.should_emit_entry_registration(id),
+            form_entry: self.is_form_entry(id),
             partial_update: true,
             checker_mode: self.checker_mode,
         }
     }
 
-    fn should_emit_entry_registration(&self, id: &str) -> bool {
-        let Some(entry_source_ids) = &self.entry_source_ids else {
-            return true;
-        };
-
-        if entry_source_ids.contains(id) {
+    fn is_form_entry(&self, id: &str) -> bool {
+        if self.form_entry_source_ids.contains(id) {
             return true;
         }
-
         let normalized = TransformEntrySourceId::new(id).normalized();
-        entry_source_ids.contains(normalized.as_str())
+        self.form_entry_source_ids.contains(normalized.as_str())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct RolldownEtsTransformOutput {
     pub code: String,
+    /// Hvigor-compatible CompileArkTS source when Rolldown needs a parser-only
+    /// adaptation such as lowering `import lazy` to a standard import.
+    pub module_source_code: Option<String>,
     pub source_map: Option<String>,
     pub record_module_source_code: bool,
     pub emits_javascript: bool,
@@ -159,6 +161,7 @@ impl RolldownEtsTransformer {
                 if final_code != code {
                     return Ok(Some(RolldownEtsTransformOutput {
                         code: final_code.into_owned(),
+                        module_source_code: None,
                         source_map: None,
                         record_module_source_code: false,
                         emits_javascript: false,
@@ -187,6 +190,7 @@ impl RolldownEtsTransformer {
                     .or_else(|| source_map::TokenSourceMapBuilder::new(&final_code, id).build());
             return Ok(Some(RolldownEtsTransformOutput {
                 code: final_code,
+                module_source_code: None,
                 source_map,
                 record_module_source_code: false,
                 emits_javascript,
@@ -226,6 +230,7 @@ impl RolldownEtsTransformer {
                     .or_else(|| source_map::TokenSourceMapBuilder::new(&final_source, id).build());
             return Ok(Some(RolldownEtsTransformOutput {
                 code: final_source,
+                module_source_code: None,
                 source_map,
                 record_module_source_code: false,
                 emits_javascript,
@@ -242,6 +247,7 @@ impl RolldownEtsTransformer {
         });
         Ok(Some(RolldownEtsTransformOutput {
             code: gen_code,
+            module_source_code: None,
             source_map,
             record_module_source_code: false,
             emits_javascript,
@@ -259,6 +265,7 @@ impl RolldownEtsTransformer {
             return Ok(source.to_string());
         }
         TypeScriptJavascriptEmitter::new(source, id, &self.plan.sources)
+            .with_const_enum_export_cache(&self.plan.const_enum_exports)
             .emit()
             .ok_or_else(|| EtsTransformError::Fatal {
                 file: id.to_string(),
@@ -276,6 +283,13 @@ impl RolldownEtsTransformer {
             return Ok(None);
         };
         output.record_module_source_code = SourceClassifier::classify(id).is_ets_transform_input();
+        if output.record_module_source_code {
+            let rolldown_source = LazyImportRolldownAdapter::new(&output.code, id).lower();
+            if let Cow::Owned(rolldown_source) = rolldown_source {
+                output.module_source_code =
+                    Some(std::mem::replace(&mut output.code, rolldown_source));
+            }
+        }
         // Hvigor normally writes transformed TypeScript for es2abc, but its
         // `hasTsNoCheckOrTsIgnoreFiles` path writes JavaScript instead. Both
         // shapes remain graph inputs and are materialized after Rolldown scan.
@@ -368,8 +382,6 @@ impl<'a, 'pipeline> HvigorPrepareSourcePass<'a, 'pipeline> {
         );
         let reexports =
             reexports.with_module_analyzer(self.pipeline.transformer.plan.module_analyzer);
-        let default_reexport = DefaultImportReexportRewriter::new();
-
         let allocator = Allocator::default();
         let source_type = self.source_type();
         let mut parsed = Parser::new(&allocator, source, source_type).parse();
@@ -377,15 +389,7 @@ impl<'a, 'pipeline> HvigorPrepareSourcePass<'a, 'pipeline> {
             return Cow::Borrowed(source);
         }
 
-        let semantic_ret = SemanticBuilder::new().build(&parsed.program);
-        if !semantic_ret.diagnostics.is_empty() {
-            return Cow::Borrowed(source);
-        }
-        let scoping = semantic_ret.semantic.into_scoping();
-
-        let mut changed = false;
-        changed |= reexports.split_program(&allocator, &mut parsed.program);
-        changed |= default_reexport.rewrite_program(&allocator, &mut parsed.program, &scoping);
+        let changed = reexports.split_program(&allocator, &mut parsed.program);
 
         self.finish(source, &parsed.program, changed)
     }
@@ -467,6 +471,7 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
         )
+        .with_const_enum_export_cache(&self.pipeline.transformer.plan.const_enum_exports)
         .rewrite_program(&allocator, &mut parsed.program);
 
         changed |= TypeOnlyNamedImportSplitter::new(
@@ -678,6 +683,148 @@ export default class ChannelManager {
     }
 
     #[test]
+    fn compile_transform_preserves_hvigor_default_import_export_shape() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "import LX from './src/main/ets/LX';\nexport default LX;\n",
+                "/tmp/project/oh_modules/@example/lx/Index.ets",
+            )
+            .unwrap()
+            .expect("default import/export barrel must produce transform output");
+
+        assert!(
+            output
+                .code
+                .contains("import LX from \"./src/main/ets/LX\";"),
+            "hvigor keeps the default import binding:\n{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("export default LX;"),
+            "hvigor keeps the local default export:\n{}",
+            output.code
+        );
+        assert!(
+            !output.code.contains("export { default }"),
+            "the prepare pass must not invent a live re-export:\n{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn compile_transform_preserves_lazy_import_for_compile_arkts_only() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "import lazy { textToSpeech } from '@kit.CoreSpeechKit';\ntextToSpeech.createEngine({});\n",
+                "/tmp/project/oh_modules/@scope/speech/FaceSpeech.ets",
+            )
+            .unwrap()
+            .expect("lazy ArkTS source must produce transform output");
+
+        assert!(
+            output
+                .code
+                .contains("import textToSpeech from \"@hms.ai.textToSpeech\";"),
+            "the current Rolldown scanner receives a standard import:\n{}",
+            output.code
+        );
+        assert!(!output.code.contains("import lazy"), "{}", output.code);
+        let module_source = output
+            .module_source_code
+            .expect("CompileArkTS must retain the hvigor lazy import");
+        assert!(
+            module_source.contains("import lazy textToSpeech from \"@hms.ai.textToSpeech\";"),
+            "es2abc source must retain lazy module semantics:\n{module_source}"
+        );
+    }
+
+    #[test]
+    fn compile_transform_folds_sdk_enum_through_kit_import_like_hvigor() {
+        let sdk_root = PathBuf::from("/sdk/ets/api");
+        let kit_root = PathBuf::from("/sdk/ets/kits");
+        let mut files = FxHashMap::default();
+        files.insert(
+            sdk_root.join("@ohos.multimedia.media.d.ts"),
+            Arc::<str>::from(
+                r#"declare namespace media {
+    declare interface OutputSize {}
+    enum VideoScaleType {
+        VIDEO_SCALE_TYPE_FIT = 0,
+        VIDEO_SCALE_TYPE_FIT_CROP = 1
+    }
+}
+export default media;"#,
+            ),
+        );
+        files.insert(
+            kit_root.join("@kit.MediaKit.d.ts"),
+            Arc::<str>::from(
+                r#"import media from "@ohos.multimedia.media";
+export { media };"#,
+            ),
+        );
+        let sources = TransformSourceSnapshot::new(files)
+            .with_sdk_declaration_roots(vec![sdk_root, kit_root]);
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            sources,
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                r#"import { media } from "@kit.MediaKit";
+export enum VideoScaleMode {
+    FIT = media.VideoScaleType.VIDEO_SCALE_TYPE_FIT,
+    CROP = media.VideoScaleType.VIDEO_SCALE_TYPE_FIT_CROP
+}"#,
+                "/tmp/project/PlayerInterface.ets",
+            )
+            .unwrap()
+            .expect("SDK enum source must produce transform output");
+
+        assert!(
+            output.code.contains("FIT = 0") && output.code.contains("CROP = 1"),
+            "hvigor's TypeScript checker folds SDK enum members before CompileArkTS:\n{}",
+            output.code
+        );
+        assert!(
+            output
+                .code
+                .contains("import media from \"@ohos.multimedia.media\";"),
+            "Kit import lowering remains part of the same hvigor stage:\n{}",
+            output.code
+        );
+    }
+
+    #[test]
     fn compile_transform_formats_plain_ets_with_sdk_indentation() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
@@ -820,9 +967,7 @@ struct Index {
     }
 
     #[test]
-    fn rolldown_transform_skips_entry_registration_for_non_entry_imports() {
-        let mut entry_sources = FxHashSet::default();
-        entry_sources.insert("/tmp/project/entry/src/main/ets/pages/Index.ets".to_string());
+    fn rolldown_transform_registers_entry_decorated_dependency_sources() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
             "entry",
@@ -832,8 +977,7 @@ struct Index {
             FxHashMap::default(),
             transform::component_meta::ComponentMetadata::default(),
             TransformSourceSnapshot::default(),
-        )
-        .with_entry_source_ids(entry_sources);
+        );
         let transformer = RolldownEtsTransformer::new(Arc::new(plan));
         let output = transformer
             .transform(
@@ -861,8 +1005,54 @@ export struct ToastSubWindowPage {
             output.code
         );
         assert!(
+            output
+                .code
+                .contains("registerNamedRoute(() => new ToastSubWindowPage(undefined, {})"),
+            "SDK processUISyntax/createEntryNode registers dependency @Entry sources:\n{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn rolldown_transform_preserves_form_entry_classification_after_path_normalization() {
+        let normalized_id = "/tmp/project/entry/src/main/ets/forms/Card.ets".to_string();
+        let mut form_entry_sources = FxHashSet::default();
+        form_entry_sources.insert(normalized_id);
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_form_entry_source_ids(form_entry_sources)
+        .with_checker_mode(CheckerMode::Off);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .transform(
+                r#"@Entry
+@Component
+struct Card {
+  build() {
+    Text("card")
+  }
+}"#,
+                "/tmp/project/entry/src/main/ets/pages/../forms/Card.ets",
+            )
+            .unwrap()
+            .expect("form entry source must produce transform output");
+
+        assert!(
+            output.code.contains("loadEtsCard(new Card(undefined, {})"),
+            "form entry must use hvigor's card registration:\n{}",
+            output.code
+        );
+        assert!(
             !output.code.contains("registerNamedRoute"),
-            "non-entry import context must not emit named-route registration:\n{}",
+            "form entry must not be registered as a page route:\n{}",
             output.code
         );
     }

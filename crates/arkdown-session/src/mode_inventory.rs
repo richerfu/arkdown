@@ -286,6 +286,7 @@ mod tests {
             bundle_name: "com.example.app".to_string(),
             version_code: 1,
             version_name: "1.0.0".to_string(),
+            build_version: None,
             bundle_type: "app".to_string(),
             product_name: "default".to_string(),
             module_order: vec![],

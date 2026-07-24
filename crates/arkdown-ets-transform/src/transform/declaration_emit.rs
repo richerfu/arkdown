@@ -6,7 +6,7 @@ use oxc_ast::ast::{
 use oxc_ast::AstBuilder;
 use oxc_span::SPAN;
 
-use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError, StylesBodyLowerer};
+use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError};
 use crate::transform::viewpu_emit::{
     GeneratedViewpuName, ParamsInterfaceAstEmitter, ParamsInterfaceField, ParamsInterfaceFieldType,
     TopLevelFunctionAstEmitter, ViewpuAstBuilder,
@@ -69,23 +69,6 @@ impl TopLevelFunctionEmitter {
                 |allocator| Self::return_type(return_annotation, allocator),
                 |_| body_statements,
             ))
-    }
-
-    pub(crate) fn decorated_styles_statement<'b>(
-        allocator: &'b Allocator,
-        exported: bool,
-        name: &str,
-        params: &FormalParameters<'_>,
-        return_annotation: Option<&TSTypeAnnotation<'_>>,
-        body: Option<&FunctionBody<'_>>,
-    ) -> Statement<'b> {
-        TopLevelFunctionAstEmitter::new(exported, name)
-            .statement_with_formal_parameters_and_body_statements(
-                allocator,
-                |allocator| Self::formal_parameters(params, false, allocator),
-                |allocator| Self::return_type(return_annotation, allocator),
-                |allocator| StylesBodyLowerer::new(body).statements(allocator),
-            )
     }
 
     pub(crate) fn extend_with_body_statement<'b>(

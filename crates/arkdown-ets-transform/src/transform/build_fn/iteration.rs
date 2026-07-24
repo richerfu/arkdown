@@ -26,11 +26,11 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
         Self { component }
     }
 
-    pub(super) fn is_lazy_list_item(&self) -> bool {
+    pub(super) fn uses_lazy_creation(&self) -> bool {
         !self.component.arguments.first().is_some_and(|arg| {
             matches!(
                 arg.as_expression(),
-                Some(Expression::BooleanLiteral(value)) if !value.value
+                Some(Expression::StringLiteral(value)) if value.value == "false"
             )
         })
     }
@@ -48,24 +48,42 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
             allocator,
             &context.runtime_names().component_list_item,
             &context.runtime_names().method_create,
-            ast.vec_from_iter([
-                Argument::from(ast.expression_identifier(
-                    SPAN,
-                    ast.str(&context.runtime_names().deep_render_function),
-                )),
-                Argument::from(ast.expression_boolean_literal(SPAN, true)),
-            ]),
+            {
+                let mut arguments = ast.vec_from_iter([
+                    Argument::from(ast.expression_identifier(
+                        SPAN,
+                        ast.str(&context.runtime_names().deep_render_function),
+                    )),
+                    Argument::from(ast.expression_boolean_literal(SPAN, true)),
+                ]);
+                arguments.extend(self.component.arguments.iter().map(|argument| {
+                    BuildArgumentEmitter::new()
+                        .with_context(context)
+                        .argument_with_allocator(argument, allocator)
+                }));
+                arguments
+            },
         ));
-        let mut has_animation = false;
-        for chain in &self.component.chain_expressions {
-            let name = ArkuiCallName::chain(chain)?;
-            has_animation |= ComponentCallStatementEmitter::is_animation_attribute(&name);
-        }
-        if has_animation {
+        let chain_names = self
+            .component
+            .chain_expressions
+            .iter()
+            .map(ArkuiCallName::chain)
+            .collect::<Result<Vec<_>, _>>()?;
+        let last_animation_index = chain_names
+            .iter()
+            .rposition(|name| ComponentCallStatementEmitter::is_animation_attribute(name));
+        if let Some(last_animation_index) = last_animation_index {
             let mut animation_segment = OxcVec::new_in(&allocator);
-            for chain in &self.component.chain_expressions {
-                let name = ArkuiCallName::chain(chain)?;
-                if ComponentCallStatementEmitter::is_animation_attribute(&name) {
+            let mut has_preceding_attribute = false;
+            for (index, (chain, name)) in self
+                .component
+                .chain_expressions
+                .iter()
+                .zip(&chain_names)
+                .enumerate()
+            {
+                if ComponentCallStatementEmitter::is_animation_attribute(name) {
                     ComponentCallStatementEmitter::push_animation_segment(
                         &mut statements,
                         &mut animation_segment,
@@ -73,7 +91,11 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
                         allocator,
                         &chain.arguments,
                         context,
+                        has_preceding_attribute,
+                        !ComponentCallStatementEmitter::is_null_animation(&chain.arguments)
+                            || index < last_animation_index,
                     );
+                    has_preceding_attribute = true;
                     continue;
                 }
                 animation_segment.push(ComponentCallStatementEmitter::attribute(
@@ -85,6 +107,7 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
                     builder_methods,
                     context,
                 ));
+                has_preceding_attribute = true;
             }
             ComponentCallStatementEmitter::flush_animation_segment(
                 &mut statements,
@@ -98,13 +121,12 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
                 statements,
             ));
         }
-        for chain in &self.component.chain_expressions {
-            let name = ArkuiCallName::chain(chain)?;
+        for (chain, name) in self.component.chain_expressions.iter().zip(&chain_names) {
             statements.push(ComponentCallStatementEmitter::attribute(
                 ast,
                 allocator,
                 &context.runtime_names().component_list_item,
-                &name,
+                name,
                 &chain.arguments,
                 builder_methods,
                 context,
@@ -140,6 +162,14 @@ impl IterationArgument {
     ) -> Option<Expression<'a>> {
         let argument = BuildArgumentEmitter::new()
             .with_context(context)
+            .with_nested_raw_object_rewrite()
+            // SDK process_component_build.js::createUpdateFunctionStatement
+            // reuses the original ForEach data node. Its parent still points
+            // at the source `ForEach(...)` identifier call, so
+            // processBuildMember does not unwrap a direct `this.items`.
+            // Calls nested inside the data expression retain their original
+            // parent shape and are still eligible.
+            .without_top_level_raw_object_rewrite()
             .argument_with_allocator(argument, allocator);
         argument
             .as_expression()
@@ -150,6 +180,15 @@ impl IterationArgument {
 pub(super) struct IterationFormalParameters;
 
 impl IterationFormalParameters {
+    pub(super) fn empty<'a>(ast: AstBuilder<'a>) -> FormalParameters<'a> {
+        ast.formal_parameters(
+            SPAN,
+            FormalParameterKind::ArrowFormalParameters,
+            ast.vec(),
+            NONE,
+        )
+    }
+
     pub(super) fn from_names<'a, const N: usize>(
         ast: AstBuilder<'a>,
         names: [&str; N],
@@ -300,6 +339,7 @@ impl IterationAstStatement {
     pub(super) fn lazy_list_item_creation<'a>(
         ast: AstBuilder<'a>,
         allocator: &'a Allocator,
+        component: &ArkUIComponentExpression<'_>,
         context: &BuildContext,
     ) -> Statement<'a> {
         let mut statements = OxcVec::new_in(&allocator);
@@ -313,18 +353,24 @@ impl IterationAstStatement {
                 ast.str(&context.runtime_names().elmt_id),
             ))),
         ));
+        let mut create_arguments = ast.vec_from_iter([
+            Argument::from(ast.expression_identifier(
+                SPAN,
+                ast.str(&context.runtime_names().deep_render_function),
+            )),
+            Argument::from(ast.expression_boolean_literal(SPAN, true)),
+        ]);
+        create_arguments.extend(component.arguments.iter().map(|argument| {
+            BuildArgumentEmitter::new()
+                .with_context(context)
+                .argument_with_allocator(argument, allocator)
+        }));
         statements.push(Self::static_call(
             ast,
             allocator,
             &context.runtime_names().component_list_item,
             &context.runtime_names().method_create,
-            ast.vec_from_iter([
-                Argument::from(ast.expression_identifier(
-                    SPAN,
-                    ast.str(&context.runtime_names().deep_render_function),
-                )),
-                Argument::from(ast.expression_boolean_literal(SPAN, true)),
-            ]),
+            create_arguments,
         ));
         statements.push(Self::lazy_list_item_not_initial_render(
             ast, allocator, context,
@@ -341,6 +387,41 @@ impl IterationAstStatement {
             &context.runtime_names().item_creation,
             IterationFormalParameters::render_callback(ast, context),
             statements,
+        )
+    }
+
+    pub(super) fn observed_item_create<'a>(
+        ast: AstBuilder<'a>,
+        allocator: &'a Allocator,
+        component_name: &str,
+        source_arguments: &[Argument<'_>],
+        context: &BuildContext,
+    ) -> Statement<'a> {
+        let empty_body = ast.function_body(SPAN, ast.vec(), ast.vec());
+        let empty_builder = ast.expression_arrow_function(
+            SPAN,
+            false,
+            false,
+            NONE,
+            IterationFormalParameters::empty(ast),
+            NONE,
+            empty_body,
+        );
+        let mut arguments = ast.vec_from_iter([
+            Argument::from(empty_builder),
+            Argument::from(ast.expression_boolean_literal(SPAN, false)),
+        ]);
+        arguments.extend(source_arguments.iter().map(|argument| {
+            BuildArgumentEmitter::new()
+                .with_context(context)
+                .argument_with_allocator(argument, allocator)
+        }));
+        Self::static_call(
+            ast,
+            allocator,
+            component_name,
+            &context.runtime_names().method_create,
+            arguments,
         )
     }
 
@@ -392,6 +473,19 @@ impl IterationAstStatement {
         let member = ast.member_expression_static(SPAN, object, property, false);
         let call = ast.expression_call(SPAN, Expression::from(member), NONE, arguments, false);
         ast.statement_expression(SPAN, call)
+    }
+
+    pub(super) fn identifier_call<'a>(ast: AstBuilder<'a>, name: &str) -> Statement<'a> {
+        ast.statement_expression(
+            SPAN,
+            ast.expression_call(
+                SPAN,
+                ast.expression_identifier(SPAN, ast.str(name)),
+                NONE,
+                ast.vec(),
+                false,
+            ),
+        )
     }
 
     pub(super) fn const_declaration<'a>(
@@ -630,10 +724,7 @@ impl<'a> ItemBindingDeclarationEmitter<'a> {
             SPAN,
             VariableDeclarationKind::Const,
             self.parameter.pattern.clone_in(allocator),
-            self.parameter
-                .type_annotation
-                .as_ref()
-                .map(|ty| ty.clone_in(allocator)),
+            NONE,
             Some(ast.expression_identifier(SPAN, ast.str(self.item_binding_name))),
             false,
         );

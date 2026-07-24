@@ -213,6 +213,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
@@ -248,6 +249,7 @@ dependencies = [
  "oxc_span 0.140.0",
  "oxc_syntax 0.140.0",
  "oxc_transformer 0.140.0",
+ "rayon",
  "rolldown_sourcemap",
  "rustc-hash 2.1.2",
  "serde",
@@ -259,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "arkdown-napi"
-version = "0.0.1-beta.0"
+version = "0.0.1-beta.1"
 dependencies = [
  "anyhow",
  "arkdown",
@@ -299,6 +301,7 @@ dependencies = [
  "oxc_parser 0.140.0",
  "oxc_span 0.140.0",
  "oxc_syntax 0.140.0",
+ "rayon",
  "rolldown_common",
  "rolldown_plugin",
  "rolldown_sourcemap",
@@ -453,6 +456,7 @@ dependencies = [
 name = "arkdown-session"
 version = "0.1.0"
 dependencies = [
+ "arkdown-config",
  "arkdown-core",
  "arkdown-ohos-schema",
  "arkdown-path",
@@ -464,6 +468,8 @@ dependencies = [
  "oxc_index",
  "oxc_parser 0.140.0",
  "oxc_span 0.140.0",
+ "oxc_syntax 0.140.0",
+ "rayon",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",

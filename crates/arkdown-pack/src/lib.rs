@@ -64,6 +64,8 @@ mod tests {
                 },
                 version_code: None,
                 version_name: None,
+                build_version: None,
+                app_options: Default::default(),
             },
             modules: vec![],
             sdk_config: SdkConfig {
@@ -102,6 +104,7 @@ mod tests {
             resources_src_dir: None,
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
@@ -111,6 +114,7 @@ mod tests {
             delivery_with_install: true,
             source_maps_path: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
             abilities: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
@@ -158,9 +162,11 @@ mod tests {
                 resources_src_dir: None,
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
+                bundle_build_version: None,
                 bundle_type: "app".to_string(),
                 source_maps_path: None,
                 pkg_context_info_path: None,
+                pkg_sdk_info_path: None,
                 abilities: vec![],
                 integrated_hsps: vec![],
                 privacy_profile_path: None,
@@ -197,6 +203,7 @@ mod tests {
             resources_src_dir: None,
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
@@ -206,6 +213,7 @@ mod tests {
             delivery_with_install: true,
             source_maps_path: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
             abilities: vec![],
         });
         assert!(result.is_err());
@@ -295,6 +303,7 @@ mod tests {
             resources_src_dir: None,
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             integrated_hsps: vec![],
             privacy_profile_path: None,
@@ -304,6 +313,7 @@ mod tests {
             delivery_with_install: true,
             source_maps_path: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
             abilities: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
@@ -341,9 +351,11 @@ mod tests {
                 resources_src_dir: None,
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
+                bundle_build_version: None,
                 bundle_type: "app".to_string(),
                 source_maps_path: None,
                 pkg_context_info_path: None,
+                pkg_sdk_info_path: None,
                 abilities: vec![],
                 privacy_profile_path: None,
                 syscap_path: None,
@@ -392,10 +404,12 @@ mod tests {
                 resources_src_dir: None,
                 bundle_version_code: 1000000,
                 bundle_version_name: "1.0.0".to_string(),
+                bundle_build_version: None,
                 bundle_type: "app".to_string(),
 
                 source_maps_path: None,
                 pkg_context_info_path: None,
+                pkg_sdk_info_path: None,
                 abilities: vec![],
                 privacy_profile_path: Some(privacy),
                 syscap_path: None,

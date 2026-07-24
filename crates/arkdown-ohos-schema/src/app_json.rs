@@ -28,6 +28,9 @@ pub struct RawAppJson5App {
     /// Human-readable version string.
     #[serde(default)]
     pub version_name: String,
+    /// Optional build identifier propagated to generated app metadata.
+    #[serde(default)]
+    pub build_version: Option<String>,
     /// Minimum compatible SDK version.
     #[serde(default)]
     pub min_compatible_version_code: u64,

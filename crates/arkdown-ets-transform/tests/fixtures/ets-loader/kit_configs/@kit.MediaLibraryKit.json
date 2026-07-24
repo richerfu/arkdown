@@ -1,0 +1,8 @@
+{
+  "symbols": {
+    "photoAccessHelper": {
+      "source": "@ohos.file.photoAccessHelper.d.ts",
+      "bindings": "default"
+    }
+  }
+}

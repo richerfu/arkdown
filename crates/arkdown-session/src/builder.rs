@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use arkdown_config::build_profile::BuildOptionProfileInventory;
 use arkdown_core::ArkdownConfig;
 
 use crate::fingerprint::{FingerprintError, InputFingerprintSet};
@@ -14,6 +15,7 @@ use crate::profiles::store::{ProfileStore, ProfileStoreError};
 use crate::project::snapshot::ProjectSnapshot;
 use crate::sdk::snapshot::{SdkSnapshot, SdkSnapshotError};
 use crate::session::BuildSession;
+use crate::WatchPlanInput;
 
 /// Errors produced during session construction.
 #[derive(Debug, Error)]
@@ -105,15 +107,22 @@ impl BuildSessionBuilder {
         // Phase 4: Build profile store.
         let profiles = ProfileStore::discover_project(&project)?;
 
-        // Phase 5: Build input fingerprints.
+        // Phase 5: Parse project/module target and build-option models once.
+        let build_options =
+            BuildOptionProfileInventory::load(&self.config.project_root, &self.config.modules)
+                .map_err(|error| BuildSessionError::Config(error.to_string()))?;
+
+        // Phase 6: Build input fingerprints.
         let fingerprints = InputFingerprintSet::build(&self.config, &project, &profiles, &sdk)?;
 
         Ok(BuildSession {
+            watch_inputs: Arc::new(WatchPlanInput::from_project(&project)),
             project: Arc::new(project),
             sdk: Arc::new(sdk),
             paths: Arc::new(paths),
             fingerprints: Arc::new(fingerprints),
             profiles: Arc::new(profiles),
+            build_options: Arc::new(build_options),
         })
     }
 }

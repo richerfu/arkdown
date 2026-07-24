@@ -203,6 +203,10 @@ impl SelfConsistencyOracle {
         cache: true,
         skip_resource: false,
         skip_profile: false,
+        watch_invalidation: None,
+        project_hvigor_overrides: None,
+        module_hvigor_overrides: Default::default(),
+        build_version: None,
       })
       .execute(),
     )

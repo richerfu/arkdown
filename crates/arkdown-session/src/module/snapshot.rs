@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arkdown_core::ModuleJson5;
-use arkdown_ohos_schema::RawOhPackage;
 use thiserror::Error;
 
-use crate::package::snapshot::PackageSnapshot;
+use crate::package::snapshot::{PackageSnapshot, PackageSnapshotError};
 use crate::paths::ModulePathLayout;
 
 /// Errors produced while reading a module snapshot.
@@ -120,25 +119,10 @@ impl ModuleSnapshot {
         // Read oh-package.json5.
         let package_path = layout.oh_package_json5();
         let (package_path_opt, package) = if package_path.is_file() {
-            let content = std::fs::read_to_string(&package_path).map_err(|source| {
-                ModuleSnapshotError::Io {
-                    path: package_path.clone(),
-                    source,
-                }
-            })?;
-            let parsed: RawOhPackage = json5::from_str(&content).map_err(|error| {
-                ModuleSnapshotError::PackageJsonParse {
-                    path: package_path.clone(),
-                    message: error.to_string(),
-                }
-            })?;
-            let snap = Some(Arc::new(PackageSnapshot {
-                name: parsed.name.clone(),
-                version: parsed.version.clone(),
-                root: root.to_path_buf(),
-                package_json: parsed,
-            }));
-            (Some(package_path), snap)
+            let snapshot = PackageSnapshot::from_root(root)
+                .map_err(Self::package_snapshot_error)?
+                .map(Arc::new);
+            (Some(package_path), snapshot)
         } else {
             (None, None)
         };
@@ -172,5 +156,14 @@ impl ModuleSnapshot {
             source_roots,
             resource_roots,
         })
+    }
+
+    fn package_snapshot_error(error: PackageSnapshotError) -> ModuleSnapshotError {
+        match error {
+            PackageSnapshotError::Io { path, source } => ModuleSnapshotError::Io { path, source },
+            PackageSnapshotError::Parse { path, message } => {
+                ModuleSnapshotError::PackageJsonParse { path, message }
+            }
+        }
     }
 }

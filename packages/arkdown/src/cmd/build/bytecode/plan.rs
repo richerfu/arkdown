@@ -278,29 +278,9 @@ impl Ts2abcPlanBuilder {
     }
   }
 
-  /// Add a pre-resolved compile unit with an upstream ProgramCache path.
-  pub fn with_compile_unit_cache(
-    mut self,
-    source: ModuleSourceInput,
-    record_name: RecordNamePlan,
-    source_file: Option<String>,
-    package_name: Option<String>,
-    is_commonjs: bool,
-    is_shared_module: bool,
-    origin_source_lang: impl Into<String>,
-    cache_file: Option<PathBuf>,
-  ) -> Self {
-    self.compile_units.push(CompileUnitPlan {
-      source,
-      record_name,
-      source_file,
-      package_name,
-      is_commonjs,
-      is_shared_module,
-      origin_source_lang: origin_source_lang.into(),
-      output_path: None,
-      cache_file,
-    });
+  /// Add a pre-resolved compile unit, including its upstream ProgramCache path.
+  pub fn with_compile_unit(mut self, compile_unit: CompileUnitPlan) -> Self {
+    self.compile_units.push(compile_unit);
     self
   }
 

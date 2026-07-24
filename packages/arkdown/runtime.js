@@ -60,7 +60,7 @@ function createBuild(nativeBuild) {
     const loadedPlugins = await runtime.load()
     const explicitPlugins = normalizePluginList(plugins, runtime.projectRoot)
     const allPlugins = [...loadedPlugins, ...explicitPlugins]
-    return nativeBuild(toNativeBuildConfig(config), allPlugins)
+    return nativeBuild(runtime.toNativeBuildConfig(), allPlugins)
   }
 }
 
@@ -77,6 +77,8 @@ class RuntimePluginLoader {
     this.projectRoot = path.resolve(this.config.project || process.cwd())
     this.hvigorWorkspaceNodeModules = configureHvigorNodePath(this.projectRoot)
     this.seen = new Set()
+    this.projectHvigorOverrides = {}
+    this.moduleHvigorOverrides = new Map()
   }
 
   async load() {
@@ -88,6 +90,35 @@ class RuntimePluginLoader {
       plugins.push(plugin)
     }
     return plugins
+  }
+
+  toNativeBuildConfig() {
+    const nativeConfig = toNativeBuildConfig(this.config)
+    // These fields are runtime-owned. Do not accept caller-provided serialized
+    // values that could bypass hvigorfile evaluation and scope discovery.
+    delete nativeConfig.projectHvigorOverridesJson
+    delete nativeConfig.moduleHvigorOverridesJson
+    if (Object.keys(this.projectHvigorOverrides).length > 0) {
+      nativeConfig.projectHvigorOverridesJson = this.serializeOverrides(
+        this.projectHvigorOverrides,
+        'project hvigor overrides',
+      )
+    }
+    if (this.moduleHvigorOverrides.size > 0) {
+      nativeConfig.moduleHvigorOverridesJson = this.serializeOverrides(
+        Object.fromEntries(this.moduleHvigorOverrides),
+        'module hvigor overrides',
+      )
+    }
+    return nativeConfig
+  }
+
+  serializeOverrides(value, label) {
+    try {
+      return JSON.stringify(value)
+    } catch (error) {
+      throw new TypeError(`failed to serialize ${label}: ${error.message}`)
+    }
   }
 
   async loadConfiguredPluginPaths() {
@@ -146,6 +177,7 @@ class RuntimePluginLoader {
     const value = unwrapDefault(exports)
     const plugins = []
     const baseDir = path.dirname(file)
+    const capturedBuildOption = this.captureHvigorOverrides(baseDir, value, host)
 
     for (const plugin of normalizePluginList(value, baseDir)) {
       plugins.push(plugin)
@@ -166,6 +198,15 @@ class RuntimePluginLoader {
         plugins.push(plugin)
       }
     }
+    // Declarative module config keeps compilePluginFile below
+    // config.ohos.overrides.buildOption. Load it from the same merged object
+    // that is forwarded to Rust, so task-factory and declarative layers cannot
+    // diverge.
+    for (const candidate of collectCompilePluginPaths(capturedBuildOption)) {
+      for (const plugin of await this.loadPluginPath(candidate, baseDir, { requireDefault: true })) {
+        plugins.push(plugin)
+      }
+    }
 
     // Collect plugin paths captured from task-factory calls (HvigorRuntimeHost effects).
     // This handles `hapTasks({ buildOption: { arkOptions: { compilePluginPath: '...' } } })`.
@@ -181,6 +222,52 @@ class RuntimePluginLoader {
     }
 
     return plugins
+  }
+
+  captureHvigorOverrides(root, value, host) {
+    const ohos = value && typeof value === 'object'
+      ? value.config?.ohos
+      : undefined
+    const overrides = ohos && typeof ohos === 'object'
+      ? ohos.overrides
+      : undefined
+    const normalizedRoot = path.resolve(root)
+
+    if (normalizedRoot === this.projectRoot) {
+      if (overrides && typeof overrides === 'object') {
+        if (overrides.appOpt !== undefined) {
+          this.projectHvigorOverrides.appOpt = mergeHvigorConfig(
+            this.projectHvigorOverrides.appOpt,
+            overrides.appOpt,
+          )
+        }
+        if (overrides.signingConfig !== undefined) {
+          this.projectHvigorOverrides.signingConfig = mergeHvigorConfig(
+            this.projectHvigorOverrides.signingConfig,
+            overrides.signingConfig,
+          )
+        }
+      }
+      return undefined
+    }
+
+    const exportedBuildOption = overrides && typeof overrides === 'object'
+      ? overrides.buildOption
+      : undefined
+    // `_effects.buildOption` retains compatibility with task-factory calls
+    // used by older projects. Declarative `config.ohos.overrides.buildOption`
+    // is applied last, matching hvigor's module config manager.
+    const capturedBuildOption = host._effects.buildOption
+    const buildOption = mergeHvigorConfig(
+      capturedBuildOption && Object.keys(capturedBuildOption).length > 0
+        ? capturedBuildOption
+        : undefined,
+      exportedBuildOption,
+    )
+    if (buildOption !== undefined) {
+      this.moduleHvigorOverrides.set(normalizedRoot, buildOption)
+    }
+    return buildOption
   }
 
   async loadPluginPath(candidate, baseDir = this.projectRoot, options = {}) {
@@ -336,16 +423,19 @@ function applyFunctionOrder(plugins) {
 
   // Second pass: resolve function-order plugins
   for (const plugin of deferred) {
-    const nameToIndex = new Map()
+    // Hvigor's arkts-pack getPlugins passes a Record<string, number>, not a
+    // Map. Use a null-prototype record so plugin names such as "constructor"
+    // remain ordinary keys.
+    const nameToIndex = Object.create(null)
     result.forEach((p, i) => {
       // Deduplicate names by appending _N suffix, matching hvigor behaviour
       let name = p.name || ''
       let suffix = 1
-      while (nameToIndex.has(name)) {
+      while (Object.prototype.hasOwnProperty.call(nameToIndex, name)) {
         name = `${p.name || ''}_${suffix}`
         suffix++
       }
-      nameToIndex.set(name, i)
+      nameToIndex[name] = i
     })
 
     let idx
@@ -876,6 +966,27 @@ function toArray(value) {
     return []
   }
   return Array.isArray(value) ? value : [value]
+}
+
+function mergeHvigorConfig(base, overlay) {
+  if (overlay === undefined) {
+    return base
+  }
+  if (
+    base !== null
+    && overlay !== null
+    && typeof base === 'object'
+    && typeof overlay === 'object'
+    && !Array.isArray(base)
+    && !Array.isArray(overlay)
+  ) {
+    const merged = { ...base }
+    for (const [key, value] of Object.entries(overlay)) {
+      merged[key] = mergeHvigorConfig(merged[key], value)
+    }
+    return merged
+  }
+  return overlay
 }
 
 module.exports = {

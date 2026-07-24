@@ -109,6 +109,11 @@ pub struct LoaderJson {
     /// Ordered list of entry-point source paths used by arkdown's bundler.
     #[serde(skip)]
     pub compile_entry: Vec<String>,
+    /// Form/card entry sources collected from the profiles referenced by
+    /// `module.json5`. SDK `main.js::readCardForm` retains this set as
+    /// `projectConfig.cardObj`; transforms must not infer it from directories.
+    #[serde(skip)]
+    pub form_entry_sources: Vec<String>,
     /// Source entries that the OHOS runtime loads directly from `module.json`.
     #[serde(skip)]
     pub runtime_entry_sources: Vec<String>,
@@ -161,10 +166,13 @@ pub struct LoaderJson {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub global_dependencies: Vec<String>,
 
-    /// Custom types registered by this module (for SDK extension use cases).
-    /// Mirrors hvigor's customTypes field in loader.json.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub custom_types: Vec<String>,
+    /// Raw values forwarded to hvigor's `projectConfig.compilerTypes`.
+    #[serde(skip)]
+    pub compiler_types: Vec<String>,
+
+    /// Resolved declaration roots loaded into the OXC transform snapshot.
+    #[serde(skip)]
+    pub compiler_type_declaration_inputs: Vec<PathBuf>,
 
     /// Version info from ByteCode HAR deps' oh-package.json5 metadata.
     /// Mirrors hvigor's dependencyPkgVersion in loader.json.
@@ -180,6 +188,11 @@ pub struct LoaderJson {
     /// Mirrors hvigor's compiledPackageNames in loader.json.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compiled_package_names: Vec<String>,
+
+    /// Absolute source paths collected from the current HAR/HSP package's
+    /// `oh-exports` declaration.
+    #[serde(rename = "oh-exports", default, skip_serializing_if = "Vec::is_empty")]
+    pub oh_exports: Vec<String>,
 }
 
 struct AotLoaderFields {
@@ -506,6 +519,41 @@ impl<'a> LoaderRouterModuleName<'a> {
 }
 
 impl LoaderJson {
+    /// Apply the validated current-package `oh-exports` file snapshot.
+    ///
+    /// Mirrors `GenerateLoaderJson.addOhExports2CompileEntry`,
+    /// `processCodeFiles`, and `writeOhExportsToLoaderJson`: declaration files
+    /// remain visible in `oh-exports`, but are not compile entries.
+    pub(crate) fn apply_oh_exports_files(&mut self, files: &[PathBuf]) {
+        self.oh_exports = files
+            .iter()
+            .map(|path| {
+                ArtifactPathSerializer::path_to_slash_string(path)
+                    .unwrap_or_else(|_| path.display().to_string())
+            })
+            .collect();
+
+        let source_root = Path::new(&self.module_root_path);
+        for path in files {
+            let lower_path = path.to_string_lossy().to_ascii_lowercase();
+            if lower_path.ends_with(".d.ets") || lower_path.ends_with(".d.ts") || !path.exists() {
+                continue;
+            }
+            let absolute = to_absolute_path_string(path);
+            if !self.hvigor_compile_entry.contains(&absolute) {
+                self.hvigor_compile_entry.push(absolute.clone());
+            }
+            let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let internal_entry = canonical_path
+                .strip_prefix(source_root)
+                .map(Self::compile_entry_from_src_main_rel)
+                .unwrap_or(absolute);
+            if !self.compile_entry.contains(&internal_entry) {
+                self.compile_entry.push(internal_entry);
+            }
+        }
+    }
+
     /// Apply the final ByteCode HAR scan result to this loader.
     ///
     /// Profile generation can run before the session-backed dependency graph is
@@ -743,13 +791,17 @@ impl LoaderJson {
             })?
         };
         let src_main_root = module_layout.src_main();
-        for form_source in &form_sources {
-            if let Ok(rel) = form_source.source_path.strip_prefix(&src_main_root) {
-                compile_entry.push(Self::compile_entry_from_src_main_rel(rel));
-            } else {
-                compile_entry.push(to_absolute_path_string(&form_source.source_path));
-            }
-        }
+        let form_entry_sources = form_sources
+            .iter()
+            .map(|form_source| {
+                if let Ok(rel) = form_source.source_path.strip_prefix(&src_main_root) {
+                    Self::compile_entry_from_src_main_rel(rel)
+                } else {
+                    to_absolute_path_string(&form_source.source_path)
+                }
+            })
+            .collect::<Vec<_>>();
+        compile_entry.extend(form_entry_sources.iter().cloned());
 
         // Module-level srcEntry (used by HSP shared packages that export a single file
         // without declaring abilities).
@@ -1140,6 +1192,7 @@ impl LoaderJson {
             compiled_importees: vec![],
 
             compile_entry,
+            form_entry_sources,
             runtime_entry_sources,
             module_root_path: src_main.clone(),
             cache_path,
@@ -1176,10 +1229,12 @@ impl LoaderJson {
                     .collect()
             },
             global_dependencies: Vec::new(),
-            custom_types: Vec::new(),
+            compiler_types: Vec::new(),
+            compiler_type_declaration_inputs: Vec::new(),
             dependency_pkg_version: Vec::new(),
             extra_importees: Vec::new(),
             compiled_package_names: Vec::new(),
+            oh_exports: Vec::new(),
         })
     }
 }
@@ -2219,6 +2274,7 @@ impl LoaderJson {
                 .as_ref()
                 .map(|pkg| pkg.version.clone())
                 .unwrap_or_default(),
+            oh_export_files: None,
         };
         let mut dependencies = Vec::new();
         for node in graph.nodes.values() {
@@ -2250,6 +2306,7 @@ impl LoaderJson {
                     .and_then(|module| module.module.name.clone()),
                 bundle_name: None,
                 bundle_type: None,
+                oh_export_files: None,
             });
         }
         let input = PkgContextInfoInput {

@@ -454,9 +454,13 @@ impl<'a> TransformEntrySources<'a> {
         Self { plan }
     }
 
-    fn source_ids(&self) -> FxHashSet<String> {
+    fn form_source_ids(&self) -> FxHashSet<String> {
+        self.source_ids_for(&self.plan.input.form_entry_sources)
+    }
+
+    fn source_ids_for(&self, entries: &[String]) -> FxHashSet<String> {
         let mut source_ids = FxHashSet::default();
-        for entry in &self.plan.input.entries {
+        for entry in entries {
             source_ids.insert(entry.clone());
             if let Some(resolved) = self.resolved_entry_id(entry) {
                 source_ids.insert(TransformEntrySourceId::new(&resolved).normalized());
@@ -576,7 +580,7 @@ impl<'a> PluginFactory<'a> {
             self.input.component_metadata,
             self.input.transform_sources,
         )
-        .with_entry_source_ids(TransformEntrySources::new(&self.plan).source_ids())
+        .with_form_entry_source_ids(TransformEntrySources::new(&self.plan).form_source_ids())
         .with_checker_mode(self.input.checker_mode)
         .with_should_emit_js(self.plan.should_emit_js)
         .with_module_analyzer(self.plan.module_analyzer);
@@ -694,6 +698,7 @@ mod tests {
                 module_path_map: Vec::new(),
                 module_record_roots: Vec::new(),
                 entries: vec!["./ets/pages/Index.ets".to_string()],
+                form_entry_sources: Vec::new(),
                 runtime_entry_sources: Vec::new(),
                 support_chunks: false,
                 source_map_packages: crate::plan::BundleSourceMapPackageInfo {

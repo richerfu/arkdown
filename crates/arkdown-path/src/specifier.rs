@@ -127,6 +127,13 @@ impl ModuleSpecifier {
         ModuleSpecifierText::new(self.as_str()).sdk_arkts_filenames()
     }
 
+    /// Return SDK API declaration candidates for runtime-form `@ohos:` and
+    /// `@hms:` specifiers. Bundlers still treat these specifiers as platform
+    /// externals; this mapping is for compiler type metadata lookup only.
+    pub fn sdk_runtime_declaration_filenames(&self) -> Vec<String> {
+        ModuleSpecifierText::new(self.as_str()).sdk_runtime_declaration_filenames()
+    }
+
     /// Return `true` for `@kit.*` SDK imports.
     pub fn is_kit(&self) -> bool {
         ModuleSpecifierText::new(self.as_str()).is_kit()
@@ -239,6 +246,12 @@ impl<'a> ModuleSpecifierText<'a> {
     /// Return SDK `arkts/` declaration file candidates for `@arkts.*` imports.
     pub fn sdk_arkts_filenames(&self) -> Vec<String> {
         SdkDeclarationSpecifier::new(self.raw).arkts_filenames()
+    }
+
+    /// Return SDK API declaration candidates for runtime-form `@ohos:` and
+    /// `@hms:` specifiers without changing their external-module kind.
+    pub fn sdk_runtime_declaration_filenames(&self) -> Vec<String> {
+        SdkDeclarationSpecifier::new(self.raw).runtime_filenames()
     }
 
     /// Return `true` for `@kit.*` SDK imports.
@@ -424,6 +437,8 @@ impl<'a> PackageCandidateList<'a> {
 impl<'a> SdkDeclarationSpecifier<'a> {
     const OHOS_SLASH_PREFIX: &'static str = "@ohos/";
     const OHOS_DOT_PREFIX: &'static str = "@ohos.";
+    const OHOS_COLON_PREFIX: &'static str = "@ohos:";
+    const HMS_COLON_PREFIX: &'static str = "@hms:";
     const KIT_PREFIX: &'static str = "@kit.";
     const ARKTS_DOT_PREFIX: &'static str = "@arkts.";
 
@@ -458,6 +473,16 @@ impl<'a> SdkDeclarationSpecifier<'a> {
     fn arkts_filenames(&self) -> Vec<String> {
         if self.raw.starts_with(Self::ARKTS_DOT_PREFIX) {
             return Self::declaration_filenames("", self.raw);
+        }
+        Vec::new()
+    }
+
+    fn runtime_filenames(&self) -> Vec<String> {
+        if let Some(api_name) = self.raw.strip_prefix(Self::OHOS_COLON_PREFIX) {
+            return Self::declaration_filenames(Self::OHOS_DOT_PREFIX, api_name);
+        }
+        if let Some(api_name) = self.raw.strip_prefix(Self::HMS_COLON_PREFIX) {
+            return Self::declaration_filenames("@hms.", api_name);
         }
         Vec::new()
     }
@@ -624,5 +649,19 @@ mod tests {
         );
         assert_eq!(ModuleSpecifier::new("@ohos:hilog").sdk_api_filename(), None);
         assert_eq!(ModuleSpecifier::new("@ohos/hilog").sdk_kit_filename(), None);
+        assert_eq!(
+            ModuleSpecifier::new("@ohos:multimedia.media").sdk_runtime_declaration_filenames(),
+            vec![
+                "@ohos.multimedia.media.d.ts".to_string(),
+                "@ohos.multimedia.media.d.ets".to_string()
+            ]
+        );
+        assert_eq!(
+            ModuleSpecifier::new("@hms:ai.textToSpeech").sdk_runtime_declaration_filenames(),
+            vec![
+                "@hms.ai.textToSpeech.d.ts".to_string(),
+                "@hms.ai.textToSpeech.d.ets".to_string()
+            ]
+        );
     }
 }

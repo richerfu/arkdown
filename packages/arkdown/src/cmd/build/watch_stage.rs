@@ -1,6 +1,6 @@
 //! Watch mode coordinator.
 //!
-//! Wraps `arkdown-watcher`'s `FileWatcher` and drives incremental rebuilds
+//! Wraps `arkdown-watcher`'s `SessionWatcher` and drives incremental rebuilds
 //! when source files change.  This is a thin coordinator that:
 //!
 //! 1. Determines which directories to watch based on the build mode
@@ -13,6 +13,7 @@
 //!    - Cold → full pipeline rebuild.
 //! 4. Calls `BuildCommand::execute` with the appropriate `skip_*` flags set.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +22,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::ArkdownConfig;
 use arkdown_path::ArtifactPathSerializer;
-use arkdown_watcher::{classify_watch_change, FileWatcher, WatchChangeKind};
+use arkdown_session::BuildSession;
+use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalidationBatch};
 
 use arkdown::plugins::factory::PackagePlugin;
 
@@ -34,6 +36,7 @@ use super::layout::ModuleBuildLayout;
 /// `BuildArgs` does not implement `Clone` (it is a clap `Args` struct).
 pub(super) struct WatchStageInput {
   pub(super) config: Arc<ArkdownConfig>,
+  pub(super) session: Arc<BuildSession>,
   /// Build target string (e.g. "hap", "hsp", "har").
   pub(super) target: String,
   /// Build mode string (e.g. "debug", "release").
@@ -47,6 +50,7 @@ pub(super) struct WatchStageInput {
   /// ABC backend choice for incremental rebuilds.
   pub(super) abc_backend: AbcBackendChoice,
   pub(super) build_target_name: Option<String>,
+  pub(super) build_version: Option<String>,
   pub(super) coverage: bool,
   pub(super) ohos_debug_asan: bool,
   pub(super) ohos_enable_hwasan: bool,
@@ -56,6 +60,8 @@ pub(super) struct WatchStageInput {
   pub(super) module_analyzer: ModuleAnalyzerChoice,
   pub(super) cache: bool,
   pub(super) package_plugins: Vec<PackagePlugin>,
+  pub(super) project_hvigor_overrides: Option<arkdown_config::ProjectHvigorOverrides>,
+  pub(super) module_hvigor_overrides: BTreeMap<String, serde_json::Value>,
   /// When `true`, only `src/main/resources/` directories are watched.
   pub(super) preview_mode: bool,
 }
@@ -70,6 +76,7 @@ impl WatchStage {
   /// encounters a fatal error.
   pub(super) fn run(input: WatchStageInput) -> Result<()> {
     let config_for_watch = input.config.clone();
+    let session = input.session;
     let preview_mode = input.preview_mode;
     let target = input.target;
     let mode = input.mode;
@@ -78,6 +85,7 @@ impl WatchStage {
     let project_root = input.project_root;
     let abc_backend = input.abc_backend;
     let build_target_name = input.build_target_name;
+    let build_version = input.build_version;
     let coverage = input.coverage;
     let ohos_debug_asan = input.ohos_debug_asan;
     let ohos_enable_hwasan = input.ohos_enable_hwasan;
@@ -87,46 +95,12 @@ impl WatchStage {
     let module_analyzer = input.module_analyzer;
     let cache = input.cache;
     let package_plugins = input.package_plugins;
+    let project_hvigor_overrides = input.project_hvigor_overrides;
+    let module_hvigor_overrides = input.module_hvigor_overrides;
 
-    // Determine which directories to watch.
-    let watch_dirs: Vec<PathBuf> = if preview_mode {
-      config_for_watch
-        .modules
-        .iter()
-        .map(|m| ModuleBuildLayout::new(&m.src_path).source().resources())
-        .filter(|p| p.exists())
-        .collect()
-    } else {
-      config_for_watch
-        .modules
-        .iter()
-        .flat_map(|m| FileWatcher::dirs_for_module(&m.src_path))
-        .collect()
-    };
-
-    // Snapshot importer maps for M2 hot-reload delta computation.
-    let importer_maps: FxHashMap<String, Vec<String>> = config_for_watch
-      .modules
-      .iter()
-      .filter_map(|m| {
-        let map_path = ModuleBuildLayout::new(&m.src_path).importer_map_json();
-        std::fs::read_to_string(&map_path)
-          .ok()
-          .and_then(|s| serde_json::from_str::<FxHashMap<String, Vec<String>>>(&s).ok())
-      })
-      .flatten()
-      .collect();
-
-    // Pre-compute module source roots for hot/cold classification.
-    // Each element is `<module_root>/src/main` — the root under which
-    // ETS/TS source files live.  Used by `classify_watch_change`.
-    let module_source_roots: Vec<PathBuf> = config_for_watch
-      .modules
-      .iter()
-      .map(|m| m.src_path.join("src").join("main"))
-      .collect();
-
-    let watcher = FileWatcher::new(config_for_watch.clone(), watch_dirs);
+    let watch_plan = WatchSessionPlan::from_session(&session, preview_mode);
+    let fingerprint_baseline = watch_plan.input.fingerprint_baseline.clone();
+    let watcher = SessionWatcher::new(watch_plan.input);
 
     tracing::info!("watching for changes");
     if preview_mode {
@@ -136,7 +110,18 @@ impl WatchStage {
     let rt = tokio::runtime::Handle::current();
 
     watcher
-      .watch(move |changed| {
+      .watch(move |events| {
+        let invalidation = WatchInvalidationBatch::from_watch_events(events, &fingerprint_baseline);
+        if invalidation.is_empty() {
+          return Ok(());
+        }
+        let changed = &invalidation.changed_files;
+        let change_kind = if preview_mode {
+          WatchChangeKind::Cold
+        } else {
+          invalidation.change_kind()
+        };
+
         // M2: Hot-reload delta computation.
         let changed_paths: Vec<WatchChangedPath> = changed
           .iter()
@@ -144,16 +129,20 @@ impl WatchStage {
           .collect::<std::result::Result<Vec<_>, _>>()
           .map_err(|error| format!("serialize changed path failed: {error}"))?;
 
+        let importer_maps = WatchImporterMapInventory::load(&config_for_watch);
         let mut affected_chunks: FxHashSet<String> = FxHashSet::default();
         for changed_path in &changed_paths {
-          for key in importer_maps.keys() {
+          for key in importer_maps.entries.keys() {
             if changed_path.matches_importer_key(key) {
               affected_chunks.insert(key.clone());
             }
           }
         }
 
-        if !importer_maps.is_empty() && affected_chunks.is_empty() {
+        if matches!(change_kind, WatchChangeKind::Hot)
+          && !importer_maps.entries.is_empty()
+          && affected_chunks.is_empty()
+        {
           tracing::info!(
             changed_files = changed.len(),
             "changed files are not in module graph; skipping rebuild"
@@ -182,26 +171,6 @@ impl WatchStage {
             );
           }
         }
-
-        // Hot/cold classification: if ALL changed files are ETS/TS source
-        // files under a known source root, this is a hot change and we can
-        // skip resource + profile stages for a faster bundle-only rebuild.
-        // If ANY file is cold (config/resource), do a full rebuild.
-        //
-        // In preview mode all changes are treated as Cold since resource
-        // files are the only thing being watched.
-        let change_kind = if preview_mode {
-          WatchChangeKind::Cold
-        } else {
-          let source_root_refs: Vec<&Path> =
-            module_source_roots.iter().map(|p| p.as_path()).collect();
-          changed.iter().fold(WatchChangeKind::Hot, |acc, path| {
-            match (acc, classify_watch_change(path, &source_root_refs)) {
-              (WatchChangeKind::Cold, _) | (_, WatchChangeKind::Cold) => WatchChangeKind::Cold,
-              _ => WatchChangeKind::Hot,
-            }
-          })
-        };
 
         let mode_label = match change_kind {
           WatchChangeKind::Hot => "hot rebuild (bundle-only)",
@@ -234,6 +203,7 @@ impl WatchStage {
           product: product_filter.clone(),
           project: Some(project_root.clone()),
           build_target_name: build_target_name.clone(),
+          build_version: build_version.clone(),
           watch: false,
           coverage,
           ohos_debug_asan,
@@ -247,6 +217,9 @@ impl WatchStage {
           cache,
           skip_resource: is_hot,
           skip_profile: is_hot,
+          watch_invalidation: Some(invalidation),
+          project_hvigor_overrides: project_hvigor_overrides.clone(),
+          module_hvigor_overrides: module_hvigor_overrides.clone(),
         };
         if let Err(e) = rt.block_on(
           BuildCommand::new(rebuild_args)
@@ -258,6 +231,55 @@ impl WatchStage {
         Ok(())
       })
       .map_err(|e| anyhow::anyhow!("watch stage error: {e}"))
+  }
+}
+
+struct WatchSessionPlan {
+  input: WatchInput,
+}
+
+impl WatchSessionPlan {
+  fn from_session(session: &BuildSession, preview_mode: bool) -> Self {
+    let mut watch_dirs = FxHashSet::default();
+    let mut watch_files = FxHashSet::default();
+    for plan in session.watch_inputs.iter() {
+      watch_dirs.extend(plan.resource_roots.iter().cloned());
+      if !preview_mode {
+        watch_dirs.extend(plan.source_roots.iter().cloned());
+        watch_files.extend(plan.config_files.iter().cloned());
+      }
+    }
+
+    let mut watch_dirs = watch_dirs.into_iter().collect::<Vec<_>>();
+    watch_dirs.sort();
+    let mut watch_files = watch_files.into_iter().collect::<Vec<_>>();
+    watch_files.sort();
+    Self {
+      input: WatchInput::new()
+        .with_dirs(watch_dirs)
+        .with_files(watch_files),
+    }
+  }
+}
+
+struct WatchImporterMapInventory {
+  entries: FxHashMap<String, Vec<String>>,
+}
+
+impl WatchImporterMapInventory {
+  fn load(config: &ArkdownConfig) -> Self {
+    let entries = config
+      .modules
+      .iter()
+      .filter_map(|module| {
+        let path = ModuleBuildLayout::new(&module.src_path).importer_map_json();
+        std::fs::read_to_string(path)
+          .ok()
+          .and_then(|content| serde_json::from_str::<FxHashMap<String, Vec<String>>>(&content).ok())
+      })
+      .flatten()
+      .collect();
+    Self { entries }
   }
 }
 

@@ -19,6 +19,8 @@ pub struct DistroFilterProfileInput<'a> {
     pub module_name: &'a str,
     pub module_root: &'a Path,
     pub product_name: &'a str,
+    /// Explicit module target selected by the build task.
+    pub target_name: Option<&'a str>,
     /// Current build mode (`"debug"` or `"release"`), used to filter targets
     /// whose `buildModeSet` restricts them to specific modes.  Defaults to
     /// all-modes matching when `None`.
@@ -70,6 +72,7 @@ impl DistroFilterProcessor {
             input.module_name,
             input.module_root,
             input.product_name,
+            input.target_name,
             input.build_mode_name,
             input.compile_api_version,
             input.metadata,
@@ -77,7 +80,36 @@ impl DistroFilterProcessor {
         else {
             return Ok(None);
         };
+        self.write_distro_filter_profile(input, plan)
+    }
 
+    /// Process a distribution filter already resolved by the build session.
+    ///
+    /// This is the production build-path entry point: it avoids re-reading
+    /// `build-profile.json5` after startup and guarantees every stage consumes
+    /// the same selected target.
+    pub fn process_resolved_distro_filter_profile(
+        &self,
+        input: DistroFilterProfileInput<'_>,
+        target_filter: Option<&serde_json::Value>,
+    ) -> Result<Option<DistroFilterProfileOutput>, ArkdownError> {
+        let Some(target_filter) = target_filter else {
+            return Ok(None);
+        };
+        let plan = build_distro_filter_plan_from_value(
+            input.module_root,
+            input.compile_api_version,
+            input.metadata,
+            target_filter.clone(),
+        )?;
+        self.write_distro_filter_profile(input, plan)
+    }
+
+    fn write_distro_filter_profile(
+        &self,
+        input: DistroFilterProfileInput<'_>,
+        plan: DistroFilterPlan,
+    ) -> Result<Option<DistroFilterProfileOutput>, ArkdownError> {
         let has_existing_metadata = plan.has_existing_metadata;
         let profile_name = if has_existing_metadata {
             plan.profile_name
@@ -122,6 +154,7 @@ pub(crate) fn build_distro_filter_plan(
     module_name: &str,
     module_root: &Path,
     product_name: &str,
+    target_name: Option<&str>,
     build_mode_name: Option<&str>,
     compile_api_version: u32,
     metadata: &[MetadataEntry],
@@ -130,12 +163,23 @@ pub(crate) fn build_distro_filter_plan(
         project_root,
         module_name,
         product_name,
+        target_name,
         build_mode_name.unwrap_or("debug"),
     )?
     else {
         return Ok(None);
     };
 
+    build_distro_filter_plan_from_value(module_root, compile_api_version, metadata, target_filter)
+        .map(Some)
+}
+
+fn build_distro_filter_plan_from_value(
+    module_root: &Path,
+    compile_api_version: u32,
+    metadata: &[MetadataEntry],
+    target_filter: serde_json::Value,
+) -> Result<DistroFilterPlan, ArkdownError> {
     let default_field_name = distro_filter_field_name(compile_api_version);
     if let Some(existing) = find_existing_distro_filter_profile(module_root, metadata)? {
         let field_name = existing
@@ -150,26 +194,27 @@ pub(crate) fn build_distro_filter_plan(
             .or_else(|| existing.value.get("distributionFilter").cloned())
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
         let merged = merge_json_objects(existing_filter, target_filter);
-        return Ok(Some(DistroFilterPlan {
+        return Ok(DistroFilterPlan {
             profile_name: existing.profile_name,
             field_name,
             value: merged,
             has_existing_metadata: true,
-        }));
+        });
     }
 
-    Ok(Some(DistroFilterPlan {
+    Ok(DistroFilterPlan {
         profile_name: DEFAULT_DISTRO_FILTER_PROFILE.to_string(),
         field_name: default_field_name.to_string(),
         value: target_filter,
         has_existing_metadata: false,
-    }))
+    })
 }
 
 fn read_target_distribution_filter(
     project_root: &Path,
     module_name: &str,
     product_name: &str,
+    target_name: Option<&str>,
     build_mode_name: &str,
 ) -> Result<Option<serde_json::Value>, ArkdownError> {
     let profile = match RawBuildProfile::load(project_root) {
@@ -184,12 +229,16 @@ fn read_target_distribution_filter(
     else {
         return Ok(None);
     };
-    // Use centralised target selection from arkdown_config for consistent priority rules.
-    let Some(target) = arkdown_config::build_profile::pick_effective_raw_target(
-        &raw_module.targets,
-        product_name,
-        build_mode_name,
-    ) else {
+    let target = target_name
+        .and_then(|name| raw_module.targets.iter().find(|target| target.name == name))
+        .or_else(|| {
+            arkdown_config::build_profile::pick_effective_raw_target(
+                &raw_module.targets,
+                product_name,
+                build_mode_name,
+            )
+        });
+    let Some(target) = target else {
         return Ok(None);
     };
     let Some(config) = target.config.as_ref() else {
@@ -386,6 +435,7 @@ mod tests {
                 module_name: "entry",
                 module_root: &module_root,
                 product_name: "default",
+                target_name: None,
                 build_mode_name: Some("debug"),
                 compile_api_version: 12,
                 metadata: &[],
@@ -447,6 +497,7 @@ mod tests {
                 module_name: "entry",
                 module_root: &module_root,
                 product_name: "default",
+                target_name: None,
                 build_mode_name: Some("debug"),
                 compile_api_version: 12,
                 metadata: &[metadata("$profile:existing_distro")],
@@ -508,6 +559,7 @@ mod tests {
                 module_name: "entry",
                 module_root: &module_root,
                 product_name: "default",
+                target_name: None,
                 build_mode_name: Some("debug"),
                 compile_api_version: 12,
                 metadata: &[],
@@ -571,6 +623,7 @@ mod tests {
                 module_name: "entry",
                 module_root: &module_root,
                 product_name: "default",
+                target_name: None,
                 build_mode_name: Some("debug"),
                 compile_api_version: 12,
                 metadata: &[],
@@ -591,6 +644,7 @@ mod tests {
                 module_name: "entry",
                 module_root: &module_root,
                 product_name: "default",
+                target_name: None,
                 build_mode_name: Some("release"),
                 compile_api_version: 12,
                 metadata: &[],
@@ -621,6 +675,7 @@ mod tests {
                 module_name: "entry",
                 module_root: &module_root,
                 product_name: "default",
+                target_name: None,
                 build_mode_name: None,
                 compile_api_version: 12,
                 metadata: &[],

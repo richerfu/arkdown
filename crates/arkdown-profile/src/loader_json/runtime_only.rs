@@ -12,11 +12,21 @@ use crate::layout::ProfileModuleLayout;
 pub(super) struct RuntimeOnlyCollector<'a> {
     config: &'a ArkdownConfig,
     module_cfg: &'a ModuleConfig,
+    declared_dependency_roots: Vec<PathBuf>,
+    local_dependency_names: FxHashSet<String>,
 }
 
 impl<'a> RuntimeOnlyCollector<'a> {
     pub(super) fn new(config: &'a ArkdownConfig, module_cfg: &'a ModuleConfig) -> Self {
-        Self { config, module_cfg }
+        let mut collector = Self {
+            config,
+            module_cfg,
+            declared_dependency_roots: Vec::new(),
+            local_dependency_names: FxHashSet::default(),
+        };
+        collector.declared_dependency_roots = collector.discover_declared_dependency_roots();
+        collector.local_dependency_names = collector.collect_local_dependency_names();
+        collector
     }
 
     pub(super) fn collect_dynamic_import_dep_names(&self) -> Vec<String> {
@@ -71,7 +81,7 @@ impl<'a> RuntimeOnlyCollector<'a> {
 
         // D3: also collect sources from dependency metadata.runtimeOnly.sources.
         // Matches hvigor's processIndirectDependency() over the dependency graph.
-        for pkg_dir in self.collect_declared_dependency_roots() {
+        for pkg_dir in &self.declared_dependency_roots {
             let rt = self.read_pkg_runtime_only(&pkg_dir);
             for source in &rt.sources {
                 self.collect_source_config_entry(&pkg_dir, source, &mut files);
@@ -99,7 +109,7 @@ impl<'a> RuntimeOnlyCollector<'a> {
 
         // D3: also include runtimeOnly.packages from dependency metadata
         // (matches hvigor's processIndirectDependency() over the dependency graph).
-        for pkg_dir in self.collect_declared_dependency_roots() {
+        for pkg_dir in &self.declared_dependency_roots {
             packages.extend(self.read_pkg_runtime_only_packages(&pkg_dir));
         }
 
@@ -114,7 +124,9 @@ impl<'a> RuntimeOnlyCollector<'a> {
             let Some(pkg_dir) = self.resolve_oh_module_dir(&package) else {
                 continue;
             };
-            files.extend(self.collect_package_source_files_from(&pkg_dir));
+            if !self.should_exclude_remote_har(&package, &pkg_dir) {
+                files.extend(self.collect_package_source_files_from(&pkg_dir));
+            }
             // Collect transitive runtimeOnly.packages from this dep.
             queue.extend(self.read_pkg_runtime_only_packages(&pkg_dir));
         }
@@ -194,8 +206,8 @@ impl<'a> RuntimeOnlyCollector<'a> {
 
     fn read_dependency_runtime_only_package_names(&self) -> Vec<String> {
         let mut names = Vec::new();
-        for pkg_dir in self.collect_declared_dependency_roots() {
-            names.extend(self.read_pkg_runtime_only_packages(&pkg_dir));
+        for pkg_dir in &self.declared_dependency_roots {
+            names.extend(self.read_pkg_runtime_only_packages(pkg_dir));
         }
         names
     }
@@ -278,7 +290,7 @@ impl<'a> RuntimeOnlyCollector<'a> {
         None
     }
 
-    fn collect_declared_dependency_roots(&self) -> Vec<PathBuf> {
+    fn discover_declared_dependency_roots(&self) -> Vec<PathBuf> {
         let mut roots = Vec::new();
         let mut visited: FxHashSet<String> = FxHashSet::default();
         let mut queue: VecDeque<PathBuf> = VecDeque::new();
@@ -335,6 +347,101 @@ impl<'a> RuntimeOnlyCollector<'a> {
             files.extend(self.collect_dynamic_import_source_files(&ets_root));
         }
         files
+    }
+
+    /// Mirrors
+    /// `exclude-remote-dynamic-import.ts#isNeedToExcludeHar`: an
+    /// `excludePackages` entry suppresses source collection only for remote
+    /// source HARs. Local project modules and non-HAR packages remain compile
+    /// inputs.
+    fn should_exclude_remote_har(&self, package_name: &str, package_root: &Path) -> bool {
+        let excluded = self
+            .config
+            .product
+            .build_option
+            .ark_options
+            .as_ref()
+            .and_then(|options| options.runtime_only.as_ref())
+            .is_some_and(|runtime_only| {
+                runtime_only
+                    .exclude_packages
+                    .iter()
+                    .any(|excluded| excluded == package_name)
+            });
+        excluded
+            && self.is_source_har(package_root)
+            && !self.is_local_dependency(package_name, package_root)
+    }
+
+    fn is_source_har(&self, package_root: &Path) -> bool {
+        for file in ["src/main/module.json5", "src/main/module.json"] {
+            let path = package_root.join(file);
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            #[derive(serde::Deserialize)]
+            struct Profile {
+                module: Module,
+            }
+            #[derive(serde::Deserialize)]
+            struct Module {
+                #[serde(rename = "type", default)]
+                type_: String,
+            }
+            if let Ok(profile) = json5::from_str::<Profile>(&content) {
+                return profile.module.type_ == "har";
+            }
+        }
+        false
+    }
+
+    fn is_local_dependency(&self, package_name: &str, package_root: &Path) -> bool {
+        let canonical_root =
+            std::fs::canonicalize(package_root).unwrap_or_else(|_| package_root.to_path_buf());
+        if self.config.modules.iter().any(|module| {
+            std::fs::canonicalize(&module.src_path).unwrap_or_else(|_| module.src_path.clone())
+                == canonical_root
+        }) {
+            return true;
+        }
+        self.local_dependency_names.contains(package_name)
+    }
+
+    fn collect_local_dependency_names(&self) -> FxHashSet<String> {
+        let mut roots = vec![
+            self.module_cfg.src_path.clone(),
+            self.config.project_root.clone(),
+        ];
+        roots.extend(self.declared_dependency_roots.iter().cloned());
+        roots
+            .iter()
+            .flat_map(|root| self.local_dependency_specs(root))
+            .filter_map(|(name, specifier)| specifier.starts_with("file:").then_some(name))
+            .collect()
+    }
+
+    fn local_dependency_specs(&self, root: &Path) -> Vec<(String, String)> {
+        let Ok(content) = std::fs::read_to_string(root.join("oh-package.json5")) else {
+            return Vec::new();
+        };
+        #[derive(serde::Deserialize)]
+        struct Manifest {
+            #[serde(default)]
+            dependencies: IndexMap<String, String>,
+            #[serde(default, rename = "devDependencies")]
+            dev_dependencies: IndexMap<String, String>,
+            #[serde(default, rename = "dynamicDependencies")]
+            dynamic_dependencies: IndexMap<String, String>,
+        }
+        let Ok(manifest) = json5::from_str::<Manifest>(&content) else {
+            return Vec::new();
+        };
+        manifest
+            .dependencies
+            .into_iter()
+            .chain(manifest.dev_dependencies)
+            .chain(manifest.dynamic_dependencies)
+            .collect()
     }
 
     fn collect_dynamic_import_source_files(&self, root: &Path) -> Vec<PathBuf> {

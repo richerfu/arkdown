@@ -53,6 +53,8 @@ fn make_config() -> Arc<ArkdownConfig> {
             },
             version_code: None,
             version_name: None,
+            build_version: None,
+            app_options: Default::default(),
         },
         modules: vec![],
         sdk_config: SdkConfig {
@@ -124,9 +126,11 @@ fn minimal_pack_input(
         resources_src_dir: None,
         bundle_version_code: 1000000,
         bundle_version_name: "1.0.0".to_string(),
+        bundle_build_version: None,
         bundle_type: "app".to_string(),
         source_maps_path: None,
         pkg_context_info_path: None,
+        pkg_sdk_info_path: None,
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
@@ -174,6 +178,58 @@ fn test_hap_output_is_readable_by_zip_crate() {
     // zip::ZipArchive will error if the file is not a well-formed ZIP
     let archive = zip::ZipArchive::new(file).expect("HAP must be a valid ZIP archive");
     assert!(archive.len() > 0, "HAP ZIP must contain at least one entry");
+}
+
+#[test]
+fn test_pack_info_matches_hvigor_optional_build_version_contract() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+
+    let with_build_path = tmp.path().join("with-build-version.hap");
+    let mut with_build = minimal_pack_input(
+        abc.clone(),
+        res.clone(),
+        modj.clone(),
+        with_build_path.clone(),
+    );
+    with_build.bundle_build_version = Some("2026.07.23".to_string());
+    Packager::new(make_config())
+        .pack_hap(with_build)
+        .expect("pack HAP with buildVersion");
+
+    let file = fs::File::open(&with_build_path).expect("open HAP with buildVersion");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let mut entry = archive.by_name("pack.info").expect("pack.info");
+    let mut content = String::new();
+    entry.read_to_string(&mut content).expect("read pack.info");
+    let pack_info: serde_json::Value = serde_json::from_str(&content).expect("parse pack.info");
+    assert_eq!(
+        pack_info["summary"]["app"]["version"]["build"].as_str(),
+        Some("2026.07.23")
+    );
+
+    let without_build_path = tmp.path().join("without-build-version.hap");
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(
+            abc,
+            res,
+            modj,
+            without_build_path.clone(),
+        ))
+        .expect("pack HAP without buildVersion");
+
+    let file = fs::File::open(&without_build_path).expect("open HAP without buildVersion");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let mut entry = archive.by_name("pack.info").expect("pack.info");
+    let mut content = String::new();
+    entry.read_to_string(&mut content).expect("read pack.info");
+    let pack_info: serde_json::Value = serde_json::from_str(&content).expect("parse pack.info");
+    assert!(
+        pack_info["summary"]["app"]["version"]
+            .get("build")
+            .is_none(),
+        "hvigor omits summary.app.version.build when buildVersion is undefined"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +602,43 @@ fn test_hap_packages_pkg_context_info_when_provided_like_hvigor() {
 }
 
 #[test]
+fn test_hap_packages_pkg_sdk_info_when_provided_like_hvigor() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("pkg_sdk.hap");
+    let pkg_sdk_info = tmp.path().join("pkgSdkInfo.json");
+    fs::write(
+        &pkg_sdk_info,
+        r#"{"library":{"version":"1.2.3","type":"har","isDirectDep":true},"entry":{"version":"1.0.0","type":"entry","isDirectDep":false}}"#,
+    )
+    .expect("write pkgSdkInfo.json");
+
+    let mut input = minimal_pack_input(abc, res, modj, out.clone());
+    input.pkg_sdk_info_path = Some(pkg_sdk_info);
+
+    Packager::new(make_config())
+        .pack_hap(input)
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(&out).expect("open HAP");
+    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let mut entry = archive
+        .by_name("pkgSdkInfo.json")
+        .expect("pkgSdkInfo.json must be packaged");
+    let mut content = String::new();
+    entry.read_to_string(&mut content).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(value["library"]["type"], "har");
+    assert_eq!(value["library"]["isDirectDep"], true);
+    drop(entry);
+    assert_eq!(
+        archive.file_names().last(),
+        Some("pkgSdkInfo.json"),
+        "SDK app_packing_tool writes pkgSdkInfo.json after pack.info"
+    );
+}
+
+#[test]
 fn test_hap_contains_abc_at_ets_path_for_api12() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
@@ -732,9 +825,11 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             resources_src_dir: Some(tmp.path().join("compiled/resources")),
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
@@ -797,9 +892,11 @@ fn test_missing_abc_returns_missing_input_error() {
         resources_src_dir: None,
         bundle_version_code: 1000000,
         bundle_version_name: "1.0.0".to_string(),
+        bundle_build_version: None,
         bundle_type: "app".to_string(),
         source_maps_path: None,
         pkg_context_info_path: None,
+        pkg_sdk_info_path: None,
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
@@ -830,9 +927,11 @@ fn test_missing_module_json_returns_missing_input_error() {
         resources_src_dir: None,
         bundle_version_code: 1000000,
         bundle_version_name: "1.0.0".to_string(),
+        bundle_build_version: None,
         bundle_type: "app".to_string(),
         source_maps_path: None,
         pkg_context_info_path: None,
+        pkg_sdk_info_path: None,
         abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
@@ -870,9 +969,11 @@ fn test_hsp_output_is_valid_zip() {
             resources_src_dir: None,
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
@@ -907,9 +1008,11 @@ fn test_hsp_pack_info_keeps_app_bundle_type_and_uses_shared_module_type() {
             resources_src_dir: None,
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
             abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
@@ -1220,7 +1323,14 @@ fn test_normalize_integrated_hsps_patches_pack_info() {
     };
 
     let out_dir = tmp.path().join("integrated");
-    let paths = normalize_integrated_hsps(&[entry], "com.host.app", 2000000, &out_dir).unwrap();
+    let paths = normalize_integrated_hsps(
+        &[entry],
+        "com.host.app",
+        2000000,
+        Some("host-build"),
+        &out_dir,
+    )
+    .unwrap();
 
     assert_eq!(paths.len(), 1);
     let out_path = &paths[0];
@@ -1243,6 +1353,11 @@ fn test_normalize_integrated_hsps_patches_pack_info() {
         2000000,
         "version.code must be patched to host value"
     );
+    assert_eq!(
+        v["summary"]["app"]["version"]["build"].as_str(),
+        Some("host-build"),
+        "version.build must be patched when the host defines buildVersion"
+    );
 }
 
 #[test]
@@ -1263,6 +1378,7 @@ fn test_pack_hap_embeds_integrated_hsp() {
         }],
         "com.test.packtest",
         1000000,
+        None,
         &integrated_dir,
     )
     .unwrap();
@@ -1286,9 +1402,11 @@ fn test_pack_hap_embeds_integrated_hsp() {
             resources_src_dir: None,
             bundle_version_code: 1000000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
             abilities: vec![],
             integrated_hsps: vec![integrated_entry],
             privacy_profile_path: None,
@@ -1644,6 +1762,7 @@ fn test_bytecode_har_uses_compiled_layout_and_does_not_mutate_source_manifest() 
                 native_header_dirs: Vec::new(),
                 preload_system_so_json: None,
                 source_maps_path: None,
+                build_profile_path: None,
                 declaration_entries: vec![
                     "@normalized:N&&library&library/src/main/ets/Index&1.0.0".into(),
                 ],

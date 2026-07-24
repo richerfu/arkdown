@@ -38,6 +38,7 @@ pub struct EtsTransformPlugin {
 
 #[derive(Debug)]
 pub(crate) struct EtsTransformModuleMetadataEntry {
+    pub(crate) module_source_code: Option<Arc<str>>,
     pub(crate) source_map: Option<Arc<str>>,
     pub(crate) emits_javascript: bool,
     pub(crate) is_shared_module: bool,
@@ -52,6 +53,7 @@ impl EtsTransformModuleMetadata {
     fn record(
         &self,
         module_id: String,
+        module_source_code: Option<Arc<str>>,
         source_map: Option<Arc<str>>,
         emits_javascript: bool,
         is_shared_module: bool,
@@ -59,6 +61,7 @@ impl EtsTransformModuleMetadata {
         self.entries.insert(
             module_id,
             EtsTransformModuleMetadataEntry {
+                module_source_code,
                 source_map,
                 emits_javascript,
                 is_shared_module,
@@ -110,6 +113,7 @@ impl EtsTransformPlugin {
                 .get_or_insert_default::<EtsTransformModuleMetadata>()
                 .record(
                     args.id.to_string(),
+                    output.module_source_code.as_deref().map(Arc::from),
                     output.source_map.as_deref().map(Arc::from),
                     output.emits_javascript,
                     output.is_shared_module,

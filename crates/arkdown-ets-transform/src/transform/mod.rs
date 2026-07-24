@@ -25,9 +25,9 @@ use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, Hvigo
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
     Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression,
-    FormalParameterKind, Function, FunctionType, ImportOrExportKind, MethodDefinitionKind,
-    MethodDefinitionType, Program, PropertyKey, Statement, StructElement, StructStatement,
-    TSModuleDeclarationBody, TSType,
+    FormalParameterKind, Function, FunctionBody, FunctionType, ImportOrExportKind,
+    MethodDefinitionKind, MethodDefinitionType, Program, PropertyKey, Statement, StructElement,
+    StructStatement, TSModuleDeclarationBody, TSType,
 };
 use oxc_ast::NONE;
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
@@ -35,12 +35,13 @@ use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, SPAN};
 
 use crate::error::EtsTransformError;
-use crate::lazy_import::LazyImportTransform;
 use crate::source::TransformSourceSnapshot;
-use crate::transform::build_fn::{BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps};
+use crate::transform::build_fn::{
+    BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps, StylesMethodInfo,
+};
 use crate::transform::component::{
-    BuilderMethodInfo, ComponentInfo, FieldExpression, ParamField, RegularField, RegularMember,
-    StateField, StylesMethodInfo, ViewPuClassEmitter,
+    BuilderMethodInfo, ComponentInfo, ComponentSourceMember, CustomDialogControllerLowerer,
+    FieldExpression, ParamField, RegularField, RegularMember, StateField, ViewPuClassEmitter,
 };
 use crate::transform::component_analysis::{
     BuilderFunctionNameCollector, CustomComponentNameCollector, ExtendAttributeIndex,
@@ -53,6 +54,7 @@ use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::declaration_emit::{ParamsInterfaceEmitter, TopLevelFunctionEmitter};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::entry::{EntryOptions, EntryRegistrationBlock, EntryRegistrationInfo};
+use crate::transform::global_rewrite::GlobalContextCallRewriter;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
@@ -75,7 +77,10 @@ pub struct TransformOptions {
     pub component_metadata: Arc<ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
     pub(crate) module_exports: ModuleExportIndex,
-    pub emit_entry_registration: bool,
+    /// Whether this source was declared in a referenced form profile.
+    ///
+    /// Mirrors SDK `projectConfig.cardObj[resourceFileName]`.
+    pub form_entry: bool,
     /// Whether Stage model partial update is enabled (API >= 9).
     ///
     /// Defaults to `true`; set to `false` only for FA model / JSBUNDLE builds,
@@ -94,7 +99,7 @@ impl Default for TransformOptions {
             component_metadata: Arc::new(ComponentMetadata::default()),
             sources: TransformSourceSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
-            emit_entry_registration: true,
+            form_entry: false,
             partial_update: true,
             checker_mode: CheckerMode::Oxc,
         }
@@ -289,13 +294,25 @@ impl<'a> ArktsTransformer<'a> {
             &mut custom_component_update_props,
         )
         .collect();
+        let builder_functions =
+            BuilderFunctionNameCollector::new(&parsed.program, &source.id.id, options).collect();
+        // SDK process_component_build.js::getComponentType only reaches the
+        // custom-component branch when the symbol is present in
+        // validate_ui_syntax.customComponents. Arkdown's unresolved-package
+        // usage fallback is deliberately broader, so exclude symbols whose
+        // source/re-export chain has already proven them to be @Builder
+        // functions. Struct @Builder methods are collected later and are not
+        // removed here; an unqualified call still resolves to a real component
+        // when a local builder method has the same name.
+        custom_components.retain(|name| !builder_functions.contains(name));
+        custom_component_update_props.retain(|name, _| !builder_functions.contains(name));
         let custom_dialog_components = custom_component_update_props
             .iter()
             .filter_map(|(name, info)| info.is_custom_dialog.then(|| name.clone()))
             .collect::<FxHashSet<_>>();
-        let builder_functions =
-            BuilderFunctionNameCollector::new(&parsed.program, &source.id.id, options).collect();
         let extend_attributes = Arc::new(ExtendAttributeIndex::from_program(&parsed.program));
+        let global_styles =
+            TopLevelStylesInventory::new(&parsed.program, &source.id.id).collect(&allocator)?;
 
         let statement_transformer = ArktsStatementTransformer::new(
             &allocator,
@@ -308,9 +325,18 @@ impl<'a> ArktsTransformer<'a> {
             &builder_functions,
             &hvigor_source_id,
             extend_attributes,
+            global_styles,
         );
         let concurrent_directives_lowered =
             ConcurrentDirectiveLowerer::new(&allocator).program(&mut parsed.program);
+        let global_context_calls_lowered =
+            GlobalContextCallRewriter::new(&allocator).program(&mut parsed.program);
+        let custom_dialog_controllers_lowered = CustomDialogControllerLowerer::new(
+            &allocator,
+            options.component_metadata.runtime_names(),
+            &custom_dialog_components,
+        )
+        .program(&mut parsed.program);
         let mut entry_registrations = EntryRegistrationBlock::default();
         let mut reusable_v2_helper_emitted = false;
         let replacement_plans = parsed
@@ -325,24 +351,21 @@ impl<'a> ArktsTransformer<'a> {
                 if let Some(replacement) =
                     statement_transformer.component_v2(statement, emit_reusable_v2_helper)?
                 {
-                    if options.emit_entry_registration {
-                        if let Some((name, info)) =
-                            statement_transformer.component_v2_entry_registration(statement)
-                        {
-                            entry_registrations.push(&name, Some(&info));
-                        }
+                    if let Some((name, info)) =
+                        statement_transformer.component_v2_entry_registration(statement)?
+                    {
+                        entry_registrations.push(&name, Some(&info));
                     }
                     reusable_v2_helper_emitted |= emit_reusable_v2_helper;
                     Ok(Some(StatementReplacementPlan::AstStatements(replacement)))
                 } else if let Some(component) = statement_transformer.component(statement)? {
-                    if component.is_entry && options.emit_entry_registration {
+                    if component.is_entry {
                         entry_registrations
                             .push(&component.name, component.entry_registration.as_ref());
                     }
                     let statements = ViewPuClassEmitter::new(
                         &component,
                         options.component_metadata.runtime_names(),
-                        &custom_dialog_components,
                     )
                     .statements(&allocator)
                     .map_err(|err| EtsTransformError::Fatal {
@@ -356,7 +379,11 @@ impl<'a> ArktsTransformer<'a> {
             })
             .collect::<Result<Vec<_>, EtsTransformError>>()?;
 
-        if concurrent_directives_lowered || replacement_plans.iter().any(Option::is_some) {
+        if concurrent_directives_lowered
+            || global_context_calls_lowered
+            || custom_dialog_controllers_lowered
+            || replacement_plans.iter().any(Option::is_some)
+        {
             let entry_registration_statements = entry_registrations.statements(
                 oxc_ast::AstBuilder::new(&allocator),
                 &allocator,
@@ -491,6 +518,7 @@ struct ArktsStatementTransformer<'a, 'b> {
     custom_component_update_props: &'a CustomComponentUpdateProps,
     builder_functions: &'a FxHashSet<String>,
     extend_attributes: Arc<ExtendAttributeIndex>,
+    global_styles: Vec<StylesMethodInfo<'b>>,
     hvigor_source_id: Arc<str>,
     module_name: Option<Arc<str>>,
 }
@@ -507,6 +535,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         builder_functions: &'a FxHashSet<String>,
         hvigor_source_id: &'a str,
         extend_attributes: Arc<ExtendAttributeIndex>,
+        global_styles: Vec<StylesMethodInfo<'b>>,
     ) -> Self {
         Self {
             allocator,
@@ -518,6 +547,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             custom_component_update_props,
             builder_functions,
             extend_attributes,
+            global_styles,
             hvigor_source_id: Arc::from(hvigor_source_id),
             module_name: options.module_name.as_deref().map(Arc::from),
         }
@@ -556,6 +586,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             self.custom_component_update_props,
             &self.options.component_metadata,
             Arc::clone(&self.extend_attributes),
+            self.options.bundle_name.as_deref(),
             self.options.module_name.as_deref(),
             is_exported,
             is_default,
@@ -596,38 +627,45 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
     fn component_v2_entry_registration<'s>(
         &self,
         statement: &'s Statement<'s>,
-    ) -> Option<(String, EntryRegistrationInfo<'s>)> {
+    ) -> Result<Option<(String, EntryRegistrationInfo<'s>)>, EtsTransformError> {
         let struct_stmt = match statement {
             Statement::StructStatement(s) => s.as_ref(),
             Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
                 Some(Declaration::StructStatement(s)) => s.as_ref(),
-                _ => return None,
+                _ => return Ok(None),
             },
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
                 ExportDefaultDeclarationKind::StructStatement(s) => s.as_ref(),
-                _ => return None,
+                _ => return Ok(None),
             },
-            _ => return None,
+            _ => return Ok(None),
         };
         if !ArkuiDecoratorRules::is_component_v2_struct(struct_stmt) {
-            return None;
+            return Ok(None);
         }
-        let entry_decorator = struct_stmt
+        let Some(entry_decorator) = struct_stmt
             .decorators
             .iter()
-            .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY)?;
+            .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY)
+        else {
+            return Ok(None);
+        };
         let storage = ArkuiDecorator::new(entry_decorator).arg_expression();
-        Some((
+        self.validate_form_entry_argument(storage)?;
+        Ok(Some((
             struct_stmt.id.name.to_string(),
             EntryRegistrationFactory::new(self.hvigor_source_id.as_ref(), self.options)
                 .with_entry_argument(storage),
-        ))
+        )))
     }
 
     fn component<'s>(
         &self,
         statement: &'s Statement<'s>,
-    ) -> Result<Option<ComponentInfo<'s>>, EtsTransformError> {
+    ) -> Result<Option<ComponentInfo<'s>>, EtsTransformError>
+    where
+        'b: 's,
+    {
         match statement {
             Statement::StructStatement(statement) => {
                 self.component_from_struct(statement, false, false)
@@ -660,17 +698,15 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     ),
                 ))
             }
-            Statement::LazyImportDeclaration(declaration) => {
-                Some(StatementReplacementPlan::AstStatements(
-                    oxc_ast::AstBuilder::new(self.allocator).vec1(
-                        LazyImportTransform::import_statement(declaration, self.allocator),
-                    ),
-                ))
-            }
             Statement::ClassDeclaration(_)
                 if SendableClassLowerer::statement_needs_lowering(statement) =>
             {
                 Some(StatementReplacementPlan::LowerSendableClass)
+            }
+            Statement::FunctionDeclaration(function) if Self::is_styles_function(function, &[]) => {
+                Some(StatementReplacementPlan::AstStatements(
+                    oxc_ast::AstBuilder::new(self.allocator).vec(),
+                ))
             }
             Statement::FunctionDeclaration(function) => self
                 .decorated_function_statement(function, false, &[])?
@@ -680,6 +716,13 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     )
                 }),
             Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
+                Some(Declaration::FunctionDeclaration(function))
+                    if Self::is_styles_function(function, &export.decorators) =>
+                {
+                    Some(StatementReplacementPlan::AstStatements(
+                        oxc_ast::AstBuilder::new(self.allocator).vec(),
+                    ))
+                }
                 Some(Declaration::FunctionDeclaration(function)) => self
                     .decorated_function_statement(function, true, &export.decorators)?
                     .map(|statement| {
@@ -714,6 +757,14 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         Ok(replacement)
     }
 
+    fn is_styles_function(function: &Function<'_>, extra_decorators: &[Decorator<'_>]) -> bool {
+        function
+            .decorators
+            .iter()
+            .chain(extra_decorators)
+            .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::STYLES)
+    }
+
     fn decorated_function_statement(
         &self,
         function: &Function<'_>,
@@ -739,14 +790,6 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             ArkuiDecoratorName::CONCURRENT => {
                 ConcurrentFunctionEmitter::new(self.allocator).statement(function, exported)
             }
-            ArkuiDecoratorName::STYLES => TopLevelFunctionEmitter::decorated_styles_statement(
-                self.allocator,
-                exported,
-                name,
-                &function.params,
-                return_annotation,
-                function.body.as_deref(),
-            ),
             decorator_name if ArkuiDecoratorName::is_extend_function(decorator_name) => {
                 let component = function
                     .decorators
@@ -766,18 +809,30 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             }
             _ => {
                 let raw_object_fields = FxHashSet::default();
-                let body = BuildBodyPlan::builder_with_shared_inputs(
+                let first_parameter = if function.params.items.len() == 1 {
+                    function.params.items[0]
+                        .pattern
+                        .get_binding_identifier()
+                        .map(|identifier| Arc::<str>::from(identifier.name.as_str()))
+                } else {
+                    None
+                };
+                let body = BuildBodyPlan::global_builder_with_shared_inputs(
                     function.body.as_deref(),
                     Arc::clone(&self.source_text),
                     Arc::clone(&self.hvigor_source_id),
                     self.custom_components,
                     self.builder_functions,
-                    &FxHashSet::default(),
                     self.custom_component_update_props,
                     Arc::clone(&self.options.component_metadata),
                     &raw_object_fields,
                     None,
                     GeneratedViewpuName::VIEWPU_BASE,
+                    first_parameter,
+                )
+                .with_xcomponent_module_identity(
+                    self.options.bundle_name.as_deref(),
+                    self.module_name.as_deref(),
                 )
                 .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
                 TopLevelFunctionEmitter::decorated_with_params_statement(
@@ -804,20 +859,23 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         statement: &'s StructStatement<'s>,
         is_exported: bool,
         is_default_export: bool,
-    ) -> Result<Option<ComponentInfo<'s>>, EtsTransformError> {
+    ) -> Result<Option<ComponentInfo<'s>>, EtsTransformError>
+    where
+        'b: 's,
+    {
         if !ArkuiDecoratorRules::is_component_struct(statement) {
             return Ok(None);
         }
 
-        let is_entry = statement
+        let entry_decorator = statement
             .decorators
             .iter()
-            .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY);
-        let entry_span = statement
-            .decorators
-            .iter()
-            .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY)
-            .map_or(SPAN, GetSpan::span);
+            .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY);
+        let is_entry = entry_decorator.is_some();
+        let entry_span = entry_decorator.map_or(SPAN, GetSpan::span);
+        let entry_argument =
+            entry_decorator.and_then(|decorator| ArkuiDecorator::new(decorator).arg_expression());
+        self.validate_form_entry_argument(entry_argument)?;
         let is_reusable = statement
             .decorators
             .iter()
@@ -826,6 +884,31 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         let mut initial_render_body = BuildBodyInfo::default();
         let mut initial_render_method_span = SPAN;
         let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
+        let mut styles_methods: Vec<StylesMethodInfo<'s>> =
+            self.global_styles.iter().cloned().collect();
+        for element in &statement.body.body {
+            let StructElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if !method.decorators.iter().any(|decorator| {
+                ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::STYLES
+            }) {
+                continue;
+            }
+            if !method.value.params.items.is_empty() {
+                return Err(EtsTransformError::Fatal {
+                    file: self.id.to_string(),
+                    message: "'@Styles' decorated functions and methods cannot have arguments."
+                        .to_string(),
+                });
+            }
+            if let Some(name) = method.key.static_name() {
+                styles_methods.push(StylesMethodInfo {
+                    name: name.into_owned(),
+                    body: method.value.body.as_deref(),
+                });
+            }
+        }
         let builder_method_names = StructBuilderMethodNames::new(statement).collect();
         let builder_param_names = StructBuilderParamNames::new(statement).collect();
         let mut visible_builder_methods = self.builder_functions.clone();
@@ -833,8 +916,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         visible_builder_methods.extend(builder_param_names.iter().cloned());
         let raw_object_fields =
             ComponentRawObjectFields::new(statement, self.simple_type_context).collect();
-        let mut styles_methods: Vec<StylesMethodInfo> = Vec::new();
         let mut regular_members: Vec<RegularMember<'_>> = Vec::new();
+        let mut source_members = Vec::new();
         let mut params_fields: Vec<ParamField> = Vec::new();
         let mut property_order: Vec<String> = Vec::new();
         let mut regular_fields: Vec<RegularField> = Vec::new();
@@ -849,12 +932,15 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         // them through `createVariableInitStatement`, params, or constructor
                         // initialization.
                         regular_members.push(RegularMember::Property(property));
+                        source_members
+                            .push(ComponentSourceMember::Regular(regular_members.len() - 1));
                         continue;
                     }
 
                     if let Some(name) = property.key.static_name() {
                         let name = name.into_owned();
                         property_order.push(name.clone());
+                        source_members.push(ComponentSourceMember::Property(name.clone()));
                         params_fields.push(ParamField {
                             name,
                             source_span: property.span,
@@ -885,6 +971,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                             });
                         } else {
                             regular_members.push(RegularMember::Property(property));
+                            source_members
+                                .push(ComponentSourceMember::Regular(regular_members.len() - 1));
                         }
                         continue;
                     };
@@ -946,7 +1034,6 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         Arc::clone(&self.hvigor_source_id),
                         self.custom_components,
                         &visible_builder_methods,
-                        &builder_param_names,
                         self.custom_component_update_props,
                         Arc::clone(&self.options.component_metadata),
                         &raw_object_fields,
@@ -954,12 +1041,18 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         is_reusable,
                         GeneratedViewpuName::VIEWPU_BASE,
                     )
-                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
+                    .with_xcomponent_module_identity(
+                        self.options.bundle_name.as_deref(),
+                        self.module_name.as_deref(),
+                    )
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_styles_methods(&styles_methods);
                     initial_render_body = BuildBodyInfo::Plan(plan);
                     // Preserve the original build method range on the generated
                     // initialRender method for TypeScript-printer source maps.
                     // There is only one valid build method per component.
                     initial_render_method_span = build_method_span;
+                    source_members.push(ComponentSourceMember::InitialRender);
                 }
                 StructElement::MethodDefinition(method)
                     if method
@@ -976,20 +1069,25 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         Arc::clone(&self.hvigor_source_id),
                         self.custom_components,
                         &visible_builder_methods,
-                        &builder_param_names,
                         self.custom_component_update_props,
                         Arc::clone(&self.options.component_metadata),
                         &raw_object_fields,
                         self.module_name.as_ref().map(Arc::clone),
                         GeneratedViewpuName::VIEWPU_BASE,
                     )
-                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
+                    .with_xcomponent_module_identity(
+                        self.options.bundle_name.as_deref(),
+                        self.module_name.as_deref(),
+                    )
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_styles_methods(&styles_methods);
                     builder_methods.push(BuilderMethodInfo {
                         name: name.into_owned(),
                         params: &method.value.params,
                         return_annotation: method.value.return_type.as_deref(),
                         body: BuildBodyInfo::Plan(body),
                     });
+                    source_members.push(ComponentSourceMember::Builder(builder_methods.len() - 1));
                 }
                 StructElement::MethodDefinition(method)
                     if method
@@ -997,14 +1095,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         .iter()
                         .any(|d| ArkuiDecorator::new(d).name() == ArkuiDecoratorName::STYLES) =>
                 {
-                    let Some(name) = method.key.static_name() else {
-                        continue;
-                    };
-                    styles_methods.push(StylesMethodInfo {
-                        name: name.into_owned(),
-                        params: &method.value.params,
-                        body: method.value.body.as_deref(),
-                    });
+                    // SDK stores the body in INNER_STYLE_FUNCTION and removes
+                    // the declaration from the generated class. Calls are
+                    // expanded by BuildBodyPlan through styles_methods.
                 }
                 StructElement::MethodDefinition(method) => {
                     if method.kind != MethodDefinitionKind::Constructor
@@ -1014,16 +1107,21 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                             .is_none_or(|name| name != GeneratedViewpuName::CONSTRUCTOR)
                     {
                         regular_members.push(RegularMember::Method(method));
+                        source_members
+                            .push(ComponentSourceMember::Regular(regular_members.len() - 1));
                     }
                 }
                 StructElement::StaticBlock(block) => {
                     regular_members.push(RegularMember::StaticBlock(block));
+                    source_members.push(ComponentSourceMember::Regular(regular_members.len() - 1));
                 }
                 StructElement::TSIndexSignature(signature) => {
                     regular_members.push(RegularMember::TSIndexSignature(signature));
+                    source_members.push(ComponentSourceMember::Regular(regular_members.len() - 1));
                 }
                 StructElement::AccessorProperty(property) => {
                     regular_members.push(RegularMember::AccessorProperty(property));
+                    source_members.push(ComponentSourceMember::Regular(regular_members.len() - 1));
                 }
             }
         }
@@ -1046,21 +1144,29 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             property_order,
             regular_fields,
             regular_members,
+            source_members,
             initial_render_body,
             entry_registration: is_entry.then(|| {
-                let storage = statement
-                    .decorators
-                    .iter()
-                    .find(|decorator| {
-                        ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY
-                    })
-                    .and_then(|decorator| ArkuiDecorator::new(decorator).arg_expression());
                 EntryRegistrationFactory::new(self.hvigor_source_id.as_ref(), self.options)
-                    .with_entry_argument(storage)
+                    .with_entry_argument(entry_argument)
             }),
             builder_methods,
-            styles_methods,
         }))
+    }
+
+    fn validate_form_entry_argument(
+        &self,
+        argument: Option<&Expression<'_>>,
+    ) -> Result<(), EtsTransformError> {
+        if self.options.form_entry
+            && argument.is_some_and(|argument| matches!(argument, Expression::ObjectExpression(_)))
+        {
+            return Err(EtsTransformError::Fatal {
+                file: self.id.to_string(),
+                message: "'@Entry' doesn't support {} parameter in card".to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1346,6 +1452,75 @@ impl ArkuiDecoratorRules {
     }
 }
 
+struct TopLevelStylesInventory<'program, 'ast, 'source> {
+    program: &'program Program<'ast>,
+    source_id: &'source str,
+}
+
+impl<'program, 'ast, 'source> TopLevelStylesInventory<'program, 'ast, 'source> {
+    fn new(program: &'program Program<'ast>, source_id: &'source str) -> Self {
+        Self { program, source_id }
+    }
+
+    fn collect(
+        &self,
+        allocator: &'ast Allocator,
+    ) -> Result<Vec<StylesMethodInfo<'ast>>, EtsTransformError> {
+        let mut styles = Vec::new();
+        for statement in &self.program.body {
+            match statement {
+                Statement::FunctionDeclaration(function) => {
+                    self.push_function(&mut styles, function, &[], allocator)?;
+                }
+                Statement::ExportNamedDeclaration(export) => {
+                    if let Some(Declaration::FunctionDeclaration(function)) =
+                        export.declaration.as_ref()
+                    {
+                        self.push_function(&mut styles, function, &export.decorators, allocator)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(styles)
+    }
+
+    fn push_function(
+        &self,
+        styles: &mut Vec<StylesMethodInfo<'ast>>,
+        function: &Function<'ast>,
+        extra_decorators: &[Decorator<'ast>],
+        allocator: &'ast Allocator,
+    ) -> Result<(), EtsTransformError> {
+        if !function
+            .decorators
+            .iter()
+            .chain(extra_decorators)
+            .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::STYLES)
+        {
+            return Ok(());
+        }
+        if !function.params.items.is_empty() {
+            return Err(EtsTransformError::Fatal {
+                file: self.source_id.to_string(),
+                message: "'@Styles' decorated functions and methods cannot have arguments."
+                    .to_string(),
+            });
+        }
+        let Some(name) = function.id.as_ref() else {
+            return Ok(());
+        };
+        styles.push(StylesMethodInfo {
+            name: name.name.to_string(),
+            body: function
+                .body
+                .as_deref()
+                .map(|body| allocator.alloc(body.clone_in(allocator)) as &FunctionBody<'ast>),
+        });
+        Ok(())
+    }
+}
+
 struct ComponentRawObjectFields<'a, 'b> {
     statement: &'a StructStatement<'a>,
     simple_type_context: &'b SimpleTypeContext,
@@ -1360,6 +1535,11 @@ impl<'a, 'b> ComponentRawObjectFields<'a, 'b> {
     }
 
     fn collect(&self) -> FxHashSet<String> {
+        // SDK process_component_class.js::isNeedGetRawObject returns false for
+        // the entire ComponentV2 context.
+        if ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return FxHashSet::default();
+        }
         let mut names = FxHashSet::default();
         for element in &self.statement.body.body {
             let StructElement::PropertyDefinition(property) = element else {
@@ -1428,6 +1608,7 @@ impl<'a> EntryRegistrationFactory<'a> {
             page_full_path,
             integrated_hsp: "false".to_string(),
             module_type: "followWithHap".to_string(),
+            form_entry: self.options.form_entry,
             options: EntryOptions::from_argument(argument),
         }
     }

@@ -212,6 +212,11 @@ pub struct PackInput {
     pub bundle_version_code: u64,
     /// Bundle version name (from `AppScope/app.json5` `versionName`).
     pub bundle_version_name: String,
+    /// Optional effective build version.
+    ///
+    /// Hvigor emits this as `summary.app.version.build` after `code` and
+    /// `name`, and omits it entirely when no buildVersion is configured.
+    pub bundle_build_version: Option<String>,
     /// Bundle type: `"app"` for HAP, `"shared"` for HSP.
     pub bundle_type: String,
     /// Path to `sourceMaps.map` produced by the bundler.
@@ -222,6 +227,11 @@ pub struct PackInput {
     /// ArkRuntime uses it to map esmodule entry paths onto records inside
     /// `ets/modules.abc`.
     pub pkg_context_info_path: Option<PathBuf>,
+    /// Path to `pkgSdkInfo.json` produced by GeneratePkgSdkInfo.
+    ///
+    /// Hvigor packages this at the HAP root when normalized OHM URLs are
+    /// disabled. It is mutually exclusive with `pkg_context_info_path`.
+    pub pkg_sdk_info_path: Option<PathBuf>,
     /// Abilities list for inclusion in `pack.info` under `modules[].abilities`.
     pub abilities: Vec<PackAbility>,
     /// Remote HSPs to embed inside this HAP (integrated HSP feature, API >= 11).
@@ -290,6 +300,9 @@ pub struct HarVariantInput {
     pub native_header_dirs: Vec<PathBuf>,
     pub preload_system_so_json: Option<PathBuf>,
     pub source_maps_path: Option<PathBuf>,
+    /// `HarBuildProfileTask` output. When supplied, this is the authoritative
+    /// generated profile and may contain target `buildProfileFields`.
+    pub build_profile_path: Option<PathBuf>,
     pub declaration_entries: Vec<String>,
     pub ignore_resource_patterns: Vec<String>,
     pub debug: bool,
@@ -420,15 +433,19 @@ impl Packager {
             }),
         );
 
+        let mut version = serde_json::Map::new();
+        version.insert("code".to_string(), input.bundle_version_code.into());
+        version.insert("name".to_string(), input.bundle_version_name.clone().into());
+        if let Some(build_version) = input.bundle_build_version.as_ref() {
+            version.insert("build".to_string(), build_version.clone().into());
+        }
+
         serde_json::json!({
             "summary": {
                 "app": {
                     "bundleName": self.config.product.bundle_name,
                     "bundleType": input.bundle_type,
-                    "version": {
-                        "code": input.bundle_version_code,
-                        "name": input.bundle_version_name
-                    }
+                    "version": serde_json::Value::Object(version)
                 },
                 "modules": [serde_json::Value::Object(module)]
             },
@@ -599,6 +616,17 @@ impl Packager {
         } else {
             None
         };
+        let pkg_sdk = if let Some(pkg_sdk_info_path) = &input.pkg_sdk_info_path {
+            if !pkg_sdk_info_path.exists() {
+                return Err(PackError::MissingInput(format!(
+                    "pkgSdkInfo.json ({})",
+                    pkg_sdk_info_path.display()
+                )));
+            }
+            Some(PackageToolJson::read(pkg_sdk_info_path)?.into_bytes())
+        } else {
+            None
+        };
 
         if let Some(syscap_path) = &input.syscap_path {
             if !syscap_path.is_file() {
@@ -728,6 +756,9 @@ impl Packager {
         // alongside the other input paths.
         if let Some(pkg_context) = pkg_context {
             zip_writer::add_bytes_stored(&mut writer, "pkgContextInfo.json", &pkg_context)?;
+        }
+        if let Some(pkg_sdk) = pkg_sdk {
+            zip_writer::add_bytes_stored(&mut writer, "pkgSdkInfo.json", &pkg_sdk)?;
         }
 
         writer.finish()?;
@@ -907,6 +938,7 @@ impl Packager {
                 native_header_dirs: Vec::new(),
                 preload_system_so_json: None,
                 source_maps_path: None,
+                build_profile_path: None,
                 declaration_entries: Vec::new(),
                 ignore_resource_patterns: Vec::new(),
                 debug: true,
@@ -986,10 +1018,14 @@ impl Packager {
         }
 
         entries.insert_bytes("oh-package.json5", manifest.serialize()?);
-        entries.insert_bytes(
-            "BuildProfile.ets",
-            manifest.build_profile(&self.config, &variant),
-        );
+        if let Some(build_profile_path) = variant.build_profile_path.as_ref() {
+            entries.insert_required("BuildProfile.ets", build_profile_path)?;
+        } else {
+            entries.insert_bytes(
+                "BuildProfile.ets",
+                manifest.build_profile(&self.config, &variant),
+            );
+        }
         // CacheNativeLibs creates this directory even when the HAR has no
         // native libraries. ohpm retains it in the package tarball.
         entries.ensure_directory("libs");

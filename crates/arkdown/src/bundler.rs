@@ -25,6 +25,7 @@ use oxc_ast::ast::Statement;
 use oxc_index::IndexVec;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use rayon::prelude::*;
 
 use arkdown_ets_transform::RolldownEtsTransformPlan;
 
@@ -599,6 +600,7 @@ impl<'a> HvigorNormalizedOhmUrl<'a> {
 
 #[derive(Debug, Clone, Default)]
 struct HvigorModuleTransformStore {
+    module_source_overrides: Arc<FxDashMap<String, Arc<str>>>,
     source_maps: Arc<FxDashMap<String, Arc<str>>>,
     javascript_module_ids: Arc<FxDashMap<String, ()>>,
     shared_module_ids: Arc<FxDashMap<String, ()>>,
@@ -608,10 +610,15 @@ impl HvigorModuleTransformStore {
     fn record(
         &self,
         module_id: String,
+        module_source_code: Option<Arc<str>>,
         source_map: Option<Arc<str>>,
         emits_javascript: bool,
         is_shared_module: bool,
     ) {
+        if let Some(module_source_code) = module_source_code {
+            self.module_source_overrides
+                .insert(module_id.clone(), module_source_code);
+        }
         if let Some(source_map) = source_map {
             self.source_maps.insert(module_id.clone(), source_map);
         }
@@ -624,6 +631,11 @@ impl HvigorModuleTransformStore {
     }
 
     fn finish(&self) -> HvigorModuleTransformSnapshot {
+        let mut module_source_overrides = FxHashMap::default();
+        for item in self.module_source_overrides.iter() {
+            module_source_overrides.insert(item.key().clone(), Arc::clone(item.value()));
+        }
+        self.module_source_overrides.clear();
         let mut source_maps = FxHashMap::default();
         for item in self.source_maps.iter() {
             source_maps.insert(item.key().clone(), Arc::clone(item.value()));
@@ -642,6 +654,7 @@ impl HvigorModuleTransformStore {
             .collect();
         self.shared_module_ids.clear();
         HvigorModuleTransformSnapshot {
+            module_source_overrides,
             source_maps,
             javascript_module_ids,
             shared_module_ids,
@@ -650,6 +663,7 @@ impl HvigorModuleTransformStore {
 }
 
 struct HvigorModuleTransformSnapshot {
+    module_source_overrides: FxHashMap<String, Arc<str>>,
     source_maps: FxHashMap<String, Arc<str>>,
     javascript_module_ids: FxHashSet<String>,
     shared_module_ids: FxHashSet<String>,
@@ -671,7 +685,7 @@ struct HvigorModuleSourceState {
 impl HvigorModuleSourceState {
     fn from_rolldown_scan(
         scan: ModuleSourceScanOutput,
-        transform: HvigorModuleTransformSnapshot,
+        mut transform: HvigorModuleTransformSnapshot,
     ) -> Self {
         let mut state = Self {
             source_maps: transform.source_maps,
@@ -682,11 +696,14 @@ impl HvigorModuleSourceState {
         for module in scan.modules {
             let module_id = module.id.to_string();
             state.record_module_id(module_id.clone());
+            let source = transform
+                .module_source_overrides
+                .remove(&module_id)
+                .map(|source| ArcStr::from(source.as_ref()))
+                .unwrap_or(module.source);
             state.sources.insert(
                 module_id.clone(),
-                HvigorCollectedModuleSource {
-                    code: module.source,
-                },
+                HvigorCollectedModuleSource { code: source },
             );
             state
                 .full_module_is_commonjs
@@ -962,6 +979,7 @@ impl Plugin for HvigorModuleTransformCollector {
             if let Some(metadata) = metadata {
                 store.record(
                     module_id,
+                    metadata.module_source_code,
                     metadata.source_map,
                     metadata.emits_javascript,
                     metadata.is_shared_module,
@@ -1048,6 +1066,11 @@ struct HvigorModuleSourceRecord {
     record_name: String,
 }
 
+struct HvigorModuleSourceWriteJob {
+    module_id: String,
+    path: PathBuf,
+}
+
 impl<'a> HvigorModuleSourceWriter<'a> {
     fn new(
         bundle_name: &'a str,
@@ -1103,47 +1126,52 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         module_ids.dedup();
 
         let module_records = self.module_source_record_index(&module_ids)?;
-        let mut files = Vec::with_capacity(module_ids.len());
-        let mut created_dirs = FxHashSet::<PathBuf>::default();
-        let mut active_paths = FxHashSet::<PathBuf>::default();
-        for module_id in &module_ids {
-            if let Some(file) =
-                self.write_module_source(module_id.as_str(), &module_records, &mut created_dirs)?
-            {
-                active_paths.insert(file.path.clone());
-                files.push(file);
+        let jobs = module_ids
+            .iter()
+            .filter_map(|module_id| {
+                self.module_source_write_job(module_id, &module_records)
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut destinations = FxHashMap::<PathBuf, String>::default();
+        for job in &jobs {
+            if let Some(existing) = destinations.insert(job.path.clone(), job.module_id.clone()) {
+                return Err(ArkdownError::Bundler(format!(
+                    "CompileArkTS module sources '{existing}' and '{}' resolve to the same output path {}",
+                    job.module_id,
+                    job.path.display()
+                )));
             }
         }
+        let files = jobs
+            .par_iter()
+            .map(|job| self.write_module_source(job, &module_records))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let active_paths = files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<FxHashSet<_>>();
         if had_output_dir {
             self.remove_stale_output_files(&active_paths)?;
         }
         Ok(files)
     }
 
-    fn write_module_source(
+    fn module_source_write_job(
         &self,
         module_id: &str,
         module_records: &HvigorModuleSourceRecordIndex,
-        created_dirs: &mut FxHashSet<PathBuf>,
-    ) -> Result<Option<HvigorModuleSourceFile>, ArkdownError> {
-        let Some(source) = self.state.sources.get(module_id) else {
+    ) -> Result<Option<HvigorModuleSourceWriteJob>, ArkdownError> {
+        if !self.state.sources.contains_key(module_id) {
             return Ok(None);
-        };
+        }
         let Some(module_record) = module_records.by_module_id.get(module_id) else {
             return Ok(None);
         };
         let ownership = &module_record.ownership;
-        let (imports, imported_record_names) =
-            self.imports_for_module(module_id, module_records)?;
-        let code = HvigorModuleSourceImportRewriter::new(
-            source.code.as_ref(),
-            self.state
-                .resolved_import_records
-                .get(module_id)
-                .map(Vec::as_slice),
-            &imports,
-        )
-        .rewrite();
         let emits_javascript = self.state.javascript_module_ids.contains(module_id);
         let path = HvigorModuleSourceOutputPath::new(
             &self.output_dir,
@@ -1155,24 +1183,52 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             emits_javascript,
         )
         .path()?;
-        if let Some(parent) = path.parent() {
-            let parent = parent.to_path_buf();
-            if created_dirs.insert(parent.clone()) {
-                fs_err::create_dir_all(&parent)
-                    .map_err(|e| ArkdownError::Bundler(e.to_string()))?;
-            }
+        Ok(Some(HvigorModuleSourceWriteJob {
+            module_id: module_id.to_string(),
+            path,
+        }))
+    }
+
+    fn write_module_source(
+        &self,
+        job: &HvigorModuleSourceWriteJob,
+        module_records: &HvigorModuleSourceRecordIndex,
+    ) -> Result<Option<HvigorModuleSourceFile>, ArkdownError> {
+        let module_id = job.module_id.as_str();
+        let Some(source) = self.state.sources.get(module_id) else {
+            return Ok(None);
+        };
+        let Some(module_record) = module_records.by_module_id.get(module_id) else {
+            return Ok(None);
+        };
+        let ownership = &module_record.ownership;
+        let (imports, imported_record_names) =
+            self.imports_for_module(module_id, module_records)?;
+        let code = HvigorModuleSourceImportRewriter::new(
+            source.code.as_ref(),
+            module_id,
+            self.state
+                .resolved_import_records
+                .get(module_id)
+                .map(Vec::as_slice),
+            &imports,
+        )
+        .rewrite();
+        let emits_javascript = self.state.javascript_module_ids.contains(module_id);
+        if let Some(parent) = job.path.parent() {
+            fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Bundler(e.to_string()))?;
         }
         let mut code = code.into_owned();
         if !code.ends_with('\n') {
             code.push('\n');
         }
-        self.write_file(&path, code.as_bytes())?;
+        self.write_file(&job.path, code.as_bytes())?;
         let origin_source_lang = HvigorModuleSourceId::new(module_id)
             .origin_source_lang()
             .to_string();
         Ok(Some(HvigorModuleSourceFile {
             module_id: module_id.to_string(),
-            path,
+            path: job.path.clone(),
             record_name: module_record.record_name.clone(),
             source_file: ownership.file_info_source_file(self.module_name, emits_javascript),
             package_name: Some(self.file_info_package_name(ownership)),
@@ -1432,6 +1488,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
 
 struct HvigorModuleSourceImportRewriter<'a> {
     source: &'a str,
+    module_id: &'a str,
     import_records: &'a [HvigorResolvedImportRecord],
     imports: &'a HvigorChunkImportMap,
 }
@@ -1439,11 +1496,13 @@ struct HvigorModuleSourceImportRewriter<'a> {
 impl<'a> HvigorModuleSourceImportRewriter<'a> {
     fn new(
         source: &'a str,
+        module_id: &'a str,
         import_records: Option<&'a [HvigorResolvedImportRecord]>,
         imports: &'a HvigorChunkImportMap,
     ) -> Self {
         Self {
             source,
+            module_id,
             import_records: import_records.unwrap_or(&[]),
             imports,
         }
@@ -1524,7 +1583,7 @@ impl<'a> HvigorModuleSourceImportRewriter<'a> {
     }
 
     fn collect_static_module_literal_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
-        HvigorStaticModuleSpecifiers::new(self.source, "")
+        HvigorStaticModuleSpecifiers::new(self.source, self.module_id)
             .collect_literals()
             .into_iter()
             .filter_map(|literal| {
@@ -1532,12 +1591,12 @@ impl<'a> HvigorModuleSourceImportRewriter<'a> {
                 if replacement == literal.specifier.as_str() {
                     return None;
                 }
-                let source_literal =
-                    HvigorModuleSourceLiteralScanner::new(self.source, Some(literal.source_span))
-                        .find(literal.specifier.as_str())?;
+                let start = literal.source_span.start as usize;
+                let end = literal.source_span.end as usize;
+                self.source.get(start..end)?;
                 Some(HvigorModuleSourceImportPatch {
-                    start: source_literal.start,
-                    end: source_literal.end,
+                    start,
+                    end,
                     replacement: replacement.clone(),
                 })
             })
@@ -1574,6 +1633,15 @@ impl<'a> HvigorStaticModuleSpecifiers<'a> {
         for statement in &parsed.program.body {
             match statement {
                 Statement::ImportDeclaration(import) => {
+                    literals.push(HvigorStaticModuleLiteral {
+                        specifier: import.source.value.to_string(),
+                        source_span: HvigorSourceSpan {
+                            start: import.source.span.start,
+                            end: import.source.span.end,
+                        },
+                    });
+                }
+                Statement::LazyImportDeclaration(import) => {
                     literals.push(HvigorStaticModuleLiteral {
                         specifier: import.source.value.to_string(),
                         source_span: HvigorSourceSpan {
@@ -3664,6 +3732,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
                         .to_string_lossy()
                         .into_owned(),
                 ],
+                form_entry_sources: Vec::new(),
                 runtime_entry_sources: vec![],
                 support_chunks: false,
                 source_map_packages: crate::plan::BundleSourceMapPackageInfo {
@@ -3768,6 +3837,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
                 module_path_map: vec![("phone".to_string(), phone_root)],
                 module_record_roots: Vec::new(),
                 entries: vec![package_entry_id.clone()],
+                form_entry_sources: Vec::new(),
                 runtime_entry_sources: vec![],
                 support_chunks: false,
                 source_map_packages: crate::plan::BundleSourceMapPackageInfo {
@@ -5722,6 +5792,69 @@ export { ASYNC_OR_SYNC_MODE, INNER_SCOPE, KEY_SCOPE };"#
     }
 
     #[test]
+    fn module_source_state_keeps_lazy_compile_arkts_override_after_rolldown_scan() {
+        let module_id = "/workspace/oh_modules/@scope/speech/FaceSpeech.ets";
+        let standard_source = r#"import textToSpeech from "@hms.ai.textToSpeech";
+textToSpeech.createEngine({});"#;
+        let lazy_source = r#"import lazy textToSpeech from "@hms.ai.textToSpeech";
+textToSpeech.createEngine({});"#;
+        let state = HvigorModuleSourceState::from_rolldown_scan(
+            rolldown::ModuleSourceScanOutput {
+                warnings: Vec::new(),
+                modules: vec![rolldown::ModuleSourceScanModule {
+                    id: module_id.into(),
+                    source: standard_source.into(),
+                    module_type: rolldown_common::ModuleType::Ts,
+                    exports_kind: rolldown_common::ExportsKind::Esm,
+                    imports: vec![rolldown::ModuleSourceScanImport {
+                        module_request: "@hms.ai.textToSpeech".to_string(),
+                        resolved_id: None,
+                        kind: rolldown_common::ImportKind::Import,
+                        importer_span: rolldown::ModuleSourceScanSpan { start: 0, end: 52 },
+                    }],
+                }],
+            },
+            HvigorModuleTransformSnapshot {
+                module_source_overrides: FxHashMap::from_iter([(
+                    module_id.to_string(),
+                    Arc::<str>::from(lazy_source),
+                )]),
+                source_maps: FxHashMap::default(),
+                javascript_module_ids: FxHashSet::default(),
+                shared_module_ids: FxHashSet::default(),
+            },
+        );
+
+        let stored_source = state.sources.get(module_id).expect("module source");
+        assert_eq!(stored_source.code.as_str(), lazy_source);
+        assert_eq!(
+            HvigorStaticModuleSpecifiers::new(stored_source.code.as_str(), module_id).collect(),
+            vec!["@hms.ai.textToSpeech".to_string()]
+        );
+
+        let imports = HvigorChunkImportMap::from_iter([(
+            "@hms.ai.textToSpeech".to_string(),
+            "@hms:ai.textToSpeech".to_string(),
+        )]);
+        let records = [HvigorResolvedImportRecord {
+            specifier: "@hms.ai.textToSpeech".to_string(),
+            source_span: HvigorSourceSpan::for_literal(standard_source, "@hms.ai.textToSpeech")
+                .expect("standard import literal"),
+        }];
+        let rewritten = HvigorModuleSourceImportRewriter::new(
+            stored_source.code.as_str(),
+            module_id,
+            Some(&records),
+            &imports,
+        )
+        .rewrite();
+        assert!(
+            rewritten.contains("import lazy textToSpeech from \"@hms:ai.textToSpeech\";"),
+            "the final CompileArkTS writer must normalize lazy SDK requests: {rewritten}"
+        );
+    }
+
+    #[test]
     fn module_source_state_consumes_rolldown_compact_scan_facts() {
         let importer = "/workspace/oh_modules/@example/passport/RSAEncryptionUtils.ets";
         let resolved = "/workspace/oh_modules/@ohos/hypium/index.js";
@@ -5777,6 +5910,7 @@ const dynamicHar = import("bytecode-har-dep");"#
                 ],
             },
             HvigorModuleTransformSnapshot {
+                module_source_overrides: FxHashMap::default(),
                 source_maps,
                 javascript_module_ids: FxHashSet::from_iter([importer.to_string()]),
                 shared_module_ids: FxHashSet::default(),

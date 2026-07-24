@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
@@ -38,6 +39,8 @@ pub struct RawAppJson5App {
     pub version_code: u64,
     #[serde(default)]
     pub version_name: String,
+    #[serde(default)]
+    pub build_version: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,10 +219,19 @@ pub struct RawSigningConfig {
 #[serde(rename_all = "camelCase")]
 pub struct RawProduct {
     pub name: String,
-    /// Kept for backward compatibility (old format had bundleName in product).
-    /// Real OHOS projects put bundleName in AppScope/app.json5 instead.
+    /// Product-level app profile override.
+    ///
+    /// Hvigor resolves `hvigorfile appOpt` → product → `AppScope/app.json5`.
     #[serde(default)]
     pub bundle_name: String,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub bundle_type: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
     #[serde(default)]
     pub compatible_sdk_version: String,
     #[serde(default)]
@@ -250,6 +262,12 @@ pub struct RawProduct {
     /// product.  Matches hvigor's product-level app override semantics.
     #[serde(default)]
     pub version_name: Option<String>,
+    /// Optional product-level `buildVersion`.
+    ///
+    /// Hvigor gives this precedence over `AppScope/app.json5`, while the
+    /// build invocation's extra config may override both.
+    #[serde(default)]
+    pub build_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,7 +573,11 @@ pub struct RawArkOptions {
     #[serde(default)]
     pub obfuscation: Option<RawObfuscation>,
     #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
     pub runtime_only: Option<RawRuntimeOnly>,
+    #[serde(default)]
+    pub build_profile_fields: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     pub support_chunks: Option<bool>,
     #[serde(default)]
@@ -572,6 +594,194 @@ pub struct RawArkOptions {
     pub host_pgo: Option<bool>,
 }
 
+pub(crate) struct BuildOptionDecoder<'a> {
+    raw: Option<&'a RawBuildOption>,
+    path_root: &'a Path,
+    profile_path: &'a Path,
+}
+
+impl<'a> BuildOptionDecoder<'a> {
+    pub(crate) fn new(
+        raw: Option<&'a RawBuildOption>,
+        path_root: &'a Path,
+        profile_path: &'a Path,
+    ) -> Self {
+        Self {
+            raw,
+            path_root,
+            profile_path,
+        }
+    }
+
+    pub(crate) fn decode(&self) -> Result<arkdown_core::BuildOption, ConfigError> {
+        let strict_mode = self
+            .raw
+            .and_then(|option| option.strict_mode.as_ref())
+            .map(|strict| arkdown_core::StrictModeConfig {
+                case_sensitive_check: strict.case_sensitive_check,
+                use_normalized_ohm_url: strict.use_normalized_ohm_url,
+            })
+            .unwrap_or(arkdown_core::StrictModeConfig {
+                case_sensitive_check: false,
+                use_normalized_ohm_url: false,
+            });
+        let raw_ark_options = self.raw.and_then(|option| option.ark_options.as_ref());
+        let ark_options = raw_ark_options.map(|options| arkdown_core::ArkOptions {
+            obfuscation: options
+                .obfuscation
+                .as_ref()
+                .map(|obfuscation| self.decode_obfuscation(obfuscation)),
+            types: options.types.clone(),
+            runtime_only: options.runtime_only.as_ref().map(|runtime_only| {
+                arkdown_core::RuntimeOnlyConfig {
+                    packages: runtime_only.packages.clone(),
+                    sources: runtime_only.sources.clone(),
+                    exclude_packages: runtime_only.exclude_packages.clone(),
+                }
+            }),
+            build_profile_fields: options.build_profile_fields.clone().unwrap_or_default(),
+            support_chunks: options.support_chunks.unwrap_or(false),
+            byte_code_har: options.byte_code_har.unwrap_or(false),
+            bundled_dependencies: options.bundled_dependencies.unwrap_or(false),
+            integrated_hsp: options.integrated_hsp,
+        });
+        let source_option = self
+            .raw
+            .and_then(|option| option.source_option.as_ref())
+            .map(|source| arkdown_core::SourceOption {
+                source_language: None,
+                workers: source
+                    .workers
+                    .iter()
+                    .map(|worker| self.resolve_path(Path::new(worker)))
+                    .collect(),
+            });
+        let har_artifact_type =
+            if raw_ark_options.and_then(|options| options.byte_code_har) == Some(true) {
+                arkdown_core::HarArtifactType::Bytecode
+            } else {
+                HarArtifactTypeParser::new(
+                    self.raw
+                        .and_then(|option| option.artifact_type.as_deref())
+                        .unwrap_or("original"),
+                    self.profile_path,
+                )
+                .parse()?
+            };
+        let mut native_build_option = resolve_product_native_build_option(self.raw);
+        native_build_option.normalize_module_paths(self.path_root);
+        let res_options =
+            self.raw
+                .and_then(|option| option.res_options.as_ref())
+                .map(|resources| arkdown_core::ResOptions {
+                    res_path: None,
+                    include_app_scope_res: resources.include_app_scope_res,
+                    resource_directories: resources
+                        .directories
+                        .iter()
+                        .map(|path| self.resolve_path(path))
+                        .collect(),
+                    compression: resources.compression.clone(),
+                    copy_code_resource: arkdown_core::CopyCodeResource {
+                        enable: resources.copy_code_resource.enable,
+                        excludes: resources.copy_code_resource.excludes.clone(),
+                        includes: resources.copy_code_resource.includes.clone(),
+                    },
+                    res_compile_threads: resources.res_compile_threads,
+                    ignore_resource_pattern: resources.ignore_resource_pattern.clone(),
+                    qualifiers_config: resources.qualifiers_config.clone(),
+                });
+        let preload_so = self
+            .raw
+            .map(|option| {
+                option
+                    .preload_so
+                    .iter()
+                    .map(|path| self.resolve_path(path))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ap_path = raw_ark_options
+            .and_then(|options| options.ap_path.as_ref())
+            .or_else(|| self.raw.and_then(|option| option.ap_path.as_ref()))
+            .map(|path| self.resolve_path(path));
+
+        Ok(arkdown_core::BuildOption {
+            strict_mode,
+            ark_options,
+            res_options,
+            source_option,
+            preload_system_so: self.raw.is_some_and(|option| option.preload_system_so),
+            preload_so,
+            deduplicate_har: self
+                .raw
+                .and_then(|option| option.pack_options.as_ref())
+                .is_some_and(|options| options.deduplicate_har),
+            remove_permissions: self
+                .raw
+                .map(|option| option.remove_permissions.clone())
+                .unwrap_or_default(),
+            aot_compile_mode: raw_ark_options
+                .and_then(|options| options.aot_compile_mode.clone())
+                .or_else(|| self.raw.and_then(|option| option.aot_compile_mode.clone())),
+            host_pgo: raw_ark_options.and_then(|options| options.host_pgo),
+            ap_path,
+            abi_filters: native_build_option.abi_filters,
+            external_native_options: native_build_option.external_native_options,
+            har_artifact_type,
+            native_lib: native_build_option.native_lib,
+        })
+    }
+
+    fn decode_obfuscation(&self, raw: &RawObfuscation) -> arkdown_core::ObfuscationConfig {
+        let resolve_paths = |paths: &[String]| {
+            paths
+                .iter()
+                .map(|path| self.resolve_path(Path::new(path)))
+                .collect()
+        };
+        let rule_files = raw
+            .rule_options
+            .as_ref()
+            .map(|options| {
+                if options.rules.is_empty() {
+                    options
+                        .files
+                        .as_ref()
+                        .map(|files| resolve_paths(files.as_slice()))
+                        .unwrap_or_default()
+                } else {
+                    resolve_paths(&options.rules)
+                }
+            })
+            .unwrap_or_default();
+        let consumer_rule_files = if raw.consumer_rules.is_empty() {
+            raw.consumer_files
+                .as_ref()
+                .map(|files| resolve_paths(files.as_slice()))
+                .unwrap_or_default()
+        } else {
+            resolve_paths(&raw.consumer_rules)
+        };
+        arkdown_core::ObfuscationConfig {
+            enable_obfuscation: raw
+                .rule_options
+                .as_ref()
+                .is_some_and(|options| options.enable),
+            rule_files,
+            consumer_rule_files,
+        }
+    }
+
+    fn resolve_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.path_root.join(path)
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RawRuntimeOnly {
@@ -579,6 +789,8 @@ pub struct RawRuntimeOnly {
     pub packages: Vec<String>,
     #[serde(default)]
     pub sources: Vec<String>,
+    #[serde(default)]
+    pub exclude_packages: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -735,6 +947,495 @@ pub struct EffectiveTargetConfig {
     pub build_mode_set: Vec<String>,
 }
 
+impl EffectiveTargetConfig {
+    fn from_raw(target: &RawTarget) -> Self {
+        Self {
+            name: target.name.clone(),
+            resource_directories: target
+                .resource
+                .as_ref()
+                .map(|resource| resource.directories.clone())
+                .unwrap_or_default(),
+            source_abilities: target
+                .source
+                .as_ref()
+                .map(|source| source.abilities.clone())
+                .unwrap_or_default(),
+            source_roots: target
+                .source
+                .as_ref()
+                .map(|source| source.source_roots.clone())
+                .unwrap_or_default(),
+            distribution_filter: target.config.as_ref().and_then(|config| {
+                config
+                    .distribution_filter
+                    .clone()
+                    .or_else(|| config.distro_filter.clone())
+            }),
+            build_mode_set: target
+                .build_mode_set
+                .iter()
+                .map(|mode| mode.name.clone())
+                .collect(),
+        }
+    }
+}
+
+/// Immutable project/module build-profile inventory loaded during build-session
+/// startup.
+///
+/// hvigor parses the project and module models once, then every stage consumes
+/// the same resolved model. Keeping both the typed project target model and the
+/// lossless JSON build-option model here prevents stage-local file reads and
+/// target-selection drift.
+#[derive(Debug)]
+pub struct BuildOptionProfileInventory {
+    project_root: PathBuf,
+    project_path: PathBuf,
+    project: BuildProfileValue,
+    raw_project: RawBuildProfile,
+    modules: BTreeMap<String, ModuleBuildProfileSnapshot>,
+}
+
+#[derive(Debug)]
+struct ModuleBuildProfileSnapshot {
+    root: PathBuf,
+    path: PathBuf,
+    profile: Option<BuildProfileValue>,
+}
+
+impl BuildOptionProfileInventory {
+    /// Load project and module build profiles exactly once.
+    pub fn load(
+        project_root: &Path,
+        modules: &[arkdown_core::ModuleConfig],
+    ) -> Result<Self, ConfigError> {
+        let project_path = project_root.join("build-profile.json5");
+        if !project_path.is_file() {
+            return Err(ConfigError::FileNotFound(project_path));
+        }
+        let project_content = fs_err::read_to_string(&project_path)?;
+        let project = BuildProfileValue::parse(&project_content, &project_path)?;
+        let raw_project = RawBuildProfile::parse(&project_content, &project_path)?;
+        let mut module_profiles = BTreeMap::new();
+        for module in modules {
+            let path = module.src_path.join("build-profile.json5");
+            let profile = if path.is_file() {
+                let content = fs_err::read_to_string(&path)?;
+                Some(BuildProfileValue::parse(&content, &path)?)
+            } else {
+                None
+            };
+            module_profiles.insert(
+                module.name.clone(),
+                ModuleBuildProfileSnapshot {
+                    root: module.src_path.clone(),
+                    path,
+                    profile,
+                },
+            );
+        }
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            project_path,
+            project,
+            raw_project,
+            modules: module_profiles,
+        })
+    }
+
+    /// Return all applicable module targets in declaration order.
+    pub fn applicable_targets(
+        &self,
+        module_name: &str,
+        product_name: &str,
+        build_mode_name: &str,
+    ) -> Vec<EffectiveTargetConfig> {
+        let Some(module) = self
+            .raw_project
+            .modules
+            .iter()
+            .find(|module| module.name == module_name)
+        else {
+            return Vec::new();
+        };
+        enumerate_applicable_raw_targets(&module.targets, product_name, build_mode_name)
+            .into_iter()
+            .map(EffectiveTargetConfig::from_raw)
+            .collect()
+    }
+
+    /// Select the effective target using hvigor's target precedence.
+    pub fn effective_target(
+        &self,
+        module_name: &str,
+        product_name: &str,
+        build_mode_name: &str,
+    ) -> Option<EffectiveTargetConfig> {
+        let module = self
+            .raw_project
+            .modules
+            .iter()
+            .find(|module| module.name == module_name)?;
+        pick_effective_raw_target(&module.targets, product_name, build_mode_name)
+            .map(EffectiveTargetConfig::from_raw)
+    }
+
+    fn module(&self, module_name: &str) -> Result<&ModuleBuildProfileSnapshot, ConfigError> {
+        self.modules
+            .get(module_name)
+            .ok_or_else(|| ConfigError::ValidationError {
+                file: self.project_path.clone(),
+                message: format!(
+                    "module '{module_name}' is missing from the build-profile inventory"
+                ),
+            })
+    }
+}
+
+/// Resolves the complete hvigor build option for one module target.
+///
+/// Upstream correspondence:
+/// - `BuildModeManager.initProjectBuildOptions`
+/// - `BuildModeManager.initModuleBuildOptionMap`
+/// - `BuildOptionCombiner.mergeBuildOption`
+pub struct EffectiveModuleBuildOptionResolver<'a> {
+    inventory: &'a BuildOptionProfileInventory,
+    module_name: &'a str,
+    product_name: &'a str,
+    build_mode_name: &'a str,
+    target_name: &'a str,
+    build_script_override: Option<serde_json::Value>,
+}
+
+impl<'a> EffectiveModuleBuildOptionResolver<'a> {
+    pub fn new(
+        inventory: &'a BuildOptionProfileInventory,
+        module_name: &'a str,
+        product_name: &'a str,
+        build_mode_name: &'a str,
+        target_name: &'a str,
+    ) -> Self {
+        Self {
+            inventory,
+            module_name,
+            product_name,
+            build_mode_name,
+            target_name,
+            build_script_override: None,
+        }
+    }
+
+    /// Apply statically extracted `hvigorfile.ts` overrides at hvigor's
+    /// highest-precedence layer.
+    pub fn with_build_script_override(mut self, override_value: serde_json::Value) -> Self {
+        self.build_script_override = Some(override_value);
+        self
+    }
+
+    pub fn resolve(&self) -> Result<arkdown_core::BuildOption, ConfigError> {
+        let module_snapshot = self.inventory.module(self.module_name)?;
+        let project = &self.inventory.project;
+        let module = module_snapshot.profile.as_ref();
+        let mut effective = BuildOptionValue::default();
+
+        effective.merge_layer(
+            project.project_build_mode_option(self.build_mode_name),
+            &self.inventory.project_root,
+        );
+        effective.merge_layer(
+            project.product_build_option(self.product_name),
+            &self.inventory.project_root,
+        );
+        if let Some(module) = module {
+            effective.merge_layer(module.module_build_option(), &module_snapshot.root);
+            if let Some(option_set) = module.selected_build_option(
+                self.build_mode_name,
+                self.target_name,
+                &module_snapshot.path,
+            )? {
+                effective.merge_layer(Some(&option_set), &module_snapshot.root);
+            }
+            effective.merge_layer(
+                module.target_build_option(self.target_name),
+                &module_snapshot.root,
+            );
+        }
+        effective.merge_layer(self.build_script_override.as_ref(), &module_snapshot.root);
+
+        let raw = effective.deserialize(&module_snapshot.path)?;
+        BuildOptionDecoder::new(Some(&raw), &module_snapshot.root, &module_snapshot.path).decode()
+    }
+}
+
+#[derive(Debug)]
+struct BuildProfileValue {
+    value: serde_json::Value,
+}
+
+impl BuildProfileValue {
+    fn parse(content: &str, path: &Path) -> Result<Self, ConfigError> {
+        let value = json5::from_str::<serde_json::Value>(content).map_err(|error| {
+            ConfigError::ParseError {
+                file: path.to_path_buf(),
+                message: error.to_string(),
+            }
+        })?;
+        Ok(Self { value })
+    }
+
+    fn project_build_mode_option(&self, build_mode_name: &str) -> Option<&serde_json::Value> {
+        self.value
+            .pointer("/app/buildModeSet")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some(build_mode_name)
+            })
+            .and_then(|entry| entry.get("buildOption"))
+    }
+
+    fn product_build_option(&self, product_name: &str) -> Option<&serde_json::Value> {
+        self.value
+            .pointer("/app/products")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some(product_name)
+            })
+            .and_then(|entry| entry.get("buildOption"))
+    }
+
+    fn module_build_option(&self) -> Option<&serde_json::Value> {
+        self.value.get("buildOption")
+    }
+
+    fn target_build_option(&self, target_name: &str) -> Option<&serde_json::Value> {
+        let target = self
+            .value
+            .get("targets")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some(target_name)
+            })?;
+        target
+            .pointer("/config/buildOption")
+            .or_else(|| target.get("buildOption"))
+    }
+
+    fn selected_build_option(
+        &self,
+        build_mode_name: &str,
+        target_name: &str,
+        file: &Path,
+    ) -> Result<Option<serde_json::Value>, ConfigError> {
+        let name = self.build_option_name(build_mode_name, target_name);
+        self.resolve_build_option_set(&name, file, &mut Vec::new())
+    }
+
+    fn build_option_name(&self, build_mode_name: &str, target_name: &str) -> String {
+        if let Some(binders) = self
+            .value
+            .get("buildModeBinder")
+            .and_then(serde_json::Value::as_array)
+        {
+            for binder in binders.iter().rev() {
+                if binder
+                    .get("buildModeName")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(build_mode_name)
+                {
+                    continue;
+                }
+                if let Some(mapping) = binder
+                    .get("mappings")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|mappings| {
+                        mappings.iter().rev().find(|mapping| {
+                            mapping
+                                .get("targetName")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(target_name)
+                        })
+                    })
+                {
+                    if let Some(name) = mapping
+                        .get("buildOptionName")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|name| !name.is_empty())
+                    {
+                        return name.to_string();
+                    }
+                }
+            }
+        }
+        match build_mode_name {
+            "debug" | "test" => "debug",
+            "release" => "release",
+            _ => "default",
+        }
+        .to_string()
+    }
+
+    fn resolve_build_option_set(
+        &self,
+        name: &str,
+        file: &Path,
+        stack: &mut Vec<String>,
+    ) -> Result<Option<serde_json::Value>, ConfigError> {
+        let Some(option) = self
+            .value
+            .get("buildOptionSet")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|options| {
+                options.iter().rev().find(|option| {
+                    option.get("name").and_then(serde_json::Value::as_str) == Some(name)
+                })
+            })
+        else {
+            return Ok(None);
+        };
+        if stack.iter().any(|visited| visited == name) {
+            return Err(ConfigError::ValidationError {
+                file: file.to_path_buf(),
+                message: format!(
+                    "circular buildOptionSet copyFrom chain: {} -> {name}",
+                    stack.join(" -> ")
+                ),
+            });
+        }
+        stack.push(name.to_string());
+        let parent =
+            if let Some(copy_from) = option.get("copyFrom").and_then(serde_json::Value::as_str) {
+                self.resolve_build_option_set(copy_from, file, stack)?
+            } else {
+                None
+            };
+        stack.pop();
+        let empty = serde_json::Value::Object(serde_json::Map::new());
+        Ok(Some(BuildOptionValue::merge_values(
+            parent.as_ref().unwrap_or(&empty),
+            option,
+            "",
+        )))
+    }
+}
+
+#[derive(Default)]
+struct BuildOptionValue {
+    value: serde_json::Value,
+}
+
+impl BuildOptionValue {
+    const MERGED_ARRAY_PATH: &'static str = "resOptions.compression.filters";
+
+    fn merge_layer(&mut self, layer: Option<&serde_json::Value>, path_root: &Path) {
+        let Some(layer) = layer else {
+            return;
+        };
+        let mut normalized = layer.clone();
+        Self::normalize_paths(&mut normalized, path_root);
+        self.value = Self::merge_values(&self.value, &normalized, "");
+    }
+
+    fn deserialize(&self, file: &Path) -> Result<RawBuildOption, ConfigError> {
+        serde_json::from_value(self.value.clone()).map_err(|error| ConfigError::ParseError {
+            file: file.to_path_buf(),
+            message: error.to_string(),
+        })
+    }
+
+    fn merge_values(
+        lower: &serde_json::Value,
+        higher: &serde_json::Value,
+        path: &str,
+    ) -> serde_json::Value {
+        match (lower, higher) {
+            (serde_json::Value::Object(lower), serde_json::Value::Object(higher)) => {
+                let mut merged = lower.clone();
+                for (key, higher_value) in higher {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    let value = merged.get(key).map_or_else(
+                        || higher_value.clone(),
+                        |lower_value| Self::merge_values(lower_value, higher_value, &child_path),
+                    );
+                    merged.insert(key.clone(), value);
+                }
+                serde_json::Value::Object(merged)
+            }
+            (serde_json::Value::Array(lower), serde_json::Value::Array(higher))
+                if path == Self::MERGED_ARRAY_PATH =>
+            {
+                serde_json::Value::Array(
+                    higher
+                        .iter()
+                        .cloned()
+                        .chain(lower.iter().cloned())
+                        .collect(),
+                )
+            }
+            _ => higher.clone(),
+        }
+    }
+
+    fn normalize_paths(value: &mut serde_json::Value, root: &Path) {
+        for pointer in [
+            "/apPath",
+            "/arkOptions/apPath",
+            "/externalNativeOptions/path",
+            "/preloadSo",
+            "/sourceOption/workers",
+            "/resOptions/directories",
+            "/nativeLib/headerPath",
+            "/arkOptions/obfuscation/ruleOptions/files",
+            "/arkOptions/obfuscation/ruleOptions/rules",
+            "/arkOptions/obfuscation/consumerFiles",
+            "/arkOptions/obfuscation/consumerRules",
+        ] {
+            if let Some(path_value) = value.pointer_mut(pointer) {
+                Self::normalize_path_value(path_value, root);
+            }
+        }
+        if let Some(filters) = value
+            .pointer_mut("/resOptions/compression/filters")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for filter in filters {
+                for pointer in ["/files/path", "/exclude/path"] {
+                    if let Some(path_value) = filter.pointer_mut(pointer) {
+                        Self::normalize_path_value(path_value, root);
+                    }
+                }
+            }
+        }
+    }
+
+    fn normalize_path_value(value: &mut serde_json::Value, root: &Path) {
+        match value {
+            serde_json::Value::String(path) => {
+                let candidate = Path::new(path);
+                if candidate.is_relative() {
+                    *path = root.join(candidate).to_string_lossy().into_owned();
+                }
+            }
+            serde_json::Value::Array(paths) => {
+                for path in paths {
+                    Self::normalize_path_value(path, root);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Select the effective target for `module_name` given the current
 /// `product_name` and `build_mode_name`.
 ///
@@ -759,34 +1460,7 @@ pub fn select_effective_target(
     let raw_module = profile.modules.iter().find(|m| m.name == module_name)?;
     let target = pick_effective_raw_target(&raw_module.targets, product_name, build_mode_name)?;
 
-    Some(EffectiveTargetConfig {
-        name: target.name.clone(),
-        resource_directories: target
-            .resource
-            .as_ref()
-            .map(|r| r.directories.clone())
-            .unwrap_or_default(),
-        source_abilities: target
-            .source
-            .as_ref()
-            .map(|s| s.abilities.to_vec())
-            .unwrap_or_default(),
-        source_roots: target
-            .source
-            .as_ref()
-            .map(|source| source.source_roots.clone())
-            .unwrap_or_default(),
-        distribution_filter: target.config.as_ref().and_then(|c| {
-            c.distribution_filter
-                .clone()
-                .or_else(|| c.distro_filter.clone())
-        }),
-        build_mode_set: target
-            .build_mode_set
-            .iter()
-            .map(|m| m.name.clone())
-            .collect(),
-    })
+    Some(EffectiveTargetConfig::from_raw(target))
 }
 
 /// Pick the first [`RawTarget`] matching the given product and build mode.
@@ -935,34 +1609,7 @@ pub fn enumerate_applicable_targets_for_module(
     };
     enumerate_applicable_raw_targets(&raw_module.targets, product_name, build_mode_name)
         .into_iter()
-        .map(|target| EffectiveTargetConfig {
-            name: target.name.clone(),
-            resource_directories: target
-                .resource
-                .as_ref()
-                .map(|r| r.directories.clone())
-                .unwrap_or_default(),
-            source_abilities: target
-                .source
-                .as_ref()
-                .map(|s| s.abilities.to_vec())
-                .unwrap_or_default(),
-            source_roots: target
-                .source
-                .as_ref()
-                .map(|source| source.source_roots.clone())
-                .unwrap_or_default(),
-            distribution_filter: target.config.as_ref().and_then(|c| {
-                c.distribution_filter
-                    .clone()
-                    .or_else(|| c.distro_filter.clone())
-            }),
-            build_mode_set: target
-                .build_mode_set
-                .iter()
-                .map(|m| m.name.clone())
-                .collect(),
-        })
+        .map(EffectiveTargetConfig::from_raw)
         .collect()
 }
 
@@ -1007,6 +1654,14 @@ pub struct EffectiveNativeBuildOption {
 }
 
 impl EffectiveNativeBuildOption {
+    pub fn from_build_option(build_option: &arkdown_core::BuildOption) -> Self {
+        Self {
+            abi_filters: build_option.abi_filters.clone(),
+            external_native_options: build_option.external_native_options.clone(),
+            native_lib: build_option.native_lib.clone(),
+        }
+    }
+
     fn normalize_module_paths(&mut self, module_root: &Path) {
         if let Some(path) = self
             .external_native_options
@@ -1868,12 +2523,18 @@ mod tests {
                             useNormalizedOHMUrl: true,
                         },
                         arkOptions: {
+                            types: ["./types/runtime"],
+                            buildProfileFields: {
+                                MTDEV: true,
+                                CHANNEL: "beta"
+                            },
                             obfuscation: {
                                 ruleOptions: { enable: false }
                             },
                             runtimeOnly: {
                                 packages: ["@ohos/dynamic-feature"],
-                                sources: ["src/main/ets/runtime"]
+                                sources: ["src/main/ets/runtime"],
+                                excludePackages: ["@ohos/remote-har"]
                             }
                         }
                     }
@@ -1899,6 +2560,17 @@ mod tests {
             .expect("runtimeOnly parsed");
         assert_eq!(runtime_only.packages, vec!["@ohos/dynamic-feature"]);
         assert_eq!(runtime_only.sources, vec!["src/main/ets/runtime"]);
+        assert_eq!(runtime_only.exclude_packages, vec!["@ohos/remote-har"]);
+        let ark_options = build_option.ark_options.as_ref().unwrap();
+        assert_eq!(ark_options.types, vec!["./types/runtime"]);
+        assert_eq!(
+            ark_options
+                .build_profile_fields
+                .as_ref()
+                .unwrap()
+                .get("MTDEV"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 
     #[test]
@@ -2608,6 +3280,7 @@ mod tests {
                         runtimeOS: "HarmonyOS",
                         versionCode: 2000000,
                         versionName: "2.0.0",
+                        buildVersion: "2026.07.23",
                     }
                 ],
                 signingConfigs: []
@@ -2620,6 +3293,7 @@ mod tests {
         let product = &raw.app.products[0];
         assert_eq!(product.version_code, Some(2000000));
         assert_eq!(product.version_name.as_deref(), Some("2.0.0"));
+        assert_eq!(product.build_version.as_deref(), Some("2026.07.23"));
     }
 
     /// Verify that when no product-level version override is present, the
@@ -2647,5 +3321,187 @@ mod tests {
         let product = &raw.app.products[0];
         assert_eq!(product.version_code, None);
         assert_eq!(product.version_name, None);
+        assert_eq!(product.build_version, None);
+    }
+
+    #[test]
+    fn effective_module_build_option_matches_hvigor_layer_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let module_root = project_root.join("entry");
+        fs_err::create_dir_all(&module_root).unwrap();
+        fs_err::write(
+            project_root.join("build-profile.json5"),
+            r#"{
+                app: {
+                    buildModeSet: [{
+                        name: "debug",
+                        buildOption: {
+                            preloadSystemSo: true,
+                            resOptions: {
+                                compression: {
+                                    filters: [{ files: { path: ["project-filter"] } }]
+                                }
+                            }
+                        }
+                    }],
+                    products: [{
+                        name: "default",
+                        buildOption: {
+                            strictMode: {
+                                caseSensitiveCheck: true,
+                                useNormalizedOHMUrl: false
+                            },
+                            arkOptions: {
+                                runtimeOnly: { packages: ["product-runtime"] },
+                                supportChunks: false
+                            },
+                            resOptions: {
+                                compression: {
+                                    filters: [{ files: { path: ["product-filter"] } }]
+                                }
+                            }
+                        }
+                    }]
+                },
+                modules: [{
+                    name: "entry",
+                    srcPath: "./entry",
+                    targets: [{ name: "phone", applyToProducts: ["default"] }]
+                }]
+            }"#,
+        )
+        .unwrap();
+        fs_err::write(
+            module_root.join("build-profile.json5"),
+            r#"{
+                buildOption: {
+                    preloadSystemSo: true,
+                    packOptions: { deduplicateHar: true },
+                    resOptions: {
+                        compression: {
+                            filters: [{ files: { path: ["module-filter"] } }]
+                        }
+                    }
+                },
+                buildOptionSet: [{
+                    name: "base",
+                    sourceOption: { workers: ["workers/base.ets"] },
+                    resOptions: {
+                        compression: {
+                            filters: [{ files: { path: ["base-filter"] } }]
+                        }
+                    }
+                }, {
+                    name: "phone-debug",
+                    copyFrom: "base",
+                    arkOptions: { supportChunks: true },
+                    resOptions: {
+                        compression: {
+                            filters: [{ files: { path: ["selected-filter"] } }]
+                        }
+                    }
+                }],
+                buildModeBinder: [{
+                    buildModeName: "debug",
+                    mappings: [{
+                        targetName: "phone",
+                        buildOptionName: "phone-debug"
+                    }]
+                }],
+                targets: [{
+                    name: "phone",
+                    config: {
+                        buildOption: {
+                            preloadSystemSo: false,
+                            strictMode: { caseSensitiveCheck: false },
+                            resOptions: {
+                                compression: {
+                                    filters: [{ files: { path: ["target-filter"] } }]
+                                }
+                            }
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let modules = vec![arkdown_core::ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root.clone(),
+            module_type: arkdown_core::OhosModuleType::Entry,
+        }];
+        let inventory = BuildOptionProfileInventory::load(project_root, &modules).unwrap();
+        let option = EffectiveModuleBuildOptionResolver::new(
+            &inventory, "entry", "default", "debug", "phone",
+        )
+        .resolve()
+        .unwrap();
+
+        assert!(!option.preload_system_so);
+        assert!(option.deduplicate_har);
+        assert!(!option.strict_mode.case_sensitive_check);
+        assert!(!option.strict_mode.use_normalized_ohm_url);
+        let ark_options = option.ark_options.unwrap();
+        assert!(ark_options.support_chunks);
+        assert_eq!(
+            ark_options.runtime_only.unwrap().packages,
+            ["product-runtime"]
+        );
+        assert_eq!(
+            option.source_option.unwrap().workers,
+            [module_root.join("workers/base.ets")]
+        );
+        let filters = option
+            .res_options
+            .unwrap()
+            .compression
+            .unwrap()
+            .get("filters")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap();
+        let paths = filters
+            .iter()
+            .map(|filter| filter["files"]["path"][0].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                module_root.join("target-filter"),
+                module_root.join("selected-filter"),
+                module_root.join("base-filter"),
+                module_root.join("module-filter"),
+                project_root.join("product-filter"),
+                project_root.join("project-filter"),
+            ]
+            .map(|path| path.to_string_lossy().into_owned())
+        );
+
+        let script_option = EffectiveModuleBuildOptionResolver::new(
+            &inventory, "entry", "default", "debug", "phone",
+        )
+        .with_build_script_override(serde_json::json!({
+            "preloadSystemSo": true,
+            "strictMode": { "caseSensitiveCheck": true },
+            "arkOptions": { "supportChunks": false }
+        }))
+        .resolve()
+        .unwrap();
+        assert!(script_option.preload_system_so);
+        assert!(script_option.strict_mode.case_sensitive_check);
+        assert!(!script_option.ark_options.as_ref().unwrap().support_chunks);
+        assert_eq!(
+            script_option
+                .ark_options
+                .as_ref()
+                .unwrap()
+                .runtime_only
+                .as_ref()
+                .unwrap()
+                .packages,
+            ["product-runtime"]
+        );
     }
 }

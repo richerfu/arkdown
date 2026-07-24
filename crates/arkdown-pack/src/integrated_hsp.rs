@@ -95,14 +95,20 @@ impl<'a> IntegratedHspCollector<'a> {
         &self,
         bundle_name: &str,
         version_code: u64,
+        build_version: Option<&str>,
         output_dir: &Path,
     ) -> Result<Vec<IntegratedHspEntry>, PackError> {
         let entries = self.collect()?;
         if entries.is_empty() {
             return Ok(Vec::new());
         }
-        let normalized_paths =
-            normalize_integrated_hsps(&entries, bundle_name, version_code, output_dir)?;
+        let normalized_paths = normalize_integrated_hsps(
+            &entries,
+            bundle_name,
+            version_code,
+            build_version,
+            output_dir,
+        )?;
         Ok(entries
             .into_iter()
             .zip(normalized_paths)
@@ -162,6 +168,7 @@ impl IntegratedHspEntry {
         &self,
         bundle_name: &str,
         version_code: u64,
+        build_version: Option<&str>,
         output_dir: &Path,
     ) -> Result<PathBuf, PackError> {
         // --- open source HSP ---
@@ -196,7 +203,8 @@ impl IntegratedHspEntry {
                 // Read, parse, patch, re-serialize.
                 let mut raw = Vec::new();
                 src_entry.read_to_end(&mut raw)?;
-                let patched = Self::patch_pack_info(&raw, bundle_name, version_code)?;
+                let patched =
+                    Self::patch_pack_info(&raw, bundle_name, version_code, build_version)?;
                 zip_writer::add_bytes_deflate(&mut writer, &name, &patched)?;
             } else {
                 let mut buf = Vec::new();
@@ -218,6 +226,7 @@ impl IntegratedHspEntry {
         raw: &[u8],
         bundle_name: &str,
         version_code: u64,
+        build_version: Option<&str>,
     ) -> Result<Vec<u8>, PackError> {
         let mut value: serde_json::Value =
             serde_json::from_slice(raw).map_err(|e| PackError::MalformedPackInfo(e.to_string()))?;
@@ -227,6 +236,9 @@ impl IntegratedHspEntry {
                 app["bundleName"] = serde_json::json!(bundle_name);
                 if let Some(version) = app.get_mut("version") {
                     version["code"] = serde_json::json!(version_code);
+                    if let Some(build_version) = build_version {
+                        version["build"] = serde_json::json!(build_version);
+                    }
                 }
             }
         }
@@ -273,11 +285,12 @@ pub fn normalize_integrated_hsps(
     entries: &[IntegratedHspEntry],
     bundle_name: &str,
     version_code: u64,
+    build_version: Option<&str>,
     output_dir: &Path,
 ) -> Result<Vec<PathBuf>, PackError> {
     let mut output_paths = Vec::with_capacity(entries.len());
     for entry in entries {
-        let out_path = entry.normalize(bundle_name, version_code, output_dir)?;
+        let out_path = entry.normalize(bundle_name, version_code, build_version, output_dir)?;
         output_paths.push(out_path);
     }
     Ok(output_paths)
@@ -336,7 +349,14 @@ mod tests {
         };
 
         let out_dir = tmp.path().join("integrated");
-        let paths = normalize_integrated_hsps(&[entry], "com.host.app", 2000000, &out_dir).unwrap();
+        let paths = normalize_integrated_hsps(
+            &[entry],
+            "com.host.app",
+            2000000,
+            Some("host-build"),
+            &out_dir,
+        )
+        .unwrap();
 
         assert_eq!(paths.len(), 1);
         let out_path = &paths[0];
@@ -359,6 +379,10 @@ mod tests {
         assert_eq!(
             v["summary"]["app"]["version"]["code"].as_u64().unwrap(),
             2000000
+        );
+        assert_eq!(
+            v["summary"]["app"]["version"]["build"].as_str(),
+            Some("host-build")
         );
         // bundleType must be preserved.
         assert_eq!(
@@ -385,7 +409,7 @@ mod tests {
         };
 
         let out_dir = tmp.path().join("out");
-        let paths = normalize_integrated_hsps(&[entry], "com.host", 9999, &out_dir).unwrap();
+        let paths = normalize_integrated_hsps(&[entry], "com.host", 9999, None, &out_dir).unwrap();
 
         let out_file = std::fs::File::open(&paths[0]).unwrap();
         let mut out_archive = zip::ZipArchive::new(out_file).unwrap();
@@ -419,7 +443,8 @@ mod tests {
             hsp_path,
         };
 
-        let result = normalize_integrated_hsps(&[entry], "com.host", 1, &tmp.path().join("out"));
+        let result =
+            normalize_integrated_hsps(&[entry], "com.host", 1, None, &tmp.path().join("out"));
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), PackError::MissingInput(ref s) if s == "pack.info"),
@@ -430,7 +455,7 @@ mod tests {
     #[test]
     fn test_normalize_empty_entries_returns_empty_vec() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = normalize_integrated_hsps(&[], "com.host", 1, tmp.path()).unwrap();
+        let paths = normalize_integrated_hsps(&[], "com.host", 1, None, tmp.path()).unwrap();
         assert!(paths.is_empty());
     }
 
