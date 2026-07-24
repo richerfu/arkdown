@@ -25,11 +25,17 @@ The Rust crates under `crates/` are internal implementations of the individual b
 
 ## Benchmark
 
-Measured on July 20, 2026. arkdown was invoked through its only supported entry point, the
+Measured on July 24, 2026. arkdown was invoked through its only supported entry point, the
 `packages/arkdown` Node.js API, with a release-mode native binding. hvigor was invoked through `hvigorw`
 with daemon mode disabled. Both tools ran their default Debug HAP build against the same source tree. Project
 `build` directories and tool-specific project caches were removed before every sample; cleanup time is not
-included.
+included. Installed dependencies and SDK toolchains were retained.
+
+Memory was sampled every 100 ms with
+[`measure-process-tree.mjs`](packages/arkdown/scripts/measure-process-tree.mjs). On macOS the sampler uses
+`proc_pid_rusage(RUSAGE_INFO_V4)` and recursively follows the launched process and all of its descendants.
+Peak process-tree values are the sum of all live descendants in the same sample, not the largest individual
+process reported by `/usr/bin/time`.
 
 ### Environment
 
@@ -41,7 +47,7 @@ included.
 | OS              | macOS 15.6.1, arm64                                   |
 | Node.js         | 22.21.1                                               |
 | OpenHarmony SDK | 6.1.0.31, API 23                                      |
-| arkdown         | 0.0.1-beta.0                                          |
+| arkdown         | 0.0.1-beta.1                                          |
 | hvigorw         | 6.21.1                                                |
 
 ### Anonymous project scale
@@ -57,15 +63,25 @@ Dependency directories, `build` outputs, `.hvigor`, and `.git` are excluded from
 
 ### Clean build comparison
 
-| Sample     | arkdown wall time | hvigor wall time | arkdown peak RSS | hvigor peak RSS |
-| ---------- | ----------------: | ---------------: | ---------------: | --------------: |
-| 1          |           89.60 s |        1465.45 s |         1.24 GiB |        1.86 GiB |
-| 2          |           78.84 s |         835.35 s |         1.27 GiB |        2.52 GiB |
-| 3          |           86.15 s |         895.28 s |         1.17 GiB |        2.66 GiB |
-| **Median** |       **86.15 s** |     **895.28 s** |     **1.24 GiB** |    **2.52 GiB** |
+| Sample     | arkdown wall time | hvigor wall time | arkdown process-tree RSS | hvigor process-tree RSS |
+| ---------- | ----------------: | ---------------: | -----------------------: | ----------------------: |
+| 1          |           49.25 s |         417.95 s |                 2.11 GiB |                5.30 GiB |
+| 2          |           47.99 s |         407.68 s |                 2.18 GiB |                4.87 GiB |
+| 3          |           52.47 s |         419.55 s |                 2.18 GiB |                5.63 GiB |
+| **Median** |       **49.25 s** |     **417.95 s** |             **2.18 GiB** |            **5.30 GiB** |
 
-At the median, hvigor took 10.39 times as long. arkdown reduced wall time by 90.38% and peak RSS by 50.91%
-for this project and environment.
+On macOS, physical footprint is the metric closest to the Memory column in Activity Monitor. It includes
+memory that RSS alone does not represent:
+
+| Sample     | arkdown process-tree footprint | hvigor process-tree footprint | hvigor main Node footprint |
+| ---------- | -----------------------------: | ----------------------------: | -------------------------: |
+| 1          |                       2.81 GiB |                      9.74 GiB |                   7.73 GiB |
+| 2          |                       2.91 GiB |                      9.55 GiB |                   7.69 GiB |
+| 3          |                       2.84 GiB |                      9.33 GiB |                   7.73 GiB |
+| **Median** |                   **2.84 GiB** |                  **9.55 GiB** |               **7.73 GiB** |
+
+At the median, hvigor took 8.49 times as long. arkdown reduced wall time by 88.22%, peak process-tree RSS
+by 58.89%, and peak process-tree physical footprint by 70.29% for this project and environment.
 
 Results are representative of this device and project scale; other SDK, hardware, and project
 configurations may differ.
