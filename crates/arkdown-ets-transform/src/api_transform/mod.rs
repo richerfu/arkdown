@@ -68,7 +68,10 @@ impl KitImportRewriter {
             .iter()
             .map(|statement| match statement {
                 Statement::ImportDeclaration(import) => {
-                    KitImportDeclarationRewriter::new(import, scoping).bindings()
+                    KitImportDeclarationRewriter::from_import(import, scoping).bindings()
+                }
+                Statement::LazyImportDeclaration(import) => {
+                    KitImportDeclarationRewriter::from_lazy_import(import, scoping).bindings()
                 }
                 _ => None,
             })
@@ -94,22 +97,44 @@ impl KitImportRewriter {
 }
 
 struct KitImportDeclarationRewriter<'a> {
-    import: &'a ImportDeclaration<'a>,
+    source: &'a oxc_ast::ast::StringLiteral<'a>,
+    specifiers: Option<&'a OxcVec<'a, ImportDeclarationSpecifier<'a>>>,
+    import_kind: ImportOrExportKind,
+    lazy: bool,
     scoping: &'a Scoping,
 }
 
 impl<'a> KitImportDeclarationRewriter<'a> {
-    fn new(import: &'a ImportDeclaration<'a>, scoping: &'a Scoping) -> Self {
-        Self { import, scoping }
+    fn from_import(import: &'a ImportDeclaration<'a>, scoping: &'a Scoping) -> Self {
+        Self {
+            source: &import.source,
+            specifiers: import.specifiers.as_ref(),
+            import_kind: import.import_kind,
+            lazy: false,
+            scoping,
+        }
+    }
+
+    fn from_lazy_import(
+        import: &'a oxc_ast::ast::LazyImportDeclaration<'a>,
+        scoping: &'a Scoping,
+    ) -> Self {
+        Self {
+            source: &import.source,
+            specifiers: import.specifiers.as_ref(),
+            import_kind: ImportOrExportKind::Value,
+            lazy: true,
+            scoping,
+        }
     }
 
     fn bindings(&self) -> Option<Vec<KitImportBinding>> {
-        let kit_specifier = self.import.source.value.as_str();
+        let kit_specifier = self.source.value.as_str();
         if !crate::kit_map::is_kit_specifier(kit_specifier) {
             return None;
         }
 
-        let specifiers = self.import.specifiers.as_ref()?;
+        let specifiers = self.specifiers?;
         let mut imports = Vec::new();
 
         for specifier in specifiers {
@@ -124,7 +149,7 @@ impl<'a> KitImportDeclarationRewriter<'a> {
                 continue;
             };
 
-            let import_kind = if self.import.import_kind.is_type()
+            let import_kind = if self.import_kind.is_type()
                 || specifier.import_kind.is_type()
                 || specifier.local.symbol_id.get().is_some_and(|symbol_id| {
                     !self
@@ -140,6 +165,7 @@ impl<'a> KitImportDeclarationRewriter<'a> {
                 local_name: local_name.to_owned(),
                 module: HvigorEsmoduleModuleSpecifier::new(kit_entry.module()).to_import_request(),
                 import_kind,
+                lazy: self.lazy,
                 binding: kit_entry,
             });
         }
@@ -175,6 +201,7 @@ struct KitImportBinding {
     local_name: String,
     module: String,
     import_kind: ImportOrExportKind,
+    lazy: bool,
     /// Whether to emit a default or named specifier.
     binding: KitEntry,
 }
@@ -226,14 +253,23 @@ impl KitImportEmitter {
                 ))
             }
         };
-        Statement::from(ast.module_declaration_import_declaration(
-            SPAN,
-            Some(ast.vec1(specifier)),
-            ast.string_literal(SPAN, module, None),
-            None,
-            NONE,
-            import.import_kind,
-        ))
+        if import.lazy {
+            Statement::from(ast.module_declaration_lazy_import_declaration(
+                SPAN,
+                Some(ast.vec1(specifier)),
+                ast.string_literal(SPAN, module, None),
+                NONE,
+            ))
+        } else {
+            Statement::from(ast.module_declaration_import_declaration(
+                SPAN,
+                Some(ast.vec1(specifier)),
+                ast.string_literal(SPAN, module, None),
+                None,
+                NONE,
+                import.import_kind,
+            ))
+        }
     }
 }
 
@@ -298,6 +334,18 @@ const value = new Want();"#;
             out.contains("import Want from \"@ohos.app.ability.Want\""),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn test_rewrite_lazy_kit_import_preserves_lazy_modifier() {
+        let src = r#"import lazy { textToSpeech } from "@kit.CoreSpeechKit";
+textToSpeech.createEngine({});"#;
+        let out = rewrite_source(src);
+        assert!(
+            out.contains("import lazy textToSpeech from \"@hms.ai.textToSpeech\""),
+            "hvigor processKitImport keeps the explicit lazy modifier: {out}"
+        );
+        assert!(!out.contains("@kit.CoreSpeechKit"), "got: {out}");
     }
 
     #[test]

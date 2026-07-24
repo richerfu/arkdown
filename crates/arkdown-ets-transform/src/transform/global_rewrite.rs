@@ -1,5 +1,7 @@
 use oxc_allocator::{Allocator, CloneIn};
-use oxc_ast::ast::{CallExpression, ClassElement, Expression, MemberExpression, MethodDefinition};
+use oxc_ast::ast::{
+    CallExpression, ClassElement, Expression, MemberExpression, MethodDefinition, Program,
+};
 use oxc_ast::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_syntax::scope::ScopeFlags;
@@ -21,6 +23,12 @@ impl<'a> GlobalContextCallRewriter<'a> {
         let changed = self.rewrite_owned_expression(&mut expression);
         debug_assert!(changed);
         Some(expression)
+    }
+
+    pub(crate) fn program(&self, program: &mut Program<'a>) -> bool {
+        let mut rewrite = GlobalContextCallMutator::new(self.allocator);
+        rewrite.visit_program(program);
+        rewrite.changed
     }
 
     pub(crate) fn owned_expression(&self, mut expression: Expression<'a>) -> Expression<'a> {
@@ -57,6 +65,11 @@ impl GlobalContextCallDetector {
         self.visit_expression(expression);
         self.found
     }
+
+    fn contains_program<'a>(mut self, program: &Program<'a>) -> bool {
+        self.visit_program(program);
+        self.found
+    }
 }
 
 impl<'a> Visit<'a> for GlobalContextCallDetector {
@@ -87,8 +100,8 @@ impl<'a> GlobalContextCallMutator<'a> {
         }
     }
 
-    fn context_member_expression(&self) -> Expression<'a> {
-        GlobalContextCallRewrite::new().callee_expression(self.allocator)
+    fn context_member_expression(&self, callee_name: &str) -> Expression<'a> {
+        GlobalContextCallRewrite::new().callee_expression(self.allocator, callee_name)
     }
 }
 
@@ -96,7 +109,8 @@ impl<'a> VisitMut<'a> for GlobalContextCallMutator<'a> {
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
         if let Expression::Identifier(callee) = &call.callee {
             if GlobalContextCallRewrite::new().is_target_callee(callee.name.as_str()) {
-                call.callee = self.context_member_expression();
+                let callee_name = callee.name.to_string();
+                call.callee = self.context_member_expression(&callee_name);
                 self.changed = true;
             }
         }
@@ -108,6 +122,7 @@ pub(crate) struct GlobalContextCallRewrite;
 
 impl GlobalContextCallRewrite {
     const ANIMATE_TO: &'static str = "animateTo";
+    const ANIMATE_TO_IMMEDIATELY: &'static str = "animateToImmediately";
     const CONTEXT: &'static str = "Context";
 
     pub(crate) fn new() -> Self {
@@ -115,13 +130,22 @@ impl GlobalContextCallRewrite {
     }
 
     pub(crate) fn is_target_callee(&self, name: &str) -> bool {
-        name == Self::ANIMATE_TO
+        matches!(name, Self::ANIMATE_TO | Self::ANIMATE_TO_IMMEDIATELY)
     }
 
-    pub(crate) fn callee_expression<'a>(&self, allocator: &'a Allocator) -> Expression<'a> {
+    pub(crate) fn program_needs_rewrite(&self, program: &Program<'_>) -> bool {
+        GlobalContextCallDetector::new().contains_program(program)
+    }
+
+    pub(crate) fn callee_expression<'a>(
+        &self,
+        allocator: &'a Allocator,
+        callee_name: &str,
+    ) -> Expression<'a> {
+        debug_assert!(self.is_target_callee(callee_name));
         let ast = AstBuilder::new(allocator);
         let object = ast.expression_identifier(oxc_span::SPAN, Self::CONTEXT);
-        let property = ast.identifier_name(oxc_span::SPAN, Self::ANIMATE_TO);
+        let property = ast.identifier_name(oxc_span::SPAN, ast.str(callee_name));
         Self::member_to_expression(ast.member_expression_static(
             oxc_span::SPAN,
             object,

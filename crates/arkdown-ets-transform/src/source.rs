@@ -76,6 +76,7 @@ pub struct TransformSourceSnapshot {
     runtime_source_paths: Arc<FxHashSet<PathBuf>>,
     package_roots: Arc<FxHashMap<String, PathBuf>>,
     resolved_static_modules: Arc<Vec<TransformResolvedStaticModuleScope>>,
+    sdk_declaration_roots: Arc<Vec<PathBuf>>,
 }
 
 impl TransformSourceSnapshot {
@@ -113,7 +114,22 @@ impl TransformSourceSnapshot {
             runtime_source_paths: Arc::new(runtime_source_paths),
             package_roots: Arc::new(package_roots),
             resolved_static_modules: Arc::new(resolved_static_modules),
+            sdk_declaration_roots: Arc::default(),
         }
+    }
+
+    /// Attach the ordered SDK declaration roots inventoried by the build
+    /// coordinator. The source text for these roots must already be present in
+    /// this snapshot, keeping transform hooks free of filesystem reads.
+    pub fn with_sdk_declaration_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        let mut seen = FxHashSet::default();
+        let roots = roots
+            .into_iter()
+            .map(|root| canonicalize_or_owned(&lexical_normalize(&root)))
+            .filter(|root| seen.insert(root.clone()))
+            .collect();
+        self.sdk_declaration_roots = Arc::new(roots);
+        self
     }
 
     pub(crate) fn resolve_relative_with_declarations(
@@ -140,6 +156,7 @@ impl TransformSourceSnapshot {
             return Some(resolved);
         }
         self.resolve_package_specifier(specifier, SourceSnapshotCandidateMode::Declarations)
+            .or_else(|| self.resolve_sdk_declaration(specifier))
     }
 
     pub(crate) fn resolve_module_entry(&self, root: &Path) -> Option<TransformSourceFile> {
@@ -242,6 +259,24 @@ impl TransformSourceSnapshot {
                     .get(specifier)
                     .and_then(|path| self.source_file(path.clone()))
             })
+    }
+
+    fn resolve_sdk_declaration(&self, specifier: &str) -> Option<TransformSourceFile> {
+        let specifier = ModuleSpecifierText::new(specifier);
+        let filenames = specifier
+            .sdk_api_filenames()
+            .into_iter()
+            .chain(specifier.sdk_kit_filenames())
+            .chain(specifier.sdk_arkts_filenames())
+            .chain(specifier.sdk_runtime_declaration_filenames());
+        for filename in filenames {
+            for root in self.sdk_declaration_roots.iter() {
+                if let Some(source) = self.source_file(root.join(&filename)) {
+                    return Some(source);
+                }
+            }
+        }
+        None
     }
 
     fn source_file(&self, path: PathBuf) -> Option<TransformSourceFile> {
@@ -630,5 +665,34 @@ mod tests {
             )
             .expect("alias importer should resolve declaration stored by canonical path");
         assert_eq!(resolved.path, declaration_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn snapshot_resolves_source_and_runtime_sdk_specifiers_from_inventoried_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let api_root = tmp.path().join("ets/api");
+        std::fs::create_dir_all(&api_root).unwrap();
+        let declaration = api_root.join("@ohos.multimedia.media.d.ts");
+        std::fs::write(
+            &declaration,
+            "declare namespace media {}\nexport default media;",
+        )
+        .unwrap();
+
+        let mut files = FxHashMap::default();
+        files.insert(
+            declaration.clone(),
+            Arc::<str>::from("declare namespace media {}\nexport default media;"),
+        );
+        let sources =
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![api_root]);
+        let importer = tmp.path().join("entry/src/main/ets/Index.ets");
+
+        for specifier in ["@ohos.multimedia.media", "@ohos:multimedia.media"] {
+            let resolved = sources
+                .resolve_static_with_declarations(&importer, specifier)
+                .unwrap_or_else(|| panic!("SDK declaration must resolve for {specifier}"));
+            assert_eq!(resolved.path, declaration.canonicalize().unwrap());
+        }
     }
 }

@@ -1,14 +1,11 @@
 use std::path::Path;
 
 use arkdown_core::{
-    ArkOptions, ArkdownConfig, BuildMode, BuildOption, HarArtifactType, ModuleConfig,
-    ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig, RuntimeOnlyConfig,
-    SigningConfig, StrictModeConfig,
+    AppOptionOverride, ArkdownConfig, BuildMode, ModuleConfig, OhosModuleType, OutputTarget,
+    ProductConfig, SigningConfig,
 };
 
-use crate::build_profile::{
-    parse_api_version, resolve_product_native_build_option, RawAppJson5, RawBuildProfile,
-};
+use crate::build_profile::{parse_api_version, BuildOptionDecoder, RawAppJson5, RawBuildProfile};
 use crate::error::ConfigError;
 use crate::module_json::RawModuleJson;
 use crate::sdk::{discover_sdk_with_selection, SdkSelection};
@@ -68,12 +65,15 @@ pub fn load_config(
     };
 
     // -----------------------------------------------------------------------
-    // 4. Bundle name: AppScope/app.json5 takes priority over product.bundle_name
+    // 4. Bundle name: product takes priority over AppScope/app.json5.
+    //
+    // Upstream: AbstractMergeProfile constructor resolves
+    // hvigorfile appOpt.bundleName → product.bundleName → app.json5.
     // -----------------------------------------------------------------------
-    let bundle_name = if !app_json5.app.bundle_name.is_empty() {
-        app_json5.app.bundle_name
-    } else {
+    let bundle_name = if !raw_product.bundle_name.is_empty() {
         raw_product.bundle_name.clone()
+    } else {
+        app_json5.app.bundle_name
     };
 
     // -----------------------------------------------------------------------
@@ -120,213 +120,12 @@ pub fn load_config(
                 })
         });
 
-    let strict_mode = raw_product
-        .build_option
-        .as_ref()
-        .and_then(|bo| bo.strict_mode.as_ref())
-        .map(|sm| StrictModeConfig {
-            case_sensitive_check: sm.case_sensitive_check,
-            use_normalized_ohm_url: sm.use_normalized_ohm_url,
-        })
-        .unwrap_or(StrictModeConfig {
-            case_sensitive_check: false,
-            use_normalized_ohm_url: false,
-        });
-
-    let raw_build_option = raw_product.build_option.as_ref();
-    let raw_ark_options = raw_build_option.and_then(|bo| bo.ark_options.as_ref());
-
-    let ark_options = raw_ark_options.map(|ao| {
-        let obfuscation = ao.obfuscation.as_ref().map(|o| {
-            let enable = o.rule_options.as_ref().map(|r| r.enable).unwrap_or(false);
-            let resolve_paths = |paths: &[String]| -> Vec<std::path::PathBuf> {
-                paths
-                    .iter()
-                    .map(|p| {
-                        let p = std::path::Path::new(p);
-                        if p.is_absolute() {
-                            p.to_path_buf()
-                        } else {
-                            root.join(p)
-                        }
-                    })
-                    .collect()
-            };
-            let rule_files = o
-                .rule_options
-                .as_ref()
-                .map(|r| {
-                    if r.rules.is_empty() {
-                        r.files
-                            .as_ref()
-                            .map(|files| resolve_paths(files.as_slice()))
-                            .unwrap_or_default()
-                    } else {
-                        resolve_paths(&r.rules)
-                    }
-                })
-                .unwrap_or_default();
-            let consumer_rule_files = if o.consumer_rules.is_empty() {
-                o.consumer_files
-                    .as_ref()
-                    .map(|files| resolve_paths(files.as_slice()))
-                    .unwrap_or_default()
-            } else {
-                resolve_paths(&o.consumer_rules)
-            };
-            ObfuscationConfig {
-                enable_obfuscation: enable,
-                rule_files,
-                consumer_rule_files,
-            }
-        });
-        let runtime_only = ao
-            .runtime_only
-            .as_ref()
-            .map(|runtime_only| RuntimeOnlyConfig {
-                packages: runtime_only.packages.clone(),
-                sources: runtime_only.sources.clone(),
-            });
-        ArkOptions {
-            obfuscation,
-            types: Vec::new(),
-            runtime_only,
-            support_chunks: ao.support_chunks.unwrap_or(false),
-            byte_code_har: ao.byte_code_har.unwrap_or(false),
-            bundled_dependencies: ao.bundled_dependencies.unwrap_or(false),
-            integrated_hsp: ao.integrated_hsp,
-        }
-    });
-
-    let preload_so = raw_build_option
-        .map(|bo| bo.preload_so.clone())
-        .unwrap_or_default();
-
-    let preload_system_so = raw_build_option
-        .map(|bo| bo.preload_system_so)
-        .unwrap_or(false);
-    let deduplicate_har = raw_build_option
-        .and_then(|bo| bo.pack_options.as_ref())
-        .is_some_and(|options| options.deduplicate_har);
-
-    let remove_permissions = raw_build_option
-        .map(|bo| bo.remove_permissions.clone())
-        .unwrap_or_default();
-
-    let aot_compile_mode = raw_ark_options
-        .and_then(|ao| ao.aot_compile_mode.clone())
-        .or_else(|| raw_build_option.and_then(|bo| bo.aot_compile_mode.clone()));
-
-    let host_pgo = raw_ark_options.and_then(|ao| ao.host_pgo);
-
-    let ap_path = raw_ark_options
-        .and_then(|ao| ao.ap_path.clone())
-        .or_else(|| raw_build_option.and_then(|bo| bo.ap_path.as_ref()).cloned());
-
-    let source_option = raw_product
-        .build_option
-        .as_ref()
-        .and_then(|bo| bo.source_option.as_ref())
-        .map(|so| {
-            let workers = so
-                .workers
-                .iter()
-                .map(|w| {
-                    let p = std::path::Path::new(w);
-                    if p.is_absolute() {
-                        p.to_path_buf()
-                    } else {
-                        root.join(p)
-                    }
-                })
-                .collect();
-            arkdown_core::SourceOption {
-                source_language: None,
-                workers,
-            }
-        });
-
-    let har_artifact_type = if raw_ark_options.and_then(|options| options.byte_code_har)
-        == Some(true)
-    {
-        HarArtifactType::Bytecode
-    } else {
-        match raw_build_option.and_then(|option| option.artifact_type.as_deref()) {
-                None | Some("original") => HarArtifactType::Original,
-                Some("obfuscation") => HarArtifactType::Obfuscation,
-                Some("bytecode") => HarArtifactType::Bytecode,
-                Some(value) => {
-                    return Err(ConfigError::ValidationError {
-                        file: root.join("build-profile.json5"),
-                        message: format!(
-                            "unsupported buildOption.artifactType '{value}'; expected original, obfuscation, or bytecode"
-                        ),
-                    })
-                }
-            }
-    };
-
-    let mut native_build_option =
-        resolve_product_native_build_option(raw_product.build_option.as_ref());
-    for path in &mut native_build_option.native_lib.header_paths {
-        if path.is_relative() {
-            *path = root.join(&*path);
-        }
-    }
-
-    let build_option = BuildOption {
-        strict_mode,
-        ark_options,
-        res_options: raw_product
-            .build_option
-            .as_ref()
-            .and_then(|bo| bo.res_options.as_ref())
-            .map(|ro| arkdown_core::ResOptions {
-                res_path: None,
-                include_app_scope_res: ro.include_app_scope_res,
-                resource_directories: ro
-                    .directories
-                    .iter()
-                    .map(|p| {
-                        if p.is_absolute() {
-                            p.clone()
-                        } else {
-                            root.join(p)
-                        }
-                    })
-                    .collect(),
-                compression: ro.compression.clone(),
-                copy_code_resource: arkdown_core::CopyCodeResource {
-                    enable: ro.copy_code_resource.enable,
-                    excludes: ro.copy_code_resource.excludes.clone(),
-                    includes: ro.copy_code_resource.includes.clone(),
-                },
-                res_compile_threads: ro.res_compile_threads,
-                ignore_resource_pattern: ro.ignore_resource_pattern.clone(),
-                qualifiers_config: ro.qualifiers_config.clone(),
-            }),
-        source_option,
-        preload_system_so,
-        preload_so,
-        deduplicate_har,
-        remove_permissions,
-        aot_compile_mode,
-        host_pgo,
-        ap_path,
-        abi_filters: native_build_option.abi_filters,
-        external_native_options: native_build_option
-            .external_native_options
-            .map(|mut options| {
-                if let Some(path) = options.path.as_mut() {
-                    if path.is_relative() {
-                        *path = root.join(&*path);
-                    }
-                }
-                options
-            }),
-        har_artifact_type,
-        native_lib: native_build_option.native_lib,
-    };
+    let build_option = BuildOptionDecoder::new(
+        raw_product.build_option.as_ref(),
+        root,
+        &root.join("build-profile.json5"),
+    )
+    .decode()?;
 
     let product = ProductConfig {
         name: raw_product.name,
@@ -339,6 +138,13 @@ pub fn load_config(
         build_option,
         version_code: raw_product.version_code,
         version_name: raw_product.version_name,
+        build_version: raw_product.build_version,
+        app_options: AppOptionOverride {
+            vendor: raw_product.vendor,
+            bundle_type: raw_product.bundle_type,
+            icon: raw_product.icon,
+            label: raw_product.label,
+        },
     };
 
     // -----------------------------------------------------------------------

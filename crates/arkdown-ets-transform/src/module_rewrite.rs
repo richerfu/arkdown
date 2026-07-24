@@ -8,15 +8,15 @@ use oxc_allocator::{Allocator, Vec as OxcVec};
 use oxc_ast::{
     ast::{
         BindingPattern, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
-        ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind,
-        Program, Statement, StringLiteral,
+        ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier, Program, Statement,
+        StringLiteral,
     },
-    AstBuilder, NONE,
+    AstBuilder,
 };
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::SourceType;
 use oxc_syntax::symbol::SymbolId;
 
 use crate::module_emit::{
@@ -132,155 +132,6 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
         }
         program.body = body;
         changed
-    }
-}
-
-pub(super) struct DefaultImportReexportRewriter;
-
-impl DefaultImportReexportRewriter {
-    pub(super) fn new() -> Self {
-        Self
-    }
-
-    pub(crate) fn rewrite_program<'ast>(
-        &self,
-        allocator: &'ast Allocator,
-        program: &mut Program<'ast>,
-        scoping: &Scoping,
-    ) -> bool {
-        let Some(plan) = DefaultImportReexportAnalyzer::new(program, scoping).analyze() else {
-            return false;
-        };
-
-        let ast = AstBuilder::new(allocator);
-        let mut body = OxcVec::new_in(&allocator);
-        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(&allocator));
-        for (statement_index, statement) in old_body.into_iter().enumerate() {
-            if statement_index == plan.import_statement_index {
-                continue;
-            }
-            if statement_index == plan.export_statement_index {
-                body.push(plan.export_statement(ast));
-            } else {
-                body.push(statement);
-            }
-        }
-        program.body = body;
-        true
-    }
-}
-
-struct DefaultImportReexportAnalyzer<'a, 'b> {
-    program: &'a Program<'a>,
-    scoping: &'b oxc_semantic::Scoping,
-}
-
-impl<'a, 'b> DefaultImportReexportAnalyzer<'a, 'b> {
-    fn new(program: &'a Program<'a>, scoping: &'b oxc_semantic::Scoping) -> Self {
-        Self { program, scoping }
-    }
-
-    fn analyze(&self) -> Option<DefaultImportReexportPlan> {
-        let default_imports = self.collect_default_imports();
-        for (statement_index, statement) in self.program.body.iter().enumerate() {
-            let Some(local_name) = Self::default_export_local_name(statement) else {
-                continue;
-            };
-            let import = default_imports.get(&local_name)?;
-            if self.has_only_default_export_reference(import.symbol_id) {
-                return Some(DefaultImportReexportPlan {
-                    import_statement_index: import.statement_index,
-                    export_statement_index: statement_index,
-                    source: import.source.clone(),
-                });
-            }
-        }
-        None
-    }
-
-    fn collect_default_imports(&self) -> FxHashMap<String, DefaultImportCandidate> {
-        let mut imports = FxHashMap::default();
-        for (statement_index, statement) in self.program.body.iter().enumerate() {
-            let Statement::ImportDeclaration(import) = statement else {
-                continue;
-            };
-            let Some(candidate) = DefaultImportCandidate::from_import(statement_index, import)
-            else {
-                continue;
-            };
-            imports.insert(candidate.local_name.clone(), candidate);
-        }
-        imports
-    }
-
-    fn default_export_local_name(statement: &Statement<'_>) -> Option<String> {
-        let Statement::ExportDefaultDeclaration(export) = statement else {
-            return None;
-        };
-        let ExportDefaultDeclarationKind::Identifier(identifier) = &export.declaration else {
-            return None;
-        };
-        Some(identifier.name.to_string())
-    }
-
-    fn has_only_default_export_reference(&self, symbol_id: SymbolId) -> bool {
-        self.scoping
-            .get_resolved_references(symbol_id)
-            .filter(|reference| reference.flags().is_value())
-            .count()
-            == 1
-    }
-}
-
-struct DefaultImportCandidate {
-    statement_index: usize,
-    local_name: String,
-    source: ModuleStringLiteral,
-    symbol_id: SymbolId,
-}
-
-impl DefaultImportCandidate {
-    fn from_import(statement_index: usize, import: &ImportDeclaration<'_>) -> Option<Self> {
-        if import.import_kind.is_type() {
-            return None;
-        }
-        let specifiers = import.specifiers.as_ref()?;
-        let [ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier)] = specifiers.as_slice()
-        else {
-            return None;
-        };
-        Some(Self {
-            statement_index,
-            local_name: specifier.local.name.to_string(),
-            source: ModuleStringLiteral::from_string_literal(&import.source),
-            symbol_id: specifier.local.symbol_id.get()?,
-        })
-    }
-}
-
-struct DefaultImportReexportPlan {
-    import_statement_index: usize,
-    export_statement_index: usize,
-    source: ModuleStringLiteral,
-}
-
-impl DefaultImportReexportPlan {
-    fn export_statement<'a>(&self, ast: AstBuilder<'a>) -> Statement<'a> {
-        let default_name = || ast.module_export_name_identifier_name(SPAN, ast.str("default"));
-        let specifiers = ast.vec1(ast.export_specifier(
-            SPAN,
-            default_name(),
-            default_name(),
-            ImportOrExportKind::Value,
-        ));
-        Statement::from(ast.module_declaration_export_named_declaration(
-            SPAN,
-            None,
-            specifiers,
-            Some(self.source.to_ast(ast)),
-            ImportOrExportKind::Value,
-            NONE,
-        ))
     }
 }
 
@@ -1790,31 +1641,6 @@ export class RuntimeName {}"#,
         }
     }
 
-    fn rewrite_default_import_reexport<'a>(source: &'a str, id: &str) -> Cow<'a, str> {
-        let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let mut parsed = Parser::new(&allocator, source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Cow::Borrowed(source);
-        }
-        let semantic_ret = SemanticBuilder::new().build(&parsed.program);
-        if !semantic_ret.diagnostics.is_empty() {
-            return Cow::Borrowed(source);
-        }
-        let scoping = semantic_ret.semantic.into_scoping();
-        let changed = DefaultImportReexportRewriter::new().rewrite_program(
-            &allocator,
-            &mut parsed.program,
-            &scoping,
-        );
-        if changed {
-            Cow::Owned(codegen_source(&parsed.program))
-        } else {
-            Cow::Borrowed(source)
-        }
-    }
-
     #[test]
     fn type_only_named_import_from_directory_declaration_is_elided() {
         let importer = PathBuf::from("/project/pkg/src/main/ets/core/AES.ets");
@@ -2281,6 +2107,36 @@ export interface RerouteOptions {
     }
 
     #[test]
+    fn sdk_named_type_reexports_use_the_inventoried_declaration_root() {
+        let index = PathBuf::from("/project/pkg/type.ets");
+        let sdk_root = PathBuf::from("/sdk/ets/api");
+        let declaration = sdk_root.join("@ohos.file.fs.d.ts");
+        let index_source = r#"export { WatchEventListener, Watcher, Filter, ConflictFiles } from '@ohos.file.fs';"#;
+
+        let mut files = FxHashMap::default();
+        files.insert(index.clone(), Arc::<str>::from(index_source));
+        files.insert(
+            declaration,
+            Arc::<str>::from(
+                r#"export interface WatchEventListener {}
+export interface Watcher {}
+export interface Filter {}
+export interface ConflictFiles {}"#,
+            ),
+        );
+        let sources =
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]);
+        let split = split_type_only_reexports(index_source, index.to_str().unwrap(), &sources);
+
+        assert!(
+            split.contains(
+                "export type { WatchEventListener, Watcher, Filter, ConflictFiles } from \"@ohos.file.fs\";"
+            ),
+            "hvigor's checker classifies SDK interface reexports as type-only:\n{split}"
+        );
+    }
+
+    #[test]
     fn reexport_of_type_from_export_all_chain_is_elided() {
         let entry = PathBuf::from("/project/pkg/ets.ets");
         let barrel = PathBuf::from("/project/pkg/src/main/ets/RNOH/ets.ets");
@@ -2441,51 +2297,6 @@ export class Config {
         let split =
             split_type_only_named_imports(config_source, config.to_str().unwrap(), &sources);
         assert_eq!(split, config_source);
-    }
-
-    #[test]
-    fn default_import_used_only_for_default_export_becomes_live_reexport() {
-        let index = PathBuf::from("/project/pkg/Index.ets");
-        let index_source = r#"import LX from './src/main/ets/LX';
-/**
- * 灵犀
- */
-export default LX;
-export { generatePageInfoKey } from './src/main/ets/utils/Utils';"#;
-        let sources = TransformSourceSnapshot::new(FxHashMap::default());
-        let index_id = index.to_str().unwrap();
-
-        let rewritten = rewrite_default_import_reexport(index_source, index_id);
-        assert!(
-            rewritten.contains("export { default } from \"./src/main/ets/LX\";"),
-            "{rewritten}"
-        );
-        assert!(!rewritten.contains("import LX from"), "{rewritten}");
-        assert!(!rewritten.contains("export default LX;"), "{rewritten}");
-        assert!(
-            rewritten
-                .contains("export { generatePageInfoKey } from \"./src/main/ets/utils/Utils\";"),
-            "{rewritten}"
-        );
-
-        let emitted = TypeScriptJavascriptEmitter::new(&rewritten, index_id, &sources)
-            .emit()
-            .expect("live default reexport must be valid TypeScript");
-        assert!(emitted.contains("export { default } from \"./src/main/ets/LX\";"));
-        assert!(!emitted.contains("import LX from"));
-    }
-
-    #[test]
-    fn default_import_with_other_runtime_use_is_not_rewritten() {
-        let index = PathBuf::from("/project/pkg/Index.ets");
-        let index_source = r#"import LX from './src/main/ets/LX';
-
-export const init = LX.init;
-export default LX;"#;
-        let index_id = index.to_str().unwrap();
-
-        let rewritten = rewrite_default_import_reexport(index_source, index_id);
-        assert_eq!(rewritten, index_source);
     }
 
     #[test]

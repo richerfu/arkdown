@@ -155,6 +155,10 @@ impl<'a> ModuleBuildLayout<'a> {
     self.default_intermediate_file("loader", "pkgContextInfo.json")
   }
 
+  pub(super) fn pkg_sdk_info_json(&self) -> PathBuf {
+    self.default_intermediate_file("loader", "pkgSdkInfo.json")
+  }
+
   pub(super) fn router_map_loader(&self) -> PathBuf {
     self.default_intermediate_file("router_map", "loader-router-map.json")
   }
@@ -186,6 +190,15 @@ impl<'a> ModuleBuildLayout<'a> {
       .join("r")
       .join("default")
       .join("ResourceTable.h")
+  }
+
+  pub(super) fn generated_build_profile(&self, target_name: &str) -> PathBuf {
+    self
+      .build_default()
+      .join("generated")
+      .join("profile")
+      .join(target_name)
+      .join("BuildProfile.ets")
   }
 
   pub(super) fn base_native_libs_json(&self) -> PathBuf {

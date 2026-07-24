@@ -46,7 +46,6 @@ fn lower_build_body_with_custom_components(
         source_id,
         custom_components,
         builder_methods,
-        &FxHashSet::default(),
         custom_component_update_props,
         component_metadata,
         &FxHashSet::default(),
@@ -67,13 +66,14 @@ fn lower_build_body_with_component_context(
     raw_object_fields: &FxHashSet<String>,
     current_component_reusable: bool,
 ) -> Result<String, BuildLoweringError> {
+    let mut visible_builder_methods = builder_methods.clone();
+    visible_builder_methods.extend(builder_param_methods.iter().cloned());
     lower_build_body_with_component_context_and_module(
         body,
         source_text,
         source_id,
         custom_components,
-        builder_methods,
-        builder_param_methods,
+        &visible_builder_methods,
         custom_component_update_props,
         component_metadata,
         raw_object_fields,
@@ -88,7 +88,6 @@ fn lower_build_body_with_component_context_and_module(
     source_id: &str,
     custom_components: &FxHashSet<String>,
     builder_methods: &FxHashSet<String>,
-    builder_param_methods: &FxHashSet<String>,
     custom_component_update_props: &CustomComponentUpdateProps,
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
@@ -101,7 +100,6 @@ fn lower_build_body_with_component_context_and_module(
         Arc::from(source_id),
         custom_components,
         builder_methods,
-        builder_param_methods,
         custom_component_update_props,
         Arc::new(component_metadata.clone()),
         raw_object_fields,
@@ -242,6 +240,27 @@ fn lowers_empty_build_body_returns_empty_string() {
 }
 
 #[test]
+fn test_xcomponent_pop_matches_sdk_static_container_type_detection() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Column() {
+      XComponent({ id: "surface", type: resolveType() })
+      XComponent({ id: "string", type: "component" }) {}
+      XComponent({ id: "number", type: 1 }) {}
+      XComponent({ id: "enum", type: XComponentType.COMPONENT }) {}
+    }
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert_eq!(
+        out.matches("XComponent.pop();").count(),
+        3,
+        "SDK checkContainer only pops the three statically recognized component variants:\n{out}"
+    );
+}
+
+#[test]
 fn lowers_builder_param_object_argument_with_hvigor_proxy() {
     let source = r#"@Component
 struct Foo {
@@ -275,7 +294,7 @@ struct Foo {
 }
 
 #[test]
-fn lowers_regular_builder_object_argument_without_builder_param_proxy() {
+fn lowers_regular_builder_object_argument_with_hvigor_proxy() {
     let source = r#"@Component
 struct Foo {
   routerContext: ESObject | null = null
@@ -295,10 +314,15 @@ struct Foo {
     )
     .unwrap();
     assert!(
-        out.contains("this.localBuilder.bind(this)({ routerContext: this.routerContext });"),
+        out.contains(
+            "this.localBuilder.bind(this)(makeBuilderParameterProxy(\"localBuilder\", { routerContext: () => this[\"__routerContext\"] ? this[\"__routerContext\"] : this[\"routerContext\"] }))"
+        ),
+        "SDK process_component_build.js::transferBuilderCall proxies customBuilderMethod object arguments; got:\n{out}"
+    );
+    assert!(
+        !out.contains("this.localBuilder.bind(this)({ routerContext: this.routerContext });"),
         "got:\n{out}"
     );
-    assert!(!out.contains("makeBuilderParameterProxy"), "got:\n{out}");
 }
 
 #[test]
@@ -477,6 +501,125 @@ struct Foo {
 }
 
 #[test]
+fn lowers_free_function_call_keeps_raw_object_argument() {
+    let source = r#"class Item {}
+@Component
+struct Foo {
+  @State item: Item = new Item();
+  build() {
+    Text(formatItem(this.item))
+  }
+}"#;
+    let raw_object_fields = FxHashSet::from_iter(["item".to_string()]);
+    let out = parse_and_lower_with_raw_object_fields(source, &raw_object_fields).unwrap();
+    assert!(
+        out.contains("Text.create(formatItem(this.item));")
+            && !out.contains("formatItem(ObservedObject.GetRawObject(this.item))"),
+        "SDK isNeedGetRawObject only rewrites arguments of property-access method calls:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_builder_arguments_using_the_source_callee_shape() {
+    let source = r#"class Item {}
+@Component
+struct Foo {
+  @State item: Item = new Item();
+  @Builder Render(item: Item) {}
+  build() {
+    Render(this.item)
+    this.Render(this.item)
+  }
+}"#;
+    let raw_object_fields = FxHashSet::from_iter(["item".to_string()]);
+    let builder_methods = FxHashSet::from_iter(["Render".to_string()]);
+    let out = parse_and_lower_with_visible_builder_methods(
+        source,
+        &raw_object_fields,
+        false,
+        &builder_methods,
+        &FxHashSet::default(),
+    )
+    .unwrap();
+    assert!(
+        out.contains("Render.bind(this)(this.item);"),
+        "an unqualified builder has an identifier callee before transferBuilderCall:\n{out}"
+    );
+    assert!(
+        out.contains("this.Render.bind(this)(ObservedObject.GetRawObject(this.item));"),
+        "a member builder retains its property-access callee eligibility:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_optional_state_field_method_argument_to_raw_object() {
+    let source = r#"class Item {}
+@Component
+struct Foo {
+  @State item: Item | null = null;
+  build() {
+    Button("OK").onClick(() => Reporter.get().send(this?.item))
+  }
+}"#;
+    let raw_object_fields = FxHashSet::from_iter(["item".to_string()]);
+    let out = parse_and_lower_with_raw_object_fields(source, &raw_object_fields).unwrap();
+    assert!(
+        out.contains("Reporter.get().send(ObservedObject.GetRawObject(this?.item))"),
+        "optional property-access arguments follow SDK checkStateName semantics:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_gesture_callback_wraps_raw_object_call_arg() {
+    let source = r#"@Component
+struct Foo {
+  @State item: object = {};
+  build() {
+    Stack()
+      .gesture(
+        TapGesture()
+          .onAction((event: GestureEvent) => {
+            this.handle(this.item, event)
+          })
+      )
+  }
+  handle(item: object, event: GestureEvent) {}
+}"#;
+    let raw_object_fields = FxHashSet::from_iter(["item".to_string()]);
+    let out = parse_and_lower_with_raw_object_fields(source, &raw_object_fields).unwrap();
+    assert!(
+        out.contains("TapGesture.onAction((event: GestureEvent) => {")
+            && out.contains(
+                "this.handle(ObservedObject.GetRawObject(this.item), event);"
+            ),
+        "SDK processBuildMember visits call arguments nested inside gesture callback attributes:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_if_condition_wraps_raw_object_call_arg() {
+    let source = r#"class Item {}
+@Component
+struct Foo {
+  @ObjectLink item: Item;
+  isVisible(item: Item): boolean {
+    return true
+  }
+  build() {
+    if (this.isVisible(this.item)) {
+      Text("visible")
+    }
+  }
+}"#;
+    let raw_object_fields = FxHashSet::from_iter(["item".to_string()]);
+    let out = parse_and_lower_with_raw_object_fields(source, &raw_object_fields).unwrap();
+    assert!(
+        out.contains("if (this.isVisible(ObservedObject.GetRawObject(this.item)))"),
+        "SDK processBuildMember rewrites state-object call arguments in UI conditions:\n{out}"
+    );
+}
+
+#[test]
 fn lowers_component_with_multiple_chain_attrs() {
     let source = r#"@Component
 struct Foo {
@@ -536,6 +679,89 @@ struct Foo {
     assert!(
         animation < width && width < height && height < clear && clear < appear,
         "animation context must wrap the preceding attribute segment; got:\n{out}"
+    );
+}
+
+#[test]
+fn first_animation_attribute_only_emits_hvigor_clear_boundary() {
+    // hvigor process_component_build.js::addComponentAttr defers the animation
+    // configuration until an earlier source attribute makes the segment active.
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Row()
+      .animation({ duration: 300 })
+      .width(100)
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        !out.contains("Context.animation({ duration: 300 });"),
+        "the first attribute must not activate its animation configuration; got:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Context.animation(null);").count(),
+        1,
+        "a non-null first animation still emits its clear boundary; got:\n{out}"
+    );
+    let clear = out.find("Context.animation(null);").unwrap();
+    let width = out.find("Row.width(100);").unwrap();
+    assert!(
+        clear < width,
+        "the clear boundary must precede width; got:\n{out}"
+    );
+}
+
+#[test]
+fn terminal_null_animation_does_not_emit_a_second_clear_boundary() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Row()
+      .width(100)
+      .animation(null)
+      .height(40)
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert_eq!(
+        out.matches("Context.animation(null);").count(),
+        1,
+        "hvigor uses the null configuration itself as the terminal boundary; got:\n{out}"
+    );
+    let animation = out.find("Context.animation(null);").unwrap();
+    let width = out.find("Row.width(100);").unwrap();
+    let height = out.find("Row.height(40);").unwrap();
+    assert!(
+        animation < width && width < height,
+        "the null animation must precede its attribute segment; got:\n{out}"
+    );
+}
+
+#[test]
+fn consecutive_animation_attributes_flush_the_later_configuration() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Row()
+      .animation({ duration: 100 })
+      .animation({ duration: 200 })
+      .width(100)
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        !out.contains("Context.animation({ duration: 100 });"),
+        "the first source attribute remains deferred; got:\n{out}"
+    );
+    assert!(
+        out.contains("Context.animation({ duration: 200 });"),
+        "the preceding animation must flush the later configuration; got:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Context.animation(null);").count(),
+        2,
+        "each non-null animation emits a clear boundary; got:\n{out}"
     );
 }
 
@@ -767,6 +993,110 @@ struct Foo {
 }
 
 #[test]
+fn lowers_empty_list_item_with_sdk_lazy_item_creation() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    List() {
+      ListItem() {}.width(8)
+    }
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        out.contains("ListItem.create(deepRenderFunction, true);"),
+        "SDK processItemComponent lazily creates every ordinary ListItem, including empty items:\n{out}"
+    );
+    assert!(
+        out.contains("const deepRenderFunction = (elmtId, isInitialRender) => {"),
+        "ordinary ListItem must define the SDK deep-render callback:\n{out}"
+    );
+    assert_eq!(
+        out.matches("ListItem.pop();").count(),
+        3,
+        "lazy item creation, deep render, and outer creation each close the ListItem:\n{out}"
+    );
+}
+
+#[test]
+fn lazy_list_item_uses_hvigor_first_animation_boundary() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    List() {
+      ListItem() {}
+        .animation({ duration: 90 })
+        .width(8)
+    }
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        !out.contains("Context.animation({ duration: 90 });"),
+        "ListItem itemCreation2 must defer a first animation attribute like bindComponentAttr; got:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Context.animation(null);").count(),
+        1,
+        "ListItem itemCreation2 must retain the non-null animation clear boundary; got:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_grid_item_with_sdk_observed_deep_render() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Grid() {
+      GridItem() {
+        Text("item")
+      }.id("cell")
+    }
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        out.contains("GridItem.create(() => {}, false);"),
+        "SDK createItemCreate uses the non-lazy item contract for GridItem:\n{out}"
+    );
+    assert!(
+        out.contains("const observedDeepRender = () => {"),
+        "GridItem children must be hosted by observedDeepRender:\n{out}"
+    );
+    assert!(
+        out.contains("this.observeComponentCreation2(itemCreation2, GridItem);"),
+        "GridItem itemCreation2 must be observed inside the deep-render callback:\n{out}"
+    );
+}
+
+#[test]
+fn list_item_string_false_disables_lazy_creation_like_sdk() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    List() {
+      ListItem("false") {
+        Text("item")
+      }
+    }
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        out.contains("ListItem.create(() => {}, false, \"false\");"),
+        "SDK checkLazyCreate recognizes the string literal 'false' and preserves it after the item flags:\n{out}"
+    );
+    assert!(
+        out.contains("const observedDeepRender = () => {"),
+        "non-lazy ListItem must use observedDeepRender:\n{out}"
+    );
+    assert!(
+        !out.contains("ListItem.create(deepRenderFunction, true"),
+        "string 'false' must disable ListItem lazy creation:\n{out}"
+    );
+}
+
+#[test]
 fn lowers_conditional_builder_attribute_branches_like_hvigor() {
     let source = r#"@Component
 struct Foo {
@@ -884,6 +1214,36 @@ struct Foo {
     assert!(
         out.contains("Column.bindPopup(this.show, { builder: { builder: this.PopupBuilder.bind(this) } });"),
         "bindPopup config builder property must follow hvigor nested builder object shape; got:\n{out}"
+    );
+}
+
+#[test]
+fn bind_menu_keeps_non_builder_arguments_unchanged() {
+    let source = r#"@Component
+struct Foo {
+  @State show: boolean = false
+  @Builder MenuBuilder() {}
+
+  build() {
+    Button("menu").bindMenu(this.show, { builder: this.MenuBuilder })
+  }
+}"#;
+    let out = parse_and_lower_with_visible_builder_methods(
+        source,
+        &FxHashSet::default(),
+        false,
+        &FxHashSet::from_iter(["MenuBuilder".to_string()]),
+        &FxHashSet::default(),
+    )
+    .unwrap();
+
+    assert!(
+        out.contains("Button.bindMenu(this.show, { builder: this.MenuBuilder.bind(this) });"),
+        "SDK isBuilderChangeNode transforms only expressions proven to be builders:\n{out}"
+    );
+    assert!(
+        !out.contains("{ builder: this.show.bind(this) }"),
+        "a regular state member must not be rebound as a builder:\n{out}"
     );
 }
 
@@ -1105,6 +1465,33 @@ struct Foo {
 }
 
 #[test]
+fn lowers_else_if_chain_with_terminal_empty_branch() {
+    let source = r#"@Component
+struct Foo {
+  @State value: number = 0;
+  build() {
+    if (this.value === 0) {
+      Text("zero")
+    } else if (this.value === 1) {
+      Text("one")
+    }
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert_eq!(
+        out.matches("this.ifElseBranchUpdateFunction(").count(),
+        3,
+        "SDK processElseStatement emits update functions for both source branches and the terminal empty branch:\n{out}"
+    );
+    for branch_index in 0..=2 {
+        assert!(
+            out.contains(&format!("this.ifElseBranchUpdateFunction({branch_index},")),
+            "missing update function for branch {branch_index}:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn lowers_sibling_containers_with_children() {
     let source = r#"@Component
 struct Foo {
@@ -1293,7 +1680,6 @@ fn parse_and_lower_with_module(
         build.value.body.as_deref(),
         source,
         source_id,
-        &FxHashSet::default(),
         &FxHashSet::default(),
         &FxHashSet::default(),
         &CustomComponentUpdateProps::default(),
@@ -1601,6 +1987,7 @@ fn navigation_nav_destination_binds_page_map_builder_attribute() {
 struct Foo {
   @State stack: NavPathStack = new NavPathStack()
 
+  @Builder
   PageMap(name: string) {}
 
   build() {
@@ -1608,7 +1995,14 @@ struct Foo {
     }.navDestination(this.PageMap)
   }
 }"#;
-    let out = parse_and_lower_with_module(source, "features/nav/RouterPage.ets", "entry").unwrap();
+    let out = parse_and_lower_with_visible_builder_methods(
+        source,
+        &FxHashSet::default(),
+        false,
+        &FxHashSet::from_iter(["PageMap".to_string()]),
+        &FxHashSet::default(),
+    )
+    .unwrap();
     assert!(
         out.contains("Navigation.navDestination({ builder: this.PageMap.bind(this) });"),
         "Navigation.navDestination must receive an hvigor-style builder object; got:\n{out}"

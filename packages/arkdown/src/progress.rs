@@ -4,6 +4,12 @@ pub struct Progress {
   step_start: std::cell::Cell<Instant>,
 }
 
+impl Default for Progress {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl Progress {
   pub fn new() -> Self {
     Progress {

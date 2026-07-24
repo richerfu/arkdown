@@ -126,4 +126,11 @@ pub enum BuildScriptEffect {
 
     /// An explicit task-to-task dependency edge.
     TaskDependency(TaskDependencyEffect),
+
+    /// Statically evaluated `export default.config.ohos.overrides`.
+    ///
+    /// Project scripts contain `appOpt`/`signingConfig`; module scripts
+    /// contain `buildOption`. Dynamic expressions are rejected by the parser
+    /// instead of being silently ignored.
+    OhosOverrides(serde_json::Value),
 }

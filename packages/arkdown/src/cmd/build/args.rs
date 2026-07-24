@@ -1,10 +1,12 @@
 //! Build command arguments and top-level `BuildCommand` entry point.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use arkdown::plugins::ets_transform::ModuleAnalyzerKind;
 use arkdown::plugins::factory::PackagePlugin;
+use arkdown_watcher::WatchInvalidationBatch;
 use clap::{Args, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
@@ -39,7 +41,7 @@ impl From<ModuleAnalyzerChoice> for ModuleAnalyzerKind {
   }
 }
 
-#[derive(Args, Default)]
+#[derive(Args, Clone, Default)]
 pub struct BuildArgs {
   /// Build target: hap, hsp, har
   #[arg(long, default_value = "hap")]
@@ -66,6 +68,12 @@ pub struct BuildArgs {
   /// Example: `arkdown build --build-target-name phone` uses the "phone" target.
   #[arg(long)]
   pub build_target_name: Option<String>,
+  /// Override the application build version for this invocation.
+  ///
+  /// Mirrors hvigor extra config `buildVersion` and takes precedence over the
+  /// selected product and `AppScope/app.json5`.
+  #[arg(long = "build-version")]
+  pub build_version: Option<String>,
   /// Watch mode: rebuild on source file changes (M1 — SPEC-023)
   #[arg(long, default_value = "false")]
   pub watch: bool,
@@ -141,6 +149,21 @@ pub struct BuildArgs {
   /// `module.json5`/`build-profile.json5` have not been modified.
   #[clap(skip)]
   pub skip_profile: bool,
+
+  /// Typed changed-file batch supplied by the watch coordinator.
+  ///
+  /// This is intentionally internal: hvigor passes the watcher change set to
+  /// `shouldInvalidCache`; it is not a user-facing command-line option.
+  #[clap(skip)]
+  pub watch_invalidation: Option<WatchInvalidationBatch>,
+
+  /// Project hvigorfile overrides evaluated by the Node runtime.
+  #[clap(skip)]
+  pub project_hvigor_overrides: Option<arkdown_config::ProjectHvigorOverrides>,
+
+  /// Highest-precedence module build options keyed by normalized module name.
+  #[clap(skip)]
+  pub module_hvigor_overrides: BTreeMap<String, serde_json::Value>,
 }
 
 pub struct BuildCommand {
@@ -163,41 +186,62 @@ impl BuildCommand {
 
   pub async fn execute(self) -> Result<()> {
     use arkdown_config::load_config;
-    use arkdown_core::{BuildMode, OutputTarget};
-    use arkdown_session::BuildSessionBuilder;
+    use arkdown_session::{BuildScriptOverrideInventory, BuildSessionBuilder};
 
-    let project_root = self
-      .args
+    let mut args = self.args;
+    let package_plugins = self.package_plugins;
+    let project_root = args
       .project
       .clone()
       .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
 
-    let mode = self.args.build_mode()?;
-    let target = self.args.output_target()?;
-    let module_analyzer = ModuleAnalyzerKind::from(self.args.module_analyzer);
+    let mode = args.build_mode()?;
+    let target = args.output_target()?;
+    let module_analyzer = ModuleAnalyzerKind::from(args.module_analyzer);
     if !module_analyzer.is_available() {
       anyhow::bail!(
         "module analyzer 'yuku' was requested but native yuku support is not compiled; rebuild with ARKDOWN_YUKU_ROOT"
       );
     }
 
-    let config = std::sync::Arc::new(
-      load_config(
-        &project_root,
-        mode,
-        target,
-        self.args.product.as_deref(),
-        None,
-      )
-      .map_err(|e| anyhow::anyhow!("{}", e))?,
-    );
+    let mut config = load_config(&project_root, mode, target, args.product.as_deref(), None)
+      .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let static_inventory =
+      if args.project_hvigor_overrides.is_none() && args.module_hvigor_overrides.is_empty() {
+        Some(
+          BuildScriptOverrideInventory::discover(&config)
+            .map_err(|error| anyhow::anyhow!("evaluate hvigorfile overrides: {error}"))?,
+        )
+      } else {
+        None
+      };
+    if let Some(inventory) = static_inventory.as_ref() {
+      args.project_hvigor_overrides = inventory.project_overrides().cloned();
+      args
+        .module_hvigor_overrides
+        .clone_from(inventory.module_build_options());
+    }
+    if let Some(overrides) = args.project_hvigor_overrides.as_ref() {
+      let fallback_source = project_root.join("hvigorfile.ts");
+      let source_path = static_inventory
+        .as_ref()
+        .and_then(BuildScriptOverrideInventory::project_source)
+        .unwrap_or(fallback_source.as_path());
+      overrides
+        .apply_to(&mut config, source_path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+    if let Some(build_version) = args.build_version.as_ref() {
+      config.product.build_version = Some(build_version.clone());
+    }
+    let config = std::sync::Arc::new(config);
     let session = std::sync::Arc::new(
       BuildSessionBuilder::new(config.clone())
         .build()
         .map_err(|e| anyhow::anyhow!("{}", e))?,
     );
-    let output = super::coordinator::BuildCoordinator::new(session, config, self.args)
-      .with_package_plugins(self.package_plugins)
+    let output = super::coordinator::BuildCoordinator::new(session, config, args)
+      .with_package_plugins(package_plugins)
       .execute()
       .await?;
     tracing::debug!(

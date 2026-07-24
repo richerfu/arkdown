@@ -1112,7 +1112,7 @@ pub struct PluginCacheRequestMeta {
 #[napi(object)]
 pub struct ArkdownPlugin {
   pub name: Option<String>,
-  #[napi(ts_type = "'first' | 'last' | ((nameToIndex: ReadonlyMap<string, number>) => number)")]
+  #[napi(ts_type = "'first' | 'last' | ((nameToIndex: Record<string, number>) => number)")]
   pub order: Option<String>,
   #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
   pub before_build: Option<String>,
@@ -1164,6 +1164,7 @@ pub struct BuildConfig {
   pub module: Option<String>,
   pub product: Option<String>,
   pub build_target_name: Option<String>,
+  pub build_version: Option<String>,
   pub watch: Option<bool>,
   pub preview: Option<bool>,
   pub coverage: Option<bool>,
@@ -1179,6 +1180,12 @@ pub struct BuildConfig {
   pub compile_plugin_path: Option<String>,
   #[napi(ts_type = "string | string[]")]
   pub hvigor_plugin_file: Option<String>,
+  /// Runtime-owned serialized `project/hvigorfile.*` OHOS overrides.
+  #[napi(skip_typescript)]
+  pub project_hvigor_overrides_json: Option<String>,
+  /// Runtime-owned serialized module-root build-option overrides.
+  #[napi(skip_typescript)]
+  pub module_hvigor_overrides_json: Option<String>,
 }
 
 #[napi(object)]
@@ -1257,6 +1264,7 @@ pub fn build(
     module,
     product,
     build_target_name,
+    build_version,
     watch,
     preview,
     coverage,
@@ -1269,12 +1277,15 @@ pub fn build(
     cache,
     compile_plugin_path: _,
     hvigor_plugin_file: _,
+    project_hvigor_overrides_json,
+    module_hvigor_overrides_json,
   } = config;
   let project = project.unwrap_or_else(|| ".".to_string());
   let target = target.unwrap_or_else(|| "hap".to_string());
   let mode = mode.unwrap_or_else(|| "debug".to_string());
   let package_args = PackageBuildArgs {
     build_target_name,
+    build_version,
     watch: watch.unwrap_or(false),
     preview: preview.unwrap_or(false),
     coverage: coverage.unwrap_or(false),
@@ -1285,6 +1296,8 @@ pub fn build(
     checker,
     module_analyzer,
     cache: cache.unwrap_or(true),
+    project_hvigor_overrides_json,
+    module_hvigor_overrides_json,
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -1334,6 +1347,7 @@ fn init_napi_tracing_from_env() {
 #[derive(Debug, Clone, Default)]
 struct PackageBuildArgs {
   build_target_name: Option<String>,
+  build_version: Option<String>,
   watch: bool,
   preview: bool,
   coverage: bool,
@@ -1344,6 +1358,8 @@ struct PackageBuildArgs {
   checker: Option<String>,
   module_analyzer: Option<String>,
   cache: bool,
+  project_hvigor_overrides_json: Option<String>,
+  module_hvigor_overrides_json: Option<String>,
 }
 
 async fn run_build(
@@ -1357,7 +1373,7 @@ async fn run_build(
 ) -> anyhow::Result<Vec<String>> {
   use crate::cmd::build::args::{AbcBackendChoice, ModuleAnalyzerChoice};
   use crate::cmd::build::BuildArgs;
-  use arkdown_config::load_config;
+  use arkdown_config::{load_config, ModuleHvigorOverrides, ProjectHvigorOverrides};
   use arkdown_core::{BuildMode, OutputTarget};
   use arkdown_session::BuildSessionBuilder;
 
@@ -1385,16 +1401,40 @@ async fn run_build(
     other => anyhow::bail!("unsupported build mode '{other}'; expected 'debug' or 'release'"),
   };
 
-  let config = std::sync::Arc::new(
-    load_config(
-      &project_path,
-      build_mode,
-      output_target,
-      product.as_deref(),
-      None,
-    )
-    .map_err(|e| anyhow::anyhow!("load_config: {e}"))?,
-  );
+  let project_hvigor_overrides = package_args
+    .project_hvigor_overrides_json
+    .as_deref()
+    .map(serde_json::from_str::<ProjectHvigorOverrides>)
+    .transpose()
+    .map_err(|error| anyhow::anyhow!("invalid project hvigor overrides: {error}"))?;
+  let module_hvigor_overrides = package_args
+    .module_hvigor_overrides_json
+    .as_deref()
+    .map(serde_json::from_str::<ModuleHvigorOverrides>)
+    .transpose()
+    .map_err(|error| anyhow::anyhow!("invalid module hvigor overrides: {error}"))?;
+
+  let mut config = load_config(
+    &project_path,
+    build_mode,
+    output_target,
+    product.as_deref(),
+    None,
+  )
+  .map_err(|e| anyhow::anyhow!("load_config: {e}"))?;
+  if let Some(overrides) = project_hvigor_overrides.as_ref() {
+    overrides
+      .apply_to(&mut config, &project_path.join("hvigorfile.ts"))
+      .map_err(|error| anyhow::anyhow!("apply project hvigor overrides: {error}"))?;
+  }
+  if let Some(build_version) = package_args.build_version.as_ref() {
+    config.product.build_version = Some(build_version.clone());
+  }
+  let module_hvigor_overrides = module_hvigor_overrides
+    .as_ref()
+    .map(|overrides| overrides.bind_to_modules(&config))
+    .unwrap_or_default();
+  let config = std::sync::Arc::new(config);
   let session = std::sync::Arc::new(
     BuildSessionBuilder::new(config.clone())
       .build()
@@ -1408,6 +1448,7 @@ async fn run_build(
     product,
     project: Some(project_path),
     build_target_name: package_args.build_target_name,
+    build_version: package_args.build_version,
     watch: package_args.watch,
     coverage: package_args.coverage,
     ohos_debug_asan: package_args.ohos_debug_asan,
@@ -1423,6 +1464,9 @@ async fn run_build(
     // — only the watch stage sets them for incremental rebuilds.
     skip_resource: false,
     skip_profile: false,
+    watch_invalidation: None,
+    project_hvigor_overrides,
+    module_hvigor_overrides,
   };
 
   let output = crate::cmd::build::coordinator::BuildCoordinator::new(session, config, args)

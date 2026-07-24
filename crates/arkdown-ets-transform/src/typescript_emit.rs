@@ -9,7 +9,6 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::RwLock;
 
 use oxc_allocator::Allocator;
@@ -27,7 +26,7 @@ use oxc_span::{SourceType, SPAN};
 use oxc_syntax::{number::NumberBase, operator::UnaryOperator};
 use oxc_transformer::{TransformOptions, Transformer};
 
-use crate::source::{TransformSourceFile, TransformSourceSnapshot};
+use crate::source::{SourceClassifier, TransformSourceFile, TransformSourceSnapshot};
 use crate::ModuleExportNameText;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,21 +37,42 @@ enum EnumValue {
 
 #[derive(Debug, Clone, Default)]
 struct ConstEnumExports {
-    enums: FxHashMap<String, FxHashMap<String, EnumValue>>,
-    namespaces: FxHashMap<String, FxHashMap<String, FxHashMap<String, EnumValue>>>,
+    enums: FxHashMap<String, ImportedEnum>,
+    namespaces: FxHashMap<String, FxHashMap<String, ImportedEnum>>,
 }
 
 #[derive(Debug, Clone)]
 enum ConstEnumImport {
-    Enum(FxHashMap<String, EnumValue>),
-    Namespace(FxHashMap<String, FxHashMap<String, EnumValue>>),
+    Enum(ImportedEnum),
+    Namespace(FxHashMap<String, ImportedEnum>),
+}
+
+#[derive(Debug, Clone)]
+struct ImportedEnum {
+    members: FxHashMap<String, EnumValue>,
+    inline_everywhere: bool,
+}
+
+impl ImportedEnum {
+    fn const_enum(members: FxHashMap<String, EnumValue>) -> Self {
+        Self {
+            members,
+            inline_everywhere: true,
+        }
+    }
+
+    fn ambient_enum(members: FxHashMap<String, EnumValue>) -> Self {
+        Self {
+            members,
+            inline_everywhere: false,
+        }
+    }
 }
 
 pub(crate) struct TypeScriptJavascriptEmitter<'a> {
     source: &'a str,
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
-    #[cfg(test)]
     const_enum_exports: Option<&'a ConstEnumExportCache>,
 }
 
@@ -62,12 +82,10 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             source,
             id,
             sources,
-            #[cfg(test)]
             const_enum_exports: None,
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_const_enum_export_cache(mut self, cache: &'a ConstEnumExportCache) -> Self {
         self.const_enum_exports = Some(cache);
         self
@@ -82,7 +100,6 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
         }
 
         let rewriter = ImportedConstEnumRewriter::new(self.id, self.sources);
-        #[cfg(test)]
         let rewriter = match self.const_enum_exports {
             Some(cache) => rewriter.with_const_enum_export_cache(cache),
             None => rewriter,
@@ -232,7 +249,6 @@ impl<'a> TypeScriptCommentDirective<'a> {
 pub(crate) struct ImportedConstEnumRewriter<'a> {
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
-    #[cfg(test)]
     const_enum_exports: Option<&'a ConstEnumExportCache>,
 }
 
@@ -241,12 +257,10 @@ impl<'a> ImportedConstEnumRewriter<'a> {
         Self {
             id,
             sources,
-            #[cfg(test)]
             const_enum_exports: None,
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_const_enum_export_cache(mut self, cache: &'a ConstEnumExportCache) -> Self {
         self.const_enum_exports = Some(cache);
         self
@@ -259,7 +273,6 @@ impl<'a> ImportedConstEnumRewriter<'a> {
     ) -> bool {
         let imports = {
             let collector = ConstEnumImportCollector::new(&program.body, self.id, self.sources);
-            #[cfg(test)]
             let collector = collector.with_const_enum_export_cache_opt(self.const_enum_exports);
             collector.collect()
         };
@@ -270,6 +283,7 @@ impl<'a> ImportedConstEnumRewriter<'a> {
         let mut visitor = ConstEnumInlineMutator {
             ast: AstBuilder::new(allocator),
             imports,
+            in_enum_initializer: false,
             changed: false,
         };
         visitor.visit_program(program);
@@ -281,7 +295,6 @@ struct ConstEnumImportCollector<'a> {
     statements: &'a [Statement<'a>],
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
-    #[cfg(test)]
     const_enum_exports: Option<&'a ConstEnumExportCache>,
 }
 
@@ -295,12 +308,10 @@ impl<'a> ConstEnumImportCollector<'a> {
             statements,
             id,
             sources,
-            #[cfg(test)]
             const_enum_exports: None,
         }
     }
 
-    #[cfg(test)]
     fn with_const_enum_export_cache_opt(mut self, cache: Option<&'a ConstEnumExportCache>) -> Self {
         self.const_enum_exports = cache;
         self
@@ -331,7 +342,6 @@ impl<'a> ConstEnumImportCollector<'a> {
         else {
             return;
         };
-        #[cfg(test)]
         let exports = if let Some(cache) = self.const_enum_exports {
             cache.analyze(target)
         } else {
@@ -339,10 +349,6 @@ impl<'a> ConstEnumImportCollector<'a> {
                 .with_sources(self.sources)
                 .analyze()
         };
-        #[cfg(not(test))]
-        let exports = ConstEnumExportAnalyzer::new(target)
-            .with_sources(self.sources)
-            .analyze();
         let Some(exports) = exports else {
             return;
         };
@@ -367,20 +373,25 @@ impl<'a> ConstEnumImportCollector<'a> {
                         ConstEnumImport::Namespace(exports.enums.clone()),
                     );
                 }
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {}
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    let local = specifier.local.name.to_string();
+                    if let Some(members) = exports.enums.get("default") {
+                        imports.insert(local, ConstEnumImport::Enum(members.clone()));
+                    } else if let Some(namespace) = exports.namespaces.get("default") {
+                        imports.insert(local, ConstEnumImport::Namespace(namespace.clone()));
+                    }
+                }
             }
         }
     }
 }
 
 #[derive(Debug)]
-#[cfg(test)]
 pub(crate) struct ConstEnumExportCache {
     sources: TransformSourceSnapshot,
     entries: RwLock<FxHashMap<PathBuf, Option<ConstEnumExports>>>,
 }
 
-#[cfg(test)]
 impl ConstEnumExportCache {
     pub(crate) fn new(sources: TransformSourceSnapshot) -> Self {
         Self {
@@ -428,7 +439,6 @@ impl ConstEnumExportCache {
 struct ConstEnumExportAnalyzer<'a> {
     source: TransformSourceFile,
     sources: Option<&'a TransformSourceSnapshot>,
-    #[cfg(test)]
     cache: Option<&'a ConstEnumExportCache>,
 }
 
@@ -437,7 +447,6 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         Self {
             source,
             sources: None,
-            #[cfg(test)]
             cache: None,
         }
     }
@@ -447,7 +456,6 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         self
     }
 
-    #[cfg(test)]
     fn with_cache(mut self, cache: &'a ConstEnumExportCache) -> Self {
         self.cache = Some(cache);
         self
@@ -468,7 +476,15 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         let source_type = SourceType::from_path(&self.source.path)
             .unwrap_or_else(|_| SourceType::ts().with_module(true));
         let parsed = Parser::new(&allocator, &self.source.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
+        let include_ambient_enums =
+            SourceClassifier::classify_path(&self.source.path).is_declaration();
+        // SDK `ets_checker.js::printArkTSLinterDiagnostic` downgrades errors in
+        // SDK declarations to warnings and keeps the TypeScript program alive.
+        // Some shipped declarations contain recoverable constructs such as a
+        // redundant `declare` inside an ambient namespace. OXC still provides
+        // the complete declaration AST, so retain it for enum metadata while
+        // keeping non-declaration source analysis strict.
+        if !parsed.diagnostics.is_empty() && !include_ambient_enums {
             visited.remove(&source_path);
             return None;
         }
@@ -479,12 +495,68 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
             .diagnostics
             .is_empty()
             .then(|| semantic_ret.semantic.scoping());
+        let imported_bindings = self.collect_imported_bindings(&parsed.program.body, visited);
+
+        let mut local_namespaces = FxHashMap::default();
+        for statement in &parsed.program.body {
+            let declaration =
+                match statement {
+                    Statement::TSModuleDeclaration(declaration) => Some(declaration.as_ref()),
+                    Statement::ExportNamedDeclaration(export) => export
+                        .declaration
+                        .as_ref()
+                        .and_then(|declaration| match declaration {
+                            Declaration::TSModuleDeclaration(declaration) => {
+                                Some(declaration.as_ref())
+                            }
+                            _ => None,
+                        }),
+                    _ => None,
+                };
+            let Some(declaration) = declaration else {
+                continue;
+            };
+            let Some(scoping) = scoping else {
+                continue;
+            };
+            if let Some(namespace) =
+                ConstEnumNamespaceCollector::new(declaration, scoping, include_ambient_enums)
+                    .collect()
+            {
+                local_namespaces.insert(namespace.name, namespace.enums);
+            }
+        }
 
         let mut exports = ConstEnumExports::default();
         for statement in &parsed.program.body {
             match statement {
                 Statement::ExportNamedDeclaration(export) => {
-                    self.collect_named_export(export, scoping, visited, &mut exports);
+                    self.collect_named_export(
+                        export,
+                        scoping,
+                        include_ambient_enums,
+                        visited,
+                        &imported_bindings,
+                        &mut exports,
+                    );
+                }
+                Statement::ExportDefaultDeclaration(export) => {
+                    let oxc_ast::ast::ExportDefaultDeclarationKind::Identifier(identifier) =
+                        &export.declaration
+                    else {
+                        continue;
+                    };
+                    if let Some(namespace) = local_namespaces.get(identifier.name.as_str()) {
+                        exports
+                            .namespaces
+                            .insert("default".to_string(), namespace.clone());
+                    } else if let Some(binding) = imported_bindings.get(identifier.name.as_str()) {
+                        Self::insert_export_binding(
+                            &mut exports,
+                            "default".to_string(),
+                            binding.clone(),
+                        );
+                    }
                 }
                 Statement::ExportAllDeclaration(export) => {
                     self.collect_export_all(export, visited, &mut exports);
@@ -496,18 +568,86 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         Some(exports)
     }
 
+    fn collect_imported_bindings(
+        &self,
+        statements: &[Statement<'_>],
+        visited: &mut FxHashSet<PathBuf>,
+    ) -> FxHashMap<String, ConstEnumImport> {
+        let mut bindings = FxHashMap::default();
+        for statement in statements {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            if import.import_kind.is_type() {
+                continue;
+            }
+            let Some(target_exports) =
+                self.analyze_reexport_source(import.source.value.as_str(), visited)
+            else {
+                continue;
+            };
+            let Some(specifiers) = &import.specifiers else {
+                continue;
+            };
+            for specifier in specifiers {
+                match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                        if specifier.import_kind.is_type() {
+                            continue;
+                        }
+                        let imported =
+                            ModuleExportNameText::new(&specifier.imported).binding_name();
+                        let local = specifier.local.name.to_string();
+                        if let Some(imported_enum) = target_exports.enums.get(&imported) {
+                            bindings.insert(local, ConstEnumImport::Enum(imported_enum.clone()));
+                        } else if let Some(namespace) = target_exports.namespaces.get(&imported) {
+                            bindings.insert(local, ConstEnumImport::Namespace(namespace.clone()));
+                        }
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        bindings.insert(
+                            specifier.local.name.to_string(),
+                            ConstEnumImport::Namespace(target_exports.enums.clone()),
+                        );
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        let local = specifier.local.name.to_string();
+                        if let Some(imported_enum) = target_exports.enums.get("default") {
+                            bindings.insert(local, ConstEnumImport::Enum(imported_enum.clone()));
+                        } else if let Some(namespace) = target_exports.namespaces.get("default") {
+                            bindings.insert(local, ConstEnumImport::Namespace(namespace.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        bindings
+    }
+
     fn collect_named_export(
         &self,
         export: &ExportNamedDeclaration<'_>,
         scoping: Option<&oxc_semantic::Scoping>,
+        include_ambient_enums: bool,
         visited: &mut FxHashSet<PathBuf>,
+        imported_bindings: &FxHashMap<String, ConstEnumImport>,
         exports: &mut ConstEnumExports,
     ) {
         if let Some(declaration) = &export.declaration {
-            self.collect_declaration(declaration, scoping, exports);
+            self.collect_declaration(declaration, scoping, include_ambient_enums, exports);
         }
 
         let Some(source) = &export.source else {
+            for specifier in &export.specifiers {
+                if export.export_kind.is_type() || specifier.export_kind.is_type() {
+                    continue;
+                }
+                let local_name = ModuleExportNameText::new(&specifier.local).binding_name();
+                let exported_name = ModuleExportNameText::new(&specifier.exported).binding_name();
+                if let Some(binding) = imported_bindings.get(&local_name) {
+                    Self::insert_export_binding(exports, exported_name, binding.clone());
+                }
+            }
             return;
         };
         let Some(target_exports) = self.analyze_reexport_source(source.value.as_str(), visited)
@@ -524,6 +664,21 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
                 exports.enums.insert(exported_name, members.clone());
             } else if let Some(namespace) = target_exports.namespaces.get(&local_name) {
                 exports.namespaces.insert(exported_name, namespace.clone());
+            }
+        }
+    }
+
+    fn insert_export_binding(
+        exports: &mut ConstEnumExports,
+        exported_name: String,
+        binding: ConstEnumImport,
+    ) {
+        match binding {
+            ConstEnumImport::Enum(imported_enum) => {
+                exports.enums.insert(exported_name, imported_enum);
+            }
+            ConstEnumImport::Namespace(namespace) => {
+                exports.namespaces.insert(exported_name, namespace);
             }
         }
     }
@@ -553,19 +708,27 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         &self,
         declaration: &Declaration<'_>,
         scoping: Option<&oxc_semantic::Scoping>,
+        include_ambient_enums: bool,
         exports: &mut ConstEnumExports,
     ) {
         match declaration {
-            Declaration::TSEnumDeclaration(declaration) if declaration.r#const => {
+            Declaration::TSEnumDeclaration(declaration)
+                if declaration.r#const || include_ambient_enums =>
+            {
                 let members = scoping
                     .and_then(|scoping| {
                         ConstEnumMemberCollector::new(declaration, scoping).collect()
                     })
                     .or_else(|| ConstEnumAstMemberCollector::new(declaration).collect());
                 if let Some(members) = members {
+                    let imported_enum = if declaration.r#const {
+                        ImportedEnum::const_enum(members)
+                    } else {
+                        ImportedEnum::ambient_enum(members)
+                    };
                     exports
                         .enums
-                        .insert(declaration.id.name.to_string(), members);
+                        .insert(declaration.id.name.to_string(), imported_enum);
                 }
             }
             Declaration::TSModuleDeclaration(declaration) => {
@@ -573,7 +736,8 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
                     return;
                 };
                 if let Some(namespace) =
-                    ConstEnumNamespaceCollector::new(declaration, scoping).collect()
+                    ConstEnumNamespaceCollector::new(declaration, scoping, include_ambient_enums)
+                        .collect()
                 {
                     exports.namespaces.insert(namespace.name, namespace.enums);
                 }
@@ -589,7 +753,6 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
     ) -> Option<ConstEnumExports> {
         let sources = self.sources.as_ref()?;
         let target = sources.resolve_static_with_declarations(&self.source.path, specifier)?;
-        #[cfg(test)]
         if let Some(cache) = self.cache {
             return cache.analyze_with_visited(target, visited);
         }
@@ -608,22 +771,25 @@ impl ConstEnumExports {
 
 struct ConstEnumNamespace {
     name: String,
-    enums: FxHashMap<String, FxHashMap<String, EnumValue>>,
+    enums: FxHashMap<String, ImportedEnum>,
 }
 
 struct ConstEnumNamespaceCollector<'a, 'b> {
     declaration: &'a oxc_ast::ast::TSModuleDeclaration<'a>,
     scoping: &'b oxc_semantic::Scoping,
+    include_ambient_enums: bool,
 }
 
 impl<'a, 'b> ConstEnumNamespaceCollector<'a, 'b> {
     fn new(
         declaration: &'a oxc_ast::ast::TSModuleDeclaration<'a>,
         scoping: &'b oxc_semantic::Scoping,
+        include_ambient_enums: bool,
     ) -> Self {
         Self {
             declaration,
             scoping,
+            include_ambient_enums,
         }
     }
 
@@ -636,17 +802,31 @@ impl<'a, 'b> ConstEnumNamespaceCollector<'a, 'b> {
         };
         let mut enums = FxHashMap::default();
         for statement in &block.body {
-            let Statement::ExportNamedDeclaration(export) = statement else {
+            let enum_decl = match statement {
+                Statement::TSEnumDeclaration(enum_decl) => Some(enum_decl.as_ref()),
+                Statement::ExportNamedDeclaration(export) => {
+                    export.declaration.as_ref().and_then(|declaration| {
+                        let Declaration::TSEnumDeclaration(enum_decl) = declaration else {
+                            return None;
+                        };
+                        Some(enum_decl.as_ref())
+                    })
+                }
+                _ => None,
+            };
+            let Some(enum_decl) = enum_decl else {
                 continue;
             };
-            let Some(Declaration::TSEnumDeclaration(enum_decl)) = &export.declaration else {
-                continue;
-            };
-            if enum_decl.r#const {
+            if enum_decl.r#const || self.include_ambient_enums {
                 if let Some(members) =
                     ConstEnumMemberCollector::new(enum_decl, self.scoping).collect()
                 {
-                    enums.insert(enum_decl.id.name.to_string(), members);
+                    let imported_enum = if enum_decl.r#const {
+                        ImportedEnum::const_enum(members)
+                    } else {
+                        ImportedEnum::ambient_enum(members)
+                    };
+                    enums.insert(enum_decl.id.name.to_string(), imported_enum);
                 }
             }
         }
@@ -761,6 +941,7 @@ impl<'a> ConstEnumAstMemberCollector<'a> {
 struct ConstEnumInlineMutator<'a> {
     ast: AstBuilder<'a>,
     imports: FxHashMap<String, ConstEnumImport>,
+    in_enum_initializer: bool,
     changed: bool,
 }
 
@@ -773,6 +954,13 @@ impl<'a> VisitMut<'a> for ConstEnumInlineMutator<'a> {
         }
         walk_mut::walk_expression(self, expr);
     }
+
+    fn visit_ts_enum_member(&mut self, member: &mut oxc_ast::ast::TSEnumMember<'a>) {
+        let previous = self.in_enum_initializer;
+        self.in_enum_initializer = true;
+        walk_mut::walk_ts_enum_member(self, member);
+        self.in_enum_initializer = previous;
+    }
 }
 
 impl ConstEnumInlineMutator<'_> {
@@ -783,8 +971,13 @@ impl ConstEnumInlineMutator<'_> {
         let member_name = member.property.name.as_str();
 
         if let Expression::Identifier(object) = &member.object {
-            if let Some(ConstEnumImport::Enum(members)) = self.imports.get(object.name.as_str()) {
-                return members.get(member_name);
+            if let Some(ConstEnumImport::Enum(imported_enum)) =
+                self.imports.get(object.name.as_str())
+            {
+                return self
+                    .should_inline(imported_enum)
+                    .then(|| imported_enum.members.get(member_name))
+                    .flatten();
             }
         }
 
@@ -798,9 +991,14 @@ impl ConstEnumInlineMutator<'_> {
         let ConstEnumImport::Namespace(enums) = self.imports.get(namespace.name.as_str())? else {
             return None;
         };
-        enums
-            .get(enum_name)
-            .and_then(|members| members.get(member_name))
+        let imported_enum = enums.get(enum_name)?;
+        self.should_inline(imported_enum)
+            .then(|| imported_enum.members.get(member_name))
+            .flatten()
+    }
+
+    fn should_inline(&self, imported_enum: &ImportedEnum) -> bool {
+        imported_enum.inline_everywhere || self.in_enum_initializer
     }
 }
 
@@ -922,6 +1120,60 @@ mod tests {
         assert!(
             output.contains("\"provider\"") && !output.contains("Constant.Key.MapProviderKey"),
             "namespace const enum must be inlined; got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn folds_sdk_ambient_enum_only_inside_enum_initializers_like_hvigor() {
+        let sdk_root = PathBuf::from("/sdk/ets/api");
+        let kit_root = PathBuf::from("/sdk/ets/kits");
+        let declaration = sdk_root.join("@ohos.multimedia.media.d.ts");
+        let mut files = FxHashMap::default();
+        files.insert(
+            declaration,
+            Arc::<str>::from(
+                r#"declare namespace media {
+    declare interface OutputSize {}
+    enum VideoScaleType {
+        VIDEO_SCALE_TYPE_FIT = 0,
+        VIDEO_SCALE_TYPE_FIT_CROP = 1
+    }
+}
+export default media;"#,
+            ),
+        );
+        files.insert(
+            kit_root.join("@kit.MediaKit.d.ts"),
+            Arc::<str>::from(
+                r#"import media from "@ohos.multimedia.media";
+export { media };"#,
+            ),
+        );
+        let sources = TransformSourceSnapshot::new(files)
+            .with_sdk_declaration_roots(vec![sdk_root, kit_root]);
+        let source_path = "/project/PlayerInterface.ets";
+        let source = r#"import { media } from "@kit.MediaKit";
+export enum MLiveVideoScaleMode {
+    FIT = media.VideoScaleType.VIDEO_SCALE_TYPE_FIT,
+    CROP = media.VideoScaleType.VIDEO_SCALE_TYPE_FIT_CROP
+}
+const runtimeScale = media.VideoScaleType.VIDEO_SCALE_TYPE_FIT;"#;
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        let changed = ImportedConstEnumRewriter::new(source_path, &sources)
+            .rewrite_program(&allocator, &mut parsed.program);
+        let output = Codegen::new().build(&parsed.program).code;
+
+        assert!(changed, "SDK ambient enum initializer must be folded");
+        assert!(
+            output.contains("FIT = 0") && output.contains("CROP = 1"),
+            "hvigor folds imported SDK enum constants in enum members:\n{output}"
+        );
+        assert!(
+            output.contains("const runtimeScale = media.VideoScaleType.VIDEO_SCALE_TYPE_FIT;"),
+            "a non-const ambient enum access outside an enum initializer stays live:\n{output}"
         );
     }
 

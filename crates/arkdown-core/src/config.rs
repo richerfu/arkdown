@@ -147,6 +147,38 @@ pub struct ProductConfig {
     /// in the compiled `module.json` app section.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub version_name: Option<String>,
+    /// Effective build version from the selected product or the highest-precedence
+    /// build invocation override.
+    ///
+    /// Hvigor resolves `buildVersion` as command extra config → product →
+    /// `AppScope/app.json5` and propagates it to BuildProfile, module metadata,
+    /// pack.info, and integrated-HSP normalization.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub build_version: Option<String>,
+    /// Effective app-profile fields supplied by the selected product or by
+    /// `project/hvigorfile.*` `config.ohos.overrides.appOpt`.
+    ///
+    /// Hvigor applies these fields after `AppScope/app.json5`; build-script
+    /// values are folded into this overlay after product values.
+    #[serde(default)]
+    pub app_options: AppOptionOverride,
+}
+
+/// App-profile values that override `AppScope/app.json5`.
+///
+/// Upstream: `AppOpt` in
+/// `hvigor-ohos-plugin/src/options/build/app-ohos-config.d.ts`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppOptionOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +378,13 @@ pub struct ArkOptions {
     pub obfuscation: Option<ObfuscationConfig>,
     pub types: Vec<String>,
     pub runtime_only: Option<RuntimeOnlyConfig>,
+    /// Constants emitted into the module's generated `BuildProfile.ets`.
+    ///
+    /// Hvigor preserves declaration order and only accepts primitive
+    /// string/number/boolean values. Validation happens in
+    /// `arkdown-profile::BuildProfileWriter`.
+    #[serde(default)]
+    pub build_profile_fields: serde_json::Map<String, serde_json::Value>,
     /// Whether to allow the bundler to split output into multiple chunks
     /// (`buildOption.arkOptions.supportChunks` in `build-profile.json5`).
     #[serde(default)]
@@ -455,6 +494,9 @@ pub struct SourceOption {
 pub struct RuntimeOnlyConfig {
     pub packages: Vec<String>,
     pub sources: Vec<String>,
+    /// Packages excluded from remote dynamic-import resource collection.
+    #[serde(default)]
+    pub exclude_packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

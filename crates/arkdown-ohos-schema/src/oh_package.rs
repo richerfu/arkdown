@@ -47,6 +47,12 @@ pub struct RawOhPackage {
     /// Types declaration entry.
     #[serde(default)]
     pub types: Option<String>,
+    /// Source files or directories exported for normalized OHM URL consumers.
+    ///
+    /// `None` and `Some(Vec::new())` are intentionally distinct: hvigor treats
+    /// a present empty `oh-exports` array as a declared field.
+    #[serde(rename = "oh-exports", default)]
+    pub oh_exports: Option<Vec<String>>,
     /// Remaining raw fields preserved for round-trip.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -76,5 +82,15 @@ mod tests {
         let pkg: RawOhPackage = serde_json::from_str(json).unwrap();
         assert_eq!(pkg.dependencies.len(), 1);
         assert_eq!(pkg.dependencies["@ohos/hilog"], "^1.0.0");
+    }
+
+    #[test]
+    fn test_parse_oh_exports_preserves_present_empty_array() {
+        let absent: RawOhPackage = serde_json::from_str(r#"{"name":"entry"}"#).unwrap();
+        let present: RawOhPackage =
+            serde_json::from_str(r#"{"name":"entry","oh-exports":[]}"#).unwrap();
+
+        assert_eq!(absent.oh_exports, None);
+        assert_eq!(present.oh_exports, Some(Vec::new()));
     }
 }

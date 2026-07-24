@@ -67,8 +67,8 @@ pub use artifacts::layout::ArtifactLayout;
 
 // build_script
 pub use build_script::{
-    BuildScriptEffect, BuildScriptFingerprint, BuildScriptKind, BuildScriptParser,
-    BuildScriptSnapshot, ParseBuildScriptError,
+    BuildScriptEffect, BuildScriptFingerprint, BuildScriptKind, BuildScriptOverrideError,
+    BuildScriptOverrideInventory, BuildScriptParser, BuildScriptSnapshot, ParseBuildScriptError,
 };
 
 // builder

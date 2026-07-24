@@ -66,6 +66,11 @@ pub struct BundleInput {
     pub module_record_roots: Vec<(String, PathBuf)>,
     /// Ordered compile entries produced by `GenerateLoaderJson`.
     pub entries: Vec<String>,
+    /// Entries declared by referenced form profiles.
+    ///
+    /// SDK `readCardForm()` records these separately in `cardObj` so the ETS
+    /// transform emits `loadEtsCard` instead of ordinary page registration.
+    pub form_entry_sources: Vec<String>,
     /// Runtime entries loaded directly by OHOS from `module.json`.
     pub runtime_entry_sources: Vec<String>,
     /// Whether hvigor `supportChunks` is enabled for this module.
@@ -413,6 +418,7 @@ mod tests {
                 module_path_map: Vec::new(),
                 module_record_roots: Vec::new(),
                 entries: vec!["./ets/pages/Index.ets".to_string()],
+                form_entry_sources: Vec::new(),
                 runtime_entry_sources: Vec::new(),
                 support_chunks: false,
                 source_map_packages: BundleSourceMapPackageInfo {

@@ -4,6 +4,7 @@ use oxc_ast::ast::{
 };
 
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
+use crate::transform::global_rewrite::GlobalContextCallRewrite;
 
 const KNOWN_ARKUI_DECORATORS: &[&str] = &[
     ArkuiDecoratorName::COMPONENT,
@@ -66,10 +67,11 @@ impl ArktsTransformSyntaxDetector {
     }
 
     pub(super) fn program(&self, program: &Program<'_>) -> bool {
-        program
-            .body
-            .iter()
-            .any(|statement| self.statement(statement))
+        GlobalContextCallRewrite::new().program_needs_rewrite(program)
+            || program
+                .body
+                .iter()
+                .any(|statement| self.statement(statement))
     }
 
     pub(super) fn is_known_decorator_name(&self, name: &str) -> bool {

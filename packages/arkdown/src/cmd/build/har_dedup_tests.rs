@@ -143,6 +143,8 @@ fn fixture(root: &Path) -> (ArkdownConfig, ProjectSnapshot) {
       },
       version_code: None,
       version_name: None,
+      build_version: None,
+      app_options: Default::default(),
     },
     modules: vec![
       ModuleConfig {
@@ -170,6 +172,7 @@ fn fixture(root: &Path) -> (ArkdownConfig, ProjectSnapshot) {
     bundle_name: config.product.bundle_name.clone(),
     version_code: 1,
     version_name: "1.0.0".to_string(),
+    build_version: None,
     bundle_type: "app".to_string(),
     product_name: config.product.name.clone(),
     module_order: vec!["entry".to_string(), "shared".to_string()],

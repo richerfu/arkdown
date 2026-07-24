@@ -4,18 +4,17 @@ use oxc_allocator::Allocator;
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
     AccessorProperty, Argument, AssignmentExpression, AssignmentTarget, ClassElement, Expression,
-    FormalParameterKind, FormalParameters, FunctionBody, MemberExpression, MethodDefinition,
-    ObjectPropertyKind, PropertyDefinition, Statement, StaticBlock, TSAccessibility,
-    TSIndexSignature, TSType, TSTypeAnnotation, TSTypeName, VariableDeclarationKind,
+    FormalParameterKind, FormalParameters, MemberExpression, MethodDefinition, ObjectPropertyKind,
+    Program, PropertyDefinition, Statement, StaticBlock, TSIndexSignature, TSType,
+    TSTypeAnnotation, TSTypeName, VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::{Span, SPAN};
 use oxc_syntax::operator::AssignmentOperator;
-use oxc_syntax::scope::ScopeFlags;
 
-use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError, StylesBodyLowerer};
+use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError};
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::decorator::{ArkuiDecoratorName, ArkuiStateDecorator, ConstructorInitKind};
 use crate::transform::entry::EntryRegistrationInfo;
@@ -41,22 +40,6 @@ pub struct BuilderMethodInfo<'a> {
     /// ArkUI DSL body plan. The final class emitter lowers it into OXC
     /// statements with the allocator that owns the generated class.
     pub body: BuildBodyInfo<'a>,
-}
-
-/// A `@Styles` method extracted from a `@Component` struct.
-///
-/// In ArkTS, `@Styles` methods declare reusable attribute chains (`.width()`, `.height()`,
-/// etc.).  The decorator is stripped and the method becomes `private`.  The attribute chain
-/// body is lowered: `.attr(x)` → `this.attr(x)`.
-#[derive(Debug, Clone)]
-pub struct StylesMethodInfo<'a> {
-    /// Method name as declared.
-    pub name: String,
-    /// Original parameter list.
-    pub params: &'a FormalParameters<'a>,
-    /// Original function body. It is lowered to ViewPU-compatible statements
-    /// through OXC AST cloning when the class is emitted.
-    pub body: Option<&'a FunctionBody<'a>>,
 }
 
 /// A state/prop/link field extracted from a `@Component` struct.
@@ -150,42 +133,44 @@ impl<'a> FieldExpression<'a> {
     }
 }
 
-struct FieldInitializerExpressionEmitter<'a, 'b> {
+/// Program-level lowering for SDK
+/// `process_ui_syntax.js::createCustomDialogController`.
+///
+/// The SDK visits every `new CustomDialogController(...)` before component
+/// classes are generated, so this pass intentionally owns V1/V2 component
+/// fields, component methods, and ordinary class/function bodies together.
+pub(super) struct CustomDialogControllerLowerer<'a, 'b> {
     allocator: &'a Allocator,
     ast: AstBuilder<'a>,
-    builder: &'b ViewpuAstBuilder<'a>,
+    builder: ViewpuAstBuilder<'a>,
     runtime_names: &'b ArkuiRuntimeNames,
     custom_dialog_components: &'b FxHashSet<String>,
+    changed: bool,
 }
 
-impl<'a, 'b> FieldInitializerExpressionEmitter<'a, 'b> {
-    fn new(
+impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
+    pub(super) fn new(
         allocator: &'a Allocator,
-        builder: &'b ViewpuAstBuilder<'a>,
         runtime_names: &'b ArkuiRuntimeNames,
         custom_dialog_components: &'b FxHashSet<String>,
     ) -> Self {
         Self {
             allocator,
             ast: AstBuilder::new(allocator),
-            builder,
+            builder: ViewpuAstBuilder::new(allocator),
             runtime_names,
             custom_dialog_components,
+            changed: false,
         }
     }
 
-    fn expression(
-        &self,
-        initializer: &FieldExpression<'_>,
-        controller_expression: Expression<'a>,
-    ) -> Expression<'a> {
-        let mut expression = initializer.to_expression(self.builder);
-        self.rewrite_custom_dialog_controller_builder(&mut expression, controller_expression);
-        expression
+    pub(super) fn program(mut self, program: &mut Program<'a>) -> bool {
+        self.visit_program(program);
+        self.changed
     }
 
     fn rewrite_custom_dialog_controller_builder(
-        &self,
+        &mut self,
         expression: &mut Expression<'a>,
         controller_expression: Expression<'a>,
     ) {
@@ -196,6 +181,9 @@ impl<'a, 'b> FieldInitializerExpressionEmitter<'a, 'b> {
             &new_expression.callee,
             ArkuiRuntimeTypeName::CUSTOM_DIALOG_CONTROLLER,
         ) {
+            return;
+        }
+        if new_expression.arguments.len() != 1 {
             return;
         }
         let Some(Argument::ObjectExpression(config)) = new_expression.arguments.first_mut() else {
@@ -224,11 +212,10 @@ impl<'a, 'b> FieldInitializerExpressionEmitter<'a, 'b> {
             );
         }
 
-        if new_expression.arguments.len() == 1 {
-            new_expression
-                .arguments
-                .push(Argument::from(self.builder.this_expression()));
-        }
+        new_expression
+            .arguments
+            .push(Argument::from(self.builder.this_expression()));
+        self.changed = true;
     }
 
     fn custom_dialog_builder_call(
@@ -434,6 +421,67 @@ impl<'a, 'b> FieldInitializerExpressionEmitter<'a, 'b> {
     fn is_identifier(expression: &Expression<'_>, expected: &str) -> bool {
         Self::identifier_name(expression).is_some_and(|name| name == expected)
     }
+
+    fn assignment_target_expression(
+        &self,
+        target: &AssignmentTarget<'a>,
+    ) -> Option<Expression<'a>> {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                Some(Expression::Identifier(identifier.clone_in(self.allocator)))
+            }
+            AssignmentTarget::StaticMemberExpression(member) => Some(
+                Expression::StaticMemberExpression(member.clone_in(self.allocator)),
+            ),
+            AssignmentTarget::ComputedMemberExpression(member) => Some(
+                Expression::ComputedMemberExpression(member.clone_in(self.allocator)),
+            ),
+            AssignmentTarget::PrivateFieldExpression(member) => Some(
+                Expression::PrivateFieldExpression(member.clone_in(self.allocator)),
+            ),
+            _ => None,
+        }
+    }
+}
+
+impl<'a, 'b> VisitMut<'a> for CustomDialogControllerLowerer<'a, 'b> {
+    fn visit_property_definition(&mut self, property: &mut PropertyDefinition<'a>) {
+        let property_name = property.key.static_name().map(|name| name.to_string());
+        if let (Some(property_name), Some(initializer)) = (property_name, property.value.as_mut()) {
+            self.rewrite_custom_dialog_controller_builder(
+                initializer,
+                self.builder.this_member_expression(&property_name),
+            );
+        }
+        walk_mut::walk_property_definition(self, property);
+    }
+
+    fn visit_variable_declarator(&mut self, declarator: &mut VariableDeclarator<'a>) {
+        let variable_name = declarator
+            .id
+            .get_binding_identifier()
+            .map(|identifier| identifier.name.to_string());
+        if let (Some(variable_name), Some(initializer)) = (variable_name, declarator.init.as_mut())
+        {
+            // SDK createCustomComponentBuilderArrowFunction intentionally
+            // addresses variable declarations as `this.<name>`.
+            self.rewrite_custom_dialog_controller_builder(
+                initializer,
+                self.builder.this_member_expression(&variable_name),
+            );
+        }
+        walk_mut::walk_variable_declarator(self, declarator);
+    }
+
+    fn visit_assignment_expression(&mut self, assignment: &mut AssignmentExpression<'a>) {
+        if let Some(controller_expression) = self.assignment_target_expression(&assignment.left) {
+            self.rewrite_custom_dialog_controller_builder(
+                &mut assignment.right,
+                controller_expression,
+            );
+        }
+        walk_mut::walk_assignment_expression(self, assignment);
+    }
 }
 
 struct CustomDialogBuilderName;
@@ -481,13 +529,15 @@ pub struct ComponentInfo<'a> {
     /// Struct members that are not ArkUI state/decorator fields and are not
     /// build/@Builder/@Styles methods. hvigor keeps these as class members.
     pub regular_members: Vec<RegularMember<'a>>,
+    /// Placement of source-derived class members after the synthetic ViewPU
+    /// lifecycle prefix. This preserves the in-place member transformation in
+    /// SDK `process_component_class.js::processMembers`.
+    pub source_members: Vec<ComponentSourceMember>,
     /// Body plan for the hvigor-style `initialRender()` method.
     pub initial_render_body: BuildBodyInfo<'a>,
     pub entry_registration: Option<EntryRegistrationInfo<'a>>,
     /// `@Builder` methods: desugared ArkUI DSL, emitted as regular class methods.
     pub builder_methods: Vec<BuilderMethodInfo<'a>>,
-    /// `@Styles` methods: emitted as `private` class methods with lowered body.
-    pub styles_methods: Vec<StylesMethodInfo<'a>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -499,26 +549,19 @@ pub enum RegularMember<'a> {
     AccessorProperty(&'a AccessorProperty<'a>),
 }
 
+#[derive(Debug, Clone)]
+pub enum ComponentSourceMember {
+    Property(String),
+    Regular(usize),
+    InitialRender,
+    Builder(usize),
+}
+
 impl<'a> RegularMember<'a> {
-    fn to_class_element<'b>(
-        &self,
-        allocator: &'b Allocator,
-        runtime_names: &ArkuiRuntimeNames,
-        custom_dialog_components: &FxHashSet<String>,
-    ) -> ClassElement<'b> {
+    fn to_class_element<'b>(&self, allocator: &'b Allocator) -> ClassElement<'b> {
         match self {
             Self::Method(method) => {
-                let mut element =
-                    GlobalContextCallRewriter::new(allocator).method_definition(method);
-                if let ClassElement::MethodDefinition(method) = &mut element {
-                    CustomDialogControllerMethodRewriter::new(
-                        allocator,
-                        runtime_names,
-                        custom_dialog_components,
-                    )
-                    .method_definition(method);
-                }
-                element
+                GlobalContextCallRewriter::new(allocator).method_definition(method)
             }
             Self::Property(property) => {
                 let ast = AstBuilder::new(allocator);
@@ -544,68 +587,6 @@ impl<'a> RegularMember<'a> {
     }
 }
 
-struct CustomDialogControllerMethodRewriter<'a, 'b> {
-    allocator: &'a Allocator,
-    builder: ViewpuAstBuilder<'a>,
-    runtime_names: &'b ArkuiRuntimeNames,
-    custom_dialog_components: &'b FxHashSet<String>,
-}
-
-impl<'a, 'b> CustomDialogControllerMethodRewriter<'a, 'b> {
-    fn new(
-        allocator: &'a Allocator,
-        runtime_names: &'b ArkuiRuntimeNames,
-        custom_dialog_components: &'b FxHashSet<String>,
-    ) -> Self {
-        Self {
-            allocator,
-            builder: ViewpuAstBuilder::new(allocator),
-            runtime_names,
-            custom_dialog_components,
-        }
-    }
-
-    fn method_definition(&mut self, method: &mut MethodDefinition<'a>) {
-        self.visit_function(&mut method.value, ScopeFlags::Function);
-    }
-
-    fn assignment_target_expression(
-        &self,
-        target: &AssignmentTarget<'a>,
-    ) -> Option<Expression<'a>> {
-        match target {
-            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                Some(Expression::Identifier(identifier.clone_in(self.allocator)))
-            }
-            AssignmentTarget::StaticMemberExpression(member) => Some(
-                Expression::StaticMemberExpression(member.clone_in(self.allocator)),
-            ),
-            AssignmentTarget::ComputedMemberExpression(member) => Some(
-                Expression::ComputedMemberExpression(member.clone_in(self.allocator)),
-            ),
-            AssignmentTarget::PrivateFieldExpression(member) => Some(
-                Expression::PrivateFieldExpression(member.clone_in(self.allocator)),
-            ),
-            _ => None,
-        }
-    }
-}
-
-impl<'a, 'b> VisitMut<'a> for CustomDialogControllerMethodRewriter<'a, 'b> {
-    fn visit_assignment_expression(&mut self, assignment: &mut AssignmentExpression<'a>) {
-        if let Some(controller_expression) = self.assignment_target_expression(&assignment.left) {
-            FieldInitializerExpressionEmitter::new(
-                self.allocator,
-                &self.builder,
-                self.runtime_names,
-                self.custom_dialog_components,
-            )
-            .rewrite_custom_dialog_controller_builder(&mut assignment.right, controller_expression);
-        }
-        walk_mut::walk_assignment_expression(self, assignment);
-    }
-}
-
 impl Default for ComponentInfo<'_> {
     fn default() -> Self {
         Self {
@@ -624,10 +605,10 @@ impl Default for ComponentInfo<'_> {
             property_order: Default::default(),
             regular_fields: Default::default(),
             regular_members: Default::default(),
+            source_members: Default::default(),
             initial_render_body: Default::default(),
             entry_registration: Default::default(),
             builder_methods: Default::default(),
-            styles_methods: Default::default(),
         }
     }
 }
@@ -677,22 +658,16 @@ impl ComponentInfo<'_> {
 pub(crate) struct ViewPuClassEmitter<'a> {
     info: &'a ComponentInfo<'a>,
     runtime_names: &'a ArkuiRuntimeNames,
-    custom_dialog_components: &'a FxHashSet<String>,
     params_type: String,
     property_order: Vec<String>,
     params_fields: Vec<ParamField<'a>>,
 }
 
 impl<'a> ViewPuClassEmitter<'a> {
-    pub(crate) fn new(
-        info: &'a ComponentInfo<'a>,
-        runtime_names: &'a ArkuiRuntimeNames,
-        custom_dialog_components: &'a FxHashSet<String>,
-    ) -> Self {
+    pub(crate) fn new(info: &'a ComponentInfo<'a>, runtime_names: &'a ArkuiRuntimeNames) -> Self {
         Self {
             info,
             runtime_names,
-            custom_dialog_components,
             params_type: GeneratedViewpuName::params_interface(&info.name),
             property_order: info.resolved_property_order(),
             params_fields: info.resolved_params_fields(),
@@ -765,27 +740,24 @@ impl<'a> ViewPuClassEmitter<'a> {
         if self.info.is_reusable {
             elements.push(self.build_update_recycle_elmt_id(allocator));
         }
-        // field declarations (PropertyDefinitions)
-        for elem in self.build_field_declarations(allocator) {
-            elements.push(elem);
-        }
-        // setController (conditional)
-        for elem in self.build_set_controller_methods(allocator) {
-            elements.push(elem);
-        }
-        // regular members (kept by cloning their parsed OXC AST elements)
-        for elem in self.build_regular_members(allocator) {
-            elements.push(elem);
-        }
-        // initialRender
-        elements.push(self.build_initial_render(allocator)?);
-        // @Builder methods
-        for elem in self.build_builder_methods(allocator)? {
-            elements.push(elem);
-        }
-        // @Styles methods
-        for elem in self.build_styles_methods(allocator) {
-            elements.push(elem);
+        if self.info.source_members.is_empty() {
+            // Compatibility path for callers that construct ComponentInfo
+            // directly. Parsed components always carry source placement.
+            for elem in self.build_field_declarations(allocator) {
+                elements.push(elem);
+            }
+            for elem in self.build_set_controller_methods(allocator) {
+                elements.push(elem);
+            }
+            for elem in self.build_regular_members(allocator) {
+                elements.push(elem);
+            }
+            elements.push(self.build_initial_render(allocator)?);
+            for elem in self.build_builder_methods(allocator)? {
+                elements.push(elem);
+            }
+        } else {
+            self.push_source_members(allocator, &mut elements)?;
         }
         // rerender
         elements.push(self.build_rerender(allocator));
@@ -795,6 +767,45 @@ impl<'a> ViewPuClassEmitter<'a> {
         }
 
         Ok(elements)
+    }
+
+    fn push_source_members<'b>(
+        &self,
+        allocator: &'b Allocator,
+        elements: &mut oxc_allocator::Vec<'b, ClassElement<'b>>,
+    ) -> Result<(), BuildLoweringError> {
+        let mut emitted_controller = false;
+        for member in &self.info.source_members {
+            match member {
+                ComponentSourceMember::Property(name) => {
+                    elements.extend(self.build_field_declaration(allocator, name));
+                    if !emitted_controller
+                        && self.info.is_custom_dialog
+                        && self
+                            .info
+                            .find_regular_field(name)
+                            .is_some_and(RegularField::is_custom_dialog_controller)
+                    {
+                        elements.extend(self.build_set_controller_methods(allocator));
+                        emitted_controller = true;
+                    }
+                }
+                ComponentSourceMember::Regular(index) => {
+                    if let Some(member) = self.info.regular_members.get(*index) {
+                        elements.push(member.to_class_element(allocator));
+                    }
+                }
+                ComponentSourceMember::InitialRender => {
+                    elements.push(self.build_initial_render(allocator)?);
+                }
+                ComponentSourceMember::Builder(index) => {
+                    if let Some(method) = self.info.builder_methods.get(*index) {
+                        elements.push(self.build_builder_method(allocator, method)?);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn build_constructor<'b>(&self, allocator: &'b Allocator) -> oxc_ast::ast::ClassElement<'b> {
@@ -826,12 +837,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                     .initializer
                     .as_ref()
                     .map(|initializer| {
-                        self.regular_field_initializer_expression(
-                            allocator,
-                            &builder,
-                            field,
-                            initializer,
-                        )
+                        self.regular_field_initializer_expression(&builder, initializer)
                     })
                     .unwrap_or_else(|| builder.undefined_expression());
                 stmts.push(builder.this_assign_statement(name, init));
@@ -894,6 +900,22 @@ impl<'a> ViewPuClassEmitter<'a> {
         let builder = ViewpuAstBuilder::new(allocator);
         let mut stmts = builder.statements();
         for name in &self.property_order {
+            if self
+                .info
+                .find_state_field(name)
+                .is_some_and(|field| field.decorator == ArkuiDecoratorName::OBJECT_LINK)
+            {
+                // SDK process_component_member.js::createUpdateParams selects
+                // createUpdateParamsWithSet for @ObjectLink. The backing
+                // SynchedPropertyNesedObjectPU must receive every parent value,
+                // including `undefined`, without going through a field setter.
+                stmts.push(builder.this_backing_field_call_statement(
+                    name,
+                    GeneratedViewpuName::SET,
+                    builder.expressions_from_iter([builder.params_field_expression(name)]),
+                ));
+                continue;
+            }
             if self.has_initially_provided_value_slot(name) {
                 let mut consequent = builder.statements();
                 consequent.push(
@@ -1055,28 +1077,38 @@ impl<'a> ViewPuClassEmitter<'a> {
     ) -> Vec<oxc_ast::ast::ClassElement<'b>> {
         let mut elements = Vec::new();
         for name in &self.property_order {
-            if let Some(field) = self.info.find_regular_field(name) {
-                let name = allocator.alloc_str(&field.name);
-                let type_annotation = field.type_annotation_ast.map(|type_annotation| {
-                    ViewpuAstBuilder::new(allocator).clone_type_annotation(type_annotation)
-                });
-                // SDK ets-loader parity:
-                // process_component_class.js::addPropertyMember/createPropertyDeclaration
-                // emits regular field declarations without initializers. The initializer is
-                // emitted by process_component_member.js::createVariableInitStatement into
-                // the generated constructor, after state-backed fields exist.
-                elements.push(
-                    ViewpuMemberAstEmitter::new(allocator).property_with_type_annotation(
-                        name,
-                        type_annotation,
-                        None,
-                        true,
-                        field.optional,
-                    ),
-                );
-            } else if let Some(field) = self.info.find_state_field(name) {
-                self.push_state_field_declaration(allocator, &mut elements, field);
-            }
+            elements.extend(self.build_field_declaration(allocator, name));
+        }
+        elements
+    }
+
+    fn build_field_declaration<'b>(
+        &self,
+        allocator: &'b Allocator,
+        property_name: &str,
+    ) -> Vec<ClassElement<'b>> {
+        let mut elements = Vec::new();
+        if let Some(field) = self.info.find_regular_field(property_name) {
+            let name = allocator.alloc_str(&field.name);
+            let type_annotation = field.type_annotation_ast.map(|type_annotation| {
+                ViewpuAstBuilder::new(allocator).clone_type_annotation(type_annotation)
+            });
+            // SDK ets-loader parity:
+            // process_component_class.js::addPropertyMember/createPropertyDeclaration
+            // emits regular field declarations without initializers. The initializer is
+            // emitted by process_component_member.js::createVariableInitStatement into
+            // the generated constructor, after state-backed fields exist.
+            elements.push(
+                ViewpuMemberAstEmitter::new(allocator).property_with_type_annotation(
+                    name,
+                    type_annotation,
+                    None,
+                    true,
+                    field.optional,
+                ),
+            );
+        } else if let Some(field) = self.info.find_state_field(property_name) {
+            self.push_state_field_declaration(allocator, &mut elements, field);
         }
         elements
     }
@@ -1124,11 +1156,7 @@ impl<'a> ViewPuClassEmitter<'a> {
     ) -> Vec<oxc_ast::ast::ClassElement<'b>> {
         let mut elements = Vec::new();
         for member in &self.info.regular_members {
-            elements.push(member.to_class_element(
-                allocator,
-                self.runtime_names,
-                self.custom_dialog_components,
-            ));
+            elements.push(member.to_class_element(allocator));
         }
         elements
     }
@@ -1163,49 +1191,33 @@ impl<'a> ViewPuClassEmitter<'a> {
     ) -> Result<Vec<oxc_ast::ast::ClassElement<'b>>, BuildLoweringError> {
         let mut elements = Vec::new();
         for method in &self.info.builder_methods {
-            let name = allocator.alloc_str(&method.name);
-            let stmts = method.body.statements(allocator)?;
-            let builder = ViewpuAstBuilder::new(allocator);
-            let params = builder.clone_formal_parameters_with_parent(method.params);
-            let return_type = method
-                .return_annotation
-                .map(|annotation| builder.clone_type_annotation(annotation));
-            elements.push(
-                ViewpuMemberAstEmitter::new(allocator).method_with_formal_parameters(
-                    name,
-                    params,
-                    return_type,
-                    stmts,
-                    false,
-                    None,
-                ),
-            );
+            elements.push(self.build_builder_method(allocator, method)?);
         }
         Ok(elements)
     }
 
-    fn build_styles_methods<'b>(
+    fn build_builder_method<'b>(
         &self,
         allocator: &'b Allocator,
-    ) -> Vec<oxc_ast::ast::ClassElement<'b>> {
-        let mut elements = Vec::new();
-        for method in &self.info.styles_methods {
-            let name = allocator.alloc_str(&method.name);
-            let stmts = StylesBodyLowerer::new(method.body).statements(allocator);
-            let builder = ViewpuAstBuilder::new(allocator);
-            let params = builder.clone_formal_parameters(method.params);
-            elements.push(
-                ViewpuMemberAstEmitter::new(allocator).method_with_formal_parameters(
-                    name,
-                    params,
-                    None,
-                    stmts,
-                    false,
-                    Some(TSAccessibility::Private),
-                ),
-            );
-        }
-        elements
+        method: &BuilderMethodInfo<'_>,
+    ) -> Result<oxc_ast::ast::ClassElement<'b>, BuildLoweringError> {
+        let name = allocator.alloc_str(&method.name);
+        let stmts = method.body.statements(allocator)?;
+        let builder = ViewpuAstBuilder::new(allocator);
+        let params = builder.clone_formal_parameters_with_parent(method.params);
+        let return_type = method
+            .return_annotation
+            .map(|annotation| builder.clone_type_annotation(annotation));
+        Ok(
+            ViewpuMemberAstEmitter::new(allocator).method_with_formal_parameters(
+                name,
+                params,
+                return_type,
+                stmts,
+                false,
+                None,
+            ),
+        )
     }
 
     fn build_rerender<'b>(&self, allocator: &'b Allocator) -> oxc_ast::ast::ClassElement<'b> {
@@ -1253,7 +1265,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                     None,
                     None,
                     true,
-                    true,
+                    field.optional,
                 ),
             );
             return;
@@ -1313,6 +1325,13 @@ impl<'a> ViewPuClassEmitter<'a> {
                 field.name_span,
             ),
         );
+
+        // SDK process_component_member.js::immutableDecorators contains
+        // @ObjectLink. Its SynchedPropertyNesedObjectPU is updated through
+        // backing `.set(...)` calls and exposes no generated field setter.
+        if field.decorator == ArkuiDecoratorName::OBJECT_LINK {
+            return;
+        }
 
         let mut setter_stmts = builder.statements();
         setter_stmts.push(builder.this_backing_field_call_statement(
@@ -1537,18 +1556,10 @@ impl<'a> ViewPuClassEmitter<'a> {
 
     fn regular_field_initializer_expression<'b>(
         &self,
-        allocator: &'b Allocator,
         builder: &ViewpuAstBuilder<'b>,
-        field: &RegularField<'_>,
         initializer: &FieldExpression<'_>,
     ) -> Expression<'b> {
-        FieldInitializerExpressionEmitter::new(
-            allocator,
-            builder,
-            self.runtime_names,
-            self.custom_dialog_components,
-        )
-        .expression(initializer, builder.this_member_expression(&field.name))
+        initializer.to_expression(builder)
     }
 
     fn local_storage_api(field: &StateField) -> &'static str {
@@ -1586,7 +1597,12 @@ impl<'a> ViewPuClassEmitter<'a> {
     }
 
     fn update_state_vars_api(field: &StateField) -> &'static str {
-        if ArkuiDecoratorName::contributes_update_state_vars(&field.decorator) {
+        if field.decorator == ArkuiDecoratorName::OBJECT_LINK {
+            // Hvigor's generated ViewPU updateStateVars body uses `.set(...)`
+            // for SynchedPropertyNesedObjectPU. Prop/Param-style one-way
+            // wrappers use `.reset(...)` instead.
+            GeneratedViewpuName::SET
+        } else if ArkuiDecoratorName::contributes_update_state_vars(&field.decorator) {
             GeneratedViewpuName::RESET
         } else {
             GeneratedViewpuName::SET

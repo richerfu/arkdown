@@ -1,92 +1,34 @@
-use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
-use oxc_ast::ast::{Expression, FunctionBody, Statement};
-use oxc_ast::AstBuilder;
-use oxc_span::SPAN;
+use rustc_hash::FxHashMap;
 
-pub(crate) struct StylesBodyLowerer<'a> {
-    body: Option<&'a FunctionBody<'a>>,
+use oxc_ast::ast::FunctionBody;
+
+/// A component-local `@Styles` declaration.
+///
+/// SDK `process_component_class.js::processComponentMethod` registers these
+/// bodies in `INNER_STYLE_FUNCTION` and removes the method from the generated
+/// class. Calls in `build()` and `@Builder` bodies are expanded by
+/// `process_component_build.js`.
+#[derive(Debug, Clone)]
+pub(crate) struct StylesMethodInfo<'a> {
+    pub(crate) name: String,
+    pub(crate) body: Option<&'a FunctionBody<'a>>,
 }
 
-impl<'a> StylesBodyLowerer<'a> {
-    pub(crate) fn new(body: Option<&'a FunctionBody<'a>>) -> Self {
-        Self { body }
-    }
-
-    pub(crate) fn statements<'b>(&self, allocator: &'b Allocator) -> OxcVec<'b, Statement<'b>> {
-        let mut statements = OxcVec::new_in(&allocator);
-        let Some(body) = self.body else {
-            return statements;
-        };
-
-        for statement in &body.statements {
-            statements.push(self.statement(statement, allocator));
-        }
-        statements
-    }
-
-    fn statement<'b>(&self, statement: &Statement<'_>, allocator: &'b Allocator) -> Statement<'b> {
-        match statement {
-            Statement::ExpressionStatement(statement) => {
-                let expression = self.expression(&statement.expression, allocator);
-                AstBuilder::new(allocator).statement_expression(statement.span, expression)
-            }
-            _ => statement.clone_in(allocator),
-        }
-    }
-
-    fn expression<'b>(
-        &self,
-        expression: &Expression<'_>,
-        allocator: &'b Allocator,
-    ) -> Expression<'b> {
-        match expression {
-            Expression::LeadingDotExpression(expression) => {
-                let mut expression = expression.expression.clone_in(allocator);
-                StylesLeadingDotPrefixer::new(allocator).prefix(&mut expression);
-                expression
-            }
-            _ => expression.clone_in(allocator),
-        }
-    }
+#[derive(Debug, Clone, Default)]
+pub(super) struct StylesAttributeIndex<'a> {
+    bodies: FxHashMap<String, Option<&'a FunctionBody<'a>>>,
 }
 
-struct StylesLeadingDotPrefixer<'a> {
-    allocator: &'a Allocator,
-    ast: AstBuilder<'a>,
-}
-
-impl<'a> StylesLeadingDotPrefixer<'a> {
-    fn new(allocator: &'a Allocator) -> Self {
-        Self {
-            allocator,
-            ast: AstBuilder::new(allocator),
-        }
+impl<'a> StylesAttributeIndex<'a> {
+    pub(super) fn from_methods(methods: &[StylesMethodInfo<'a>]) -> Self {
+        let bodies = methods
+            .iter()
+            .map(|method| (method.name.clone(), method.body))
+            .collect();
+        Self { bodies }
     }
 
-    fn prefix(&self, expression: &mut Expression<'a>) -> bool {
-        if let Expression::CallExpression(call) = expression {
-            self.prefix_callee(&mut call.callee)
-        } else {
-            false
-        }
-    }
-
-    fn prefix_callee(&self, callee: &mut Expression<'a>) -> bool {
-        match callee {
-            Expression::Identifier(identifier) => {
-                let property_name = self.allocator.alloc_str(identifier.name.as_str());
-                let member = self.ast.member_expression_static(
-                    identifier.span,
-                    self.ast.expression_this(SPAN),
-                    self.ast.identifier_name(identifier.span, property_name),
-                    false,
-                );
-                *callee = Expression::from(member);
-                true
-            }
-            Expression::StaticMemberExpression(member) => self.prefix(&mut member.object),
-            Expression::CallExpression(call) => self.prefix_callee(&mut call.callee),
-            _ => false,
-        }
+    pub(super) fn body(&self, name: &str) -> Option<Option<&'a FunctionBody<'a>>> {
+        self.bodies.get(name).copied()
     }
 }

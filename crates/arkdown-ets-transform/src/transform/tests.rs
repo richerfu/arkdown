@@ -716,6 +716,49 @@ struct SecondCell {
 }
 
 #[test]
+fn test_reusable_v2_call_uses_sdk_reuse_or_create_protocol() {
+    let src = r#"
+@ReusableV2
+@ComponentV2
+struct ReusableCell {
+  @Param value: string = "";
+  build() {
+    Text(this.value)
+  }
+}
+
+@ComponentV2
+struct Host {
+  @Local value: string = "value";
+  build() {
+    ReusableCell({ value: this.value })
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/ReusableCell.ets",
+        src,
+    ))
+    .expect("@ReusableV2 call site must lower to the SDK reuse protocol");
+
+    assert!(
+        result.contains("this.reuseOrCreateNewComponent({")
+            && result.contains("componentClass: ReusableCell")
+            && result.contains("getParams: () => ({ value: this.value })")
+            && result.contains("getReuseId: () => \"ReusableCell\"")
+            && result.contains(
+                "extraInfo: { page: \"entry/src/main/ets/pages/ReusableCell.ets\""
+            ),
+        "SDK process_custom_component.createCustomComponent uses reuseOrCreateNewComponent for @ReusableV2 children:\n{result}"
+    );
+    assert_eq!(
+        result.matches("ViewV2.create(componentCall);").count(),
+        0,
+        "a reusable V2 child call must not allocate through the ordinary ViewV2 observer path:\n{result}"
+    );
+}
+
+#[test]
 fn test_component_v2_rejects_once_without_param_even_when_checker_off() {
     let src = r#"@ComponentV2
 struct MyView {
@@ -1049,14 +1092,17 @@ struct MyView {
         TransformHarness::transform(&make_source("entry/src/main/ets/pages/MyView.ets", src))
             .expect("@ComponentV2 @Styles methods must lower leading-dot chains");
 
-    assert!(result.contains("cardStyle()"), "got:\n{result}");
     assert!(
-        result.contains("this.padding({ left: 8 })"),
+        result.contains("Text.padding({ left: 8 });")
+            && result.contains("Text.backgroundColor(Color.White);")
+            && result.contains("Text.borderRadius(10);"),
         "got:\n{result}"
     );
     assert!(
-        !result.contains("\n    .padding"),
-        "raw @Styles leading-dot chain must not leak:\n{result}"
+        !result.contains("Text.cardStyle()")
+            && !result.contains("cardStyle() {")
+            && !result.contains("\n    .padding"),
+        "SDK must expand and remove local @Styles declarations:\n{result}"
     );
 
     let allocator = oxc_allocator::Allocator::default();
@@ -1070,6 +1116,237 @@ struct MyView {
         parsed.diagnostics.is_empty(),
         "lowered @Styles output must be valid TypeScript: {:?}\n{result}",
         parsed.diagnostics
+    );
+}
+
+#[test]
+fn test_component_styles_expand_at_attribute_call_and_are_removed_from_class() {
+    let src = r#"
+@Component
+struct StyledCard {
+  @State inset: number = 8
+
+  @Styles
+  cardStyle() {
+    .padding({ left: this.inset })
+      .backgroundColor(Color.White)
+      .borderRadius(10)
+  }
+
+  build() {
+    Text('title')
+      .cardStyle()
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/StyledCard.ets", src))
+            .expect("SDK INNER_STYLE_FUNCTION calls must expand into component attributes");
+
+    assert!(
+        result.contains("Text.padding({ left: this.inset });"),
+        "local @Styles must inline its first attribute:\n{result}"
+    );
+    assert!(
+        result.contains("Text.backgroundColor(Color.White);")
+            && result.contains("Text.borderRadius(10);"),
+        "local @Styles chained attributes must preserve declaration order:\n{result}"
+    );
+    assert!(
+        !result.contains("Text.cardStyle()") && !result.contains("cardStyle() {"),
+        "SDK removes local @Styles declarations after expanding their calls:\n{result}"
+    );
+}
+
+#[test]
+fn test_top_level_styles_expand_and_declaration_is_removed() {
+    let src = r#"
+@Styles
+function sharedCardStyle() {
+  .padding(12)
+    .backgroundColor(Color.White)
+}
+
+@Component
+struct StyledCard {
+  build() {
+    Row() {
+      Text('title')
+    }
+    .sharedCardStyle()
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/StyledCard.ets", src))
+            .expect("SDK GLOBAL_STYLE_FUNCTION calls must expand into component attributes");
+
+    assert!(
+        result.contains("Row.padding(12);") && result.contains("Row.backgroundColor(Color.White);"),
+        "top-level @Styles attributes must expand at the call site:\n{result}"
+    );
+    assert!(
+        !result.contains("Row.sharedCardStyle()") && !result.contains("function sharedCardStyle()"),
+        "SDK removes top-level @Styles declarations after indexing them:\n{result}"
+    );
+}
+
+#[test]
+fn test_component_source_methods_keep_hvigor_member_order() {
+    let src = r#"
+@Component
+struct OrderedPage {
+  aboutToAppear() {}
+
+  @Builder
+  contentArea() {
+    Text('content')
+  }
+
+  build() {
+    this.contentArea()
+  }
+
+  afterBuildMethod() {}
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/OrderedPage.ets",
+        src,
+    ))
+    .expect("component members must lower");
+    let about = result.find("aboutToAppear()").expect("aboutToAppear");
+    let builder = result
+        .find("contentArea(parent = null)")
+        .expect("@Builder method");
+    let initial = result.find("initialRender()").expect("initialRender");
+    let after = result
+        .find("afterBuildMethod()")
+        .expect("method after source build");
+
+    assert!(
+        about < builder && builder < initial && initial < after,
+        "SDK processMembers transforms members in source order:\n{result}"
+    );
+}
+
+#[test]
+fn test_component_v2_source_methods_keep_hvigor_member_order() {
+    let src = r#"
+@ComponentV2
+struct OrderedPage {
+  @Param count: number = 0;
+
+  beforeBuildMethod() {}
+
+  @Builder
+  contentArea() {
+    Text('content')
+  }
+
+  build() {
+    this.contentArea()
+  }
+
+  afterBuildMethod() {}
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/OrderedPageV2.ets",
+        src,
+    ))
+    .expect("ComponentV2 members must lower");
+    let before = result
+        .find("beforeBuildMethod()")
+        .expect("method before source build");
+    let builder = result
+        .find("contentArea(parent = null)")
+        .expect("@Builder method");
+    let initial = result.find("initialRender()").expect("initialRender");
+    let after = result
+        .find("afterBuildMethod()")
+        .expect("method after source build");
+    let update = result
+        .find("updateStateVars(params)")
+        .expect("synthetic updateStateVars");
+    let rerender = result.find("rerender()").expect("synthetic rerender");
+
+    assert!(
+        before < builder
+            && builder < initial
+            && initial < after
+            && after < update
+            && update < rerender,
+        "SDK processStructMembersV2 preserves source members before synthetic suffixes:\n{result}"
+    );
+}
+
+#[test]
+fn test_if_branch_component_id_uses_hvigor_can_retake_guard() {
+    let src = r#"
+@Component
+struct Child {
+  build() {
+    Text('child')
+  }
+}
+
+@Component
+struct Parent {
+  @State visible: boolean = true;
+
+  build() {
+    if (this.visible) {
+      Column() {
+        Text('content')
+      }
+      .id('stable-column')
+      Child().id('stable-child')
+    }
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/RetakePage.ets", src))
+            .expect("if branch component IDs must lower");
+
+    assert!(
+        result.contains("if (!If.canRetake(\"stable-column\"))")
+            && result.contains("if (!If.canRetake(\"stable-child\"))"),
+        "SDK process_component_build.ifRetakeId must guard system and custom components in If branches:\n{result}"
+    );
+    assert_eq!(
+        result.matches("If.canRetake(").count(),
+        2,
+        "only source components carrying .id(...) should receive retake guards:\n{result}"
+    );
+}
+
+#[test]
+fn test_global_animate_calls_rewrite_to_context_for_entire_ets_program() {
+    let src = r#"
+export function animateLater(): void {
+  animateTo({ duration: 120 }, () => {});
+}
+
+export function animateNow(): void {
+  animateToImmediately({ duration: 0 }, () => {});
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/utils/AnimationUtils.ets",
+        src,
+    ))
+    .expect("SDK global animation calls must lower without requiring a component");
+
+    assert!(
+        result.contains("Context.animateTo({ duration: 120 }, () =>")
+            && result.contains("Context.animateToImmediately({ duration: 0 }, () =>"),
+        "SDK processAnimateToOrImmediately must rewrite both global APIs across the ETS program:\n{result}"
+    );
+    assert!(
+        !result.contains("\n    animateTo(") && !result.contains("\n    animateToImmediately("),
+        "unqualified animation globals must not remain after UI syntax transform:\n{result}"
     );
 }
 
@@ -1238,7 +1515,7 @@ fn test_rejects_component_v1_v2_decorator_mix() {
 }
 
 #[test]
-fn test_lowers_all_oxc_arkts_extra_nodes_to_standard_ts() {
+fn test_lowers_arkui_nodes_but_preserves_hvigor_lazy_import() {
     let src = r#"
 @interface RouteMeta {
   value: string;
@@ -1261,23 +1538,17 @@ struct Page {
         TransformHarness::transform(&make_source("entry/src/main/ets/pages/Page.ets", src))
             .unwrap();
     assert!(result.contains("interface RouteMeta"));
-    assert!(result.contains("import LazyPage, { Helper } from \"./lazy\";"));
+    assert!(result.contains("import lazy LazyPage, { Helper } from \"./lazy\";"));
     assert!(result.contains("class Page extends ViewPU"));
     assert!(!result.contains("@interface"));
-    assert!(!result.contains("import lazy"));
     assert!(!result.contains("struct Page"));
     assert!(!result.contains("Column() {"));
 
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(
-        &allocator,
-        &result,
-        oxc_span::SourceType::ts().with_module(true),
-    )
-    .parse();
+    let parsed = oxc_parser::Parser::new(&allocator, &result, oxc_span::SourceType::ets()).parse();
     assert!(
         parsed.diagnostics.is_empty(),
-        "lowered output must be standard TypeScript: {:?}\n{}",
+        "lowered output must be valid hvigor ArkTS: {:?}\n{}",
         parsed.diagnostics,
         result
     );
@@ -1291,9 +1562,49 @@ fn test_transforms_export_builder_function_decorator() {
         TransformHarness::transform(&make_source("entry/src/main/ets/components/Card.ets", src))
             .unwrap();
     assert!(result.contains("export function Card(title: string, parent = null)"));
-    assert!(result.contains("observeComponentCreation2"));
+    assert!(
+        result.contains("const __title__ = title;")
+            && result.contains(
+                "(parent ? parent : this).observeComponentCreation2((elmtId, isInitialRender, title = __title__) => {"
+            ),
+        "SDK processUISyntax/processComponentBlock must preserve the top-level builder receiver and single-parameter capture:\n{result}"
+    );
     assert!(!result.contains("@Builder"));
     assert!(!result.contains("Column() {"));
+}
+
+#[test]
+fn test_global_builder_custom_component_common_wrapper_matches_hvigor_block_shape() {
+    let src = r#"
+@Component
+struct Child {
+  build() {
+    Text("child")
+  }
+}
+
+@Builder
+export function Card(title: string) {
+  Child()
+    .width(60)
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/components/Card.ets", src))
+            .unwrap();
+    assert!(
+        result.contains("__Common__.width(60);")
+            && result.contains(
+                "    {\n        (parent ? parent : this).observeComponentCreation2((elmtId, isInitialRender, title = __title__) => {"
+            ),
+        "SDK processCustomComponent appends the block returned by createCustomComponent directly:\n{result}"
+    );
+    assert!(
+        !result.contains(
+            "    {\n        {\n            (parent ? parent : this).observeComponentCreation2"
+        ),
+        "custom component common attributes must not add a second block around createCustomComponent:\n{result}"
+    );
 }
 
 #[test]
@@ -1303,6 +1614,95 @@ fn test_top_level_builder_preserves_explicit_return_type() {
         TransformHarness::transform(&make_source("entry/src/main/ets/components/Card.ets", src))
             .unwrap();
     assert!(result.contains("export function Card(parent = null): void"));
+}
+
+#[test]
+fn test_global_builder_trailing_lambda_uses_lexical_this_like_hvigor() {
+    let src = r#"
+@Component
+struct Wrapper {
+  @BuilderParam content: () => void;
+  build() {
+    this.content()
+  }
+}
+
+@Builder
+function GlobalBuilder(title: string, subtitle: string) {
+  Wrapper() {
+    Text(title + subtitle)
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/Global.ets",
+        src,
+    ))
+    .unwrap();
+    assert_eq!(
+        result
+            .matches("this.observeComponentCreation2((elmtId, isInitialRender) => {")
+            .count(),
+        2,
+        "SDK processBlockToExpression lowers both constructor and params-lambda trailing bodies against lexical this:\n{result}"
+    );
+    assert!(
+        !result.contains(
+            "content: () => {\n                (parent ? parent : this).observeComponentCreation2"
+        ),
+        "a custom component trailing lambda must not inherit the global builder parent receiver:\n{result}"
+    );
+}
+
+#[test]
+fn test_global_builder_terminal_empty_if_branch_uses_lexical_this_like_hvigor() {
+    let src = r#"
+@Builder
+function GlobalBuilder(show: boolean) {
+  if (show) {
+    Text("shown")
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/Global.ets",
+        src,
+    ))
+    .unwrap();
+    assert!(
+        result.contains("(parent ? parent : this).ifElseBranchUpdateFunction(0, () => {"),
+        "source-backed global-builder branches use createConditionParent():\n{result}"
+    );
+    assert!(
+        result.contains("this.ifElseBranchUpdateFunction(1, () => {"),
+        "SDK processElseStatement synthesizes its empty branch against lexical this:\n{result}"
+    );
+}
+
+#[test]
+fn test_builder_param_backing_field_preserves_required_marker() {
+    let src = r#"
+@Component
+struct Panel {
+  @BuilderParam required: () => void;
+  @BuilderParam optional?: () => void;
+
+  build() {
+    Column() {}
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/components/Panel.ets", src))
+            .unwrap();
+    assert!(
+        result.contains("private __required;") && !result.contains("private __required?;"),
+        "required @BuilderParam backing field must remain required like SDK createPropertyDeclaration:\n{result}"
+    );
+    assert!(
+        result.contains("private __optional?;"),
+        "optional @BuilderParam backing field must preserve the source question token:\n{result}"
+    );
 }
 
 #[test]
@@ -1506,7 +1906,7 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
         module_exports: ModuleExportIndex::default(),
-        emit_entry_registration: true,
+        form_entry: false,
         partial_update: true,
         checker_mode: crate::CheckerMode::Oxc,
     };
@@ -1522,6 +1922,38 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
     assert!(result.contains("pageFullPath: \"products/phone/src/main/ets/pages/Page\""));
     assert!(!result.contains("@Entry"));
     assert!(!result.contains("struct Page"));
+}
+
+#[test]
+fn test_xcomponent_create_appends_hvigor_host_module_identity() {
+    let src = r#"
+@Component
+struct Player {
+  build() {
+    XComponent({ id: "player", type: resolveXComponentType(), libraryname: "player" })
+  }
+}
+"#;
+    let options = TransformOptions {
+        bundle_name: Some("com.example.app".to_string()),
+        module_name: Some("entry".to_string()),
+        ..TransformOptions::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/Player.ets", src),
+        &options,
+    )
+    .unwrap();
+    assert!(
+        result.contains(
+            "XComponent.create({ id: \"player\", type: resolveXComponentType(), libraryname: \"player\" }, \"com.example.app/entry\")"
+        ),
+        "SDK checkArguments appends bundleName/moduleName to XComponent.create:\n{result}"
+    );
+    assert!(
+        !result.contains("XComponent.pop();"),
+        "a dynamic XComponent type is not statically a container in SDK checkContainer:\n{result}"
+    );
 }
 
 #[test]
@@ -1549,7 +1981,7 @@ export struct SecureModePage {
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
         module_exports: ModuleExportIndex::default(),
-        emit_entry_registration: true,
+        form_entry: false,
         partial_update: true,
         checker_mode: crate::CheckerMode::Oxc,
     };
@@ -1659,7 +2091,7 @@ export struct SecureModePage {
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
         sources,
-        emit_entry_registration: true,
+        form_entry: false,
         partial_update: true,
         checker_mode: crate::CheckerMode::Oxc,
     };
@@ -1689,6 +2121,256 @@ export struct SecureModePage {
         !result.contains("LaunchProtectPage.create()"),
         "resolved re-exported @ComponentV2 imports must not lower as SDK components:\n{}",
         result
+    );
+}
+
+#[test]
+fn test_custom_component_create_uses_child_generation_like_hvigor() {
+    let temp = tempfile::tempdir().unwrap();
+    let page_dir = temp.path().join("entry/src/main/ets/pages");
+    let legacy_path = page_dir.join("Legacy.ets");
+    let modern_path = page_dir.join("Modern.ets");
+    let host_path = page_dir.join("Host.ets");
+    let mut sources = rustc_hash::FxHashMap::default();
+    sources.insert(
+        arkdown_path::lexical_normalize(&legacy_path),
+        std::sync::Arc::<str>::from("@Component\nexport struct Legacy {\n  build() {}\n}"),
+    );
+    sources.insert(
+        arkdown_path::lexical_normalize(&modern_path),
+        std::sync::Arc::<str>::from("@ComponentV2\nexport struct Modern {\n  build() {}\n}"),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(sources);
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
+        ..Default::default()
+    };
+    let source = r#"
+import { Legacy } from "./Legacy";
+import { Modern } from "./Modern";
+
+@Builder
+function ModernBuilder() {
+  Modern()
+}
+
+@ComponentV2
+struct Host {
+  build() {
+    Legacy()
+  }
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source(host_path.to_str().unwrap(), source),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("let componentCall = new Modern(")
+            && result.contains("ViewV2.create(componentCall);"),
+        "SDK process_custom_component/createNewComponent selects ViewV2 from the child struct even in a global builder:\n{result}"
+    );
+    assert!(
+        result.contains("let componentCall = new Legacy(")
+            && result.contains("ViewPU.create(componentCall);"),
+        "a ComponentV2 parent must still create a V1 child through ViewPU:\n{result}"
+    );
+    assert_eq!(
+        result.matches("ViewV2.create(componentCall);").count(),
+        1,
+        "only the V2 child uses ViewV2.create:\n{result}"
+    );
+    assert_eq!(
+        result.matches("ViewPU.create(componentCall);").count(),
+        1,
+        "only the V1 child uses ViewPU.create:\n{result}"
+    );
+}
+
+#[test]
+fn test_global_builder_uses_local_component_v2_generation_like_hvigor() {
+    let source = r#"
+@Builder
+function ModernBuilder() {
+  Modern()
+}
+
+@ComponentV2
+struct Modern {
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/Modern.ets",
+        source,
+    ))
+    .unwrap();
+
+    assert!(
+        result.contains("let componentCall = new Modern(")
+            && result.contains("ViewV2.create(componentCall);"),
+        "SDK createNewComponent selects ViewV2 from a local child declaration even when the caller is a preceding global builder:\n{result}"
+    );
+    assert!(
+        !result.contains("ViewPU.create(componentCall);"),
+        "local @ComponentV2 metadata must be available before statement lowering:\n{result}"
+    );
+}
+
+#[test]
+fn test_custom_component_name_wins_over_local_builder_method_for_unqualified_call() {
+    let source = r#"
+@Component
+struct LogPanel {
+  build() {
+    Text("log")
+  }
+}
+
+@Component
+struct Host {
+  @Builder
+  LogPanel() {
+    LogPanel()
+  }
+
+  build() {
+    this.LogPanel()
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/Host.ets",
+        source,
+    ))
+    .unwrap();
+
+    assert!(
+        result.contains("let componentCall = new LogPanel(this, {}")
+            && result.contains("ViewPU.create(componentCall);"),
+        "SDK process_component_build.getComponentType resolves a custom component before a same-named @Builder method:\n{result}"
+    );
+    assert!(
+        !result.contains("\n        LogPanel.bind(this)();"),
+        "the unqualified component call inside the builder must not dispatch to the same-named method:\n{result}"
+    );
+    assert!(
+        result.contains("this.LogPanel.bind(this)();"),
+        "the explicit this.LogPanel() call remains a builder-method dispatch:\n{result}"
+    );
+}
+
+#[test]
+fn test_resolved_package_builder_is_not_reclassified_by_external_component_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let package_root = temp.path().join("oh_modules/@scope/ui");
+    let index_path = package_root.join("Index.ets");
+    let host_path = temp.path().join("entry/src/main/ets/components/Host.ets");
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&index_path),
+        std::sync::Arc::<str>::from(
+            "@Builder\nexport function LoadingBuilder() {\n  Text(\"loading\")\n}",
+        ),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let module_roots = vec![("ui".to_string(), package_root)];
+    let options = TransformOptions {
+        module_exports: ModuleExportIndex::build(
+            &sources,
+            &module_roots,
+            &ComponentMetadata::default(),
+        ),
+        module_roots,
+        sources,
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(
+            host_path.to_str().unwrap(),
+            "import { LoadingBuilder } from \"@scope/ui\";\n@Component\nstruct Host {\n  build() {\n    LoadingBuilder()\n  }\n}",
+        ),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("LoadingBuilder.bind(this)();")
+            && !result.contains("new LoadingBuilder(")
+            && !result.contains("ViewPU.create(componentCall);"),
+        "a resolved @Builder export must not be promoted by the unresolved-package custom-component usage fallback:\n{result}"
+    );
+}
+
+#[test]
+fn test_imported_builder_object_argument_uses_hvigor_parameter_proxy() {
+    let temp = tempfile::tempdir().unwrap();
+    let builder_path = temp.path().join("components/PicassoBuilder.ets");
+    let host_path = temp.path().join("components/AnimationView.ets");
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&builder_path),
+        std::sync::Arc::<str>::from(
+            "@Builder\nexport function PicassoBuilder($$: { vm: object }) {\n  Text($$.vm)\n}",
+        ),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let options = TransformOptions {
+        module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
+        sources,
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(
+            host_path.to_str().unwrap(),
+            "import { PicassoBuilder } from './PicassoBuilder';\n@Component\nstruct AnimationView {\n  build() {\n    ForEach([], (vm: object) => PicassoBuilder({ vm: vm }))\n  }\n}",
+        ),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains(
+            "PicassoBuilder.bind(this)(makeBuilderParameterProxy(\"PicassoBuilder\", { vm: () => vm }))"
+        ),
+        "SDK process_component_build.js::transferBuilderCall proxies an imported @Builder object argument:\n{result}"
+    );
+}
+
+#[test]
+fn test_global_builder_proxy_uses_dollar_parameter_not_this_backing_state() {
+    let src = r#"
+interface BuilderParams {
+  value: string;
+}
+
+@Builder
+function TargetBuilder(params: object) {}
+
+@Builder
+export function HostBuilder($$: BuilderParams) {
+  TargetBuilder({ fromParam: $$.value, fromThis: this.value })
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/Builders.ets",
+        src,
+    ))
+    .unwrap();
+
+    assert!(
+        result.contains(
+            "fromParam: () => $$[\"__value\"] ? $$[\"__value\"] : $$[\"value\"]"
+        ),
+        "SDK traverseBuilderParams uses the $$ backing property while processing a global @Builder:\n{result}"
+    );
+    assert!(
+        result.contains("fromThis: () => this.value")
+            && !result.contains("fromThis: () => this[\"__value\"]"),
+        "SDK suppresses this.x backing-property fallback while processGlobalBuilder is active:\n{result}"
     );
 }
 
@@ -1899,7 +2581,7 @@ struct ImgItem {
 }
 
 #[test]
-fn test_non_entry_transform_context_does_not_emit_named_route_registration() {
+fn test_dependency_entry_transform_emits_named_route_registration() {
     let src = r#"
 export const ACTION_SHEET_ENTRY_NAME: string = "MSIActionSheetApiEntryPage"
 
@@ -1914,10 +2596,7 @@ export struct MSIActionSheetApiEntryPage {
             "oh_modules/@msi/runtime/src/main/ets/window/ActionSheetPage.ets",
             src,
         ),
-        &TransformOptions {
-            emit_entry_registration: false,
-            ..Default::default()
-        },
+        &TransformOptions::default(),
     )
     .unwrap();
 
@@ -1933,12 +2612,12 @@ export struct MSIActionSheetApiEntryPage {
     );
     assert!(
         result.contains("static getEntryName()"),
-        "@Entry class metadata must remain available even when route registration is skipped:\n{}",
+        "@Entry class metadata must remain available:\n{}",
         result
     );
     assert!(
-        !result.contains("registerNamedRoute"),
-        "normal import context must not execute named-route registration side effects:\n{}",
+        result.contains("registerNamedRoute(() => new MSIActionSheetApiEntryPage(undefined, {})"),
+        "SDK processUISyntax/createEntryNode registers dependency @Entry sources:\n{}",
         result
     );
 }
@@ -2058,12 +2737,16 @@ fn test_imported_reexported_enum_state_is_simple_like_hvigor_enum_collection() {
     let enum_dir = utils_root.join("src/main/ets/common");
     let index_path = utils_root.join("Index.ets");
     let index_source = r#"
+import {
+  EventTypeEnum,
+  LoadingStatus,
+  ResourcesType
+} from './src/main/ets/common/CommonEnums';
 export {
   EventTypeEnum,
   LoadingStatus,
-  WebpageStatus,
   ResourcesType
-} from './src/main/ets/common/CommonEnums';
+};
 "#;
     let enum_path = enum_dir.join("CommonEnums.ets");
     let enum_source = "export enum LoadingStatus { OFF, LOADING, SUCCESS, FAILED }\nexport enum EventTypeEnum { A }\nexport class ResourcesType {}\n";
@@ -2116,6 +2799,208 @@ struct Page {
     assert!(
         result.contains("private __loadingStatus: ObservedPropertySimplePU<LoadingStatus>"),
         "imported enum state must use SimplePU like hvigor enumCollection, got:\n{result}"
+    );
+}
+
+#[test]
+fn test_imported_reexported_basic_union_alias_is_simple_like_hvigor_type_checker() {
+    let temp = tempfile::tempdir().unwrap();
+    let package_root = temp.path().join("payment/recce");
+    let alias_path = package_root.join("src/main/ets/Mode.ets");
+    let index_path = package_root.join("Index.ets");
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&alias_path),
+        std::sync::Arc::<str>::from(
+            "export type OfflineMode = \"specified_only\" | \"cache_only\";",
+        ),
+    );
+    source_map.insert(
+        arkdown_path::lexical_normalize(&index_path),
+        std::sync::Arc::<str>::from("export * from './src/main/ets/Mode';"),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let module_roots = vec![("recce".to_string(), package_root)];
+    let options = TransformOptions {
+        module_exports: ModuleExportIndex::build(
+            &sources,
+            &module_roots,
+            &ComponentMetadata::default(),
+        ),
+        module_roots,
+        sources,
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(
+            temp.path()
+                .join("entry/src/main/ets/pages/Page.ets")
+                .to_str()
+                .unwrap(),
+            "import { OfflineMode } from '@ohos/recce';\n@Component\nstruct Page {\n  @State mode: OfflineMode = \"specified_only\";\n  build() {}\n}",
+        ),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("private __mode: ObservedPropertySimplePU<OfflineMode>"),
+        "SDK getDeclarationType follows re-exported basic-union aliases through the TypeScript checker:\n{result}"
+    );
+}
+
+#[test]
+fn test_sdk_enum_and_nullable_state_types_are_simple_like_hvigor_type_checker() {
+    let component_metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ets-loader"
+    )))
+    .expect("test ets-loader metadata");
+    let options = TransformOptions {
+        component_metadata: std::sync::Arc::new(component_metadata),
+        ..Default::default()
+    };
+    let source = r#"
+@Component
+struct Page {
+  @State weight: FontWeight | null = null;
+  @State visible: boolean | undefined = undefined;
+  @State label: string | null = null;
+  @State exact: "text" = "text";
+  @State normalizedString: "toast" | "loading" | string = "toast";
+  @State qualifiedEnum: arkui.FontWeight = arkui.FontWeight.Normal;
+  @State qualifiedObject: cips.Channel = {} as cips.Channel;
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/Page.ets", source),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("private __weight: ObservedPropertySimplePU<FontWeight | null>")
+            && result.contains(
+                "private __visible: ObservedPropertySimplePU<boolean | undefined>"
+            )
+            && result
+                .contains("private __qualifiedEnum: ObservedPropertySimplePU<arkui.FontWeight>"),
+        "SDK enumCollection and findNonNullType keep enum/nullable primitive unions on SimplePU:\n{result}"
+    );
+    assert!(
+        result.contains("private __label: ObservedPropertyObjectPU<string | null>")
+            && result.contains("private __exact: ObservedPropertyObjectPU<\"text\">")
+            && result.contains(
+                "private __normalizedString: ObservedPropertyObjectPU<\"toast\" | \"loading\" | string>"
+            )
+            && result
+                .contains("private __qualifiedObject: ObservedPropertyObjectPU<cips.Channel>"),
+        "SDK getDeclarationType applies TypeScript union normalization before inspecting TypeFlags:\n{result}"
+    );
+}
+
+#[test]
+fn test_kit_namespace_enum_prop_is_simple_like_typescript_checker() {
+    let component_metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ets-loader"
+    )))
+    .expect("test ets-loader metadata");
+    let options = TransformOptions {
+        component_metadata: std::sync::Arc::new(component_metadata),
+        ..Default::default()
+    };
+    let source = r#"
+import { photoAccessHelper } from "@kit.MediaLibraryKit";
+
+@Component
+struct Page {
+  @Prop mimeType: photoAccessHelper.PhotoViewMIMETypes;
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/Page.ets", source),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains(
+            "this.__mimeType = new SynchedPropertySimpleOneWayPU(params.mimeType, this, \"mimeType\")"
+        ),
+        "SDK process_component_member.js delegates qualified namespace enums to the TypeScript checker:\n{result}"
+    );
+}
+
+#[test]
+fn test_unrelated_enum_name_does_not_reclassify_local_interface() {
+    let temp = tempfile::tempdir().unwrap();
+    let enum_path = temp.path().join("feature/SharedEnums.ets");
+    let page_path = temp.path().join("entry/src/main/ets/pages/Page.ets");
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&enum_path),
+        std::sync::Arc::<str>::from("export enum Position { Start, End }"),
+    );
+    source_map.insert(
+        arkdown_path::lexical_normalize(&page_path),
+        std::sync::Arc::<str>::from(
+            "interface Position { x: number; y: number }\n@Component\nstruct Page {\n  @State point: Position = { x: 0, y: 0 };\n  build() {}\n}",
+        ),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(
+            page_path.to_str().unwrap(),
+            "interface Position { x: number; y: number }\n@Component\nstruct Page {\n  @State point: Position = { x: 0, y: 0 };\n  build() {}\n}",
+        ),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("private __point: ObservedPropertyObjectPU<Position>"),
+        "an unrelated enum must not reclassify a local interface according to parallel source scheduling:\n{result}"
+    );
+}
+
+#[test]
+fn test_prior_unrelated_enum_name_does_not_reclassify_local_interface() {
+    let temp = tempfile::tempdir().unwrap();
+    let enum_path = temp.path().join("a-feature/SharedEnums.ets");
+    let page_path = temp.path().join("z-entry/src/main/ets/pages/Page.ets");
+    let page_source = "interface Position { x: number; y: number }\n@Component\nstruct Page {\n  @State point: Position = { x: 0, y: 0 };\n  build() {}\n}";
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        arkdown_path::lexical_normalize(&enum_path),
+        std::sync::Arc::<str>::from("export enum Position { Start, End }"),
+    );
+    source_map.insert(
+        arkdown_path::lexical_normalize(&page_path),
+        std::sync::Arc::<str>::from(page_source),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(page_path.to_str().unwrap(), page_source),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("private __point: ObservedPropertyObjectPU<Position>"),
+        "source inventory order must not let an unrelated enum reclassify a local interface:\n{result}"
     );
 }
 
@@ -2224,6 +3109,15 @@ struct ItemRow {
         result.contains("new SynchedPropertyNesedObjectPU(params.item, this, \"item\")"),
         "expected params.item init for @ObjectLink, got:\n{}",
         result
+    );
+    assert_eq!(
+        result.matches("this.__item.set(params.item)").count(),
+        2,
+        "@ObjectLink must update its backing property in both setInitiallyProvidedValue and updateStateVars:\n{result}"
+    );
+    assert!(
+        !result.contains("set item("),
+        "@ObjectLink is immutable and must not emit a field setter:\n{result}"
     );
 }
 
@@ -2577,10 +3471,43 @@ struct Parent {
         "expected callback call argument to match upstream GetRawObject lowering, got:\n{}",
         result
     );
+    assert_eq!(
+        result
+            .matches("onClicked: () => this.handle(ObservedObject.GetRawObject(this.item))")
+            .count(),
+        3,
+        "SDK process_component_build.js rewrites the source parameter before cloning it into the constructor, paramsGenerator_, and updateStateVars branches:\n{result}"
+    );
     assert!(
         !result.contains("item: ObservedObject.GetRawObject(this.item)"),
         "GetRawObject must be limited to call arguments, got:\n{}",
         result
+    );
+}
+
+#[test]
+fn test_component_v2_method_arguments_do_not_use_v1_raw_object_protocol() {
+    let src = r#"
+class Item {}
+
+@ComponentV2
+struct Parent {
+  @Local item: Item = new Item();
+  handle(item: Item) {}
+  build() {
+    Button("send").onClick(() => this.handle(this.item))
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "products/phone/src/main/ets/pages/Parent.ets",
+        src,
+    ))
+    .unwrap();
+    assert!(
+        result.contains("this.handle(this.item)")
+            && !result.contains("ObservedObject.GetRawObject(this.item)"),
+        "SDK process_component_class.js disables isNeedGetRawObject in ComponentV2 context:\n{result}"
     );
 }
 
@@ -2793,7 +3720,7 @@ struct Parent {
 }
 
 #[test]
-fn test_for_each_wraps_raw_observed_state_data_argument() {
+fn test_for_each_keeps_direct_observed_state_data_argument() {
     let src = r#"
 class Item {}
 
@@ -2813,12 +3740,94 @@ struct Parent {
     ))
     .unwrap();
     assert!(
-            result.contains(
-                "this.forEachUpdateFunction(elmtId, ObservedObject.GetRawObject(this.items), forEachItemGenFunction)"
-            ),
-            "expected ForEach data argument to match upstream GetRawObject lowering, got:\n{}",
-            result
-        );
+        result.contains("this.forEachUpdateFunction(elmtId, this.items, forEachItemGenFunction)")
+            && !result.contains("ObservedObject.GetRawObject(this.items)"),
+        "SDK keeps the original ForEach identifier-call parent on a direct data argument:\n{}",
+        result
+    );
+}
+
+#[test]
+fn test_for_each_wraps_raw_observed_state_nested_in_data_call() {
+    let src = r#"
+interface Metrics {
+  [name: string]: number
+}
+
+@Component
+struct Parent {
+  @State metrics: Metrics = {};
+  build() {
+    ForEach(Object.keys(this.metrics), (name: string) => {
+      Text(name)
+    }, (name: string) => name)
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "products/phone/src/main/ets/pages/Parent.ets",
+        src,
+    ))
+    .unwrap();
+    assert!(
+        result.contains(
+            "this.forEachUpdateFunction(elmtId, Object.keys(ObservedObject.GetRawObject(this.metrics)), forEachItemGenFunction, (name: string) => name, false, false)"
+        ),
+        "ForEach call data must apply hvigor's nested @State raw-object lowering:\n{}",
+        result
+    );
+}
+
+#[test]
+fn test_lazy_for_each_list_item_uses_observed_deep_render_contract() {
+    let src = r#"
+class DataSource implements IDataSource {}
+
+@Component
+struct Parent {
+  private dataSource: DataSource = new DataSource();
+  build() {
+    List() {
+      LazyForEach(this.dataSource, (item: string, index: number) => {
+        ListItem() {
+          Text(item)
+        }
+        .width("100%")
+      }, (item: string) => item)
+    }
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "products/phone/src/main/ets/pages/Parent.ets",
+        src,
+    ))
+    .unwrap();
+    assert!(
+        result.contains(
+            "const __lazyForEachItemGenFunction = (_item, index: number) => {\n            const item = _item;"
+        ),
+        "LazyForEach must use hvigor's untyped _item binding contract:\n{}",
+        result
+    );
+    assert!(
+        result.contains("ListItem.create(() => { }, false);")
+            && result.contains("const observedDeepRender = () => {")
+            && result.contains("this.observeComponentCreation2(itemCreation2, ListItem);")
+            && result.contains("observedDeepRender();"),
+        "ListItem inside LazyForEach must use hvigor's observedDeepRender path:\n{}",
+        result
+    );
+    assert!(
+        result.contains("ListItem.width(\"100%\");"),
+        "LazyForEach ListItem attributes must remain on itemCreation2:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("ListItem.create(deepRenderFunction, true);"),
+        "LazyForEach must not use the eager/ForEach ListItem deepRenderFunction path:\n{}",
+        result
+    );
 }
 
 #[test]
@@ -2845,7 +3854,7 @@ struct Parent {
     .unwrap();
     assert!(
         result.contains(
-            "this.forEachUpdateFunction(elmtId, ObservedObject.GetRawObject(this.items), forEachItemGenFunction, undefined, true, false)"
+            "this.forEachUpdateFunction(elmtId, this.items, forEachItemGenFunction, undefined, true, false)"
         ),
         "expected 6-arg forEachUpdateFunction with undefined keyFn when itemFn uses index, got:\n{}",
         result
@@ -2926,11 +3935,9 @@ struct Parent {
 }
 
 #[test]
-fn test_entry_with_storage_lowers_to_load_ets_card() {
+fn test_form_profile_entry_lowers_to_load_ets_card_without_storage_argument() {
     let src = r#"
-let storage = new LocalStorage();
-
-@Entry(storage)
+@Entry
 @Component
 struct WidgetCard {
   build() {}
@@ -2946,21 +3953,114 @@ struct WidgetCard {
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
-            emit_entry_registration: true,
+            form_entry: true,
             partial_update: true,
             checker_mode: crate::CheckerMode::Oxc,
         },
     )
     .unwrap();
     assert!(
-            result.contains("loadEtsCard(new WidgetCard(undefined, {}, storage), \"com.example.hmosworld/phone/ets/widget/pages/WidgetCard\")"),
-            "expected widget entry to use loadEtsCard, got:\n{}",
-            result
-        );
+        result.contains(
+            "loadEtsCard(new WidgetCard(undefined, {}), \"com.example.hmosworld/phone/ets/widget/pages/WidgetCard\")"
+        ) && result.contains(
+            "ViewStackProcessor.StartGetAccessRecordingFor(ViewStackProcessor.AllocateNewElmetIdForNextComponent())"
+        ) && result.contains("ViewStackProcessor.StopGetAccessRecording()"),
+        "SDK readCardForm/cardObj entries must use the card registration sequence:\n{result}"
+    );
     assert!(
         !result.contains("registerNamedRoute(() => new WidgetCard"),
-        "widget entry must not use page route registration, got:\n{}",
-        result
+        "form profile entry must not use page route registration:\n{result}"
+    );
+}
+
+#[test]
+fn test_regular_entry_with_storage_is_not_misclassified_as_card() {
+    let src = r#"
+let storage = new LocalStorage();
+
+@Entry(storage)
+@Component
+struct Page {
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source("phone/src/main/ets/pages/Page.ets", src),
+        &TransformOptions {
+            bundle_name: Some("com.example.hmosworld".to_string()),
+            module_name: Some("phone".to_string()),
+            ..TransformOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        result.contains("registerNamedRoute(() => new Page(undefined, {}, storage)")
+            && !result.contains("loadEtsCard"),
+        "SDK createEntryNode selects card behavior from cardObj, not from the presence of an @Entry argument:\n{result}"
+    );
+}
+
+#[test]
+fn test_identifier_entry_options_use_hvigor_runtime_dispatch() {
+    let src = r#"
+declare const entryOptions: object;
+
+@Entry(entryOptions)
+@Component
+struct Page {
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source("phone/src/main/ets/pages/Page.ets", src),
+        &TransformOptions {
+            ..TransformOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        result.contains(
+            "entryOptions && entryOptions.routeName != undefined && entryOptions.storage != undefined"
+        ) && result.contains(
+            "entryOptions && entryOptions.routeName != undefined && entryOptions.storage == undefined"
+        ) && result.contains(
+            "entryOptions && entryOptions.routeName == undefined && entryOptions.storage != undefined"
+        ) && result.contains(
+            "entryOptions && entryOptions.useSharedStorage != undefined"
+        ),
+        "SDK judgeRouteNameAndStorageForIdentifier runtime branches must be preserved:\n{result}"
+    );
+    assert!(
+        result.contains(
+            "entryOptions.useSharedStorage ? LocalStorage.getShared() : entryOptions.storage"
+        ) && result.contains("new Page(undefined, {}, entryOptions)"),
+        "identifier entry options must preserve shared-storage selection and scalar-storage fallback:\n{result}"
+    );
+}
+
+#[test]
+fn test_form_entry_rejects_object_entry_options_like_hvigor() {
+    let src = r#"
+@Entry({ storage: LocalStorage.getShared() })
+@Component
+struct WidgetCard {
+  build() {}
+}
+"#;
+    let error = TransformHarness::transform_with_options(
+        &make_source("phone/src/main/ets/widget/pages/WidgetCard.ets", src),
+        &TransformOptions {
+            form_entry: true,
+            ..TransformOptions::default()
+        },
+    )
+    .expect_err("SDK rejects object-literal @Entry options for card sources");
+    assert!(
+        error
+            .to_string()
+            .contains("'@Entry' doesn't support {} parameter in card"),
+        "unexpected diagnostic: {error}"
     );
 }
 
@@ -2987,7 +4087,7 @@ struct ModalPage {
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
-            emit_entry_registration: true,
+            form_entry: false,
             partial_update: true,
             checker_mode: crate::CheckerMode::Oxc,
         },
@@ -3003,6 +4103,13 @@ struct ModalPage {
         result.contains("new ModalPage(undefined, {}, LocalStorage.getShared())"),
         "object-literal @Entry storage must pass only the storage expression, got:\n{}",
         result
+    );
+    assert_eq!(
+        result
+            .matches("new ModalPage(undefined, {}, LocalStorage.getShared())")
+            .count(),
+        2,
+        "routeName undefined fallback must retain object-literal storage like hvigor:\n{result}"
     );
     assert!(
         result.contains("routeNameNode"),
@@ -3281,7 +4388,102 @@ struct Host {
 }
 
 #[test]
-fn test_state_styles_leading_dot_object_lowers_to_property() {
+fn test_custom_dialog_controller_program_pass_covers_v2_fields_and_local_variables() {
+    let src = r#"
+@CustomDialog
+struct DismissDialog {
+  controller?: CustomDialogController
+  title: string = ""
+  build() {
+    Column()
+  }
+}
+
+@ComponentV2
+struct Host {
+  fieldController: CustomDialogController = new CustomDialogController({
+    builder: DismissDialog({ title: "field" })
+  })
+
+  aboutToAppear(): void {
+    const localController = new CustomDialogController({
+      builder: DismissDialog({ title: "local" })
+    })
+    localController.open()
+  }
+
+  build() {
+    Column()
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/HostV2.ets", src))
+            .unwrap();
+
+    assert_eq!(
+        result.matches("ViewPU.create(jsDialog);").count(),
+        2,
+        "SDK process_ui_syntax visits ComponentV2 property and variable declarations before class lowering:\n{result}"
+    );
+    assert!(
+        result.contains("jsDialog.setController(this.fieldController);")
+            && result.contains("jsDialog.setController(this.localController);"),
+        "SDK createCustomComponentBuilderArrowFunction addresses property and variable declarations through this.<name>:\n{result}"
+    );
+    assert_eq!(
+        result.matches("new CustomDialogController({").count(),
+        2,
+        "both controller constructors must remain present:\n{result}"
+    );
+    assert_eq!(
+        result.matches("}, this);").count(),
+        2,
+        "both controller constructors must receive the SDK owner argument:\n{result}"
+    );
+}
+
+#[test]
+fn test_custom_dialog_controller_program_pass_covers_regular_class_assignment() {
+    let src = r#"
+@CustomDialog
+struct DismissDialog {
+  controller?: CustomDialogController
+  build() {
+    Column()
+  }
+}
+
+class DialogManager {
+  private static controller: CustomDialogController | null = null
+
+  static reset(): void {
+    DialogManager.controller = new CustomDialogController({
+      builder: DismissDialog()
+    })
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/dialog/DialogManager.ets",
+        src,
+    ))
+    .unwrap();
+
+    assert!(
+        result.contains("jsDialog.setController(DialogManager.controller);")
+            && result.contains("ViewPU.create(jsDialog);"),
+        "SDK process_ui_syntax visits CustomDialogController assignments in ordinary classes:\n{result}"
+    );
+    assert!(
+        result.contains("DialogManager.controller = new CustomDialogController({")
+            && result.contains("}, this);"),
+        "ordinary class assignments preserve the constructor and add the SDK owner argument:\n{result}"
+    );
+}
+
+#[test]
+fn test_state_styles_inline_object_lowers_to_visual_state_sequence() {
     let src = r#"
 @Component
 struct Demo {
@@ -3299,13 +4501,15 @@ struct Demo {
         TransformHarness::transform(&make_source("entry/src/main/ets/components/Demo.ets", src))
             .unwrap();
     assert!(
-        result.contains("Text.stateStyles({ pressed: { backgroundColor: Color.Transparent } })"),
-        "stateStyles leading-dot properties must lower to object fields:\n{}",
+        result.contains(
+            "ViewStackProcessor.visualState(\"pressed\");\n            Text.backgroundColor(Color.Transparent);\n            ViewStackProcessor.visualState();"
+        ),
+        "stateStyles must lower to hvigor's visual-state sequence:\n{}",
         result
     );
     assert!(
-        !result.contains(": \n            .backgroundColor"),
-        "leading-dot stateStyles property must not leak to codegen:\n{}",
+        !result.contains("Text.stateStyles("),
+        "stateStyles must not remain as a component runtime call:\n{}",
         result
     );
 
@@ -3320,6 +4524,126 @@ struct Demo {
         parsed.diagnostics.is_empty(),
         "stateStyles lowering must emit standard TypeScript: {:?}\n{}",
         parsed.diagnostics,
+        result
+    );
+}
+
+#[test]
+fn test_state_styles_expand_local_and_global_styles_in_source_order() {
+    let src = r#"
+@Styles
+function disabledStyle() {
+  .opacity(0.5)
+}
+
+@Component
+struct Demo {
+  @Styles normalStyle() {
+    .backgroundColor(Color.White)
+  }
+
+  @Styles pressedStyle() {
+    .backgroundColor('#eeeeee')
+    .scale({ x: 0.98, y: 0.98 })
+  }
+
+  build() {
+    Text("x")
+      .stateStyles({
+        normal: this.normalStyle,
+        pressed: this.pressedStyle,
+        disabled: disabledStyle
+      })
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/components/Demo.ets", src))
+            .unwrap();
+    let normal = result
+        .find("ViewStackProcessor.visualState(\"normal\");")
+        .expect("normal visual state");
+    let normal_attr = result[normal..]
+        .find("Text.backgroundColor(Color.White);")
+        .map(|offset| normal + offset)
+        .expect("normal style expansion");
+    let pressed = result
+        .find("ViewStackProcessor.visualState(\"pressed\");")
+        .expect("pressed visual state");
+    let pressed_color = result[pressed..]
+        .find("Text.backgroundColor(\"#eeeeee\");")
+        .map(|offset| pressed + offset)
+        .expect("pressed color expansion");
+    let pressed_scale = result[pressed..]
+        .find("Text.scale(")
+        .map(|offset| pressed + offset)
+        .expect("pressed scale expansion");
+    let disabled = result
+        .find("ViewStackProcessor.visualState(\"disabled\");")
+        .expect("disabled visual state");
+    let disabled_attr = result[disabled..]
+        .find("Text.opacity(.5);")
+        .map(|offset| disabled + offset)
+        .expect("global style expansion");
+    let reset = result[disabled..]
+        .find("ViewStackProcessor.visualState();")
+        .map(|offset| disabled + offset)
+        .expect("visual state reset");
+    assert!(
+        normal < normal_attr
+            && normal_attr < pressed
+            && pressed < pressed_color
+            && pressed_color < pressed_scale
+            && pressed_scale < disabled
+            && disabled < disabled_attr
+            && disabled_attr < reset,
+        "stateStyles states and expanded attributes must retain hvigor source order:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("normalStyle()")
+            && !result.contains("pressedStyle()")
+            && !result.contains("disabledStyle()"),
+        "@Styles declarations and references must not leak into generated output:\n{}",
+        result
+    );
+}
+
+#[test]
+fn test_custom_component_state_styles_lower_on_common_component() {
+    let src = r#"
+@Component
+struct Child {
+  build() {
+    Text("child")
+  }
+}
+
+@Component
+struct Demo {
+  @Styles pressedStyle() {
+    .backgroundColor(Color.Transparent)
+  }
+
+  build() {
+    Child()
+      .stateStyles({ pressed: this.pressedStyle })
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/components/Demo.ets", src))
+            .unwrap();
+    assert!(
+        result.contains(
+            "ViewStackProcessor.visualState(\"pressed\");\n            __Common__.backgroundColor(Color.Transparent);\n            ViewStackProcessor.visualState();"
+        ),
+        "custom-component stateStyles must target hvigor's __Common__ wrapper:\n{}",
+        result
+    );
+    assert!(
+        !result.contains("__Common__.stateStyles("),
+        "custom-component stateStyles must not remain as a runtime attribute:\n{}",
         result
     );
 }

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use arkdown_config::build_profile::BuildOptionProfileInventory;
+
 use crate::artifacts::layout::ArtifactLayout;
 use crate::dependency_graph::snapshot::DependencyGraphSnapshot;
 use crate::fingerprint::InputFingerprintSet;
@@ -11,6 +13,7 @@ use crate::profiles::store::ProfileStore;
 use crate::project::snapshot::ProjectSnapshot;
 use crate::resources::plan::ResourcePlan;
 use crate::sdk::snapshot::SdkSnapshot;
+use crate::WatchPlanInput;
 
 /// The immutable build session, constructed once at startup and shared across
 /// all compilation stages.
@@ -29,6 +32,10 @@ pub struct BuildSession {
     pub fingerprints: Arc<InputFingerprintSet>,
     /// Profile file store (lazily indexed by module and profile kind).
     pub profiles: Arc<ProfileStore>,
+    /// Project/module target and build-option models parsed once at startup.
+    pub build_options: Arc<BuildOptionProfileInventory>,
+    /// Typed source, resource, dependency, and configuration watch inventory.
+    pub watch_inputs: Arc<Vec<WatchPlanInput>>,
 }
 
 impl BuildSession {

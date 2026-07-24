@@ -13,6 +13,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 json5 = { workspace = true }
 rustc-hash = { workspace = true }
+rayon = { workspace = true }
 tracing = { workspace = true }
 # OXC parser/transformer for ArkTS source processing
 # Uses ohos-rs/oxc fork with .ets StructStatement support

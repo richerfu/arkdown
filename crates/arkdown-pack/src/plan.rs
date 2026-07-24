@@ -323,6 +323,8 @@ pub struct PackagePlan {
     ///
     /// Used in `pack.info` `summary.app.version.name`.
     pub bundle_version_name: String,
+    /// Optional build version emitted as `summary.app.version.build`.
+    pub bundle_build_version: Option<String>,
     /// Bundle type string: `"app"` for HAP, `"shared"` for HSP.
     ///
     /// Used in `pack.info` `summary.app.bundleType`.
@@ -475,6 +477,7 @@ mod tests {
             bundle_name: "com.example.app".to_string(),
             bundle_version_code: 1_000_000,
             bundle_version_name: "1.0.0".to_string(),
+            bundle_build_version: None,
             bundle_type: "app".to_string(),
             device_types: vec![],
             installation_free: false,

@@ -2,6 +2,10 @@
 
 use std::path::PathBuf;
 
+use crate::dependency_graph::snapshot::DependencyNodeType;
+use crate::paths::ProjectPathLayout;
+use crate::project::snapshot::ProjectSnapshot;
+
 // ---------------------------------------------------------------------------
 // WatchPlanInput
 // ---------------------------------------------------------------------------
@@ -43,6 +47,133 @@ impl WatchPlanInput {
             config_files,
             module_name: module_name.into(),
             debounce_ms: 300,
+        }
+    }
+
+    /// Build the complete watch inventory from startup-owned project snapshots.
+    ///
+    /// Source HAR inputs and their resources are included because hvigor's
+    /// Rollup watch graph observes source dependencies as compilation inputs.
+    /// Configuration files are recorded explicitly instead of recursively
+    /// watching the project root and observing generated build output.
+    pub fn from_project(project: &ProjectSnapshot) -> Vec<Self> {
+        project
+            .module_order
+            .iter()
+            .filter_map(|module_name| {
+                let module = project.modules.get(module_name)?;
+                let mut source_roots = module.source_roots.clone();
+                let mut resource_roots = module.resource_roots.clone();
+                let mut config_files = Self::project_config_files(project);
+
+                Self::push_file(&mut config_files, module.module_json_path.as_ref());
+                Self::push_file(&mut config_files, module.package_path.as_ref());
+                Self::push_existing_candidates(
+                    &mut config_files,
+                    &module.root,
+                    &[
+                        "build-profile.json5",
+                        "hvigorfile.ts",
+                        "hvigorfile.js",
+                        "hvigorfile.cjs",
+                        "hvigorfile.mjs",
+                    ],
+                );
+
+                if let Some(graph) = project.dependency_graphs.get(module_name) {
+                    for node in graph.nodes.values() {
+                        let Some(package_root) = node.package_root.as_ref() else {
+                            continue;
+                        };
+                        Self::push_existing_candidates(
+                            &mut config_files,
+                            package_root,
+                            &["oh-package.json5", "src/main/module.json5"],
+                        );
+                        if matches!(
+                            node.node_type,
+                            DependencyNodeType::SourceHar | DependencyNodeType::OhpmSource
+                        ) {
+                            Self::push_dir(
+                                &mut source_roots,
+                                package_root.join("src").join("main"),
+                            );
+                        }
+                        if matches!(
+                            node.node_type,
+                            DependencyNodeType::SourceHar
+                                | DependencyNodeType::SharedHsp
+                                | DependencyNodeType::IntegratedHsp
+                        ) {
+                            Self::push_dir(
+                                &mut resource_roots,
+                                package_root.join("src").join("main").join("resources"),
+                            );
+                        }
+                    }
+                }
+
+                source_roots.sort();
+                source_roots.dedup();
+                resource_roots.sort();
+                resource_roots.dedup();
+                config_files.sort();
+                config_files.dedup();
+
+                Some(Self {
+                    source_roots,
+                    resource_roots,
+                    config_files,
+                    module_name: module_name.clone(),
+                    // hvigor-arkts-compose/arkts-pack.ts::getWatchConfig.
+                    debounce_ms: 100,
+                })
+            })
+            .collect()
+    }
+
+    fn project_config_files(project: &ProjectSnapshot) -> Vec<PathBuf> {
+        let layout = ProjectPathLayout::new(&project.root);
+        let mut files = Vec::new();
+        Self::push_existing_candidates(
+            &mut files,
+            &project.root,
+            &[
+                "build-profile.json5",
+                "oh-package.json5",
+                "oh-package-lock.json5",
+                "hvigorfile.ts",
+                "hvigorfile.js",
+                "hvigorfile.cjs",
+                "hvigorfile.mjs",
+                "hvigorconfig.ts",
+            ],
+        );
+        let app_json = layout.app_scope_app_json5();
+        if app_json.is_file() {
+            files.push(app_json);
+        }
+        files
+    }
+
+    fn push_existing_candidates(output: &mut Vec<PathBuf>, root: &std::path::Path, paths: &[&str]) {
+        for path in paths {
+            let candidate = root.join(path);
+            if candidate.is_file() {
+                output.push(candidate);
+            }
+        }
+    }
+
+    fn push_file(output: &mut Vec<PathBuf>, path: Option<&PathBuf>) {
+        if let Some(path) = path {
+            output.push(path.clone());
+        }
+    }
+
+    fn push_dir(output: &mut Vec<PathBuf>, path: PathBuf) {
+        if path.is_dir() {
+            output.push(path);
         }
     }
 }

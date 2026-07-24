@@ -49,6 +49,8 @@ fn default_config() -> Arc<ArkdownConfig> {
             },
             version_code: None,
             version_name: None,
+            build_version: None,
+            app_options: Default::default(),
         },
         modules: vec![],
         sdk_config: SdkConfig {

@@ -214,15 +214,17 @@ test('PLUGIN_NAME_WITH_UNKNOWN_ORDER is thrown for unknown string order values',
   )
 })
 
-test('function order receives name-to-index map and returns correct splice position', () => {
+test('function order receives name-to-index record and returns correct splice position', () => {
   const alpha = { name: 'alpha', transform(code) { return code } }
   const gamma = { name: 'gamma', transform(code) { return code } }
+  let orderCalls = 0
   // beta should be inserted between alpha and gamma by returning index 1
   const beta = {
     name: 'beta',
     order(nameToIndex) {
+      orderCalls++
       // alpha is at 0, so 1 inserts after alpha
-      return (nameToIndex.get('alpha') ?? 0) + 1
+      return (nameToIndex.alpha ?? 0) + 1
     },
     transform(code) { return code },
   }
@@ -231,6 +233,29 @@ test('function order receives name-to-index map and returns correct splice posit
   assert.deepEqual(result.map((p) => p.name), ['alpha', 'beta', 'gamma'])
   // order property should be stripped from the resolved plugin
   assert.equal(result[1].order, undefined)
+  // Hvigor's getPlugins invokes a function-valued order exactly once.
+  assert.equal(orderCalls, 1)
+})
+
+test('function order receives hvigor Record shape and safe duplicate names', () => {
+  let received
+  const ordered = {
+    name: 'ordered',
+    order(nameToIndex) {
+      received = nameToIndex
+      return nameToIndex.alpha_1 + 1
+    },
+    transform(code) { return code },
+  }
+  const result = applyFunctionOrder([
+    { name: 'alpha', transform(code) { return code } },
+    { name: 'alpha', transform(code) { return code } },
+    ordered,
+  ])
+
+  assert.equal(received instanceof Map, false)
+  assert.deepEqual({ ...received }, { alpha: 0, alpha_1: 1 })
+  assert.deepEqual(result.map((plugin) => plugin.name), ['alpha', 'alpha', 'ordered'])
 })
 
 test('shouldTransformCachedModule receives structured request objects', () => {
@@ -354,6 +379,41 @@ module.exports = {
   )
 })
 
+test('module config.ohos.overrides loads arkOptions.compilePluginFile', async () => {
+  const root = tempProject()
+  const moduleRoot = path.join(root, 'entry')
+  const compileRoot = path.join(moduleRoot, 'hvigorCompile')
+  fs.mkdirSync(compileRoot, { recursive: true })
+  fs.writeFileSync(
+    path.join(compileRoot, 'plugin.js'),
+    `exports.default = { name: 'declarative-compile-plugin', transform(code) { return code } }\n`,
+  )
+  fs.writeFileSync(
+    path.join(moduleRoot, 'hvigorfile.js'),
+    `
+module.exports = {
+  config: {
+    ohos: {
+      overrides: {
+        buildOption: {
+          arkOptions: {
+            compilePluginFile: './hvigorCompile/plugin.js'
+          }
+        }
+      }
+    }
+  }
+}
+`,
+  )
+
+  const plugins = await new RuntimePluginLoader({ project: root }).load()
+  assert.deepEqual(
+    plugins.map((plugin) => plugin.name),
+    ['declarative-compile-plugin'],
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Group 5: BuildConfig field forwarding
 // ---------------------------------------------------------------------------
@@ -418,6 +478,107 @@ test('createBuild forwards native BuildConfig fields and strips runtime plugin p
     capturedPlugins.map((plugin) => plugin.name),
     ['runtime-hvigor', 'runtime-compile-a', 'runtime-compile-b'],
   )
+})
+
+test('createBuild evaluates project and module config.ohos overrides before native build', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  fs.mkdirSync(entry)
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.js'),
+    `
+const versionCode = () => 2000001
+module.exports = {
+  system: {},
+  config: {
+    ohos: {
+      overrides: {
+        appOpt: {
+          vendor: 'example',
+          versionCode: versionCode(),
+          versionName: '2.0.1',
+          bundleName: 'com.example.override',
+          bundleType: 'atomicService',
+          icon: '$media:override_icon',
+          label: '$string:override_label'
+        },
+        signingConfig: {
+          material: {
+            keyAlias: 'override-key'
+          }
+        }
+      }
+    }
+  }
+}
+`,
+  )
+  fs.writeFileSync(
+    path.join(entry, 'hvigorfile.js'),
+    `
+module.exports = {
+  system: {},
+  config: {
+    ohos: {
+      overrides: {
+        buildOption: {
+          arkOptions: {
+            hostPGO: true,
+            runtimeOnly: {
+              packages: ['runtime-package']
+            }
+          },
+          externalNativeOptions: {
+            abiFilters: ['arm64-v8a']
+          }
+        }
+      }
+    }
+  }
+}
+`,
+  )
+
+  let capturedConfig
+  const build = createBuild(async (config) => {
+    capturedConfig = config
+    return { artifacts: [] }
+  })
+  await build({
+    project: root,
+    projectHvigorOverridesJson: 'caller values must not be trusted',
+    moduleHvigorOverridesJson: 'caller values must not be trusted',
+  })
+
+  assert.deepEqual(JSON.parse(capturedConfig.projectHvigorOverridesJson), {
+    appOpt: {
+      vendor: 'example',
+      versionCode: 2000001,
+      versionName: '2.0.1',
+      bundleName: 'com.example.override',
+      bundleType: 'atomicService',
+      icon: '$media:override_icon',
+      label: '$string:override_label',
+    },
+    signingConfig: {
+      material: {
+        keyAlias: 'override-key',
+      },
+    },
+  })
+  assert.deepEqual(JSON.parse(capturedConfig.moduleHvigorOverridesJson), {
+    [entry]: {
+      arkOptions: {
+        hostPGO: true,
+        runtimeOnly: {
+          packages: ['runtime-package'],
+        },
+      },
+      externalNativeOptions: {
+        abiFilters: ['arm64-v8a'],
+      },
+    },
+  })
 })
 
 // ---------------------------------------------------------------------------

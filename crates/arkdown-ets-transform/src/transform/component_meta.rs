@@ -8,7 +8,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, Declaration,
     ExportDefaultDeclarationKind, Expression, Program, Statement, StructElement, StructStatement,
+    TSEnumDeclaration,
 };
+use oxc_ast_visit::Visit;
 use oxc_parser::{ArkTsAttributeCallback, ArkTsOptions, Parser, ParserReturn};
 use oxc_span::SourceType;
 use serde::Deserialize;
@@ -48,6 +50,8 @@ pub struct ComponentMetadata {
     gesture_type_names: FxHashSet<String>,
     enum_names: FxHashSet<String>,
     sdk_components: FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
+    sdk_enum_exports: FxHashMap<String, FxHashSet<String>>,
+    sdk_namespace_enum_exports: FxHashMap<String, FxHashMap<String, FxHashSet<String>>>,
     runtime_names: ArkuiRuntimeNames,
 }
 
@@ -145,6 +149,22 @@ impl ComponentMetadata {
             .get(specifier)
             .and_then(|components| components.get(binding))
     }
+
+    pub(crate) fn is_sdk_enum_export(&self, specifier: &str, binding: &str) -> bool {
+        self.sdk_enum_exports
+            .get(specifier)
+            .is_some_and(|enums| enums.contains(binding))
+    }
+
+    pub(crate) fn sdk_namespace_enum_exports(
+        &self,
+        specifier: &str,
+        binding: &str,
+    ) -> Option<&FxHashSet<String>> {
+        self.sdk_namespace_enum_exports
+            .get(specifier)
+            .and_then(|bindings| bindings.get(binding))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -189,12 +209,21 @@ pub struct ArkuiRuntimeNames {
     pub repeat_each: String,
     pub repeat_template: String,
     pub component_list_item: String,
+    pub component_grid_item: String,
+    pub component_arc_list_item: String,
     pub component_button: String,
     pub component_navigation: String,
     pub component_nav_destination: String,
     pub component_gesture_group: String,
     pub component_gesture: String,
     pub component_if: String,
+    pub component_xcomponent: String,
+    pub xcomponent_type: String,
+    pub xcomponent_type_container: String,
+    pub attribute_id: String,
+    pub attribute_state_styles: String,
+    pub can_retake: String,
+    pub visual_state: String,
     pub method_create: String,
     pub method_create_with_child: String,
     pub method_create_with_label: String,
@@ -233,6 +262,7 @@ pub struct ArkuiRuntimeNames {
     pub observe_component_creation2: String,
     pub item_creation: String,
     pub item_creation2: String,
+    pub observed_deep_render: String,
     pub item_binding: String,
     pub foreach_item_gen_function: String,
     pub foreach_update_function: String,
@@ -266,10 +296,13 @@ pub enum ArkuiRuntimeComponentKind {
     ForEach,
     LazyForEach,
     ListItem,
+    GridItem,
+    ArcListItem,
     Button,
     Navigation,
     NavDestination,
     GestureGroup,
+    XComponent,
     Other,
 }
 
@@ -284,6 +317,10 @@ impl ArkuiRuntimeComponentKind {
 
     pub fn is_list_item(self) -> bool {
         matches!(self, Self::ListItem)
+    }
+
+    pub fn is_item_component(self) -> bool {
+        matches!(self, Self::ListItem | Self::GridItem | Self::ArcListItem)
     }
 
     pub fn is_nav_router(self) -> bool {
@@ -308,12 +345,21 @@ impl Default for ArkuiRuntimeNames {
             repeat_each: "each".to_string(),
             repeat_template: "template".to_string(),
             component_list_item: "ListItem".to_string(),
+            component_grid_item: "GridItem".to_string(),
+            component_arc_list_item: "ArcListItem".to_string(),
             component_button: "Button".to_string(),
             component_navigation: "Navigation".to_string(),
             component_nav_destination: "NavDestination".to_string(),
             component_gesture_group: "GestureGroup".to_string(),
             component_gesture: "Gesture".to_string(),
             component_if: "If".to_string(),
+            component_xcomponent: "XComponent".to_string(),
+            xcomponent_type: "XComponentType".to_string(),
+            xcomponent_type_container: "COMPONENT".to_string(),
+            attribute_id: "id".to_string(),
+            attribute_state_styles: "stateStyles".to_string(),
+            can_retake: "canRetake".to_string(),
+            visual_state: "visualState".to_string(),
             method_create: "create".to_string(),
             method_create_with_child: "createWithChild".to_string(),
             method_create_with_label: "createWithLabel".to_string(),
@@ -352,6 +398,7 @@ impl Default for ArkuiRuntimeNames {
             observe_component_creation2: "observeComponentCreation2".to_string(),
             item_creation: "itemCreation".to_string(),
             item_creation2: "itemCreation2".to_string(),
+            observed_deep_render: "observedDeepRender".to_string(),
             item_binding: "_item".to_string(),
             foreach_item_gen_function: "forEachItemGenFunction".to_string(),
             foreach_update_function: "forEachUpdateFunction".to_string(),
@@ -396,6 +443,12 @@ impl ArkuiRuntimeNames {
         if name == self.component_list_item {
             return ArkuiRuntimeComponentKind::ListItem;
         }
+        if name == self.component_grid_item {
+            return ArkuiRuntimeComponentKind::GridItem;
+        }
+        if name == self.component_arc_list_item {
+            return ArkuiRuntimeComponentKind::ArcListItem;
+        }
         if name == self.component_button {
             return ArkuiRuntimeComponentKind::Button;
         }
@@ -407,6 +460,9 @@ impl ArkuiRuntimeNames {
         }
         if name == self.component_gesture_group {
             return ArkuiRuntimeComponentKind::GestureGroup;
+        }
+        if name == self.component_xcomponent {
+            return ArkuiRuntimeComponentKind::XComponent;
         }
         ArkuiRuntimeComponentKind::Other
     }
@@ -436,12 +492,16 @@ impl ArkuiRuntimeNames {
             "REPEAT_EACH" => self.repeat_each = value.to_string(),
             "REPEAT_TEMPLATE" => self.repeat_template = value.to_string(),
             "LIST_ITEM" => self.component_list_item = value.to_string(),
+            "GRID_ITEM" => self.component_grid_item = value.to_string(),
+            "ARC_LIST_ITEM" => self.component_arc_list_item = value.to_string(),
             "COMPONENT_BUTTON" => self.component_button = value.to_string(),
             "NAVIGATION" => self.component_navigation = value.to_string(),
             "NAV_DESTINATION" => self.component_nav_destination = value.to_string(),
             "COMPONENT_GESTURE_GROUP" => self.component_gesture_group = value.to_string(),
             "COMPONENT_GESTURE" => self.component_gesture = value.to_string(),
             "COMPONENT_IF" => self.component_if = value.to_string(),
+            "XCOMPONENTTYPE" => self.xcomponent_type = value.to_string(),
+            "XCOMPONENTTYPE_CONTAINER" => self.xcomponent_type_container = value.to_string(),
             "COMPONENT_CREATE_FUNCTION" => self.method_create = value.to_string(),
             "COMPONENT_CREATE_CHILD_FUNCTION" => self.method_create_with_child = value.to_string(),
             "COMPONENT_CREATE_LABEL_FUNCTION" => self.method_create_with_label = value.to_string(),
@@ -541,7 +601,7 @@ impl<'a> ComponentMetadataLoader<'a> {
             SdkPreDefineBindingLoader::new(self.ets_loader_path.join("lib").join("pre_define.js"))
                 .load()?;
         let enum_names = SdkEnumNameLoader::new(self.ets_loader_path).load()?;
-        let sdk_components = SdkComponentLoader::new(self.ets_loader_path).load()?;
+        let sdk_declarations = SdkComponentLoader::new(self.ets_loader_path).load()?;
 
         let mut bind_object_properties = bind_rules.bind_object_properties;
         if !component_map_metadata.custom_builder_properties.is_empty() {
@@ -566,7 +626,9 @@ impl<'a> ComponentMetadataLoader<'a> {
             gesture_attr_names: component_map_metadata.gesture_attr_names,
             gesture_type_names: component_map_metadata.gesture_type_names,
             enum_names,
-            sdk_components,
+            sdk_components: sdk_declarations.components,
+            sdk_enum_exports: sdk_declarations.enum_exports,
+            sdk_namespace_enum_exports: sdk_declarations.namespace_enum_exports,
             runtime_names: bind_rules.runtime_names,
         })
     }
@@ -691,61 +753,75 @@ struct SdkComponentLoader<'a> {
     ets_loader_path: &'a Path,
 }
 
+#[derive(Default)]
+struct SdkDeclarationMetadata {
+    components: FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
+    enum_exports: FxHashMap<String, FxHashSet<String>>,
+    namespace_enum_exports: FxHashMap<String, FxHashMap<String, FxHashSet<String>>>,
+}
+
 impl<'a> SdkComponentLoader<'a> {
     fn new(ets_loader_path: &'a Path) -> Self {
         Self { ets_loader_path }
     }
 
-    fn load(&self) -> anyhow::Result<FxHashMap<String, FxHashMap<String, SdkComponentInfo>>> {
-        let api_components = self.load_api_components()?;
-        let mut imports = FxHashMap::default();
-        for (specifier, components) in &api_components {
-            imports.insert(specifier.clone(), components.clone());
-        }
-        self.load_kit_components(&api_components, &mut imports)?;
-        Ok(imports)
+    fn load(&self) -> anyhow::Result<SdkDeclarationMetadata> {
+        let mut declarations = self.load_api_declarations()?;
+        self.load_kit_declarations(&mut declarations)?;
+        Ok(declarations)
     }
 
-    fn load_api_components(
-        &self,
-    ) -> anyhow::Result<FxHashMap<String, FxHashMap<String, SdkComponentInfo>>> {
+    fn load_api_declarations(&self) -> anyhow::Result<SdkDeclarationMetadata> {
         let api_root = self.ets_loader_path.join("..").join("..").join("api");
         let mut paths = Vec::new();
         self.collect_declaration_files(&api_root, &mut paths)?;
         paths.sort();
 
-        let mut components_by_specifier = FxHashMap::default();
+        let mut declarations = SdkDeclarationMetadata::default();
         for path in paths {
             let source = fs::read_to_string(&path)?;
             let allocator = Allocator::default();
             let source_type = SourceType::from_path(&path).unwrap_or_else(|_| SourceType::ets());
             let parsed = Parser::new(&allocator, &source, source_type).parse();
-            if !parsed.diagnostics.is_empty() {
-                anyhow::bail!(
-                    "failed to parse SDK component declaration at {}",
-                    path.display()
-                );
-            }
+            // The platform API directory contains declarations accepted by the
+            // SDK's TypeScript version but not yet accepted by OXC. OXC still
+            // returns a recovered AST, and the metadata below only consumes
+            // complete enum and ArkUI struct declarations from that tree. An
+            // unrelated recovery diagnostic must not make all SDK metadata
+            // unavailable to a build.
 
             let components = SdkComponentDeclarationCollector::new(&parsed.program).collect();
-            if components.is_empty() {
-                continue;
-            }
+            let enums = SdkModuleEnumDeclarationCollector::new(&parsed.program).collect();
 
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
             for specifier in SdkDeclarationSpecifier::new(file_name).forms() {
-                components_by_specifier.insert(specifier, components.clone());
+                if !components.is_empty() {
+                    declarations
+                        .components
+                        .insert(specifier.clone(), components.clone());
+                }
+                if !enums.exports.is_empty() {
+                    declarations
+                        .enum_exports
+                        .insert(specifier.clone(), enums.exports.clone());
+                }
+                if !enums.namespace.is_empty() {
+                    declarations
+                        .namespace_enum_exports
+                        .entry(specifier)
+                        .or_default()
+                        .insert("default".to_string(), enums.namespace.clone());
+                }
             }
         }
-        Ok(components_by_specifier)
+        Ok(declarations)
     }
 
-    fn load_kit_components(
+    fn load_kit_declarations(
         &self,
-        api_components: &FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
-        imports: &mut FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
+        declarations: &mut SdkDeclarationMetadata,
     ) -> anyhow::Result<()> {
         let kit_root = self.ets_loader_path.join("kit_configs");
         if !kit_root.is_dir() {
@@ -773,21 +849,45 @@ impl<'a> SdkComponentLoader<'a> {
                 let Some(binding) = symbol.get("bindings").and_then(Value::as_str) else {
                     continue;
                 };
-                let Some(info) = SdkDeclarationSpecifier::new(source)
-                    .forms()
-                    .into_iter()
-                    .find_map(|specifier| {
-                        api_components
-                            .get(&specifier)
-                            .and_then(|components| components.get(binding))
-                    })
-                else {
-                    continue;
-                };
-                imports
-                    .entry(kit_specifier.to_string())
-                    .or_default()
-                    .insert(local_name.clone(), info.clone());
+                let source_specifiers = SdkDeclarationSpecifier::new(source).forms();
+                if let Some(info) = source_specifiers.iter().find_map(|specifier| {
+                    declarations
+                        .components
+                        .get(specifier)
+                        .and_then(|components| components.get(binding))
+                        .cloned()
+                }) {
+                    declarations
+                        .components
+                        .entry(kit_specifier.to_string())
+                        .or_default()
+                        .insert(local_name.clone(), info);
+                }
+                if source_specifiers.iter().any(|specifier| {
+                    declarations
+                        .enum_exports
+                        .get(specifier)
+                        .is_some_and(|enums| enums.contains(binding))
+                }) {
+                    declarations
+                        .enum_exports
+                        .entry(kit_specifier.to_string())
+                        .or_default()
+                        .insert(local_name.clone());
+                }
+                if let Some(enums) = source_specifiers.iter().find_map(|specifier| {
+                    declarations
+                        .namespace_enum_exports
+                        .get(specifier)
+                        .and_then(|bindings| bindings.get(binding))
+                        .cloned()
+                }) {
+                    declarations
+                        .namespace_enum_exports
+                        .entry(kit_specifier.to_string())
+                        .or_default()
+                        .insert(local_name.clone(), enums);
+                }
             }
         }
 
@@ -810,8 +910,7 @@ impl<'a> SdkComponentLoader<'a> {
             } else if matches!(
                 SourceClassifier::classify_path(&path),
                 SourceFileKind::Declaration
-            ) && path.extension().and_then(|ext| ext.to_str()) == Some("ets")
-            {
+            ) {
                 paths.push(path);
             }
         }
@@ -852,6 +951,54 @@ impl<'a> SdkDeclarationSpecifier<'a> {
             return None;
         }
         Some(format!("{prefix}:{module}"))
+    }
+}
+
+#[derive(Default)]
+struct SdkModuleEnumDeclarations {
+    exports: FxHashSet<String>,
+    namespace: FxHashSet<String>,
+}
+
+struct SdkModuleEnumDeclarationCollector<'a> {
+    program: &'a Program<'a>,
+}
+
+impl<'a> SdkModuleEnumDeclarationCollector<'a> {
+    fn new(program: &'a Program<'a>) -> Self {
+        Self { program }
+    }
+
+    fn collect(&self) -> SdkModuleEnumDeclarations {
+        let mut declarations = SdkModuleEnumDeclarations::default();
+        for statement in &self.program.body {
+            match statement {
+                Statement::TSEnumDeclaration(declaration) => {
+                    declarations.exports.insert(declaration.id.name.to_string());
+                }
+                Statement::ExportNamedDeclaration(export) => {
+                    if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                        declarations.exports.insert(declaration.id.name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut nested = SdkNestedEnumNameCollector::default();
+        nested.visit_program(self.program);
+        declarations.namespace = nested.names;
+        declarations
+    }
+}
+
+#[derive(Default)]
+struct SdkNestedEnumNameCollector {
+    names: FxHashSet<String>,
+}
+
+impl<'a> Visit<'a> for SdkNestedEnumNameCollector {
+    fn visit_ts_enum_declaration(&mut self, declaration: &TSEnumDeclaration<'a>) {
+        self.names.insert(declaration.id.name.to_string());
     }
 }
 
@@ -1740,5 +1887,11 @@ BIND_POPUP_SET=exports.BIND_POPUP_SET=new Set([BIND_POPUP]);"#;
         assert!(metadata
             .sdk_component("@ohos:multimedia.avVolumePanel", "AVVolumePanel")
             .is_some());
+        assert!(metadata
+            .sdk_namespace_enum_exports("@ohos.file.photoAccessHelper", "default")
+            .is_some_and(|enums| enums.contains("PhotoViewMIMETypes")));
+        assert!(metadata
+            .sdk_namespace_enum_exports("@kit.MediaLibraryKit", "photoAccessHelper")
+            .is_some_and(|enums| enums.contains("PhotoViewMIMETypes")));
     }
 }

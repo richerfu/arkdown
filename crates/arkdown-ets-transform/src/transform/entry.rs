@@ -5,7 +5,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast::{AstBuilder, NONE};
 use oxc_span::SPAN;
-use oxc_syntax::operator::BinaryOperator;
+use oxc_syntax::operator::{BinaryOperator, LogicalOperator};
 use std::path::PathBuf;
 
 use crate::transform::component_meta::ArkuiRuntimeNames;
@@ -20,6 +20,8 @@ pub struct EntryRegistrationInfo<'a> {
     pub page_full_path: String,
     pub integrated_hsp: String,
     pub module_type: String,
+    /// SDK `projectConfig.cardObj[resourceFileName]` classification.
+    pub form_entry: bool,
     pub options: EntryOptions<'a>,
 }
 
@@ -174,12 +176,20 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
             return ast.vec1(self.named_route_statement(ast, allocator));
         };
 
+        if info.form_entry {
+            return self.card_statements(ast, info, allocator);
+        }
+
         if info.options.object_literal {
             return self.object_entry_statements(ast, info, allocator);
         }
 
         if info.options.argument.is_some() {
-            return self.card_statements(ast, info, allocator);
+            return ast.vec1(self.identifier_entry_statement(
+                ast,
+                allocator,
+                info.options.argument.expect("checked above"),
+            ));
         }
 
         ast.vec1(self.named_route_statement(ast, allocator))
@@ -244,6 +254,7 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
     ) -> Statement<'b> {
         let mut statements = ast.vec();
         statements.push(self.route_name_declaration(ast, route_name));
+        let alternate_storage = storage.clone_in(allocator);
         let consequent = ast.statement_block(
             SPAN,
             ast.vec1(self.named_route_statement_with(
@@ -253,8 +264,15 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
                 Some(storage),
             )),
         );
-        let alternate =
-            ast.statement_block(SPAN, ast.vec1(self.named_route_statement(ast, allocator)));
+        let alternate = ast.statement_block(
+            SPAN,
+            ast.vec1(self.named_route_statement_with(
+                ast,
+                allocator,
+                None,
+                Some(alternate_storage),
+            )),
+        );
         statements.push(ast.statement_if(
             SPAN,
             self.route_name_node_not_undefined(ast),
@@ -308,8 +326,212 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
         ast.expression_binary(
             SPAN,
             ast.expression_identifier(SPAN, EntryRuntimeName::ROUTENAME_NODE),
-            BinaryOperator::StrictInequality,
+            BinaryOperator::Inequality,
             ast.expression_identifier(SPAN, ast.str(self.runtime_names.undefined.as_str())),
+        )
+    }
+
+    fn identifier_entry_statement<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        argument: &Expression<'_>,
+    ) -> Statement<'b> {
+        let route_and_storage = self.identifier_route_and_storage_condition(
+            ast,
+            allocator,
+            argument,
+            BinaryOperator::Inequality,
+            BinaryOperator::Inequality,
+        );
+        let route_only = self.identifier_route_and_storage_condition(
+            ast,
+            allocator,
+            argument,
+            BinaryOperator::Inequality,
+            BinaryOperator::Equality,
+        );
+        let storage_only = self.identifier_route_and_storage_condition(
+            ast,
+            allocator,
+            argument,
+            BinaryOperator::Equality,
+            BinaryOperator::Inequality,
+        );
+        let shared_storage = self.identifier_property_condition(
+            ast,
+            allocator,
+            argument,
+            EntryRuntimeName::USE_SHARED_STORAGE,
+            BinaryOperator::Inequality,
+        );
+
+        let route_and_storage_statement = self.named_route_statement_with(
+            ast,
+            allocator,
+            Some(self.identifier_property_expression(
+                ast,
+                allocator,
+                argument,
+                EntryRuntimeName::ROUTE_NAME,
+            )),
+            Some(self.identifier_storage_expression(ast, allocator, argument)),
+        );
+        let route_only_statement = self.named_route_statement_with(
+            ast,
+            allocator,
+            Some(self.identifier_property_expression(
+                ast,
+                allocator,
+                argument,
+                EntryRuntimeName::ROUTE_NAME,
+            )),
+            Some(self.identifier_storage_expression(ast, allocator, argument)),
+        );
+        let storage_only_statement = self.named_route_statement_with(
+            ast,
+            allocator,
+            None,
+            Some(self.identifier_storage_expression(ast, allocator, argument)),
+        );
+        let shared_storage_statement = self.named_route_statement_with(
+            ast,
+            allocator,
+            None,
+            Some(self.local_storage_get_shared_call(ast)),
+        );
+        let fallback_statement = self.named_route_statement_with(
+            ast,
+            allocator,
+            None,
+            Some(argument.clone_in(allocator)),
+        );
+
+        let shared_or_fallback = ast.statement_if(
+            SPAN,
+            shared_storage,
+            ast.statement_block(SPAN, ast.vec1(shared_storage_statement)),
+            Some(ast.statement_block(SPAN, ast.vec1(fallback_statement))),
+        );
+        let storage_or_shared = ast.statement_if(
+            SPAN,
+            storage_only,
+            ast.statement_block(SPAN, ast.vec1(storage_only_statement)),
+            Some(shared_or_fallback),
+        );
+        let route_or_storage = ast.statement_if(
+            SPAN,
+            route_only,
+            ast.statement_block(SPAN, ast.vec1(route_only_statement)),
+            Some(storage_or_shared),
+        );
+        ast.statement_if(
+            SPAN,
+            route_and_storage,
+            ast.statement_block(SPAN, ast.vec1(route_and_storage_statement)),
+            Some(route_or_storage),
+        )
+    }
+
+    fn identifier_route_and_storage_condition<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        argument: &Expression<'_>,
+        route_operator: BinaryOperator,
+        storage_operator: BinaryOperator,
+    ) -> Expression<'b> {
+        let argument_exists = argument.clone_in(allocator);
+        let route_condition = self.identifier_property_comparison(
+            ast,
+            allocator,
+            argument,
+            EntryRuntimeName::ROUTE_NAME,
+            route_operator,
+        );
+        let storage_condition = self.identifier_property_comparison(
+            ast,
+            allocator,
+            argument,
+            EntryRuntimeName::STORAGE,
+            storage_operator,
+        );
+        ast.expression_logical(
+            SPAN,
+            ast.expression_logical(SPAN, argument_exists, LogicalOperator::And, route_condition),
+            LogicalOperator::And,
+            storage_condition,
+        )
+    }
+
+    fn identifier_property_condition<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        argument: &Expression<'_>,
+        property: &'static str,
+        operator: BinaryOperator,
+    ) -> Expression<'b> {
+        ast.expression_logical(
+            SPAN,
+            argument.clone_in(allocator),
+            LogicalOperator::And,
+            self.identifier_property_comparison(ast, allocator, argument, property, operator),
+        )
+    }
+
+    fn identifier_property_comparison<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        argument: &Expression<'_>,
+        property: &'static str,
+        operator: BinaryOperator,
+    ) -> Expression<'b> {
+        ast.expression_binary(
+            SPAN,
+            self.identifier_property_expression(ast, allocator, argument, property),
+            operator,
+            ast.expression_identifier(SPAN, ast.str(self.runtime_names.undefined.as_str())),
+        )
+    }
+
+    fn identifier_property_expression<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        argument: &Expression<'_>,
+        property: &'static str,
+    ) -> Expression<'b> {
+        Self::member_expression_to_expression(ast.member_expression_static(
+            SPAN,
+            argument.clone_in(allocator),
+            ast.identifier_name(SPAN, property),
+            false,
+        ))
+    }
+
+    fn identifier_storage_expression<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        argument: &Expression<'_>,
+    ) -> Expression<'b> {
+        ast.expression_conditional(
+            SPAN,
+            self.identifier_property_expression(
+                ast,
+                allocator,
+                argument,
+                EntryRuntimeName::USE_SHARED_STORAGE,
+            ),
+            self.local_storage_get_shared_call(ast),
+            self.identifier_property_expression(
+                ast,
+                allocator,
+                argument,
+                EntryRuntimeName::STORAGE,
+            ),
         )
     }
 
@@ -378,16 +600,13 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
         let storage = info
             .options
             .argument
-            .map(|expression| expression.clone_in(allocator))
-            .unwrap_or_else(|| {
-                ast.expression_identifier(SPAN, ast.str(&self.runtime_names.undefined))
-            });
+            .map(|expression| expression.clone_in(allocator));
         let load_call = ast.expression_call(
             SPAN,
             ast.expression_identifier(SPAN, EntryRuntimeName::LOAD_ETS_CARD),
             NONE,
             ast.vec_from_iter([
-                Self::argument_from_expression(self.component_new_expression(ast, Some(storage))),
+                Self::argument_from_expression(self.component_new_expression(ast, storage)),
                 Self::argument_from_expression(ast.expression_string_literal(
                     SPAN,
                     ast.str(&self.record_name(info)),

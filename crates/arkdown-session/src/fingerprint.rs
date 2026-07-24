@@ -3,13 +3,17 @@
 //! Cache keys must be built from `InputFingerprintSet` or explicit content
 //! hashes. Placeholder hashes are forbidden.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::ArkdownConfig;
 use arkdown_path::{lexical_normalize, to_slash};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::dependency_graph::snapshot::DependencyNodeType;
 use crate::paths::ProjectPathLayout;
 use crate::profiles::store::ProfileStore;
 use crate::project::snapshot::ProjectSnapshot;
@@ -35,6 +39,30 @@ impl Fingerprint {
         let data = std::fs::read(path)?;
         Ok(Self::of_bytes(&data))
     }
+
+    /// Serialize this fingerprint as a stable lowercase SHA-256 hex string.
+    pub fn to_hex(&self) -> String {
+        let mut output = String::with_capacity(self.0.len() * 2);
+        for byte in self.0 {
+            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        output
+    }
+}
+
+/// Content fingerprints scoped to one module's real compilation inputs.
+///
+/// Source and resource dependencies are included so a source HAR or resource
+/// dependency change invalidates only consumers of that dependency instead of
+/// every module in the project.
+#[derive(Debug, Clone)]
+pub struct ModuleInputFingerprints {
+    /// Source files compiled or bundled for this module.
+    pub sources: Fingerprint,
+    /// Resource inputs linked into this module.
+    pub resources: Fingerprint,
+    /// Package manifests and lockfiles that define this module's resolution graph.
+    pub dependencies: Fingerprint,
 }
 
 /// Errors produced while fingerprinting startup inputs.
@@ -79,6 +107,8 @@ pub struct InputFingerprintSet {
     pub sources: Fingerprint,
     /// Hash of the selected SDK metadata.
     pub sdk: Fingerprint,
+    /// Per-module content fingerprints used by stage cache keys.
+    module_inputs: BTreeMap<String, ModuleInputFingerprints>,
 }
 
 impl InputFingerprintSet {
@@ -89,14 +119,22 @@ impl InputFingerprintSet {
         profiles: &ProfileStore,
         sdk: &SdkSnapshot,
     ) -> Result<Self, FingerprintError> {
+        let project_inputs = ProjectFingerprintInventory::new(project).build()?;
         Ok(Self {
             config: Self::compute_config_hash(config, project)?,
             package_graph: Self::compute_package_hash(project)?,
             profiles: profiles.fingerprint(),
-            resources: Self::compute_resource_hash(project)?,
-            sources: Self::compute_source_hash(project)?,
+            resources: project_inputs.resources,
+            sources: project_inputs.sources,
             sdk: Self::compute_sdk_hash(sdk)?,
+            module_inputs: project_inputs.modules,
         })
+    }
+
+    /// Return content fingerprints for one module's source, resources, and
+    /// dependency metadata.
+    pub fn module(&self, module_name: &str) -> Option<&ModuleInputFingerprints> {
+        self.module_inputs.get(module_name)
     }
 
     fn compute_config_hash(
@@ -124,38 +162,6 @@ impl InputFingerprintSet {
         let mut builder = FingerprintBuilder::new("package_graph", &project.root);
         for path in builder.named_files_under(&project.root, "oh-package.json5")? {
             builder.add_file(&path)?;
-        }
-        Ok(builder.finish())
-    }
-
-    fn compute_source_hash(project: &ProjectSnapshot) -> Result<Fingerprint, FingerprintError> {
-        let mut builder = FingerprintBuilder::new("sources", &project.root);
-        for module in project.modules.values() {
-            for root in &module.source_roots {
-                for path in builder.files_under(root)? {
-                    if FingerprintBuilder::is_source_input(&path) {
-                        builder.add_file(&path)?;
-                    }
-                }
-            }
-        }
-        Ok(builder.finish())
-    }
-
-    fn compute_resource_hash(project: &ProjectSnapshot) -> Result<Fingerprint, FingerprintError> {
-        let mut builder = FingerprintBuilder::new("resources", &project.root);
-        let app_scope_resources = ProjectPathLayout::new(&project.root).app_scope_resources();
-        if app_scope_resources.is_dir() {
-            for path in builder.files_under(&app_scope_resources)? {
-                builder.add_file(&path)?;
-            }
-        }
-        for module in project.modules.values() {
-            for root in &module.resource_roots {
-                for path in builder.files_under(root)? {
-                    builder.add_file(&path)?;
-                }
-            }
         }
         Ok(builder.finish())
     }
@@ -200,6 +206,257 @@ impl InputFingerprintSet {
 
         Ok(builder.finish())
     }
+}
+
+#[derive(Debug, Default)]
+struct ModuleInputPaths {
+    sources: BTreeSet<PathBuf>,
+    resources: BTreeSet<PathBuf>,
+    dependencies: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug)]
+struct ProjectFingerprintInventory<'a> {
+    project: &'a ProjectSnapshot,
+    scanner: FingerprintBuilder,
+}
+
+impl<'a> ProjectFingerprintInventory<'a> {
+    fn new(project: &'a ProjectSnapshot) -> Self {
+        Self {
+            project,
+            scanner: FingerprintBuilder::new("input_inventory", &project.root),
+        }
+    }
+
+    fn build(&self) -> Result<ProjectFingerprintOutput, FingerprintError> {
+        let mut paths_by_module = BTreeMap::new();
+        for module_name in &self.project.module_order {
+            paths_by_module.insert(module_name.clone(), self.module_paths(module_name)?);
+        }
+
+        let all_paths = paths_by_module
+            .values()
+            .flat_map(|paths| {
+                paths
+                    .sources
+                    .iter()
+                    .chain(paths.resources.iter())
+                    .chain(paths.dependencies.iter())
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let content = ProjectContentFingerprints::read(all_paths)?;
+
+        let mut global_sources = FingerprintBuilder::new("sources", &self.project.root);
+        let mut global_resources = FingerprintBuilder::new("resources", &self.project.root);
+        let mut modules = BTreeMap::new();
+        for (module_name, paths) in paths_by_module {
+            let mut source_builder = FingerprintBuilder::new("module_sources", &self.project.root);
+            let mut resource_builder =
+                FingerprintBuilder::new("module_resources", &self.project.root);
+            let mut dependency_builder =
+                FingerprintBuilder::new("module_dependencies", &self.project.root);
+
+            content.add_all(&mut source_builder, &paths.sources);
+            content.add_all(&mut resource_builder, &paths.resources);
+            content.add_all(&mut dependency_builder, &paths.dependencies);
+            content.add_all(&mut global_sources, &paths.sources);
+            content.add_all(&mut global_resources, &paths.resources);
+
+            modules.insert(
+                module_name,
+                ModuleInputFingerprints {
+                    sources: source_builder.finish(),
+                    resources: resource_builder.finish(),
+                    dependencies: dependency_builder.finish(),
+                },
+            );
+        }
+
+        Ok(ProjectFingerprintOutput {
+            sources: global_sources.finish(),
+            resources: global_resources.finish(),
+            modules,
+        })
+    }
+
+    fn module_paths(&self, module_name: &str) -> Result<ModuleInputPaths, FingerprintError> {
+        let Some(module) = self.project.modules.get(module_name) else {
+            return Ok(ModuleInputPaths::default());
+        };
+        let mut paths = ModuleInputPaths::default();
+        self.add_source_roots(&mut paths.sources, &module.source_roots)?;
+        self.add_resource_roots(&mut paths.resources, &module.resource_roots)?;
+        if let Some(package_path) = &module.package_path {
+            paths.dependencies.insert(package_path.clone());
+        }
+        if let Some(package) = module.package.as_deref() {
+            if let Some(exports) = package.package_json.oh_exports.as_deref() {
+                for entry in exports {
+                    self.add_source_path(&mut paths.sources, &package.root.join(entry))?;
+                }
+            }
+        }
+        if let Some(module_json_path) = &module.module_json_path {
+            paths.dependencies.insert(module_json_path.clone());
+        }
+
+        let project_layout = ProjectPathLayout::new(&self.project.root);
+        for path in [
+            self.project.root.join("oh-package.json5"),
+            self.project.root.join("oh-package-lock.json5"),
+            self.project.root.join("build-profile.json5"),
+            project_layout.app_scope_app_json5(),
+        ] {
+            if path.is_file() {
+                paths.dependencies.insert(path);
+            }
+        }
+
+        if let Some(graph) = self.project.dependency_graphs.get(module_name) {
+            for node in graph.nodes.values() {
+                let Some(package_root) = node.package_root.as_ref() else {
+                    continue;
+                };
+                for manifest in [
+                    package_root.join("oh-package.json5"),
+                    package_root.join("src").join("main").join("module.json5"),
+                    package_root.join("src").join("main").join("module.json"),
+                ] {
+                    if manifest.is_file() {
+                        paths.dependencies.insert(manifest);
+                    }
+                }
+                if matches!(
+                    node.node_type,
+                    DependencyNodeType::SourceHar | DependencyNodeType::OhpmSource
+                ) {
+                    self.add_source_roots(
+                        &mut paths.sources,
+                        &[package_root.join("src").join("main")],
+                    )?;
+                    if let Some(package) = &node.package {
+                        for entry in [
+                            package.package_json.main.as_deref(),
+                            package.package_json.types.as_deref(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            self.add_source_path(&mut paths.sources, &package_root.join(entry))?;
+                        }
+                        if let Some(exports) = package.package_json.oh_exports.as_deref() {
+                            for entry in exports {
+                                self.add_source_path(
+                                    &mut paths.sources,
+                                    &package_root.join(entry),
+                                )?;
+                            }
+                        }
+                    }
+                }
+                if matches!(
+                    node.node_type,
+                    DependencyNodeType::SourceHar
+                        | DependencyNodeType::SharedHsp
+                        | DependencyNodeType::IntegratedHsp
+                ) {
+                    self.add_resource_roots(
+                        &mut paths.resources,
+                        &[package_root.join("src").join("main").join("resources")],
+                    )?;
+                }
+            }
+        }
+
+        let app_scope_resources = project_layout.app_scope_resources();
+        self.add_resource_roots(&mut paths.resources, &[app_scope_resources])?;
+        Ok(paths)
+    }
+
+    fn add_source_path(
+        &self,
+        output: &mut BTreeSet<PathBuf>,
+        path: &Path,
+    ) -> Result<(), FingerprintError> {
+        if path.is_dir() {
+            return self.add_source_roots(output, &[path.to_path_buf()]);
+        }
+        if path.is_file() && FingerprintBuilder::is_source_input(path) {
+            output.insert(path.to_path_buf());
+        }
+        Ok(())
+    }
+
+    fn add_source_roots(
+        &self,
+        output: &mut BTreeSet<PathBuf>,
+        roots: &[PathBuf],
+    ) -> Result<(), FingerprintError> {
+        for root in roots {
+            for path in self.scanner.files_under(root)? {
+                if FingerprintBuilder::is_source_input(&path) {
+                    output.insert(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_resource_roots(
+        &self,
+        output: &mut BTreeSet<PathBuf>,
+        roots: &[PathBuf],
+    ) -> Result<(), FingerprintError> {
+        for root in roots {
+            output.extend(self.scanner.files_under(root)?);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct ProjectContentFingerprints {
+    files: BTreeMap<PathBuf, Fingerprint>,
+}
+
+impl ProjectContentFingerprints {
+    fn read(paths: BTreeSet<PathBuf>) -> Result<Self, FingerprintError> {
+        let paths = paths.into_iter().collect::<Vec<_>>();
+        let results = paths
+            .par_iter()
+            .map(|path| {
+                Fingerprint::of_file(path)
+                    .map(|fingerprint| (path.clone(), fingerprint))
+                    .map_err(|source| FingerprintError::Io {
+                        path: path.clone(),
+                        source,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut files = BTreeMap::new();
+        for result in results {
+            let (path, fingerprint) = result?;
+            files.insert(path, fingerprint);
+        }
+        Ok(Self { files })
+    }
+
+    fn add_all(&self, builder: &mut FingerprintBuilder, paths: &BTreeSet<PathBuf>) {
+        for path in paths {
+            if let Some(fingerprint) = self.files.get(path) {
+                builder.add_file_fingerprint(path, fingerprint);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProjectFingerprintOutput {
+    sources: Fingerprint,
+    resources: Fingerprint,
+    modules: BTreeMap<String, ModuleInputFingerprints>,
 }
 
 /// Builder for deterministic, typed fingerprint inputs.

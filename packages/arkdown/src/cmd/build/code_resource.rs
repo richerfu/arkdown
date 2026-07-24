@@ -115,7 +115,7 @@ impl CodeResourceCopyPlan {
     if let Some(includes) = self.options.includes.as_ref() {
       return includes
         .iter()
-        .any(|pattern| fast_glob::glob_match(&Self::normalized_pattern(pattern), &candidate));
+        .any(|pattern| fast_glob::glob_match(Self::normalized_pattern(pattern), &candidate));
     }
     if Self::is_code_source(source) {
       return false;
@@ -124,7 +124,7 @@ impl CodeResourceCopyPlan {
       .options
       .excludes
       .iter()
-      .any(|pattern| fast_glob::glob_match(&Self::normalized_pattern(pattern), &candidate))
+      .any(|pattern| fast_glob::glob_match(Self::normalized_pattern(pattern), &candidate))
   }
 
   fn copy_file(

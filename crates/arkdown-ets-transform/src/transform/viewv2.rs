@@ -18,7 +18,7 @@ use oxc_ast::{AstBuilder, NONE};
 use oxc_span::SPAN;
 
 use crate::transform::build_fn::{
-    BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps, StylesBodyLowerer,
+    BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps, StylesMethodInfo,
 };
 use crate::transform::component_analysis::ExtendAttributeIndex;
 use crate::transform::component_meta::ArkuiRuntimeNames;
@@ -72,6 +72,14 @@ enum V2RegularMember<'a> {
     StaticBlock(&'a StaticBlock<'a>),
     TSIndexSignature(&'a TSIndexSignature<'a>),
     AccessorProperty(&'a AccessorProperty<'a>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum V2SourceMember {
+    Field(usize),
+    InitialRender,
+    Builder(usize),
+    Regular(usize),
 }
 
 impl<'a> V2RegularMember<'a> {
@@ -161,6 +169,7 @@ pub(super) struct ComponentV2Lowerer<'a, 'b> {
     custom_component_update_props: &'a CustomComponentUpdateProps,
     component_metadata: &'a ComponentMetadata,
     extend_attributes: Arc<ExtendAttributeIndex>,
+    bundle_name: Option<&'a str>,
     module_name: Option<&'a str>,
     is_exported: bool,
     is_default: bool,
@@ -181,6 +190,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         custom_component_update_props: &'a CustomComponentUpdateProps,
         component_metadata: &'a ComponentMetadata,
         extend_attributes: Arc<ExtendAttributeIndex>,
+        bundle_name: Option<&'a str>,
         module_name: Option<&'a str>,
         is_exported: bool,
         is_default: bool,
@@ -198,6 +208,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             custom_component_update_props,
             component_metadata,
             extend_attributes,
+            bundle_name,
             module_name,
             is_exported,
             is_default,
@@ -210,17 +221,39 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         let name = self.stmt.id.name.as_str();
         let raw_object_fields = FxHashSet::default();
         let mut visible_builder_methods = self.visible_builder_methods();
-        let mut builder_param_methods = FxHashSet::default();
-        self.collect_builder_param_methods(
-            &mut visible_builder_methods,
-            &mut builder_param_methods,
-        );
+        self.collect_builder_param_methods(&mut visible_builder_methods);
 
         let mut fields = Vec::new();
         let mut build_body = None;
         let mut has_build = false;
         let mut builder_methods = Vec::new();
-        let mut styles_methods: Vec<&MethodDefinition<'_>> = Vec::new();
+        let mut source_members = Vec::new();
+        let mut styles_methods = Vec::new();
+        for element in &self.stmt.body.body {
+            let StructElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if !self.is_styles_method(method) {
+                continue;
+            }
+            if !method.value.params.items.is_empty() {
+                return Err(ComponentV2Error::InvalidFieldDecorators {
+                    name: name.to_string(),
+                    field: method
+                        .key
+                        .static_name()
+                        .map(|name| name.into_owned())
+                        .unwrap_or_else(|| "<anonymous>".to_string()),
+                    message: "'@Styles' decorated methods cannot have arguments.".to_string(),
+                });
+            }
+            if let Some(method_name) = method.key.static_name() {
+                styles_methods.push(StylesMethodInfo {
+                    name: method_name.into_owned(),
+                    body: method.value.body.as_deref(),
+                });
+            }
+        }
         let mut regular_members: Vec<V2RegularMember<'_>> = Vec::new();
         let mut constructor_method: Option<&MethodDefinition<'_>> = None;
         let mut computed_names = Vec::new();
@@ -233,6 +266,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         self.field_from_property(name, property, &visible_builder_methods)?
                     {
                         fields.push(field);
+                        source_members.push(V2SourceMember::Field(fields.len() - 1));
                     }
                 }
                 StructElement::MethodDefinition(method)
@@ -245,15 +279,17 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         self.source_id,
                         self.custom_components,
                         &visible_builder_methods,
-                        &builder_param_methods,
                         self.custom_component_update_props,
                         self.component_metadata,
                         &raw_object_fields,
                         self.module_name,
                         false,
                     )
-                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
+                    .with_xcomponent_module_identity(self.bundle_name, self.module_name)
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_styles_methods(&styles_methods);
                     build_body = Some(plan);
+                    source_members.push(V2SourceMember::InitialRender);
                 }
                 StructElement::MethodDefinition(method) if self.is_builder_method(method) => {
                     let Some(method_name) = method.key.static_name() else {
@@ -265,17 +301,20 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         self.source_id,
                         self.custom_components,
                         &visible_builder_methods,
-                        &builder_param_methods,
                         self.custom_component_update_props,
                         self.component_metadata,
                         &raw_object_fields,
                         self.module_name,
                     )
-                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
+                    .with_xcomponent_module_identity(self.bundle_name, self.module_name)
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_styles_methods(&styles_methods);
                     builder_methods.push((method_name.into_owned(), method.as_ref(), plan));
+                    source_members.push(V2SourceMember::Builder(builder_methods.len() - 1));
                 }
                 StructElement::MethodDefinition(method) if self.is_styles_method(method) => {
-                    styles_methods.push(method.as_ref());
+                    // SDK stores and expands local @Styles bodies instead of
+                    // emitting them as ViewV2 class methods.
                 }
                 StructElement::MethodDefinition(method) if self.is_constructor(method) => {
                     constructor_method = Some(method.as_ref());
@@ -290,15 +329,19 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     has_monitor_method |=
                         self.has_method_decorator(method, ArkuiDecoratorName::MONITOR);
                     regular_members.push(V2RegularMember::Method(method));
+                    source_members.push(V2SourceMember::Regular(regular_members.len() - 1));
                 }
                 StructElement::StaticBlock(block) => {
                     regular_members.push(V2RegularMember::StaticBlock(block));
+                    source_members.push(V2SourceMember::Regular(regular_members.len() - 1));
                 }
                 StructElement::TSIndexSignature(signature) => {
                     regular_members.push(V2RegularMember::TSIndexSignature(signature));
+                    source_members.push(V2SourceMember::Regular(regular_members.len() - 1));
                 }
                 StructElement::AccessorProperty(property) => {
                     regular_members.push(V2RegularMember::AccessorProperty(property));
+                    source_members.push(V2SourceMember::Regular(regular_members.len() - 1));
                 }
             }
         }
@@ -319,8 +362,22 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             has_monitor_method,
         ));
 
-        for field in &fields {
-            elements.push(self.field_property_element(field));
+        for source_member in source_members {
+            match source_member {
+                V2SourceMember::Field(index) => {
+                    elements.push(self.field_property_element(&fields[index]));
+                }
+                V2SourceMember::InitialRender => {
+                    elements.push(self.initial_render_element(name, build_body.as_ref())?);
+                }
+                V2SourceMember::Builder(index) => {
+                    let (method_name, method, body) = &builder_methods[index];
+                    elements.push(self.builder_method_element(name, method_name, method, body)?);
+                }
+                V2SourceMember::Regular(index) => {
+                    elements.push(regular_members[index].to_class_element(self.allocator));
+                }
+            }
         }
 
         if fields
@@ -330,22 +387,9 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             elements.push(self.update_state_vars_element(&fields));
         }
 
-        elements.push(self.initial_render_element(name, build_body.as_ref())?);
-        for (method_name, method, body) in &builder_methods {
-            elements.push(self.builder_method_element(name, method_name, method, body)?);
-        }
-        for method in &styles_methods {
-            if let Some(element) = self.styles_method_element(method) {
-                elements.push(element);
-            }
-        }
         elements.push(self.rerender_element());
         if self.is_entry {
             elements.push(self.entry_name_element(name));
-        }
-
-        for member in &regular_members {
-            elements.push(member.to_class_element(self.allocator));
         }
 
         let mut statements = ast.vec();
@@ -490,20 +534,14 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         methods
     }
 
-    fn collect_builder_param_methods(
-        &self,
-        visible_builder_methods: &mut FxHashSet<String>,
-        builder_param_methods: &mut FxHashSet<String>,
-    ) {
+    fn collect_builder_param_methods(&self, visible_builder_methods: &mut FxHashSet<String>) {
         for element in &self.stmt.body.body {
             let StructElement::PropertyDefinition(property) = element else {
                 continue;
             };
             if self.property_has_decorator(property, ArkuiDecoratorName::BUILDER_PARAM) {
                 if let Some(name) = property.key.static_name() {
-                    let name = name.into_owned();
-                    visible_builder_methods.insert(name.clone());
-                    builder_param_methods.insert(name);
+                    visible_builder_methods.insert(name.into_owned());
                 }
             }
         }
@@ -887,27 +925,6 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             ViewpuMemberAstEmitter::new(self.allocator).method_with_formal_parameters(
                 self.allocator.alloc_str(method_name),
                 builder.clone_formal_parameters_with_parent(&method.value.params),
-                return_type,
-                stmts,
-                false,
-                None,
-            ),
-        )
-    }
-
-    fn styles_method_element(&self, method: &MethodDefinition<'_>) -> Option<ClassElement<'b>> {
-        let method_name = method.key.static_name()?;
-        let builder = ViewpuAstBuilder::new(self.allocator);
-        let return_type = method
-            .value
-            .return_type
-            .as_deref()
-            .map(|annotation| builder.clone_type_annotation(annotation));
-        let stmts = StylesBodyLowerer::new(method.value.body.as_deref()).statements(self.allocator);
-        Some(
-            ViewpuMemberAstEmitter::new(self.allocator).method_with_formal_parameters(
-                self.allocator.alloc_str(&method_name),
-                builder.clone_formal_parameters(&method.value.params),
                 return_type,
                 stmts,
                 false,

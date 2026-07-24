@@ -14,8 +14,12 @@
 //! processor.write_loader_json(&loader, Path::new("/module/build/loader.json"))?;
 //! ```
 
+pub mod build_profile;
 pub mod bytecode_har;
+pub mod custom_types;
+pub mod oh_exports;
 pub mod pkg_context_info;
+pub mod pkg_sdk_info;
 pub mod plan;
 // Per SPEC-048 Phase 2A: `lockfile` and `ohpm_registry` have been deleted
 // from arkdown-profile. Their functionality is now owned by `arkdown-ohpm`.
@@ -41,10 +45,12 @@ pub mod router_map;
 pub mod validate_permissions;
 
 pub use arkdown_core::PkgBriefInfo;
+pub use build_profile::{BuildProfileInput, BuildProfileKind, BuildProfileWriter};
 pub use bytecode_har::{
     ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CompatibleSdkVersionValue,
     DynamicImportLibEntry, HostModuleInfo, LoaderByteCodeHarFields,
 };
+pub use custom_types::{CustomTypeError, CustomTypeInventory, CustomTypeResolver};
 pub use form_profile::{
     FormProfileEntry, FormProfileInput, FormProfileProcessor, FormSourceEntry,
     ModuleFormProfileInput,
@@ -74,10 +80,12 @@ pub use validate_permissions::{
 };
 
 // SPEC-048 Phase 3: typed plan inputs (re-export from plan.rs)
+pub use oh_exports::OhExportsProcessor;
 pub use pkg_context_info::{
     PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
     PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
 };
+pub use pkg_sdk_info::PkgSdkInfoGenerator;
 pub use plan::{
     LoaderJsonPlan, PackageModuleJsonPlan, PkgContextInfoPlan, ProfileArtifactPaths,
     ProfileProcessPlan,
@@ -605,6 +613,8 @@ mod tests {
                 },
                 version_code: None,
                 version_name: None,
+                build_version: None,
+                app_options: Default::default(),
             },
             modules: vec![],
             sdk_config: SdkConfig {

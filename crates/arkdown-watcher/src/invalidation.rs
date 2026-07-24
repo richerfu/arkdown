@@ -5,7 +5,7 @@
 //!
 //! Upstream: `invalid-cache-plugin.js`, rollup watch cache.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use arkdown_path::classify::is_inside_oh_modules;
@@ -174,6 +174,61 @@ pub struct InvalidationEvent {
     pub affected_stages: Vec<AffectedStage>,
     /// Which modules are affected.
     pub affected_modules_set: AffectedModuleSet,
+}
+
+/// One debounced, typed filesystem invalidation batch.
+///
+/// The exact changed paths are retained for hvigor-compatible
+/// `shouldInvalidCache` hooks and the batch exposes whether a source-only hot
+/// rebuild is valid.
+#[derive(Debug, Clone, Default)]
+pub struct WatchInvalidationBatch {
+    /// Classified invalidation events.
+    pub events: Vec<InvalidationEvent>,
+    /// Deduplicated changed files passed to cache/plugin invalidation.
+    pub changed_files: Vec<PathBuf>,
+}
+
+impl WatchInvalidationBatch {
+    /// Classify a debounced watcher batch and discard non-actionable events.
+    pub fn from_watch_events(
+        events: &[WatchEvent],
+        fingerprint_baseline: &HashMap<PathBuf, u64>,
+    ) -> Self {
+        let mut invalidations = Vec::new();
+        let mut changed_files = BTreeSet::new();
+        for event in events {
+            if let Some(invalidation) =
+                InvalidationEvent::from_watch_event(event, fingerprint_baseline)
+            {
+                changed_files.insert(event.path.clone());
+                invalidations.push(invalidation);
+            }
+        }
+        Self {
+            events: invalidations,
+            changed_files: changed_files.into_iter().collect(),
+        }
+    }
+
+    /// Return whether the batch contains no actionable changes.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// Classify this batch as source-only hot or full-pipeline cold.
+    pub fn change_kind(&self) -> WatchChangeKind {
+        if !self.events.is_empty()
+            && self
+                .events
+                .iter()
+                .all(|event| matches!(event.reason, InvalidationReason::SourceFileChanged { .. }))
+        {
+            WatchChangeKind::Hot
+        } else {
+            WatchChangeKind::Cold
+        }
+    }
 }
 
 impl InvalidationEvent {
@@ -559,6 +614,21 @@ mod tests {
         // .png in a non-resource path should return None
         let event = InvalidationEvent::from_file_event(&path, &baseline);
         assert!(event.is_none(), "png in non-resource path must return None");
+    }
+
+    #[test]
+    fn watch_batch_preserves_changed_files_and_cold_precedence() {
+        let source = WatchEvent::new(
+            PathBuf::from("/project/entry/src/main/ets/Index.ets"),
+            crate::watcher::WatchEventKind::Modified,
+        );
+        let resource = WatchEvent::new(
+            PathBuf::from("/project/entry/src/main/resources/base/media/icon.png"),
+            crate::watcher::WatchEventKind::Modified,
+        );
+        let batch = WatchInvalidationBatch::from_watch_events(&[source, resource], &HashMap::new());
+        assert_eq!(batch.changed_files.len(), 2);
+        assert_eq!(batch.change_kind(), WatchChangeKind::Cold);
     }
 
     #[test]

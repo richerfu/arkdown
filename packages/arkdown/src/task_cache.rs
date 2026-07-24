@@ -3,8 +3,38 @@ use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownConfig, BuildMode, ObfuscationConfig};
 use arkdown_ets_transform::ModuleAnalyzerKind;
-use arkdown_path::ArtifactPathSerializer;
+use arkdown_path::{ArtifactPathSerializer, SourceFileName};
 use arkdown_profile::LoaderJson;
+use arkdown_session::BuildSession;
+
+/// Session-derived, content-addressed inputs for one module compile task.
+///
+/// Hvigor's `ArkCompile.declareInputFiles()` tracks actual input file content.
+/// The CLI builds this snapshot from `BuildSession` so cache checks do not
+/// perform filesystem discovery or content reads during stage execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskInputSnapshot {
+  pub source_hash: String,
+  pub resource_hash: String,
+  pub dependency_content_hash: String,
+  pub config_hash: String,
+  pub profile_hash: String,
+  pub sdk_hash: String,
+}
+
+impl TaskInputSnapshot {
+  pub fn for_module(session: &BuildSession, module_name: &str) -> Option<Self> {
+    let module = session.fingerprints.module(module_name)?;
+    Some(Self {
+      source_hash: module.sources.to_hex(),
+      resource_hash: module.resources.to_hex(),
+      dependency_content_hash: module.dependencies.to_hex(),
+      config_hash: session.fingerprints.config.to_hex(),
+      profile_hash: session.fingerprints.profiles.to_hex(),
+      sdk_hash: session.fingerprints.sdk.to_hex(),
+    })
+  }
+}
 
 /// Snapshot of all task-level inputs that determine whether the compile step
 /// can be skipped entirely.
@@ -19,27 +49,36 @@ use arkdown_profile::LoaderJson;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInputs {
   pub schema_version: u32,
-  pub source_hash: u64,
+  pub source_hash: String,
   pub obfuscation_hash: u64,
   pub sdk_version: String,
   pub compile_env: String,
   pub module_analyzer: String,
   pub plugin_hash: u64,
-  pub resource_hash: u64,
+  pub resource_hash: String,
+  pub dependency_content_hash: String,
+  pub config_hash: String,
+  pub profile_hash: String,
+  pub sdk_hash: String,
+  /// Content fingerprint of `buildOption.arkOptions.types` declaration inputs.
+  pub custom_types_hash: u64,
   /// FNV-1a hash of the module dependency graph identity (hsp/har ohm maps).
   /// Mirrors hvigor's inclusion of dependency changes in ArkCompile cache inputs.
   pub dependency_hash: u64,
 }
 
 const TASK_INPUTS_FILE: &str = ".task_inputs";
-const TASK_INPUTS_SCHEMA_VERSION: u32 = 3;
+const TASK_INPUTS_SCHEMA_VERSION: u32 = 5;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
 impl TaskInputs {
   /// Compute current task inputs from config and loader data.
-  pub fn compute(config: &ArkdownConfig, loader: &LoaderJson) -> Self {
-    let source_hash = Self::hash_source_files(&loader.compile_entry);
+  pub fn compute(
+    config: &ArkdownConfig,
+    loader: &LoaderJson,
+    snapshot: &TaskInputSnapshot,
+  ) -> Self {
     let obfuscation_hash = Self::compute_obfuscation_hash(config);
     let sdk_version = config.sdk_config.compile_sdk_version.clone();
     let obfuscation_enabled = config
@@ -90,13 +129,18 @@ impl TaskInputs {
     };
     TaskInputs {
       schema_version: TASK_INPUTS_SCHEMA_VERSION,
-      source_hash,
+      source_hash: snapshot.source_hash.clone(),
       obfuscation_hash,
       sdk_version,
       compile_env,
       module_analyzer: ModuleAnalyzerKind::default().as_str().to_string(),
       plugin_hash: 0,
-      resource_hash: 0,
+      resource_hash: snapshot.resource_hash.clone(),
+      dependency_content_hash: snapshot.dependency_content_hash.clone(),
+      config_hash: snapshot.config_hash.clone(),
+      profile_hash: snapshot.profile_hash.clone(),
+      sdk_hash: snapshot.sdk_hash.clone(),
+      custom_types_hash: 0,
       dependency_hash,
     }
   }
@@ -132,10 +176,66 @@ impl TaskInputs {
     self
   }
 
-  /// Builder: set the resource hash (FNV-1a of resource dir state).
-  pub fn with_resource_hash(mut self, h: u64) -> Self {
-    self.resource_hash = h;
-    self
+  /// Track the exact compiler type identities and declaration contents.
+  ///
+  /// Hvigor's `ArkCompile.declareInputFiles()` includes the files resolved
+  /// from `arkOptions.types`. These files can live outside the module's
+  /// standard `src/main` roots, so the session source fingerprint alone is
+  /// insufficient.
+  pub fn with_custom_type_inputs(
+    mut self,
+    compiler_types: &[String],
+    declaration_inputs: &[PathBuf],
+  ) -> io::Result<Self> {
+    if compiler_types.is_empty() {
+      self.custom_types_hash = 0;
+      return Ok(self);
+    }
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for configured in compiler_types {
+      Self::hash_bytes_into(&mut hash, configured.as_bytes());
+    }
+    for (input_index, input) in declaration_inputs.iter().enumerate() {
+      let mut files = Vec::new();
+      if input.is_file() {
+        if SourceFileName::new(input).is_declaration() {
+          files.push(input.clone());
+        }
+      } else if input.is_dir() {
+        for entry in walkdir::WalkDir::new(input).follow_links(false) {
+          let entry = entry.map_err(|error| {
+            io::Error::other(format!(
+              "scan custom type input {} failed: {error}",
+              input.display()
+            ))
+          })?;
+          if entry.file_type().is_file() && SourceFileName::new(entry.path()).is_declaration() {
+            files.push(entry.into_path());
+          }
+        }
+      }
+      files.sort();
+      for path in files {
+        Self::hash_bytes_into(&mut hash, input_index.to_string().as_bytes());
+        let path_key = path
+          .strip_prefix(input)
+          .ok()
+          .filter(|relative| !relative.as_os_str().is_empty())
+          .map(ArtifactPathSerializer::rel_to_slash)
+          .or_else(|| {
+            path
+              .file_name()
+              .map(|name| name.to_string_lossy().into_owned())
+          })
+          .unwrap_or_else(|| path.display().to_string());
+        Self::hash_bytes_into(&mut hash, path_key.as_bytes());
+        let content = std::fs::read(&path)?;
+        Self::hash_bytes_into(&mut hash, &content);
+      }
+    }
+    self.custom_types_hash = hash;
+    Ok(self)
   }
 
   /// Builder: add dependency-exported obfuscation rule files to the existing
@@ -174,6 +274,11 @@ impl TaskInputs {
       && stored.module_analyzer == self.module_analyzer
       && stored.plugin_hash == self.plugin_hash
       && stored.resource_hash == self.resource_hash
+      && stored.dependency_content_hash == self.dependency_content_hash
+      && stored.config_hash == self.config_hash
+      && stored.profile_hash == self.profile_hash
+      && stored.sdk_hash == self.sdk_hash
+      && stored.custom_types_hash == self.custom_types_hash
       && stored.dependency_hash == self.dependency_hash
   }
 
@@ -182,17 +287,21 @@ impl TaskInputs {
     std::fs::create_dir_all(cache_dir)?;
     let stored = StoredTaskInputs {
       schema_version: self.schema_version,
-      source_hash: self.source_hash,
+      source_hash: self.source_hash.clone(),
       obfuscation_hash: self.obfuscation_hash,
       sdk_version: self.sdk_version.clone(),
       compile_env: self.compile_env.clone(),
       module_analyzer: self.module_analyzer.clone(),
       plugin_hash: self.plugin_hash,
-      resource_hash: self.resource_hash,
+      resource_hash: self.resource_hash.clone(),
+      dependency_content_hash: self.dependency_content_hash.clone(),
+      config_hash: self.config_hash.clone(),
+      profile_hash: self.profile_hash.clone(),
+      sdk_hash: self.sdk_hash.clone(),
+      custom_types_hash: self.custom_types_hash,
       dependency_hash: self.dependency_hash,
     };
-    let json =
-      serde_json::to_string_pretty(&stored).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(&stored).map_err(io::Error::other)?;
     std::fs::write(cache_dir.join(TASK_INPUTS_FILE), json)
   }
 }
@@ -201,7 +310,8 @@ impl TaskInputs {
 struct StoredTaskInputs {
   #[serde(default)]
   schema_version: u32,
-  source_hash: u64,
+  #[serde(default)]
+  source_hash: String,
   obfuscation_hash: u64,
   sdk_version: String,
   compile_env: String,
@@ -210,7 +320,17 @@ struct StoredTaskInputs {
   #[serde(default)]
   plugin_hash: u64,
   #[serde(default)]
-  resource_hash: u64,
+  resource_hash: String,
+  #[serde(default)]
+  dependency_content_hash: String,
+  #[serde(default)]
+  config_hash: String,
+  #[serde(default)]
+  profile_hash: String,
+  #[serde(default)]
+  sdk_hash: String,
+  #[serde(default)]
+  custom_types_hash: u64,
   #[serde(default)]
   dependency_hash: u64,
 }
@@ -222,20 +342,6 @@ impl StoredTaskInputs {
 }
 
 impl TaskInputs {
-  /// FNV-1a 64-bit hash of all source file paths in declaration order.
-  fn hash_source_files(compile_entry: &[String]) -> u64 {
-    let mut h: u64 = FNV_OFFSET_BASIS;
-    for path in compile_entry {
-      for b in path.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME);
-      }
-      h ^= b'|' as u64;
-      h = h.wrapping_mul(FNV_PRIME);
-    }
-    h
-  }
-
   /// Derive a stable obfuscation hash from the config's obfuscation settings.
   ///
   /// Hashes the content of ALL rule files (not just the first) so that a
@@ -291,6 +397,15 @@ impl TaskInputs {
       *h = (*h).wrapping_mul(FNV_PRIME);
     }
   }
+
+  fn hash_bytes_into(h: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+      *h ^= u64::from(*byte);
+      *h = (*h).wrapping_mul(FNV_PRIME);
+    }
+    *h ^= 0;
+    *h = (*h).wrapping_mul(FNV_PRIME);
+  }
 }
 
 #[cfg(test)]
@@ -324,6 +439,7 @@ mod tests {
       non_entry_importees: vec![],
       compiled_importees: vec![],
       compile_entry,
+      form_entry_sources: vec![],
       runtime_entry_sources: vec![],
       module_root_path: String::new(),
       cache_path: cache_path.to_string(),
@@ -338,10 +454,12 @@ mod tests {
       source_roots: vec![],
       bundle_dependencies: vec![],
       global_dependencies: vec![],
-      custom_types: vec![],
+      compiler_types: vec![],
+      compiler_type_declaration_inputs: vec![],
       dependency_pkg_version: vec![],
       extra_importees: vec![],
       compiled_package_names: vec![],
+      oh_exports: vec![],
     }
   }
 
@@ -381,6 +499,8 @@ mod tests {
         },
         version_code: None,
         version_name: None,
+        build_version: None,
+        app_options: Default::default(),
       },
       modules: vec![ModuleConfig {
         name: "entry".to_string(),
@@ -398,6 +518,19 @@ mod tests {
     }
   }
 
+  fn make_snapshot(source: &str) -> TaskInputSnapshot {
+    TaskInputSnapshot {
+      source_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash(source),
+      resource_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("resources"),
+      dependency_content_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash(
+        "dependencies",
+      ),
+      config_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("config"),
+      profile_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("profiles"),
+      sdk_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("sdk"),
+    }
+  }
+
   #[test]
   fn test_task_inputs_roundtrip() {
     let tmp = std::env::temp_dir().join("arkdown_task_cache_roundtrip");
@@ -408,7 +541,7 @@ mod tests {
       vec!["./ets/entryability/EntryAbility.ets".to_string()],
       "/tmp/cache",
     );
-    let inputs = TaskInputs::compute(&config, &loader);
+    let inputs = TaskInputs::compute(&config, &loader, &make_snapshot("entry source"));
 
     assert!(!inputs.matches_cached(&tmp), "no stored file → cache miss");
 
@@ -426,7 +559,7 @@ mod tests {
 
     let config = make_config();
     let loader = make_loader(vec!["./ets/Index.ets".to_string()], "/tmp/cache");
-    let inputs = TaskInputs::compute(&config, &loader);
+    let inputs = TaskInputs::compute(&config, &loader, &make_snapshot("index source"));
     let legacy = serde_json::json!({
       "source_hash": inputs.source_hash,
       "obfuscation_hash": inputs.obfuscation_hash,
@@ -458,12 +591,13 @@ mod tests {
     let mut config = make_config();
     let loader = make_loader(vec!["./ets/Index.ets".to_string()], "/tmp/cache");
 
-    let inputs_v1 = TaskInputs::compute(&config, &loader);
+    let snapshot = make_snapshot("index source");
+    let inputs_v1 = TaskInputs::compute(&config, &loader, &snapshot);
     inputs_v1.save(&tmp).unwrap();
 
     // Bump SDK version → different compile_env
     config.sdk_config.compile_sdk_version = "7.0.0.1".to_string();
-    let inputs_v2 = TaskInputs::compute(&config, &loader);
+    let inputs_v2 = TaskInputs::compute(&config, &loader, &snapshot);
 
     assert!(
       !inputs_v2.matches_cached(&tmp),
@@ -479,19 +613,15 @@ mod tests {
     let _ = std::fs::remove_dir_all(&tmp);
 
     let config = make_config();
-    let loader_v1 = make_loader(vec!["./ets/A.ets".to_string()], "/tmp/cache");
-    let inputs_v1 = TaskInputs::compute(&config, &loader_v1);
+    let loader = make_loader(vec!["./ets/A.ets".to_string()], "/tmp/cache");
+    let inputs_v1 = TaskInputs::compute(&config, &loader, &make_snapshot("const value = 1;"));
     inputs_v1.save(&tmp).unwrap();
 
-    let loader_v2 = make_loader(
-      vec!["./ets/A.ets".to_string(), "./ets/B.ets".to_string()],
-      "/tmp/cache",
-    );
-    let inputs_v2 = TaskInputs::compute(&config, &loader_v2);
+    let inputs_v2 = TaskInputs::compute(&config, &loader, &make_snapshot("const value = 2;"));
 
     assert!(
       !inputs_v2.matches_cached(&tmp),
-      "added source file must be a cache miss"
+      "changed source content at the same path must be a cache miss"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -505,7 +635,7 @@ mod tests {
     let config = make_config();
     let loader = make_loader(vec!["./ets/Index.ets".to_string()], "/tmp/cache");
 
-    let base = TaskInputs::compute(&config, &loader);
+    let base = TaskInputs::compute(&config, &loader, &make_snapshot("index source"));
     let with_dep = base
       .clone()
       .with_additional_obfuscation_rule_files(std::slice::from_ref(&dep_rules));
@@ -516,6 +646,42 @@ mod tests {
     let changed = base.with_additional_obfuscation_rule_files(std::slice::from_ref(&dep_rules));
 
     assert_ne!(with_dep.obfuscation_hash, changed.obfuscation_hash);
+  }
+
+  #[test]
+  fn custom_type_declaration_content_invalidates_compile_cache() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let declaration = temp.path().join("runtime.d.ts");
+    std::fs::write(
+      &declaration,
+      "declare interface Runtime { value: string }\n",
+    )
+    .unwrap();
+    let config = make_config();
+    let loader = make_loader(vec!["./ets/Index.ets".to_string()], "/tmp/cache");
+    let base = TaskInputs::compute(&config, &loader, &make_snapshot("index source"));
+    let first = base
+      .clone()
+      .with_custom_type_inputs(
+        &["./types/runtime".to_string()],
+        std::slice::from_ref(&declaration),
+      )
+      .expect("fingerprint custom type");
+
+    std::fs::write(
+      &declaration,
+      "declare interface Runtime { value: number }\n",
+    )
+    .unwrap();
+    let changed = base
+      .with_custom_type_inputs(
+        &["./types/runtime".to_string()],
+        std::slice::from_ref(&declaration),
+      )
+      .expect("fingerprint changed custom type");
+
+    assert_ne!(first.custom_types_hash, 0);
+    assert_ne!(first.custom_types_hash, changed.custom_types_hash);
   }
 
   #[test]
@@ -532,7 +698,7 @@ mod tests {
       consumer_rule_files: vec![],
     };
 
-    let product_only = TaskInputs::compute(&config, &loader);
+    let product_only = TaskInputs::compute(&config, &loader, &make_snapshot("index source"));
     let effective = product_only
       .clone()
       .with_effective_obfuscation(Some(&module_obfuscation), &config.build_mode)

@@ -100,12 +100,7 @@ pub fn run(args: CheckArgs) -> Result<()> {
       .into_iter()
       .filter_map(|e| e.ok())
       .filter(|e| e.file_type().is_file())
-      .filter(|e| {
-        e.path()
-          .extension()
-          .and_then(|ext| ext.to_str())
-          .map_or(false, |ext| ext == "ets")
-      })
+      .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("ets"))
     {
       let path = entry.path();
       total_files += 1;

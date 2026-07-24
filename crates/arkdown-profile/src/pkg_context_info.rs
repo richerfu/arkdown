@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use arkdown_core::ArkdownError;
 use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
@@ -30,6 +31,8 @@ pub struct PkgContextCurrentInput {
     pub source_root: PathBuf,
     pub main: Option<String>,
     pub version: String,
+    /// Snapshot of files collected from the current package's `oh-exports`.
+    pub oh_export_files: Option<Arc<[PathBuf]>>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +50,8 @@ pub struct PkgContextDependencyInput {
     pub module_name: Option<String>,
     pub bundle_name: Option<String>,
     pub bundle_type: Option<String>,
+    /// Snapshot of files collected from the dependency's `oh-exports`.
+    pub oh_export_files: Option<Arc<[PathBuf]>>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +72,8 @@ pub struct PkgContextInfoOpt {
     #[serde(rename = "isSO")]
     pub is_so: bool,
     pub dependency_alias: String,
-    #[serde(rename = "oh-exports", skip_serializing_if = "BTreeMap::is_empty")]
-    pub oh_exports: BTreeMap<String, String>,
+    #[serde(rename = "oh-exports", skip_serializing_if = "Option::is_none")]
+    pub oh_exports: Option<BTreeMap<String, String>>,
 }
 
 pub struct PkgContextInfoGenerator;
@@ -118,7 +123,7 @@ impl PkgContextInfoGenerator {
         &self,
         current: &PkgContextCurrentInput,
     ) -> Result<PkgContextInfoOpt, ArkdownError> {
-        Ok(PkgContextInfoOpt {
+        let mut context = PkgContextInfoOpt {
             package_name: current.package_name.clone(),
             bundle_name: self.current_module_bundle_name(current),
             module_name: String::new(),
@@ -130,8 +135,19 @@ impl PkgContextInfoGenerator {
             entry_path: self.current_entry_path(current)?,
             is_so: false,
             dependency_alias: String::new(),
-            oh_exports: BTreeMap::new(),
-        })
+            oh_exports: None,
+        };
+        if matches!(
+            current.module_kind,
+            PkgContextModuleKind::Har | PkgContextModuleKind::Hsp
+        ) {
+            context.oh_exports = self.oh_exports_context(
+                &current.module_root,
+                current.oh_export_files.as_deref(),
+                &context,
+            )?;
+        }
+        Ok(context)
     }
 
     fn dependency_context(
@@ -139,7 +155,7 @@ impl PkgContextInfoGenerator {
         current: &PkgContextCurrentInput,
         dependency: &PkgContextDependencyInput,
     ) -> Result<PkgContextInfoOpt, ArkdownError> {
-        Ok(PkgContextInfoOpt {
+        let mut context = PkgContextInfoOpt {
             package_name: dependency.package_name.clone(),
             bundle_name: self.dependency_bundle_name(current, dependency)?,
             module_name: self.dependency_module_name(dependency)?,
@@ -155,8 +171,16 @@ impl PkgContextInfoGenerator {
             } else {
                 dependency.alias.clone()
             },
-            oh_exports: BTreeMap::new(),
-        })
+            oh_exports: None,
+        };
+        if let Some(package_root) = dependency.package_root.as_deref() {
+            context.oh_exports = self.oh_exports_context(
+                package_root,
+                dependency.oh_export_files.as_deref(),
+                &context,
+            )?;
+        }
+        Ok(context)
     }
 
     fn so_context(&self, so_name: &str, current: &PkgContextCurrentInput) -> PkgContextInfoOpt {
@@ -168,7 +192,97 @@ impl PkgContextInfoGenerator {
             entry_path: String::new(),
             is_so: true,
             dependency_alias: String::new(),
-            oh_exports: BTreeMap::new(),
+            oh_exports: None,
+        }
+    }
+
+    /// Match
+    /// `generate-pkg-context-info.ts#generateOhExportsOhmUrlObj`.
+    fn oh_exports_context(
+        &self,
+        package_root: &Path,
+        files: Option<&[PathBuf]>,
+        context: &PkgContextInfoOpt,
+    ) -> Result<Option<BTreeMap<String, String>>, ArkdownError> {
+        let Some(files) = files else {
+            return Ok(None);
+        };
+        let mut oh_exports = BTreeMap::new();
+        for file in files {
+            let relative = Self::relative_path(package_root, file);
+            let relative = ArtifactPathSerializer::path_to_slash_string(&relative)
+                .map_err(|error| ArkdownError::Io(std::io::Error::other(error.to_string())))?;
+            oh_exports.insert(
+                relative.clone(),
+                Self::normalized_source_ohm_url(context, &relative),
+            );
+        }
+        Ok(Some(oh_exports))
+    }
+
+    fn normalized_source_ohm_url(context: &PkgContextInfoOpt, source_file: &str) -> String {
+        let source_file = Self::remove_ohm_suffix(source_file);
+        let import_path = if source_file.is_empty() {
+            String::new()
+        } else {
+            format!("{}/{}", context.package_name, source_file)
+        };
+        format!(
+            "@normalized:{}&{}&{}&{}&{}",
+            if context.is_so { "Y" } else { "N" },
+            context.module_name,
+            context.bundle_name,
+            import_path,
+            context.version
+        )
+    }
+
+    /// Match `ohmurl-utils.ts#removeSuffix`.
+    fn remove_ohm_suffix(path: &str) -> &str {
+        const SUFFIXES: [&str; 11] = [
+            ".d.ets", ".d.ts", ".d.mjs", ".d.cjs", ".d.js", ".ets", ".ts", ".mjs", ".cjs", ".js",
+            ".so",
+        ];
+        SUFFIXES
+            .iter()
+            .find_map(|suffix| path.strip_suffix(suffix))
+            .unwrap_or(path)
+    }
+
+    /// Platform-native equivalent of Node's `path.relative`.
+    fn relative_path(from: &Path, to: &Path) -> PathBuf {
+        let from = lexical_normalize(from);
+        let to = lexical_normalize(to);
+        let from_components = from.components().collect::<Vec<_>>();
+        let to_components = to.components().collect::<Vec<_>>();
+        if !Self::same_path_anchor(&from_components, &to_components) {
+            return to;
+        }
+
+        let common = from_components
+            .iter()
+            .zip(&to_components)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let mut relative = PathBuf::new();
+        for component in &from_components[common..] {
+            if matches!(component, Component::Normal(_)) {
+                relative.push("..");
+            }
+        }
+        for component in &to_components[common..] {
+            relative.push(component.as_os_str());
+        }
+        relative
+    }
+
+    fn same_path_anchor(left: &[Component<'_>], right: &[Component<'_>]) -> bool {
+        match (left.first(), right.first()) {
+            (Some(Component::Prefix(left)), Some(Component::Prefix(right))) => left == right,
+            (Some(Component::RootDir), Some(Component::RootDir)) => true,
+            (Some(Component::Prefix(_)), _) | (_, Some(Component::Prefix(_))) => false,
+            (Some(Component::RootDir), _) | (_, Some(Component::RootDir)) => false,
+            _ => true,
         }
     }
 
@@ -331,6 +445,7 @@ mod tests {
             source_root: PathBuf::from("/project/products/phone/src/main"),
             main: Some(String::new()),
             version: "1.0.0".to_string(),
+            oh_export_files: None,
         }
     }
 
@@ -353,6 +468,7 @@ mod tests {
                 module_name: None,
                 bundle_name: None,
                 bundle_type: None,
+                oh_export_files: None,
             }],
             native_libraries: vec!["libagccrypto.so".to_string()],
         };
@@ -394,6 +510,7 @@ mod tests {
                 module_name: None,
                 bundle_name: None,
                 bundle_type: None,
+                oh_export_files: None,
             }],
             native_libraries: Vec::new(),
         };
@@ -419,6 +536,7 @@ mod tests {
                 module_name: None,
                 bundle_name: None,
                 bundle_type: None,
+                oh_export_files: None,
             }],
             native_libraries: Vec::new(),
         };
@@ -444,6 +562,7 @@ mod tests {
                 module_name: None,
                 bundle_name: None,
                 bundle_type: None,
+                oh_export_files: None,
             }],
             native_libraries: Vec::new(),
         };
@@ -451,5 +570,73 @@ mod tests {
         let entries = PkgContextInfoGenerator::new().generate(&input).unwrap();
         assert!(entries["libvad.so"].is_so);
         assert_eq!(entries["libvad.so"].entry_path, "Index.ets");
+    }
+
+    #[test]
+    fn current_and_dependency_oh_exports_match_hvigor_normalized_source_urls() {
+        let temp = tempfile::tempdir().unwrap();
+        let current_root = temp.path().join("current");
+        let dependency_root = temp.path().join("dependency");
+        fs_err::create_dir_all(current_root.join("src/main/ets")).unwrap();
+        fs_err::create_dir_all(dependency_root.join("types")).unwrap();
+        let current_export = current_root.join("src/main/ets/Public.ets");
+        let dependency_export = dependency_root.join("types/Public.d.ts");
+        fs_err::write(&current_export, "export const value = 1;\n").unwrap();
+        fs_err::write(&dependency_export, "export declare const value: number;\n").unwrap();
+
+        let input = PkgContextInfoInput {
+            current: PkgContextCurrentInput {
+                package_name: "@scope/current".to_string(),
+                bundle_name: "com.example.shared".to_string(),
+                bundle_type: "shared".to_string(),
+                module_kind: PkgContextModuleKind::Har,
+                module_root: current_root.clone(),
+                source_root: current_root.join("src/main/ets"),
+                main: Some("Index.ets".to_string()),
+                version: "1.2.0".to_string(),
+                oh_export_files: Some(Arc::from(vec![current_export])),
+            },
+            dependencies: vec![PkgContextDependencyInput {
+                alias: "public-types".to_string(),
+                package_name: "@scope/dependency".to_string(),
+                version_spec: Some("file:../dependency".to_string()),
+                package_root: Some(dependency_root),
+                node_entry: None,
+                main: None,
+                kind: PkgContextDependencyKind::Har,
+                module_name: None,
+                bundle_name: None,
+                bundle_type: None,
+                oh_export_files: Some(Arc::from(vec![dependency_export])),
+            }],
+            native_libraries: Vec::new(),
+        };
+
+        let entries = PkgContextInfoGenerator::new().generate(&input).unwrap();
+        assert_eq!(
+            entries["@scope/current"].oh_exports.as_ref().unwrap()["src/main/ets/Public.ets"],
+            "@normalized:N&&&@scope/current/src/main/ets/Public&1.2.0"
+        );
+        assert_eq!(
+            entries["@scope/dependency"].oh_exports.as_ref().unwrap()["types/Public.d.ts"],
+            "@normalized:N&&com.example.shared&@scope/dependency/types/Public&file:../dependency"
+        );
+    }
+
+    #[test]
+    fn present_empty_oh_exports_serializes_as_empty_object() {
+        let mut current = current_hap();
+        current.module_kind = PkgContextModuleKind::Har;
+        current.oh_export_files = Some(Arc::from(Vec::<PathBuf>::new()));
+        let entries = PkgContextInfoGenerator::new()
+            .generate(&PkgContextInfoInput {
+                current,
+                dependencies: Vec::new(),
+                native_libraries: Vec::new(),
+            })
+            .unwrap();
+        let value = serde_json::to_value(entries).unwrap();
+
+        assert_eq!(value["phone"]["oh-exports"], serde_json::json!({}));
     }
 }

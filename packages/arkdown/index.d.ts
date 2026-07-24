@@ -11,7 +11,7 @@
  */
 export interface ArkdownPlugin {
   name?: string
-  order?: 'first' | 'last' | ((nameToIndex: ReadonlyMap<string, number>) => number)
+  order?: 'first' | 'last' | ((nameToIndex: Record<string, number>) => number)
   beforeBuild?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   buildStart?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   afterBuildStart?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
@@ -71,6 +71,7 @@ export interface BuildConfig {
   module?: string
   product?: string
   buildTargetName?: string
+  buildVersion?: string
   watch?: boolean
   preview?: boolean
   coverage?: boolean
