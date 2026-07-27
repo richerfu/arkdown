@@ -15,11 +15,34 @@ export interface ArkdownPlugin {
   beforeBuild?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   buildStart?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   afterBuildStart?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
-  resolveId?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveId?: (
+    id: string,
+    importer?: string | null,
+    options?: JsResolveIdOptions,
+  ) =>
+    | string
+    | JsResolveIdOutput
+    | false
+    | null
+    | undefined
+    | Promise<string | JsResolveIdOutput | false | null | undefined>
   load?: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>
-  transform?: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
+  transform?: (
+    code: string,
+    id: string,
+  ) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
   moduleParsed?: (moduleInfo: HvigorModuleInfo) => void | Promise<void>
-  resolveDynamicImport?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveDynamicImport?: (
+    id: string,
+    importer?: string | null,
+    options?: JsResolveIdOptions,
+  ) =>
+    | string
+    | JsResolveIdOutput
+    | false
+    | null
+    | undefined
+    | Promise<string | JsResolveIdOutput | false | null | undefined>
   beforeBuildEnd?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   buildEnd?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
   afterBuildEnd?: (this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>
@@ -62,7 +85,10 @@ export interface ArkdownPlugin {
  * Plugins are wrapped synchronously before spawning the async build task,
  * so non-Send JS values (Env, Array) don't cross the tokio task boundary.
  */
-export declare function build(config: BuildConfig, plugins?: Array<ArkdownPlugin> | undefined | null): Promise<BuildResult>
+export declare function build(
+  config: BuildConfig,
+  plugins?: Array<ArkdownPlugin> | undefined | null,
+): Promise<BuildResult>
 
 export interface BuildConfig {
   project?: string
@@ -146,8 +172,7 @@ export interface HvigorShareContext {
   projectConfig?: HvigorProjectConfig
 }
 
-export type JsHookSideEffects =
-  boolean | string
+export type JsHookSideEffects = boolean | string
 
 export interface JsJsonSourceMap {
   file?: string
@@ -167,8 +192,7 @@ export interface JsLoadOutput {
   moduleType?: string
 }
 
-export type JsResolvedExternal =
-  boolean | string
+export type JsResolvedExternal = boolean | string
 
 export interface JsResolveIdOptions {
   attributes: Record<string, string>
@@ -183,8 +207,7 @@ export interface JsResolveIdOutput {
   packageJsonPath?: string
 }
 
-export type JsSourceMap =
-  string | JsJsonSourceMap
+export type JsSourceMap = string | JsJsonSourceMap
 
 export interface JsTransformOutput {
   code?: string
