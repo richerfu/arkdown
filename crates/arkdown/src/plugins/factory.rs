@@ -514,6 +514,7 @@ impl<'a> PluginFactory<'a> {
 
     pub fn build_output(self) -> anyhow::Result<PluginFactoryOutput> {
         let project_root = self.plan.input.project_root.clone();
+        let project_path = self.plan.input.project_path.clone();
         let module_root = self.plan.input.module_root.clone();
         let module_name = self.plan.input.module_name.clone();
 
@@ -574,6 +575,7 @@ impl<'a> PluginFactory<'a> {
             self.plan.bundle_name.clone(),
             self.plan.input.module_name.clone(),
             project_root.clone(),
+            project_path,
             self.input.all_module_roots,
             self.plan.target_api_version,
             self.input.resource_refs,
@@ -693,6 +695,7 @@ mod tests {
                 loader_json_path: module_root
                     .join("build/default/intermediates/loader/loader.json"),
                 project_root: root.clone(),
+                project_path: module_root.join("src/main/ets"),
                 module_root,
                 module_name: "entry".to_string(),
                 module_path_map: Vec::new(),

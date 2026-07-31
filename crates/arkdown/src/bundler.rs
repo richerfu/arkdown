@@ -3711,6 +3711,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
             input: BundleInput {
                 loader_json_path: app_root.join("loader.json"),
                 project_root: app_root.clone(),
+                project_path: module_root.join("ets"),
                 module_root: module_root.clone(),
                 module_name: "phone".to_string(),
                 module_path_map: vec![
@@ -3832,6 +3833,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
             input: BundleInput {
                 loader_json_path: project_root.join("loader.json"),
                 project_root: project_root.to_path_buf(),
+                project_path: module_root.join("ets"),
                 module_root: module_root.clone(),
                 module_name: "phone".to_string(),
                 module_path_map: vec![("phone".to_string(), phone_root)],

@@ -810,6 +810,7 @@ export const AESEncrypt: (input: string, key: string, iv: string) => EncryptionR
     )
     .expect("declaration file");
 
+    let project_path = module_root.join("src/main/ets");
     let module_roots = vec![("entry".to_string(), module_root)];
     let dependency_source_roots = vec![package_root];
     let native_declaration_roots = vec![native_root];
@@ -825,6 +826,7 @@ export const AESEncrypt: (input: string, key: string, iv: string) => EncryptionR
       "com.example",
       "entry",
       temp.path().to_path_buf(),
+      project_path,
       module_roots,
       12,
       FxHashMap::default(),
@@ -908,6 +910,7 @@ export const AESEncrypt: (input: string, key: string, iv: string) => EncryptionR
     )
     .expect("declaration file");
 
+    let project_path = module_root.join("src/main/ets");
     let module_roots = vec![("entry".to_string(), module_root)];
     let dependency_source_roots = vec![symlink_package_root];
     let native_declaration_roots = vec![symlink_native_root];
@@ -923,6 +926,7 @@ export const AESEncrypt: (input: string, key: string, iv: string) => EncryptionR
       "com.example",
       "entry",
       temp.path().to_path_buf(),
+      project_path,
       module_roots,
       12,
       FxHashMap::default(),
@@ -1005,6 +1009,7 @@ export const nativeCall: () => void;"#,
     )
     .expect("native declaration types");
 
+    let project_path = module_root.join("src/main/ets");
     let module_roots = vec![("entry".to_string(), module_root)];
     let dependency_source_roots = vec![package_root];
     let native_declaration_roots = vec![native_root];
@@ -1020,6 +1025,7 @@ export const nativeCall: () => void;"#,
       "com.example",
       "entry",
       temp.path().to_path_buf(),
+      project_path,
       module_roots,
       12,
       FxHashMap::default(),
