@@ -10,11 +10,10 @@ use oxc_ast::ast::{
     ModuleExportName, Program, Statement, StructElement, StructStatement, TSLiteral, TSType,
     TSTypeName,
 };
-use oxc_span::SourceType;
 use rayon::prelude::*;
 
 use super::{ArkuiDecorator, ArkuiDecoratorName, ArkuiDecoratorRules, TransformOptions};
-use crate::source::TransformSourceFile;
+use crate::source::{CompileArktsSourceType, TransformSourceFile};
 use crate::transform::build_fn::{
     CustomComponentGeneration, CustomComponentInfo, CustomComponentUpdateProps,
 };
@@ -1394,7 +1393,7 @@ impl ModuleExportFacts {
         component_metadata: &crate::transform::component_meta::ComponentMetadata,
     ) -> Self {
         let allocator = Allocator::default();
-        let source_type = SourceType::from_path(&source.path).unwrap_or_else(|_| SourceType::ets());
+        let source_type = CompileArktsSourceType::from_path(&source.path);
         let parsed = component_metadata.parse_ets(&allocator, &source.source, source_type);
         if !parsed.diagnostics.is_empty() {
             return Self::default();

@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, ModuleSpecifierText, SourceFileName};
+use oxc_span::SourceType;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// The kind of source file, used to select the right OXC parser mode.
@@ -65,6 +66,29 @@ impl SourceClassifier {
             Some("ts") => SourceFileKind::Ts,
             Some("js") | Some("mjs") | Some("cjs") => SourceFileKind::Js,
             _ => SourceFileKind::Other,
+        }
+    }
+}
+
+/// Selects the parser mode used by the SDK CompileArkTS source pipeline.
+///
+/// OpenHarmony packages may keep ArkTS extensions such as `import lazy` in a
+/// file named `*.ts`. SDK `ModuleSourceFile.processTransformedTsModuleRequest`
+/// parses those files with the ArkTS-enabled TypeScript frontend, so runtime
+/// `.ts` and `.ets` inputs must both use OXC's ArkUI language variant.
+pub struct CompileArktsSourceType;
+
+impl CompileArktsSourceType {
+    pub fn from_id(id: &str) -> SourceType {
+        Self::from_path(Path::new(id))
+    }
+
+    pub fn from_path(path: &Path) -> SourceType {
+        match SourceClassifier::classify_path(path) {
+            SourceFileKind::Ets | SourceFileKind::Ts => SourceType::ets(),
+            SourceFileKind::Declaration | SourceFileKind::Js | SourceFileKind::Other => {
+                SourceType::from_path(path).unwrap_or_else(|_| SourceType::ts().with_module(true))
+            }
         }
     }
 }
@@ -603,6 +627,19 @@ mod tests {
         assert!(SourceFileKind::Ts.is_ets_transform_input());
         assert!(!SourceFileKind::Declaration.is_ets_transform_input());
         assert!(!SourceFileKind::Js.is_ets_transform_input());
+    }
+
+    #[test]
+    fn compile_arkts_source_type_treats_runtime_ts_as_arkts_but_keeps_declarations() {
+        let ts = CompileArktsSourceType::from_id("src/main/ts/Player.ts");
+        assert!(ts.is_typescript());
+        assert!(ts.is_arkui());
+        assert!(CompileArktsSourceType::from_id("src/main/ets/Page.ets").is_arkui());
+
+        let declaration = CompileArktsSourceType::from_id("types/libplayer/index.d.ts");
+        assert!(declaration.is_typescript_definition());
+        assert!(!declaration.is_arkui());
+        assert!(!CompileArktsSourceType::from_id("src/main/js/index.js").is_typescript());
     }
 
     #[test]

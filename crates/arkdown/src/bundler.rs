@@ -24,10 +24,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::Statement;
 use oxc_index::IndexVec;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
 use rayon::prelude::*;
 
-use arkdown_ets_transform::RolldownEtsTransformPlan;
+use arkdown_ets_transform::{CompileArktsSourceType, RolldownEtsTransformPlan};
 
 use arkdown_core::{
     ArkdownConfig, ArkdownError, ChunkGraph, ChunkSourceFile, HvigorModuleSourceFile,
@@ -1623,8 +1622,7 @@ impl<'a> HvigorStaticModuleSpecifiers<'a> {
 
     fn collect_literals(&self) -> Vec<HvigorStaticModuleLiteral> {
         let allocator = Allocator::default();
-        let source_type = SourceType::from_path(self.module_id)
-            .unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let source_type = CompileArktsSourceType::from_id(self.module_id);
         let parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return Vec::new();
@@ -5853,6 +5851,46 @@ textToSpeech.createEngine({});"#;
         assert!(
             rewritten.contains("import lazy textToSpeech from \"@hms:ai.textToSpeech\";"),
             "the final CompileArkTS writer must normalize lazy SDK requests: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn compile_arkts_rewrites_lazy_native_import_in_ts_dependency_like_sdk() {
+        let module_id = "/workspace/oh_modules/mtmediaplayer/src/main/ts/MTMediaPlayerCache.ts";
+        let source = r#"import lazy nativePlayer from "libaemonplayer.so";
+nativePlayer.cacheInit();"#;
+
+        assert_eq!(
+            HvigorStaticModuleSpecifiers::new(source, module_id).collect(),
+            vec!["libaemonplayer.so".to_string()],
+            "SDK ModuleSourceFile.processTransformedTsModuleRequest recognizes lazy imports in .ts"
+        );
+
+        let mut packages = FxHashMap::default();
+        packages.insert(
+            "libaemonplayer.so".to_string(),
+            BundleRuntimePackageContext {
+                package_name: "libaemonplayer.so".to_string(),
+                is_so: true,
+                ..BundleRuntimePackageContext::default()
+            },
+        );
+        let runtime_packages = BundleRuntimePackageInfo { packages };
+        let normalized_request = HvigorBytecodeHarImports::new(&runtime_packages, &[], true)
+            .ohm_url_for_request("libaemonplayer.so")
+            .expect("native package context lookup")
+            .expect("native package context must produce an OHM URL");
+        let imports = HvigorChunkImportMap::from_iter([(
+            "libaemonplayer.so".to_string(),
+            normalized_request,
+        )]);
+        let rewritten =
+            HvigorModuleSourceImportRewriter::new(source, module_id, None, &imports).rewrite();
+
+        assert!(
+            rewritten
+                .contains("import lazy nativePlayer from \"@normalized:Y&&&libaemonplayer.so&\";"),
+            "CompileArkTS must retain lazy semantics and rewrite native requests: {rewritten}"
         );
     }
 
