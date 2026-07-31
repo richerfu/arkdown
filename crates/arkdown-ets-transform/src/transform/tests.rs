@@ -1901,7 +1901,8 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
     let options = TransformOptions {
         bundle_name: Some("com.example.arkdown.test".to_string()),
         module_name: Some("phone".to_string()),
-        project_root: None,
+        project_root: Some(PathBuf::from("/project")),
+        project_path: Some(PathBuf::from("/project/products/phone/src/main/ets")),
         module_roots: Vec::new(),
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
@@ -1976,7 +1977,8 @@ export struct SecureModePage {
     let options = TransformOptions {
         bundle_name: Some("com.sankuai.hmeituan".to_string()),
         module_name: Some("meituan".to_string()),
-        project_root: None,
+        project_root: Some(PathBuf::from("/project")),
+        project_path: Some(PathBuf::from("/project/meituan/src/main/ets")),
         module_roots: Vec::new(),
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
@@ -2087,6 +2089,7 @@ export struct SecureModePage {
         bundle_name: Some("com.sankuai.hmeituan".to_string()),
         module_name: Some("meituan".to_string()),
         project_root: Some(project_root.clone()),
+        project_path: Some(project_root.join("meituan/src/main/ets")),
         module_roots: Vec::new(),
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
@@ -2559,10 +2562,14 @@ struct ImgItem {
   build() {}
 }
 "#;
-    let result = TransformHarness::transform(&make_source(
-        "products/phone/src/main/ets/pages/SplashPage.ets",
-        src,
-    ))
+    let result = TransformHarness::transform_with_options(
+        &make_source("products/phone/src/main/ets/pages/SplashPage.ets", src),
+        &TransformOptions {
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/products/phone/src/main/ets")),
+            ..TransformOptions::default()
+        },
+    )
     .unwrap();
     let splash = result.find("class SplashPage extends ViewPU").unwrap();
     let img = result.find("class ImgItem extends ViewPU").unwrap();
@@ -2596,7 +2603,11 @@ export struct MSIActionSheetApiEntryPage {
             "oh_modules/@msi/runtime/src/main/ets/window/ActionSheetPage.ets",
             src,
         ),
-        &TransformOptions::default(),
+        &TransformOptions {
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/entry/src/main/ets")),
+            ..TransformOptions::default()
+        },
     )
     .unwrap();
 
@@ -2626,9 +2637,15 @@ export struct MSIActionSheetApiEntryPage {
 fn test_minimal_index_component_lowers_arkui_semantics() {
     let src =
         include_str!("../../../../tests/fixtures/minimal-hap/entry/src/main/ets/pages/Index.ets");
-    let result =
-        TransformHarness::transform(&make_source("entry/src/main/ets/pages/Index.ets", src))
-            .unwrap();
+    let result = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/Index.ets", src),
+        &TransformOptions {
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/entry/src/main/ets")),
+            ..TransformOptions::default()
+        },
+    )
+    .unwrap();
 
     assert!(result.contains("class Index extends ViewPU"));
     assert!(result.contains("private __message: ObservedPropertySimplePU<string>"));
@@ -3948,7 +3965,8 @@ struct WidgetCard {
         &TransformOptions {
             bundle_name: Some("com.example.hmosworld".to_string()),
             module_name: Some("phone".to_string()),
-            project_root: None,
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/phone/src/main/ets")),
             module_roots: vec![],
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),
@@ -3989,6 +4007,8 @@ struct Page {
         &TransformOptions {
             bundle_name: Some("com.example.hmosworld".to_string()),
             module_name: Some("phone".to_string()),
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/phone/src/main/ets")),
             ..TransformOptions::default()
         },
     )
@@ -4014,6 +4034,8 @@ struct Page {
     let result = TransformHarness::transform_with_options(
         &make_source("phone/src/main/ets/pages/Page.ets", src),
         &TransformOptions {
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/phone/src/main/ets")),
             ..TransformOptions::default()
         },
     )
@@ -4082,7 +4104,8 @@ struct ModalPage {
         &TransformOptions {
             bundle_name: Some("com.sankuai.hmeituan".to_string()),
             module_name: Some("meituan".to_string()),
-            project_root: None,
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/meituan/src/main/ets")),
             module_roots: vec![],
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),

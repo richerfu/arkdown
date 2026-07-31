@@ -79,6 +79,7 @@ pub fn run(args: CheckArgs) -> Result<()> {
       config.product.bundle_name.clone(),
       module.name.clone(),
       config.project_root.clone(),
+      ModulePathLayout::new(&module.src_path).ets_source_root(),
       config
         .modules
         .iter()

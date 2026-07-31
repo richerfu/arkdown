@@ -57,6 +57,7 @@ pub(super) fn make_bundle_plan(
     input: BundleInput {
       loader_json_path: loader_json_path.as_ref().to_path_buf(),
       project_root: PathBuf::from(&loader_json.project_root_path),
+      project_path: PathBuf::from(&loader_json.module_root_path).join("ets"),
       module_root: PathBuf::from(&loader_json.module_root_path),
       module_name: loader_json.module_name.clone(),
       module_path_map: loader_json

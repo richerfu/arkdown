@@ -73,6 +73,12 @@ pub struct TransformOptions {
     pub bundle_name: Option<String>,
     pub module_name: Option<String>,
     pub project_root: Option<PathBuf>,
+    /// Hvigor `projectConfig.projectPath` / `aceModuleRoot`.
+    ///
+    /// For ETS compilation this is `<module>/src/main/ets`. Entry route
+    /// metadata is relative to this path, not to each source package's own
+    /// `src/main/ets` directory.
+    pub project_path: Option<PathBuf>,
     pub module_roots: Vec<(String, PathBuf)>,
     pub component_metadata: Arc<ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
@@ -95,6 +101,7 @@ impl Default for TransformOptions {
             bundle_name: None,
             module_name: None,
             project_root: None,
+            project_path: None,
             module_roots: Vec::new(),
             component_metadata: Arc::new(ComponentMetadata::default()),
             sources: TransformSourceSnapshot::default(),
@@ -654,8 +661,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         self.validate_form_entry_argument(storage)?;
         Ok(Some((
             struct_stmt.id.name.to_string(),
-            EntryRegistrationFactory::new(self.hvigor_source_id.as_ref(), self.options)
-                .with_entry_argument(storage),
+            EntryRegistrationFactory::new(self.id, self.hvigor_source_id.as_ref(), self.options)
+                .with_entry_argument(storage)?,
         )))
     }
 
@@ -1146,10 +1153,16 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             regular_members,
             source_members,
             initial_render_body,
-            entry_registration: is_entry.then(|| {
-                EntryRegistrationFactory::new(self.hvigor_source_id.as_ref(), self.options)
+            entry_registration: is_entry
+                .then(|| {
+                    EntryRegistrationFactory::new(
+                        self.id,
+                        self.hvigor_source_id.as_ref(),
+                        self.options,
+                    )
                     .with_entry_argument(entry_argument)
-            }),
+                })
+                .transpose()?,
             builder_methods,
         }))
     }
@@ -1578,30 +1591,52 @@ impl<'a, 'b> ComponentRawObjectFields<'a, 'b> {
 }
 
 struct EntryRegistrationFactory<'a> {
-    id: &'a str,
+    source_id: &'a str,
+    hvigor_source_id: &'a str,
     options: &'a TransformOptions,
 }
 
 impl<'a> EntryRegistrationFactory<'a> {
-    fn new(id: &'a str, options: &'a TransformOptions) -> Self {
-        Self { id, options }
+    fn new(source_id: &'a str, hvigor_source_id: &'a str, options: &'a TransformOptions) -> Self {
+        Self {
+            source_id,
+            hvigor_source_id,
+            options,
+        }
     }
 
     fn with_entry_argument<'b>(
         &self,
         argument: Option<&'b Expression<'b>>,
-    ) -> EntryRegistrationInfo<'b> {
-        let source_path = TransformSourcePath::new(self.id);
+    ) -> Result<EntryRegistrationInfo<'b>, EtsTransformError> {
+        let source_path = TransformSourcePath::new(self.source_id);
+        let hvigor_source_path = TransformSourcePath::new(self.hvigor_source_id);
+        let project_path =
+            self.options
+                .project_path
+                .as_deref()
+                .ok_or_else(|| EtsTransformError::Fatal {
+                    file: self.source_id.to_string(),
+                    message: "missing hvigor projectPath for @Entry route metadata".to_string(),
+                })?;
+        let project_root =
+            self.options
+                .project_root
+                .as_deref()
+                .ok_or_else(|| EtsTransformError::Fatal {
+                    file: self.source_id.to_string(),
+                    message: "missing hvigor projectRootPath for @Entry route metadata".to_string(),
+                })?;
         let module_name = self
             .options
             .module_name
             .clone()
-            .or_else(|| source_path.module_name())
+            .or_else(|| hvigor_source_path.module_name())
             .unwrap_or_else(|| "entry".to_string());
-        let page_path = source_path.entry_page_path();
-        let page_full_path = source_path.extensionless_path("ets");
+        let page_path = source_path.entry_page_path(project_path, project_root);
+        let page_full_path = hvigor_source_path.extensionless_path("ets");
 
-        EntryRegistrationInfo {
+        Ok(EntryRegistrationInfo {
             bundle_name: self.options.bundle_name.clone().unwrap_or_default(),
             module_name,
             page_path,
@@ -1610,7 +1645,7 @@ impl<'a> EntryRegistrationFactory<'a> {
             module_type: "followWithHap".to_string(),
             form_entry: self.options.form_entry,
             options: EntryOptions::from_argument(argument),
-        }
+        })
     }
 }
 
@@ -1627,8 +1662,8 @@ impl<'a> TransformSourcePath<'a> {
         HvigorModulePath::new(self.id).module_name()
     }
 
-    fn entry_page_path(&self) -> String {
-        HvigorModulePath::new(self.id).entry_page_path()
+    fn entry_page_path(&self, project_path: &Path, project_root: &Path) -> String {
+        HvigorModulePath::new(self.id).entry_page_path(project_path, project_root)
     }
 
     fn extensionless_path(&self, extension: &str) -> String {

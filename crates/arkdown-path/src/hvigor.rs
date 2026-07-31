@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use crate::ArtifactPathSerializer;
+use crate::{lexical_normalize, ArtifactPathSerializer};
 
 /// Hvigor-compatible module path view used by ETS transforms and sourcemap
 /// metadata.
@@ -28,10 +28,22 @@ impl<'a> HvigorModulePath<'a> {
             .and_then(|module_index| segments.get(module_index).cloned())
     }
 
-    pub fn entry_page_path(&self) -> String {
-        self.relative_after_src_main_ets()
-            .map(|path| Self::path_without_extension(&path, Self::ETS_SEGMENT))
-            .unwrap_or_else(|| self.extensionless_path(Self::ETS_SEGMENT))
+    /// Compute SDK `registerNamedRoute.pagePath`.
+    ///
+    /// Mirrors `process_module_package.js::pathMessage`, which evaluates
+    /// `path.relative(projectConfig.projectPath, resourceFileName)` before
+    /// removing the `.ets` suffix. `project_path` is hvigor's `aceModuleRoot`
+    /// (`<module>/src/main/ets`), while relative Rolldown IDs are rooted at
+    /// `project_root`.
+    pub fn entry_page_path(&self, project_path: &Path, project_root: &Path) -> String {
+        let source_path = Path::new(self.id);
+        let source_path = if source_path.is_absolute() {
+            source_path.to_path_buf()
+        } else {
+            project_root.join(source_path)
+        };
+        let relative = Self::relative_path(project_path, &source_path);
+        Self::path_without_extension(&relative, Self::ETS_SEGMENT)
     }
 
     pub fn extensionless_path(&self, extension: &str) -> String {
@@ -65,16 +77,6 @@ impl<'a> HvigorModulePath<'a> {
         segments.windows(3).position(Self::is_src_main_ets_window)
     }
 
-    fn relative_after_src_main_ets(&self) -> Option<PathBuf> {
-        let segments = self.normal_segments();
-        let start = Self::src_main_ets_index(&segments)? + 3;
-        let mut path = PathBuf::new();
-        for segment in segments.into_iter().skip(start) {
-            path.push(segment);
-        }
-        Some(path)
-    }
-
     fn path_without_extension(path: &Path, extension: &str) -> String {
         if path.extension().and_then(|value| value.to_str()) != Some(extension) {
             return ArtifactPathSerializer::rel_to_slash(path);
@@ -87,6 +89,43 @@ impl<'a> HvigorModulePath<'a> {
         let mut extensionless = path.to_path_buf();
         extensionless.set_file_name(file_stem);
         ArtifactPathSerializer::rel_to_slash(&extensionless)
+    }
+
+    /// Platform-native lexical equivalent of Node's `path.relative`.
+    fn relative_path(from: &Path, to: &Path) -> PathBuf {
+        let from = lexical_normalize(from);
+        let to = lexical_normalize(to);
+        let from_components = from.components().collect::<Vec<_>>();
+        let to_components = to.components().collect::<Vec<_>>();
+        if !Self::same_path_anchor(&from_components, &to_components) {
+            return to;
+        }
+
+        let common = from_components
+            .iter()
+            .zip(&to_components)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let mut relative = PathBuf::new();
+        for component in &from_components[common..] {
+            if matches!(component, Component::Normal(_)) {
+                relative.push("..");
+            }
+        }
+        for component in &to_components[common..] {
+            relative.push(component.as_os_str());
+        }
+        relative
+    }
+
+    fn same_path_anchor(left: &[Component<'_>], right: &[Component<'_>]) -> bool {
+        match (left.first(), right.first()) {
+            (Some(Component::Prefix(left)), Some(Component::Prefix(right))) => left == right,
+            (Some(Component::RootDir), Some(Component::RootDir)) => true,
+            (Some(Component::Prefix(_)), _) | (_, Some(Component::Prefix(_))) => false,
+            (Some(Component::RootDir), _) | (_, Some(Component::RootDir)) => false,
+            _ => true,
+        }
     }
 
     fn is_module_segment(name: &str) -> bool {
@@ -114,5 +153,68 @@ impl<'a> HvigorModulePath<'a> {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_page_path_is_relative_to_hvigor_project_path() {
+        let page = HvigorModulePath::new("/project/meituan/src/main/ets/pages/Index.ets");
+
+        assert_eq!(
+            page.entry_page_path(
+                Path::new("/project/meituan/src/main/ets"),
+                Path::new("/project"),
+            ),
+            "pages/Index"
+        );
+    }
+
+    #[test]
+    fn dependency_entry_page_path_keeps_package_identity() {
+        let page = HvigorModulePath::new(
+            "/project/oh_modules/.ohpm/appmock@1.0.0/oh_modules/appmock/src/main/ets/pages/Index.ets",
+        );
+
+        assert_eq!(
+            page.entry_page_path(
+                Path::new("/project/meituan/src/main/ets"),
+                Path::new("/project"),
+            ),
+            "../../../../oh_modules/.ohpm/appmock@1.0.0/oh_modules/appmock/src/main/ets/pages/Index"
+        );
+    }
+
+    #[test]
+    fn relative_rolldown_id_is_resolved_from_project_root() {
+        let page = HvigorModulePath::new(
+            "oh_modules/.ohpm/appmock@1.0.0/oh_modules/appmock/src/main/ets/pages/Index.ets",
+        );
+
+        assert_eq!(
+            page.entry_page_path(
+                Path::new("/project/meituan/src/main/ets"),
+                Path::new("/project"),
+            ),
+            "../../../../oh_modules/.ohpm/appmock@1.0.0/oh_modules/appmock/src/main/ets/pages/Index"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dependency_entry_page_path_uses_slashes_on_windows() {
+        let page =
+            HvigorModulePath::new(r"C:\project\oh_modules\appmock\src\main\ets\pages\Index.ets");
+
+        assert_eq!(
+            page.entry_page_path(
+                Path::new(r"C:\project\meituan\src\main\ets"),
+                Path::new(r"C:\project"),
+            ),
+            "../../../../oh_modules/appmock/src/main/ets/pages/Index"
+        );
     }
 }

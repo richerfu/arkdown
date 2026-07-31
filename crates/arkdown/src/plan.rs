@@ -50,6 +50,11 @@ pub struct BundleInput {
     pub loader_json_path: PathBuf,
     /// Absolute project root used as rolldown's `cwd`.
     pub project_root: PathBuf,
+    /// Hvigor `projectConfig.projectPath` / `aceModuleRoot`.
+    ///
+    /// For ETS compilation this is the current module's `src/main/ets`
+    /// directory and is the base for generated `registerNamedRoute.pagePath`.
+    pub project_path: PathBuf,
     /// Module root directory (used to resolve relative entry paths).
     pub module_root: PathBuf,
     /// OHOS module name (e.g., `"entry"`, `"feature"`).
@@ -413,6 +418,7 @@ mod tests {
             input: BundleInput {
                 loader_json_path: loader_json_path.clone(),
                 project_root: PathBuf::from("/project"),
+                project_path: PathBuf::from("/project/entry/src/main/ets"),
                 module_root: PathBuf::from("/project/entry"),
                 module_name: "entry".to_string(),
                 module_path_map: Vec::new(),

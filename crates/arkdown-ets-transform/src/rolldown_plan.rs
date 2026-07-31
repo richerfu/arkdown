@@ -38,6 +38,7 @@ pub struct RolldownEtsTransformPlan {
     pub bundle_name: String,
     pub module_name: String,
     pub project_root: PathBuf,
+    pub project_path: PathBuf,
     pub module_roots: Vec<(String, PathBuf)>,
     pub api_version: u32,
     pub resource_refs: Arc<FxHashMap<String, ResourceReference>>,
@@ -56,6 +57,7 @@ impl RolldownEtsTransformPlan {
         bundle_name: impl Into<String>,
         module_name: impl Into<String>,
         project_root: PathBuf,
+        project_path: PathBuf,
         module_roots: Vec<(String, PathBuf)>,
         api_version: u32,
         resource_refs: FxHashMap<String, ResourceReference>,
@@ -68,6 +70,7 @@ impl RolldownEtsTransformPlan {
             bundle_name: bundle_name.into(),
             module_name: module_name.into(),
             project_root,
+            project_path,
             module_roots,
             api_version,
             resource_refs: Arc::new(resource_refs),
@@ -107,6 +110,7 @@ impl RolldownEtsTransformPlan {
             bundle_name: Some(self.bundle_name.clone()),
             module_name: Some(self.module_name.clone()),
             project_root: Some(self.project_root.clone()),
+            project_path: Some(self.project_path.clone()),
             module_roots: self.module_roots.clone(),
             component_metadata: Arc::clone(&self.component_metadata),
             sources: self.sources.clone(),
@@ -523,6 +527,7 @@ mod tests {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -559,6 +564,7 @@ preferences.getPreferencesSync(undefined, { name: "x" });"#,
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -593,6 +599,7 @@ export { emitter };"#,
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -635,6 +642,7 @@ export const raw = $rawfile("data/config.json");"#,
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -688,6 +696,7 @@ export default class ChannelManager {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -728,6 +737,7 @@ export default class ChannelManager {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -791,6 +801,7 @@ export { media };"#,
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -830,6 +841,7 @@ export enum VideoScaleMode {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -864,6 +876,7 @@ export enum VideoScaleMode {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -904,6 +917,7 @@ export namespace Zip {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -928,6 +942,7 @@ export namespace Zip {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -972,6 +987,7 @@ struct Index {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -1011,6 +1027,64 @@ export struct ToastSubWindowPage {
             "SDK processUISyntax/createEntryNode registers dependency @Entry sources:\n{}",
             output.code
         );
+        assert!(
+            output.code.contains(
+                "pagePath: \"../../../../oh_modules/@msi/runtime/src/main/ets/toast/pages/ToastSubWindowPage\""
+            ),
+            "SDK process_module_package.pathMessage computes pagePath relative to projectPath:\n{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn dependency_entry_named_index_does_not_collide_with_host_page() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_checker_mode(CheckerMode::Off);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let source = r#"@Entry
+@Component
+struct Index {
+  build() {}
+}"#;
+        let host = transformer
+            .transform(source, "/tmp/project/entry/src/main/ets/pages/Index.ets")
+            .unwrap()
+            .expect("host @Entry source must be transformed");
+        let dependency = transformer
+            .transform(
+                source,
+                "/tmp/project/oh_modules/.ohpm/appmock@1.0.0/oh_modules/appmock/src/main/ets/pages/Index.ets",
+            )
+            .unwrap()
+            .expect("dependency @Entry source must be transformed");
+
+        assert!(
+            host.code.contains("pagePath: \"pages/Index\""),
+            "host pagePath must remain relative to projectPath:\n{}",
+            host.code
+        );
+        assert!(
+            dependency.code.contains(
+                "pagePath: \"../../../../oh_modules/.ohpm/appmock@1.0.0/oh_modules/appmock/src/main/ets/pages/Index\""
+            ),
+            "dependency pagePath must retain package identity like SDK path.relative:\n{}",
+            dependency.code
+        );
+        assert!(
+            !dependency.code.contains("pagePath: \"pages/Index\""),
+            "dependency @Entry must not overwrite the host pages/Index registration:\n{}",
+            dependency.code
+        );
     }
 
     #[test]
@@ -1022,6 +1096,7 @@ export struct ToastSubWindowPage {
             "com.example",
             "entry",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -1063,6 +1138,7 @@ struct Card {
             "com.sankuai.hmeituan",
             "meituan",
             PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/meituan/src/main/ets"),
             vec![("meituan".to_string(), PathBuf::from("/tmp/project/meituan"))],
             12,
             FxHashMap::default(),
