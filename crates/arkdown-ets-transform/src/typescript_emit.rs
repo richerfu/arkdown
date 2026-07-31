@@ -26,7 +26,9 @@ use oxc_span::{SourceType, SPAN};
 use oxc_syntax::{number::NumberBase, operator::UnaryOperator};
 use oxc_transformer::{TransformOptions, Transformer};
 
-use crate::source::{SourceClassifier, TransformSourceFile, TransformSourceSnapshot};
+use crate::source::{
+    CompileArktsSourceType, SourceClassifier, TransformSourceFile, TransformSourceSnapshot,
+};
 use crate::ModuleExportNameText;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,7 +140,7 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
     }
 
     fn source_type(&self) -> SourceType {
-        SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true))
+        CompileArktsSourceType::from_id(self.id)
     }
 }
 
@@ -157,8 +159,7 @@ pub struct TypeScriptDirectiveFlags {
 impl TypeScriptDirectiveFlags {
     pub fn from_source(source: &str, id: &str) -> Self {
         let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let source_type = CompileArktsSourceType::from_id(id);
         let parsed = Parser::new(&allocator, source, source_type).parse();
         Self::from_program(&parsed.program)
     }
@@ -473,8 +474,7 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         }
 
         let allocator = Allocator::default();
-        let source_type = SourceType::from_path(&self.source.path)
-            .unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let source_type = CompileArktsSourceType::from_path(&self.source.path);
         let parsed = Parser::new(&allocator, &self.source.source, source_type).parse();
         let include_ambient_enums =
             SourceClassifier::classify_path(&self.source.path).is_declaration();

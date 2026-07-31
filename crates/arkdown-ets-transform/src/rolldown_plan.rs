@@ -18,7 +18,9 @@ use crate::module_rewrite::{
     ModuleAnalyzerKind, TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
 };
 use crate::resource_transform::{ResourceReference, ResourceReferenceRewriter};
-use crate::source::{SourceClassifier, SourceFileKind, TransformSourceSnapshot};
+use crate::source::{
+    CompileArktsSourceType, SourceClassifier, SourceFileKind, TransformSourceSnapshot,
+};
 use crate::source_map;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::{self, CheckerMode, ModuleExportIndex, TransformOptions};
@@ -343,8 +345,7 @@ impl<'a> HvigorSourcePipeline<'a> {
 
     fn format_source(&self, source: &str) -> String {
         let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let source_type = CompileArktsSourceType::from_id(self.id);
         let parsed = Parser::new(&allocator, source, source_type).parse();
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             return source.to_string();
@@ -399,8 +400,7 @@ impl<'a, 'pipeline> HvigorPrepareSourcePass<'a, 'pipeline> {
     }
 
     fn source_type(&self) -> SourceType {
-        SourceType::from_path(self.pipeline.id)
-            .unwrap_or_else(|_| SourceType::ts().with_module(true))
+        CompileArktsSourceType::from_id(self.pipeline.id)
     }
 
     fn finish<'s>(
@@ -501,8 +501,7 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
     }
 
     fn source_type(&self) -> SourceType {
-        SourceType::from_path(self.pipeline.id)
-            .unwrap_or_else(|_| SourceType::ts().with_module(true))
+        CompileArktsSourceType::from_id(self.pipeline.id)
     }
 }
 
@@ -767,6 +766,43 @@ export default class ChannelManager {
         assert!(
             module_source.contains("import lazy textToSpeech from \"@hms.ai.textToSpeech\";"),
             "es2abc source must retain lazy module semantics:\n{module_source}"
+        );
+    }
+
+    #[test]
+    fn compile_transform_adapts_lazy_import_in_ts_dependency_for_rolldown() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "import lazy nativePlayer from 'libaemonplayer.so';\nnativePlayer.create();\n",
+                "/tmp/project/oh_modules/mtmediaplayer/src/main/ts/MTMediaPlayer.ts",
+            )
+            .unwrap()
+            .expect("ArkTS lazy import in a .ts dependency must produce transform output");
+
+        assert!(
+            output
+                .code
+                .contains("import nativePlayer from \"libaemonplayer.so\";"),
+            "Rolldown must receive a standard import from a .ts dependency:\n{}",
+            output.code
+        );
+        assert!(!output.code.contains("import lazy"), "{}", output.code);
+        assert_eq!(
+            output.module_source_code.as_deref(),
+            Some("import lazy nativePlayer from 'libaemonplayer.so';\nnativePlayer.create();\n"),
+            "CompileArkTS must retain the original lazy-import semantics"
         );
     }
 

@@ -16,6 +16,7 @@ use oxc_ast::{
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
+#[cfg(test)]
 use oxc_span::SourceType;
 use oxc_syntax::symbol::SymbolId;
 
@@ -24,7 +25,9 @@ use crate::module_emit::{
     ModuleStringLiteral, NamedImportBinding, ReExportSplitEmitter, TypeImportBinding,
     ValueImportBinding,
 };
-use crate::source::{SourceClassifier, TransformSourceFile, TransformSourceSnapshot};
+use crate::source::{
+    CompileArktsSourceType, SourceClassifier, TransformSourceFile, TransformSourceSnapshot,
+};
 use crate::transform::source_emit::CodegenSourceText;
 use crate::ModuleExportNameText;
 
@@ -426,8 +429,7 @@ where
 
     pub fn rewrite(mut self) -> Cow<'a, str> {
         let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let source_type = CompileArktsSourceType::from_id(self.id);
         let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return Cow::Borrowed(self.source);
@@ -509,6 +511,9 @@ where
                 if self.should_skip_type_only(import.import_kind.is_type(), &import.source) {
                     return;
                 }
+                self.rewrite_literal(&mut import.source);
+            }
+            Statement::LazyImportDeclaration(import) => {
                 self.rewrite_literal(&mut import.source);
             }
             Statement::ExportNamedDeclaration(export) => {
@@ -845,8 +850,7 @@ impl<'a> ModuleExportClassifier<'a> {
         }
 
         let allocator = Allocator::default();
-        let source_type = SourceType::from_path(&self.source.path)
-            .unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let source_type = CompileArktsSourceType::from_path(&self.source.path);
         let parsed = Parser::new(&allocator, &self.source.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             visited.remove(&source_path);

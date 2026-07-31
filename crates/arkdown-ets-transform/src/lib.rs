@@ -13,8 +13,10 @@
 //!
 //! ## Key constraints
 //!
-//! - `.ets` files use OXC `SourceType::ets()` (ohos-rs/oxc fork, pinned rev).
-//! - `.ts` files use OXC TS parser; `.js` uses OXC JS parser.
+//! - CompileArkTS `.ets` and runtime `.ts` files use OXC `SourceType::ets()`
+//!   (ohos-rs/oxc fork, pinned rev), because ArkTS extensions are legal in
+//!   either filename form.
+//! - `.js` uses OXC JS parser.
 //! - `.d.ts`/`.d.ets` are excluded by both `SourceClassifier` and the pipeline.
 //! - Transform crate does not read SDK, profile, package, or resource files directly.
 
@@ -41,7 +43,10 @@ pub use rolldown_plan::{
     RolldownEtsTransformOutput, RolldownEtsTransformPlan, RolldownEtsTransformer,
     TransformEntrySourceId,
 };
-pub use source::{SourceClassifier, TransformResolvedStaticModule, TransformSourceSnapshot};
+pub use source::{
+    CompileArktsSourceType, SourceClassifier, TransformResolvedStaticModule,
+    TransformSourceSnapshot,
+};
 pub use sys_resource::SystemResourceReferenceLoader;
 pub use transform::{ArktsTransformer, ArkuiComponentNameCollector, CheckerMode};
 pub use typescript_emit::TypeScriptDirectiveFlags;

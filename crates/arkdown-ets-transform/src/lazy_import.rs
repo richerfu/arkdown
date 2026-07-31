@@ -3,14 +3,14 @@
 //! Corresponds to SDK `process_lazy_import.js`.
 
 use std::borrow::Cow;
-use std::path::Path;
 
 use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::{ImportOrExportKind, LazyImportDeclaration, Statement};
 use oxc_ast::AstBuilder;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+
+use crate::source::CompileArktsSourceType;
 
 /// Adapts hvigor's `import lazy` TypeScript to the standard import syntax
 /// understood by the current Rolldown scanner. The CompileArkTS module source
@@ -27,8 +27,7 @@ impl<'a> LazyImportRolldownAdapter<'a> {
 
     pub(crate) fn lower(&self) -> Cow<'a, str> {
         let allocator = Allocator::default();
-        let source_type = SourceType::from_path(Path::new(self.id))
-            .unwrap_or_else(|_| SourceType::ts().with_module(true));
+        let source_type = CompileArktsSourceType::from_id(self.id);
         let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return Cow::Borrowed(self.source);

@@ -15,7 +15,7 @@ use oxc_span::SourceType;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::source::{SourceClassifier, SourceFileKind};
+use crate::source::{CompileArktsSourceType, SourceClassifier, SourceFileKind};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 
 mod sdk_semantics;
@@ -668,7 +668,7 @@ impl<'a> SdkComponentLoader<'a> {
         for path in paths {
             let source = fs::read_to_string(&path)?;
             let allocator = Allocator::default();
-            let source_type = SourceType::from_path(&path).unwrap_or_else(|_| SourceType::ets());
+            let source_type = CompileArktsSourceType::from_path(&path);
             let parsed = Parser::new(&allocator, &source, source_type).parse();
             // The platform API directory contains declarations accepted by the
             // SDK's TypeScript version but not yet accepted by OXC. OXC still

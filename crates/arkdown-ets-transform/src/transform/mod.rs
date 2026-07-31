@@ -32,10 +32,12 @@ use oxc_ast::ast::{
 use oxc_ast::NONE;
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType, SPAN};
+#[cfg(test)]
+use oxc_span::SourceType;
+use oxc_span::{GetSpan, SPAN};
 
 use crate::error::EtsTransformError;
-use crate::source::TransformSourceSnapshot;
+use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps, StylesMethodInfo,
 };
@@ -150,7 +152,7 @@ impl<'a> ArkuiComponentNameCollector<'a> {
     /// component expressions rather than source-text matching.
     pub fn collect(&self) -> Result<Vec<String>, EtsTransformError> {
         let allocator = Allocator::default();
-        let source_type = SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ets());
+        let source_type = CompileArktsSourceType::from_id(self.id);
         let parsed = match self.options {
             Some(options) => {
                 options
@@ -238,8 +240,7 @@ impl<'a> ArktsTransformer<'a> {
         let content = source.content.as_str();
 
         let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(&source.id.id).unwrap_or_else(|_| SourceType::ets());
+        let source_type = CompileArktsSourceType::from_id(&source.id.id);
         let mut parsed = options
             .component_metadata
             .parse_ets(&allocator, content, source_type);
