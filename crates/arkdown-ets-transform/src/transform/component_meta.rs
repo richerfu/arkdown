@@ -6,8 +6,7 @@ use std::{
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, Declaration,
-    ExportDefaultDeclarationKind, Expression, Program, Statement, StructElement, StructStatement,
+    Declaration, ExportDefaultDeclarationKind, Program, Statement, StructElement, StructStatement,
     TSEnumDeclaration,
 };
 use oxc_ast_visit::Visit;
@@ -19,20 +18,9 @@ use serde_json::Value;
 use crate::source::{SourceClassifier, SourceFileKind};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 
-struct ComponentMapRuntimeName;
+mod sdk_semantics;
 
-impl ComponentMapRuntimeName {
-    const MAP: &'static str = "Map";
-    const SET: &'static str = "Set";
-
-    fn is_map(name: &str) -> bool {
-        name == Self::MAP
-    }
-
-    fn is_set(name: &str) -> bool {
-        name == Self::SET
-    }
-}
+use sdk_semantics::SdkArkUiSemanticSnapshot;
 
 #[derive(Debug, Clone, Default)]
 pub struct ComponentMetadata {
@@ -83,7 +71,7 @@ impl ComponentMetadata {
             .is_some_and(|methods| methods.contains(method_name))
             || self
                 .bind_object_properties
-                .get(SdkPreDefineBindingExtractor::ALL_COMPONENTS)
+                .get(SdkArkUiSemanticSnapshot::ALL_COMPONENTS)
                 .is_some_and(|methods| methods.contains(method_name))
             || (method_name == self.runtime_names.method_create
                 && self.create_bind_components.contains(component_name))
@@ -483,100 +471,6 @@ impl ArkuiRuntimeNames {
             || property_name == self.preview
             || property_name == self.title
     }
-
-    fn set_from_pre_define_binding(&mut self, name: &str, value: &str) {
-        match name {
-            "COMPONENT_FOREACH" => self.component_for_each = value.to_string(),
-            "COMPONENT_LAZYFOREACH" => self.component_lazy_for_each = value.to_string(),
-            "COMPONENT_REPEAT" => self.component_repeat = value.to_string(),
-            "REPEAT_EACH" => self.repeat_each = value.to_string(),
-            "REPEAT_TEMPLATE" => self.repeat_template = value.to_string(),
-            "LIST_ITEM" => self.component_list_item = value.to_string(),
-            "GRID_ITEM" => self.component_grid_item = value.to_string(),
-            "ARC_LIST_ITEM" => self.component_arc_list_item = value.to_string(),
-            "COMPONENT_BUTTON" => self.component_button = value.to_string(),
-            "NAVIGATION" => self.component_navigation = value.to_string(),
-            "NAV_DESTINATION" => self.component_nav_destination = value.to_string(),
-            "COMPONENT_GESTURE_GROUP" => self.component_gesture_group = value.to_string(),
-            "COMPONENT_GESTURE" => self.component_gesture = value.to_string(),
-            "COMPONENT_IF" => self.component_if = value.to_string(),
-            "XCOMPONENTTYPE" => self.xcomponent_type = value.to_string(),
-            "XCOMPONENTTYPE_CONTAINER" => self.xcomponent_type_container = value.to_string(),
-            "COMPONENT_CREATE_FUNCTION" => self.method_create = value.to_string(),
-            "COMPONENT_CREATE_CHILD_FUNCTION" => self.method_create_with_child = value.to_string(),
-            "COMPONENT_CREATE_LABEL_FUNCTION" => self.method_create_with_label = value.to_string(),
-            "COMPONENT_CREATE_RECYCLE" => self.method_create_recycle = value.to_string(),
-            "COMPONENT_RENDER_FUNCTION" => self.method_render = value.to_string(),
-            "COMPONENT_POP_FUNCTION" => self.method_pop = value.to_string(),
-            "BUILDER_ATTR_BIND" => self.method_bind = value.to_string(),
-            "GLOBAL_CONTEXT" => self.component_context = value.to_string(),
-            "COMPONENT_COMMON" => self.component_common = value.to_string(),
-            "COMPONENT_RECYCLE" => self.component_recycle = value.to_string(),
-            "ATTRIBUTE_ATTRIBUTE_MODIFIER" => self.attribute_modifier = value.to_string(),
-            "ATTRIBUTE_CONTENT_MODIFIER" => self.content_modifier = value.to_string(),
-            "ATTRIBUTE_MENUITEM_CONTENT_MODIFIER" => {
-                self.menu_item_content_modifier = value.to_string()
-            }
-            "BUILDER_PARAM_PROXY" => self.builder_param_proxy = value.to_string(),
-            "CALL" => self.method_call = value.to_string(),
-            "$$_THIS" => self.double_dollar_this = value.to_string(),
-            "$$_NEW_VALUE" => self.double_dollar_new_value = value.to_string(),
-            "$$_VALUE" => self.double_dollar_value = value.to_string(),
-            "$$_CHANGE_EVENT" => self.double_dollar_change_event = value.to_string(),
-            "CUSTOM_DIALOG_CONTROLLER_BUILDER" => {
-                self.custom_dialog_controller_builder = value.to_string()
-            }
-            "HEADER" => self.header = value.to_string(),
-            "INDICATORBUILDER" => self.indicator_builder = value.to_string(),
-            "FOOTER" => self.footer = value.to_string(),
-            "START" => self.start = value.to_string(),
-            "END" => self.end = value.to_string(),
-            "PREVIEW" => self.preview = value.to_string(),
-            "TITLE" => self.title = value.to_string(),
-            "GESTURE_ENUM_KEY" => self.gesture_priority = value.to_string(),
-            "GESTURE_ENUM_VALUE_LOW" => self.gesture_priority_low = value.to_string(),
-            "ISINITIALRENDER" => self.is_initial_render = value.to_string(),
-            "ELMTID" => self.elmt_id = value.to_string(),
-            "COMPONENT_CONSTRUCTOR_UNDEFINED" => self.undefined = value.to_string(),
-            "VIEWSTACKPROCESSOR" => self.view_stack_processor = value.to_string(),
-            "STARTGETACCESSRECORDINGFOR" => self.start_get_access_recording_for = value.to_string(),
-            "STOPGETACCESSRECORDING" => self.stop_get_access_recording = value.to_string(),
-            "OBSERVECOMPONENTCREATION2" => self.observe_component_creation2 = value.to_string(),
-            "ITEMCREATION" => self.item_creation = value.to_string(),
-            "ITEMCREATION2" => self.item_creation2 = value.to_string(),
-            "_ITEM" => self.item_binding = value.to_string(),
-            "FOREACHITEMGENFUNCTION" => self.foreach_item_gen_function = value.to_string(),
-            "FOREACHUPDATEFUNCTION" => self.foreach_update_function = value.to_string(),
-            "__LAZYFOREACHITEMGENFUNCTION" => {
-                self.lazy_foreach_item_gen_function = value.to_string()
-            }
-            "__LAZYFOREACHITEMIDFUNC" => self.lazy_foreach_item_id_func = value.to_string(),
-            "DEEPRENDERFUNCTION" => self.deep_render_function = value.to_string(),
-            "IFELSEBRANCHUPDATEFUNCTION" => self.if_else_branch_update_function = value.to_string(),
-            "COMPONENT_CALL" => self.component_call = value.to_string(),
-            "COMPONENT_PARAMS_LAMBDA_FUNCTION" => self.params_lambda = value.to_string(),
-            "COMPONENT_PARAMS_FUNCTION" => self.params_generator_prefix = value.to_string(),
-            "UPDATE_STATE_VARS_OF_CHIND_BY_ELMTID" => {
-                self.update_state_vars_of_child_by_elmt_id = value.to_string()
-            }
-            "OBSERVE_RECYCLE_COMPONENT_CREATION" => {
-                self.observe_recycle_component_creation = value.to_string()
-            }
-            "RECYCLE_NODE" => self.recycle_node = value.to_string(),
-            "COMPONENT_ABOUTTOREUSEINTERNAL_FUNCTION" => {
-                self.about_to_reuse_internal = value.to_string()
-            }
-            "ABOUT_TO_REUSE" => self.about_to_reuse = value.to_string(),
-            "COMPONENT_RERENDER_FUNCTION" => self.rerender = value.to_string(),
-            "FUNCTION" => self.function_type = value.to_string(),
-            "NAME" => self.name = value.to_string(),
-            "RESOURCE_NAME_MODULE" => self.module_name = value.to_string(),
-            "PAGE_PATH" => self.page_path = value.to_string(),
-            "IS_USER_CREATE_STACK" => self.is_user_create_stack = value.to_string(),
-            "BUILDER_ATTR_NAME" => self.builder_property = value.to_string(),
-            _ => {}
-        }
-    }
 }
 
 struct ComponentMetadataLoader<'a> {
@@ -593,43 +487,36 @@ impl<'a> ComponentMetadataLoader<'a> {
             SdkArkTsOptionsLoader::new(self.ets_loader_path.join("tsconfig.json")).load()?,
         );
         let atomic_components = self.load_atomic_components()?;
-        let component_map_metadata = ComponentMapMetadataLoader::new(
-            self.ets_loader_path.join("lib").join("component_map.js"),
-        )
-        .load()?;
-        let bind_rules =
-            SdkPreDefineBindingLoader::new(self.ets_loader_path.join("lib").join("pre_define.js"))
-                .load()?;
+        let semantics = SdkArkUiSemanticSnapshot::bundled();
         let enum_names = SdkEnumNameLoader::new(self.ets_loader_path).load()?;
         let sdk_declarations = SdkComponentLoader::new(self.ets_loader_path).load()?;
 
-        let mut bind_object_properties = bind_rules.bind_object_properties;
-        if !component_map_metadata.custom_builder_properties.is_empty() {
+        let mut bind_object_properties = semantics.bind_object_properties;
+        if !semantics.custom_builder_properties.is_empty() {
             bind_object_properties
-                .entry(SdkPreDefineBindingExtractor::ALL_COMPONENTS.to_string())
+                .entry(SdkArkUiSemanticSnapshot::ALL_COMPONENTS.to_string())
                 .or_default()
-                .extend(component_map_metadata.custom_builder_properties);
+                .extend(semantics.custom_builder_properties);
         }
 
         Ok(ComponentMetadata {
             arkts_parser,
             atomic_components,
-            need_pop_components: component_map_metadata.need_pop_components,
+            need_pop_components: semantics.need_pop_components,
             bind_object_properties,
-            create_bind_components: bind_rules.create_bind_components,
-            custom_builder_properties_without_key: component_map_metadata
-                .custom_builder_properties_without_key,
-            style_double_dollar_attrs: bind_rules.style_double_dollar_attrs,
-            component_double_dollar_properties: bind_rules.component_double_dollar_properties,
-            bind_popup_attrs: bind_rules.bind_popup_attrs,
-            bind_drag_attrs: bind_rules.bind_drag_attrs,
-            gesture_attr_names: component_map_metadata.gesture_attr_names,
-            gesture_type_names: component_map_metadata.gesture_type_names,
+            create_bind_components: semantics.create_bind_components,
+            custom_builder_properties_without_key: semantics.custom_builder_properties_without_key,
+            style_double_dollar_attrs: semantics.style_double_dollar_attrs,
+            component_double_dollar_properties: semantics.component_double_dollar_properties,
+            bind_popup_attrs: semantics.bind_popup_attrs,
+            bind_drag_attrs: semantics.bind_drag_attrs,
+            gesture_attr_names: semantics.gesture_attr_names,
+            gesture_type_names: semantics.gesture_type_names,
             enum_names,
             sdk_components: sdk_declarations.components,
             sdk_enum_exports: sdk_declarations.enum_exports,
             sdk_namespace_enum_exports: sdk_declarations.namespace_enum_exports,
-            runtime_names: bind_rules.runtime_names,
+            runtime_names: ArkuiRuntimeNames::default(),
         })
     }
 
@@ -1093,309 +980,6 @@ impl<'a> SdkComponentDeclarationCollector<'a> {
     }
 }
 
-#[derive(Debug, Default)]
-struct PreDefineBindingRules {
-    bind_object_properties: FxHashMap<String, FxHashSet<String>>,
-    create_bind_components: FxHashSet<String>,
-    style_double_dollar_attrs: FxHashSet<String>,
-    component_double_dollar_properties: FxHashMap<String, FxHashSet<String>>,
-    bind_popup_attrs: FxHashSet<String>,
-    bind_drag_attrs: FxHashSet<String>,
-    runtime_names: ArkuiRuntimeNames,
-}
-
-struct SdkPreDefineBindingLoader {
-    pre_define_path: PathBuf,
-}
-
-impl SdkPreDefineBindingLoader {
-    fn new(pre_define_path: PathBuf) -> Self {
-        Self { pre_define_path }
-    }
-
-    fn load(&self) -> anyhow::Result<PreDefineBindingRules> {
-        let source = fs::read_to_string(&self.pre_define_path)?;
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, &source, SourceType::cjs()).parse();
-        if !parsed.diagnostics.is_empty() {
-            anyhow::bail!(
-                "failed to parse SDK pre_define.js at {}",
-                self.pre_define_path.display()
-            );
-        }
-        Ok(SdkPreDefineBindingExtractor::new(&parsed.program).extract())
-    }
-}
-
-struct SdkPreDefineBindingExtractor<'a> {
-    program: &'a Program<'a>,
-    string_bindings: FxHashMap<String, String>,
-}
-
-impl<'a> SdkPreDefineBindingExtractor<'a> {
-    const ALL_COMPONENTS: &'static str = "AllComponents";
-    const BIND_OBJECT_PROPERTY: &'static str = "BIND_OBJECT_PROPERTY";
-    const CREATE_BIND_COMPONENT: &'static str = "CREATE_BIND_COMPONENT";
-    const STYLE_ADD_DOUBLE_DOLLAR: &'static str = "STYLE_ADD_DOUBLE_DOLLAR";
-    const PROPERTIES_ADD_DOUBLE_DOLLAR: &'static str = "PROPERTIES_ADD_DOUBLE_DOLLAR";
-    const BIND_POPUP_SET: &'static str = "BIND_POPUP_SET";
-    const BIND_DRAG_SET: &'static str = "BIND_DRAG_SET";
-
-    fn new(program: &'a Program<'a>) -> Self {
-        let string_bindings = Self::collect_string_bindings(program);
-        Self {
-            program,
-            string_bindings,
-        }
-    }
-
-    fn extract(&self) -> PreDefineBindingRules {
-        let mut rules = PreDefineBindingRules::default();
-        for statement in &self.program.body {
-            let Statement::VariableDeclaration(declaration) = statement else {
-                continue;
-            };
-            for declarator in &declaration.declarations {
-                let Some(init) = declarator.init.as_ref() else {
-                    continue;
-                };
-                match Self::binding_name(&declarator.id) {
-                    Some(Self::BIND_OBJECT_PROPERTY) => {
-                        if let Some(map) = self.map_literal_string_sets(init) {
-                            rules.bind_object_properties = map;
-                        }
-                    }
-                    Some(Self::CREATE_BIND_COMPONENT) => {
-                        if let Some(values) = self.set_literal_strings(init) {
-                            rules.create_bind_components = values;
-                        }
-                    }
-                    Some(Self::STYLE_ADD_DOUBLE_DOLLAR) => {
-                        if let Some(values) = self.set_literal_strings(init) {
-                            rules.style_double_dollar_attrs = values;
-                        }
-                    }
-                    Some(Self::PROPERTIES_ADD_DOUBLE_DOLLAR) => {
-                        if let Some(map) = self.map_literal_string_sets(init) {
-                            rules.component_double_dollar_properties = map;
-                        }
-                    }
-                    Some(Self::BIND_POPUP_SET) => {
-                        if let Some(values) = self.set_literal_strings(init) {
-                            rules.bind_popup_attrs = values;
-                        }
-                    }
-                    Some(Self::BIND_DRAG_SET) => {
-                        if let Some(values) = self.set_literal_strings(init) {
-                            rules.bind_drag_attrs = values;
-                        }
-                    }
-                    _ => {}
-                }
-                self.extract_from_expression(init, &mut rules);
-                if let Some(name) = Self::binding_name(&declarator.id) {
-                    if let Some(value) = Self::string_literal(init) {
-                        rules
-                            .runtime_names
-                            .set_from_pre_define_binding(name, &value);
-                    }
-                }
-            }
-        }
-        rules
-    }
-
-    fn collect_string_bindings(program: &Program<'_>) -> FxHashMap<String, String> {
-        let mut bindings = FxHashMap::default();
-        for statement in &program.body {
-            let Statement::VariableDeclaration(declaration) = statement else {
-                continue;
-            };
-            for declarator in &declaration.declarations {
-                let Some(name) = Self::binding_name(&declarator.id) else {
-                    continue;
-                };
-                let Some(init) = declarator.init.as_ref() else {
-                    continue;
-                };
-                if let Some(value) = Self::string_literal(init) {
-                    bindings.insert(name.to_string(), value);
-                }
-            }
-        }
-        bindings
-    }
-
-    fn extract_from_expression(&self, expr: &Expression<'_>, rules: &mut PreDefineBindingRules) {
-        match expr {
-            Expression::AssignmentExpression(assignment) => {
-                if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::BIND_OBJECT_PROPERTY)
-                {
-                    if let Some(map) = self.map_literal_string_sets(&assignment.right) {
-                        rules.bind_object_properties = map;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::CREATE_BIND_COMPONENT)
-                {
-                    if let Some(values) = self.set_literal_strings(&assignment.right) {
-                        rules.create_bind_components = values;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::STYLE_ADD_DOUBLE_DOLLAR)
-                {
-                    if let Some(values) = self.set_literal_strings(&assignment.right) {
-                        rules.style_double_dollar_attrs = values;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::PROPERTIES_ADD_DOUBLE_DOLLAR)
-                {
-                    if let Some(map) = self.map_literal_string_sets(&assignment.right) {
-                        rules.component_double_dollar_properties = map;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::BIND_POPUP_SET)
-                {
-                    if let Some(values) = self.set_literal_strings(&assignment.right) {
-                        rules.bind_popup_attrs = values;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::BIND_DRAG_SET)
-                {
-                    if let Some(values) = self.set_literal_strings(&assignment.right) {
-                        rules.bind_drag_attrs = values;
-                    }
-                }
-                self.extract_from_expression(&assignment.right, rules);
-            }
-            Expression::ParenthesizedExpression(parenthesized) => {
-                self.extract_from_expression(&parenthesized.expression, rules);
-            }
-            Expression::SequenceExpression(sequence) => {
-                for expression in &sequence.expressions {
-                    self.extract_from_expression(expression, rules);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn binding_name<'b>(pattern: &'b BindingPattern<'b>) -> Option<&'b str> {
-        match pattern {
-            BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
-            _ => None,
-        }
-    }
-
-    fn assignment_target_name<'b>(target: &'b AssignmentTarget<'b>) -> Option<&'b str> {
-        match target {
-            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                Some(identifier.name.as_str())
-            }
-            AssignmentTarget::StaticMemberExpression(member) => Some(member.property.name.as_str()),
-            _ => None,
-        }
-    }
-
-    fn initializer_value<'b>(expr: &'b Expression<'b>) -> Option<&'b Expression<'b>> {
-        match expr {
-            Expression::AssignmentExpression(assignment) => {
-                Self::initializer_value(&assignment.right)
-            }
-            Expression::ParenthesizedExpression(parenthesized) => {
-                Self::initializer_value(&parenthesized.expression)
-            }
-            Expression::SequenceExpression(sequence) => sequence
-                .expressions
-                .last()
-                .and_then(Self::initializer_value),
-            _ => Some(expr),
-        }
-    }
-
-    fn map_literal_string_sets(
-        &self,
-        expr: &Expression<'_>,
-    ) -> Option<FxHashMap<String, FxHashSet<String>>> {
-        let Expression::NewExpression(new_expr) = Self::initializer_value(expr)? else {
-            return None;
-        };
-        let Expression::Identifier(callee) = &new_expr.callee else {
-            return None;
-        };
-        if !ComponentMapRuntimeName::is_map(callee.name.as_str()) {
-            return None;
-        }
-        let Some(Argument::ArrayExpression(entries)) = new_expr.arguments.first() else {
-            return None;
-        };
-        let mut map = FxHashMap::default();
-        for entry in &entries.elements {
-            let Expression::ArrayExpression(pair) = entry.as_expression()? else {
-                return None;
-            };
-            let key = pair
-                .elements
-                .first()
-                .and_then(ArrayExpressionElement::as_expression)
-                .and_then(|expression| self.string_value(expression))?;
-            let values = pair
-                .elements
-                .get(1)
-                .and_then(ArrayExpressionElement::as_expression)
-                .and_then(|expression| self.set_literal_strings(expression))?;
-            map.insert(key, values);
-        }
-        Some(map)
-    }
-
-    fn set_literal_strings(&self, expr: &Expression<'_>) -> Option<FxHashSet<String>> {
-        let Expression::NewExpression(new_expr) = Self::initializer_value(expr)? else {
-            return None;
-        };
-        let Expression::Identifier(callee) = &new_expr.callee else {
-            return None;
-        };
-        if !ComponentMapRuntimeName::is_set(callee.name.as_str()) {
-            return None;
-        }
-        let Some(Argument::ArrayExpression(array)) = new_expr.arguments.first() else {
-            return None;
-        };
-        let mut out = FxHashSet::default();
-        for element in &array.elements {
-            let value = element
-                .as_expression()
-                .and_then(|expression| self.string_value(expression))?;
-            out.insert(value);
-        }
-        Some(out)
-    }
-
-    fn string_value(&self, expr: &Expression<'_>) -> Option<String> {
-        match Self::initializer_value(expr)? {
-            Expression::Identifier(identifier) => {
-                self.string_bindings.get(identifier.name.as_str()).cloned()
-            }
-            expression => Self::string_literal(expression),
-        }
-    }
-
-    fn string_literal(expr: &Expression<'_>) -> Option<String> {
-        match expr {
-            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
-            Expression::AssignmentExpression(assignment) => Self::string_literal(&assignment.right),
-            Expression::ParenthesizedExpression(parenthesized) => {
-                Self::string_literal(&parenthesized.expression)
-            }
-            Expression::SequenceExpression(sequence) => {
-                sequence.expressions.last().and_then(Self::string_literal)
-            }
-            _ => None,
-        }
-    }
-}
-
 struct SdkEnumNameLoader<'a> {
     ets_loader_path: &'a Path,
 }
@@ -1485,338 +1069,11 @@ impl<'a> SdkEnumDeclarationCollector<'a> {
     }
 }
 
-#[derive(Debug, Default)]
-struct ComponentMapMetadata {
-    need_pop_components: FxHashSet<String>,
-    gesture_attr_names: FxHashSet<String>,
-    gesture_type_names: FxHashSet<String>,
-    custom_builder_properties: FxHashSet<String>,
-    custom_builder_properties_without_key: FxHashSet<String>,
-}
-
-struct ComponentMapMetadataLoader {
-    component_map_path: PathBuf,
-}
-
-impl ComponentMapMetadataLoader {
-    fn new(component_map_path: PathBuf) -> Self {
-        Self { component_map_path }
-    }
-
-    fn load(&self) -> anyhow::Result<ComponentMapMetadata> {
-        let source = fs::read_to_string(&self.component_map_path)?;
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, &source, SourceType::cjs()).parse();
-        if !parsed.diagnostics.is_empty() {
-            anyhow::bail!(
-                "failed to parse SDK component_map.js at {}",
-                self.component_map_path.display()
-            );
-        }
-        ComponentMapMetadataExtractor::new(&parsed.program)
-            .extract()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "failed to find component metadata in SDK component_map.js at {}",
-                    self.component_map_path.display()
-                )
-            })
-    }
-}
-
-struct ComponentMapMetadataExtractor<'a> {
-    program: &'a Program<'a>,
-}
-
-impl<'a> ComponentMapMetadataExtractor<'a> {
-    const CUSTOM_BUILDER_PROPERTIES: &'static str = "CUSTOM_BUILDER_PROPERTIES";
-    const CUSTOM_BUILDER_PROPERTIES_WITHOUTKEY: &'static str =
-        "CUSTOM_BUILDER_PROPERTIES_WITHOUTKEY";
-    const GESTURE_ATTRS: &'static str = "GESTURE_ATTRS";
-    const GESTURE_TYPE_NAMES: &'static str = "GESTURE_TYPE_NAMES";
-    const NEEDPOP_COMPONENT: &'static str = "NEEDPOP_COMPONENT";
-
-    fn new(program: &'a Program<'a>) -> Self {
-        Self { program }
-    }
-
-    fn extract(&self) -> Option<ComponentMapMetadata> {
-        let mut metadata = ComponentMapMetadata::default();
-        for statement in &self.program.body {
-            let Statement::VariableDeclaration(declaration) = statement else {
-                continue;
-            };
-            for declarator in &declaration.declarations {
-                let Some(init) = declarator.init.as_ref() else {
-                    continue;
-                };
-                match Self::binding_name(&declarator.id) {
-                    Some(Self::NEEDPOP_COMPONENT) => {
-                        if let Some(values) = Self::set_literal_strings(init) {
-                            metadata.need_pop_components = values;
-                        }
-                    }
-                    Some(Self::GESTURE_ATTRS) => {
-                        if let Some(values) = Self::set_literal_strings(init) {
-                            metadata.gesture_attr_names = values;
-                        }
-                    }
-                    Some(Self::GESTURE_TYPE_NAMES) => {
-                        if let Some(values) = Self::set_literal_strings(init) {
-                            metadata.gesture_type_names = values;
-                        }
-                    }
-                    Some(Self::CUSTOM_BUILDER_PROPERTIES) => {
-                        if let Some(values) = Self::set_literal_strings(init) {
-                            metadata.custom_builder_properties = values;
-                        }
-                    }
-                    Some(Self::CUSTOM_BUILDER_PROPERTIES_WITHOUTKEY) => {
-                        if let Some(values) = Self::set_literal_strings(init) {
-                            metadata.custom_builder_properties_without_key = values;
-                        }
-                    }
-                    _ => {}
-                }
-                Self::extract_from_expression(init, &mut metadata);
-            }
-        }
-        (!metadata.need_pop_components.is_empty()
-            || !metadata.gesture_type_names.is_empty()
-            || !metadata.custom_builder_properties.is_empty()
-            || !metadata.custom_builder_properties_without_key.is_empty())
-        .then_some(metadata)
-    }
-
-    fn extract_from_expression(expr: &Expression<'_>, metadata: &mut ComponentMapMetadata) {
-        match expr {
-            Expression::AssignmentExpression(assignment) => {
-                if Self::assignment_target_name(&assignment.left) == Some(Self::NEEDPOP_COMPONENT) {
-                    if let Some(values) = Self::set_literal_strings(&assignment.right) {
-                        metadata.need_pop_components = values;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::GESTURE_ATTRS)
-                {
-                    if let Some(values) = Self::set_literal_strings(&assignment.right) {
-                        metadata.gesture_attr_names = values;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::GESTURE_TYPE_NAMES)
-                {
-                    if let Some(values) = Self::set_literal_strings(&assignment.right) {
-                        metadata.gesture_type_names = values;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::CUSTOM_BUILDER_PROPERTIES)
-                {
-                    if let Some(values) = Self::set_literal_strings(&assignment.right) {
-                        metadata.custom_builder_properties = values;
-                    }
-                } else if Self::assignment_target_name(&assignment.left)
-                    == Some(Self::CUSTOM_BUILDER_PROPERTIES_WITHOUTKEY)
-                {
-                    if let Some(values) = Self::set_literal_strings(&assignment.right) {
-                        metadata.custom_builder_properties_without_key = values;
-                    }
-                }
-                Self::extract_from_expression(&assignment.right, metadata);
-            }
-            Expression::ParenthesizedExpression(parenthesized) => {
-                Self::extract_from_expression(&parenthesized.expression, metadata);
-            }
-            Expression::SequenceExpression(sequence) => {
-                for expression in &sequence.expressions {
-                    Self::extract_from_expression(expression, metadata);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn binding_name<'b>(pattern: &'b BindingPattern<'b>) -> Option<&'b str> {
-        match pattern {
-            BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
-            _ => None,
-        }
-    }
-
-    fn assignment_target_name<'b>(target: &'b AssignmentTarget<'b>) -> Option<&'b str> {
-        match target {
-            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                Some(identifier.name.as_str())
-            }
-            _ => None,
-        }
-    }
-
-    fn set_literal_strings(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
-        if let Expression::ParenthesizedExpression(parenthesized) = expr {
-            return Self::set_literal_strings(&parenthesized.expression);
-        }
-        let Expression::SequenceExpression(sequence) = expr else {
-            return Self::set_literal_strings_from_new_set(expr);
-        };
-        sequence
-            .expressions
-            .last()
-            .and_then(Self::set_literal_strings_from_new_set)
-    }
-
-    fn set_literal_strings_from_new_set(expr: &Expression<'_>) -> Option<FxHashSet<String>> {
-        let Expression::NewExpression(new_expr) = expr else {
-            return None;
-        };
-        let Expression::Identifier(callee) = &new_expr.callee else {
-            return None;
-        };
-        if !ComponentMapRuntimeName::is_set(callee.name.as_str()) {
-            return None;
-        }
-        let Some(Argument::ArrayExpression(array)) = new_expr.arguments.first() else {
-            return None;
-        };
-        let mut out = FxHashSet::default();
-        for element in &array.elements {
-            let ArrayExpressionElement::StringLiteral(literal) = element else {
-                return None;
-            };
-            out.insert(literal.value.to_string());
-        }
-        Some(out)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxc_allocator::Allocator;
-
-    fn parse_component_map_metadata(source: &str) -> ComponentMapMetadata {
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
-        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        ComponentMapMetadataExtractor::new(&parsed.program)
-            .extract()
-            .expect("component metadata")
-    }
-
     #[test]
-    fn extracts_need_pop_from_upstream_minified_declarator_shape() {
-        let values = parse_component_map_metadata(
-            r#"const JS_BIND_COMPONENTS=new Set(["ForEach"]),NEEDPOP_COMPONENT=(exports.JS_BIND_COMPONENTS=JS_BIND_COMPONENTS,new Set(["Blank","Search"]));"#,
-        )
-        .need_pop_components;
-        assert!(values.contains("Blank"));
-        assert!(values.contains("Search"));
-        assert_eq!(values.len(), 2);
-    }
-
-    #[test]
-    fn extracts_need_pop_from_assignment_initializer_shape() {
-        let values = parse_component_map_metadata(
-            r#"const componentMap=(NEEDPOP_COMPONENT=new Set(["Blank","Search"]));"#,
-        )
-        .need_pop_components;
-        assert!(values.contains("Blank"));
-        assert!(values.contains("Search"));
-        assert_eq!(values.len(), 2);
-    }
-
-    #[test]
-    fn extracts_gesture_type_names_from_upstream_minified_declarator_shape() {
-        let values = parse_component_map_metadata(
-            r#"const GESTURE_ATTRS=new Set(["onAction"]),GESTURE_TYPE_NAMES=(exports.GESTURE_ATTRS=GESTURE_ATTRS,new Set(["TapGesture","GestureGroup"]));"#,
-        );
-        assert!(values.gesture_attr_names.contains("onAction"));
-        assert!(values.gesture_type_names.contains("TapGesture"));
-        assert!(values.gesture_type_names.contains("GestureGroup"));
-        assert_eq!(values.gesture_type_names.len(), 2);
-    }
-
-    #[test]
-    fn extracts_custom_builder_properties_from_upstream_minified_declarator_shape() {
-        let values = parse_component_map_metadata(
-            r#"const NEEDPOP_COMPONENT=new Set(["Blank"]),CUSTOM_BUILDER_PROPERTIES=(exports.NEEDPOP_COMPONENT=NEEDPOP_COMPONENT,new Set(["title","navDestination"])),CUSTOM_BUILDER_PROPERTIES_WITHOUTKEY=(exports.CUSTOM_BUILDER_PROPERTIES=CUSTOM_BUILDER_PROPERTIES,new Set(["create"]));"#,
-        );
-        assert!(values.custom_builder_properties.contains("title"));
-        assert!(values.custom_builder_properties.contains("navDestination"));
-        assert_eq!(values.custom_builder_properties.len(), 2);
-        assert!(values
-            .custom_builder_properties_without_key
-            .contains("create"));
-    }
-
-    #[test]
-    fn extracts_double_dollar_and_builder_sets_from_pre_define() {
-        let allocator = Allocator::default();
-        let source = r#"const STYLE_ADD_DOUBLE_DOLLAR=new Set(["bindSheet"]);
-const PROPERTIES_ADD_DOUBLE_DOLLAR=new Map([["TextInput",new Set(["text"])]]);
-const BIND_POPUP_SET=new Set(["bindPopup"]);
-const BIND_DRAG_SET=new Set(["onDragStart"]);
-const BUILDER_PARAM_PROXY="makeBuilderParameterProxy";
-const CALL="call";
-const $$_THIS="$$this";
-const $$_NEW_VALUE="newValue";
-const $$_VALUE="value";
-const $$_CHANGE_EVENT="changeEvent";"#;
-        let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
-        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let rules = SdkPreDefineBindingExtractor::new(&parsed.program).extract();
-        assert!(rules.style_double_dollar_attrs.contains("bindSheet"));
-        assert!(rules
-            .component_double_dollar_properties
-            .get("TextInput")
-            .is_some_and(|properties| properties.contains("text")));
-        assert!(rules.bind_popup_attrs.contains("bindPopup"));
-        assert!(rules.bind_drag_attrs.contains("onDragStart"));
-        assert_eq!(
-            rules.runtime_names.builder_param_proxy,
-            "makeBuilderParameterProxy"
-        );
-        assert_eq!(rules.runtime_names.double_dollar_this, "$$this");
-        assert_eq!(
-            rules.runtime_names.double_dollar_change_event,
-            "changeEvent"
-        );
-    }
-
-    #[test]
-    fn extracts_double_dollar_sets_from_sdk_exported_identifier_shape() {
-        let allocator = Allocator::default();
-        let source = r#"const BIND_POPUP=exports.BIND_POPUP="bindPopup",
-BIND_SHEET=exports.BIND_SHEET="bindSheet",
-TEXT_INPUT=exports.TEXT_INPUT="TextInput",
-TEXT=exports.TEXT="text",
-ALL_COMPONENTS=exports.ALL_COMPONENTS="AllComponents",
-BIND_OBJECT_PROPERTY=exports.BIND_OBJECT_PROPERTY=new Map([[ALL_COMPONENTS,new Set([BIND_SHEET])]]),
-STYLE_ADD_DOUBLE_DOLLAR=exports.STYLE_ADD_DOUBLE_DOLLAR=new Set([BIND_POPUP,BIND_SHEET]),
-PROPERTIES_ADD_DOUBLE_DOLLAR=exports.PROPERTIES_ADD_DOUBLE_DOLLAR=new Map([[TEXT_INPUT,new Set([TEXT])]]),
-BIND_POPUP_SET=exports.BIND_POPUP_SET=new Set([BIND_POPUP]);"#;
-        let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
-        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let rules = SdkPreDefineBindingExtractor::new(&parsed.program).extract();
-        assert!(rules.style_double_dollar_attrs.contains("bindPopup"));
-        assert!(rules.style_double_dollar_attrs.contains("bindSheet"));
-        assert!(
-            rules
-                .component_double_dollar_properties
-                .get("TextInput")
-                .is_some_and(|properties| properties.contains("text")),
-            "SDK exported identifier constants must feed PROPERTIES_ADD_DOUBLE_DOLLAR"
-        );
-        assert!(
-            rules
-                .bind_object_properties
-                .get("AllComponents")
-                .is_some_and(|properties| properties.contains("bindSheet")),
-            "SDK exported identifier constants must feed BIND_OBJECT_PROPERTY"
-        );
-        assert!(rules.bind_popup_attrs.contains("bindPopup"));
-    }
-
-    #[test]
-    fn loads_sdk_enum_names_from_declarations() {
+    fn loads_sdk_declarations_with_bundled_arkui_semantics() {
         let metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/ets-loader"
@@ -1824,6 +1081,8 @@ BIND_POPUP_SET=exports.BIND_POPUP_SET=new Set([BIND_POPUP]);"#;
         .expect("test ets-loader metadata");
         assert!(metadata.is_known_enum("FontWeight"));
         assert!(metadata.is_known_enum("ImageInterpolation"));
+        assert!(metadata.needs_pop("Blank"));
+        assert!(metadata.needs_pop("Search"));
         assert_eq!(metadata.runtime_names().component_for_each, "ForEach");
         assert_eq!(
             metadata.runtime_names().component_gesture_group,
@@ -1831,7 +1090,11 @@ BIND_POPUP_SET=exports.BIND_POPUP_SET=new Set([BIND_POPUP]);"#;
         );
         assert!(metadata.is_gesture_attribute_name("gesture"));
         assert!(metadata.is_gesture_attribute_name("priorityGesture"));
+        assert!(metadata.is_gesture_type_name("TapGesture"));
         assert!(metadata.is_builder_attribute_method("Navigation", "navDestination"));
+        assert!(metadata.is_builder_attribute_method("Text", "bindContextMenuWithResponse"));
+        assert!(metadata.is_builder_attribute_method("Web", "bindSelectionMenu"));
+        assert!(metadata.is_builder_attribute_method("ListItemGroup", "create"));
         assert_eq!(
             metadata.runtime_names().method_create_with_child,
             "createWithChild"
@@ -1849,6 +1112,7 @@ BIND_POPUP_SET=exports.BIND_POPUP_SET=new Set([BIND_POPUP]);"#;
         assert_eq!(metadata.runtime_names().method_call, "call");
         assert!(metadata.is_style_double_dollar_attr("bindSheet"));
         assert!(metadata.is_component_double_dollar_property("TextInput", "text"));
+        assert!(metadata.is_component_double_dollar_property("TextTimer", "isCountDown"));
         assert!(metadata.is_bind_popup_attr("bindPopup"));
         assert!(metadata.is_bind_drag_attr("onDragStart"));
         assert!(metadata.is_builder_attribute_without_key("create"));
