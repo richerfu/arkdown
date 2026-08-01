@@ -44,7 +44,9 @@ use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 
 use arkdown_core::OutputTarget;
-use arkdown_path::{lexical_normalize, strip_relative_prefix, ModuleSpecifier, SpecifierKind};
+use arkdown_path::{
+    lexical_normalize, strip_relative_prefix, AbsPath, ModuleSpecifier, SpecifierKind,
+};
 use arkdown_resolver::{OhosResolver, PkgBriefInfo, ResolverConfig};
 use rolldown_common::ModuleInfo;
 use rolldown_plugin::{
@@ -334,7 +336,8 @@ impl PackagePlugin {
     /// module build, matching a top-level Rolldown plugin configuration.
     pub fn with_module_root(mut self, module_root: Option<PathBuf>) -> Self {
         self.module_root = module_root.map(|root| {
-            root.canonicalize()
+            AbsPath::canonicalize(&root)
+                .map(AbsPath::into_path_buf)
                 .unwrap_or_else(|_| lexical_normalize(&root))
         });
         self
@@ -354,8 +357,8 @@ impl PackagePlugin {
         let Some(scope) = &self.module_root else {
             return true;
         };
-        let candidate = module_root
-            .canonicalize()
+        let candidate = AbsPath::canonicalize(module_root)
+            .map(AbsPath::into_path_buf)
             .unwrap_or_else(|_| lexical_normalize(module_root));
         scope == &candidate
     }
@@ -585,7 +588,8 @@ impl<'a> TransformEntrySources<'a> {
                 .module_root
                 .join(strip_relative_prefix(entry)),
         };
-        path.canonicalize()
+        AbsPath::canonicalize(&path)
+            .map(AbsPath::into_path_buf)
             .unwrap_or_else(|_| lexical_normalize(&path))
             .into_os_string()
             .into_string()

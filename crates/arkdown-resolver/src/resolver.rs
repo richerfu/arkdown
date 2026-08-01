@@ -819,7 +819,7 @@ mod tests {
         match result {
             OhosResolvedModule::RemotePackage { path, pkg_name, .. } => {
                 assert_eq!(pkg_name, "@ohos/utils");
-                assert_eq!(path, std::fs::canonicalize(&entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&entry));
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -913,7 +913,7 @@ mod tests {
             OhosResolvedModule::LocalSource {
                 path, module_type, ..
             } => {
-                assert_eq!(path, std::fs::canonicalize(&helper).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&helper));
                 assert_eq!(module_type, ModuleType::Ets);
             }
             _ => panic!("expected LocalSource"),
@@ -938,7 +938,7 @@ mod tests {
         let result = resolver.resolve(".", &importer).unwrap();
         match result {
             OhosResolvedModule::LocalSource { path, .. } => {
-                assert_eq!(path, std::fs::canonicalize(&index).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&index));
             }
             _ => panic!("expected LocalSource"),
         }
@@ -962,7 +962,7 @@ mod tests {
         let result = resolver.resolve("..", &importer).unwrap();
         match result {
             OhosResolvedModule::LocalSource { path, .. } => {
-                assert_eq!(path, std::fs::canonicalize(&index).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&index));
             }
             _ => panic!("expected LocalSource"),
         }
@@ -1039,7 +1039,7 @@ mod tests {
 
         match result {
             OhosResolvedModule::RemotePackage { path, .. } => {
-                assert_eq!(path, std::fs::canonicalize(&esm_entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&esm_entry));
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -1069,7 +1069,7 @@ mod tests {
         match result {
             OhosResolvedModule::RemotePackage { path, pkg_name, .. } => {
                 assert_eq!(pkg_name, "@example/abTest");
-                assert_eq!(path, std::fs::canonicalize(&entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&entry));
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -1111,7 +1111,7 @@ mod tests {
             } => {
                 assert_eq!(pkg_name, "@ohos/hypium");
                 assert_eq!(pkg_version, "1.0.11");
-                assert_eq!(path, std::fs::canonicalize(&entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&entry));
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -1154,7 +1154,7 @@ mod tests {
             OhosResolvedModule::LocalSource {
                 path, pkg_context, ..
             } => {
-                assert_eq!(path, std::fs::canonicalize(&request).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&request));
                 assert_eq!(
                     pkg_context.expect("pkg context").package_name,
                     "@ohos/network"
@@ -1193,7 +1193,7 @@ mod tests {
                 pkg_version,
                 ..
             } => {
-                assert_eq!(path, std::fs::canonicalize(&entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&entry));
                 assert_eq!(pkg_name, "bignumber.js");
                 assert_eq!(pkg_version, "9.0.1");
             }
@@ -1238,7 +1238,7 @@ mod tests {
         let result = resolver.resolve("long", &importer).unwrap();
         match result {
             OhosResolvedModule::RemotePackage { path, .. } => {
-                assert_eq!(path, std::fs::canonicalize(&esm_entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&esm_entry));
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -1248,7 +1248,7 @@ mod tests {
             .unwrap();
         match result {
             OhosResolvedModule::RemotePackage { path, .. } => {
-                assert_eq!(path, std::fs::canonicalize(&cjs_entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&cjs_entry));
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -1302,7 +1302,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&base64_root, scoped_nested_root.join("base64")).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&base64_root, scoped_nested_root.join("base64")).unwrap();
+        junction::create(&base64_root, scoped_nested_root.join("base64")).unwrap();
 
         let resolver = make_resolver(
             dir.path().to_path_buf(),
@@ -1319,7 +1319,7 @@ mod tests {
                 pkg_version,
                 ..
             } => {
-                assert_eq!(path, std::fs::canonicalize(&base64_entry).unwrap());
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&base64_entry));
                 assert_eq!(pkg_name, "@protobufjs/base64");
                 assert_eq!(pkg_version, "1.1.2");
             }
@@ -1391,9 +1391,9 @@ mod tests {
         let result = resolver.resolve("./Utils", &importer).unwrap();
         match result {
             OhosResolvedModule::LocalSource { path, .. } => {
-                let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                let canonical = arkdown_path::canonicalize_or_owned(&path);
                 let target_canonical =
-                    std::fs::canonicalize(&target_ets.join("Utils.ets")).unwrap();
+                    arkdown_path::canonicalize_or_owned(&target_ets.join("Utils.ets"));
                 assert_eq!(
                     canonical, target_canonical,
                     "source-set overlay must redirect to target-specific file; got: {:?}",
@@ -1419,8 +1419,9 @@ mod tests {
         let result2 = resolver_no_overlay.resolve("./Utils", &importer).unwrap();
         match result2 {
             OhosResolvedModule::LocalSource { path, .. } => {
-                let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
-                let base_canonical = std::fs::canonicalize(&base_ets.join("Utils.ets")).unwrap();
+                let canonical = arkdown_path::canonicalize_or_owned(&path);
+                let base_canonical =
+                    arkdown_path::canonicalize_or_owned(&base_ets.join("Utils.ets"));
                 assert_eq!(
                     canonical, base_canonical,
                     "without overlay, must resolve to base file; got: {:?}",

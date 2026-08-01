@@ -59,6 +59,12 @@ impl<'a> LoaderJsonGoldenNormalizer<'a> {
     if let Some(build_config_path) = &mut loader.build_config_path {
       self.normalize_path(build_config_path);
     }
+    for compile_entry in &mut loader.hvigor_compile_entry {
+      self.normalize_path(compile_entry);
+    }
+    for compile_file in &mut loader.other_compile_files {
+      self.normalize_path(compile_file);
+    }
     for worker in &mut loader.workers {
       self.normalize_path(worker);
     }
@@ -272,7 +278,29 @@ fn test_loader_json_golden_minimal_hap() {
   use arkdown_profile::ProfileProcessor;
   use std::sync::Arc;
 
-  let project_root = workspace_root().join("tests/fixtures/minimal-hap");
+  let fixture_root = workspace_root().join("tests/fixtures/minimal-hap");
+  let isolated_fixture = tempfile::tempdir().expect("create isolated golden fixture");
+  let project_root = isolated_fixture.path().join("minimal-hap");
+  for entry in walkdir::WalkDir::new(&fixture_root) {
+    let entry = entry.expect("read minimal HAP fixture");
+    let relative = entry
+      .path()
+      .strip_prefix(&fixture_root)
+      .expect("fixture entry under fixture root");
+    if relative
+      .components()
+      .any(|component| component.as_os_str() == "build")
+    {
+      continue;
+    }
+    let destination = project_root.join(relative);
+    if entry.file_type().is_dir() {
+      std::fs::create_dir_all(&destination).expect("create isolated fixture directory");
+    } else if entry.file_type().is_file() {
+      std::fs::copy(entry.path(), &destination).expect("copy isolated fixture file");
+    }
+  }
+  let project_root = arkdown_path::canonicalize_or_owned(&project_root);
   let config = Arc::new(ArkdownConfig {
     project_root: project_root.clone(),
     build_mode: BuildMode::Debug,

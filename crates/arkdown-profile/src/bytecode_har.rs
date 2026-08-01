@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::layout::ProfileModuleLayout;
 use crate::loader_json::ByteCodeHarEntry;
 use arkdown_path::{
-    ArtifactPath, ArtifactPathSerializer, ModuleSpecifierText, OhmUrl, SourceFileName,
-    SpecifierKind,
+    canonicalize_or_owned, ArtifactPath, ArtifactPathSerializer, ModuleSpecifierText, OhmUrl,
+    SourceFileName, SpecifierKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -489,7 +489,7 @@ impl ByteCodeHarScanEntry {
     }
 
     fn path_key(path: &Path) -> String {
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = canonicalize_or_owned(path);
         ByteCodeHarPathText::new(&path).string()
     }
 }
@@ -834,7 +834,7 @@ impl LoaderByteCodeHarFields {
             // selected `oh_modules` entry through `realpathSync`.  This is
             // observable for registry packages because OHPM exposes them as
             // symlinks into its content-addressed store.
-            let pkg_dir = std::fs::canonicalize(&pkg_dir).unwrap_or(pkg_dir);
+            let pkg_dir = canonicalize_or_owned(&pkg_dir);
             let entry_file = DynamicImportLibEntry::find_entry_file(&pkg_dir);
             let pkg_module_name = DynamicImportLibEntry::read_module_name(&pkg_dir, dep_name);
 

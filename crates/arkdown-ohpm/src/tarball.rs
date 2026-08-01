@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use arkdown_path::ArtifactPathSerializer;
+use arkdown_path::{lexical_normalize, ArtifactPathSerializer, RelPath};
 use flate2::read::GzDecoder;
 use tar::Archive;
 
@@ -31,6 +31,7 @@ pub fn extract_tgz(tarball_data: &[u8], dest_dir: &Path) -> Result<(), OhpmError
     let mut archive = Archive::new(gz);
 
     std::fs::create_dir_all(dest_dir).map_err(|e| OhpmError::io(dest_dir, e))?;
+    let extraction_root = lexical_normalize(dest_dir);
 
     for entry in archive
         .entries()
@@ -44,36 +45,42 @@ pub fn extract_tgz(tarball_data: &[u8], dest_dir: &Path) -> Result<(), OhpmError
             .map_err(|e| OhpmError::TarballExtract("entry path".into(), e.to_string()))?
             .into_owned();
 
+        // Validate the archive-owned path before stripping its conventional
+        // top-level directory. On Windows, `Path::is_absolute()` alone does
+        // not reject root-relative (`\foo`) or drive-relative (`C:foo`)
+        // entries; RelPath rejects roots, prefixes, and every traversal that
+        // could rise above the extraction base.
+        let archive_path = RelPath::parse(path.clone()).map_err(|_| {
+            OhpmError::UnsafeTarballEntry(UnsafeTarballEntryText::new(&path).string())
+        })?;
+        if archive_path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(OhpmError::UnsafeTarballEntry(
+                UnsafeTarballEntryText::new(archive_path.as_path()).string(),
+            ));
+        }
+
         // Strip the top-level `package/` component (npm/OHPM convention).
-        let stripped = strip_top_component(&path);
+        let stripped = strip_top_component(archive_path.as_path());
 
         // Skip the top-level directory entry itself.
         if stripped.as_os_str().is_empty() {
             continue;
         }
 
-        // Reject absolute paths.
-        if stripped.is_absolute() {
-            return Err(OhpmError::UnsafeTarballEntry(
-                UnsafeTarballEntryText::new(&stripped).string(),
-            ));
-        }
+        let stripped = RelPath::parse(stripped)
+            .map_err(|error| OhpmError::UnsafeTarballEntry(error.to_string()))?;
 
-        // Reject path traversal.
-        if stripped.components().any(|c| c.as_os_str() == "..") {
-            return Err(OhpmError::UnsafeTarballEntry(
-                UnsafeTarballEntryText::new(&stripped).string(),
-            ));
-        }
-
-        let dest = dest_dir.join(&stripped);
+        let dest = extraction_root.join(stripped.as_path());
 
         // Verify destination stays inside dest_dir after normalization.
         // Use lexical normalization (no canonicalize — dest may not exist yet).
-        let normalized_dest = crate_lexical_normalize(&dest);
-        if !normalized_dest.starts_with(dest_dir) {
+        let normalized_dest = lexical_normalize(&dest);
+        if !normalized_dest.starts_with(&extraction_root) {
             return Err(OhpmError::UnsafeTarballEntry(
-                UnsafeTarballEntryText::new(&stripped).string(),
+                UnsafeTarballEntryText::new(stripped.as_path()).string(),
             ));
         }
 
@@ -113,22 +120,6 @@ fn strip_top_component(path: &Path) -> std::path::PathBuf {
     components.as_path().to_path_buf()
 }
 
-/// Lexically normalize a path without touching the filesystem.
-fn crate_lexical_normalize(path: &Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut result = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            c => result.push(c),
-        }
-    }
-    result
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -157,12 +148,5 @@ mod tests {
         let path = Path::new("package/a/b/c.ts");
         let stripped = strip_top_component(path);
         assert_eq!(stripped, Path::new("a/b/c.ts"));
-    }
-
-    #[test]
-    fn test_lexical_normalize_removes_dotdot() {
-        let path = Path::new("/dest/a/../b");
-        let norm = crate_lexical_normalize(path);
-        assert_eq!(norm, Path::new("/dest/b"));
     }
 }

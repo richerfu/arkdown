@@ -14,6 +14,8 @@
 
 use std::path::PathBuf;
 
+use arkdown_path::canonicalize_or_owned;
+
 use crate::cache::{lookup_via_lockfile, ohpm_cache_root};
 use crate::error::OhpmError;
 use crate::integrity;
@@ -137,7 +139,7 @@ impl OhpmResolver {
         // 1. Check local oh_modules/ first.
         let local_candidate = req.issuer_root.join("oh_modules").join(req.name.as_str());
         if local_candidate.is_dir() {
-            let root = std::fs::canonicalize(&local_candidate).unwrap_or(local_candidate);
+            let root = canonicalize_or_owned(&local_candidate);
             return Ok(PackageAcquisitionResult {
                 name: req.name.clone(),
                 root: Some(root),

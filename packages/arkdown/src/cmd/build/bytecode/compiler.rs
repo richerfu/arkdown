@@ -476,6 +476,42 @@ mod tests {
     }
   }
 
+  struct FakeEs2abc;
+
+  impl FakeEs2abc {
+    fn write(root: &Path, args_log: Option<&Path>) -> PathBuf {
+      let path = root.join(if cfg!(windows) {
+        "es2abc.cmd"
+      } else {
+        "es2abc"
+      });
+      let script = if cfg!(windows) {
+        let log_argument = args_log
+          .map(|path| format!(r#">>"{}" echo %~1"#, path.display()))
+          .unwrap_or_default();
+        format!(
+          "@echo off\r\nsetlocal\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\n{log_argument}\r\nif not \"%~1\"==\"--output\" goto next\r\nshift\r\ntype nul > \"%~1\"\r\n:next\r\nshift\r\ngoto loop\r\n:done\r\n"
+        )
+      } else {
+        let log_argument = args_log
+          .map(|path| format!(r#"printf '%s\n' "$@" > "{}""#, path.display()))
+          .unwrap_or_default();
+        format!(
+          "#!/bin/sh\n{log_argument}\nwhile [ \"$1\" != \"\" ]; do if [ \"$1\" = \"--output\" ]; then shift; touch \"$1\"; fi; shift; done\n"
+        )
+      };
+      fs::write(&path, script).unwrap();
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+      }
+      path
+    }
+  }
+
   #[test]
   fn sdk_backend_requires_path() {
     let tmp = tempfile::tempdir().unwrap();
@@ -498,19 +534,7 @@ mod tests {
   fn writes_fixed_files_info_before_sdk_spawn() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("entry.js"), "export {};").unwrap();
-    let es2abc = tmp.path().join("es2abc");
-    fs::write(
-            &es2abc,
-            "#!/bin/sh\nwhile [ \"$1\" != \"\" ]; do if [ \"$1\" = \"--output\" ]; then shift; touch \"$1\"; fi; shift; done\n",
-        )
-        .unwrap();
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt;
-      let mut permissions = fs::metadata(&es2abc).unwrap().permissions();
-      permissions.set_mode(0o755);
-      fs::set_permissions(&es2abc, permissions).unwrap();
-    }
+    let es2abc = FakeEs2abc::write(tmp.path(), None);
 
     let plan = plan(tmp.path());
     let output = Ts2abcCompiler::with_sdk_es2abc_path(es2abc)
@@ -553,23 +577,8 @@ mod tests {
     let module_source = tmp.path().join("module_sources/phone/ets/pages/Index.js");
     fs::create_dir_all(module_source.parent().unwrap()).unwrap();
     fs::write(&module_source, "export {};").unwrap();
-    let es2abc = tmp.path().join("es2abc");
     let args_log = tmp.path().join("es2abc.args");
-    fs::write(
-            &es2abc,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nwhile [ \"$1\" != \"\" ]; do if [ \"$1\" = \"--output\" ]; then shift; touch \"$1\"; fi; shift; done\n",
-                args_log.display()
-            ),
-        )
-        .unwrap();
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt;
-      let mut permissions = fs::metadata(&es2abc).unwrap().permissions();
-      permissions.set_mode(0o755);
-      fs::set_permissions(&es2abc, permissions).unwrap();
-    }
+    let es2abc = FakeEs2abc::write(tmp.path(), Some(&args_log));
 
     let compiler =
       RolldownBytecodeCompiler::new(RolldownBytecodeBackendChoice::Sdk, es2abc, 12, true);

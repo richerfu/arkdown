@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_core::{ArkdownConfig, HarArtifactType};
-use arkdown_path::{ArtifactPath, ArtifactPathSerializer};
+use arkdown_path::{AbsPath, ArtifactPath, ArtifactPathSerializer};
 
 use crate::error::PackError;
 use crate::integrated_hsp::IntegratedHspEntry;
@@ -1482,7 +1482,9 @@ impl<'a> HarArchiveEntries<'a> {
             )));
         }
         let ignore_rules = HarIgnoreRules::load(module_root)?;
-        let main = main.map(|path| path.trim_start_matches("./").replace('\\', "/"));
+        let main = main.map(|path| {
+            ArtifactPathSerializer::rel_to_slash(Path::new(path.trim_start_matches("./")))
+        });
         let mut files = Self::files_under(module_root)?;
         files.sort();
         for path in files {
@@ -1554,9 +1556,9 @@ impl<'a> HarArchiveEntries<'a> {
         module_root: &Path,
         dependencies: &[PathBuf],
     ) -> Result<(), PackError> {
-        let canonical_root = module_root.canonicalize()?;
+        let canonical_root = AbsPath::canonicalize(module_root)?.into_path_buf();
         for dependency in dependencies {
-            let source = if dependency.is_absolute() {
+            let source = if dependency.has_root() {
                 dependency.clone()
             } else {
                 module_root.join(dependency)
@@ -1564,7 +1566,7 @@ impl<'a> HarArchiveEntries<'a> {
             if !source.exists() {
                 continue;
             }
-            let canonical_source = source.canonicalize()?;
+            let canonical_source = AbsPath::canonicalize(&source)?.into_path_buf();
             if !canonical_source.starts_with(&canonical_root) || canonical_source == canonical_root
             {
                 continue;
@@ -1721,7 +1723,9 @@ impl<'a> HarArchiveEntries<'a> {
     fn write_archive(mut self) -> Result<(), PackError> {
         use std::io::Cursor;
 
-        let output_canonical = self.output_path.canonicalize().ok();
+        let output_canonical = AbsPath::canonicalize(self.output_path)
+            .ok()
+            .map(AbsPath::into_path_buf);
         self.collect_parent_directories();
 
         let output = fs_err::File::create(self.output_path)?;
@@ -1755,11 +1759,9 @@ impl<'a> HarArchiveEntries<'a> {
         for (archive_path, source) in &self.files {
             if source == self.output_path
                 || output_canonical.as_ref().is_some_and(|output| {
-                    source
-                        .canonicalize()
+                    AbsPath::canonicalize(source)
                         .ok()
-                        .as_ref()
-                        .is_some_and(|path| path == output)
+                        .is_some_and(|path| path.as_path() == output)
                 })
             {
                 continue;
@@ -1833,7 +1835,8 @@ impl HarIgnoreRules {
     }
 
     fn matchers(pattern: &str) -> Result<Vec<globset::GlobMatcher>, PackError> {
-        let pattern = pattern.trim_start_matches('/').replace('\\', "/");
+        let pattern =
+            ArtifactPathSerializer::rel_to_slash(Path::new(pattern.trim_start_matches('/')));
         let mut patterns = vec![pattern.clone()];
         if !pattern.contains('/') {
             patterns.push(format!("**/{pattern}"));
@@ -1898,7 +1901,9 @@ impl Packager {
         ets_dir: &std::path::Path,
         output_path: &std::path::Path,
     ) -> Result<(), PackError> {
-        let output_canonical = output_path.canonicalize().ok();
+        let output_canonical = AbsPath::canonicalize(output_path)
+            .ok()
+            .map(AbsPath::into_path_buf);
         for entry in walkdir::WalkDir::new(ets_dir)
             .min_depth(1)
             .into_iter()
@@ -2000,7 +2005,11 @@ impl<'a> LoaderOutEtsAsset<'a> {
             return true;
         }
         self.output_canonical
-            .and_then(|output| self.path.canonicalize().ok().map(|path| path == output))
+            .and_then(|output| {
+                AbsPath::canonicalize(self.path)
+                    .ok()
+                    .map(|path| path.as_path() == output)
+            })
             .unwrap_or(false)
     }
 }

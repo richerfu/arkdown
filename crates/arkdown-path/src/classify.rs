@@ -8,7 +8,7 @@
 //! | Forbidden                            | Replacement                        |
 //! |--------------------------------------|------------------------------------|
 //! | `path.contains("oh_modules")`        | [`is_inside_oh_modules`]           |
-//! | `path.starts_with('/')`              | `Path::is_absolute()`              |
+//! | `path.starts_with('/')`              | `Path::has_root()`                 |
 //! | `starts_with("@ohpm:")`              | [`OhmUrl::schema`]                 |
 
 use std::path::Path;

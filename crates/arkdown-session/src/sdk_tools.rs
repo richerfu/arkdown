@@ -21,6 +21,8 @@
 
 use std::path::{Path, PathBuf};
 
+use arkdown_path::HostPlatform;
+
 use crate::sdk::snapshot::SdkSnapshot;
 
 // ---------------------------------------------------------------------------
@@ -36,15 +38,15 @@ use crate::sdk::snapshot::SdkSnapshot;
 pub enum SdkToolKind {
     /// `restool` — resource compiler. Replaced by `arkdown-resource` (SPEC-011).
     Restool,
-    /// `package-tool` — HAP/HSP/HAR packager.
+    /// `app_packing_tool.jar` (or legacy `hmos_app_packing_tool.jar`) packager.
     PackageTool,
-    /// `hap-sign-tool.jar` v2 — HAP signing. Replaced by `arkdown-sign` (SPEC-021).
+    /// `hapsigntoolv2.jar` — HAP signing. Replaced by `arkdown-sign` (SPEC-021).
     HapSignToolV2,
-    /// `hap-to-bin` — HAP-to-binary converter.
+    /// `haptobin_tool.jar` — HAP-to-binary converter.
     HapToBin,
     /// `syscap-tool` — system capability validator.
     SyscapTool,
-    /// `verify-sign-config` — signing config verifier.
+    /// `hap-sign-tool.jar` — signing config verifier.
     VerifySignConfigTool,
     /// `cmake` — CMake build system (native builds).
     Cmake,
@@ -61,11 +63,11 @@ impl SdkToolKind {
     pub fn binary_name(self) -> &'static str {
         match self {
             Self::Restool => "restool",
-            Self::PackageTool => "package-tool",
-            Self::HapSignToolV2 => "hap-sign-tool.jar",
-            Self::HapToBin => "hap-to-bin",
+            Self::PackageTool => "app_packing_tool.jar",
+            Self::HapSignToolV2 => "hapsigntoolv2.jar",
+            Self::HapToBin => "haptobin_tool.jar",
             Self::SyscapTool => "syscap_tool",
-            Self::VerifySignConfigTool => "verify-sign-config",
+            Self::VerifySignConfigTool => "hap-sign-tool.jar",
             Self::Cmake => "cmake",
             Self::NativeNinja => "ninja",
             Self::LlvmStrip => "llvm-strip",
@@ -119,13 +121,25 @@ impl SdkToolPath {
 #[derive(Debug, Clone)]
 pub struct SdkToolResolver {
     sdk_root: PathBuf,
+    compile_sdk_version: String,
+    host: HostPlatform,
 }
 
 impl SdkToolResolver {
     /// Create a resolver from an [`SdkSnapshot`].
     pub fn new(sdk: &SdkSnapshot) -> Self {
+        Self::for_host(sdk, HostPlatform::CURRENT)
+    }
+
+    /// Create a resolver for an explicit host layout.
+    ///
+    /// This is primarily useful for validating SDK snapshots before they are
+    /// transferred to another build host.
+    pub fn for_host(sdk: &SdkSnapshot, host: HostPlatform) -> Self {
         Self {
             sdk_root: sdk.sdk_root.clone(),
+            compile_sdk_version: sdk.compile_sdk_version.clone(),
+            host,
         }
     }
 
@@ -133,11 +147,15 @@ impl SdkToolResolver {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Resolve a tool path under `<sdk_root>/toolchains/<subpath>` with an
-    /// explicit kind.
-    fn tool_at(&self, subpath: &str, kind: SdkToolKind) -> Option<SdkToolPath> {
-        let path = self.sdk_root.join("toolchains").join(subpath);
-        Some(SdkToolPath::new(path, kind))
+    fn toolchains_lib_file(&self, file_name: &str, kind: SdkToolKind) -> SdkToolPath {
+        SdkToolPath::new(
+            self.sdk_root.join("toolchains").join("lib").join(file_name),
+            kind,
+        )
+    }
+
+    fn executable_at(&self, parent: PathBuf, stem: &str, kind: SdkToolKind) -> SdkToolPath {
+        SdkToolPath::new(parent.join(self.host.executable_name(stem)), kind)
     }
 
     /// Return a tool path by kind.
@@ -165,107 +183,144 @@ impl SdkToolResolver {
     /// Upstream: `DefaultSdk.getRestool`.
     /// Note: replaced by `arkdown-resource` (SPEC-011) at compile time.
     pub fn restool(&self) -> Option<SdkToolPath> {
-        self.tool_at("restool", SdkToolKind::Restool)
+        Some(self.executable_at(
+            self.sdk_root.join("toolchains"),
+            "restool",
+            SdkToolKind::Restool,
+        ))
     }
 
-    /// Path to `package-tool`.
+    /// Path to the app packing tool JAR.
     ///
     /// Upstream: `DefaultSdk.getPackageTool`.
     pub fn package_tool(&self) -> Option<SdkToolPath> {
-        self.tool_at("package-tool", SdkToolKind::PackageTool)
+        let file_name =
+            if SdkVersionText::new(&self.compile_sdk_version).is_higher_than([3, 1, 5, 4]) {
+                "app_packing_tool.jar"
+            } else {
+                "hmos_app_packing_tool.jar"
+            };
+        Some(self.toolchains_lib_file(file_name, SdkToolKind::PackageTool))
     }
 
-    /// Path to `hap-sign-tool.jar` (v2).
+    /// Path to `hapsigntoolv2.jar`.
     ///
     /// Upstream: `DefaultSdk.getHapSignToolV2`.
     /// Note: replaced by `arkdown-sign` (SPEC-021) at compile time.
     pub fn hap_sign_tool_v2(&self) -> Option<SdkToolPath> {
-        let path = self
-            .sdk_root
-            .join("toolchains")
-            .join("lib")
-            .join("hap-sign-tool.jar");
-        Some(SdkToolPath::new(path, SdkToolKind::HapSignToolV2))
+        Some(self.toolchains_lib_file("hapsigntoolv2.jar", SdkToolKind::HapSignToolV2))
     }
 
-    /// Path to `hap-to-bin`.
+    /// Path to `haptobin_tool.jar`.
     ///
     /// Upstream: `DefaultSdk.getHapTobin`.
     pub fn hap_to_bin(&self) -> Option<SdkToolPath> {
-        self.tool_at("hap-to-bin", SdkToolKind::HapToBin)
+        let path = self
+            .sdk_root
+            .join("js")
+            .join("build-tools")
+            .join("binary-tools")
+            .join("haptobin_tool.jar");
+        Some(SdkToolPath::new(path, SdkToolKind::HapToBin))
     }
 
     /// Path to `syscap_tool`.
     ///
     /// Upstream: `DefaultSdk.getSysCapTool`.
     pub fn syscap_tool(&self) -> Option<SdkToolPath> {
-        let binary = if cfg!(windows) {
-            "syscap_tool.exe"
-        } else {
-            "syscap_tool"
-        };
-        self.tool_at(binary, SdkToolKind::SyscapTool)
+        Some(self.executable_at(
+            self.sdk_root.join("toolchains"),
+            "syscap_tool",
+            SdkToolKind::SyscapTool,
+        ))
     }
 
-    /// Path to `verify-sign-config`.
+    /// Path to `hap-sign-tool.jar`, used by verify-sign-config tasks.
     ///
     /// Upstream: `DefaultSdk.getVerifySignConfigTool`.
     pub fn verify_sign_config_tool(&self) -> Option<SdkToolPath> {
-        self.tool_at("verify-sign-config", SdkToolKind::VerifySignConfigTool)
+        Some(self.toolchains_lib_file("hap-sign-tool.jar", SdkToolKind::VerifySignConfigTool))
     }
 
     /// Path to the CMake binary bundled with the OHOS native SDK.
     ///
     /// Upstream: `DefaultSdk.getCmakeTool`.
     pub fn cmake_tool(&self) -> Option<SdkToolPath> {
-        let path = self
-            .sdk_root
-            .join("native")
-            .join("build-tools")
-            .join("cmake")
-            .join("bin")
-            .join("cmake");
-        Some(SdkToolPath::new(path, SdkToolKind::Cmake))
+        Some(
+            self.executable_at(
+                self.sdk_root
+                    .join("native")
+                    .join("build-tools")
+                    .join("cmake")
+                    .join("bin"),
+                "cmake",
+                SdkToolKind::Cmake,
+            ),
+        )
     }
 
     /// Path to the Ninja binary bundled with the OHOS native SDK.
     ///
     /// Upstream: `DefaultSdk.getNativeNinjaTool`.
     pub fn native_ninja_tool(&self) -> Option<SdkToolPath> {
-        let path = self
-            .sdk_root
-            .join("native")
-            .join("build-tools")
-            .join("cmake")
-            .join("bin")
-            .join("ninja");
-        Some(SdkToolPath::new(path, SdkToolKind::NativeNinja))
+        Some(
+            self.executable_at(
+                self.sdk_root
+                    .join("native")
+                    .join("build-tools")
+                    .join("cmake")
+                    .join("bin"),
+                "ninja",
+                SdkToolKind::NativeNinja,
+            ),
+        )
     }
 
     /// Path to `llvm-strip` from the OHOS LLVM toolchain.
     ///
     /// Upstream: `DefaultSdk.getSdkLlvmStrip`.
     pub fn llvm_strip(&self) -> Option<SdkToolPath> {
-        let path = self
-            .sdk_root
-            .join("native")
-            .join("llvm")
-            .join("bin")
-            .join("llvm-strip");
-        Some(SdkToolPath::new(path, SdkToolKind::LlvmStrip))
+        Some(self.executable_at(
+            self.sdk_root.join("native").join("llvm").join("bin"),
+            "llvm-strip",
+            SdkToolKind::LlvmStrip,
+        ))
     }
 
     /// Path to `llvm-readelf` from the OHOS LLVM toolchain.
     ///
     /// Upstream: `DefaultSdk.getSdkLlvmReadElf`.
     pub fn llvm_read_elf(&self) -> Option<SdkToolPath> {
-        let path = self
-            .sdk_root
-            .join("native")
-            .join("llvm")
-            .join("bin")
-            .join("llvm-readelf");
-        Some(SdkToolPath::new(path, SdkToolKind::LlvmReadElf))
+        Some(self.executable_at(
+            self.sdk_root.join("native").join("llvm").join("bin"),
+            "llvm-readelf",
+            SdkToolKind::LlvmReadElf,
+        ))
+    }
+}
+
+struct SdkVersionText<'a> {
+    value: &'a str,
+}
+
+impl<'a> SdkVersionText<'a> {
+    fn new(value: &'a str) -> Self {
+        Self { value }
+    }
+
+    fn is_higher_than(&self, expected: [u32; 4]) -> bool {
+        let mut actual = self
+            .value
+            .split('.')
+            .map(|component| component.parse::<u32>().unwrap_or(0));
+        for expected_component in expected {
+            match actual.next().unwrap_or(0).cmp(&expected_component) {
+                std::cmp::Ordering::Greater => return true,
+                std::cmp::Ordering::Less => return false,
+                std::cmp::Ordering::Equal => {}
+            }
+        }
+        actual.any(|component| component != 0)
     }
 }
 
@@ -288,17 +343,17 @@ mod tests {
     #[test]
     fn resolver_returns_paths_from_sdk_root() {
         let sdk = TestSdk::snapshot("/sdk/ohos/12");
-        let resolver = SdkToolResolver::new(&sdk);
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Linux);
         assert_eq!(
             resolver.package_tool().unwrap().path,
-            PathBuf::from("/sdk/ohos/12/toolchains/package-tool")
+            PathBuf::from("/sdk/ohos/12/toolchains/lib/app_packing_tool.jar")
         );
     }
 
     #[test]
     fn restool_path_under_toolchains() {
         let sdk = TestSdk::snapshot("/sdk/ohos/12");
-        let resolver = SdkToolResolver::new(&sdk);
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Linux);
         let path = resolver.restool().unwrap();
         assert_eq!(path.path, PathBuf::from("/sdk/ohos/12/toolchains/restool"));
         assert_eq!(path.kind, SdkToolKind::Restool);
@@ -307,18 +362,50 @@ mod tests {
     #[test]
     fn hap_sign_tool_v2_under_lib() {
         let sdk = TestSdk::snapshot("/sdk/ohos/12");
-        let resolver = SdkToolResolver::new(&sdk);
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Linux);
         let path = resolver.hap_sign_tool_v2().unwrap();
         assert_eq!(
             path.path,
+            PathBuf::from("/sdk/ohos/12/toolchains/lib/hapsigntoolv2.jar")
+        );
+    }
+
+    #[test]
+    fn latest_sdk_jar_tools_match_hvigor_component_layout() {
+        let sdk = TestSdk::snapshot("/sdk/ohos/12");
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Windows);
+
+        assert_eq!(
+            resolver.hap_to_bin().unwrap().path,
+            PathBuf::from("/sdk/ohos/12/js/build-tools/binary-tools/haptobin_tool.jar")
+        );
+        assert_eq!(
+            resolver.verify_sign_config_tool().unwrap().path,
             PathBuf::from("/sdk/ohos/12/toolchains/lib/hap-sign-tool.jar")
+        );
+        assert!(!resolver
+            .package_tool()
+            .unwrap()
+            .path
+            .to_string_lossy()
+            .ends_with(".exe"));
+    }
+
+    #[test]
+    fn legacy_sdk_uses_hmos_app_packing_tool() {
+        let sdk =
+            SdkSnapshot::from_parts(PathBuf::from("/sdk/ohos/8"), 8, 8, "3.1.5.4".to_string());
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Linux);
+        assert_eq!(
+            resolver.package_tool().unwrap().path,
+            PathBuf::from("/sdk/ohos/8/toolchains/lib/hmos_app_packing_tool.jar")
         );
     }
 
     #[test]
     fn cmake_under_build_tools() {
         let sdk = TestSdk::snapshot("/sdk/ohos/12");
-        let resolver = SdkToolResolver::new(&sdk);
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Linux);
         let path = resolver.cmake_tool().unwrap();
         assert_eq!(
             path.path,
@@ -333,7 +420,7 @@ mod tests {
     #[test]
     fn llvm_strip_under_native_llvm() {
         let sdk = TestSdk::snapshot("/sdk/ohos/12");
-        let resolver = SdkToolResolver::new(&sdk);
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Linux);
         let path = resolver.llvm_strip().unwrap();
         assert!(path.path.to_str().unwrap().contains("native/llvm/bin"));
         assert!(path.path.to_str().unwrap().ends_with("llvm-strip"));
@@ -344,5 +431,28 @@ mod tests {
         assert_eq!(SdkToolKind::Restool.binary_name(), "restool");
         assert_eq!(SdkToolKind::Cmake.binary_name(), "cmake");
         assert_eq!(SdkToolKind::LlvmStrip.binary_name(), "llvm-strip");
+    }
+
+    #[test]
+    fn windows_sdk_tools_use_explicit_exe_names() {
+        let sdk = TestSdk::snapshot(r"C:\Huawei\Sdk\openharmony");
+        let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Windows);
+
+        for (kind, expected) in [
+            (SdkToolKind::Restool, "restool.exe"),
+            (SdkToolKind::SyscapTool, "syscap_tool.exe"),
+            (SdkToolKind::Cmake, "cmake.exe"),
+            (SdkToolKind::NativeNinja, "ninja.exe"),
+            (SdkToolKind::LlvmStrip, "llvm-strip.exe"),
+            (SdkToolKind::LlvmReadElf, "llvm-readelf.exe"),
+        ] {
+            assert_eq!(
+                resolver
+                    .tool_path(kind)
+                    .and_then(|tool| tool.path.file_name().map(|name| name.to_owned()))
+                    .as_deref(),
+                Some(std::ffi::OsStr::new(expected))
+            );
+        }
     }
 }

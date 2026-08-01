@@ -52,7 +52,7 @@ use arkdown_core::{
   BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibFilterOption, NativeLibOption,
   NativeLibPackageSelection,
 };
-use arkdown_path::{ArtifactPathSerializer, HvigorNativeLibraryPattern};
+use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer, HvigorNativeLibraryPattern};
 use arkdown_session::dependency_graph::snapshot::{
   DependencyGraphSnapshot, DependencyNodeSnapshot,
 };
@@ -228,12 +228,18 @@ impl NativeLibPackageInfo {
 pub struct NativeSdkToolchain {
   cmake: Option<PathBuf>,
   ninja: Option<PathBuf>,
+  llvm_strip: Option<PathBuf>,
   native_dir: Option<PathBuf>,
   toolchain_file: Option<PathBuf>,
 }
 
 impl NativeSdkToolchain {
-  pub fn new(sdk_root: PathBuf, cmake: Option<PathBuf>, ninja: Option<PathBuf>) -> Self {
+  pub fn new(
+    sdk_root: PathBuf,
+    cmake: Option<PathBuf>,
+    ninja: Option<PathBuf>,
+    llvm_strip: Option<PathBuf>,
+  ) -> Self {
     let native_dir = sdk_root.join("native");
     let toolchain_file = native_dir
       .join("build")
@@ -242,6 +248,7 @@ impl NativeSdkToolchain {
     Self {
       cmake,
       ninja,
+      llvm_strip,
       native_dir: Some(native_dir),
       toolchain_file: Some(toolchain_file),
     }
@@ -297,15 +304,7 @@ impl NativeSdkToolchain {
   }
 
   fn llvm_strip_path(&self) -> Option<PathBuf> {
-    let executable = if cfg!(windows) {
-      "llvm-strip.exe"
-    } else {
-      "llvm-strip"
-    };
-    self
-      .native_dir
-      .as_ref()
-      .map(|native_dir| native_dir.join("llvm").join("bin").join(executable))
+    self.llvm_strip.clone()
   }
 }
 
@@ -809,7 +808,10 @@ impl DebugSymbolCollector {
     }
     #[cfg(windows)]
     {
-      std::os::windows::fs::symlink_dir(source, destination)
+      // Latest hvigor passes `junction` to Node's fs.symlinkSync on Windows.
+      // Junctions avoid the Developer Mode/administrator requirement of a
+      // directory symbolic link while preserving the same directory view.
+      junction::create(source, destination)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -955,7 +957,7 @@ impl<'a> NativeLibCollector<'a> {
     }
     let self_package = self.self_package_info();
     for (_, so_path) in native_out.libs_by_abi {
-      let canonical = std::fs::canonicalize(&so_path).unwrap_or(so_path.clone());
+      let canonical = canonicalize_or_owned(&so_path);
       if seen.insert(canonical) {
         candidates.push(NativeLibCandidate::from_collected_path(
           so_path,
@@ -1417,7 +1419,7 @@ impl<'a> NativeStripProcessor<'a> {
       .exclude
       .iter()
       .map(|pattern| {
-        let normalized = pattern.replace('\\', "/");
+        let normalized = ArtifactPathSerializer::rel_to_slash(Path::new(pattern));
         globset::GlobBuilder::new(&normalized)
           .literal_separator(false)
           .build()
@@ -1799,10 +1801,10 @@ impl<'a> NativeDuplicateFile<'a> {
   }
 
   fn canonical_equals(&self, other: &Path) -> bool {
-    let Ok(left) = std::fs::canonicalize(self.path) else {
+    let Ok(left) = arkdown_path::AbsPath::canonicalize(self.path) else {
       return false;
     };
-    let Ok(right) = std::fs::canonicalize(other) else {
+    let Ok(right) = arkdown_path::AbsPath::canonicalize(other) else {
       return false;
     };
     left == right

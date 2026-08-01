@@ -16,6 +16,8 @@
 
 use std::path::{Path, PathBuf};
 
+use arkdown_path::canonicalize_or_owned;
+
 use crate::lockfile::OhPackageLockfile;
 use crate::package_name::PackageName;
 
@@ -91,7 +93,7 @@ pub fn lookup_cache(cache_root: &Path, name: &PackageName, version: &str) -> Opt
     let path = cache_path(cache_root, name, version);
     if path.is_dir() {
         // Canonicalize to resolve any symlinks.
-        let root = std::fs::canonicalize(&path).unwrap_or(path);
+        let root = canonicalize_or_owned(&path);
         return Some(CacheHit {
             root,
             version: version.into(),

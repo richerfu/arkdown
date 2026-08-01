@@ -7,5 +7,6 @@ edition = "2021"
 thiserror = { workspace = true }
 serde = { workspace = true }
 fast-glob = { workspace = true }
+dunce = { workspace = true }
 
 [dev-dependencies]

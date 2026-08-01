@@ -2,7 +2,7 @@
 //!
 //! # Invariants
 //!
-//! - Not absolute.
+//! - Has no filesystem root or platform prefix.
 //! - Contains no leading `..` components that would traverse above the base
 //!   directory.
 //! - Does not start with a root (`/`).
@@ -22,8 +22,8 @@ pub struct RelPath(PathBuf);
 /// Errors produced when constructing a [`RelPath`].
 #[derive(Debug, Error)]
 pub enum RelPathError {
-    /// The supplied path is absolute.
-    #[error("path is absolute: {0}")]
+    /// The supplied path has a filesystem root or platform prefix.
+    #[error("path is rooted or prefixed: {0}")]
     IsAbsolute(PathBuf),
     /// The supplied path traverses above the base directory.
     #[error("path traverses above base: {0}")]
@@ -40,13 +40,23 @@ impl RelPath {
     /// - [`RelPathError::TraversesAboveBase`] — path leads with `..`.
     pub fn parse(path: impl Into<PathBuf>) -> Result<Self, RelPathError> {
         let path = path.into();
-        if path.is_absolute() {
+        if path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_))) {
             return Err(RelPathError::IsAbsolute(path));
         }
-        // Check for leading `..` traversal.
-        let first = path.components().next();
-        if matches!(first, Some(Component::ParentDir)) {
-            return Err(RelPathError::TraversesAboveBase(path));
+
+        let mut depth = 0usize;
+        for component in path.components() {
+            match component {
+                Component::Normal(_) => depth += 1,
+                Component::ParentDir if depth == 0 => {
+                    return Err(RelPathError::TraversesAboveBase(path));
+                }
+                Component::ParentDir => depth -= 1,
+                Component::CurDir => {}
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(RelPathError::IsAbsolute(path));
+                }
+            }
         }
         Ok(Self(path))
     }
@@ -112,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_rel_path_parse_rejects_absolute() {
-        let err = RelPath::parse("/absolute/path");
+        let err = RelPath::parse(std::env::temp_dir().join("absolute/path"));
         assert!(matches!(err, Err(RelPathError::IsAbsolute(_))));
     }
 
@@ -130,11 +140,15 @@ mod tests {
     }
 
     #[test]
-    fn test_rel_path_subdir_then_dotdot_is_ok() {
-        // `a/../b` does not lead with `..` so it passes the leading-check.
-        // (The spec only prevents leading traversal, not internal one.)
+    fn test_rel_path_balanced_internal_parent_is_ok() {
         let p = RelPath::parse("a/../b").unwrap();
         assert_eq!(p.as_path(), Path::new("a/../b"));
+    }
+
+    #[test]
+    fn test_rel_path_rejects_internal_traversal_above_base() {
+        let err = RelPath::parse("a/../../outside");
+        assert!(matches!(err, Err(RelPathError::TraversesAboveBase(_))));
     }
 
     #[test]
@@ -149,5 +163,19 @@ mod tests {
         let err = RelPath::parse("C:\\windows\\path");
         // Windows `C:\...` paths are absolute.
         assert!(err.is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_rel_path_rejects_windows_root_relative_path() {
+        let err = RelPath::parse(r"\windows\path");
+        assert!(matches!(err, Err(RelPathError::IsAbsolute(_))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_rel_path_rejects_windows_drive_relative_prefix() {
+        let err = RelPath::parse(r"C:windows\path");
+        assert!(matches!(err, Err(RelPathError::IsAbsolute(_))));
     }
 }

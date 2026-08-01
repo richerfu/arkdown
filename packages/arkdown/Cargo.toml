@@ -84,6 +84,9 @@ mimalloc-safe = { workspace = true, optional = true, features = [
   "no_opt_arch",
 ] }
 
+[target.'cfg(windows)'.dependencies]
+junction = { workspace = true }
+
 [features]
 default = ["allocator"]
 allocator = ["dep:mimalloc-safe"]

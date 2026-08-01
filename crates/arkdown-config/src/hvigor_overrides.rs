@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{AppOptionOverride, ArkdownConfig, SigningConfig};
+use arkdown_path::canonicalize_or_owned;
 use serde::Deserialize;
 
 use crate::ConfigError;
@@ -112,10 +113,7 @@ impl ModuleHvigorOverrides {
             .iter()
             .map(|module| {
                 (
-                    module
-                        .src_path
-                        .canonicalize()
-                        .unwrap_or_else(|_| module.src_path.clone()),
+                    canonicalize_or_owned(&module.src_path),
                     module.name.as_str(),
                 )
             })
@@ -123,7 +121,7 @@ impl ModuleHvigorOverrides {
         self.0
             .iter()
             .filter_map(|(root, build_option)| {
-                let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+                let root = canonicalize_or_owned(root);
                 configured
                     .get(&root)
                     .map(|module_name| ((*module_name).to_string(), build_option.clone()))
@@ -241,7 +239,7 @@ impl<'a> HvigorSigningConfigMerger<'a> {
     ) -> Result<PathBuf, ConfigError> {
         if let Some(value) = overlay.filter(|value| !value.is_empty()) {
             let path = PathBuf::from(value);
-            return Ok(if path.is_absolute() {
+            return Ok(if path.has_root() {
                 path
             } else {
                 self.project_root.join(path)

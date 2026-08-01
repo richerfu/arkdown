@@ -98,7 +98,7 @@ impl ImportCheckPlugin {
     ) -> Option<ImportViolation> {
         // Only check local filesystem paths.
         let importee_raw = Path::new(importee_resolved);
-        if !importee_raw.is_absolute() {
+        if !importee_raw.has_root() {
             return None;
         }
         let module_root = lexical_normalize(module_root);

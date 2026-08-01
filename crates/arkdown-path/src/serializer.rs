@@ -26,6 +26,9 @@ pub enum SerializerError {
     /// The path contains non-UTF-8 bytes.
     #[error("path contains non-UTF-8 bytes: {0}")]
     NonUtf8(String),
+    /// A Windows device/verbatim path cannot be represented in hvigor output.
+    #[error("Windows device path cannot be serialized for hvigor: {0}")]
+    UnsupportedWindowsDevicePath(String),
 }
 
 /// The single serializer for hvigor-compatible artifact path strings.
@@ -92,11 +95,28 @@ impl ArtifactPathSerializer {
 fn path_to_slash_string(path: &Path) -> Result<String, SerializerError> {
     // On Unix the path is already a valid UTF-8 string if the underlying
     // OsStr is valid UTF-8. On Windows we iterate components.
-    let s: String = path
+    let s = path
         .to_str()
         .ok_or_else(|| SerializerError::NonUtf8(path.to_string_lossy().into_owned()))?
         .replace('\\', "/");
-    Ok(s)
+    normalize_windows_namespace(s)
+}
+
+/// Normalize the one Windows namespace form that hvigor represents without a
+/// namespace prefix (UNC), and reject device paths that SDK tools cannot
+/// consume. `AbsPath::canonicalize` already removes safe drive prefixes.
+fn normalize_windows_namespace(path: String) -> Result<String, SerializerError> {
+    const VERBATIM_UNC: &str = "//?/UNC/";
+    if path
+        .get(..VERBATIM_UNC.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(VERBATIM_UNC))
+    {
+        return Ok(format!("//{}", &path[VERBATIM_UNC.len()..]));
+    }
+    if path.starts_with("//?/") || path.starts_with("//./") {
+        return Err(SerializerError::UnsupportedWindowsDevicePath(path));
+    }
+    Ok(path)
 }
 
 /// Lossy conversion: produces `/`-separated string, replacing non-UTF-8 with
@@ -159,6 +179,35 @@ mod tests {
         let p = Path::new("resources/base/media/icon.png");
         let result = ArtifactPathSerializer::path_to_slash_string(p).unwrap();
         assert!(!result.contains('\\'), "artifact path must not contain \\");
+    }
+
+    #[test]
+    fn test_verbatim_unc_matches_hvigor_unc_spelling_on_every_host() {
+        let result = ArtifactPathSerializer::path_to_slash_string(Path::new(
+            r"\\?\UNC\server\share\project\entry",
+        ))
+        .unwrap();
+        assert_eq!(result, "//server/share/project/entry");
+    }
+
+    #[test]
+    fn test_verbatim_drive_path_is_rejected_instead_of_leaking_into_artifacts() {
+        let error =
+            ArtifactPathSerializer::path_to_slash_string(Path::new(r"\\?\C:\project\entry"))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            SerializerError::UnsupportedWindowsDevicePath(_)
+        ));
+    }
+
+    #[test]
+    fn test_regular_unc_path_is_preserved() {
+        let result = ArtifactPathSerializer::path_to_slash_string(Path::new(
+            r"\\server\share\project\entry",
+        ))
+        .unwrap();
+        assert_eq!(result, "//server/share/project/entry");
     }
 
     // On Windows, verify that native path separators are converted.

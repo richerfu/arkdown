@@ -768,7 +768,7 @@ impl IntermediateArtifactWriter {
         .map(|pattern| {
           pattern
             .as_str()
-            .map(|pattern| pattern.replace('\\', "/"))
+            .map(|pattern| ArtifactPathSerializer::rel_to_slash(Path::new(pattern)))
             .context("resource compression paths must be strings")
         })
         .collect::<Result<Vec<_>>>()?;

@@ -18,7 +18,7 @@ use arkdown::{
   BundleSourceMapPackageInfo, Bundler, LoaderResourceJoin, SourceMapPolicy,
 };
 use arkdown_core::ArkdownConfig;
-use arkdown_path::NormalizedOhmUrl;
+use arkdown_path::{ArtifactPathSerializer, NormalizedOhmUrl};
 use arkdown_profile::{LoaderJson, PkgContextInfoOpt};
 use arkdown_session::PackageSnapshot;
 
@@ -330,11 +330,11 @@ impl<'a> LoaderRuntimePackageContextCollector<'a> {
   }
 
   fn trim_declaration_suffix(path: &str) -> String {
-    path
+    let path = path
       .strip_suffix(".d.ets")
       .or_else(|| path.strip_suffix(".d.ts"))
-      .unwrap_or(path)
-      .replace('\\', "/")
+      .unwrap_or(path);
+    ArtifactPathSerializer::rel_to_slash(Path::new(path))
   }
 }
 

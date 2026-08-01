@@ -38,7 +38,7 @@ impl CompileEntryNamer {
     /// directly.  For collisions the full relative path is sanitised into a
     /// valid identifier.
     pub fn chunk_name(&self, entry: &str, index: usize) -> String {
-        if !Path::new(entry).is_absolute() {
+        if !Path::new(entry).has_root() {
             return Self::chunk_output_stem(entry);
         }
 

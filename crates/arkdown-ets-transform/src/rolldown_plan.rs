@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arkdown_path::ModuleSpecifierText;
+use arkdown_path::{AbsPath, ModuleSpecifierText};
 use oxc_allocator::Allocator;
 use oxc_codegen::{CodegenOptions, IndentChar};
 use oxc_parser::Parser;
@@ -318,10 +318,11 @@ impl<'a> TransformEntrySourceId<'a> {
 
     pub fn normalized(&self) -> String {
         let path = Path::new(self.id);
-        if !path.is_absolute() {
+        if !path.has_root() {
             return self.id.to_string();
         }
-        path.canonicalize()
+        AbsPath::canonicalize(path)
+            .map(AbsPath::into_path_buf)
             .unwrap_or_else(|_| arkdown_path::lexical_normalize(path))
             .into_os_string()
             .into_string()

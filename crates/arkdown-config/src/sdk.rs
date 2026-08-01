@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use arkdown_core::SdkConfig;
+use arkdown_path::HostPlatform;
 
 use crate::error::ConfigError;
 
@@ -20,74 +21,178 @@ pub struct SdkSelection {
 // SDK path discovery
 // ---------------------------------------------------------------------------
 
-/// Return candidate SDK root paths to try in priority order.
-///
-/// Order:
-/// 1. `DEVECO_SDK_HOME` environment variable (hvigor HarmonyOS SDK root)
-/// 2. `OHOS_BASE_SDK_HOME` environment variable (hvigor OpenHarmony SDK root)
-/// 3. `OHOS_SDK_HOME` environment variable
-/// 4. `~/Library/Huawei/Sdk/` (macOS)
-/// 5. `~/AppData/Local/Huawei/Sdk/` (Windows)
-/// 6. `/opt/huawei/sdk/` (Linux)
-fn sdk_candidates() -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+#[derive(Debug, Clone, Default)]
+struct SdkLocationEnvironment {
+    deveco_sdk_home: Option<PathBuf>,
+    ohos_base_sdk_home: Option<PathBuf>,
+    ohos_sdk_home: Option<PathBuf>,
+    ohos_ndk_home: Option<PathBuf>,
+    ohos_sdk_native: Option<PathBuf>,
+    home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    app_data: Option<PathBuf>,
+    program_files: Option<PathBuf>,
+    program_w6432: Option<PathBuf>,
+}
 
-    // hvigor reads DEVECO_SDK_HOME for HarmonyOS SDK discovery.
-    if let Ok(home) = std::env::var("DEVECO_SDK_HOME") {
-        candidates.push(PathBuf::from(home));
+impl SdkLocationEnvironment {
+    fn from_process() -> Self {
+        let path = |name| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            deveco_sdk_home: path("DEVECO_SDK_HOME"),
+            ohos_base_sdk_home: path("OHOS_BASE_SDK_HOME"),
+            ohos_sdk_home: path("OHOS_SDK_HOME"),
+            ohos_ndk_home: path("OHOS_NDK_HOME"),
+            ohos_sdk_native: path("OHOS_SDK_NATIVE"),
+            home: path("HOME").or_else(|| path("USERPROFILE")),
+            local_app_data: path("LOCALAPPDATA"),
+            app_data: path("APPDATA"),
+            program_files: path("PROGRAMFILES"),
+            program_w6432: path("ProgramW6432"),
+        }
+    }
+}
+
+/// Host-aware SDK locator matching latest hvigor environment precedence and
+/// the SDK locations used by current DevEco Studio installations.
+struct SdkLocator {
+    host: HostPlatform,
+    environment: SdkLocationEnvironment,
+}
+
+impl SdkLocator {
+    fn from_process() -> Self {
+        Self::new(
+            HostPlatform::CURRENT,
+            SdkLocationEnvironment::from_process(),
+        )
     }
 
-    // hvigor reads OHOS_BASE_SDK_HOME for OpenHarmony SDK discovery.
-    if let Ok(home) = std::env::var("OHOS_BASE_SDK_HOME") {
-        candidates.push(PathBuf::from(home));
+    fn new(host: HostPlatform, environment: SdkLocationEnvironment) -> Self {
+        Self { host, environment }
     }
 
-    if let Ok(home) = std::env::var("OHOS_SDK_HOME") {
-        candidates.push(PathBuf::from(home));
+    fn find_sdk_root(&self) -> Option<PathBuf> {
+        self.candidates()
+            .into_iter()
+            .find(|candidate| looks_like_openharmony_base(&openharmony_base_from_root(candidate)))
     }
 
-    // macOS defaults
-    if let Some(home_dir) = home_dir() {
-        candidates.push(home_dir.join("Library").join("Huawei").join("Sdk"));
-        candidates.push(home_dir.join("Library").join("OpenHarmony").join("Sdk"));
-    }
-
-    // Windows default
-    if let Ok(app_data) = std::env::var("APPDATA") {
-        // APPDATA points to Roaming; Local is one level up + Local
-        let roaming = PathBuf::from(&app_data);
-        if let Some(local) = roaming
-            .parent()
-            .map(|p| p.join("Local").join("Huawei").join("Sdk"))
+    /// Return candidate SDK roots in observed hvigor precedence. Latest
+    /// hvigor 6.24.3 reads `DEVECO_SDK_HOME` for HarmonyOS and
+    /// `OHOS_BASE_SDK_HOME` for OpenHarmony. The NDK aliases and installation
+    /// locations keep the standalone arkdown CLI aligned with an IDE-owned SDK
+    /// even when it was not launched by the IDE process.
+    fn candidates(&self) -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        for candidate in [
+            self.environment.deveco_sdk_home.as_ref(),
+            self.environment.ohos_base_sdk_home.as_ref(),
+            self.environment.ohos_sdk_home.as_ref(),
+            self.environment.ohos_ndk_home.as_ref(),
+            self.environment.ohos_sdk_native.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
-            candidates.push(local);
+            Self::push_unique(&mut candidates, candidate.clone());
+        }
+
+        match self.host {
+            HostPlatform::Macos => self.push_macos_candidates(&mut candidates),
+            HostPlatform::Windows => self.push_windows_candidates(&mut candidates),
+            HostPlatform::Linux | HostPlatform::OtherUnix => {
+                self.push_linux_candidates(&mut candidates);
+            }
+        }
+        candidates
+    }
+
+    fn push_macos_candidates(&self, candidates: &mut Vec<PathBuf>) {
+        Self::push_unique(
+            candidates,
+            PathBuf::from("/Applications/DevEco-Studio.app/Contents/sdk"),
+        );
+        Self::push_unique(
+            candidates,
+            PathBuf::from("/Applications/DevEco Studio.app/Contents/sdk"),
+        );
+        if let Some(home) = &self.environment.home {
+            Self::push_unique(
+                candidates,
+                home.join("Applications/DevEco-Studio.app/Contents/sdk"),
+            );
+            Self::push_unique(candidates, home.join("Library/Huawei/Sdk"));
+            Self::push_unique(candidates, home.join("Library/OpenHarmony/Sdk"));
         }
     }
 
-    // Linux default
-    candidates.push(PathBuf::from("/opt/huawei/sdk"));
+    fn push_windows_candidates(&self, candidates: &mut Vec<PathBuf>) {
+        if let Some(local_app_data) = self.windows_local_app_data() {
+            Self::push_unique(candidates, local_app_data.join("Huawei").join("Sdk"));
+            Self::push_unique(
+                candidates,
+                local_app_data.join("Programs/Huawei/DevEco Studio/sdk"),
+            );
+        }
+        for program_files in [
+            self.environment.program_files.as_ref(),
+            self.environment.program_w6432.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            Self::push_unique(candidates, program_files.join("Huawei/DevEco Studio/sdk"));
+            Self::push_unique(candidates, program_files.join("DevEco Studio/sdk"));
+        }
+    }
 
-    candidates
-}
+    fn push_linux_candidates(&self, candidates: &mut Vec<PathBuf>) {
+        if let Some(home) = &self.environment.home {
+            Self::push_unique(candidates, home.join("DevEco-Studio/sdk"));
+            Self::push_unique(candidates, home.join("deveco-studio/sdk"));
+        }
+        Self::push_unique(candidates, PathBuf::from("/opt/DevEco-Studio/sdk"));
+        Self::push_unique(candidates, PathBuf::from("/opt/deveco-studio/sdk"));
+        Self::push_unique(candidates, PathBuf::from("/opt/huawei/sdk"));
+    }
 
-/// Return the platform string used in es2abc path (`build-linux`, `build-mac`, `build-win`).
-fn platform_dir() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "build-mac"
-    } else if cfg!(target_os = "windows") {
-        "build-win"
-    } else {
-        "build-linux"
+    fn windows_local_app_data(&self) -> Option<PathBuf> {
+        self.environment.local_app_data.clone().or_else(|| {
+            self.environment
+                .app_data
+                .as_ref()
+                .and_then(|roaming| roaming.parent())
+                .map(|profile| profile.join("Local"))
+        })
+    }
+
+    fn push_unique(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
     }
 }
 
 struct SdkToolResolver<'a> {
     ets_loader_path: &'a Path,
+    host: HostPlatform,
 }
 
 impl<'a> SdkToolResolver<'a> {
     fn new(ets_loader_path: &'a Path) -> Self {
-        Self { ets_loader_path }
+        Self::for_host(ets_loader_path, HostPlatform::CURRENT)
+    }
+
+    fn for_host(ets_loader_path: &'a Path, host: HostPlatform) -> Self {
+        Self {
+            ets_loader_path,
+            host,
+        }
     }
 
     fn es2abc_path(&self) -> PathBuf {
@@ -103,9 +208,10 @@ impl<'a> SdkToolResolver<'a> {
 
     fn es2abc_candidates(&self) -> [PathBuf; 2] {
         let ark_dir = self.ets_loader_path.join("bin").join("ark");
+        let executable = self.host.executable_name("es2abc");
         [
             self.platform_es2abc_path(),
-            ark_dir.join("build").join("bin").join("es2abc"),
+            ark_dir.join("build").join("bin").join(executable),
         ]
     }
 
@@ -113,19 +219,24 @@ impl<'a> SdkToolResolver<'a> {
         self.ets_loader_path
             .join("bin")
             .join("ark")
-            .join(platform_dir())
+            .join(self.ark_build_dir())
             .join("bin")
-            .join("es2abc")
+            .join(self.host.executable_name("es2abc"))
     }
-}
 
-/// Attempt to discover the OHOS SDK root directory.
-///
-/// Iterates the candidate list and returns the first directory that exists.
-pub fn find_sdk_root() -> Option<PathBuf> {
-    sdk_candidates()
-        .into_iter()
-        .find(|candidate| candidate.exists())
+    fn toolchains_executable(&self, ohos_base: &Path, stem: &str) -> PathBuf {
+        ohos_base
+            .join("toolchains")
+            .join(self.host.executable_name(stem))
+    }
+
+    fn ark_build_dir(&self) -> &'static str {
+        match self.host {
+            HostPlatform::Windows => "build-win",
+            HostPlatform::Macos => "build-mac",
+            HostPlatform::Linux | HostPlatform::OtherUnix => "build-linux",
+        }
+    }
 }
 
 /// Build [`SdkConfig`] from a known SDK root path.
@@ -151,8 +262,9 @@ fn sdk_config_from_root_with_selection(sdk_root: &Path, selection: &SdkSelection
         .unwrap_or(sdk_component_api_version);
 
     let ets_loader_path = ohos_base.join("ets").join("build-tools").join("ets-loader");
-    let es2abc_path = SdkToolResolver::new(&ets_loader_path).es2abc_path();
-    let restool_path = ohos_base.join("toolchains").join("restool");
+    let tool_resolver = SdkToolResolver::new(&ets_loader_path);
+    let es2abc_path = tool_resolver.es2abc_path();
+    let restool_path = tool_resolver.toolchains_executable(&ohos_base, "restool");
 
     let has_rollup_plugin = compile_api_version >= 9;
 
@@ -189,7 +301,9 @@ pub fn discover_sdk(target_api_version: Option<u32>) -> Result<SdkConfig, Config
 /// not the SDK component path. Tool paths continue to come from normal SDK
 /// discovery (`DEVECO_SDK_HOME`, `OHOS_BASE_SDK_HOME`, `OHOS_SDK_HOME`, etc.).
 pub fn discover_sdk_with_selection(selection: SdkSelection) -> Result<SdkConfig, ConfigError> {
-    let sdk_root = find_sdk_root().ok_or(ConfigError::SdkNotFound)?;
+    let sdk_root = SdkLocator::from_process()
+        .find_sdk_root()
+        .ok_or(ConfigError::SdkNotFound)?;
     Ok(sdk_config_from_root_with_selection(&sdk_root, &selection))
 }
 
@@ -233,6 +347,21 @@ fn openharmony_base_from_root(sdk_root: &Path) -> PathBuf {
 
     if looks_like_openharmony_base(sdk_root) {
         return sdk_root.to_path_buf();
+    }
+
+    // CI helpers and native toolchains commonly expose the `native`
+    // component through OHOS_NDK_HOME/OHOS_SDK_NATIVE. Recover the owning SDK
+    // root instead of treating that component as a complete SDK.
+    if sdk_root
+        .file_name()
+        .is_some_and(|name| matches!(name.to_str(), Some("native" | "ets" | "toolchains")))
+    {
+        if let Some(parent) = sdk_root
+            .parent()
+            .filter(|parent| looks_like_openharmony_base(parent))
+        {
+            return parent.to_path_buf();
+        }
     }
 
     let openharmony = sdk_root.join("openharmony");
@@ -418,22 +547,6 @@ fn json_u32_field(value: &serde_json::Value, field: &str) -> Option<u32> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper — portable home directory
-// ---------------------------------------------------------------------------
-
-fn home_dir() -> Option<PathBuf> {
-    // std::env::home_dir is deprecated but still works; use HOME env var for reliability.
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home));
-    }
-    // Windows USERPROFILE
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        return Some(PathBuf::from(profile));
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -475,6 +588,73 @@ mod tests {
     }
 
     #[test]
+    fn test_sdk_locator_preserves_hvigor_environment_precedence_on_every_host() {
+        let environment = SdkLocationEnvironment {
+            deveco_sdk_home: Some(PathBuf::from("/env/deveco")),
+            ohos_base_sdk_home: Some(PathBuf::from("/env/openharmony")),
+            ohos_sdk_home: Some(PathBuf::from("/env/legacy")),
+            ohos_ndk_home: Some(PathBuf::from("/env/ndk")),
+            ohos_sdk_native: Some(PathBuf::from("/env/native")),
+            home: Some(PathBuf::from("/users/arkdown")),
+            local_app_data: Some(PathBuf::from("C:/Users/arkdown/AppData/Local")),
+            program_files: Some(PathBuf::from("C:/Program Files")),
+            ..SdkLocationEnvironment::default()
+        };
+
+        for host in [
+            HostPlatform::Windows,
+            HostPlatform::Macos,
+            HostPlatform::Linux,
+        ] {
+            let candidates = SdkLocator::new(host, environment.clone()).candidates();
+            assert_eq!(
+                &candidates[..5],
+                &[
+                    PathBuf::from("/env/deveco"),
+                    PathBuf::from("/env/openharmony"),
+                    PathBuf::from("/env/legacy"),
+                    PathBuf::from("/env/ndk"),
+                    PathBuf::from("/env/native"),
+                ]
+            );
+        }
+
+        let windows = SdkLocator::new(HostPlatform::Windows, environment.clone()).candidates();
+        assert!(windows.contains(&PathBuf::from("C:/Users/arkdown/AppData/Local/Huawei/Sdk")));
+        assert!(windows.contains(&PathBuf::from("C:/Program Files/Huawei/DevEco Studio/sdk")));
+
+        let macos = SdkLocator::new(HostPlatform::Macos, environment.clone()).candidates();
+        assert!(macos.contains(&PathBuf::from(
+            "/Applications/DevEco-Studio.app/Contents/sdk"
+        )));
+
+        let linux = SdkLocator::new(HostPlatform::Linux, environment).candidates();
+        assert!(linux.contains(&PathBuf::from("/opt/DevEco-Studio/sdk")));
+    }
+
+    #[test]
+    fn test_sdk_locator_accepts_native_component_environment_path() {
+        let root = temp_root("sdk-native-component");
+        let openharmony = root.join("default/openharmony");
+        for component in ["ets", "native", "toolchains"] {
+            fs::create_dir_all(openharmony.join(component)).expect("create SDK component");
+        }
+        let native = openharmony.join("native");
+        let locator = SdkLocator::new(
+            HostPlatform::Macos,
+            SdkLocationEnvironment {
+                ohos_ndk_home: Some(native.clone()),
+                ..SdkLocationEnvironment::default()
+            },
+        );
+
+        assert_eq!(locator.find_sdk_root(), Some(native.clone()));
+        assert_eq!(openharmony_base_from_root(&native), openharmony);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_sdk_config_from_root_paths() {
         let root = PathBuf::from("/fake/sdk");
         let cfg = sdk_config_from_root(&root, Some(12));
@@ -489,21 +669,42 @@ mod tests {
     }
 
     #[test]
-    fn test_sdk_config_from_root_accepts_linux_sdk_generic_ark_build_layout() {
-        let root = temp_root("linux-sdk-es2abc");
+    fn test_sdk_tool_paths_match_every_hvigor_host_layout() {
+        let ets_loader = Path::new("/sdk/ets/build-tools/ets-loader");
+        let windows = SdkToolResolver::for_host(ets_loader, HostPlatform::Windows);
+        let macos = SdkToolResolver::for_host(ets_loader, HostPlatform::Macos);
+        let linux = SdkToolResolver::for_host(ets_loader, HostPlatform::Linux);
+
+        assert!(windows
+            .platform_es2abc_path()
+            .ends_with("build-win/bin/es2abc.exe"));
+        assert!(macos
+            .platform_es2abc_path()
+            .ends_with("build-mac/bin/es2abc"));
+        assert!(linux
+            .platform_es2abc_path()
+            .ends_with("build-linux/bin/es2abc"));
+        assert!(windows
+            .toolchains_executable(Path::new("/sdk"), "restool")
+            .ends_with("toolchains/restool.exe"));
+    }
+
+    #[test]
+    fn test_sdk_config_from_root_accepts_generic_ark_build_layout() {
+        let root = temp_root("generic-sdk-es2abc");
         let ets_loader = root.join("ets").join("build-tools").join("ets-loader");
         let es2abc = ets_loader
             .join("bin")
             .join("ark")
             .join("build")
             .join("bin")
-            .join("es2abc");
+            .join(HostPlatform::CURRENT.executable_name("es2abc"));
         fs::create_dir_all(es2abc.parent().expect("es2abc parent"))
             .expect("create generic ark build dir");
         fs::write(&es2abc, []).expect("write fake es2abc");
 
-        // setup-ohos-sdk's Linux SDK can expose host tools under ark/build
-        // instead of the platform-qualified ark/build-linux directory.
+        // setup-ohos-sdk can expose host tools under ark/build instead of the
+        // platform-qualified ark/build-{host} directory.
         let cfg = sdk_config_from_root(&root, Some(12));
 
         assert_eq!(cfg.es2abc_path, es2abc);
@@ -672,12 +873,7 @@ mod tests {
         let root = temp_root("ark-vm");
         let ets_dir = root.join("ets");
         let ets_loader = ets_dir.join("build-tools").join("ets-loader");
-        let es2abc = ets_loader
-            .join("bin")
-            .join("ark")
-            .join(platform_dir())
-            .join("bin")
-            .join("es2abc");
+        let es2abc = SdkToolResolver::new(&ets_loader).platform_es2abc_path();
 
         fs::create_dir_all(&ets_dir).expect("create ets dir");
         fs::create_dir_all(es2abc.parent().expect("es2abc parent")).expect("create es2abc dir");

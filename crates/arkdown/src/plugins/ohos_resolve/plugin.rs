@@ -256,7 +256,7 @@ impl<'a> ResolveHookOutputMapper<'a> {
         let path = resolved
             .local_path()
             .expect("non-external OhosResolvedModule must have a local path");
-        let path = if path.is_absolute() {
+        let path = if path.has_root() {
             path.clone()
         } else {
             self.project_root.join(path)

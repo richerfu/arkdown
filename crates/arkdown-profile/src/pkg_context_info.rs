@@ -418,10 +418,11 @@ impl PkgContextInfoGenerator {
     }
 
     fn trim_declaration_suffix(path: &str) -> String {
-        path.strip_suffix(".d.ets")
+        let path = path
+            .strip_suffix(".d.ets")
             .or_else(|| path.strip_suffix(".d.ts"))
-            .unwrap_or(path)
-            .replace('\\', "/")
+            .unwrap_or(path);
+        ArtifactPathSerializer::rel_to_slash(Path::new(path))
     }
 }
 

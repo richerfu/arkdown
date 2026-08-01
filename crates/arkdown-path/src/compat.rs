@@ -29,5 +29,7 @@ pub fn to_slash(path: &Path) -> String {
 /// unchanged. New code should use [`AbsPath::canonicalize`] for inputs and
 /// [`AbsPath::from_absolute`] for outputs.
 pub fn canonicalize_or_owned(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    super::AbsPath::canonicalize(path)
+        .map(super::AbsPath::into_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
 }

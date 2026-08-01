@@ -37,7 +37,7 @@ impl<'a> HvigorModulePath<'a> {
     /// `project_root`.
     pub fn entry_page_path(&self, project_path: &Path, project_root: &Path) -> String {
         let source_path = Path::new(self.id);
-        let source_path = if source_path.is_absolute() {
+        let source_path = if source_path.has_root() {
             source_path.to_path_buf()
         } else {
             project_root.join(source_path)

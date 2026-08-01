@@ -62,6 +62,7 @@ pub(super) struct WatchStageInput {
   pub(super) package_plugins: Vec<PackagePlugin>,
   pub(super) project_hvigor_overrides: Option<arkdown_config::ProjectHvigorOverrides>,
   pub(super) module_hvigor_overrides: BTreeMap<String, serde_json::Value>,
+  pub(super) node_executable: Option<PathBuf>,
   /// When `true`, only `src/main/resources/` directories are watched.
   pub(super) preview_mode: bool,
 }
@@ -97,6 +98,7 @@ impl WatchStage {
     let package_plugins = input.package_plugins;
     let project_hvigor_overrides = input.project_hvigor_overrides;
     let module_hvigor_overrides = input.module_hvigor_overrides;
+    let node_executable = input.node_executable;
 
     let watch_plan = WatchSessionPlan::from_session(&session, preview_mode);
     let fingerprint_baseline = watch_plan.input.fingerprint_baseline.clone();
@@ -220,6 +222,7 @@ impl WatchStage {
           watch_invalidation: Some(invalidation),
           project_hvigor_overrides: project_hvigor_overrides.clone(),
           module_hvigor_overrides: module_hvigor_overrides.clone(),
+          node_executable: node_executable.clone(),
         };
         if let Err(e) = rt.block_on(
           BuildCommand::new(rebuild_args)

@@ -29,7 +29,7 @@ pub fn load_config(
     if !root.is_dir() {
         return Err(ConfigError::FileNotFound(root.join("build-profile.json5")));
     }
-    let root = root.canonicalize()?;
+    let root = arkdown_path::AbsPath::canonicalize(root)?.into_path_buf();
     let root = root.as_path();
 
     // -----------------------------------------------------------------------

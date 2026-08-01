@@ -476,7 +476,7 @@ impl FormProfileProcessor {
 
     fn form_source_path(module_root: &Path, src: &str) -> PathBuf {
         let src_path = Path::new(src);
-        if src_path.is_absolute() {
+        if src_path.has_root() {
             src_path.to_path_buf()
         } else {
             ProfileModuleLayout::new(module_root).source_from_module_src(src_path)

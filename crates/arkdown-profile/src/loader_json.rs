@@ -12,8 +12,8 @@ use arkdown_core::{
     OutputTarget, PkgBriefInfo,
 };
 use arkdown_path::{
-    ArtifactPath, ArtifactPathSerializer, ModuleSpecifier, ModuleSpecifierText, OhmUrl,
-    SourceFileName, SpecifierKind,
+    canonicalize_or_owned, AbsPath, ArtifactPath, ArtifactPathSerializer, ModuleSpecifier,
+    ModuleSpecifierText, OhmUrl, SourceFileName, SpecifierKind,
 };
 
 use crate::bytecode_har::{
@@ -386,7 +386,7 @@ impl AotLoaderFields {
 
     fn resolve_ap_path(config: &ArkdownConfig, module_cfg: &ModuleConfig) -> Option<PathBuf> {
         if let Some(path) = config.product.build_option.ap_path.as_ref() {
-            return Some(if path.is_absolute() {
+            return Some(if path.has_root() {
                 path.clone()
             } else {
                 module_cfg.src_path.join(path)
@@ -545,7 +545,7 @@ impl LoaderJson {
             if !self.hvigor_compile_entry.contains(&absolute) {
                 self.hvigor_compile_entry.push(absolute.clone());
             }
-            let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let canonical_path = canonicalize_or_owned(path);
             let internal_entry = canonical_path
                 .strip_prefix(source_root)
                 .map(Self::compile_entry_from_src_main_rel)
@@ -1021,7 +1021,7 @@ impl LoaderJson {
         if matches!(config.output_target, OutputTarget::Har) {
             for entry in &compile_entry {
                 let path = Path::new(entry);
-                let absolute = if path.is_absolute() {
+                let absolute = if path.has_root() {
                     to_absolute_path_string(path)
                 } else {
                     to_absolute_path_string(&src_main_root.join(entry.trim_start_matches("./")))
@@ -1312,7 +1312,8 @@ pub struct ByteCodeHarEntry {
 /// Return an absolute, normalized path string for `path`.
 ///
 /// Strategy (matches hvigor's behavior of always writing absolute paths):
-/// 1. Try `std::fs::canonicalize` — works perfectly when the path already exists
+/// 1. Try `AbsPath::canonicalize` — resolves existing paths without leaking
+///    Windows verbatim prefixes into SDK-facing artifacts.
 ///    on disk (project root, module source root).
 /// 2. If canonicalize fails (path not yet on disk, or a hypothetical path used in
 ///    tests), fall back to:
@@ -1321,13 +1322,13 @@ pub struct ByteCodeHarEntry {
 ///      normalize.
 pub(super) fn to_absolute_path_string(path: &Path) -> String {
     // Fast path: canonicalize works for real, existing paths.
-    if let Ok(abs) = std::fs::canonicalize(path) {
-        return ArtifactPathSerializer::path_to_slash_string(&abs)
-            .unwrap_or_else(|_| abs.display().to_string());
+    if let Ok(abs) = AbsPath::canonicalize(path) {
+        return ArtifactPathSerializer::path_to_slash_string(abs.as_path())
+            .unwrap_or_else(|_| abs.to_string());
     }
 
     // Fallback for non-existent or constructed paths.
-    let base = if path.is_absolute() {
+    let base = if path.has_root() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
@@ -1547,7 +1548,7 @@ impl LoaderJson {
             else {
                 continue;
             };
-            if Path::new(&page_source_file).is_absolute() {
+            if Path::new(&page_source_file).has_root() {
                 continue;
             }
             let absolute = to_absolute_path_string(

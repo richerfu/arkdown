@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownConfig, ModuleConfig};
-use arkdown_path::ArtifactPathSerializer;
+use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -396,12 +396,13 @@ impl<'a> RuntimeOnlyCollector<'a> {
     }
 
     fn is_local_dependency(&self, package_name: &str, package_root: &Path) -> bool {
-        let canonical_root =
-            std::fs::canonicalize(package_root).unwrap_or_else(|_| package_root.to_path_buf());
-        if self.config.modules.iter().any(|module| {
-            std::fs::canonicalize(&module.src_path).unwrap_or_else(|_| module.src_path.clone())
-                == canonical_root
-        }) {
+        let canonical_root = canonicalize_or_owned(package_root);
+        if self
+            .config
+            .modules
+            .iter()
+            .any(|module| canonicalize_or_owned(&module.src_path) == canonical_root)
+        {
             return true;
         }
         self.local_dependency_names.contains(package_name)
@@ -469,7 +470,7 @@ impl<'a> RuntimeOnlyCollector<'a> {
 
     fn collect_source_config_entry(&self, base_dir: &Path, source: &str, files: &mut Vec<PathBuf>) {
         let path = Path::new(source);
-        let source_path = if path.is_absolute() {
+        let source_path = if path.has_root() {
             path.to_path_buf()
         } else {
             base_dir.join(path)

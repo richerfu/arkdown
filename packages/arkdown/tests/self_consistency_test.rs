@@ -207,6 +207,7 @@ impl SelfConsistencyOracle {
         project_hvigor_overrides: None,
         module_hvigor_overrides: Default::default(),
         build_version: None,
+        node_executable: None,
       })
       .execute(),
     )
