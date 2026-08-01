@@ -343,6 +343,8 @@ impl<'a> ArktsTransformer<'a> {
             &allocator,
             options.component_metadata.runtime_names(),
             &custom_dialog_components,
+            content,
+            &hvigor_source_id,
         )
         .program(&mut parsed.program);
         let mut entry_registrations = EntryRegistrationBlock::default();

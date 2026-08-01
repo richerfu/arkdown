@@ -41,6 +41,39 @@ fn debug_source_maps_remain_in_loader_output_after_staging() {
 }
 
 #[test]
+fn resource_table_outputs_match_latest_process_resource_contract() {
+  let temp = TempDir::new().expect("create resource table fixture root");
+  let module_layout = super::layout::ModuleBuildLayout::new(temp.path());
+  let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+  let hap = writer.resource_table_outputs(
+    &module_layout,
+    &arkdown_core::OhosModuleType::Entry,
+    &arkdown_core::OutputTarget::Hap,
+  );
+  assert_eq!(
+    hap
+      .iter()
+      .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+      .collect::<Vec<_>>(),
+    ["ResourceTable.h", "ResourceTable.ts"]
+  );
+
+  let har = writer.resource_table_outputs(
+    &module_layout,
+    &arkdown_core::OhosModuleType::Har,
+    &arkdown_core::OutputTarget::Har,
+  );
+  assert_eq!(har.len(), 1);
+  let preview = writer.resource_table_outputs(
+    &module_layout,
+    &arkdown_core::OhosModuleType::Entry,
+    &arkdown_core::OutputTarget::Preview,
+  );
+  assert_eq!(preview.len(), 1);
+}
+
+#[test]
 fn compile_resource_metadata_is_added_after_profile_intermediates() {
   let temp = TempDir::new().expect("create resource profile fixture root");
   let module_json = temp.path().join("res/default/module.json");

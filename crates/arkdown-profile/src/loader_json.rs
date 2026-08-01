@@ -76,6 +76,8 @@ pub struct LoaderJson {
     pub hsp_resources_map: FxHashMap<String, String>,
     /// Incremental update metadata. Empty for the minimal fixture.
     pub update_version_info: IndexMap<String, serde_json::Value>,
+    /// Whether HAR compilation uses `packingOptions.customizedOptions.basePackage`.
+    pub customized_har: bool,
     /// Ark Native output path emitted by hvigor when AOT is enabled for this module.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub an_build_out_put: Option<String>,
@@ -968,6 +970,15 @@ impl LoaderJson {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "compile_entry_dedupe");
             runtime_only_collector.dedupe_paths(&mut serialized_compile_entry);
         }
+        // Latest GenerateLoaderJson.addResourceTable2CompileEntry appends the
+        // restool-generated TS table after normal source filtering. It gates
+        // on the selected SDK component API, not the project's target API.
+        if !matches!(module_cfg.module_type, OhosModuleType::Har)
+            && !matches!(config.output_target, OutputTarget::Preview)
+            && config.sdk_config.sdk_component_api_version >= 23
+        {
+            serialized_compile_entry.push(module_layout.generated_resource_table_typescript());
+        }
 
         let mut hvigor_compile_entry: Vec<String> = serialized_compile_entry
             .iter()
@@ -1183,6 +1194,11 @@ impl LoaderJson {
             router_map,
             hsp_resources_map,
             update_version_info,
+            customized_har: config
+                .product
+                .build_option
+                .customized_har_base_package
+                .is_some(),
             an_build_out_put: aot_fields.an_build_out_put,
             an_build_mode: aot_fields.an_build_mode,
             ap_path: aot_fields.ap_path,

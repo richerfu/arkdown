@@ -69,6 +69,11 @@ pub struct BundleInput {
     /// keeps `modulePathMap` narrow, while `ModuleSourceFile.processModuleInfos`
     /// uses `rollup.getModuleInfo(id).meta` for every compiled source file.
     pub module_record_roots: Vec<(String, PathBuf)>,
+    /// Source files whose Rollup module metadata carries an explicit OHM URL.
+    ///
+    /// Latest hvigor uses this for generated `ResourceTable.ts`; the override
+    /// intentionally differs from the file's build-directory-relative path.
+    pub module_meta_info_files: Vec<BundleModuleMetaInfoFile>,
     /// Ordered compile entries produced by `GenerateLoaderJson`.
     pub entries: Vec<String>,
     /// Entries declared by referenced form profiles.
@@ -93,6 +98,12 @@ pub struct BundleInput {
     /// Mirrors hvigor `ArkCompile.needPreloadSoFileSet`: the current module's
     /// `module.srcEntry`, home abilities, and source-HAR home abilities.
     pub preload_system_so_entries: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BundleModuleMetaInfoFile {
+    pub file_path: PathBuf,
+    pub ohm_url: String,
 }
 
 /// Package metadata required by hvigor's `SourceMapGenerator`.
@@ -279,7 +290,7 @@ pub struct LoaderResourceJoin {
 /// The set of rolldown plugin names to activate for this bundle.
 ///
 /// `BundlePluginSet` records which built-in plugins are included in this build
-/// so that the `LifecycleParityReport` can verify all required hooks are covered.
+/// so planning and cache fingerprints observe the same ordered plugin set.
 ///
 /// # Upstream correspondence
 ///
@@ -423,6 +434,7 @@ mod tests {
                 module_name: "entry".to_string(),
                 module_path_map: Vec::new(),
                 module_record_roots: Vec::new(),
+                module_meta_info_files: Vec::new(),
                 entries: vec!["./ets/pages/Index.ets".to_string()],
                 form_entry_sources: Vec::new(),
                 runtime_entry_sources: Vec::new(),

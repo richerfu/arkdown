@@ -300,25 +300,45 @@ impl HvigorSourceMapOptions {
                 )
             })
             .unwrap_or_else(|| default_scope.clone());
-        let key = scope.key_for_source_file(&source_file);
-        let file = Path::new(&source_file)
+        let key = source_map
+            .key_path
+            .as_deref()
+            .map(|path| scope.source_file_with_src_main_path(path))
+            .unwrap_or_else(|| scope.key_for_source_file(&source_file));
+        let file_source = source_map
+            .file
+            .as_deref()
+            .or(source_map.source_map_source_file.as_deref())
+            .unwrap_or(&source_file);
+        let file = Path::new(file_source)
             .file_name()
             .and_then(|file| file.to_str())
-            .unwrap_or(&source_file);
+            .unwrap_or(file_source);
         let sources = source_map
             .source_map_source_file
             .as_ref()
             .map(|source_file| vec![source_file.clone()])
             .unwrap_or_else(|| vec![scope.source_for_source_file(&source_file)]);
-        let mut value = serde_json::json!({
-            "version": 3,
-            "file": file,
-            "sourceRoot": "",
-            "sources": sources,
-            "names": [],
-            "mappings": source_map.mappings,
-            "entry-package-info": default_scope.entry_package_info(),
-        });
+        let mut value = if source_map.include_source_root {
+            serde_json::json!({
+                "version": 3,
+                "file": file,
+                "sourceRoot": "",
+                "sources": sources,
+                "names": [],
+                "mappings": source_map.mappings,
+                "entry-package-info": default_scope.entry_package_info(),
+            })
+        } else {
+            serde_json::json!({
+                "version": 3,
+                "file": file,
+                "sources": sources,
+                "names": [],
+                "mappings": source_map.mappings,
+                "entry-package-info": default_scope.entry_package_info(),
+            })
+        };
         if let Some(package_info) = source_map.package_info() {
             value["package-info"] = serde_json::Value::String(package_info);
         }
@@ -334,6 +354,9 @@ pub struct HvigorSourceMapEntry {
     pub source_map_source_file: Option<String>,
     pub package_name: Option<String>,
     pub package_version: Option<String>,
+    pub key_path: Option<String>,
+    pub file: Option<String>,
+    pub include_source_root: bool,
 }
 
 impl HvigorSourceMapEntry {

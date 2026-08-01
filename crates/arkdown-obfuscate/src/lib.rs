@@ -3,10 +3,11 @@
 //! The SDK implementation delegates source and bytecode obfuscation to
 //! `arkguard`. This crate parses and merges arkguard rule files, exports HAR
 //! consumer `obfuscation.txt` files, and invokes the SDK ArkGuard package for
-//! module-scoped source obfuscation. Bytecode-only options remain explicitly
-//! unsupported until the matching SDK bytecode pipeline is integrated.
+//! module-scoped source obfuscation and the SDK bytecode obfuscator after
+//! `es2abc` has produced `modules.abc`.
 
 mod arkguard;
+mod bytecode;
 mod consumer;
 pub mod plan;
 mod rules;
@@ -14,6 +15,9 @@ mod transform;
 
 pub use arkguard::{
     ArkguardAdapterOptions, ObfuscationModuleFile, ObfuscationModuleInput, ObfuscationModuleOutput,
+};
+pub use bytecode::{
+    BytecodeObfuscationInput, BytecodeObfuscationModuleRecord, BytecodeObfuscationOutput,
 };
 pub use consumer::ConsumerObfuscationFileWriter;
 pub use plan::{
@@ -46,6 +50,24 @@ pub enum ObfuscationError {
     ArkguardSdkApisNotFound(Vec<PathBuf>),
     #[error("active ArkGuard source obfuscation requires a complete module input")]
     ArkguardModuleContextRequired,
+    #[error("bytecode obfuscation must run after es2abc with a complete modules.abc input")]
+    BytecodeObfuscationRequiresPostCompile,
+    #[error("bytecode obfuscation is not enabled by the effective ArkGuard rules")]
+    BytecodeObfuscationNotEnabled,
+    #[error(
+        "bytecode obfuscation requires API 13 or API 12 beta3, got compatibleSdkVersion={version} stage={stage:?}"
+    )]
+    BytecodeObfuscationUnsupportedCompatibleSdk { version: u32, stage: Option<String> },
+    #[error("SDK ets-loader directory does not exist: {0}")]
+    EtsLoaderNotFound(PathBuf),
+    #[error("bytecode obfuscation input does not exist: {0}")]
+    BytecodeObfuscationInputNotFound(PathBuf),
+    #[error("bytecode obfuscation requires sourceMaps.map from the bundle stage")]
+    BytecodeObfuscationSourceMapsRequired,
+    #[error("bytecode obfuscation expected ABC at {expected}, got {actual}")]
+    BytecodeObfuscationAbcPathMismatch { expected: PathBuf, actual: PathBuf },
+    #[error("bytecode obfuscation output does not exist: {0}")]
+    BytecodeObfuscationOutputNotFound(PathBuf),
     #[error("failed to start ArkGuard process '{executable}': {source}")]
     ArkguardProcessStart {
         executable: PathBuf,
@@ -79,7 +101,7 @@ pub struct ObfuscationOptions {
     /// Export rule path (consumer rules for HAR publishing).
     pub export_rule_path: Option<PathBuf>,
     /// Typed adapter configuration for the SDK ArkGuard implementation.
-    /// Required only when source obfuscation is enabled.
+    /// Required when source or bytecode obfuscation is enabled.
     pub arkguard: Option<ArkguardAdapterOptions>,
 }
 
@@ -89,11 +111,20 @@ pub struct ObfuscationOptions {
 ///
 /// Create once per build (rules are parsed at construction time) and reuse
 /// across all files in the same module. Active source options are delegated to
-/// the SDK ArkGuard implementation; bytecode-only options are rejected during
-/// construction.
+/// the SDK ArkGuard implementation. Bytecode obfuscation is exposed as a
+/// separate post-`es2abc` operation so source and bytecode modes cannot run at
+/// the same time, matching SDK `Initializer.initObfuscationConfig`.
 pub struct Obfuscator {
     rules: ObfuscationRules,
     options: ObfuscationOptions,
+}
+
+/// Effective execution mode selected by the merged ArkGuard rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObfuscationMode {
+    Disabled,
+    Source,
+    Bytecode,
 }
 
 impl Obfuscator {
@@ -137,26 +168,21 @@ impl Obfuscator {
         };
         merged.disable_obfuscation = merged.disable_obfuscation || dependency_disables_obfuscation;
         merged.enable_obfuscation = options.enable_obfuscation && !merged.disable_obfuscation;
-        if merged.enable_obfuscation
-            && (merged.enable_bytecode_obfuscation
-                || merged.enable_bytecode_obfuscation_debugging
-                || merged.enable_bytecode_obfuscation_enhanced
-                || merged.enable_bytecode_obfuscation_arkui)
-        {
-            let unsupported = merged
-                .unsupported_arkguard_obfuscation_options()
-                .into_iter()
-                .filter(|feature| feature.contains("bytecode"))
-                .collect::<Vec<_>>();
-            return Err(ObfuscationError::UnsupportedArkguardObfuscationOptions {
-                features: unsupported.join(", "),
-            });
-        }
-
         Ok(Obfuscator {
             rules: merged,
             options,
         })
+    }
+
+    /// Return the SDK execution mode selected by the effective rule set.
+    pub fn mode(&self) -> ObfuscationMode {
+        if !self.rules.enable_obfuscation {
+            ObfuscationMode::Disabled
+        } else if self.rules.enable_bytecode_obfuscation {
+            ObfuscationMode::Bytecode
+        } else {
+            ObfuscationMode::Source
+        }
     }
 
     /// Process JavaScript source text in memory.
@@ -194,7 +220,7 @@ impl Obfuscator {
         &self,
         input: ObfuscationModuleInput,
     ) -> Result<ObfuscationModuleOutput, ObfuscationError> {
-        if !self.rules.enable_obfuscation {
+        if self.mode() == ObfuscationMode::Disabled {
             return Ok(ObfuscationModuleOutput {
                 name_cache_path: self.options.cache_dir.join("nameCache.json"),
                 output_files: input
@@ -204,12 +230,32 @@ impl Obfuscator {
                     .collect(),
             });
         }
+        if self.mode() == ObfuscationMode::Bytecode {
+            return Err(ObfuscationError::BytecodeObfuscationRequiresPostCompile);
+        }
         let adapter = self
             .options
             .arkguard
             .as_ref()
             .ok_or_else(|| ObfuscationError::ArkguardPackageNotFound(PathBuf::new()))?;
         arkguard::ArkguardModuleRunner::new(&self.options, adapter).run(input)
+    }
+
+    /// Obfuscate a completed `modules.abc` with the latest SDK's ArkGuard and
+    /// PandaGuard implementation.
+    pub fn obfuscate_bytecode(
+        &self,
+        input: BytecodeObfuscationInput,
+    ) -> Result<BytecodeObfuscationOutput, ObfuscationError> {
+        if self.mode() != ObfuscationMode::Bytecode {
+            return Err(ObfuscationError::BytecodeObfuscationNotEnabled);
+        }
+        let adapter = self
+            .options
+            .arkguard
+            .as_ref()
+            .ok_or_else(|| ObfuscationError::ArkguardPackageNotFound(PathBuf::new()))?;
+        bytecode::ArkguardBytecodeRunner::new(&self.options, adapter).run(input)
     }
 
     /// Process all `.js` files found up to 2 levels deep in `dir`, in-place.
@@ -438,6 +484,27 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_rule_selects_post_es2abc_mode_without_source_rewrite() {
+        let tmp = tempdir().expect("tempdir");
+        let obfuscator = make_obfuscator(
+            "-enable-property-obfuscation\n-enable-bytecode-obfuscation\n",
+            &tmp,
+        )
+        .expect("SDK bytecode mode should be accepted");
+        assert_eq!(obfuscator.mode(), ObfuscationMode::Bytecode);
+        let err = obfuscator
+            .obfuscate_module(ObfuscationModuleInput {
+                files: Vec::new(),
+                source_maps_path: None,
+            })
+            .expect_err("bytecode mode must wait for modules.abc");
+        assert!(matches!(
+            err,
+            ObfuscationError::BytecodeObfuscationRequiresPostCompile
+        ));
+    }
+
+    #[test]
     fn test_obfuscate_file_reads_and_writes() {
         let tmp = tempdir().expect("tempdir");
         let input = tmp.path().join("input.js");
@@ -475,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_disable_obfuscation_suppresses_unsupported_option_rejection() {
+    fn dependency_disable_obfuscation_suppresses_active_sdk_mode() {
         let tmp = tempdir().expect("tempdir");
         let rule_file = tmp.path().join("rules.txt");
         let dep_rule_file = tmp.path().join("dep-rules.txt");

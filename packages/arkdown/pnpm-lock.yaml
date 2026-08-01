@@ -12,8 +12,8 @@ importers:
         specifier: ^8.15.0
         version: 8.17.0
       typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
+        specifier: 4.9.5
+        version: 4.9.5
     devDependencies:
       '@napi-rs/cli':
         specifier: ^3.7.1
@@ -662,9 +662,9 @@ packages:
   typanion@3.14.0:
     resolution: {integrity: sha512-ZW/lVMRabETuYCd9O9ZvMhAh8GslSqaUjxmK/JLPCh6l73CvLBiuXswj/+7LdnWOgYsQ130FqLzFz5aGT4I3Ug==}
 
-  typescript@5.9.3:
-    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
-    engines: {node: '>=14.17'}
+  typescript@4.9.5:
+    resolution: {integrity: sha512-1FXk9E2Hm+QzZQ7z+McJiHL4NW1F2EzMu9Nq9i3zAaGqibafqYwCVU6WyWAuyQRRzOlxou8xZSyXLEN8oKj24g==}
+    engines: {node: '>=4.2.0'}
     hasBin: true
 
   universal-user-agent@7.0.3:
@@ -1178,6 +1178,6 @@ snapshots:
 
   typanion@3.14.0: {}
 
-  typescript@5.9.3: {}
+  typescript@4.9.5: {}
 
   universal-user-agent@7.0.3: {}

@@ -25,8 +25,10 @@ pub enum SdkSnapshotError {
 pub struct SdkSnapshot {
     /// Root SDK directory.
     pub sdk_root: PathBuf,
-    /// API version (numeric).
+    /// Project target API version passed to compilers and SDK tools.
     pub api_version: u32,
+    /// API version of the selected SDK component.
+    pub component_api_version: u32,
     /// Compile SDK version string (e.g., `"5.0.0.47"`).
     pub compile_sdk_version: String,
     /// SDK compile-plugin metadata resolved during session startup.
@@ -57,18 +59,28 @@ impl SdkSnapshot {
         Ok(Self::from_parts(
             sdk_root,
             config.compile_api_version,
+            config.sdk_component_api_version,
             config.compile_sdk_version.clone(),
         ))
     }
 
     /// Build from already resolved SDK parts.
-    pub fn from_parts(sdk_root: PathBuf, api_version: u32, compile_sdk_version: String) -> Self {
-        let compile_plugin =
-            SdkCompilePluginSnapshot::from_sdk_parts(&sdk_root, api_version, &compile_sdk_version);
+    pub fn from_parts(
+        sdk_root: PathBuf,
+        api_version: u32,
+        component_api_version: u32,
+        compile_sdk_version: String,
+    ) -> Self {
+        let compile_plugin = SdkCompilePluginSnapshot::from_sdk_parts(
+            &sdk_root,
+            component_api_version,
+            &compile_sdk_version,
+        );
 
         Self {
             sdk_root,
             api_version,
+            component_api_version,
             compile_sdk_version,
             compile_plugin,
         }

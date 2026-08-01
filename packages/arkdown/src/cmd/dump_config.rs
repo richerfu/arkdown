@@ -144,6 +144,7 @@ pub fn run(args: DumpConfigArgs) -> anyhow::Result<()> {
       "sdk": {
           "compile_sdk_version": config.sdk_config.compile_sdk_version,
           "compile_api_version": config.sdk_config.compile_api_version,
+          "sdk_component_api_version": config.sdk_config.sdk_component_api_version,
           "has_rollup_plugin": config.sdk_config.has_rollup_plugin,
           "ets_loader_path": config.sdk_config.ets_loader_path.display().to_string(),
           "es2abc_path": config.sdk_config.es2abc_path.display().to_string(),

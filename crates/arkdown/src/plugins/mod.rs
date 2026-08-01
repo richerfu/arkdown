@@ -22,11 +22,6 @@
 
 pub mod duplicate_check;
 pub mod ets_transform;
-/// External compile plugin support (declarative subset, OXC-analyzed).
-///
-/// Bridges `compilePluginPath` JS plugins to the Rolldown `Plugin` trait.
-/// See [`external::ExternalPluginLoader`] and the SPEC-008 design doc.
-pub mod external;
 pub mod factory;
 pub mod har_dedup;
 #[cfg(test)]
@@ -35,7 +30,5 @@ pub mod import_check;
 pub mod json5;
 pub mod minify;
 pub mod module_meta;
-/// Node.js subprocess runner for external JavaScript compile plugins.
-pub mod node_js;
 pub mod ohos_resolve;
 pub mod wrapper_chunk;

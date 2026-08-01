@@ -314,6 +314,7 @@ mod tests {
                 es2abc_path: project_root.join("sdk/es2abc"),
                 restool_path: project_root.join("sdk/restool"),
                 compile_api_version: 12,
+                sdk_component_api_version: 12,
                 has_rollup_plugin: true,
                 compile_sdk_version: "6.0.0.47".to_string(),
             },

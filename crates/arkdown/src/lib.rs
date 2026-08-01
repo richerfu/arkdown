@@ -9,7 +9,6 @@
 //! |------|---------------|
 //! | `plan.rs` | `BundlePlan`, `BundleInput`, `BundleOutputOptions`, `BundleCachePolicy` |
 //! | `bundler.rs` | `Bundler`, `BundleOutput` — Rolldown orchestration |
-//! | `plugin_lifecycle.rs` | `RolldownLifecycleBridge`, `LifecycleParityReport`, `HookOrderPlan` |
 //! | `compile_env.rs` | `CompileEnvironment`, `CompileEnvFlagSet` |
 //! | `manual_chunks.rs` | `ManualChunkPolicy`, `ManualChunkDecision`, `ChunkName` |
 //! | `watch_config.rs` | `WatchConfigBridge`, `WatchInvalidationEvent` |
@@ -31,7 +30,6 @@ pub mod manual_chunks;
 pub mod memory_diagnostics;
 pub mod output;
 pub mod plan;
-pub mod plugin_lifecycle;
 pub mod plugins;
 pub mod watch_config;
 
@@ -47,15 +45,9 @@ pub use bundler::{BundleOutput, Bundler, PreloadSystemSoTask};
 
 // plan — typed bundle plan (SPEC-048 Phase 4 primary input)
 pub use plan::{
-    BundleCachePolicy, BundleInput, BundleOutputOptions, BundlePlan, BundlePluginSet,
-    BundleRuntimePackageContext, BundleRuntimePackageInfo, BundleSourceMapPackageInfo,
-    LoaderResourceJoin, SourceMapPolicy,
-};
-
-// plugin_lifecycle — lifecycle bridge and parity report
-pub use plugin_lifecycle::{
-    HookCoverage, HookOrderPlan, LifecycleHook, LifecycleParityReport, ParityGap,
-    PluginHookContext, PluginSharedState, RolldownLifecycleBridge,
+    BundleCachePolicy, BundleInput, BundleModuleMetaInfoFile, BundleOutputOptions, BundlePlan,
+    BundlePluginSet, BundleRuntimePackageContext, BundleRuntimePackageInfo,
+    BundleSourceMapPackageInfo, LoaderResourceJoin, SourceMapPolicy,
 };
 
 // compile_env — compile environment
@@ -71,7 +63,10 @@ pub use watch_config::{WatchConfigBridge, WatchInvalidationEvent, WatchParityPol
 pub use facts::{BundleFacts, DuplicateOutputFact, HarDedupFact, ImporteeFact, ModuleFact};
 
 // cache_bridge — rollup cache bridge
-pub use cache_bridge::{BundleCacheBridge, ShouldInvalidCacheRequest, ShouldInvalidCacheResult};
+pub use cache_bridge::{
+    BundleCacheBridge, PluginCacheModule, PluginCacheModuleInventory, ShouldInvalidCacheRequest,
+    ShouldInvalidCacheResult,
+};
 
 // diagnostics
 pub use diagnostics::{BundlerDiagnostic, RolldownErrorKind};

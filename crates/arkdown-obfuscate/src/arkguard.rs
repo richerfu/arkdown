@@ -10,6 +10,7 @@ use crate::{ObfuscationError, ObfuscationOptions};
 #[derive(Debug, Clone)]
 pub struct ArkguardAdapterOptions {
     pub node_executable: PathBuf,
+    pub ets_loader_path: PathBuf,
     pub arkguard_package: PathBuf,
     pub sdk_api_paths: Vec<PathBuf>,
     pub module_root: PathBuf,
@@ -19,15 +20,19 @@ pub struct ArkguardAdapterOptions {
     pub ace_module_build: PathBuf,
     pub ace_module_json_path: PathBuf,
     pub compile_sdk_version: String,
+    pub compatible_sdk_version: u32,
+    pub compatible_sdk_version_stage: Option<String>,
     pub entry_package_info: String,
     pub package_dir: String,
     pub module_path_map: BTreeMap<String, PathBuf>,
     pub entry_array: Vec<String>,
+    pub resource_table_path: Option<PathBuf>,
     pub local_packages: Vec<String>,
     pub compile_har: bool,
     pub compile_shared: bool,
     pub use_normalized: bool,
     pub use_ts_har: bool,
+    pub byte_code_har_info: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]

@@ -20,9 +20,125 @@
 //! marked for recompilation.  See [`arkdown_cache::CacheGroupKey`] for the
 //! full group taxonomy.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use arkdown_cache::{CacheGroupDiff, CacheGroupSnapshot, CacheGroupsStore};
+use arkdown_core::HvigorModuleSourceFile;
+use arkdown_path::{ArtifactPathSerializer, RelPath};
+use serde::{Deserialize, Serialize};
+
+/// A cached transformed module passed to latest-hvigor
+/// `shouldInvalidCache({ ast, code, id })` hooks.
+#[derive(Debug, Clone)]
+pub struct PluginCacheModule {
+    pub id: String,
+    pub code: String,
+}
+
+/// Persistent module inventory for custom compile-plugin cache decisions.
+///
+/// Rolldown's Rust plugin trait does not currently expose Rollup's
+/// `shouldTransformCachedModule` hook. Arkdown's coarse task cache can skip the
+/// whole scan, so this inventory preserves the exact transformed module IDs
+/// and code required by latest hvigor's custom `shouldInvalidCache` wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCacheModuleInventory {
+    version: u32,
+    modules: Vec<PluginCacheModuleRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCacheModuleRecord {
+    id: String,
+    source_path: String,
+}
+
+impl PluginCacheModuleInventory {
+    const FILE_NAME: &'static str = "plugin_module_cache.json";
+    const VERSION: u32 = 1;
+
+    pub fn from_module_sources(
+        cache_dir: &Path,
+        module_sources: &[HvigorModuleSourceFile],
+    ) -> anyhow::Result<Self> {
+        let mut modules = module_sources
+            .iter()
+            .map(|source| {
+                let relative = source.path.strip_prefix(cache_dir).map_err(|_| {
+                    anyhow::anyhow!(
+                        "plugin cache source '{}' is outside cache root '{}'",
+                        source.path.display(),
+                        cache_dir.display()
+                    )
+                })?;
+                Ok(PluginCacheModuleRecord {
+                    id: source.module_id.clone(),
+                    source_path: ArtifactPathSerializer::path_to_slash_string(relative)?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        modules.sort_by(|left, right| left.id.cmp(&right.id));
+        modules.dedup_by(|left, right| left.id == right.id);
+        Ok(Self {
+            version: Self::VERSION,
+            modules,
+        })
+    }
+
+    pub fn load(cache_dir: &Path) -> anyhow::Result<Option<Self>> {
+        let path = cache_dir.join(Self::FILE_NAME);
+        let source = match fs_err::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let inventory: Self = serde_json::from_str(&source)?;
+        if inventory.version != Self::VERSION {
+            anyhow::bail!(
+                "unsupported plugin module cache version {}; expected {}",
+                inventory.version,
+                Self::VERSION
+            );
+        }
+        Ok(Some(inventory))
+    }
+
+    pub fn save(&self, cache_dir: &Path) -> anyhow::Result<()> {
+        fs_err::create_dir_all(cache_dir)?;
+        let source = serde_json::to_vec_pretty(self)?;
+        fs_err::write(cache_dir.join(Self::FILE_NAME), source)?;
+        Ok(())
+    }
+
+    pub fn clear(cache_dir: &Path) -> anyhow::Result<()> {
+        match fs_err::remove_file(cache_dir.join(Self::FILE_NAME)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
+
+    pub fn modules(&self) -> &[PluginCacheModuleRecord] {
+        &self.modules
+    }
+}
+
+impl PluginCacheModuleRecord {
+    pub fn read(&self, cache_dir: &Path) -> anyhow::Result<PluginCacheModule> {
+        let relative = RelPath::parse(PathBuf::from(&self.source_path))?;
+        let code = fs_err::read_to_string(cache_dir.join(relative.as_path()))?;
+        Ok(PluginCacheModule {
+            id: self.id.clone(),
+            code,
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ShouldInvalidCacheRequest
@@ -285,6 +401,20 @@ mod tests {
     use super::*;
     use arkdown_cache::CacheGroupKey;
 
+    fn module_source(module_id: &str, path: PathBuf) -> HvigorModuleSourceFile {
+        HvigorModuleSourceFile {
+            module_id: module_id.to_string(),
+            path,
+            record_name: "entry/ets/pages/Index".to_string(),
+            source_file: "entry/src/main/ets/pages/Index.ets".to_string(),
+            package_name: Some("entry".to_string()),
+            is_commonjs: false,
+            is_shared_module: false,
+            origin_source_lang: "ets".to_string(),
+            imported_record_names: Vec::new(),
+        }
+    }
+
     fn empty_request(compile_env: &str) -> ShouldInvalidCacheRequest {
         ShouldInvalidCacheRequest {
             compile_env: compile_env.to_string(),
@@ -302,6 +432,46 @@ mod tests {
     fn keep_result_is_not_invalidation() {
         let result = ShouldInvalidCacheResult::keep();
         assert!(!result.should_invalidate);
+    }
+
+    #[test]
+    fn plugin_module_inventory_round_trips_exact_transformed_code() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cache_dir = tmp.path().join("cache");
+        let source_path = cache_dir.join("entry/ets/pages/Index.js");
+        fs_err::create_dir_all(source_path.parent().expect("source parent"))
+            .expect("create source directory");
+        fs_err::write(&source_path, "export const cached = true;").expect("write source");
+
+        PluginCacheModuleInventory::from_module_sources(
+            &cache_dir,
+            &[module_source("/entry/Index.ets", source_path)],
+        )
+        .expect("inventory")
+        .save(&cache_dir)
+        .expect("save inventory");
+
+        let loaded = PluginCacheModuleInventory::load(&cache_dir)
+            .expect("load inventory")
+            .expect("inventory exists");
+        let module = loaded.modules()[0]
+            .read(&cache_dir)
+            .expect("read cached module");
+        assert_eq!(module.id, "/entry/Index.ets");
+        assert_eq!(module.code, "export const cached = true;");
+    }
+
+    #[test]
+    fn plugin_module_inventory_rejects_sources_outside_cache_root() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cache_dir = tmp.path().join("cache");
+        let outside = tmp.path().join("outside.js");
+        let error = PluginCacheModuleInventory::from_module_sources(
+            &cache_dir,
+            &[module_source("outside", outside)],
+        )
+        .expect_err("outside source must fail");
+        assert!(error.to_string().contains("outside cache root"));
     }
 
     #[test]

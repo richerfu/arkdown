@@ -45,6 +45,7 @@ impl CustomComponentStatementEmitter {
         ));
         LeafAttributeStatementEmitter::new(
             &context.runtime_names().component_common,
+            span,
             chain_attrs,
             builder_methods,
             context,

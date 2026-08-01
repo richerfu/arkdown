@@ -623,7 +623,10 @@ impl Packager {
                     pkg_sdk_info_path.display()
                 )));
             }
-            Some(PackageToolJson::read(pkg_sdk_info_path)?.into_bytes())
+            // Latest SDK app_packing_tool stores pkgSdkInfo.json byte-for-byte.
+            // Unlike module.json/pkgContextInfo.json, it does not run this
+            // metadata through fastjson's object-key normalization.
+            Some(std::fs::read(pkg_sdk_info_path)?)
         } else {
             None
         };

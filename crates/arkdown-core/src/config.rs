@@ -199,6 +199,12 @@ pub struct BuildOption {
     /// `buildOption.packOptions.deduplicateHar`.
     #[serde(default)]
     pub deduplicate_har: bool,
+    /// Absolute path to `buildOption.packingOptions.customizedOptions.basePackage`.
+    ///
+    /// Hvigor resolves this HAR base ABC relative to the module root before it
+    /// constructs the ArkTS compiler configuration.
+    #[serde(default)]
+    pub customized_har_base_package: Option<PathBuf>,
     /// Permissions to remove from HAR/HSP dependency `requestPermissions`.
     /// Matches hvigor's `MergeProfile.getRemovePermissionSet()` behavior.
     #[serde(default)]
@@ -277,6 +283,9 @@ pub struct NativeLibOption {
     /// consumers need both headers and link libraries in that case.
     #[serde(default)]
     pub exclude_so_from_interface_har: bool,
+    /// Glob patterns from `nativeLib.excludeSoFromBinXO`.
+    #[serde(default)]
+    pub exclude_so_from_binxo: Vec<String>,
     /// Native debug-symbol/strip policy.
     #[serde(default)]
     pub debug_symbol: NativeDebugSymbolOption,
@@ -290,6 +299,7 @@ impl Default for NativeLibOption {
             header_paths: Vec::new(),
             exclude_from_har: true,
             exclude_so_from_interface_har: false,
+            exclude_so_from_binxo: Vec::new(),
             debug_symbol: NativeDebugSymbolOption::default(),
         }
     }
@@ -507,8 +517,15 @@ pub struct SdkConfig {
     pub es2abc_path: PathBuf,
     /// Path to `restool` binary for the SDK resource backend.
     pub restool_path: PathBuf,
-    /// SDK API version (numeric).
+    /// Target API version passed to compilers and SDK tools.
     pub compile_api_version: u32,
+    /// API version of the selected SDK component.
+    ///
+    /// This is intentionally distinct from `compile_api_version`: current
+    /// hvigor gates SDK-provided artifacts such as `ResourceTable.ts` on the
+    /// installed component version even when a project targets an older API.
+    #[serde(default = "default_sdk_component_api_version")]
+    pub sdk_component_api_version: u32,
     /// Whether the SDK has the rollup plugin (required for stage mode).
     pub has_rollup_plugin: bool,
     /// DevEco Studio SDK version string discovered from SDK metadata.
@@ -519,6 +536,10 @@ pub struct SdkConfig {
 
 fn default_compile_sdk_version() -> String {
     "6.0.0.47".to_string()
+}
+
+fn default_sdk_component_api_version() -> u32 {
+    12
 }
 
 impl SdkConfig {

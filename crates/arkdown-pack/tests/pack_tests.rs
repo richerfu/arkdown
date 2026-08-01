@@ -35,6 +35,7 @@ fn make_config() -> Arc<ArkdownConfig> {
                 preload_system_so: false,
                 preload_so: vec![],
                 deduplicate_har: false,
+                customized_har_base_package: None,
                 remove_permissions: vec![],
                 aot_compile_mode: None,
                 host_pgo: None,
@@ -62,6 +63,7 @@ fn make_config() -> Arc<ArkdownConfig> {
             es2abc_path: "/sdk/es2abc".into(),
             restool_path: "/sdk/restool".into(),
             compile_api_version: 12,
+            sdk_component_api_version: 12,
             has_rollup_plugin: true,
             compile_sdk_version: "6.0.0.47".to_string(),
         },
@@ -607,11 +609,8 @@ fn test_hap_packages_pkg_sdk_info_when_provided_like_hvigor() {
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
     let out = tmp.path().join("pkg_sdk.hap");
     let pkg_sdk_info = tmp.path().join("pkgSdkInfo.json");
-    fs::write(
-        &pkg_sdk_info,
-        r#"{"library":{"version":"1.2.3","type":"har","isDirectDep":true},"entry":{"version":"1.0.0","type":"entry","isDirectDep":false}}"#,
-    )
-    .expect("write pkgSdkInfo.json");
+    let expected = r#"{"library":{"version":"1.2.3","type":"har","isDirectDep":true},"entry":{"version":"1.0.0","type":"entry","isDirectDep":false}}"#;
+    fs::write(&pkg_sdk_info, expected).expect("write pkgSdkInfo.json");
 
     let mut input = minimal_pack_input(abc, res, modj, out.clone());
     input.pkg_sdk_info_path = Some(pkg_sdk_info);
@@ -627,9 +626,10 @@ fn test_hap_packages_pkg_sdk_info_when_provided_like_hvigor() {
         .expect("pkgSdkInfo.json must be packaged");
     let mut content = String::new();
     entry.read_to_string(&mut content).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-    assert_eq!(value["library"]["type"], "har");
-    assert_eq!(value["library"]["isDirectDep"], true);
+    assert_eq!(
+        content, expected,
+        "pkgSdkInfo.json must remain byte-identical"
+    );
     drop(entry);
     assert_eq!(
         archive.file_names().last(),

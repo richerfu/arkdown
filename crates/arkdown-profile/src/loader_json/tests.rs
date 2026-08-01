@@ -33,6 +33,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 preload_system_so: false,
                 preload_so: vec![],
                 deduplicate_har: false,
+                customized_har_base_package: None,
                 remove_permissions: vec![],
                 aot_compile_mode: None,
                 host_pgo: None,
@@ -53,6 +54,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
             es2abc_path: PathBuf::from("/sdk/es2abc"),
             restool_path: PathBuf::from("/sdk/restool"),
             compile_api_version: 12,
+            sdk_component_api_version: 12,
             has_rollup_plugin: true,
             compile_sdk_version: "6.0.0.47".to_string(),
         },
@@ -657,6 +659,7 @@ fn test_loader_json_hvigor_keys() {
         "routerMap",
         "hspResourcesMap",
         "updateVersionInfo",
+        "customizedHar",
         "anBuildOutPut",
         "anBuildMode",
     ]
@@ -708,6 +711,7 @@ fn test_loader_json_serializes_minimal_hvigor_shape() {
   "routerMap": [],
   "hspResourcesMap": {},
   "updateVersionInfo": {},
+  "customizedHar": false,
   "anBuildOutPut": "/project/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
   "anBuildMode": "type"
 }"#
@@ -1354,6 +1358,7 @@ fn test_loader_json_golden_hvigor_key_set() {
         "routerMap",
         "hspResourcesMap",
         "updateVersionInfo",
+        "customizedHar",
         "anBuildOutPut",
         "anBuildMode",
     ]
@@ -1811,6 +1816,45 @@ fn test_loader_json_serialized_compile_entry_is_separate_from_internal_entries()
             .len(),
         0
     );
+    assert_eq!(value["customizedHar"], false);
+}
+
+#[test]
+fn test_loader_json_uses_sdk_component_api_for_resource_table_and_serializes_customized_har() {
+    let mut config = make_config(false);
+    config.sdk_config.compile_api_version = 17;
+    config.sdk_config.sdk_component_api_version = 24;
+    config.product.build_option.customized_har_base_package =
+        Some(PathBuf::from("/project/entry/base.abc"));
+    let module_cfg = make_module_cfg();
+    let manifest = make_manifest();
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+    assert!(loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|entry| entry.ends_with("/entry/build/default/generated/r/default/ResourceTable.ts")));
+    assert!(loader
+        .compile_entry
+        .iter()
+        .any(|entry| entry.ends_with("/entry/build/default/generated/r/default/ResourceTable.ts")));
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+    assert_eq!(value["customizedHar"], true);
+
+    config.sdk_config.sdk_component_api_version = 22;
+    let legacy_sdk_loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+    assert!(!legacy_sdk_loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|entry| entry.ends_with("ResourceTable.ts")));
+
+    config.sdk_config.sdk_component_api_version = 24;
+    config.output_target = OutputTarget::Preview;
+    let preview_loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+    assert!(!preview_loader
+        .hvigor_compile_entry
+        .iter()
+        .any(|entry| entry.ends_with("ResourceTable.ts")));
 }
 
 #[test]

@@ -192,6 +192,14 @@ impl<'a> ProfileModuleLayout<'a> {
         self.default_intermediate_file("res", "ResourceTable.txt")
     }
 
+    pub(crate) fn generated_resource_table_typescript(&self) -> PathBuf {
+        self.build_default()
+            .join("generated")
+            .join("r")
+            .join("default")
+            .join("ResourceTable.ts")
+    }
+
     pub(crate) fn merge_profile_module_json(&self) -> PathBuf {
         self.default_intermediate_file("merge_profile", "module.json")
     }

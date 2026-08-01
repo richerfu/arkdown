@@ -9,6 +9,7 @@ fn sdk_config(ets_loader_path: PathBuf) -> SdkConfig {
         es2abc_path: PathBuf::new(),
         restool_path: PathBuf::new(),
         compile_api_version: 17,
+        sdk_component_api_version: 24,
         has_rollup_plugin: true,
         compile_sdk_version: "6.0.1.112".to_string(),
     }
