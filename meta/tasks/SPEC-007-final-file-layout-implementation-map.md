@@ -372,7 +372,6 @@ crates/arkdown/src/
   cache_bridge.rs
   watch_config.rs
   facts.rs
-  plugin_lifecycle.rs
   plugins/
     mod.rs
     factory.rs
@@ -402,10 +401,10 @@ crates/arkdown/src/
   cache inputs/outputs. Must not depend on Rollup cache object shape.
 - `watch_config.rs`: bundle watch configuration inputs.
 - `facts.rs`: importee maps, module path maps, chunk facts, HAR/HSP facts.
-- `plugin_lifecycle.rs`: fixed adapter order and hook-usage audit helpers. This
-  is not a custom plugin runtime.
 - `plugins/mod.rs`: internal adapter module declarations.
-- `plugins/factory.rs`: builds fixed built-in adapter list from `BundlePlan`.
+- `plugins/factory.rs`: builds the fixed Rolldown adapter list from
+  `BundlePlan`; it may add thin internal plugins only for observed hvigor hook
+  boundaries absent from upstream Rolldown.
 - `plugins/json5.rs`: JSON5 load/transform adapter.
 - `plugins/duplicate_check.rs`: duplicate filename checks.
 - `plugins/module_meta.rs`: package/module metadata facts.

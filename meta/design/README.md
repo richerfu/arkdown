@@ -18,9 +18,9 @@ Read these documents before working in a covered area. Keep them in sync with im
 | [module-resolution.md](module-resolution.md) | OHOS module resolution deep dive: all specifier forms (@ohos/_, @kit/_, @bundle:, bare ohpm), oh-package.json5 dependency types, oxc-resolver integration, OHM URL normalization, SDK path conventions |
 | [abc-pipeline.md](abc-pipeline.md)           | es2abc compilation step: why ABC is required, module-mode input contract, DebugInfo coordinate source, incremental cache, worker pool parallelism                                                     |
 | [chunk-model.md](chunk-model.md)             | Legacy chunk-wrapper background plus current module-mode chunk notes; current CompileArkTS output remains ESM for `es2abc --module`                                                                     |
-| [types.md](types.md)                         | Canonical shared type definitions: ResolvedId, Module, ModuleGraph, ArkChunk, ChunkGraph, AbcArtifact, HapManifest, OhPackageJson5, ArkdownPlugin trait, enums                                         |
+| [types.md](types.md)                         | Canonical shared type definitions: ResolvedId, module/chunk models, artifacts, manifests, build enums, Rolldown plugin boundary, and hvigor gap metadata                                             |
 | [compat.md](compat.md)                       | hvigorw compatibility layer: command mapping, hvigorw wrapper script, build-profile.json5 field mapping, plugin API differences, unsupported features, migration guide                                 |
-| [plugins.md](plugins.md)                     | Complete plugin inventory: all JS plugins from hvigor-arkts-compose and hvigor-arkts-base, what each does, P0/P1/P2 priority, arkdown Rust crate replacement, complexity estimate                      |
+| [plugins.md](plugins.md)                     | Rolldown-only plugin architecture, installed-IDE compile-plugin contract, Rust built-in ownership, TypeScript configuration boundary, and replacement proof                                          |
 | [hvigor-full-gap-analysis.md](hvigor-full-gap-analysis.md) | Comprehensive mapping of all 95 hvigor pipeline steps against current arkdown status; implementation tasks TASK-ABC-01 through TASK-WATCH-01 with priority ordering and upstream refs |
 
 ---

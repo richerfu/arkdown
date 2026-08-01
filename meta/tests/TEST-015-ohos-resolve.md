@@ -1,6 +1,7 @@
-# TEST-015: arkdown-plugin-ohos-resolve
+# TEST-015: arkdown OHOS resolve Rolldown adapter
 
-**Crate**: `arkdown-plugin-ohos-resolve`
+**Crates**: `arkdown`, `arkdown-resolver`
+**Owners**: `crates/arkdown/src/plugins/ohos_resolve/`, `crates/arkdown-resolver/`
 **Original source**: `hvigor-arkts-compose/dist/src/plugins/resolve/index.js`,
 `import-resolver.js`, `resolveImportSpecifiers.js`, `build-steps/process-importee.js`
 
@@ -9,16 +10,12 @@
 ## Test File Layout
 
 ```
-crates/arkdown-plugin-ohos-resolve/src/
-├── tests/
-│   ├── sdk_specifiers.rs     ← @ohos/* and @kit.* resolution
-│   ├── bundle_specifiers.rs  ← @bundle: and @shared: external refs
-│   ├── relative.rs           ← relative import resolution + extension order
-│   ├── ohpm_packages.rs      ← bare specifiers from oh_modules/
-│   ├── local_har.rs          ← file: local HAR references
-│   ├── bytecode_har.rs       ← packages with metadata.abcPath
-│   ├── ohm_url.rs            ← OHM URL generation
-│   └── case_check.rs         ← case-sensitive path check
+crates/arkdown/src/plugins/ohos_resolve/
+├── mod.rs
+├── plugin.rs                 ← Rolldown resolve hook
+└── importee.rs               ← OHOS importee adaptation
+
+crates/arkdown-resolver/      ← typed resolver and focused integration tests
 ```
 
 ---
@@ -67,9 +64,10 @@ crates/arkdown-plugin-ohos-resolve/src/
 - **Input**: `"@shared:com.example/lib/path"`
 - **Expected**: `ExternalHsp { ... }` or `ExternalBundle { ohm_url: ... }`
 
-### TC-008: plugin returns `ResolvedId { external: true }` for ExternalBundle
+### TC-008: Rolldown adapter returns an external resolved ID for ExternalBundle
 
-- **Expected**: the `ArkdownPlugin::resolve_id` result has `external = true` so bundler skips loading
+- **Expected**: the `rolldown_plugin::Plugin::resolve_id` result has
+  `external = true` so Rolldown skips loading
 
 ---
 

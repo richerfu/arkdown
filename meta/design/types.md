@@ -289,91 +289,34 @@ pub struct PackageMetadata {
 
 ---
 
-## 6. Plugin Trait
+## 6. Plugin Types
+
+Arkdown does not define an `ArkdownPlugin` trait. The canonical hook type is
+upstream `rolldown_plugin::Plugin`, and every built-in or same-process
+JavaScript adapter enters Rolldown as a `SharedPluginable`.
+
+`PackagePlugin` is build-boundary metadata around that real Rolldown plugin. It
+stores order plus optional module/target scope and an optional
+`HvigorPluginGapHooks` object. The gap trait contains only behavior unavailable
+from upstream Rolldown:
 
 ```rust
-/// The arkdown plugin trait — mirrors rolldown/rollup plugin hooks.
-/// Plugins implement whichever hooks they need; all hooks have default no-op implementations.
-#[async_trait]
-pub trait ArkdownPlugin: Send + Sync {
-    fn name(&self) -> &str;
-
-    /// Called once at build start.
-    async fn build_start(&self, ctx: &mut BuildContext) -> PluginResult<()> { Ok(()) }
-
-    /// Resolve a module specifier to a ResolvedId.
-    /// Return None to defer to the next plugin.
-    async fn resolve_id(
+pub trait HvigorPluginGapHooks: Send + Sync {
+    async fn seed_hvigor_context(&self, share_json: &str) -> anyhow::Result<()>;
+    async fn should_invalid_cache(&self, module: &PluginCacheModule) -> anyhow::Result<bool>;
+    fn has_should_invalid_cache(&self) -> bool;
+    async fn before_build_end_with_graph_context(
         &self,
-        ctx: &ResolveContext,
-        specifier: &str,
-        importer: Option<&str>,
-    ) -> PluginResult<Option<ResolvedId>> { Ok(None) }
-
-    /// Load the source content for a resolved module ID.
-    /// Return None to defer to the default file loader.
-    async fn load(
-        &self,
-        ctx: &LoadContext,
-        id: &str,
-    ) -> PluginResult<Option<ModuleSource>> { Ok(None) }
-
-    /// Transform the source of a module.
-    /// Return None to leave source unchanged.
-    async fn transform(
-        &self,
-        ctx: &TransformContext,
-        source: ModuleSource,
-    ) -> PluginResult<Option<ModuleSource>> { Ok(None) }
-
-    /// Called after a module is parsed.
-    async fn module_parsed(
-        &self,
-        ctx: &ModuleParsedContext,
-        module: &Module,
-    ) -> PluginResult<()> { Ok(()) }
-
-    /// Called before the build ends (all modules parsed).
-    async fn before_build_end(&self, ctx: &mut BuildContext) -> PluginResult<()> { Ok(()) }
-
-    /// Called when the build ends (all chunks generated).
-    async fn build_end(
-        &self,
-        ctx: &BuildContext,
-        error: Option<&BuildError>,
-    ) -> PluginResult<()> { Ok(()) }
-
-    /// Transform a rendered chunk's code.
-    async fn render_chunk(
-        &self,
-        ctx: &RenderChunkContext,
-        code: String,
-        chunk: &ArkChunk,
-    ) -> PluginResult<Option<RenderedChunk>> { Ok(None) }
-
-    /// Called after all chunks are rendered, before file write.
-    async fn generate_bundle(
-        &self,
-        ctx: &mut GenerateBundleContext,
-        bundle: &mut ChunkGraph,
-        is_write: bool,
-    ) -> PluginResult<()> { Ok(()) }
-
-    /// Decide whether an incremental cache entry is still valid.
-    fn should_invalidate_cache(
-        &self,
-        ctx: &CacheContext,
-        cached: &CachedModule,
-    ) -> bool { false }
+        context: &PackagePluginGraphContext,
+    ) -> anyhow::Result<()>;
+    fn has_before_build_end(&self) -> bool;
+    fn runtime_cache_identity(&self) -> Option<String>;
 }
-
-pub struct RenderedChunk {
-    pub code: String,
-    pub map: Option<SourceMap>,
-}
-
-pub type PluginResult<T> = Result<T, PluginError>;
 ```
+
+`beforeBuildEnd` is still executed by an internal `pre` Rolldown `build_end`
+plugin; `shouldInvalidCache` belongs to the cache boundary. Standard hooks must
+never be added to the gap trait or scheduled by a parallel Arkdown driver.
 
 ---
 
@@ -556,4 +499,4 @@ pub struct SigningConfig {
 - [chunk-model.md](chunk-model.md) — legacy chunk-wrapper background and ChunkGraph details
 - [abc-pipeline.md](abc-pipeline.md) — AbcArtifact usage
 - [module-resolution.md](module-resolution.md) — OhosResolvedModule
-- [plugins.md](plugins.md) — ArkdownPlugin trait implementations
+- [plugins.md](plugins.md) — Rolldown plugin ownership and the thin hvigor gap adapter

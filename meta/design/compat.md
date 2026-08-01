@@ -156,31 +156,48 @@ Each target in `modules[].targets` may have its own `buildOption`:
 
 ## 4. `hvigorfile.ts` Plugin API Differences
 
-### hvigor plugin API (JavaScript)
+### hvigor configuration plugin API (TypeScript/JavaScript)
 
-hvigor custom compile plugins are loaded from `hvigorPluginFile` and follow this interface:
+The Node package follows the `@ohos/hvigor@6.24.3` custom plugin contract. The
+`apply` argument is a `HvigorNode`; the OHOS context is obtained from that node:
 
 ```typescript
 // hvigorfile.ts (module-level)
-import { moduleTasks, OhosHapContext, OhosPluginId } from "@ohos/hvigor-ohos-plugin";
+import { hapTasks, OhosHapContext, OhosPluginId } from "@ohos/hvigor-ohos-plugin";
 
 const entryPlugin = {
-  pluginId: OhosPluginId.OHOS_HAP_PLUGIN,
-  apply(context: OhosHapContext): void {
-    context.targets((target) => {
-      target.getBuildProfile();
-      target.getCompileArkTsOption();
-    });
+  pluginId: "example.entry-options",
+  context() {
+    return { enabled: true };
+  },
+  apply(node): void {
+    const context = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN) as OhosHapContext;
+    context.loadCompilePlugin("./compile-plugin.ts");
   },
 };
 
 export default {
-  system: moduleTasks,
+  system: hapTasks,
   plugins: [entryPlugin],
 };
 ```
 
-Rollup-level compile plugins (from `compilePluginPath` in build config):
+arkdown executes imported `.ts` plugins in the same Node/V8 process, binds each
+node's custom `context` callbacks before running that node's `apply(node)`, and fires
+`nodesEvaluated` after every project/module hvigorfile has been evaluated.
+`Target.getBuildOption()` is a deeply frozen snapshot; configuration changes use
+`setBuildProfileOpt()` or `loadCompilePlugin()`, as in hvigor 6.24.3.
+
+For current projects, `loadCompilePlugin('./path/plugin.ts')` is the supported
+compile-plugin registration API. Although an internal/latest type declaration
+still mentions `arkOptions.compilePluginFile`, the installed project, module,
+and hvigorfile schemas reject that declarative field. Arkdown rejects it with
+`HVIGOR_SCHEMA_COMPILE_PLUGIN_FILE` instead of creating a configuration path
+that real hvigor does not accept. `loadCompilePlugin` also runs the same
+TypeScript 4.9.5 pre-emit diagnostics as the IDE.
+
+Rolldown-level compile plugins (registered through `loadCompilePlugin`, or
+passed directly through Arkdown's `compilePluginPath` build config):
 
 ```typescript
 // Rollup plugin contract (from validatePlugin in arkts-pack.js)
@@ -200,26 +217,28 @@ export default {
 
 ### arkdown plugin API (Rust)
 
-arkdown plugins implement the `ArkdownPlugin` trait (see [types.md](types.md)). The hooks map 1:1 to rollup hooks.
+Arkdown's built-ins and JavaScript adapters implement
+`rolldown_plugin::Plugin`. There is no parallel `ArkdownPlugin` hook engine.
+Native Rust remains preferred for built-in business logic and hot paths; the
+same-process NAPI adapter exists because arbitrary TypeScript/JavaScript
+execution is part of hvigor's public plugin behavior.
 
-**Migration note**: Existing rollup-compatible JavaScript plugins can run in a compatibility shim (via NAPI), but native Rust plugins are preferred for performance.
+`beforeBuildEnd` and `shouldInvalidCache` are the only latest-hvigor external
+compile-plugin hooks not supplied by upstream Rolldown. They use thin gap
+adapters while all standard hook scheduling remains in Rolldown.
 
 ### Plugin hook mapping
 
-| rollup hook                   | arkdown hook                            | Notes |
-| ----------------------------- | --------------------------------------- | ----- |
-| `buildStart`                  | `build_start`                           |       |
-| `resolveId`                   | `resolve_id`                            |       |
-| `load`                        | `load`                                  |       |
-| `transform`                   | `transform`                             |       |
-| `moduleParsed`                | `module_parsed`                         |       |
-| `beforeBuildEnd`              | `before_build_end`                      |       |
-| `buildEnd`                    | `build_end`                             |       |
-| `renderChunk`                 | `render_chunk`                          |       |
-| `generateBundle`              | `generate_bundle`                       |       |
-| `shouldInvalidCache`          | `should_invalidate_cache`               |       |
-| `shouldTransformCachedModule` | (merged into `should_invalidate_cache`) |       |
-| `resolveDynamicImport`        | (handled by `resolve_id`)               |       |
+| latest-hvigor hook    | arkdown owner                               | Notes                                      |
+| --------------------- | ------------------------------------------- | ------------------------------------------ |
+| `buildStart`          | Rolldown `Plugin::build_start`              | direct                                     |
+| `resolveId`           | Rolldown `Plugin::resolve_id`               | direct                                     |
+| `load`                | Rolldown `Plugin::load`                     | direct                                     |
+| `transform`           | Rolldown `Plugin::transform`                | direct                                     |
+| `moduleParsed`        | Rolldown `Plugin::module_parsed`            | direct                                     |
+| `beforeBuildEnd`      | internal Rolldown `pre` `build_end` adapter | sequential, real module graph context      |
+| `buildEnd`            | Rolldown `Plugin::build_end`                | direct                                     |
+| `shouldInvalidCache`  | cache-boundary gap adapter                  | real retained module `{ ast?, code, id }`    |
 
 ---
 
@@ -238,19 +257,30 @@ hvigorw accepts `-p key=value` for build property overrides. arkdown supports th
 
 ---
 
-## 6. Features arkdown Explicitly Will NOT Support
+## 6. Current Replacement Blockers
 
 ### Gradle Interop
 
-hvigor has hooks into Gradle for native `.so` compilation (CMake/NDK). arkdown does not replicate this. Native code is compiled separately via CMake/Ninja and the resulting `.so` files are placed in `entry/libs/arm64-v8a/` for arkdown to package.
+Arkdown packages prebuilt `.so` files and can run project-defined custom tasks,
+but complete parity for every hvigor native CMake/NDK task remains to be proven.
+Until then, native libraries can be built separately and placed in the module's
+ABI directory.
 
-### Custom hvigorfile Task Registration
+### Arbitrary hvigor Task Graphs
 
-hvigorw supports registering arbitrary custom Gradle-like tasks in `hvigorfile.ts`. arkdown does not have a general task system — it has a fixed pipeline. Custom behavior is expressed via arkdown plugins, not custom tasks.
+Arkdown owns a typed native build pipeline and overlays observed custom-task
+behavior. Package-bound custom tasks are supported: a task registered from a
+TypeScript plugin or `nodesEvaluated` hook can use `postDependencies` targeting
+`PackageHap`, `PackageHsp`, or `PackageHar`, and custom-to-custom dependencies
+are executed in deterministic topological order. Edges to other hvigor built-in
+tasks currently produce a typed diagnostic; each missing edge is a replacement
+gap, not a permanent alternate contract.
 
 ### Java Daemon
 
-The hvigor daemon architecture (persistent JVM, shared class state) is not replicated. arkdown starts fresh each invocation; incremental state is managed via on-disk caches.
+The hvigor daemon architecture is not replicated. Arkdown starts fresh each
+invocation and uses on-disk caches; command/output parity must not depend on the
+daemon implementation detail.
 
 ### FA Mode (Legacy Framework)
 
@@ -263,10 +293,6 @@ Preview mode (in-IDE hot-reload via DevEco Studio's previewer). Support may be a
 ### Integrated HSP Signing (`SignProjectRemoteHsp`, `SignModuleRemoteHsp`)
 
 Remote HSP signing via the Huawei AppGallery integration. Deferred to v2.
-
-### `@baize/wdk` Framework APIs
-
-hvigor's internal `@baize/wdk` provides utilities like `cloneDeep`, `difference`, `uniq`. These are irrelevant to arkdown (Rust equivalents are trivial).
 
 ---
 
@@ -284,13 +310,23 @@ hvigor's internal `@baize/wdk` provides utilities like `cloneDeep`, `difference`
    - `.ets` source files
 4. **Run**: `./hvigorw assembleHap` or `arkdown build --target hap`
 
-### If you use custom rollup compile plugins
+### If you use custom compile plugins
 
-Custom plugins in `compilePluginPath` that follow the rollup plugin interface will work via the NAPI JavaScript plugin compatibility shim. However, for best performance, consider rewriting them as Rust `ArkdownPlugin` implementations.
+Keep the plugin as TypeScript and register it from a module HvigorPlugin with
+`OhosModuleContext.loadCompilePlugin()`. It is type-checked, loaded, and
+validated with latest-hvigor rules, then wrapped as a real Rolldown plugin in
+the same Node/V8 process. Arkdown's direct Node API also accepts an explicit
+`compilePluginPath`. No hook rewrite is required; Rust implementations are
+preferred only for Arkdown-owned built-ins and performance-sensitive
+extensions.
 
 ### If you use hvigorfile.ts module-level plugins
 
-hvigor module-level plugins that modify `getBuildProfile()` or `getCompileArkTsOption()` need to be expressed as arkdown config overrides or Rust plugins. There is no direct equivalent API.
+Arkdown evaluates TypeScript module plugins and exposes the latest node/task and
+OHOS context surface already covered by the runtime. Unsupported artifact-
+affecting context methods fail with `ARKDOWN_UNSUPPORTED_HVIGOR_CONTEXT_API`;
+those diagnostics identify remaining replacement gaps rather than silently
+ignoring configuration.
 
 ### Environment variables
 
@@ -326,4 +362,4 @@ With:
 - [pipeline.md](pipeline.md) — what arkdown actually does for each command
 - [hvigorw-analysis.md](hvigorw-analysis.md) — hvigor task chain that each command triggers
 - [plugins.md](plugins.md) — plugin API and Rust plugin crates
-- [types.md](types.md) — ArkdownPlugin trait
+- [types.md](types.md) — Rolldown plugin boundary and hvigor gap metadata

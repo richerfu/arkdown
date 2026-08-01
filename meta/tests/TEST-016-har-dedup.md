@@ -1,6 +1,7 @@
-# TEST-016: arkdown-plugin-har-dedup
+# TEST-016: arkdown HAR-dedup Rolldown adapter
 
-**Crate**: `arkdown-plugin-har-dedup`
+**Crate**: `arkdown`
+**Owner**: `crates/arkdown/src/plugins/har_dedup.rs`
 **Original source**: `hvigor-arkts-compose/dist/src/plugins/har-deduplicate/har-deduplicate-util.js`,
 `hsp-collect-har-files.js`
 
@@ -9,11 +10,9 @@
 ## Test File Layout
 
 ```
-crates/arkdown-plugin-har-dedup/src/
-├── tests/
-│   ├── collect_pass.rs       ← pass 1: HAR file collection written to disk
-│   ├── dedup_pass.rs         ← pass 2: collected files excluded from HAP
-│   └── hsp_only.rs           ← plugin inactive for non-HSP targets
+crates/arkdown/src/plugins/
+├── har_dedup.rs              ← collect/real Rolldown passes
+└── har_dedup_tests.rs        ← pass, exclusion, and target coverage
 ```
 
 ---

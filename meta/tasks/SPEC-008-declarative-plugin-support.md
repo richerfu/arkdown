@@ -1,331 +1,214 @@
-# SPEC-008 Declarative Compile Plugin Support
+# SPEC-008 Hvigor Plugin Support on Rolldown
+
+## Status
+
+Complete for the declared compile-plugin scope. The implementation target is
+the hvigor and OHOS plugin runtime bundled with the latest installed DevEco
+Studio, currently `6.24.3`.
 
 ## Goal
 
-Align arkdown's plugin capability with hvigor by supporting the two distinct
-plugin surfaces that hvigor exposes, using the same architectural principles
-as Rolldown.
+Allow existing TypeScript/JavaScript hvigor configuration plugins and
+`compilePluginPath` plugins to run in arkdown while keeping one compile-plugin
+engine: Rolldown's `rolldown_plugin::Plugin` system.
 
----
+Arkdown must not maintain a second hook scheduler, a declarative approximation,
+or a subprocess plugin protocol. A compatibility adapter is allowed only for a
+latest-hvigor behavior that upstream Rolldown does not expose.
 
-## hvigor Plugin Surfaces
+## Upstream Evidence
 
-hvigor exposes two separate plugin surfaces with different semantics:
+The behavior in this specification comes from the installed IDE, not a copied
+repository dependency:
 
-### Surface A — `hvigorfile.ts` module-level plugins
+- `@ohos/hvigor@6.24.3` lifecycle and node/task implementations from the
+  currently installed DevEco Studio distribution.
+- `OhosModuleContextImpl._loadCompilePlugin` under the installed
+  `hvigor-ohos-plugin/src/plugin/context/impl/` and the installed project,
+  module, and hvigorfile JSON schemas.
+- `@ohos/hvigor-arkts-compose` `arkts-pack.js`, especially `getPlugins`,
+  `loadCustomCompilePlugins`, `validatePlugin`, `doWrapper`, and
+  `getCompilePluginContext`.
+- The IDE's patched Rollup in
+  `@ohos/hvigor-arkts-base/node_modules/rollup/dist/shared/rollup.js`.
 
-```typescript
-// hvigorfile.ts (project-level or module-level)
-import { moduleTasks, OhosHapContext } from "@ohos/hvigor-ohos-plugin";
-
-const myPlugin = {
-  pluginId: OhosPluginId.OHOS_HAP_PLUGIN,
-  apply(context: OhosHapContext): void {
-    context.targets((target) => {
-      target.getCompileArkTsOption().compilePluginPath = "./my-rollup-plugin.js";
-      target.getBuildProfile().buildOption.arkOptions.obfuscation.enable = true;
-    });
-  },
-};
-
-export default { system: moduleTasks, plugins: [myPlugin] };
-```
-
-**Purpose**: Mutate build configuration before the compile stage begins.
-**APIs used**: `OhosHapContext`, `getBuildProfile()`, `getCompileArkTsOption()`.
-**Not** Rollup/Rolldown hooks — these are lifecycle hooks that run before bundling.
-
-**arkdown equivalent**: `BuildScriptEffect` entries extracted by OXC static
-analysis in `arkdown-session::build_script::parse_build_script()`.
-
----
-
-### Surface B — `compilePluginPath` Rollup-compatible plugins
-
-```typescript
-// ./my-rollup-plugin.js (referenced via compilePluginPath)
-export default {
-  name: "my-transform",
-  order: "last",  // "first" | "last"
-  resolveId(id) { if (id === "virtual") return "\0virtual"; return null; },
-  load(id) { if (id === "\0virtual") return "export default 42;"; return null; },
-  transform(code, id) { return code.replace(/OLD/g, "NEW"); },
-};
-```
-
-**Purpose**: Hook into the Rollup/Rolldown module pipeline.
-**APIs**: same hooks as Rolldown (`resolveId`, `load`, `transform`, `moduleParsed`,
-`buildStart`, `buildEnd`, `renderChunk`, `generateBundle`).
-**These ARE Rolldown plugins** — they implement the identical hook interface.
-
-**arkdown equivalent**: `rolldown_plugin::Plugin` trait implementations.
-
----
-
-## Architecture: Following Rolldown
-
-Rolldown's plugin model:
-
-```
-User-supplied plugin
-        │
-        ├── Rust native  →  impl rolldown_plugin::Plugin directly
-        │
-        └── JavaScript   →  NAPI binding wraps JS function → impl Plugin
-                             (rolldown_binding crate; requires Node.js)
-```
-
-arkdown's plugin model (same interface, different bridge):
-
-```
-compilePluginPath plugin file
-        │
-        ├── OXC static analysis  →  DeclarativePlugin (impl Plugin)    ← P1
-        │   Supported patterns:
-        │   · resolveId: if (id === "a") return "b"
-        │   · load: if (id === "\0x") return "content"
-        │   · transform: code.replace(/PAT/g, "REPL")
-        │
-        ├── Embedded QuickJS     →  ExternalJsPlugin (impl Plugin)     ← P2
-        │   (via rquickjs crate — no Node.js required)
-        │   Executes arbitrary hook code in a sandbox JS runtime.
-        │
-        └── Unsupported          →  typed error listing why             ← P0
-            "Plugin 'name' uses patterns that require JS execution.
-             Rewrite as a Rust arkdown plugin or simplify to declarative hooks."
-```
-
-**Key principle**: The plugin interface is always `rolldown_plugin::Plugin`.
-The question is only HOW the implementation is produced — native Rust, static
-analysis, or an embedded JS runtime.
-
----
-
-## P1: Declarative Subset (Implemented)
-
-### What's supported
-
-`crates/arkdown/src/plugins/external.rs` implements:
-
-```rust
-pub enum PluginHookDecl {
-    ResolveIdAlias { from: String, to: String },
-    VirtualModule { id: String, content: String },
-    TransformSubstitution { pattern: String, replacement: String, global: bool },
-}
-```
-
-`analyze_compile_plugin(path)` parses a JS plugin file with OXC and extracts
-`PluginHookDecl` values. `DeclarativePlugin` implements `rolldown_plugin::Plugin`
-using these extracted values.
-
-### Supported patterns
-
-**`resolveId`:**
-```javascript
-resolveId(id) {
-    if (id === "from-specifier") return "to-specifier";
-    return null;
-}
-```
-→ `ResolveIdAlias { from: "from-specifier", to: "to-specifier" }`
-
-**`load`:**
-```javascript
-load(id) {
-    if (id === "\0virtual-module") return "export const x = 42;";
-    return null;
-}
-```
-→ `VirtualModule { id: "\0virtual-module", content: "export const x = 42;" }`
-
-**`transform`:**
-```javascript
-transform(code, id) {
-    return code.replace(/PLACEHOLDER/g, "REPLACEMENT");
-}
-```
-→ `TransformSubstitution { pattern: "PLACEHOLDER", replacement: "REPLACEMENT", global: true }`
-
-### Unsupported (typed rejection)
-
-Any hook that uses:
-- External `require()` or `import()` calls
-- `fs.*` or network access
-- Conditional logic based on runtime values
-- Multiple if-branches or complex logic
-
-Results in `CompilePluginAnalysis::Unsupported { name, reasons }` with a
-diagnostic listing each unsupported pattern.
-
----
-
-## P2: Embedded QuickJS (Future)
-
-For plugins that exceed the declarative subset, embed a QuickJS runtime
-(via `rquickjs` crate) to execute the hook functions:
-
-```rust
-pub struct ExternalJsPlugin {
-    runtime: Arc<rquickjs::AsyncRuntime>,
-    // loaded module with hooks
-}
-
-impl Plugin for ExternalJsPlugin {
-    async fn transform(&self, ctx, args) -> HookTransformReturn {
-        // call the JS transform function via QuickJS
-        self.call_hook("transform", args.code, args.id).await
-    }
-}
-```
-
-Benefits:
-- Full compatibility with arbitrary hook code
-- No Node.js required (QuickJS is embeddable)
-- Sandboxed — no filesystem access unless explicitly exposed
-
-Design notes:
-- The `rquickjs` crate is MIT-licensed and actively maintained
-- Async-compatible via `rquickjs::AsyncRuntime`
-- A separate `arkdown-plugin-js` crate would own this
-
----
-
-## P0: `hvigorfile.ts` Static Analysis (Implemented)
-
-`arkdown-session::build_script::parse_build_script()` now performs real OXC
-AST analysis instead of being a stub:
-
-1. Parses the script with `oxc_parser::Parser`
-2. Detects standard pattern (known system task + empty `plugins: []`) → no effects
-3. Extracts non-empty `plugins: [...]` → `BuildScriptEffect::CustomTask`
-4. Extracts `compilePluginPath`/`compilePluginFile` assignments →
-   `BuildScriptEffect::CompilePluginFile` or `BuildOptionOverride`
-
-The coordinator's `check_custom_hvigor_plugins()` function uses text-based
-detection as a fast guard. The full OXC analysis provides richer effect
-extraction for future `BuildCoordinator` integration.
-
----
-
-## PluginFactory Integration
-
-`PluginFactory::build()` can include external declarative plugins:
-
-```rust
-// Load all compilePluginPath entries from the build plan
-for plugin_path in &plan.compile_plugin_paths {
-    if let Some((plugin, order)) = load_declarative_plugin(plugin_path) {
-        match order {
-            PluginOrder::First => plugins.insert(0, plugin as SharedPluginable),
-            PluginOrder::Last => plugins.push(plugin as SharedPluginable),
-        }
-    }
-}
-```
-
-The `load_declarative_plugin()` function returns `None` with a warning when
-the plugin is unsupported. The build continues without the plugin in that case.
-
----
-
-## File Layout
-
-```
-crates/arkdown/src/plugins/
-  external.rs              ← this spec; OXC analysis + DeclarativePlugin
-
-crates/arkdown-session/src/build_script/
-  parse.rs                 ← OXC analysis of hvigorfile.ts → BuildScriptEffect
-  effects.rs               ← effect types: CompilePluginFile, BuildOptionOverride, etc.
-```
-
----
-
-## P2: Node.js CLI Package — Full Rolldown Alignment
-
-The correct long-term architecture for complete plugin capability is to
-distribute arkdown as a Node.js native addon (`.node` file), exactly as
-Rolldown does.
-
-### Why this fully aligns with Rolldown
-
-Rolldown embeds Rust **inside** Node.js — JS plugins work because they run in
-the same V8 process:
+The patched Rollup lifecycle is:
 
 ```text
-Node.js process
-├── import { rolldown } from 'rolldown'  ← Rust loaded as .node via NAPI-RS
-├── plugins: [{ transform(code, id) { ... } }]
-└── NAPI ThreadsafeFunction → JS called directly, no IPC, no serialization
+beforeBuild (sequential, SDK-internal)
+buildStart (parallel)
+afterBuildStart (sequential, SDK-internal)
+graph.build
+beforeBuildEnd (sequential)
+buildEnd (parallel)
+afterBuildEnd (parallel, SDK-internal)
+bundleEnd / cleanUp
 ```
 
-`@arkdown/core` does the same:
+The public custom compile-plugin validator accepts exactly:
 
 ```text
-Node.js process
-├── import { build } from '@arkdown/core'  ← arkdown-napi.node
-├── plugins: [{ transform(code, id) { ... } }]
-└── JsPlugin: impl rolldown_plugin::Plugin
-    → tsfn.call_async((code, id)).await  (same V8 heap)
+name, order,
+buildStart, resolveId, load, transform,
+shouldInvalidCache, moduleParsed, beforeBuildEnd, buildEnd
 ```
 
-### Setup
+Unknown properties warn. Invalid plugin type, missing/non-string name, invalid
+hook value, invalid order, invalid function-order result, and duplicate final
+plugin name are hard errors.
 
-Create `packages/arkdown-core/` using the official napi-rs pnpm template:
+## Two Plugin Surfaces
 
-```bash
-cd packages && napi new
-# name: @arkdown/core, napi4, pnpm, type-def: yes
+### Hvigor configuration plugins
+
+`hvigorfile.ts` and imported TypeScript plugins configure nodes, tasks, OHOS
+contexts, and compile-plugin paths. They are not Rolldown plugins.
+
+The Node package evaluates them in the same V8 process used by the native addon,
+following latest-hvigor ordering:
+
+```text
+hvigorconfig evaluation
+configEvaluated
+node creation
+nodesInitialized
+project/module node evaluation
+nodesEvaluated
+task graph resolution
+taskGraphResolved
+native build
+buildFinished
 ```
 
-Then add to `src/lib.rs`:
+Configuration effects cross into Rust as typed build options or explicit task
+records. The Node runtime is required here because arbitrary TypeScript plugin
+code is an intentional hvigor capability.
 
-```rust
-// JsPlugin: wraps a JS plugin object, implements rolldown_plugin::Plugin
-struct JsPlugin {
-    name: String,
-    transform_fn: Option<ThreadsafeFunction<(String, String), JsUnknown>>,
-    resolve_id_fn: Option<ThreadsafeFunction<(String, Option<String>), JsUnknown>>,
-    load_fn:       Option<ThreadsafeFunction<String, JsUnknown>>,
-}
-impl Plugin for JsPlugin { /* calls JS via tsfn.call_async().await */ }
+### Compile plugins
 
-// build() NAPI export — accepts config + JS plugins array
-#[napi]
-pub async fn build(config: JsBuildConfig, plugins: Option<Array>) -> NapiResult<JsBuildResult>
+The latest public project entry is a custom module HvigorPlugin calling
+`OhosModuleContext.loadCompilePlugin(path)`. It validates a non-empty existing
+`.ts` path and runs `doCompilePluginTypeCheck` before storing the module-scoped
+compile-plugin path. Arkdown mirrors that TypeScript `4.9.5` check.
+
+The installed type declarations retain `arkOptions.compilePluginFile`, but the
+installed project, module, and hvigorfile schemas do not contain the field and
+a real build rejects it. Declarative uses therefore fail with
+`HVIGOR_SCHEMA_COMPILE_PLUGIN_FILE`; they are not treated as a supported
+discovery mechanism. Arkdown's direct package API continues to accept
+`compilePluginPath` and `hvigorPluginFile` as explicit compatibility inputs.
+
+Every accepted path must default-export one plugin object or a flat plugin
+array. These are compile-pipeline plugins.
+
+```text
+TS/JS module
+  -> latest-hvigor load/default-export/validation/order rules
+  -> same-process NAPI ThreadsafeFunction callbacks
+  -> JsPlugin implements rolldown_plugin::Plugin
+  -> PluginFactory inserts it in the Rust-native Rolldown list
+  -> Rolldown owns hook scheduling and module context
 ```
 
-### Plugin API (identical to Rolldown / hvigor compilePluginPath)
+Standard hooks map directly:
 
-```typescript
-import { build } from '@arkdown/core';
+| Hvigor hook | Rolldown implementation |
+| --- | --- |
+| `buildStart` | `Plugin::build_start` |
+| `resolveId` | `Plugin::resolve_id` |
+| `load` | `Plugin::load` |
+| `transform` | `Plugin::transform` |
+| `moduleParsed` | `Plugin::module_parsed` |
+| `buildEnd` | `Plugin::build_end` |
 
-await build({
-  project: './my-app',
-  target: 'hap',
-  mode: 'debug',
-  plugins: [{
-    name: 'my-plugin',
-    transform(code, id) { return code.replace(/OLD/g, 'NEW'); },
-    resolveId(id)      { if (id === 'v') return '\0v'; },
-    load(id)           { if (id === '\0v') return 'export default 42'; },
-  }],
-});
-```
+Arkdown's explicit JavaScript API may additionally expose a real Rolldown hook
+such as `resolveDynamicImport`; the strict hvigor file loader still warns for it
+because latest hvigor does not accept it in an external compile-plugin object.
 
-### Comparison
+## Thin Hvigor Gap Adapter
 
-| Approach | Process | IPC | Node.js required | Compat |
-|---|---|---|---|---|
-| NAPI package (this spec) | 1 | none (V8) | embedded in pkg | 100% |
-| Subprocess (current) | 2 | JSON-RPC | must be installed | 100% |
-| Declarative OXC (P1) | 1 | none | no | ~30% |
+Only behavior absent from upstream Rolldown belongs in the gap adapter:
 
----
+- `beforeBuildEnd`: an internal Rust Rolldown plugin registers a `pre`
+  `build_end` hook. It snapshots `getModuleIds()` and `getModuleInfo()` from the
+  real Rolldown `PluginContext`, then invokes custom callbacks sequentially in
+  the resolved plugin order before normal `buildEnd` hooks.
+- `shouldInvalidCache`: evaluated at Arkdown's cache boundary. The public input
+  shape must remain latest-hvigor `{ ast?, code, id }`.
+- `this.share`: build metadata is seeded as per-plugin data before Rolldown
+  starts. This is context initialization, not another lifecycle hook.
 
-## Non-Goals
+The gap trait must not contain Rolldown-native hooks. SDK-only hooks such as
+`beforeBuild`, `afterBuildStart`, `afterBuildEnd`, `cleanUp`, and
+`shouldTransformCachedModule` are implemented by their owning Rust stages when
+needed; they are not accepted as external custom compile-plugin hooks.
 
-- Executing hvigor-specific `OhosHapContext` APIs in TypeScript
-- Supporting Vite-specific Rolldown plugins
-- Replicating hvigor's full task graph runtime
+## Ordering
+
+The JavaScript loader evaluates `order` against the latest IDE's full built-in
+plugin name/index record. It preserves hvigor's observable details:
+
+- default and `last` append;
+- repeated `first` entries reverse through repeated `unshift`;
+- function order receives `Record<string, number>` and uses the IDE's
+  index-zero truthiness behavior for duplicate-name suffixing;
+- a negative function result inserts at zero;
+- a non-number/`NaN` result or thrown callback is a hard error;
+- duplicate names in the final virtual pipeline are a hard error.
+
+The resolved virtual list is reduced to Rust-owned built-ins plus custom
+plugins. Each custom plugin then receives an absolute slot for
+`PluginFactory`; hook execution still belongs to Rolldown.
+
+## Removed Alternative Implementations
+
+The following approaches are obsolete and must not return:
+
+- OXC extraction of a small "declarative plugin" subset;
+- a Node child-process/JSON protocol for hook execution;
+- an embedded QuickJS plugin engine;
+- a standalone lifecycle scheduler or parity-report object that claims to run
+  Rolldown hooks itself;
+- separate `arkdown-plugin-*` crates for these adapters.
+
+Rust is preferred for built-in business logic and performance-sensitive work.
+Node/V8 is retained only for executing the arbitrary JS/TS behavior that hvigor
+itself exposes.
+
+## Closed Parity Proofs
+
+The former plugin-system blockers are covered:
+
+1. `shouldInvalidCache` receives each retained cached module's real `id`,
+   transformed `code`, and optional parsed ESTree `ast`. A `true` result causes
+   an output-correct whole-module rebuild.
+2. The strict latest-hvigor wrappers discard returned Promises from
+   `buildStart`, `moduleParsed`, and `buildEnd`; `beforeBuildEnd` is the awaited
+   sequential hook. Arkdown reproduces those wrapper semantics. Plugins passed
+   through Arkdown's explicit Rolldown API keep Rolldown's native async
+   semantics.
+3. Compile-plugin state is scoped by package module root. A regression fixture
+   specifically protects the distinction between the package root and
+   Rolldown's `src/main` loader root; programmatically target-scoped legacy
+   entries are filtered by effective target.
+4. The native E2E runs one `OhosModuleContext.loadCompilePlugin()` TypeScript
+   fixture through both the installed hvigor and Arkdown and compares hook
+   events, argument counts, graph-hook activity, and AST shape.
+
+`.mjs` configuration parity is covered: Arkdown pins the IDE's TypeScript
+`4.9.5` and installs the same CommonJS transpile hook for `.ts` and `.mjs`, so
+both extensions use the OHOS module mocks and imported `.mjs` plugins follow
+the latest runtime rather than Node's native ESM loader.
+
+## Verification Contract
+
+Every plugin behavior change must include:
+
+1. the installed-IDE owner/function used as evidence;
+2. a Node runtime test for module loading, validation, ordering, or context;
+3. a Rust test proving standard hooks remain Rolldown plugins and gap hooks are
+   represented by an internal Rolldown adapter;
+4. an end-to-end build fixture when the hook can affect output;
+5. hvigor/arkdown artifact comparison for the affected stage.
+
+Passing only a loader unit test is not enough to claim compatibility.

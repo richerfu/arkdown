@@ -1,6 +1,7 @@
-# TEST-014: arkdown-plugin-module-meta
+# TEST-014: arkdown module-meta Rolldown adapter
 
-**Crate**: `arkdown-plugin-module-meta`
+**Crate**: `arkdown`
+**Owner**: `crates/arkdown/src/plugins/module_meta/`
 **Original source**: `hvigor-arkts-compose/dist/src/plugins/module-meta-info-plugin.js`
 
 ---
@@ -8,12 +9,11 @@
 ## Test File Layout
 
 ```
-crates/arkdown-plugin-module-meta/src/
-├── tests/
-│   ├── meta_compute.rs       ← ModuleMeta field derivation per module type
-│   ├── host_modules.rs       ← reverse importer map (hostModulesInfo)
-│   ├── pkg_brief_info.rs     ← pkgNameToPkgBriefInfo generation
-│   └── preload_so.rs         ← need_preload_so tagging from ability entries
+crates/arkdown/src/plugins/module_meta/
+├── mod.rs
+├── plugin.rs                 ← Rolldown hooks
+├── meta_compute.rs           ← ModuleMeta derivation
+└── pkg_brief_info.rs         ← package/module inventory
 ```
 
 ---

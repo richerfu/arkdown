@@ -61,16 +61,18 @@ caches, plugin structs, or long-lived stage state.
 Hvigor allows `arkOptions.compilePluginFile` and custom compile plugin behavior.
 The replacement policy is:
 
-1. Detect configured compile plugin files during session startup.
-2. Parse with OXC.
-3. Support only a documented declarative subset that maps to typed transform
-   passes.
-4. Hard fail when the plugin requires arbitrary JavaScript execution, dynamic
-   hook registration, filesystem access in transform hooks, or unsupported
-   Rollup/Hvigor APIs.
+1. Detect plugin paths through the latest hvigor configuration/runtime surface.
+2. Load TypeScript/JavaScript in the Node package's existing V8 process and
+   apply the latest-hvigor export, validation, diagnostics, and ordering rules.
+3. Wrap supported standard hooks as a real `rolldown_plugin::Plugin` through
+   the same-process NAPI boundary; Rolldown owns their execution.
+4. Add only thin typed adapters for observed latest-hvigor hooks absent from
+   Rolldown (`beforeBuildEnd` and `shouldInvalidCache`).
 
-Supported custom transformations must become Rust transform passes or data
-driven transform rules. They must not execute JS in production.
+Arkdown-owned transforms remain native OXC/Rust passes. The JS path exists only
+for arbitrary user plugin code that hvigor itself executes; declarative OXC
+approximation, subprocess execution, and a second plugin scheduler are
+forbidden.
 
 ## Source Rewrite Policy
 
