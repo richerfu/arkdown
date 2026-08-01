@@ -73,6 +73,12 @@ mod tests {
     }
 
     #[test]
+    fn test_lexical_normalize_preserves_unmatched_relative_parent() {
+        let p = lexical_normalize(Path::new("a/../../b"));
+        assert_eq!(p, Path::new("../b"));
+    }
+
+    #[test]
     fn test_strip_relative_prefix_dot_slash() {
         assert_eq!(strip_relative_prefix("./pages/Index"), "pages/Index");
     }

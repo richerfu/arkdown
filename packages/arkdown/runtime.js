@@ -84,6 +84,10 @@ function toNativeBuildConfig(config) {
   const nativeConfig = { ...(config || {}) }
   delete nativeConfig.compilePluginPath
   delete nativeConfig.hvigorPluginFile
+  // The native side may need to run ArkGuard. Use the exact Node binary that
+  // owns this V8 process; IDE launches do not guarantee that `node` is on PATH.
+  // This field is runtime-owned and cannot be overridden by project config.
+  nativeConfig.runtimeNodeExecutable = process.execPath
   return nativeConfig
 }
 
@@ -310,11 +314,7 @@ class RuntimePluginLoader {
     }
 
     const exportedBuildOption = overrides && typeof overrides === 'object' ? overrides.buildOption : undefined
-    this.hvigorHost.assertNoDeclarativeCompilePluginFile(
-      exportedBuildOption,
-      file,
-      'config.ohos.overrides.buildOption',
-    )
+    this.hvigorHost.assertNoDeclarativeCompilePluginFile(exportedBuildOption, file, 'config.ohos.overrides.buildOption')
     // `effects.buildOption` retains compatibility with task-factory calls
     // used by older projects. Declarative `config.ohos.overrides.buildOption`
     // is applied last, matching hvigor's module config manager.
@@ -1073,9 +1073,7 @@ class HvigorRuntimeHost {
           productMatches(target),
       ) ||
       candidates.find((target) => target.name === 'default' && productMatches(target)) ||
-      candidates.find(
-        (target) => productMatches(target) && toArray(target.buildModeSet).length === 0,
-      ) ||
+      candidates.find((target) => productMatches(target) && toArray(target.buildModeSet).length === 0) ||
       candidates.find((target) => target.name === 'default')
     )
   }
@@ -1161,11 +1159,10 @@ class HvigorRuntimeHost {
     }
     const requiredPrefix = './build/hvigor_compile/'
     if (!configured.startsWith(requiredPrefix)) {
-      throw this._error(
-        'INVALID_COMPILE_PLUGIN_PREFIX',
-        `'compilePluginFile' must start with '${requiredPrefix}'.`,
-        { pluginPath: configured, moduleName: node.name },
-      )
+      throw this._error('INVALID_COMPILE_PLUGIN_PREFIX', `'compilePluginFile' must start with '${requiredPrefix}'.`, {
+        pluginPath: configured,
+        moduleName: node.name,
+      })
     }
     const compileRoot = path.resolve(node.root, 'build', 'hvigor_compile')
     let resolved = path.resolve(node.root, configured)
@@ -1180,11 +1177,10 @@ class HvigorRuntimeHost {
     const fileName = path.basename(resolved)
     const suffixIndex = fileName.lastIndexOf('.')
     if (suffixIndex > 0 && fileName.slice(suffixIndex) !== '.ts') {
-      throw this._error(
-        'PLUGIN_FILE_MUST_END_WITH_TS',
-        `'compilePluginFile' must end with .ts.`,
-        { pluginPath: resolved, moduleName: node.name },
-      )
+      throw this._error('PLUGIN_FILE_MUST_END_WITH_TS', `'compilePluginFile' must end with .ts.`, {
+        pluginPath: resolved,
+        moduleName: node.name,
+      })
     }
     if (!fs.existsSync(resolved)) {
       resolved = `${resolved}.ts`
@@ -2571,7 +2567,9 @@ function getHvigorUserHome() {
 }
 
 function hvigorProjectHash(projectRoot) {
-  return crypto.createHash('sha256').update(path.resolve(projectRoot)).digest('hex')
+  // Latest hvigor calProjectCacheDir() truncates the project hash to 32
+  // hexadecimal characters before selecting .hvigor/project_caches.
+  return crypto.createHash('sha256').update(path.resolve(projectRoot)).digest('hex').slice(0, 32)
 }
 
 function readProjectHvigorConfig(file) {

@@ -452,7 +452,7 @@ impl<'a> ByteCodeHarDeclarationCollector<'a> {
     package_root: &Path,
     source: &Path,
   ) -> Result<()> {
-    let relative = if source.is_absolute() {
+    let relative = if source.has_root() {
       source.strip_prefix(package_root).with_context(|| {
         format!(
           "ByteCode HAR declaration source '{}' is outside package root '{}'",

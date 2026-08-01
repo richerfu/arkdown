@@ -1024,6 +1024,9 @@ pub struct BuildConfig {
   /// Runtime-owned serialized module-root build-option overrides.
   #[napi(skip_typescript)]
   pub module_hvigor_overrides_json: Option<String>,
+  /// Runtime-owned path to the Node executable hosting this native addon.
+  #[napi(skip_typescript)]
+  pub runtime_node_executable: Option<String>,
 }
 
 #[napi(object)]
@@ -1119,6 +1122,7 @@ pub fn build(
     hvigor_plugin_file: _,
     project_hvigor_overrides_json,
     module_hvigor_overrides_json,
+    runtime_node_executable,
   } = config;
   let project = project.unwrap_or_else(|| ".".to_string());
   let target = target.unwrap_or_else(|| "hap".to_string());
@@ -1138,6 +1142,7 @@ pub fn build(
     cache: cache.unwrap_or(true),
     project_hvigor_overrides_json,
     module_hvigor_overrides_json,
+    runtime_node_executable,
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -1200,6 +1205,7 @@ struct PackageBuildArgs {
   cache: bool,
   project_hvigor_overrides_json: Option<String>,
   module_hvigor_overrides_json: Option<String>,
+  runtime_node_executable: Option<String>,
 }
 
 async fn run_build(
@@ -1307,6 +1313,9 @@ async fn run_build(
     watch_invalidation: None,
     project_hvigor_overrides,
     module_hvigor_overrides,
+    node_executable: package_args
+      .runtime_node_executable
+      .map(std::path::PathBuf::from),
   };
 
   let output = crate::cmd::build::coordinator::BuildCoordinator::new(session, config, args)

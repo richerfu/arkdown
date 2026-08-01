@@ -73,7 +73,7 @@ impl OhExportsProcessor {
             let resolved = lexical_normalize(&root.join(declared_path));
             let is_strict_descendant = resolved != root && resolved.starts_with(&root);
             if declaration.is_empty()
-                || declared_path.is_absolute()
+                || declared_path.has_root()
                 || !is_strict_descendant
                 || !resolved.exists()
             {
@@ -162,10 +162,9 @@ mod tests {
             compile_entry: Vec::new(),
             form_entry_sources: Vec::new(),
             runtime_entry_sources: Vec::new(),
-            module_root_path: std::fs::canonicalize(module_root.join("src/main"))
-                .unwrap_or_else(|_| module_root.join("src/main"))
-                .display()
-                .to_string(),
+            module_root_path: crate::loader_json::to_absolute_path_string(
+                &module_root.join("src/main"),
+            ),
             cache_path: String::new(),
             ace_module_build: String::new(),
             build_mode: "debug".to_string(),

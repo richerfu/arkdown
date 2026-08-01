@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use arkdown_path::HvigorNativeLibraryPattern;
+use arkdown_path::{canonicalize_or_owned, HvigorNativeLibraryPattern};
 
 /// Classification of a dependency node in the dependency graph.
 ///
@@ -429,7 +429,7 @@ fn resolve_dep_dir_with_config(
     for base in local_roots {
         let candidate = base.join(dep_name);
         if candidate.is_dir() {
-            return Some(std::fs::canonicalize(&candidate).unwrap_or(candidate));
+            return Some(canonicalize_or_owned(&candidate));
         }
     }
 
@@ -483,7 +483,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(target, link).unwrap();
+        junction::create(target, link).unwrap();
     }
 
     #[test]
@@ -520,7 +520,7 @@ mod tests {
             .get("@ohos/hypium")
             .expect("dev dependency must be in graph");
 
-        assert_eq!(node.pkg_root, std::fs::canonicalize(pkg).unwrap());
+        assert_eq!(node.pkg_root, canonicalize_or_owned(&pkg));
     }
 
     #[test]
@@ -776,7 +776,7 @@ mod tests {
 
         assert_eq!(
             node.pkg_root,
-            fs::canonicalize(&base64_store_root).unwrap(),
+            canonicalize_or_owned(&base64_store_root),
             "dependency graph must follow the issuer package's OHPM symlink farm"
         );
     }

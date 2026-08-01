@@ -49,8 +49,14 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
+          - windows-latest
 
     steps:
+      - name: Enable long paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -68,6 +74,7 @@ jobs:
           components: all
 
       - name: Configure OpenHarmony SDK environment
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           sdk_home="${{ steps.setup-ohos-sdk.outputs.ohos-base-sdk-home }}"
@@ -86,6 +93,41 @@ jobs:
           test -x "$es2abc"
           echo "OHOS_BASE_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
           echo "OHOS_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
+
+      - name: Configure OpenHarmony SDK environment on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdkHome = '${{ steps.setup-ohos-sdk.outputs.ohos-base-sdk-home }}'
+          if ($sdkHome -match '^/([A-Za-z])(?:/(.*))?$') {
+            $drive = $Matches[1].ToUpperInvariant()
+            $tail = $Matches[2] -replace '/', '\'
+            $sdkHome = "${drive}:\$tail"
+          } elseif ($sdkHome.StartsWith('/')) {
+            $cygpath = Get-Command cygpath.exe -ErrorAction SilentlyContinue
+            if (-not $cygpath) {
+              throw "Cannot convert MSYS SDK path without cygpath.exe: $sdkHome"
+            }
+            $sdkHome = (& $cygpath.Source -w $sdkHome).Trim()
+          }
+          if (-not $sdkHome) {
+            throw 'OpenHarmony SDK action returned an empty host SDK path'
+          }
+          if (-not (Test-Path -PathType Container (Join-Path $sdkHome 'ets/build-tools/ets-loader'))) {
+            throw "Missing ets-loader under $sdkHome"
+          }
+          if (-not (Test-Path -PathType Leaf (Join-Path $sdkHome 'toolchains/restool.exe'))) {
+            throw "Missing restool.exe under $sdkHome"
+          }
+          $es2abc = Join-Path $sdkHome 'ets/build-tools/ets-loader/bin/ark/build-win/bin/es2abc.exe'
+          if (-not (Test-Path -PathType Leaf $es2abc)) {
+            $es2abc = Join-Path $sdkHome 'ets/build-tools/ets-loader/bin/ark/build/bin/es2abc.exe'
+          }
+          if (-not (Test-Path -PathType Leaf $es2abc)) {
+            throw "Missing es2abc.exe under $sdkHome"
+          }
+          "OHOS_BASE_SDK_HOME=$sdkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OHOS_SDK_HOME=$sdkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -118,12 +160,31 @@ jobs:
         run: cargo check --locked --workspace --all-targets
 
       - name: Test workspace libraries
+        if: runner.os != 'Windows'
         run: cargo test --locked --workspace --lib
 
       - name: Test workspace integration tests
+        if: runner.os != 'Windows'
         run: cargo test --locked --workspace --test '*'
         env:
           ARKDOWN_PARITY_RUN: ""
+
+      - name: Test Windows portability contracts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo test --locked -p arkdown-path --lib
+          cargo test --locked -p arkdown-config --lib sdk::tests
+          cargo test --locked -p arkdown-session --lib sdk_tools::tests
+          cargo test --locked -p arkdown-ohpm --lib tarball::tests
+          cargo test --locked -p arkdown-profile --lib test_transitive_dependency_resolves_from_issuer_ohpm_symlink_farm
+          cargo test --locked -p arkdown-resolver --lib test_nested_ohpm_scoped_symlink_dependency_resolves_from_importer_package_store
+          cargo test --locked -p arkdown-ets-transform --lib snapshot_resolves_source_files_through_indexed_aliases
+          cargo test --locked -p arkdown-napi --lib bytecode::compiler
+          cargo test --locked -p arkdown-napi --lib native_declaration_roots_follow_ohpm_symlinks
+          cargo test --locked -p arkdown-napi --lib collect_debug_symbol_prefers_intermediate_map_and_copies_name_cache
+          cargo test --locked -p arkdown-napi --test golden_test test_loader_json_golden_minimal_hap
+          cargo test --locked -p arkdown-napi --test self_consistency_test test_minimal_hap_build_is_deterministic
 
       - name: Build arkdown CLI
         run: cargo build --locked -p arkdown-napi --bin arkdown

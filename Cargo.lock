@@ -204,6 +204,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkdown-core",
+ "arkdown-path",
  "fs-err",
  "json5",
  "rustc-hash 2.1.2",
@@ -236,6 +237,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "json5",
+ "junction",
  "oxc_allocator 0.140.0",
  "oxc_ast 0.140.0",
  "oxc_ast_visit 0.140.0",
@@ -284,6 +286,7 @@ dependencies = [
  "hex",
  "indexmap",
  "json5",
+ "junction",
  "mimalloc-safe",
  "napi",
  "napi-build",
@@ -388,6 +391,7 @@ dependencies = [
 name = "arkdown-path"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "fast-glob",
  "serde",
  "thiserror",
@@ -405,6 +409,7 @@ dependencies = [
  "fs-err",
  "indexmap",
  "json5",
+ "junction",
  "oxc_allocator 0.140.0",
  "oxc_ast 0.140.0",
  "oxc_ast_visit 0.140.0",
@@ -427,6 +432,7 @@ dependencies = [
  "arkdown-path",
  "fs-err",
  "json5",
+ "junction",
  "oxc_resolver",
  "rustc-hash 2.1.2",
  "serde",
@@ -1214,6 +1220,12 @@ name = "dragonbox_ecma"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd8e701084c37e7ef62d3f9e453b618130cbc0ef3573847785952a3ac3f746bf"
+
+[[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "ecdsa"
@@ -2034,6 +2046,16 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
+]
+
+[[package]]
+name = "junction"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "160f2eade097f30263b548aae5deb12ad349c909baa710fa24b92c9090b2e006"
+dependencies = [
+ "scopeguard",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

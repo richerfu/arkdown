@@ -164,6 +164,10 @@ pub struct BuildArgs {
   /// Highest-precedence module build options keyed by normalized module name.
   #[clap(skip)]
   pub module_hvigor_overrides: BTreeMap<String, serde_json::Value>,
+
+  /// Node executable supplied by the same-process JavaScript runtime.
+  #[clap(skip)]
+  pub node_executable: Option<PathBuf>,
 }
 
 pub struct BuildCommand {
@@ -253,6 +257,17 @@ impl BuildCommand {
 }
 
 impl BuildArgs {
+  pub(crate) fn resolved_node_executable(&self) -> PathBuf {
+    if let Some(executable) = self.node_executable.as_ref() {
+      return executable.clone();
+    }
+    if let Some(node_home) = std::env::var_os("NODE_HOME") {
+      return PathBuf::from(node_home)
+        .join(arkdown_path::HostPlatform::CURRENT.executable_name("node"));
+    }
+    PathBuf::from(arkdown_path::HostPlatform::CURRENT.executable_name("node"))
+  }
+
   pub(crate) fn build_mode(&self) -> Result<arkdown_core::BuildMode> {
     match self.mode.as_str() {
       "debug" => Ok(arkdown_core::BuildMode::Debug),

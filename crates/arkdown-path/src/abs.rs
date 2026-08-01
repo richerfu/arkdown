@@ -43,7 +43,9 @@ impl AbsPath {
     /// Returns an IO error if the path does not exist or cannot be
     /// canonicalized.
     pub fn canonicalize(path: &Path) -> std::io::Result<Self> {
-        let canonical = dunce_canonicalize(path)?;
+        let canonical = dunce::canonicalize(path)?;
+        #[cfg(windows)]
+        let canonical = simplify_verbatim_unc(canonical);
         Ok(Self(canonical))
     }
 
@@ -168,6 +170,7 @@ impl fmt::Display for AbsPath {
 /// This is the same algorithm OXC uses for lexical normalization. It does
 /// **not** resolve symlinks.
 pub(crate) fn lexical_normalize_pathbuf(path: PathBuf) -> PathBuf {
+    let has_root = path.has_root();
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -175,11 +178,20 @@ pub(crate) fn lexical_normalize_pathbuf(path: PathBuf) -> PathBuf {
                 // `.` — skip
             }
             Component::ParentDir => {
-                // `..` — pop last component if not a prefix/root
-                if !normalized.pop() {
-                    // Cannot go above the root; keep the `..` only for relative
-                    // paths (AbsPath should never have loose `..` above root).
-                    normalized.push(component);
+                // Pop a normal segment. A rooted path cannot traverse above
+                // its root; a relative path must preserve any unmatched `..`.
+                match normalized.components().next_back() {
+                    Some(Component::Normal(_)) => {
+                        normalized.pop();
+                    }
+                    Some(Component::ParentDir) | Some(Component::Prefix(_)) | None if !has_root => {
+                        normalized.push(component);
+                    }
+                    Some(Component::RootDir)
+                    | Some(Component::Prefix(_))
+                    | Some(Component::ParentDir)
+                    | None => {}
+                    Some(Component::CurDir) => unreachable!("CurDir components are not retained"),
                 }
             }
             c => normalized.push(c),
@@ -188,15 +200,33 @@ pub(crate) fn lexical_normalize_pathbuf(path: PathBuf) -> PathBuf {
     normalized
 }
 
-/// Platform-agnostic canonicalization that avoids UNC path expansion on Windows.
-///
-/// On Windows, `std::fs::canonicalize` returns extended-length UNC paths
-/// (`\\?\C:\…`) which many tools cannot handle. This function produces a
-/// shorter form when the path does not require UNC.
-fn dunce_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
-    // Use `std::fs::canonicalize` for now. Callers that need Windows
-    // dunce behavior can replace this with the `dunce` crate.
-    std::fs::canonicalize(path)
+#[cfg(windows)]
+fn simplify_verbatim_unc(path: PathBuf) -> PathBuf {
+    use std::ffi::OsString;
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let Prefix::VerbatimUNC(server, share) = prefix.kind() else {
+        return path;
+    };
+
+    // Node's path.resolve(), and therefore hvigor, uses the regular
+    // `\\server\share` spelling. Preserve OsStr components so UNC roots do not
+    // require a Unicode round-trip.
+    let mut root = OsString::from(r"\\");
+    root.push(server);
+    root.push(r"\");
+    root.push(share);
+    let mut simplified = PathBuf::from(root);
+    for component in components {
+        if component != Component::RootDir {
+            simplified.push(component.as_os_str());
+        }
+    }
+    simplified
 }
 
 // ---------------------------------------------------------------------------
@@ -206,11 +236,14 @@ fn dunce_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+
+    fn test_root() -> PathBuf {
+        std::env::temp_dir().join("arkdown-abs-path-tests")
+    }
 
     #[test]
-    fn test_abs_path_from_absolute_unix() {
-        let p = AbsPath::from_absolute("/usr/local/bin").expect("should succeed");
+    fn test_abs_path_from_absolute_on_current_host() {
+        let p = AbsPath::from_absolute(test_root().join("usr/local/bin")).expect("should succeed");
         assert!(p.is_absolute());
     }
 
@@ -222,36 +255,55 @@ mod tests {
 
     #[test]
     fn test_abs_path_lexical_normalization() {
-        // /foo/./bar/../baz -> /foo/baz
-        let p = AbsPath::from_absolute("/foo/./bar/../baz").expect("absolute");
-        assert_eq!(p.as_path(), Path::new("/foo/baz"));
+        let root = test_root();
+        let p = AbsPath::from_absolute(root.join("foo/./bar/../baz")).expect("absolute");
+        assert_eq!(p.as_path(), root.join("foo/baz"));
+    }
+
+    #[test]
+    fn test_abs_path_does_not_retain_parent_segments_above_root() {
+        let temp_dir = std::env::temp_dir();
+        let root = temp_dir
+            .ancestors()
+            .last()
+            .expect("temporary directory has a filesystem root");
+        let path = root.join("../../arkdown-rooted-output");
+        let normalized = AbsPath::from_absolute(path).expect("absolute");
+        assert!(normalized.is_absolute());
+        assert!(!normalized
+            .components()
+            .any(|component| component == Component::ParentDir));
     }
 
     #[test]
     fn test_abs_path_join_appends() {
-        let base = AbsPath::from_absolute("/project/src").unwrap();
+        let root = test_root();
+        let base = AbsPath::from_absolute(root.join("project/src")).unwrap();
         let joined = base.join("pages/Index.ets");
-        assert_eq!(joined.as_path(), Path::new("/project/src/pages/Index.ets"));
+        assert_eq!(joined.as_path(), root.join("project/src/pages/Index.ets"));
     }
 
     #[test]
     fn test_abs_path_parent() {
-        let p = AbsPath::from_absolute("/project/src/lib.rs").unwrap();
+        let root = test_root();
+        let p = AbsPath::from_absolute(root.join("project/src/lib.rs")).unwrap();
         let parent = p.parent().unwrap();
-        assert_eq!(parent.as_path(), Path::new("/project/src"));
+        assert_eq!(parent.as_path(), root.join("project/src"));
     }
 
     #[test]
     fn test_abs_path_with_extension() {
-        let p = AbsPath::from_absolute("/project/src/Index.ets").unwrap();
+        let root = test_root();
+        let p = AbsPath::from_absolute(root.join("project/src/Index.ets")).unwrap();
         let js = p.with_extension("js");
-        assert_eq!(js.as_path(), Path::new("/project/src/Index.js"));
+        assert_eq!(js.as_path(), root.join("project/src/Index.js"));
     }
 
     #[test]
     fn test_abs_path_display() {
-        let p = AbsPath::from_absolute("/project").unwrap();
-        assert_eq!(p.to_string(), "/project");
+        let root = test_root().join("project");
+        let p = AbsPath::from_absolute(root.clone()).unwrap();
+        assert_eq!(p.to_string(), root.display().to_string());
     }
 
     #[cfg(windows)]

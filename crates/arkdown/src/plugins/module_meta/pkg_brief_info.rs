@@ -68,10 +68,10 @@ impl<'a> PkgBriefInfoPath<'a> {
     }
 
     fn absolute_path(&self) -> PathBuf {
-        if let Ok(path) = std::fs::canonicalize(self.path) {
-            return path;
+        if let Ok(path) = arkdown_path::AbsPath::canonicalize(self.path) {
+            return path.into_path_buf();
         }
-        if self.path.is_absolute() {
+        if self.path.has_root() {
             return lexical_normalize(self.path);
         }
         lexical_normalize(

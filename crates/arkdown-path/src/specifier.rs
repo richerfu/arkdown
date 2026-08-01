@@ -187,7 +187,7 @@ impl<'a> ModuleSpecifierText<'a> {
             || self.raw.starts_with("@normalized:")
         {
             SpecifierKind::OhmUrl
-        } else if Path::new(self.raw).is_absolute() {
+        } else if Path::new(self.raw).has_root() {
             SpecifierKind::AbsolutePath
         } else if self.raw.starts_with('@') {
             SpecifierKind::ScopedPackage
@@ -573,6 +573,27 @@ mod tests {
     #[test]
     fn test_specifier_bare_package() {
         let s = ModuleSpecifier::new("hilog");
+        assert_eq!(s.kind(), SpecifierKind::BarePackage);
+    }
+
+    #[test]
+    fn test_specifier_absolute_path_on_current_host() {
+        let absolute = std::env::temp_dir().join("arkdown-specifier/Index.ets");
+        let s = ModuleSpecifier::new(absolute.to_string_lossy());
+        assert_eq!(s.kind(), SpecifierKind::AbsolutePath);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_specifier_windows_root_relative_path_matches_node_path_semantics() {
+        let s = ModuleSpecifier::new(r"\project\entry\Index.ets");
+        assert_eq!(s.kind(), SpecifierKind::AbsolutePath);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_specifier_windows_drive_relative_path_is_not_absolute() {
+        let s = ModuleSpecifier::new(r"C:project\entry\Index.ets");
         assert_eq!(s.kind(), SpecifierKind::BarePackage);
     }
 

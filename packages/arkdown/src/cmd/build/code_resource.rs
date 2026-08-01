@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use arkdown_core::CopyCodeResource;
+use arkdown_path::ArtifactPathSerializer;
 
 /// Copies non-code files from ArkTS source roots into the loader output.
 ///
@@ -165,7 +166,7 @@ impl CodeResourceCopyPlan {
     }
     let entries: Vec<String> = copied
       .iter()
-      .map(|path| path.to_string_lossy().replace('\\', "/"))
+      .map(|path| ArtifactPathSerializer::rel_to_slash(path))
       .collect();
     fs_err::write(&self.manifest_path, serde_json::to_vec_pretty(&entries)?)?;
     Ok(())
@@ -179,10 +180,10 @@ impl CodeResourceCopyPlan {
   }
 
   fn match_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    ArtifactPathSerializer::rel_to_slash(path)
   }
 
   fn normalized_pattern(pattern: &str) -> String {
-    pattern.replace('\\', "/")
+    ArtifactPathSerializer::rel_to_slash(Path::new(pattern))
   }
 }

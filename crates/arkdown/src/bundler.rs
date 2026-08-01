@@ -33,8 +33,8 @@ use arkdown_core::{
     HvigorNpmEntry,
 };
 use arkdown_path::{
-    lexical_normalize, specifier::SpecifierKind, strip_relative_prefix, ArtifactPathSerializer,
-    ModuleSpecifier, NormalizedOhmUrl,
+    lexical_normalize, specifier::SpecifierKind, strip_relative_prefix, AbsPath,
+    ArtifactPathSerializer, ModuleSpecifier, NormalizedOhmUrl,
 };
 use arkdown_resolver::OhPackage;
 use rolldown::{BundlerOptions, InputItem, ModuleSourceScanOutput, OutputFormat};
@@ -429,17 +429,19 @@ impl Bundler {
     }
 
     fn canonical_project_root(path: &std::path::Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| {
-            if path.is_absolute() {
-                lexical_normalize(path)
-            } else {
-                lexical_normalize(
-                    &std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .join(path),
-                )
-            }
-        })
+        AbsPath::canonicalize(path)
+            .map(AbsPath::into_path_buf)
+            .unwrap_or_else(|_| {
+                if path.has_root() {
+                    lexical_normalize(path)
+                } else {
+                    lexical_normalize(
+                        &std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .join(path),
+                    )
+                }
+            })
     }
 
     fn module_source_scan_treeshake_enabled() -> bool {
@@ -807,7 +809,7 @@ impl HvigorModuleSourceState {
         for module_id in &self.module_ids {
             let module_id = module_id.strip_prefix('\0').unwrap_or(module_id);
             let path = Path::new(module_id);
-            if path.is_absolute() {
+            if path.has_root() {
                 module_ids_by_path.insert(
                     arkdown_path::canonicalize_or_owned(path),
                     module_id.to_string(),
@@ -1360,7 +1362,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
 
     fn canonical_module_id(module_id: &str) -> Option<String> {
         let path = Path::new(module_id);
-        path.is_absolute().then(|| {
+        path.has_root().then(|| {
             HvigorModulePathMap::canonical_root(path)
                 .to_string_lossy()
                 .into_owned()
@@ -1483,7 +1485,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         }
 
         let path = Path::new(resolved_id);
-        if !path.is_absolute() {
+        if !path.has_root() {
             return Ok(None);
         }
         let ownership = self.module_path_map.source_file_for_entry(resolved_id)?;
@@ -1892,7 +1894,7 @@ impl<'a> HvigorBytecodeHarImports<'a> {
     }
 
     fn remove_module_suffix(&self, value: &str) -> String {
-        let value = value.replace('\\', "/");
+        let value = ArtifactPathSerializer::rel_to_slash(Path::new(value));
         for suffix in [".d.ets", ".d.ts", ".ets", ".ts", ".mjs", ".cjs", ".js"] {
             if let Some(stripped) = value.strip_suffix(suffix) {
                 return stripped.to_string();
@@ -1913,7 +1915,7 @@ impl<'a> HvigorModuleSourceId<'a> {
 
     fn should_compile(&self) -> bool {
         let path = Path::new(self.module_id);
-        if !path.is_absolute() {
+        if !path.has_root() {
             return false;
         }
         if arkdown_path::SourceFileName::new(path).is_declaration() {
@@ -2126,7 +2128,8 @@ impl RolldownInputPlan {
         }
 
         let candidate = self.module_root.join(strip_relative_prefix(entry));
-        std::fs::canonicalize(&candidate)
+        AbsPath::canonicalize(&candidate)
+            .map(AbsPath::into_path_buf)
             .unwrap_or_else(|_| lexical_normalize(&candidate))
             .into_os_string()
             .into_string()
@@ -2139,17 +2142,19 @@ impl RolldownInputPlan {
     }
 
     fn canonical_module_root(path: &std::path::Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| {
-            if path.is_absolute() {
-                lexical_normalize(path)
-            } else {
-                lexical_normalize(
-                    &std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .join(path),
-                )
-            }
-        })
+        AbsPath::canonicalize(path)
+            .map(AbsPath::into_path_buf)
+            .unwrap_or_else(|_| {
+                if path.has_root() {
+                    lexical_normalize(path)
+                } else {
+                    lexical_normalize(
+                        &std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .join(path),
+                    )
+                }
+            })
     }
 }
 
@@ -2199,9 +2204,7 @@ impl HvigorModulePathMap {
         let mut roots = std::mem::take(&mut self.roots);
         for entry in entries {
             let entry_path = Path::new(entry);
-            if !entry_path.is_absolute()
-                || !arkdown_path::classify::is_inside_oh_modules(entry_path)
-            {
+            if !entry_path.has_root() || !arkdown_path::classify::is_inside_oh_modules(entry_path) {
                 continue;
             }
             let Some(root_path) = Self::package_root_for_compile_entry(entry_path) else {
@@ -2303,7 +2306,7 @@ impl HvigorModulePathMap {
 
     fn source_file_for_entry(&self, entry: &str) -> Result<HvigorChunkSource, ArkdownError> {
         let entry_path = Path::new(entry);
-        if !entry_path.is_absolute() {
+        if !entry_path.has_root() {
             return Ok(HvigorChunkSource::source_module(
                 self.current_module_name.clone(),
                 self.current_module_name.clone(),
@@ -2327,7 +2330,9 @@ impl HvigorModulePathMap {
     }
 
     fn canonical_root(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path))
+        AbsPath::canonicalize(path)
+            .map(AbsPath::into_path_buf)
+            .unwrap_or_else(|_| lexical_normalize(path))
     }
 
     /// Mirrors `ark_utils.getOhmUrlByFilepath` for ModuleMode builds where
@@ -3161,8 +3166,8 @@ mod tests {
         std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         std::fs::write(&source_path, "").unwrap();
 
-        let module_root = std::fs::canonicalize(module_root).unwrap();
-        let source_path = std::fs::canonicalize(source_path).unwrap();
+        let module_root = arkdown_path::canonicalize_or_owned(&module_root);
+        let source_path = arkdown_path::canonicalize_or_owned(&source_path);
         let module_path_map = HvigorModulePathMap::new("entry", &module_root, &[]);
         let source = module_path_map
             .source_file_for_entry(source_path.to_str().unwrap())
@@ -3220,9 +3225,9 @@ mod tests {
         .unwrap();
         std::fs::write(&source_path, "").unwrap();
 
-        let module_root = std::fs::canonicalize(module_root).unwrap();
-        let src_main = std::fs::canonicalize(src_main).unwrap();
-        let source_path = std::fs::canonicalize(source_path).unwrap();
+        let module_root = arkdown_path::canonicalize_or_owned(&module_root);
+        let src_main = arkdown_path::canonicalize_or_owned(&src_main);
+        let source_path = arkdown_path::canonicalize_or_owned(&source_path);
         let module_path_map =
             HvigorModulePathMap::new("entry", &src_main, &[("entry".to_string(), module_root)]);
         let source = module_path_map

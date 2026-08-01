@@ -30,3 +30,6 @@ rolldown_sourcemap = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = { workspace = true }

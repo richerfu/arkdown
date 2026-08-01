@@ -357,6 +357,7 @@ fn test_loader_json_populates_bytecode_har_update_version_info() {
     let bytecode_har = oh_modules.join("bytecode-har");
 
     fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode har");
+    fs::create_dir_all(bytecode_har.join("src/main")).expect("create bytecode har profile dir");
     fs::write(
         bytecode_har.join("ets").join("modules.abc"),
         b"PANDA\x00\x00\x00",
@@ -373,6 +374,11 @@ fn test_loader_json_populates_bytecode_har_update_version_info() {
             }"#,
     )
     .expect("write bytecode har package");
+    fs::write(
+        bytecode_har.join("src/main/module.json5"),
+        r#"{ module: { name: "bytecode-har", type: "har" } }"#,
+    )
+    .expect("write bytecode har module profile");
     fs::create_dir_all(oh_modules.join("dep-a")).expect("create dep package");
     fs::write(
         oh_modules.join("dep-a").join("oh-package.json5"),
@@ -957,8 +963,8 @@ fn test_loader_json_writes_ap_path_and_copies_ap_when_present() {
     let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
 
     let source_ap = module_root.join("modules.ap");
-    let canonical_module_root = std::fs::canonicalize(&module_root).expect("canonical module root");
-    let canonical_source_ap = std::fs::canonicalize(&source_ap).expect("canonical ap");
+    let canonical_module_root = arkdown_path::canonicalize_or_owned(&module_root);
+    let canonical_source_ap = arkdown_path::canonicalize_or_owned(&source_ap);
     assert_eq!(
         loader.an_build_out_put.as_deref(),
         Some(
@@ -1716,8 +1722,18 @@ fn test_loader_json_hsp_har_ohm_maps_normalized_mode() {
 /// Verify all path-valued fields in the serialized loader.json are absolute.
 #[test]
 fn test_loader_json_serialized_paths_are_absolute() {
-    let config = make_config(false); // project_root = /project
-    let module_cfg = make_module_cfg(); // src_path = /project/entry
+    let temp = tempfile::tempdir().expect("temporary project");
+    let project_root = temp.path().join("project");
+    let module_root = project_root.join("entry");
+    fs::create_dir_all(&module_root).expect("module root");
+    let config = ArkdownConfig {
+        project_root,
+        ..make_config(false)
+    };
+    let module_cfg = ModuleConfig {
+        src_path: module_root,
+        ..make_module_cfg()
+    };
     let manifest = make_manifest();
 
     let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
@@ -1915,14 +1931,8 @@ fn test_loader_json_compile_entry_includes_startup_config_and_tasks() {
         .filter_map(|entry| entry.as_str())
         .collect();
 
-    let expected_config_entry = std::fs::canonicalize(&config_entry)
-        .expect("canonical config entry")
-        .to_string_lossy()
-        .into_owned();
-    let expected_startup_task = std::fs::canonicalize(&startup_task)
-        .expect("canonical startup task")
-        .to_string_lossy()
-        .into_owned();
+    let expected_config_entry = to_absolute_path_string(&config_entry);
+    let expected_startup_task = to_absolute_path_string(&startup_task);
     assert!(entries.contains(&expected_config_entry.as_str()));
     assert!(entries.contains(&expected_startup_task.as_str()));
     assert!(loader
@@ -1969,14 +1979,8 @@ fn test_loader_json_compile_entry_includes_insight_intent_entries() {
         .filter_map(|entry| entry.as_str())
         .collect();
 
-    let expected_intent = std::fs::canonicalize(&intent)
-        .expect("canonical intent")
-        .to_string_lossy()
-        .into_owned();
-    let expected_intent_entry = std::fs::canonicalize(&intent_entry)
-        .expect("canonical intent entry")
-        .to_string_lossy()
-        .into_owned();
+    let expected_intent = to_absolute_path_string(&intent);
+    let expected_intent_entry = to_absolute_path_string(&intent_entry);
     assert!(entries.contains(&expected_intent.as_str()));
     assert!(entries.contains(&expected_intent_entry.as_str()));
     assert!(loader
@@ -2092,22 +2096,10 @@ fn test_loader_json_compile_entry_includes_source_har_ability_entries() {
         .filter_map(|entry| entry.as_str())
         .collect();
 
-    let expected_ability = std::fs::canonicalize(&ability_entry)
-        .expect("canonical ability")
-        .to_string_lossy()
-        .into_owned();
-    let expected_extension = std::fs::canonicalize(&extension_entry)
-        .expect("canonical extension")
-        .to_string_lossy()
-        .into_owned();
-    let skipped_hsp = std::fs::canonicalize(&hsp_entry)
-        .expect("canonical hsp")
-        .to_string_lossy()
-        .into_owned();
-    let skipped_bytecode = std::fs::canonicalize(&bytecode_entry)
-        .expect("canonical bytecode")
-        .to_string_lossy()
-        .into_owned();
+    let expected_ability = to_absolute_path_string(&ability_entry);
+    let expected_extension = to_absolute_path_string(&extension_entry);
+    let skipped_hsp = to_absolute_path_string(&hsp_entry);
+    let skipped_bytecode = to_absolute_path_string(&bytecode_entry);
 
     assert!(entries.contains(&expected_ability.as_str()));
     assert!(entries.contains(&expected_extension.as_str()));
@@ -2258,26 +2250,11 @@ fn test_loader_json_compile_entry_includes_source_har_insight_intent_entries() {
         .filter_map(|entry| entry.as_str())
         .collect();
 
-    let expected_default = std::fs::canonicalize(&default_entry)
-        .expect("canonical default insight")
-        .to_string_lossy()
-        .into_owned();
-    let expected_custom = std::fs::canonicalize(&custom_entry)
-        .expect("canonical custom insight")
-        .to_string_lossy()
-        .into_owned();
-    let skipped_default_intent = std::fs::canonicalize(&ignored_default_entry)
-        .expect("canonical ignored insight")
-        .to_string_lossy()
-        .into_owned();
-    let skipped_hsp = std::fs::canonicalize(&hsp_entry)
-        .expect("canonical hsp")
-        .to_string_lossy()
-        .into_owned();
-    let skipped_bytecode = std::fs::canonicalize(&bytecode_entry)
-        .expect("canonical bytecode")
-        .to_string_lossy()
-        .into_owned();
+    let expected_default = to_absolute_path_string(&default_entry);
+    let expected_custom = to_absolute_path_string(&custom_entry);
+    let skipped_default_intent = to_absolute_path_string(&ignored_default_entry);
+    let skipped_hsp = to_absolute_path_string(&hsp_entry);
+    let skipped_bytecode = to_absolute_path_string(&bytecode_entry);
 
     assert!(entries.contains(&expected_default.as_str()));
     assert!(entries.contains(&expected_custom.as_str()));

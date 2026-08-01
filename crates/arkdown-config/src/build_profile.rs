@@ -801,7 +801,7 @@ impl<'a> BuildOptionDecoder<'a> {
     }
 
     fn resolve_path(&self, path: &Path) -> PathBuf {
-        if path.is_absolute() {
+        if path.has_root() {
             path.to_path_buf()
         } else {
             self.path_root.join(path)
@@ -2063,7 +2063,7 @@ impl<'a> ObfuscationConfigMerger<'a> {
                 .iter()
                 .map(|path| {
                     let path = Path::new(path);
-                    if path.is_absolute() {
+                    if path.has_root() {
                         path.to_path_buf()
                     } else {
                         self.module_root.join(path)

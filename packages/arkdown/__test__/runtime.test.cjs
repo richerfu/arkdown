@@ -1,6 +1,7 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -18,11 +19,19 @@ const {
   parsePluginContext,
   buildPluginContext,
   requireDefaultExport,
+  hvigorProjectHash,
 } = require('../runtime')
 
 function tempProject() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-runtime-'))
 }
+
+test('hvigor project cache hash matches latest 32-character cache layout', () => {
+  const root = path.resolve('fixtures', 'cache-project')
+  const expected = crypto.createHash('sha256').update(root).digest('hex').slice(0, 32)
+  assert.equal(hvigorProjectHash(root), expected)
+  assert.equal(hvigorProjectHash(root).length, 32)
+})
 
 test('runtime loader applies hvigorfile plugins and loads compilePluginPath modules', async () => {
   const root = tempProject()
@@ -1177,6 +1186,8 @@ test('createBuild forwards native BuildConfig fields and strips runtime plugin p
   })
 
   await build(config)
+
+  assert.equal(capturedConfig.runtimeNodeExecutable, process.execPath)
 
   for (const [key, value] of Object.entries(config)) {
     if (key === 'compilePluginPath' || key === 'hvigorPluginFile') {

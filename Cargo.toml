@@ -116,9 +116,11 @@ sourcemap = "9"
 
 # File system
 fs-err = "3"
+dunce = "1.0.5"
 walkdir = "2"
 fast-glob = "1.0.1"
 globset = "0.4.18"
+junction = { version = "2.0.0", default-features = false }
 
 # Parallel
 rayon = "1"

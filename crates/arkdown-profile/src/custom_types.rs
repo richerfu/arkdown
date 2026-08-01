@@ -162,7 +162,7 @@ impl<'a> CustomTypeResolver<'a> {
     fn resolve_declaration_path(&self, configured: &str) -> Result<PathBuf, CustomTypeError> {
         let base = {
             let configured_path = Path::new(configured);
-            if configured_path.is_absolute() {
+            if configured_path.has_root() {
                 configured_path.to_path_buf()
             } else {
                 self.module_root.join(configured_path)

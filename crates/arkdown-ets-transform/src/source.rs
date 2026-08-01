@@ -653,7 +653,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_root, &alias_root).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&real_root, &alias_root).unwrap();
+        junction::create(&real_root, &alias_root).unwrap();
 
         let mut files = FxHashMap::default();
         files.insert(
@@ -667,7 +667,7 @@ mod tests {
             .expect("declaration file should resolve through the alias indexed at snapshot build");
         assert_eq!(
             source.path,
-            real_root.join("types.d.ts").canonicalize().unwrap()
+            arkdown_path::canonicalize_or_owned(&real_root.join("types.d.ts"))
         );
     }
 
@@ -685,12 +685,15 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_root, &alias_root).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&real_root, &alias_root).unwrap();
+        junction::create(&real_root, &alias_root).unwrap();
 
         let mut files = FxHashMap::default();
-        files.insert(source_path.canonicalize().unwrap(), Arc::<str>::from(""));
         files.insert(
-            declaration_path.canonicalize().unwrap(),
+            arkdown_path::canonicalize_or_owned(&source_path),
+            Arc::<str>::from(""),
+        );
+        files.insert(
+            arkdown_path::canonicalize_or_owned(&declaration_path),
             Arc::<str>::from("export interface EncryptionResult {}"),
         );
         let sources = TransformSourceSnapshot::new(files);
@@ -701,7 +704,10 @@ mod tests {
                 "../../cpp/types/libmtcrypto",
             )
             .expect("alias importer should resolve declaration stored by canonical path");
-        assert_eq!(resolved.path, declaration_path.canonicalize().unwrap());
+        assert_eq!(
+            resolved.path,
+            arkdown_path::canonicalize_or_owned(&declaration_path)
+        );
     }
 
     #[test]
@@ -729,7 +735,10 @@ mod tests {
             let resolved = sources
                 .resolve_static_with_declarations(&importer, specifier)
                 .unwrap_or_else(|| panic!("SDK declaration must resolve for {specifier}"));
-            assert_eq!(resolved.path, declaration.canonicalize().unwrap());
+            assert_eq!(
+                resolved.path,
+                arkdown_path::canonicalize_or_owned(&declaration)
+            );
         }
     }
 }

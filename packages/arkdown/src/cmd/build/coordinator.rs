@@ -177,11 +177,11 @@ impl<'a> WidgetCompileArktsPass<'a> {
       .into_iter()
       .filter(|source| source.is_arkts())
       .map(|source| {
-        canonicalize_or_owned(&source.source_path)
-          .to_string_lossy()
-          .into_owned()
+        let path = canonicalize_or_owned(&source.source_path);
+        ArtifactPathSerializer::path_to_slash_string(&path)
+          .with_context(|| format!("serialize widget compile entry {}", path.display()))
       })
-      .collect::<Vec<_>>();
+      .collect::<Result<Vec<_>>>()?;
     entries.sort();
     entries.dedup();
     if entries.is_empty() {
@@ -215,14 +215,20 @@ impl<'a> WidgetCompileArktsPass<'a> {
     bundle_plan
   }
 
-  fn compile_context_loader_json(&self, plan: &WidgetCompileArktsPlan) -> LoaderJson {
+  fn compile_context_loader_json(&self, plan: &WidgetCompileArktsPlan) -> Result<LoaderJson> {
     let mut loader_json = self.loader_json.clone();
     loader_json.hvigor_compile_entry.clear();
     loader_json.compile_entry = plan.entries.clone();
     loader_json.form_entry_sources = plan.entries.clone();
     loader_json.runtime_entry_sources.clear();
-    loader_json.cache_path = plan.cache_dir.to_string_lossy().into_owned();
-    loader_json
+    loader_json.cache_path = ArtifactPathSerializer::path_to_slash_string(&plan.cache_dir)
+      .with_context(|| {
+        format!(
+          "serialize widget compile cache directory {}",
+          plan.cache_dir.display()
+        )
+      })?;
+    Ok(loader_json)
   }
 
   fn write_component_collection(
@@ -560,6 +566,7 @@ struct ModuleArkguardPlanBuilder<'a> {
   module: &'a ModuleConfig,
   loader_json: &'a LoaderJson,
   bundle_out: &'a BundleStageOutput,
+  node_executable: PathBuf,
 }
 
 impl<'a> ModuleArkguardPlanBuilder<'a> {
@@ -569,6 +576,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
     module: &'a ModuleConfig,
     loader_json: &'a LoaderJson,
     bundle_out: &'a BundleStageOutput,
+    node_executable: PathBuf,
   ) -> Self {
     Self {
       config,
@@ -576,6 +584,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
       module,
       loader_json,
       bundle_out,
+      node_executable,
     }
   }
 
@@ -668,7 +677,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
       .map(|(name, path)| (name.clone(), PathBuf::from(path)))
       .collect();
     let adapter = ArkguardAdapterOptions {
-      node_executable: PathBuf::from("node"),
+      node_executable: self.node_executable.clone(),
       ets_loader_path: self.config.sdk_config.ets_loader_path.clone(),
       arkguard_package: self
         .config
@@ -1164,7 +1173,7 @@ export const nativeCall: () => void;"#,
 
   #[cfg(windows)]
   fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(src, dst)
+    junction::create(src, dst)
   }
 }
 
@@ -1759,7 +1768,7 @@ struct SourcePathKey {
 impl SourcePathKey {
   fn from_source_entry(source_entry: &str, module_root: &Path) -> Self {
     let path = Path::new(source_entry);
-    let value = if path.is_absolute() {
+    let value = if path.has_root() {
       path.to_path_buf()
     } else {
       module_root.join(Self::trim_relative_prefix(path))
@@ -1769,7 +1778,7 @@ impl SourcePathKey {
 
   fn from_module_source(source: &arkdown_core::HvigorModuleSourceFile) -> Option<Self> {
     let module_id_path = Path::new(&source.module_id);
-    if module_id_path.is_absolute() {
+    if module_id_path.has_root() {
       return Some(Self::new(module_id_path));
     }
     source
@@ -2830,6 +2839,10 @@ impl BuildCoordinator {
       session
         .sdk
         .tool_path(SdkToolKind::NativeNinja)
+        .map(|tool| tool.path),
+      session
+        .sdk
+        .tool_path(SdkToolKind::LlvmStrip)
         .map(|tool| tool.path),
     );
     let sanitizer_native_policy = match (args.ohos_debug_asan, args.ohos_enable_hwasan) {
@@ -4386,8 +4399,14 @@ impl BuildCoordinator {
           .validate()
           .map_err(|e| anyhow::anyhow!("Obfuscation config invalid: {}", e))?;
         let rule_files = obfuscation_plan.all_rule_files();
-        let arkguard_plan =
-          ModuleArkguardPlanBuilder::new(config.as_ref(), session, module, loader_json, bundle_out);
+        let arkguard_plan = ModuleArkguardPlanBuilder::new(
+          config.as_ref(),
+          session,
+          module,
+          loader_json,
+          bundle_out,
+          args.resolved_node_executable(),
+        );
         let (arkguard, module_input) = arkguard_plan.build()?;
         let obfuscator = Obfuscator::new(ObfuscationOptions {
           enable_obfuscation: obfuscation_plan.should_obfuscate(),
@@ -4593,7 +4612,7 @@ impl BuildCoordinator {
           .collect::<Result<Vec<_>>>()?;
         let widget_loader_json =
           WidgetCompileArktsPass::new(module_config.as_ref(), module, manifest, loader_json)
-            .compile_context_loader_json(&widget_out.plan);
+            .compile_context_loader_json(&widget_out.plan)?;
         let widget_compile_context_info_path = if loader_json.use_normalized_ohm_url {
           let module_context = session
             .module_context(&module.name)
@@ -5451,6 +5470,7 @@ impl BuildCoordinator {
         package_plugins: package_plugins.clone(),
         project_hvigor_overrides: args.project_hvigor_overrides.clone(),
         module_hvigor_overrides: args.module_hvigor_overrides.clone(),
+        node_executable: args.node_executable.clone(),
         preview_mode,
       })?;
     }
@@ -5563,7 +5583,7 @@ impl<'a> ResourceDirSelector<'a> {
       .iter()
       .filter(|dir| !dir.as_os_str().is_empty())
       .map(|dir| {
-        if dir.is_absolute() {
+        if dir.has_root() {
           dir.clone()
         } else {
           self.module.src_path.join(dir)
@@ -5815,7 +5835,7 @@ impl<'a> HarResourceDependencySelector<'a> {
         continue;
       };
       let path = PathBuf::from(directory);
-      roots.push(if path.is_absolute() {
+      roots.push(if path.has_root() {
         path
       } else {
         package_root.join(path)
