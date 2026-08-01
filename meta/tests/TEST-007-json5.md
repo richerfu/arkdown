@@ -1,6 +1,7 @@
-# TEST-007: arkdown-plugin-json5
+# TEST-007: arkdown JSON5 Rolldown adapter
 
-**Crate**: `arkdown-plugin-json5`
+**Crate**: `arkdown`
+**Owner**: `crates/arkdown/src/plugins/json5/`
 **Original source**: `@rollup/plugin-json@6.0.0` (JS) — behavior derived from plugin spec
 
 ---
@@ -8,11 +9,10 @@
 ## Test File Layout
 
 ```
-crates/arkdown-plugin-json5/src/
-├── tests/
-│   ├── load.rs               ← load hook: file content → ESM code
-│   ├── named_exports.rs      ← named exports for object root
-│   └── errors.rs             ← invalid JSON5 error handling
+crates/arkdown/src/plugins/json5/
+├── mod.rs
+├── plugin.rs                 ← Rolldown load hook
+└── module_emit.rs            ← deterministic ESM emission
 ```
 
 ---

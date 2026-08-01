@@ -120,22 +120,19 @@ and generate-bundle behavior inside that call.
 
 ## Custom `hvigorfile.ts` Policy
 
-Arbitrary hvigor JavaScript execution is not allowed in the final production
-path. The compatibility model must be:
+`hvigorfile.ts` / `hvigorconfig.ts` are executable configuration programs in
+hvigor's public contract. The Node package therefore evaluates them in its
+existing V8 process with the latest-hvigor node, task, lifecycle, and OHOS
+context adapters. Observable configuration effects cross the native boundary
+as typed snapshots, build-option overlays, task records, or compile-plugin
+paths.
 
-1. Parse `hvigorfile.ts` / `hvigorconfig.ts` with OXC.
-2. Extract a documented declarative subset:
-   - build option overlays
-   - compile plugin file path declarations that can map to typed transform
-     plans
-   - known hooks that map to stage extension points
-3. Emit typed `BuildScriptSnapshot` and `BuildScriptEffect`.
-4. Hard fail with a diagnostic when a script uses arbitrary task registration,
-   dynamic code execution, unsupported custom action, or unsupported hook.
-
-The final public API must use generic names such as `BuildScriptSnapshot`,
-`BuildScriptEffect`, `StageHook`, and `StageExtension`. Public `Hvigor*`
-runtime types must be deleted.
+Rust stages must not evaluate JavaScript, and static projects should continue
+to use the Rust snapshot path. Arbitrary TS/JS execution is confined to the
+Node compatibility boundary because that is the behavior being replaced; it
+must not lead to a second Rust build pipeline or untyped serialized build
+state. Unsupported artifact-affecting context APIs hard fail with typed
+diagnostics rather than being ignored.
 
 ## Parallelism Contract
 

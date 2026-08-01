@@ -1,8 +1,9 @@
 # arkdown Test Documentation
 
-One file per crate or test scope. Each file specifies the test file layout, every test case
-(with input and expected output), and — for crates that rewrite a hvigor JS plugin — the
-exact behavioral parity cases derived from reading the original source.
+One file per crate or test scope. Each file specifies the test file layout,
+every test case (with input and expected output), and—for internal Rolldown
+adapters that replace a hvigor JavaScript plugin—the exact behavioral parity
+cases derived from the installed IDE source.
 
 ## Convention
 
@@ -23,16 +24,16 @@ exact behavioral parity cases derived from reading the original source.
 | [TEST-002](TEST-002-config.md)            | `arkdown-config`                                                   | JSON5 parsing, SDK discovery                            |
 | [TEST-003](TEST-003-resolver.md)          | `arkdown-resolver`                                                 | All OHOS specifier forms                                |
 | [TEST-005](TEST-005-bundler.md)           | `arkdown`                                                          | Link, tree-shake, chunk split                           |
-| [TEST-007](TEST-007-json5.md)             | `arkdown-plugin-json5`                                             | **Original behavioral parity**                          |
-| [TEST-008](TEST-008-duplicate-check.md)   | `arkdown-plugin-duplicate-check`                                   | **Original behavioral parity**                          |
+| [TEST-007](TEST-007-json5.md)             | `arkdown::plugins::json5`                                          | **Installed-IDE behavioral parity**                     |
+| [TEST-008](TEST-008-duplicate-check.md)   | `arkdown::plugins::duplicate_check`                                | **Installed-IDE behavioral parity**                     |
 | [TEST-009](TEST-009-abc-compiler.md)      | `arkdown-abc`                                                      | **Original behavioral parity** (Rust ABC compiler)      |
 | [TEST-010](TEST-010-profile.md)           | `arkdown-profile`                                                  | loader.json generation                                  |
 | [TEST-011](TEST-011-resource.md)          | `arkdown-resource`                                                 | **Original behavioral parity** (Rust resource compiler) |
 | [TEST-012](TEST-012-packager.md)          | `arkdown-pack`                                                     | ZIP structure correctness                               |
 | [TEST-013](TEST-013-cli.md)               | `packages/arkdown`                                                      | Command parsing, error codes                            |
-| [TEST-014](TEST-014-module-meta.md)       | `arkdown-plugin-module-meta`                                       | **Original behavioral parity**                          |
-| [TEST-015](TEST-015-ohos-resolve.md)      | `arkdown-plugin-ohos-resolve`                                      | **Original behavioral parity**                          |
-| [TEST-016](TEST-016-har-dedup.md)         | `arkdown-plugin-har-dedup`                                         | **Original behavioral parity**                          |
+| [TEST-014](TEST-014-module-meta.md)       | `arkdown::plugins::module_meta`                                    | **Installed-IDE behavioral parity**                     |
+| [TEST-015](TEST-015-ohos-resolve.md)      | `arkdown::plugins::ohos_resolve` + `arkdown-resolver`              | **Installed-IDE behavioral parity**                     |
+| [TEST-016](TEST-016-har-dedup.md)         | `arkdown::plugins::har_dedup`                                      | **Installed-IDE behavioral parity**                     |
 | **[TEST-E2E](TEST-E2E-hmosworld.md)**     | all crates                                                         | **Golden path: hmosworld HAR/HAP/APP/device**           |
 
 ## End-to-End Test
@@ -54,9 +55,10 @@ git clone https://github.com/susns/HmosWorld tests/fixtures/hmosworld
 
 ## Origin Behavioral Parity
 
-Crates marked **"Original behavioral parity"** rewrite a hvigor JavaScript plugin. Their tests
-are derived by reading the original compiled JS source. The test cases in those files are
-the ground truth — passing all of them is equivalent to passing the original plugin's test suite.
+Scopes marked **"Installed-IDE behavioral parity"** replace a hvigor
+JavaScript plugin inside Arkdown's Rolldown plugin directory. Their tests are
+derived from the latest installed compiled source and generated artifacts.
+There are no standalone `arkdown-plugin-*` crates in the final architecture.
 
 Original source locations:
 

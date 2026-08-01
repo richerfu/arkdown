@@ -1,6 +1,7 @@
-# TEST-008: arkdown-plugin-duplicate-check
+# TEST-008: arkdown duplicate-check Rolldown adapter
 
-**Crate**: `arkdown-plugin-duplicate-check`
+**Crate**: `arkdown`
+**Owner**: `crates/arkdown/src/plugins/duplicate_check.rs`
 **Original source**: `hvigor-arkts-compose/dist/src/plugins/check-duplicate-filenames-plugin.js`
 
 ---
@@ -8,10 +9,8 @@
 ## Test File Layout
 
 ```
-crates/arkdown-plugin-duplicate-check/src/
-├── tests/
-│   ├── detection.rs          ← duplicate detected, unique passes
-│   └── exclusions.rs         ← SDK, declaration, external files excluded
+crates/arkdown/src/plugins/
+└── duplicate_check.rs        ← implementation and focused unit tests
 ```
 
 ---
