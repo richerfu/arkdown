@@ -281,7 +281,7 @@ mod tests {
 
     impl TestSdk {
         fn snapshot(root: &str) -> SdkSnapshot {
-            SdkSnapshot::from_parts(PathBuf::from(root), 12, "5.0.0.47".to_string())
+            SdkSnapshot::from_parts(PathBuf::from(root), 12, 12, "5.0.0.47".to_string())
         }
     }
 

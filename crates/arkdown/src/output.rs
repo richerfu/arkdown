@@ -54,14 +54,15 @@ impl WrittenOutput {
         source_map_opts: &SourceMapOptions,
     ) -> Result<Option<PathBuf>, ArkdownError>
     where
-        I: IntoIterator<Item = (&'a str, &'a str)>,
+        I: IntoIterator<Item = (&'a str, &'a str, bool)>,
     {
         let source_maps = source_maps
             .into_iter()
-            .map(|(chunk_name, raw_map)| ChunkSourceMap {
+            .map(|(chunk_name, raw_map, emits_javascript)| ChunkSourceMap {
                 chunk_name,
                 generated_line_count: 0,
                 raw_map,
+                emits_javascript,
             })
             .collect::<Vec<_>>();
         if source_maps.is_empty() {
@@ -81,6 +82,10 @@ impl WrittenOutput {
 /// and each entry carries an `"entry-package-info"` field.
 #[derive(Debug, Clone)]
 pub struct SourceMapOptions {
+    /// Canonical project root used by latest SourceMapGenerator module paths.
+    pub project_root: PathBuf,
+    /// Canonical owning module root used for generated sources outside src/main.
+    pub module_root: PathBuf,
     /// OHOS module name (e.g. `"entry"`).
     pub module_name: String,
     /// Package name from `oh-package.json5` (typically equals `module_name`).
@@ -111,6 +116,7 @@ struct ChunkSourceMap<'a> {
     chunk_name: &'a str,
     generated_line_count: usize,
     raw_map: &'a str,
+    emits_javascript: bool,
 }
 
 struct IndentedJsonValueWriter<'a, W> {
@@ -171,6 +177,7 @@ impl WrittenOutput {
                     chunk_name: chunk.name.as_str(),
                     generated_line_count: chunk.code.lines().count(),
                     raw_map: map.as_str(),
+                    emits_javascript: false,
                 });
             }
         }
@@ -321,14 +328,28 @@ impl WrittenOutput {
 
         let mut entries = Vec::with_capacity(sources.len());
         for (source_id, source) in sources {
-            let descriptor = HvigorSourceDescriptor::new(&source, &opts.package_versions)?;
+            let descriptor = HvigorSourceDescriptor::new(
+                &source,
+                &opts.project_root,
+                &opts.module_root,
+                source_map.emits_javascript,
+                &opts.package_versions,
+            )?;
             entries.push(HvigorSourceMapEntry {
                 chunk_name: source_map.chunk_name.to_string(),
-                mappings: Self::mappings_for_source(&decoded, source_id, &source),
+                mappings: Self::mappings_for_source(
+                    &decoded,
+                    source_id,
+                    &source,
+                    source_map.raw_map,
+                ),
                 source_file: Some(descriptor.source_file),
                 source_map_source_file: descriptor.source_map_source_file,
                 package_name: descriptor.package_name,
                 package_version: descriptor.package_version,
+                key_path: descriptor.key_path,
+                file: descriptor.file,
+                include_source_root: descriptor.include_source_root,
             });
         }
         Ok(entries)
@@ -355,6 +376,9 @@ impl WrittenOutput {
             source_map_source_file,
             package_name: None,
             package_version: None,
+            key_path: None,
+            file: None,
+            include_source_root: true,
         }])
     }
 
@@ -362,6 +386,7 @@ impl WrittenOutput {
         decoded: &RolldownOwnedSourceMap,
         source_id: u32,
         source: &str,
+        raw_map: &str,
     ) -> String {
         let mut builder = SourceMapBuilder::default();
         let source_content = decoded
@@ -370,10 +395,12 @@ impl WrittenOutput {
             .unwrap_or_default();
         builder.set_source_and_content(source, source_content);
 
+        let mut has_source_tokens = false;
         for token in decoded
             .get_tokens()
             .filter(|token| token.get_source_id() == Some(source_id))
         {
+            has_source_tokens = true;
             let name_id = token
                 .get_name_id()
                 .and_then(|id| decoded.get_name(id))
@@ -386,6 +413,13 @@ impl WrittenOutput {
                 Some(0),
                 name_id,
             );
+        }
+
+        if !has_source_tokens {
+            return serde_json::from_str::<serde_json::Value>(raw_map)
+                .ok()
+                .and_then(|value| value.get("mappings")?.as_str().map(str::to_string))
+                .unwrap_or_default();
         }
 
         let value: serde_json::Value =
@@ -404,11 +438,17 @@ struct HvigorSourceDescriptor {
     source_map_source_file: Option<String>,
     package_name: Option<String>,
     package_version: Option<String>,
+    key_path: Option<String>,
+    file: Option<String>,
+    include_source_root: bool,
 }
 
 impl HvigorSourceDescriptor {
     fn new(
         source: &str,
+        project_root: &Path,
+        module_root: &Path,
+        emits_javascript: bool,
         package_versions: &FxHashMap<String, String>,
     ) -> Result<Self, ArkdownError> {
         let normalized = ArtifactPathSerializer::rel_to_slash(&PathBuf::from(source));
@@ -423,7 +463,46 @@ impl HvigorSourceDescriptor {
                 source_map_source_file: Some(package.source_map_source_file),
                 package_name: Some(package.package_name),
                 package_version: Some(package.package_version),
+                key_path: None,
+                file: None,
+                include_source_root: true,
             });
+        }
+
+        let source_path = Path::new(&normalized);
+        if let Ok(module_relative) = source_path.strip_prefix(module_root) {
+            if Self::source_file_after_src_main(&components).is_none() {
+                let source_file = ArtifactPathSerializer::rel_to_slash(module_relative);
+                let mut key_path = module_relative.to_path_buf();
+                if emits_javascript {
+                    key_path.set_extension("js");
+                }
+                let source_map_source_file = source_path
+                    .strip_prefix(project_root)
+                    .map(ArtifactPathSerializer::rel_to_slash)
+                    .unwrap_or_else(|_| {
+                        let mut path = PathBuf::from(
+                            module_root
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or_default(),
+                        );
+                        path.push(module_relative);
+                        ArtifactPathSerializer::rel_to_slash(&path)
+                    });
+                return Ok(Self {
+                    file: source_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string),
+                    source_file,
+                    source_map_source_file: Some(source_map_source_file),
+                    package_name: None,
+                    package_version: None,
+                    key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
+                    include_source_root: false,
+                });
+            }
         }
 
         Ok(Self {
@@ -432,6 +511,9 @@ impl HvigorSourceDescriptor {
             source_map_source_file: None,
             package_name: None,
             package_version: None,
+            key_path: None,
+            file: None,
+            include_source_root: true,
         })
     }
 
@@ -701,6 +783,8 @@ mod tests {
         );
         chunk_source_files.insert("Index".to_string(), "ets/pages/Index.ets".to_string());
         let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/entry"),
             module_name: "entry".to_string(),
             package_name: "entry".to_string(),
             version: "1.0.0".to_string(),
@@ -763,6 +847,8 @@ mod tests {
         let mut package_versions = FxHashMap::default();
         package_versions.insert("@hw-agconnect/hmcore".to_string(), "1.0.6".to_string());
         let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/phone"),
             module_name: "phone".to_string(),
             package_name: "phone".to_string(),
             version: "1.0.0".to_string(),
@@ -817,6 +903,8 @@ mod tests {
         let mut package_versions = FxHashMap::default();
         package_versions.insert("@protobufjs/base64".to_string(), "1.1.2".to_string());
         let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/phone"),
             module_name: "phone".to_string(),
             package_name: "phone".to_string(),
             version: "1.0.0".to_string(),

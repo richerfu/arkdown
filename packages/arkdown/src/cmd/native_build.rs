@@ -606,6 +606,23 @@ impl<'a> NativeModuleLayout<'a> {
       .join("base_native_libs.json")
   }
 
+  fn binxo_libs_dir(&self) -> PathBuf {
+    self
+      .build_default()
+      .join("intermediates")
+      .join("binxo")
+      .join("default")
+  }
+
+  fn binxo_native_lib_cache_file(&self) -> PathBuf {
+    self
+      .build_default()
+      .join("intermediates")
+      .join("patch")
+      .join("default")
+      .join("binxo_native_libs.json")
+  }
+
   fn cangjie_intermediate_dir(&self) -> PathBuf {
     self
       .build_default()
@@ -1187,10 +1204,26 @@ impl<'a> NativeProcessLibWriter<'a> {
 
 #[derive(Serialize)]
 struct NativeLibCache<'a> {
-  libs: BTreeMap<String, String>,
-  stripped: BTreeMap<String, String>,
+  libs: &'a BTreeMap<String, String>,
+  stripped: &'a BTreeMap<String, String>,
   #[serde(rename = "debugSymbol", skip_serializing_if = "Option::is_none")]
   debug_symbol: Option<&'a arkdown_core::NativeDebugSymbolOption>,
+}
+
+#[derive(Serialize)]
+struct NativeBinxoCache<'a> {
+  libs: &'a BTreeMap<String, String>,
+  binxo: &'a BTreeMap<String, String>,
+  #[serde(rename = "binxoSymbol")]
+  binxo_symbol: NativeBinxoSymbol<'a>,
+}
+
+#[derive(Serialize)]
+struct NativeBinxoSymbol<'a> {
+  #[serde(rename = "enableAsanBinxo")]
+  enable_asan_binxo: bool,
+  #[serde(rename = "excludeSoFromBinxo")]
+  exclude_so_from_binxo: &'a [String],
 }
 
 /// Mirrors hvigor `CacheNativeLibs` and `LibsFileCacheUtil`. Hashes are
@@ -1210,12 +1243,33 @@ impl<'a> NativeLibCacheWriter<'a> {
 
   fn write(&self) -> NativeBuildResult<()> {
     let layout = NativeModuleLayout::new(self.module_root);
+    // CacheNativeLibs reads each directory once and reuses the process-libs
+    // inventory for both cache artifacts. Keep that ownership shape here.
+    let libs = self.hash_directory(&layout.process_libs_dir())?;
+    let stripped = self.hash_directory(&layout.stripped_libs_dir())?;
+    let binxo = self.hash_directory(&layout.binxo_libs_dir())?;
     let cache = NativeLibCache {
-      libs: self.hash_directory(&layout.process_libs_dir())?,
-      stripped: self.hash_directory(&layout.stripped_libs_dir())?,
+      libs: &libs,
+      stripped: &stripped,
       debug_symbol: self.explicit_debug_symbol(),
     };
-    let cache_file = layout.native_lib_cache_file();
+    self.write_json(&layout.native_lib_cache_file(), &cache)?;
+
+    let binxo_cache = NativeBinxoCache {
+      libs: &libs,
+      binxo: &binxo,
+      binxo_symbol: NativeBinxoSymbol {
+        // Arkdown does not expose hvigor's independent OHOS_ENABLE_BINXO
+        // switch yet. Its supported native modes therefore own the observed
+        // disabled-binxo cache contract rather than inferring it from HWASAN.
+        enable_asan_binxo: false,
+        exclude_so_from_binxo: &self.option.exclude_so_from_binxo,
+      },
+    };
+    self.write_json(&layout.binxo_native_lib_cache_file(), &binxo_cache)
+  }
+
+  fn write_json<T: Serialize>(&self, cache_file: &Path, cache: &T) -> NativeBuildResult<()> {
     if let Some(parent) = cache_file.parent() {
       std::fs::create_dir_all(parent).map_err(|error| {
         NativeBuildError::NativePostProcessFailed {
@@ -1226,11 +1280,11 @@ impl<'a> NativeLibCacheWriter<'a> {
     }
     let bytes =
       serde_json::to_vec(&cache).map_err(|error| NativeBuildError::NativePostProcessFailed {
-        path: cache_file.clone(),
+        path: cache_file.to_path_buf(),
         message: error.to_string(),
       })?;
-    std::fs::write(&cache_file, bytes).map_err(|error| NativeBuildError::NativePostProcessFailed {
-      path: cache_file,
+    std::fs::write(cache_file, bytes).map_err(|error| NativeBuildError::NativePostProcessFailed {
+      path: cache_file.to_path_buf(),
       message: error.to_string(),
     })
   }
@@ -2428,6 +2482,15 @@ mod tests {
     assert_eq!(cache["libs"].as_object().unwrap().len(), 1);
     assert_eq!(cache["stripped"].as_object().unwrap().len(), 1);
     assert!(cache.get("debugSymbol").is_none());
+    let binxo_cache: serde_json::Value =
+      serde_json::from_slice(&fs::read(layout.binxo_native_lib_cache_file()).unwrap()).unwrap();
+    assert_eq!(binxo_cache["libs"].as_object().unwrap().len(), 1);
+    assert!(binxo_cache["binxo"].as_object().unwrap().is_empty());
+    assert_eq!(binxo_cache["binxoSymbol"]["enableAsanBinxo"], false);
+    assert_eq!(
+      binxo_cache["binxoSymbol"]["excludeSoFromBinxo"],
+      serde_json::json!([])
+    );
     for hash in cache["libs"]
       .as_object()
       .unwrap()
@@ -2438,6 +2501,26 @@ mod tests {
       assert_eq!(hash.len(), 64);
       assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
+  }
+
+  #[test]
+  fn test_native_cache_empty_artifacts_match_latest_hvigor_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let option = NativeLibOption::default();
+
+    NativeLibCacheWriter::new(tmp.path(), &option)
+      .write()
+      .expect("write empty native caches");
+
+    let layout = NativeModuleLayout::new(tmp.path());
+    assert_eq!(
+      fs::read_to_string(layout.native_lib_cache_file()).unwrap(),
+      r#"{"libs":{},"stripped":{}}"#
+    );
+    assert_eq!(
+      fs::read_to_string(layout.binxo_native_lib_cache_file()).unwrap(),
+      r#"{"libs":{},"binxo":{},"binxoSymbol":{"enableAsanBinxo":false,"excludeSoFromBinxo":[]}}"#
+    );
   }
 
   #[test]

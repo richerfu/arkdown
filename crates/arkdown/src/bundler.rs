@@ -310,7 +310,15 @@ impl Bundler {
             ));
         }
         let package_versions = Self::source_map_package_versions(plan, &module_graph_facts);
+        let source_map_module_root = plan
+            .input
+            .module_path_map
+            .iter()
+            .find_map(|(name, root)| (name == &plan.input.module_name).then_some(root))
+            .unwrap_or(&plan.input.module_root);
         let source_map_opts = output::SourceMapOptions {
+            project_root: Self::canonical_project_root(&plan.input.project_root),
+            module_root: Self::canonical_project_root(source_map_module_root),
             module_name: source_map_packages.entry_package_name.clone(),
             package_name: source_map_packages.entry_package_name.clone(),
             version: source_map_packages.entry_package_version.clone(),
@@ -322,7 +330,15 @@ impl Bundler {
         let mut raw_source_maps = module_source_state
             .source_maps
             .iter()
-            .map(|(module_id, source_map)| (module_id.as_str(), source_map.as_ref()))
+            .map(|(module_id, source_map)| {
+                (
+                    module_id.as_str(),
+                    source_map.as_ref(),
+                    module_source_state
+                        .javascript_module_ids
+                        .contains(module_id),
+                )
+            })
             .collect::<Vec<_>>();
         raw_source_maps.sort_by(|left, right| left.0.cmp(right.0));
         let source_maps_path = output::WrittenOutput::write_hvigor_source_maps_from_raw(
@@ -1311,7 +1327,11 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             if ownership.module_name.is_empty() {
                 continue;
             }
-            let record_name = if self.use_normalized_ohm_url {
+            let record_name = if let Some(record_name) =
+                self.module_path_map.module_meta_info_ohm_url(module_id)
+            {
+                record_name.to_string()
+            } else if self.use_normalized_ohm_url {
                 ownership.normalized_record_name(self.runtime_packages)?
             } else {
                 self.module_path_map.non_normalized_record_name(
@@ -2038,6 +2058,7 @@ impl RolldownInputPlan {
             &plan.input.module_path_map,
         );
         module_path_map.add_module_record_roots(&plan.input.module_record_roots);
+        module_path_map.add_module_meta_info_files(&plan.input.module_meta_info_files);
         let entries = plan.input.entries.clone();
         module_path_map.add_compile_entry_package_roots(&entries);
         Self {
@@ -2136,6 +2157,7 @@ impl RolldownInputPlan {
 struct HvigorModulePathMap {
     current_module_name: String,
     roots: Vec<HvigorModuleRoot>,
+    module_meta_info_ohm_urls: FxHashMap<PathBuf, String>,
 }
 
 impl HvigorModulePathMap {
@@ -2193,8 +2215,7 @@ impl HvigorModulePathMap {
             };
             roots.push(root);
         }
-        let current_module_name = self.current_module_name.clone();
-        *self = Self::from_roots(current_module_name, roots);
+        self.rebuild_roots(roots);
     }
 
     fn add_module_record_roots(&mut self, module_record_roots: &[(String, PathBuf)]) {
@@ -2205,8 +2226,29 @@ impl HvigorModulePathMap {
                 Self::canonical_root(root),
             ));
         }
+        self.rebuild_roots(roots);
+    }
+
+    fn add_module_meta_info_files(&mut self, files: &[crate::plan::BundleModuleMetaInfoFile]) {
+        self.module_meta_info_ohm_urls.reserve(files.len());
+        for file in files {
+            self.module_meta_info_ohm_urls
+                .insert(Self::canonical_root(&file.file_path), file.ohm_url.clone());
+        }
+    }
+
+    fn module_meta_info_ohm_url(&self, module_id: &str) -> Option<&str> {
+        self.module_meta_info_ohm_urls
+            .get(&Self::canonical_root(Path::new(module_id)))
+            .map(String::as_str)
+    }
+
+    fn rebuild_roots(&mut self, roots: Vec<HvigorModuleRoot>) {
         let current_module_name = self.current_module_name.clone();
-        *self = Self::from_roots(current_module_name, roots);
+        let module_meta_info_ohm_urls = std::mem::take(&mut self.module_meta_info_ohm_urls);
+        let mut rebuilt = Self::from_roots(current_module_name, roots);
+        rebuilt.module_meta_info_ohm_urls = module_meta_info_ohm_urls;
+        *self = rebuilt;
     }
 
     fn from_roots(current_module_name: String, mut roots: Vec<HvigorModuleRoot>) -> Self {
@@ -2240,6 +2282,7 @@ impl HvigorModulePathMap {
         Self {
             current_module_name,
             roots: merged_roots,
+            module_meta_info_ohm_urls: FxHashMap::default(),
         }
     }
 
@@ -3138,6 +3181,32 @@ mod tests {
     }
 
     #[test]
+    fn module_meta_info_ohm_url_survives_compile_entry_root_enrichment() {
+        let project = tempfile::tempdir().unwrap();
+        let module_root = project.path().join("entry");
+        let resource_table = module_root.join("build/default/generated/r/default/ResourceTable.ts");
+        std::fs::create_dir_all(resource_table.parent().unwrap()).unwrap();
+        std::fs::write(&resource_table, "//@ts-noCheck\n").unwrap();
+
+        let mut module_path_map = HvigorModulePathMap::new(
+            "entry",
+            &module_root,
+            &[("entry".to_string(), module_root.clone())],
+        );
+        module_path_map.add_module_meta_info_files(&[crate::plan::BundleModuleMetaInfoFile {
+            file_path: resource_table.clone(),
+            ohm_url: "com.example/entry/build/generated/r/ResourceTable".to_string(),
+        }]);
+        module_path_map
+            .add_compile_entry_package_roots(&[resource_table.to_string_lossy().into_owned()]);
+
+        assert_eq!(
+            module_path_map.module_meta_info_ohm_url(resource_table.to_str().unwrap()),
+            Some("com.example/entry/build/generated/r/ResourceTable")
+        );
+    }
+
+    #[test]
     fn module_path_map_keeps_package_version_for_src_main_sources() {
         let project = tempfile::tempdir().unwrap();
         let module_root = project.path().join("entry");
@@ -3720,6 +3789,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
                     ),
                 ],
                 module_record_roots: Vec::new(),
+                module_meta_info_files: Vec::new(),
                 entries: vec![
                     "./ets/entryability/EntryAbility.ets".to_string(),
                     app_root
@@ -3836,6 +3906,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
                 module_name: "phone".to_string(),
                 module_path_map: vec![("phone".to_string(), phone_root)],
                 module_record_roots: Vec::new(),
+                module_meta_info_files: Vec::new(),
                 entries: vec![package_entry_id.clone()],
                 form_entry_sources: Vec::new(),
                 runtime_entry_sources: vec![],

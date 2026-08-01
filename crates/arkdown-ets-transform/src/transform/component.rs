@@ -4,9 +4,10 @@ use oxc_allocator::Allocator;
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
     AccessorProperty, Argument, AssignmentExpression, AssignmentTarget, ClassElement, Expression,
-    FormalParameterKind, FormalParameters, MemberExpression, MethodDefinition, ObjectPropertyKind,
-    Program, PropertyDefinition, Statement, StaticBlock, TSIndexSignature, TSType,
-    TSTypeAnnotation, TSTypeName, VariableDeclarationKind, VariableDeclarator,
+    FormalParameterKind, FormalParameters, MemberExpression, MethodDefinition, NumberBase,
+    ObjectPropertyKind, Program, PropertyDefinition, PropertyKind, Statement, StaticBlock,
+    TSIndexSignature, TSType, TSTypeAnnotation, TSTypeName, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
@@ -14,7 +15,7 @@ use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::{Span, SPAN};
 use oxc_syntax::operator::AssignmentOperator;
 
-use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError};
+use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError, BuildSourceMetadata};
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::decorator::{ArkuiDecoratorName, ArkuiStateDecorator, ConstructorInitKind};
 use crate::transform::entry::EntryRegistrationInfo;
@@ -145,6 +146,7 @@ pub(super) struct CustomDialogControllerLowerer<'a, 'b> {
     builder: ViewpuAstBuilder<'a>,
     runtime_names: &'b ArkuiRuntimeNames,
     custom_dialog_components: &'b FxHashSet<String>,
+    source_metadata: BuildSourceMetadata<'b>,
     changed: bool,
 }
 
@@ -153,6 +155,8 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         allocator: &'a Allocator,
         runtime_names: &'b ArkuiRuntimeNames,
         custom_dialog_components: &'b FxHashSet<String>,
+        source_text: &'b str,
+        source_id: &'b str,
     ) -> Self {
         Self {
             allocator,
@@ -160,6 +164,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             builder: ViewpuAstBuilder::new(allocator),
             runtime_names,
             custom_dialog_components,
+            source_metadata: BuildSourceMetadata::new(source_text, source_id),
             changed: false,
         }
     }
@@ -201,7 +206,8 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             {
                 continue;
             }
-            let Some((dialog_name, params)) = self.custom_dialog_builder_call(&property.value)
+            let Some((dialog_name, params, source_span)) =
+                self.custom_dialog_builder_call(&property.value)
             else {
                 continue;
             };
@@ -209,6 +215,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
                 &dialog_name,
                 params,
                 controller_expression.clone_in(self.allocator),
+                source_span,
             );
         }
 
@@ -221,7 +228,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
     fn custom_dialog_builder_call(
         &self,
         expression: &Expression<'a>,
-    ) -> Option<(String, Expression<'a>)> {
+    ) -> Option<(String, Expression<'a>, Span)> {
         let Expression::CallExpression(call) = expression else {
             return None;
         };
@@ -236,7 +243,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             None => self.ast.expression_object(SPAN, self.ast.vec()),
             _ => return None,
         };
-        Some((dialog_name.to_string(), params))
+        Some((dialog_name.to_string(), params, call.span))
     }
 
     fn custom_dialog_builder_arrow(
@@ -244,12 +251,13 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         dialog_name: &str,
         params: Expression<'a>,
         controller_expression: Expression<'a>,
+        source_span: Span,
     ) -> Expression<'a> {
         let mut statements = self.ast.vec();
         let params_for_generator = params.clone_in(self.allocator);
         statements.push(self.variable_declaration(
             CustomDialogBuilderName::JS_DIALOG,
-            self.custom_dialog_new_expression(dialog_name, params),
+            self.custom_dialog_new_expression(dialog_name, params, source_span),
         ));
         statements.push(self.js_dialog_call_statement(
             GeneratedViewpuName::SET_CONTROLLER,
@@ -277,6 +285,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         &self,
         dialog_name: &str,
         params: Expression<'a>,
+        source_span: Span,
     ) -> Expression<'a> {
         self.ast.expression_new(
             SPAN,
@@ -289,7 +298,58 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
                 Argument::from(self.builder.undefined_expression()),
                 Argument::from(self.builder.minus_one_expression()),
                 Argument::from(self.builder.empty_arrow_function_expression(None)),
+                Argument::from(self.source_info_expression(source_span)),
             ]),
+        )
+    }
+
+    /// Latest SDK `process_component_member.js::addCustomComponentId` appends
+    /// the original custom-dialog call location to the generated ViewPU
+    /// constructor, including for the lazy builder synthesized by
+    /// `process_ui_syntax.js::createCustomComponentBuilderArrowFunction`.
+    fn source_info_expression(&self, source_span: Span) -> Expression<'a> {
+        let (line, col) = self.source_metadata.source_position(source_span.start);
+        let page = self.source_metadata.component_page_path();
+        self.ast.expression_object(
+            SPAN,
+            self.ast.vec_from_iter([
+                self.object_property(
+                    GeneratedViewpuName::SOURCE_PAGE,
+                    self.ast
+                        .expression_string_literal(SPAN, self.ast.str(&page), None),
+                ),
+                self.object_property(
+                    GeneratedViewpuName::SOURCE_LINE,
+                    self.ast.expression_numeric_literal(
+                        SPAN,
+                        line as f64,
+                        None,
+                        NumberBase::Decimal,
+                    ),
+                ),
+                self.object_property(
+                    GeneratedViewpuName::SOURCE_COL,
+                    self.ast.expression_numeric_literal(
+                        SPAN,
+                        col as f64,
+                        None,
+                        NumberBase::Decimal,
+                    ),
+                ),
+            ]),
+        )
+    }
+
+    fn object_property(&self, name: &str, value: Expression<'a>) -> ObjectPropertyKind<'a> {
+        self.ast.object_property_kind_object_property(
+            SPAN,
+            PropertyKind::Init,
+            self.ast
+                .property_key_static_identifier(SPAN, self.ast.str(name)),
+            value,
+            false,
+            false,
+            false,
         )
     }
 

@@ -282,6 +282,32 @@ pub struct TokenSourceMapBuilder<'a> {
     id: &'a str,
 }
 
+pub struct TypeScriptCommentOnlySourceMap<'a> {
+    id: &'a str,
+}
+
+impl<'a> TypeScriptCommentOnlySourceMap<'a> {
+    pub fn new(id: &'a str) -> Self {
+        Self { id }
+    }
+
+    pub fn build(&self) -> String {
+        let source = ArtifactPathSerializer::rel_to_slash(Path::new(self.id));
+        let file = Path::new(self.id)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(self.id);
+        serde_json::to_string(&serde_json::json!({
+            "version": 3,
+            "file": file,
+            "sources": [source],
+            "names": [],
+            "mappings": ";",
+        }))
+        .expect("comment-only TypeScript source map is serializable")
+    }
+}
+
 impl<'a> TokenSourceMapBuilder<'a> {
     pub fn new(source: &'a str, id: &'a str) -> Self {
         Self { source, id }

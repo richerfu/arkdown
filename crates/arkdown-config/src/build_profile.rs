@@ -329,6 +329,9 @@ pub struct RawBuildOption {
     /// HSP/source-HAR deduplication policy.
     #[serde(rename = "packOptions", default)]
     pub pack_options: Option<RawPackOptions>,
+    /// HAR compiler/packing options from `buildOption.packingOptions`.
+    #[serde(default)]
+    pub packing_options: Option<RawPackingOptions>,
     /// Resource options from `buildOption.resOptions` in `build-profile.json5`.
     #[serde(rename = "resOptions", default)]
     pub res_options: Option<RawResOptions>,
@@ -365,6 +368,20 @@ pub struct RawBuildOption {
 pub struct RawPackOptions {
     #[serde(default)]
     pub deduplicate_har: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawPackingOptions {
+    #[serde(default)]
+    pub customized_options: Option<RawCustomizedPackingOptions>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawCustomizedPackingOptions {
+    #[serde(default)]
+    pub base_package: Option<std::path::PathBuf>,
 }
 
 /// `buildOption.externalNativeOptions` — controls native/CMake build settings.
@@ -404,6 +421,8 @@ pub struct RawNativeLibOption {
     pub exclude_from_har: Option<bool>,
     #[serde(default)]
     pub exclude_so_from_interface_har: Option<bool>,
+    #[serde(rename = "excludeSoFromBinXO", alias = "excludeSoFromBinxo", default)]
+    pub exclude_so_from_binxo: Option<StringList>,
     #[serde(default)]
     pub debug_symbol: Option<RawNativeDebugSymbolOption>,
 }
@@ -705,6 +724,13 @@ impl<'a> BuildOptionDecoder<'a> {
             .and_then(|options| options.ap_path.as_ref())
             .or_else(|| self.raw.and_then(|option| option.ap_path.as_ref()))
             .map(|path| self.resolve_path(path));
+        let customized_har_base_package = self
+            .raw
+            .and_then(|option| option.packing_options.as_ref())
+            .and_then(|options| options.customized_options.as_ref())
+            .and_then(|options| options.base_package.as_ref())
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| self.resolve_path(path));
 
         Ok(arkdown_core::BuildOption {
             strict_mode,
@@ -717,6 +743,7 @@ impl<'a> BuildOptionDecoder<'a> {
                 .raw
                 .and_then(|option| option.pack_options.as_ref())
                 .is_some_and(|options| options.deduplicate_har),
+            customized_har_base_package,
             remove_permissions: self
                 .raw
                 .map(|option| option.remove_permissions.clone())
@@ -2177,6 +2204,10 @@ impl<'a> NativeBuildOptionMerger<'a> {
                 self.effective.native_lib.exclude_so_from_interface_har =
                     exclude_so_from_interface_har;
             }
+            if let Some(exclude_so_from_binxo) = native_lib.exclude_so_from_binxo.as_ref() {
+                self.effective.native_lib.exclude_so_from_binxo =
+                    exclude_so_from_binxo.as_slice().to_vec();
+            }
             if let Some(debug_symbol) = native_lib.debug_symbol.as_ref() {
                 if let Some(strip) = debug_symbol.strip {
                     self.effective.native_lib.debug_symbol.strip = strip;
@@ -3378,6 +3409,12 @@ mod tests {
                 buildOption: {
                     preloadSystemSo: true,
                     packOptions: { deduplicateHar: true },
+                    packingOptions: {
+                        customizedOptions: { basePackage: "./base.abc" }
+                    },
+                    nativeLib: {
+                        excludeSoFromBinXO: ["**/libskip.so"]
+                    },
                     resOptions: {
                         compression: {
                             filters: [{ files: { path: ["module-filter"] } }]
@@ -3443,6 +3480,11 @@ mod tests {
         assert!(option.deduplicate_har);
         assert!(!option.strict_mode.case_sensitive_check);
         assert!(!option.strict_mode.use_normalized_ohm_url);
+        assert_eq!(
+            option.customized_har_base_package.as_deref(),
+            Some(module_root.join("base.abc").as_path())
+        );
+        assert_eq!(option.native_lib.exclude_so_from_binxo, ["**/libskip.so"]);
         let ark_options = option.ark_options.unwrap();
         assert!(ark_options.support_chunks);
         assert_eq!(

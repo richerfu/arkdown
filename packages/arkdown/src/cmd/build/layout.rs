@@ -192,6 +192,15 @@ impl<'a> ModuleBuildLayout<'a> {
       .join("ResourceTable.h")
   }
 
+  pub(super) fn generated_resource_table_typescript(&self) -> PathBuf {
+    self
+      .build_default()
+      .join("generated")
+      .join("r")
+      .join("default")
+      .join("ResourceTable.ts")
+  }
+
   pub(super) fn generated_build_profile(&self, target_name: &str) -> PathBuf {
     self
       .build_default()

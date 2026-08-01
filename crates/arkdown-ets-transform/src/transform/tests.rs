@@ -4296,9 +4296,9 @@ struct Host {
     );
     assert!(
         result.contains(
-            "let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => { });"
+            "let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => { }, { page: \"entry/src/main/ets/pages/Host.ets\", line: 14, col: 14 });"
         ),
-        "lazy builder should instantiate the dialog with ViewPU constructor args:\n{}",
+        "lazy builder should instantiate the dialog with the SDK source location argument:\n{}",
         result
     );
     assert!(
@@ -4380,8 +4380,8 @@ struct Host {
         result
     );
     assert!(
-        result.contains("let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => { });"),
-        "method assignment lazy builder should instantiate the dialog with ViewPU constructor args:\n{}",
+        result.contains("let jsDialog = new DismissDialog(this, { title: \"privacy\" }, undefined, -1, () => { }, { page: \"entry/src/main/ets/pages/Host.ets\", line: 17, col: 16 });"),
+        "method assignment lazy builder should preserve the exact SDK source location:\n{}",
         result
     );
     assert!(

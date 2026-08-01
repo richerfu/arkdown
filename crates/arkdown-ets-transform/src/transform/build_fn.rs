@@ -164,7 +164,7 @@ pub(super) struct BuildSourceMetadata<'a> {
 }
 
 impl<'a> BuildSourceMetadata<'a> {
-    fn new(source_text: &'a str, source_id: &'a str) -> Self {
+    pub(super) fn new(source_text: &'a str, source_id: &'a str) -> Self {
         Self {
             source_text,
             source_id,
@@ -787,6 +787,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let resolved_attrs = self.component_chain_attributes(component, context)?;
         LeafAttributeStatementEmitter::new(
             &name,
+            component.callee.span(),
             &resolved_attrs,
             &self.plan.builder_methods,
             context,
@@ -889,6 +890,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let resolved_attrs = self.component_chain_attributes(component, context)?;
         LeafAttributeStatementEmitter::new(
             name,
+            component.callee.span(),
             &resolved_attrs,
             &self.plan.builder_methods,
             context,
@@ -1015,6 +1017,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         ));
         LeafAttributeStatementEmitter::new(
             &lc.name,
+            lc.component_span,
             &resolved_attrs,
             &self.plan.builder_methods,
             context,
@@ -1246,6 +1249,10 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             if let Some(body) = self.plan.styles.body(&name) {
                 attrs.extend(StylesAttributeList::from_body(body, context)?.attrs);
             } else {
+                let attribute_span = match &chain.callee {
+                    Expression::StaticMemberExpression(member) => member.property.span,
+                    _ => SPAN,
+                };
                 let gesture = context
                     .is_gesture_attribute_name(&name)
                     .then(|| {
@@ -1265,6 +1272,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 attrs.push(
                     LeafAttribute {
                         name,
+                        attribute_span,
                         arguments: chain.arguments.iter().collect(),
                         gesture,
                         state_styles: None,
@@ -1549,6 +1557,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let resolved_attrs = self.component_chain_attributes(component, context)?;
         LeafAttributeStatementEmitter::new(
             component_name,
+            component.callee.span(),
             &resolved_attrs,
             &self.plan.builder_methods,
             context,
@@ -2291,6 +2300,7 @@ impl<'a> GestureChain<'a> {
 /// Extracted representation of a leaf component call and its attribute chain.
 struct LeafComponent<'a> {
     name: String,
+    component_span: Span,
     create_arguments: Vec<&'a Argument<'a>>,
     chain_attrs: Vec<LeafAttribute<'a>>,
 }
@@ -2298,6 +2308,7 @@ struct LeafComponent<'a> {
 #[derive(Clone)]
 struct LeafAttribute<'a> {
     name: String,
+    attribute_span: Span,
     arguments: Vec<&'a Argument<'a>>,
     gesture: Option<GestureChain<'a>>,
     state_styles: Option<StateStylesAttributeList<'a>>,
@@ -2305,6 +2316,11 @@ struct LeafAttribute<'a> {
 
 impl<'a> LeafAttribute<'a> {
     fn from_call(name: String, call: &'a CallExpression<'a>, context: &BuildContext) -> Self {
+        let attribute_span = match &call.callee {
+            Expression::Identifier(identifier) => identifier.span,
+            Expression::StaticMemberExpression(member) => member.property.span,
+            _ => SPAN,
+        };
         let gesture = context
             .is_gesture_attribute_name(&name)
             .then(|| {
@@ -2322,6 +2338,7 @@ impl<'a> LeafAttribute<'a> {
             .flatten();
         Self {
             name,
+            attribute_span,
             arguments: call.arguments.iter().collect(),
             gesture,
             state_styles: None,
@@ -2503,6 +2520,7 @@ impl<'a> LeafComponent<'a> {
                 let name = ArkuiCallName::component(&call.callee)?;
                 Ok(Self {
                     name,
+                    component_span: call.callee.span(),
                     create_arguments: call.arguments.iter().collect(),
                     chain_attrs: vec![],
                 })
@@ -2537,6 +2555,7 @@ impl<'a> LeafComponent<'a> {
 
 struct LeafAttributeStatementEmitter<'a, 'ctx> {
     component_name: &'a str,
+    component_span: Span,
     attrs: &'a [LeafAttribute<'a>],
     builder_methods: &'a FxHashSet<String>,
     context: &'ctx BuildContext,
@@ -2546,12 +2565,14 @@ struct LeafAttributeStatementEmitter<'a, 'ctx> {
 impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
     fn new(
         component_name: &'a str,
+        component_span: Span,
         attrs: &'a [LeafAttribute<'a>],
         builder_methods: &'a FxHashSet<String>,
         context: &'ctx BuildContext,
     ) -> Self {
         Self {
             component_name,
+            component_span,
             attrs,
             builder_methods,
             context,
@@ -2640,7 +2661,7 @@ impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
                 gesture.push_sequence_statements(stmts, ast, allocator, self.context);
                 continue;
             }
-            let statement = ComponentCallStatementEmitter::attribute_refs(
+            let statement = ComponentCallStatementEmitter::attribute_refs_with_source(
                 ast,
                 allocator,
                 self.component_name,
@@ -2648,6 +2669,8 @@ impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
                 &attr.arguments,
                 self.builder_methods,
                 self.context,
+                self.component_span,
+                attr.attribute_span,
             );
             if self.use_reusable_immutable_guard
                 && self.context.current_component_reusable
@@ -4101,6 +4124,48 @@ impl ComponentCallStatementEmitter {
             return Self::raw_bound_call(ast, component_name, attr_name, arguments, context);
         }
         Self::raw_call(ast, component_name, attr_name, arguments)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attribute_refs_with_source<'b>(
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        component_name: &str,
+        attr_name: &str,
+        arguments: &[&Argument<'_>],
+        builder_methods: &FxHashSet<String>,
+        context: &BuildContext,
+        component_span: Span,
+        attribute_span: Span,
+    ) -> Statement<'b> {
+        let arguments = AttributeArgumentEmitter::new(
+            component_name,
+            attr_name,
+            builder_methods,
+            Some(context),
+        )
+        .argument_refs(arguments, allocator);
+        if context.is_extend_attribute(component_name, attr_name) {
+            return Self::raw_identifier_call(
+                ast,
+                &GeneratedViewpuName::extend_function(component_name, attr_name),
+                arguments,
+            );
+        }
+        if context
+            .runtime_names()
+            .component_attribute_requires_bind(attr_name)
+        {
+            return Self::raw_bound_call(ast, component_name, attr_name, arguments, context);
+        }
+        Self::raw_call_with_source(
+            ast,
+            component_name,
+            attr_name,
+            arguments,
+            component_span,
+            attribute_span,
+        )
     }
 
     fn empty<'b>(ast: AstBuilder<'b>, component_name: &str, method_name: &str) -> Statement<'b> {

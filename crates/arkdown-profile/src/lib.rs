@@ -47,8 +47,8 @@ pub mod validate_permissions;
 pub use arkdown_core::PkgBriefInfo;
 pub use build_profile::{BuildProfileInput, BuildProfileKind, BuildProfileWriter};
 pub use bytecode_har::{
-    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CompatibleSdkVersionValue,
-    DynamicImportLibEntry, HostModuleInfo, LoaderByteCodeHarFields,
+    ByteCodeHarDependencyRoot, ByteCodeHarMetadataWriter, ByteCodeHarScanEntry,
+    CompatibleSdkVersionValue, DynamicImportLibEntry, HostModuleInfo, LoaderByteCodeHarFields,
 };
 pub use custom_types::{CustomTypeError, CustomTypeInventory, CustomTypeResolver};
 pub use form_profile::{
@@ -602,6 +602,7 @@ mod tests {
                     preload_system_so: false,
                     preload_so: vec![],
                     deduplicate_har: false,
+                    customized_har_base_package: None,
                     remove_permissions: vec![],
                     aot_compile_mode: None,
                     host_pgo: None,
@@ -622,6 +623,7 @@ mod tests {
                 es2abc_path: PathBuf::from("/sdk/es2abc"),
                 restool_path: PathBuf::from("/sdk/restool"),
                 compile_api_version: 12,
+                sdk_component_api_version: 12,
                 has_rollup_plugin: true,
                 compile_sdk_version: "6.0.0.47".to_string(),
             },

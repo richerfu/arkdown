@@ -69,7 +69,8 @@ use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
 };
 use arkdown::{
-  BundleCacheBridge, BundleSourceMapPackageInfo, ShouldInvalidCacheRequest, SourceMapPolicy,
+  BundleCacheBridge, BundleSourceMapPackageInfo, PluginCacheModuleInventory,
+  ShouldInvalidCacheRequest, SourceMapPolicy,
 };
 
 use crate::cmd::native_build::{
@@ -93,19 +94,20 @@ use arkdown_ets_transform::{
   ArkuiComponentNameCollector, RolldownEtsTransformPlan, SourceClassifier,
 };
 use arkdown_obfuscate::{
-  ArkguardAdapterOptions, ConsumerObfuscationFileWriter, ObfuscationModuleFile,
-  ObfuscationModuleInput, ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator,
+  ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
+  ConsumerObfuscationFileWriter, ObfuscationMode, ObfuscationModuleFile, ObfuscationModuleInput,
+  ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator,
 };
 use arkdown_pack::{
   HarPackInput, HarVariantInput, HspInterfaceHarInput, IntegratedHspCandidate,
   IntegratedHspCollector, PackAbility, PackInput, Packager,
 };
 use arkdown_profile::{
-  BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarMetadataWriter,
-  ByteCodeHarScanEntry, CustomTypeResolver, FormProfileProcessor, LoaderJson,
-  ModuleFormProfileInput, OhExportsProcessor, PkgContextCurrentInput, PkgContextDependencyInput,
-  PkgContextDependencyKind, PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt,
-  PkgContextModuleKind, ProfileProcessor,
+  BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarDependencyRoot,
+  ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, FormProfileProcessor,
+  LoaderJson, ModuleFormProfileInput, OhExportsProcessor, PkgContextCurrentInput,
+  PkgContextDependencyInput, PkgContextDependencyKind, PkgContextInfoGenerator,
+  PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind, ProfileProcessor,
 };
 use arkdown_resolver::{OhPackage, PkgBriefInfo};
 use arkdown_resource::{ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput};
@@ -667,6 +669,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
       .collect();
     let adapter = ArkguardAdapterOptions {
       node_executable: PathBuf::from("node"),
+      ets_loader_path: self.config.sdk_config.ets_loader_path.clone(),
       arkguard_package: self
         .config
         .sdk_config
@@ -684,6 +687,9 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
       ace_module_build: PathBuf::from(&self.loader_json.ace_module_build),
       ace_module_json_path: ModuleBuildLayout::new(&self.module.src_path).res_ark_module_json(),
       compile_sdk_version: self.config.sdk_config.compile_sdk_version.clone(),
+      compatible_sdk_version: parse_api_version(&self.config.product.compatible_sdk_version)
+        .unwrap_or(self.config.sdk_config.compile_api_version),
+      compatible_sdk_version_stage: self.config.product.compatible_sdk_version_stage.clone(),
       entry_package_info: format!("{}|{}", package.name, package.version),
       package_dir: if self.loader_json.package_manager_type == "ohpm" {
         "oh_modules".to_string()
@@ -691,12 +697,14 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
         "node_modules".to_string()
       },
       module_path_map,
-      entry_array: self.loader_json.runtime_entry_sources.clone(),
+      entry_array: self.arkguard_entry_array(),
+      resource_table_path: self.generated_resource_table_path(),
       local_packages: Vec::new(),
       compile_har: matches!(self.module.module_type, OhosModuleType::Har),
       compile_shared: matches!(self.module.module_type, OhosModuleType::Shared),
       use_normalized: self.loader_json.use_normalized_ohm_url,
       use_ts_har: false,
+      byte_code_har_info: serde_json::to_value(&self.loader_json.byte_code_har_info)?,
     };
     Ok((
       adapter,
@@ -705,6 +713,95 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
         source_maps_path: Some(source_maps_path),
       },
     ))
+  }
+
+  fn bytecode_input(&self, module: ObfuscationModuleInput) -> BytecodeObfuscationInput {
+    let module_records = self
+      .bundle_out
+      .bundle_output
+      .module_source_files
+      .iter()
+      .map(|source| BytecodeObfuscationModuleRecord {
+        source_path: PathBuf::from(&source.module_id),
+        record_name: source.record_name.clone(),
+      })
+      .collect();
+    // Latest SDK `module_mode.js::generateCompileContextInfo` registers only
+    // explicit module-meta `ohmurl` values. Arkdown's matching meta collector
+    // assigns that shape to generated ResourceTable entries (`&...&`).
+    let resource_table_path = self.generated_resource_table_path();
+    let mut record_name_white_list = self
+      .bundle_out
+      .bundle_output
+      .module_source_files
+      .iter()
+      .filter(|source| {
+        resource_table_path
+          .as_ref()
+          .is_some_and(|path| Path::new(&source.module_id) == path)
+      })
+      .map(|source| source.record_name.clone())
+      .collect::<Vec<_>>();
+    record_name_white_list.sort();
+    record_name_white_list.dedup();
+    BytecodeObfuscationInput {
+      module,
+      modules_abc_path: self.bundle_out.bundle_output.modules_abc_path.clone(),
+      module_records,
+      record_name_white_list,
+    }
+  }
+
+  fn arkguard_entry_array(&self) -> Vec<String> {
+    let mut entries = self.loader_json.runtime_entry_sources.clone();
+    entries.extend(self.loader_json.hvigor_compile_entry.iter().cloned());
+    let mut seen = FxHashSet::default();
+    entries.retain(|entry| seen.insert(entry.clone()));
+    entries
+  }
+
+  fn generated_resource_table_path(&self) -> Option<PathBuf> {
+    self
+      .loader_json
+      .hvigor_compile_entry
+      .iter()
+      .map(PathBuf::from)
+      .find(|path| {
+        path.file_name().and_then(|name| name.to_str()) == Some("ResourceTable.ts")
+          && path
+            .strip_prefix(&self.module.src_path)
+            .is_ok_and(|relative| {
+              relative.starts_with("build")
+                && relative
+                  .components()
+                  .any(|part| part.as_os_str() == "generated")
+            })
+      })
+  }
+}
+
+struct PendingBytecodeObfuscation {
+  obfuscator: Obfuscator,
+  input: BytecodeObfuscationInput,
+}
+
+impl PendingBytecodeObfuscation {
+  fn new(obfuscator: Obfuscator, input: BytecodeObfuscationInput) -> Self {
+    Self { obfuscator, input }
+  }
+
+  fn run(self, module_name: &str) -> Result<()> {
+    self
+      .obfuscator
+      .obfuscate_bytecode(self.input)
+      .map_err(|error| {
+        anyhow::anyhow!(
+          "Bytecode obfuscation failed for module '{}': {}",
+          module_name,
+          error
+        )
+      })?;
+    Ok(())
   }
 }
 
@@ -2090,6 +2187,7 @@ mod compile_context_info_tests {
       router_map: vec![],
       hsp_resources_map: FxHashMap::default(),
       update_version_info: IndexMap::new(),
+      customized_har: false,
       an_build_out_put: None,
       an_build_mode: None,
       ap_path: None,
@@ -2289,7 +2387,11 @@ fn build_cache_group_snapshots(
 /// Plugins can access this as `this.share` inside `beforeBuild`,
 /// `afterBuildStart`, `buildStart`, etc., matching hvigor's
 /// `getCompilePluginContext(this).share` shape.
-fn build_share_context_json(config: &ArkdownConfig, args: &BuildArgs) -> String {
+fn build_share_context_json(
+  config: &ArkdownConfig,
+  args: &BuildArgs,
+  module: Option<&ModuleConfig>,
+) -> String {
   let build_mode = match config.build_mode {
     BuildMode::Debug => "debug",
     BuildMode::Release => "release",
@@ -2307,10 +2409,86 @@ fn build_share_context_json(config: &ArkdownConfig, args: &BuildArgs) -> String 
               "compatibleSdkVersion": config.product.compatible_sdk_version,
               "packageManagerType": "ohpm",
               "isByteCodeHarOptimize": false,
+              "moduleName": module.map(|module| module.name.as_str()),
+              "modulePath": module.map(|module| module.src_path.as_path()),
+              "projectTopDir": args.project.as_deref(),
           }
       }
   })
   .to_string()
+}
+
+struct PluginCacheInvalidationRunner<'a> {
+  plugins: &'a [PackagePlugin],
+  cache_dir: &'a Path,
+}
+
+impl<'a> PluginCacheInvalidationRunner<'a> {
+  fn new(plugins: &'a [PackagePlugin], cache_dir: &'a Path) -> Self {
+    Self { plugins, cache_dir }
+  }
+
+  async fn should_invalidate(&self) -> Result<bool> {
+    let cache_plugins = self
+      .plugins
+      .iter()
+      .filter(|plugin| plugin.has_should_invalid_cache())
+      .cloned()
+      .collect::<Vec<_>>();
+    if cache_plugins.is_empty() {
+      return Ok(false);
+    }
+
+    let inventory = match PluginCacheModuleInventory::load(self.cache_dir) {
+      Ok(Some(inventory)) if !inventory.is_empty() => inventory,
+      Ok(_) => {
+        tracing::info!(
+          cache_dir = %self.cache_dir.display(),
+          "plugin module cache is absent; rebuilding before shouldInvalidCache can run"
+        );
+        return Ok(true);
+      }
+      Err(error) => {
+        tracing::warn!(
+          cache_dir = %self.cache_dir.display(),
+          error = %error,
+          "plugin module cache is unreadable; rebuilding"
+        );
+        return Ok(true);
+      }
+    };
+
+    for record in inventory.modules() {
+      let module = match record.read(self.cache_dir) {
+        Ok(module) => Arc::new(module),
+        Err(error) => {
+          tracing::warn!(
+            cache_dir = %self.cache_dir.display(),
+            error = %error,
+            "cached transformed module is unreadable; rebuilding"
+          );
+          return Ok(true);
+        }
+      };
+      // Latest invalid-cache-plugin.js evaluates every custom plugin for the
+      // current cached module with Promise.all. JoinSet preserves that parallel
+      // boundary while keeping modules themselves in deterministic ID order.
+      let mut tasks = tokio::task::JoinSet::new();
+      for plugin in cache_plugins.iter().cloned() {
+        let module = Arc::clone(&module);
+        tasks.spawn(async move { plugin.should_invalid_cache(module.as_ref()).await });
+      }
+      let mut should_invalidate = false;
+      while let Some(result) = tasks.join_next().await {
+        should_invalidate |=
+          result.map_err(|error| anyhow::anyhow!("shouldInvalidCache task failed: {error}"))??;
+      }
+      if should_invalidate {
+        return Ok(true);
+      }
+    }
+    Ok(false)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2508,26 +2686,8 @@ impl BuildCoordinator {
 
   /// Execute the full build pipeline and return the produced artifacts.
   ///
-  /// Wraps [`BuildCoordinator::execute_impl`] to ensure the `cleanUp`
-  /// lifecycle hook is called unconditionally, even when the build fails.
   pub async fn execute(self) -> Result<BuildOutput> {
-    // Clone before moving self into execute_impl so we can fire cleanUp
-    // after execute_impl returns, regardless of success or failure.
-    let package_plugins_for_cleanup = self.package_plugins.clone();
-    let result = self.execute_targets().await;
-    if result.is_err() {
-      for plugin in &package_plugins_for_cleanup {
-        if let Err(error) = plugin.after_build_end(false).await {
-          tracing::warn!(error = %error, "afterBuildEnd(false) hook failed while handling build error");
-        }
-      }
-    }
-    for plugin in &package_plugins_for_cleanup {
-      if let Err(e) = plugin.clean_up().await {
-        tracing::warn!(error = %e, "cleanUp hook failed (non-fatal)");
-      }
-    }
-    result
+    self.execute_targets().await
   }
 
   async fn execute_targets(self) -> Result<BuildOutput> {
@@ -2628,16 +2788,6 @@ impl BuildCoordinator {
         )
       })
       .collect::<Result<Vec<_>>>()?;
-    // beforeBuild — hvigor exposes the already-resolved module-target build
-    // option through `this.share.projectConfig`.
-    let share_config = build_module_configs
-      .first()
-      .map(|resolved| resolved.config.as_ref())
-      .unwrap_or(config.as_ref());
-    let share_ctx_json = build_share_context_json(share_config, args);
-    for plugin in package_plugins.iter() {
-      plugin.before_build_with_share(&share_ctx_json).await?;
-    }
     let mut har_dedup_config = config.as_ref().clone();
     har_dedup_config.product.build_option.deduplicate_har = build_module_configs
       .iter()
@@ -3429,7 +3579,7 @@ impl BuildCoordinator {
         .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
       let mut bc_har_deps = {
         let _timer = BuildTimingProbe::module(&module.name, "bytecode_har_scan");
-        let typed_roots: Vec<(String, std::path::PathBuf)> = module_context
+        let typed_roots: Vec<ByteCodeHarDependencyRoot> = module_context
           .deps
           .bytecode_har_nodes_in_traversal_order()
           .into_iter()
@@ -3437,7 +3587,15 @@ impl BuildCoordinator {
             node
               .package_root
               .as_ref()
-              .map(|root| (node.package_name.clone(), root.clone()))
+              .map(|root| ByteCodeHarDependencyRoot {
+                package_name: node.package_name.clone(),
+                package_root: root.clone(),
+                is_har_dependency: node
+                  .module_profile
+                  .as_ref()
+                  .and_then(|profile| profile.module_type.as_ref())
+                  .is_some_and(|module_type| matches!(module_type, OhosModuleType::Har)),
+              })
           })
           .collect();
 
@@ -3537,6 +3695,18 @@ impl BuildCoordinator {
     {
       let module_build_option = &module_config.product.build_option;
       let module_layout = ModuleBuildLayout::new(&module.src_path);
+      let module_package_plugins = package_plugins
+        .iter()
+        .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
+        .cloned()
+        .collect::<Vec<_>>();
+      // `this.share.projectConfig` is module-specific in latest hvigor. Seed
+      // only the plugins participating in this module before cache hooks or
+      // Rolldown hooks execute.
+      let share_ctx_json = build_share_context_json(module_config.as_ref(), args, Some(module));
+      for plugin in &module_package_plugins {
+        plugin.seed_hvigor_context(&share_ctx_json).await?;
+      }
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
       let cache_dir = PathBuf::from(&loader_json.cache_path);
       let output_dir = PathBuf::from(&loader_json.ace_module_build);
@@ -3552,7 +3722,7 @@ impl BuildCoordinator {
         WidgetCompileArktsPass::new(module_config.as_ref(), module, manifest, loader_json);
       let widget_compile_plan = widget_pass.plan()?;
       let task_plugin_hash =
-        package_plugins
+        module_package_plugins
           .iter()
           .fold(0xcbf29ce484222325u64, |mut hash, plugin| {
             for byte in plugin.cache_identity().bytes() {
@@ -3595,7 +3765,7 @@ impl BuildCoordinator {
         module_config.as_ref(),
         module,
         loader_json,
-        package_plugins,
+        &module_package_plugins,
         &project_root,
       );
 
@@ -3641,23 +3811,10 @@ impl BuildCoordinator {
         }
       }
       if cache_hit {
-        // Per-plugin shouldInvalidCache check (plugin-specific conditions).
-        let invalid_cache_request = ShouldInvalidCacheRequest {
-          compile_env: bundle_compile_env.clone(),
-          changed_files: watch_changed_files.clone(),
-          module_name: Some(module.name.clone()),
-          cache_dir: Some(cache_dir.clone()),
-          is_watch: is_incremental_watch,
-          cache_hit,
-          group_snapshots: group_snapshots.clone(),
-          module_deps: vec![],
-        };
-        for plugin in package_plugins {
-          if plugin.should_invalid_cache(&invalid_cache_request).await? {
-            cache_hit = false;
-            break;
-          }
-        }
+        cache_hit =
+          !PluginCacheInvalidationRunner::new(&module_package_plugins, cache_dir.as_path())
+            .should_invalidate()
+            .await?;
       }
 
       if cache_hit {
@@ -3837,6 +3994,7 @@ impl BuildCoordinator {
 
       let plugin_factory_start = Instant::now();
       let mut factory_input = PluginFactoryInput {
+        target_name: module_target_name.clone(),
         sdk_api_dirs: config.sdk_config.ets_api_dirs(),
         sdk_kits_dirs: config.sdk_config.ets_kits_dirs(),
         sdk_arkts_dirs: config.sdk_config.ets_arkts_dirs(),
@@ -3851,7 +4009,7 @@ impl BuildCoordinator {
         case_sensitive_check: module_build_option.strict_mode.case_sensitive_check,
         har_dedup: HarDedupFactoryMode::Disabled,
         disabled_plugins: custom_cfg.plugins.disabled.clone(),
-        package_plugins: package_plugins.clone(),
+        package_plugins: module_package_plugins.clone(),
       };
       let collect_factory_output = if module_har_dedup_plan.is_empty() {
         None
@@ -3906,11 +4064,6 @@ impl BuildCoordinator {
         "bundle plugin factory completed"
       );
 
-      // afterBuildStart — hvigor calls this after Rollup's buildStart. The
-      // collection task does not execute package-supplied plugin lifecycles.
-      for plugin in package_plugins.iter() {
-        plugin.after_build_start_with_share(&share_ctx_json).await?;
-      }
       let bundle_out = BundleStage::run(BundleStageInput {
         config: config.clone(),
         plugins,
@@ -3997,19 +4150,20 @@ impl BuildCoordinator {
         .generate()
         .map_err(|error| anyhow::anyhow!("generate HSP declarations failed: {error}"))?;
       }
-      // Collect scanned bundle module IDs to pass as context to
-      // beforeBuildEnd.  Corresponds to hvigor's getModuleIds() in the
-      // plugin context, most commonly used in beforeBuildEnd hooks.
-      let bundle_module_ids = bundle_out.bundle_output.chunk_graph.all_module_ids();
-      for plugin in package_plugins {
-        plugin
-          .before_build_end_with_context(&bundle_module_ids)
-          .await?;
-      }
-      // afterBuildEnd — hvigor calls this after buildEnd.  Called with
-      // success=true here since we'd have returned early on error above.
-      for plugin in package_plugins.iter() {
-        plugin.after_build_end(true).await?;
+      // beforeBuildEnd is supplied by the internal Rolldown gap adapter and
+      // executes immediately before Rolldown's native buildEnd hooks.
+
+      if module_package_plugins
+        .iter()
+        .any(PackagePlugin::has_should_invalid_cache)
+      {
+        PluginCacheModuleInventory::from_module_sources(
+          cache_dir.as_path(),
+          &bundle_out.bundle_output.module_source_files,
+        )?
+        .save(cache_dir.as_path())?;
+      } else {
+        PluginCacheModuleInventory::clear(cache_dir.as_path())?;
       }
 
       // Write bundle-level cache manifest.
@@ -4195,16 +4349,23 @@ impl BuildCoordinator {
     }
 
     // ── Obfuscation (release builds only) ────────────────────────────
+    let mut pending_bytecode_obfuscations = (0..bundle_outs.len())
+      .map(|_| None)
+      .collect::<Vec<Option<PendingBytecodeObfuscation>>>();
     for (
+      bundle_index,
       (
-        (module, _manifest, loader_json, _resource_refs, _module_target_name, _module_config),
-        (bundle_out,),
+        (
+          (module, _manifest, loader_json, _resource_refs, _module_target_name, _module_config),
+          (bundle_out,),
+        ),
+        module_obfuscation,
       ),
-      module_obfuscation,
     ) in loader_jsons
       .iter()
       .zip(bundle_outs.iter())
       .zip(module_obfuscation_contexts.iter())
+      .enumerate()
     {
       if bundle_out.bypasses_compilation() {
         continue;
@@ -4225,9 +4386,9 @@ impl BuildCoordinator {
           .validate()
           .map_err(|e| anyhow::anyhow!("Obfuscation config invalid: {}", e))?;
         let rule_files = obfuscation_plan.all_rule_files();
-        let (arkguard, module_input) =
-          ModuleArkguardPlanBuilder::new(config.as_ref(), session, module, loader_json, bundle_out)
-            .build()?;
+        let arkguard_plan =
+          ModuleArkguardPlanBuilder::new(config.as_ref(), session, module, loader_json, bundle_out);
+        let (arkguard, module_input) = arkguard_plan.build()?;
         let obfuscator = Obfuscator::new(ObfuscationOptions {
           enable_obfuscation: obfuscation_plan.should_obfuscate(),
           rule_files,
@@ -4237,9 +4398,20 @@ impl BuildCoordinator {
           arkguard: Some(arkguard),
         })
         .map_err(|e| anyhow::anyhow!("Obfuscation config invalid: {}", e))?;
-        obfuscator
-          .obfuscate_module(module_input)
-          .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
+        match obfuscator.mode() {
+          ObfuscationMode::Bytecode => {
+            pending_bytecode_obfuscations[bundle_index] = Some(PendingBytecodeObfuscation::new(
+              obfuscator,
+              arkguard_plan.bytecode_input(module_input),
+            ));
+          }
+          ObfuscationMode::Source => {
+            obfuscator
+              .obfuscate_module(module_input)
+              .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
+          }
+          ObfuscationMode::Disabled => {}
+        }
       }
 
       if matches!(config.build_mode, BuildMode::Release)
@@ -4290,6 +4462,10 @@ impl BuildCoordinator {
       .enumerate()
     {
       let module_layout = ModuleBuildLayout::new(&module.src_path);
+      let module_package_plugins = package_plugins
+        .iter()
+        .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
+        .collect::<Vec<_>>();
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
       let module_obfuscation = &module_obfuscation_contexts[bundle_index];
       if bundle_out.bypasses_compilation() {
@@ -4394,6 +4570,10 @@ impl BuildCoordinator {
       );
       bytecode_result?;
 
+      if let Some(pending) = pending_bytecode_obfuscations[bundle_index].take() {
+        pending.run(&module.name)?;
+      }
+
       // ── P12: Widget compile pass ──────────────────────────────────
       if let Some(widget_out) = widget_bundle_outs
         .get(bundle_index)
@@ -4493,7 +4673,7 @@ impl BuildCoordinator {
 
       let cache_dir = PathBuf::from(&loader_json.cache_path);
       let task_plugin_hash =
-        package_plugins
+        module_package_plugins
           .iter()
           .fold(0xcbf29ce484222325u64, |mut hash, plugin| {
             for byte in plugin.cache_identity().bytes() {

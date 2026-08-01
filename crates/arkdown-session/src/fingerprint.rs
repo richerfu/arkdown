@@ -170,6 +170,10 @@ impl InputFingerprintSet {
         let mut builder = FingerprintBuilder::new("sdk", &sdk.sdk_root);
         builder.add_value("sdk_root", to_slash(&sdk.sdk_root).as_bytes());
         builder.add_value("api_version", sdk.api_version.to_string().as_bytes());
+        builder.add_value(
+            "component_api_version",
+            sdk.component_api_version.to_string().as_bytes(),
+        );
         builder.add_value("compile_sdk_version", sdk.compile_sdk_version.as_bytes());
 
         for relative in [

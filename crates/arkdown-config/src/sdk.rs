@@ -145,10 +145,10 @@ pub fn sdk_config_from_root(sdk_root: &Path, target_api_version: Option<u32>) ->
 fn sdk_config_from_root_with_selection(sdk_root: &Path, selection: &SdkSelection) -> SdkConfig {
     let ohos_base = openharmony_base_from_root(sdk_root);
     let sdk_metadata = discover_sdk_metadata(&ohos_base);
+    let sdk_component_api_version = sdk_metadata.api_version.unwrap_or(12);
     let compile_api_version = selection
         .target_api_version
-        .or(sdk_metadata.api_version)
-        .unwrap_or(12);
+        .unwrap_or(sdk_component_api_version);
 
     let ets_loader_path = ohos_base.join("ets").join("build-tools").join("ets-loader");
     let es2abc_path = SdkToolResolver::new(&ets_loader_path).es2abc_path();
@@ -161,6 +161,7 @@ fn sdk_config_from_root_with_selection(sdk_root: &Path, selection: &SdkSelection
         restool_path,
         ets_loader_path,
         compile_api_version,
+        sdk_component_api_version,
         has_rollup_plugin,
         compile_sdk_version: selection
             .compile_sdk_version
@@ -533,6 +534,8 @@ mod tests {
         let cfg = sdk_config_from_root(&root, Some(12));
 
         assert_eq!(cfg.compile_sdk_version, "6.0.1.112");
+        assert_eq!(cfg.compile_api_version, 12);
+        assert_eq!(cfg.sdk_component_api_version, 12);
         assert!(cfg
             .ets_loader_path
             .starts_with(root.join("default").join("openharmony")));
@@ -554,6 +557,7 @@ mod tests {
         let cfg = sdk_config_from_root(&root, None);
 
         assert_eq!(cfg.compile_api_version, 21);
+        assert_eq!(cfg.sdk_component_api_version, 21);
         assert_eq!(
             discover_sdk_api_version(&root.join("default/openharmony")),
             Some(21)
@@ -589,6 +593,7 @@ mod tests {
         );
 
         assert_eq!(cfg.compile_api_version, 20);
+        assert_eq!(cfg.sdk_component_api_version, 21);
         assert_eq!(cfg.compile_sdk_version, "6.0.0.47");
         assert!(cfg
             .ets_loader_path

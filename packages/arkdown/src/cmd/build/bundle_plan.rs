@@ -13,9 +13,9 @@ use rustc_hash::FxHashSet;
 
 use arkdown::plugins::ets_transform::{ModuleAnalyzerKind, RolldownEtsTransformPlan};
 use arkdown::{
-  BundleCachePolicy, BundleInput, BundleOutput, BundleOutputOptions, BundlePlan, BundlePluginSet,
-  BundleRuntimePackageContext, BundleRuntimePackageInfo, BundleSourceMapPackageInfo, Bundler,
-  LoaderResourceJoin, SourceMapPolicy,
+  BundleCachePolicy, BundleInput, BundleModuleMetaInfoFile, BundleOutput, BundleOutputOptions,
+  BundlePlan, BundlePluginSet, BundleRuntimePackageContext, BundleRuntimePackageInfo,
+  BundleSourceMapPackageInfo, Bundler, LoaderResourceJoin, SourceMapPolicy,
 };
 use arkdown_core::ArkdownConfig;
 use arkdown_path::NormalizedOhmUrl;
@@ -53,6 +53,10 @@ pub(super) fn make_bundle_plan(
   add_runtime_package_versions(&runtime, &mut source_map);
   add_loader_ohm_package_versions(loader_json, &mut source_map);
   LoaderRuntimePackageContextCollector::new(loader_json).extend(&mut runtime);
+  let entries = ordered_compile_entries(loader_json);
+  let module_meta_info_files =
+    BundleModuleMetaInfoFileCollector::new(loader_json, config.product.bundle_name.as_str())
+      .collect(&entries);
   BundlePlan {
     input: BundleInput {
       loader_json_path: loader_json_path.as_ref().to_path_buf(),
@@ -66,7 +70,8 @@ pub(super) fn make_bundle_plan(
         .map(|(name, path)| (name.clone(), PathBuf::from(path)))
         .collect(),
       module_record_roots: Vec::new(),
-      entries: ordered_compile_entries(loader_json),
+      module_meta_info_files,
+      entries,
       form_entry_sources: loader_json.form_entry_sources.clone(),
       runtime_entry_sources: loader_json.runtime_entry_sources.clone(),
       support_chunks: loader_json.support_chunks,
@@ -104,6 +109,65 @@ pub(super) fn make_bundle_plan(
     shim_missing_exports_override: custom_cfg.and_then(|c| c.shim_missing_exports),
     treeshake_override: custom_cfg.and_then(|c| c.treeshake),
     context_override: custom_cfg.and_then(|c| c.context.clone()),
+  }
+}
+
+struct BundleModuleMetaInfoFileCollector<'a> {
+  loader_json: &'a LoaderJson,
+  bundle_name: &'a str,
+}
+
+impl<'a> BundleModuleMetaInfoFileCollector<'a> {
+  fn new(loader_json: &'a LoaderJson, bundle_name: &'a str) -> Self {
+    Self {
+      loader_json,
+      bundle_name,
+    }
+  }
+
+  fn collect(&self, entries: &[String]) -> Vec<BundleModuleMetaInfoFile> {
+    entries
+      .iter()
+      .map(PathBuf::from)
+      .filter(|path| self.is_generated_resource_table(path))
+      .map(|file_path| BundleModuleMetaInfoFile {
+        file_path,
+        ohm_url: self.resource_table_ohm_url(),
+      })
+      .collect()
+  }
+
+  fn is_generated_resource_table(&self, path: &Path) -> bool {
+    if path.file_name().and_then(|name| name.to_str()) != Some("ResourceTable.ts") {
+      return false;
+    }
+    let Some(module_root) = self
+      .loader_json
+      .module_path_map
+      .get(&self.loader_json.module_name)
+      .map(Path::new)
+    else {
+      return false;
+    };
+    path.strip_prefix(module_root).is_ok_and(|relative| {
+      relative.starts_with("build")
+        && relative
+          .components()
+          .any(|part| part.as_os_str() == "generated")
+    })
+  }
+
+  fn resource_table_ohm_url(&self) -> String {
+    if self.loader_json.use_normalized_ohm_url {
+      return format!(
+        "&{}/build/generated/r/ResourceTable&",
+        self.loader_json.module_name
+      );
+    }
+    format!(
+      "{}/{}/build/generated/r/ResourceTable",
+      self.bundle_name, self.loader_json.module_name
+    )
   }
 }
 

@@ -491,11 +491,16 @@ impl IntermediateArtifactWriter {
       "moduleNames".to_string(),
       serde_json::Value::String(module_names),
     );
+    let resource_tables = self
+      .resource_table_outputs(&module_layout, &module.module_type, &config.output_target)
+      .iter()
+      .map(|path| {
+        serde_json::Value::String(IntermediateArtifactWriter::path_string(path.as_path()))
+      })
+      .collect();
     res_config.insert(
       "ResourceTable".to_string(),
-      serde_json::Value::Array(vec![serde_json::Value::String(
-        IntermediateArtifactWriter::path_string(&module_layout.generated_resource_table_header()),
-      )]),
+      serde_json::Value::Array(resource_tables),
     );
     if include_app_resource {
       res_config.insert(
@@ -601,6 +606,24 @@ impl IntermediateArtifactWriter {
     )?;
 
     Ok(())
+  }
+
+  pub(super) fn resource_table_outputs(
+    &self,
+    module_layout: &ModuleBuildLayout<'_>,
+    module_type: &OhosModuleType,
+    output_target: &OutputTarget,
+  ) -> Vec<PathBuf> {
+    let mut outputs = vec![module_layout.generated_resource_table_header()];
+    // Latest hvigor ProcessResource asks restool for the TypeScript resource
+    // table for every non-HAR, non-preview module. The installed SDK version
+    // only gates whether GenerateLoaderJson compiles that generated file.
+    if !matches!(module_type, OhosModuleType::Har)
+      && !matches!(output_target, OutputTarget::Preview)
+    {
+      outputs.push(module_layout.generated_resource_table_typescript());
+    }
+    outputs
   }
 
   fn opt_compression_config(

@@ -166,6 +166,62 @@ struct OhPkgRuntimeOnly {
     packages: Vec<String>,
 }
 
+/// Minimal dependency profile used to preserve hvigor's two independent
+/// ByteCode HAR predicates.
+///
+/// `DefaultNpmDependency.isByteCodeHarDependency()` reads
+/// `oh-package.json5#metadata.byteCodeHar`, while
+/// `TaskService.getHarDependencies()` is classified from
+/// `src/main/module.json[5]#module.type`. A package can therefore contribute
+/// to `byteCodeHarInfo` without contributing to `updateVersionInfo`.
+#[derive(Debug, Deserialize)]
+struct ByteCodeHarDependencyProfile {
+    module: ByteCodeHarDependencyProfileModule,
+}
+
+#[derive(Debug, Deserialize)]
+struct ByteCodeHarDependencyProfileModule {
+    #[serde(rename = "type", default)]
+    module_type: Option<String>,
+    #[serde(default)]
+    distro: Option<ByteCodeHarDependencyProfileDistro>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ByteCodeHarDependencyProfileDistro {
+    #[serde(default)]
+    module_type: Option<String>,
+}
+
+impl ByteCodeHarDependencyProfile {
+    fn is_har_dependency(package_root: &Path) -> bool {
+        let layout = ProfileModuleLayout::new(package_root);
+        for path in [
+            layout.module_json5(),
+            layout.module_json(),
+            layout.src_main().join("config.json"),
+        ] {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(profile) = json5::from_str::<Self>(&content) else {
+                continue;
+            };
+            let module_type = profile
+                .module
+                .module_type
+                .or_else(|| profile.module.distro.and_then(|distro| distro.module_type));
+            match module_type.as_deref() {
+                Some("har") => return true,
+                Some("shared" | "entry" | "feature") => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+}
+
 struct PackageDependencySpec<'a> {
     raw: &'a str,
 }
@@ -203,6 +259,10 @@ pub struct ByteCodeHarScanEntry {
     pub package_root: PathBuf,
     /// Absolute path to the pre-compiled `.abc` file.
     pub abc_path: PathBuf,
+    /// Whether hvigor classifies this package as a HAR dependency from its
+    /// module profile. This is independent of `metadata.byteCodeHar` and gates
+    /// the non-integrated-optimization `updateVersionInfo` traversal.
+    pub is_har_dependency: bool,
     /// Compatible SDK version in its source scalar form. Hvigor preserves
     /// numeric API levels as JSON numbers and named versions as strings.
     pub compatible_sdk_version: Option<CompatibleSdkVersionValue>,
@@ -220,6 +280,18 @@ pub struct ByteCodeHarScanEntry {
     /// Main entry path from `oh-package.json5#main`, used to compute the
     /// compiled-importee OHM URL for this package.
     pub main_entry: Option<String>,
+}
+
+/// Session-owned root for one dependency carrying ByteCode HAR metadata.
+///
+/// The dependency graph has already read and classified the module profile,
+/// so the build coordinator passes that classification with the package root
+/// rather than making the profile stage read it again.
+#[derive(Debug, Clone)]
+pub struct ByteCodeHarDependencyRoot {
+    pub package_name: String,
+    pub package_root: PathBuf,
+    pub is_har_dependency: bool,
 }
 
 impl ByteCodeHarScanEntry {
@@ -281,10 +353,21 @@ impl ByteCodeHarScanEntry {
     pub fn try_collect_from_root(
         pkg_root: &Path,
         fallback_pkg_name: &str,
+        is_har_dependency: bool,
         seen: &mut FxHashSet<String>,
         out: &mut Vec<Self>,
     ) {
-        Self::try_collect(pkg_root.to_path_buf(), fallback_pkg_name, seen, out);
+        let Some(pkg) = OhPkgMinimal::load(pkg_root) else {
+            return;
+        };
+        Self::try_collect_loaded(
+            pkg_root.to_path_buf(),
+            fallback_pkg_name,
+            pkg,
+            is_har_dependency,
+            seen,
+            out,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -347,13 +430,16 @@ impl ByteCodeHarScanEntry {
             return;
         };
 
-        Self::try_collect_loaded(pkg_dir, pkg_name, pkg, seen, out);
+        let is_har_dependency = ByteCodeHarDependencyProfile::is_har_dependency(pkg_dir.as_path());
+
+        Self::try_collect_loaded(pkg_dir, pkg_name, pkg, is_har_dependency, seen, out);
     }
 
     fn try_collect_loaded(
         pkg_dir: PathBuf,
         fallback_pkg_name: &str,
         pkg: OhPkgMinimal,
+        is_har_dependency: bool,
         seen: &mut FxHashSet<String>,
         out: &mut Vec<Self>,
     ) {
@@ -391,6 +477,7 @@ impl ByteCodeHarScanEntry {
             package_name,
             package_root: pkg_dir,
             abc_path,
+            is_har_dependency,
             compatible_sdk_version,
             compatible_sdk_version_stage,
             source_maps_path,
@@ -448,11 +535,14 @@ impl<'a> ByteCodeHarGraphScanner<'a> {
                     continue;
                 };
                 let child_dep_names = pkg.dependency_names();
+                let is_har_dependency =
+                    ByteCodeHarDependencyProfile::is_har_dependency(pkg_dir.as_path());
 
                 ByteCodeHarScanEntry::try_collect_loaded(
                     pkg_dir.clone(),
                     &dep_name,
                     pkg,
+                    is_har_dependency,
                     &mut self.seen_outputs,
                     &mut self.results,
                 );
@@ -557,7 +647,7 @@ impl ByteCodeHarMetadataWriter {
     /// backed by the dependency graph, used by `generate-loader-json.ts` to
     /// locate ByteCode HAR dependencies without re-scanning the filesystem.
     pub fn scan_from_typed_roots(
-        typed_roots: &[(String, PathBuf)],
+        typed_roots: &[ByteCodeHarDependencyRoot],
         fallback_module_root: &Path,
         fallback_project_root: &Path,
     ) -> Vec<ByteCodeHarScanEntry> {
@@ -572,8 +662,14 @@ impl ByteCodeHarMetadataWriter {
 
         let mut seen = FxHashSet::default();
         let mut out = Vec::new();
-        for (pkg_name, pkg_root) in typed_roots {
-            ByteCodeHarScanEntry::try_collect_from_root(pkg_root, pkg_name, &mut seen, &mut out);
+        for root in typed_roots {
+            ByteCodeHarScanEntry::try_collect_from_root(
+                &root.package_root,
+                &root.package_name,
+                root.is_har_dependency,
+                &mut seen,
+                &mut out,
+            );
         }
         out
     }
@@ -595,6 +691,15 @@ impl ByteCodeHarScanEntry {
         let mut info = IndexMap::new();
 
         for dep in deps {
+            // Latest IDE hvigor 6.24.3
+            // `GenerateLoaderJson.processUpdateVersionInfo()` uses
+            // `getHarDependencies().filter(isByteCodeHarDependency)` unless
+            // the separate integrated-optimization property is enabled.
+            // Arkdown's currently supported default mode must therefore not
+            // confuse every byteCodeHarInfo entry with a HAR dependency.
+            if !dep.is_har_dependency {
+                continue;
+            }
             let mut version_info = serde_json::Map::new();
             let Some(pkg) = OhPkgMinimal::load(&dep.package_root) else {
                 continue;
@@ -1484,6 +1589,10 @@ mod tests {
             }"#,
         );
         write_file(
+            &bytecode_har.join("src/main/module.json5"),
+            r#"{ module: { name: "bytecode-har", type: "har" } }"#,
+        );
+        write_file(
             &oh_modules.join("dep-a").join("oh-package.json5"),
             r#"{ name: "dep-a", version: "1.1.0" }"#,
         );
@@ -1528,6 +1637,10 @@ mod tests {
               metadata: { byteCodeHar: true, dependencyPkgVersion: {} }
             }"#,
         );
+        write_file(
+            &bytecode_har.join("src/main/module.json5"),
+            r#"{ module: { name: "bytecode-har", type: "har" } }"#,
+        );
 
         let deps =
             ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
@@ -1541,6 +1654,41 @@ mod tests {
             info.get("bytecode-har"),
             Some(&serde_json::json!({})),
             "Hvigor initializes every ByteCode HAR updateVersionInfo entry before filtering"
+        );
+    }
+
+    #[test]
+    fn test_collect_update_version_info_omits_bytecode_other_dependency() {
+        let tmp = make_temp_dir();
+        let bytecode_package = tmp.path().join("oh_modules").join("bytecode-package");
+
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "bytecode-package": "1.0.0" } }"#,
+        );
+        write_abc(&bytecode_package.join("ets").join("modules.abc"));
+        write_file(
+            &bytecode_package.join("oh-package.json5"),
+            r#"{
+              name: "bytecode-package",
+              metadata: { byteCodeHar: true, dependencyPkgVersion: {} }
+            }"#,
+        );
+
+        let deps =
+            ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
+        assert!(deps
+            .iter()
+            .any(|dep| dep.package_name == "bytecode-package"));
+
+        let info = ByteCodeHarScanEntry::collect_bytecode_har_update_version_info(
+            &deps,
+            tmp.path(),
+            tmp.path(),
+        );
+        assert!(
+            !info.contains_key("bytecode-package"),
+            "GenerateLoaderJson.processUpdateVersionInfo only traverses HAR-typed ByteCode dependencies"
         );
     }
 
@@ -1563,6 +1711,10 @@ mod tests {
               dynamicDependencies: { "dep-b": "2.0.0" },
               metadata: { byteCodeHar: true }
             }"#,
+        );
+        write_file(
+            &bytecode_har.join("src/main/module.json5"),
+            r#"{ module: { name: "bytecode-har", type: "har" } }"#,
         );
         write_file(
             &oh_modules.join("dep-a").join("oh-package.json5"),
@@ -1747,6 +1899,7 @@ mod tests {
             package_name: "bytecode-har".to_string(),
             package_root: bytecode_har.clone(),
             abc_path: bytecode_har.join("ets").join("modules.abc"),
+            is_har_dependency: true,
             compatible_sdk_version: Some(CompatibleSdkVersionValue::Int(12)),
             compatible_sdk_version_stage: None,
             source_maps_path: None,
@@ -1797,6 +1950,7 @@ mod tests {
             package_name: "@scope/pkg".to_string(),
             package_root: PathBuf::from("/project/oh_modules/@scope/pkg"),
             abc_path: PathBuf::from("/project/oh_modules/@scope/pkg/index.abc"),
+            is_har_dependency: true,
             compatible_sdk_version: Some(CompatibleSdkVersionValue::Str("5.0.0(12)".to_string())),
             compatible_sdk_version_stage: Some("beta1".to_string()),
             source_maps_path: Some(PathBuf::from(
@@ -1907,6 +2061,7 @@ mod tests {
             abc_path: PathBuf::from("/oh_modules")
                 .join(pkg)
                 .join("ets/modules.abc"),
+            is_har_dependency: true,
             compatible_sdk_version: Some(CompatibleSdkVersionValue::Int(12)),
             compatible_sdk_version_stage: None,
             source_maps_path: None,

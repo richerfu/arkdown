@@ -18,8 +18,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
-use oxc_codegen::Codegen;
-use oxc_codegen::CodegenOptions;
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, SPAN};
@@ -76,6 +75,7 @@ pub(crate) struct TypeScriptJavascriptEmitter<'a> {
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
     const_enum_exports: Option<&'a ConstEnumExportCache>,
+    hvigor_emit_wrapper: bool,
 }
 
 impl<'a> TypeScriptJavascriptEmitter<'a> {
@@ -85,11 +85,17 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             id,
             sources,
             const_enum_exports: None,
+            hvigor_emit_wrapper: false,
         }
     }
 
     pub(crate) fn with_const_enum_export_cache(mut self, cache: &'a ConstEnumExportCache) -> Self {
         self.const_enum_exports = Some(cache);
+        self
+    }
+
+    pub(crate) fn with_hvigor_emit_wrapper(mut self) -> Self {
+        self.hvigor_emit_wrapper = true;
         self
     }
 
@@ -131,12 +137,43 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             return None;
         }
 
-        Some(
-            Codegen::new()
-                .with_options(CodegenOptions::default())
-                .build(&parsed.program)
-                .code,
-        )
+        let options = if self.hvigor_emit_wrapper {
+            CodegenOptions {
+                comments: CommentOptions::disabled(),
+                ..CodegenOptions::default()
+            }
+        } else {
+            CodegenOptions::default()
+        };
+        let code = Codegen::new()
+            .with_options(options)
+            .build(&parsed.program)
+            .code;
+        Some(if self.hvigor_emit_wrapper {
+            self.wrap_hvigor_emit(code)
+        } else {
+            code
+        })
+    }
+
+    fn wrap_hvigor_emit(&self, code: String) -> String {
+        let code = code.replace("\r\n", "\n").replace('\r', "\n");
+        let code = code.trim();
+        let mut sections = Vec::with_capacity(3);
+        if !code.starts_with("\"use strict\";") && !code.starts_with("'use strict';") {
+            sections.push("\"use strict\";".to_string());
+        }
+        if !code.is_empty() {
+            sections.push(code.to_string());
+        }
+        sections.push(format!(
+            "//# sourceMappingURL={}.js.map",
+            Path::new(self.id)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("module")
+        ));
+        sections.join("\r\n")
     }
 
     fn source_type(&self) -> SourceType {
@@ -154,6 +191,7 @@ pub struct TypeScriptDirectiveFlags {
     suppress_type_check: bool,
     keep_typescript: bool,
     shared_module: bool,
+    comment_only: bool,
 }
 
 impl TypeScriptDirectiveFlags {
@@ -172,6 +210,10 @@ impl TypeScriptDirectiveFlags {
     /// precede `"use shared"`, but any other statement ends directive lookup.
     pub fn is_shared_module(self) -> bool {
         self.shared_module
+    }
+
+    pub(crate) fn is_comment_only(self) -> bool {
+        self.comment_only
     }
 
     fn from_program(program: &oxc_ast::ast::Program<'_>) -> Self {
@@ -207,6 +249,7 @@ impl TypeScriptDirectiveFlags {
                         if literal.value == "use shared"
                 )
             });
+        flags.comment_only = program.body.is_empty();
         flags
     }
 }
@@ -236,9 +279,13 @@ impl<'a> TypeScriptCommentDirective<'a> {
         let line = self
             .final_line
             .trim_start_matches(|character: char| character == '*' || character.is_whitespace());
-        let Some(rest) = line.strip_prefix(name) else {
+        let Some(prefix) = line.get(..name.len()) else {
             return false;
         };
+        if !prefix.eq_ignore_ascii_case(name) {
+            return false;
+        }
+        let rest = line.get(name.len()..).unwrap_or_default();
         rest.is_empty()
             || rest
                 .chars()
@@ -1053,6 +1100,16 @@ mod tests {
             )
             .should_emit_javascript()
         );
+        assert!(TypeScriptDirectiveFlags::from_source(
+            "//@ts-noCheck\nconst value: string = runtime.value;",
+            "ResourceTable.ts",
+        )
+        .should_emit_javascript());
+        assert!(TypeScriptDirectiveFlags::from_source(
+            "// @TS-IGNORE\nconst value: string = runtime.value;",
+            "Index.ts",
+        )
+        .should_emit_javascript());
         assert!(!TypeScriptDirectiveFlags::from_source(
             "// @keepTs\n// @ts-ignore\nconst value: string = runtime.value;",
             "Index.ts",

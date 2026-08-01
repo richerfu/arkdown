@@ -151,6 +151,7 @@ mod tests {
             router_map: Vec::new(),
             hsp_resources_map: Default::default(),
             update_version_info: Default::default(),
+            customized_har: false,
             an_build_out_put: None,
             an_build_mode: None,
             ap_path: None,

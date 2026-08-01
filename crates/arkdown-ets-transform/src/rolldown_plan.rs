@@ -190,10 +190,13 @@ impl RolldownEtsTransformer {
             let final_code = pipeline.finalize_source(code.as_ref());
             let final_code =
                 self.emit_javascript_if_required(final_code.as_ref(), id, directive_flags)?;
-            let source_map =
+            let source_map = if emits_javascript && directive_flags.is_comment_only() {
+                Some(source_map::TypeScriptCommentOnlySourceMap::new(id).build())
+            } else {
                 source_map::HvigorStandardSourceMapBuilder::new(&final_code, original_source, id)
                     .build()
-                    .or_else(|| source_map::TokenSourceMapBuilder::new(&final_code, id).build());
+                    .or_else(|| source_map::TokenSourceMapBuilder::new(&final_code, id).build())
+            };
             return Ok(Some(RolldownEtsTransformOutput {
                 code: final_code,
                 module_source_code: None,
@@ -272,6 +275,7 @@ impl RolldownEtsTransformer {
         }
         TypeScriptJavascriptEmitter::new(source, id, &self.plan.sources)
             .with_const_enum_export_cache(&self.plan.const_enum_exports)
+            .with_hvigor_emit_wrapper()
             .emit()
             .ok_or_else(|| EtsTransformError::Fatal {
                 file: id.to_string(),
@@ -944,6 +948,43 @@ export namespace Zip {
             output.code
         );
         assert!(!output.code.contains("namespace Zip"), "{}", output.code);
+        assert!(output.emits_javascript);
+    }
+
+    #[test]
+    fn compile_transform_matches_latest_resource_table_javascript_contract() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            24,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "/* generated resource table */\n//@ts-noCheck\n",
+                "/tmp/project/entry/build/default/generated/r/default/ResourceTable.ts",
+            )
+            .unwrap()
+            .expect("ResourceTable.ts participates in CompileArkTS");
+
+        assert_eq!(
+            output.code,
+            "\"use strict\";\r\n//# sourceMappingURL=ResourceTable.js.map"
+        );
+        let source_map: serde_json::Value = serde_json::from_str(
+            output
+                .source_map
+                .as_deref()
+                .expect("ResourceTable source map"),
+        )
+        .expect("valid source map");
+        assert_eq!(source_map["mappings"], ";");
         assert!(output.emits_javascript);
     }
 

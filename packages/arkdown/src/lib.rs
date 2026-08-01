@@ -26,6 +26,7 @@ pub mod task_cache;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
@@ -43,9 +44,10 @@ use rolldown_plugin::{
   PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 
-use arkdown::plugins::external::PluginOrder;
-use arkdown::plugins::factory::{PackagePlugin, PackagePluginRuntimeHooks};
-use arkdown::ShouldInvalidCacheRequest;
+use arkdown::plugins::factory::{
+  HvigorPluginGapHooks, HvigorPluginOrder, PackagePlugin, PackagePluginGraphContext,
+};
+use arkdown::PluginCacheModule;
 
 // ---------------------------------------------------------------------------
 // Type aliases for the ThreadsafeFunction types
@@ -275,6 +277,9 @@ type BoolTsfn = Arc<ThreadsafeFunction<String, bool, FnArgs<(String,)>, napi::St
 /// JS plugins to Rust's rolldown core.
 pub struct JsPlugin {
   name: String,
+  is_hvigor_compile_plugin: bool,
+  module_root: Option<PathBuf>,
+  target_name: Option<String>,
   // ── Rolldown bundler hooks ───────────────────────────────────────────────
   resolve_id_fn: Option<ResolveIdTsfn>,
   load_fn: Option<LoadTsfn>,
@@ -288,27 +293,10 @@ pub struct JsPlugin {
   /// Corresponds to hvigor's `resolveDynamicImport` hook listed in
   /// `doWrapper` event names.
   resolve_dynamic_import_fn: Option<ResolveIdTsfn>,
-  // ── Cache/transform decision hooks ──────────────────────────────────────
+  // ── Hvigor-only gaps around Rolldown ────────────────────────────────────
   should_invalid_cache_fn: Option<BoolTsfn>,
-  should_transform_cached_module_fn: Option<BoolTsfn>,
-  // ── Coordinator lifecycle hooks ──────────────────────────────────────────
-  /// `beforeBuild` — hvigor calls this before `runArkPack()` starts.
-  ///
-  /// Called with a JSON share context: `{ share: { bundleName, buildMode, … } }`.
-  before_build_fn: Option<NoopTsfn>,
-  /// `afterBuildStart` — hvigor calls this after Rolldown `buildStart` finishes.
-  after_build_start_fn: Option<NoopTsfn>,
-  /// `afterBuildEnd` — hvigor calls this after `buildEnd` and `cleanUp`.
-  ///
-  /// Called with `{ success: bool, share: { … } }`.
-  after_build_end_fn: Option<NoopTsfn>,
-  /// `cleanUp` — resource cleanup; always called, even on error.
-  clean_up_fn: Option<NoopTsfn>,
-  // ── Diagnostic context handlers ──────────────────────────────────────────
-  /// `warn` — forward warning diagnostics from Rust pipeline to plugin.
-  warn_fn: Option<NoopTsfn>,
-  /// `error` — forward error diagnostics from Rust pipeline to plugin.
-  error_fn: Option<NoopTsfn>,
+  /// Internal data seeding for hvigor's `this.share`; not a user hook.
+  seed_hvigor_context_fn: Option<NoopTsfn>,
   usage: HookUsage,
 }
 
@@ -379,20 +367,65 @@ impl JsPlugin {
     })
   }
 
-  fn from_js_object(obj: Object<'_>) -> napi::Result<(Arc<Self>, PluginOrder)> {
+  fn build_start_options_value(args: &HookBuildStartArgs<'_>) -> serde_json::Value {
+    let input = if args.options.input.len() == 1 && args.options.input[0].name.is_none() {
+      serde_json::Value::String(args.options.input[0].import.clone())
+    } else if args.options.input.iter().all(|item| item.name.is_some()) {
+      serde_json::Value::Object(
+        args
+          .options
+          .input
+          .iter()
+          .filter_map(|item| {
+            item
+              .name
+              .as_ref()
+              .map(|name| (name.clone(), serde_json::Value::String(item.import.clone())))
+          })
+          .collect(),
+      )
+    } else {
+      serde_json::Value::Array(
+        args
+          .options
+          .input
+          .iter()
+          .map(|item| serde_json::Value::String(item.import.clone()))
+          .collect(),
+      )
+    };
+    serde_json::json!({
+      "input": input,
+      "cwd": args.options.cwd,
+      "platform": args.options.platform.to_string(),
+      "shimMissingExports": args.options.shim_missing_exports,
+      "context": args.options.context,
+    })
+  }
+
+  fn from_js_object(obj: Object<'_>) -> napi::Result<(Arc<Self>, HvigorPluginOrder)> {
     let name: String = obj
       .get::<String>("name")?
       .unwrap_or_else(|| "unknown".to_string());
-    let order = match obj.get::<String>("order")?.as_deref() {
-      Some("first") => PluginOrder::First,
-      Some("last") | None => PluginOrder::Last,
-      Some(other) => {
-        tracing::warn!(
-          plugin = %name,
-          order = %other,
-          "unsupported JS plugin order, using 'last'"
-        );
-        PluginOrder::Last
+    let is_hvigor_compile_plugin = obj
+      .get::<bool>("__arkdownHvigorCompilePlugin")?
+      .unwrap_or(false);
+    let module_root = obj.get::<String>("__arkdownModuleRoot")?.map(PathBuf::from);
+    let target_name = obj.get::<String>("__arkdownTargetName")?;
+    let order = if let Some(position) = obj.get::<u32>("__arkdownOrderIndex")? {
+      HvigorPluginOrder::Position(position as usize)
+    } else {
+      match obj.get::<String>("order")?.as_deref() {
+        Some("first") => HvigorPluginOrder::First,
+        Some("last") | None => HvigorPluginOrder::Last,
+        Some(other) => {
+          tracing::warn!(
+            plugin = %name,
+            order = %other,
+            "unsupported JS plugin order, using 'last'"
+          );
+          HvigorPluginOrder::Last
+        }
       }
     };
 
@@ -493,16 +526,6 @@ impl JsPlugin {
         None
       };
 
-    let should_transform_cached_module_fn =
-      if let Some(js_fn) = obj.get::<Function<(String,), bool>>("shouldTransformCachedModule")? {
-        let tsfn = js_fn
-          .build_threadsafe_function::<String>()
-          .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
-        Some(Arc::new(tsfn))
-      } else {
-        None
-      };
-
     // ── resolveDynamicImport — same TSFN shape as resolveId ─────────────────
     let resolve_dynamic_import_fn = if let Some(js_fn) = obj.get::<Function<
       (String, Option<String>, JsResolveIdOptions),
@@ -522,21 +545,8 @@ impl JsPlugin {
       None
     };
 
-    // ── Coordinator lifecycle hooks ───────────────────────────────────────
-    // beforeBuild / afterBuildStart / afterBuildEnd / cleanUp.
-    // Each receives a JSON share context string so plugins can read build
-    // metadata as `this.share` via runtime.js normalizeHookArguments.
-    let before_build_fn = if let Some(js_fn) = obj.get::<Function<(String,), ()>>("beforeBuild")? {
-      let tsfn = js_fn
-        .build_threadsafe_function::<String>()
-        .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
-      Some(Arc::new(tsfn))
-    } else {
-      None
-    };
-
-    let after_build_start_fn =
-      if let Some(js_fn) = obj.get::<Function<(String,), ()>>("afterBuildStart")? {
+    let seed_hvigor_context_fn =
+      if let Some(js_fn) = obj.get::<Function<(String,), ()>>("__arkdownSeedHvigorContext")? {
         let tsfn = js_fn
           .build_threadsafe_function::<String>()
           .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
@@ -545,50 +555,18 @@ impl JsPlugin {
         None
       };
 
-    let after_build_end_fn =
-      if let Some(js_fn) = obj.get::<Function<(String,), ()>>("afterBuildEnd")? {
-        let tsfn = js_fn
-          .build_threadsafe_function::<String>()
-          .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
-        Some(Arc::new(tsfn))
-      } else {
-        None
-      };
-
-    let clean_up_fn = if let Some(js_fn) = obj.get::<Function<(String,), ()>>("cleanUp")? {
-      let tsfn = js_fn
-        .build_threadsafe_function::<String>()
-        .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
-      Some(Arc::new(tsfn))
-    } else {
-      None
-    };
-
-    // Plugin context hooks: warn/error are diagnostic handlers called by the
-    // Rust build pipeline to notify the plugin of build warnings/errors.
-    // Corresponds to hvigor's `context.warn` / `context.error` in `getCompilePluginContext`.
-    let warn_fn = if let Some(js_fn) = obj.get::<Function<(String,), ()>>("warn")? {
-      let tsfn = js_fn
-        .build_threadsafe_function::<String>()
-        .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
-      Some(Arc::new(tsfn))
-    } else {
-      None
-    };
-
-    let error_fn = if let Some(js_fn) = obj.get::<Function<(String,), ()>>("error")? {
-      let tsfn = js_fn
-        .build_threadsafe_function::<String>()
-        .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?;
-      Some(Arc::new(tsfn))
-    } else {
-      None
-    };
-
-    tracing::debug!(plugin = %name, "wrapped JS plugin");
+    tracing::debug!(
+      plugin = %name,
+      module_root = ?module_root,
+      target_name = ?target_name,
+      "wrapped JS plugin"
+    );
     Ok((
       Arc::new(Self {
         name,
+        is_hvigor_compile_plugin,
+        module_root,
+        target_name,
         resolve_id_fn,
         load_fn,
         transform_fn,
@@ -598,13 +576,7 @@ impl JsPlugin {
         build_end_fn,
         resolve_dynamic_import_fn,
         should_invalid_cache_fn,
-        should_transform_cached_module_fn,
-        before_build_fn,
-        after_build_start_fn,
-        after_build_end_fn,
-        clean_up_fn,
-        warn_fn,
-        error_fn,
+        seed_hvigor_context_fn,
         usage,
       }),
       order,
@@ -628,12 +600,17 @@ impl Plugin for JsPlugin {
   fn build_start(
     &self,
     _ctx: &PluginContext,
-    _args: &HookBuildStartArgs<'_>,
+    args: &HookBuildStartArgs<'_>,
   ) -> impl std::future::Future<Output = rolldown_plugin::HookNoopReturn> + Send {
+    let options_json = if self.is_hvigor_compile_plugin {
+      String::new()
+    } else {
+      Self::build_start_options_value(args).to_string()
+    };
     let tsfn = self.build_start_fn.clone();
     async move {
       let Some(f) = tsfn else { return Ok(()) };
-      f.call_async(String::new())
+      f.call_async(options_json)
         .await
         .map_err(|e| anyhow::anyhow!("buildStart JS error: {e}"))?;
       Ok(())
@@ -753,10 +730,6 @@ impl Plugin for JsPlugin {
     ctx: &PluginContext,
     args: Option<&HookBuildEndArgs<'_>>,
   ) -> impl std::future::Future<Output = rolldown_plugin::HookNoopReturn> + Send {
-    let error_count = args
-      .map(|args| args.errors.len().to_string())
-      .unwrap_or_default();
-
     // Collect module info from the Rolldown module graph synchronously
     // (PluginContext is not Send, so this must happen outside the async block).
     //
@@ -771,7 +744,21 @@ impl Plugin for JsPlugin {
     //     e.set(t, a ? a.importedIds.concat(a.dynamicallyImportedIds) : []);
     //   }
     // The serialized map is passed to JS as `{ moduleInfoMap: { id: { importedIds, dynamicallyImportedIds } } }`.
-    let module_info_json: String = {
+    let should_call = args.is_none() || !self.is_hvigor_compile_plugin;
+    let errors = args.map_or_else(Vec::new, |args| {
+      args
+        .errors
+        .iter()
+        .map(|error| {
+          serde_json::json!({
+            "message": error.to_string(),
+            "id": error.id(),
+            "plugin": error.plugin(),
+          })
+        })
+        .collect::<Vec<_>>()
+    });
+    let module_info_json = should_call.then(|| {
       let mut map = serde_json::Map::new();
       let mut module_ids = Vec::new();
       for module_id in ctx.get_module_ids() {
@@ -784,15 +771,22 @@ impl Plugin for JsPlugin {
       // Serialise the context object that hvigor's buildEnd plugin receives.
       // JS side: buildEnd(ctx) where ctx.errorCount and ctx.moduleInfoMap are available.
       serde_json::to_string(&serde_json::json!({
-        "errorCount": &error_count,
+        "errorCount": errors.len(),
+        "errors": errors,
         "moduleIds": module_ids,
         "moduleInfoMap": serde_json::Value::Object(map),
       }))
-      .unwrap_or_else(|_| error_count.clone())
-    };
+      .unwrap_or_default()
+    });
 
     let tsfn = self.build_end_fn.clone();
     async move {
+      // DevEco Studio 6.24.3 skips compile-plugin buildEnd when graph.build()
+      // throws. Explicit Rolldown plugins retain the standard buildEnd(error)
+      // callback; only strict hvigor compile plugins suppress that path.
+      let Some(module_info_json) = module_info_json else {
+        return Ok(());
+      };
       let Some(f) = tsfn else { return Ok(()) };
       f.call_async(module_info_json)
         .await
@@ -803,77 +797,27 @@ impl Plugin for JsPlugin {
 }
 
 #[async_trait::async_trait]
-impl PackagePluginRuntimeHooks for JsPlugin {
-  // ── Coordinator lifecycle hooks ────────────────────────────────────────
-
-  async fn before_build_with_share(&self, share_json: &str) -> anyhow::Result<()> {
-    let Some(f) = self.before_build_fn.clone() else {
+impl HvigorPluginGapHooks for JsPlugin {
+  async fn seed_hvigor_context(&self, share_json: &str) -> anyhow::Result<()> {
+    let Some(f) = self.seed_hvigor_context_fn.clone() else {
       return Ok(());
     };
     f.call_async(share_json.to_string())
       .await
-      .map_err(|e| anyhow::anyhow!("beforeBuild JS error: {e}"))?;
+      .map_err(|e| anyhow::anyhow!("seed hvigor compile context JS error: {e}"))?;
     Ok(())
   }
 
-  async fn after_build_start_with_share(&self, share_json: &str) -> anyhow::Result<()> {
-    let Some(f) = self.after_build_start_fn.clone() else {
-      return Ok(());
-    };
-    f.call_async(share_json.to_string())
-      .await
-      .map_err(|e| anyhow::anyhow!("afterBuildStart JS error: {e}"))?;
-    Ok(())
-  }
-
-  /// `afterBuildEnd` — called after `buildEnd` with success status.
-  async fn after_build_end(&self, success: bool) -> anyhow::Result<()> {
-    let Some(f) = self.after_build_end_fn.clone() else {
-      return Ok(());
-    };
-    let ctx = serde_json::json!({ "success": success }).to_string();
-    f.call_async(ctx)
-      .await
-      .map_err(|e| anyhow::anyhow!("afterBuildEnd JS error: {e}"))?;
-    Ok(())
-  }
-
-  /// `cleanUp` — resource cleanup; always called, even on error.
-  async fn clean_up(&self) -> anyhow::Result<()> {
-    let Some(f) = self.clean_up_fn.clone() else {
-      return Ok(());
-    };
-    f.call_async(String::new())
-      .await
-      .map_err(|e| anyhow::anyhow!("cleanUp JS error: {e}"))?;
-    Ok(())
-  }
-
-  async fn should_invalid_cache(
-    &self,
-    request: &ShouldInvalidCacheRequest,
-  ) -> anyhow::Result<bool> {
+  async fn should_invalid_cache(&self, module: &PluginCacheModule) -> anyhow::Result<bool> {
     let Some(f) = self.should_invalid_cache_fn.clone() else {
       return Ok(false);
     };
+    // @ohos/hvigor-arkts-compose 6.24.3 ShouldInvalidCacheOptions is exactly
+    // `{ ast?: AcornNode, code: string, id: string }`. The runtime reconstructs
+    // Acorn's AST from this retained transformed code when the syntax permits.
     let request_json = serde_json::json!({
-      "id": request.module_name.as_deref().unwrap_or_default(),
-      "meta": {
-        "moduleName": &request.module_name,
-        "cacheDir": request
-          .cache_dir
-          .as_ref()
-          .map(|path| arkdown_path::ArtifactPathSerializer::path_to_slash_string(path))
-          .transpose()?,
-        "compileEnv": &request.compile_env,
-      },
-      "changedFiles": request
-        .changed_files
-        .iter()
-        .map(|path| arkdown_path::ArtifactPathSerializer::path_to_slash_string(path))
-        .collect::<std::result::Result<Vec<_>, _>>()?,
-      "isWatch": request.is_watch,
-      "cacheHit": request.cache_hit,
+      "code": module.code,
+      "id": module.id,
     })
     .to_string();
     f.call_async(request_json)
@@ -881,84 +825,25 @@ impl PackagePluginRuntimeHooks for JsPlugin {
       .map_err(|e| anyhow::anyhow!("shouldInvalidCache JS error: {e}"))
   }
 
-  async fn before_build_end(&self) -> anyhow::Result<()> {
-    self.before_build_end_with_context(&[]).await
+  fn has_should_invalid_cache(&self) -> bool {
+    self.should_invalid_cache_fn.is_some()
   }
 
-  async fn before_build_end_with_context(&self, module_ids: &[String]) -> anyhow::Result<()> {
+  async fn before_build_end_with_graph_context(
+    &self,
+    context: &PackagePluginGraphContext,
+  ) -> anyhow::Result<()> {
     let Some(f) = self.before_build_end_fn.clone() else {
       return Ok(());
     };
-    // Serialise module IDs as a JSON context object so plugins can call
-    // `getModuleIds()` inside `beforeBuildEnd`.  Matches hvigor's
-    // `getCompilePluginContext(this).getModuleIds()` surface.
-    //
-    // The hook signature on the JS side is:
-    //   `beforeBuildEnd(ctx?: { moduleIds: string[] }): void`
-    //
-    // For backwards compatibility with plugins that take no argument, the
-    // empty-string token is used when no module IDs are available.
-    let ctx_json = if module_ids.is_empty() {
-      String::new()
-    } else {
-      serde_json::json!({ "moduleIds": module_ids }).to_string()
-    };
-    f.call_async(ctx_json)
+    f.call_async(context.to_json()?)
       .await
       .map_err(|e| anyhow::anyhow!("beforeBuildEnd JS error: {e}"))?;
     Ok(())
   }
 
-  async fn should_transform_cached_module(
-    &self,
-    request: &ShouldInvalidCacheRequest,
-  ) -> anyhow::Result<bool> {
-    let Some(f) = self.should_transform_cached_module_fn.clone() else {
-      return Ok(false);
-    };
-    let request_json = serde_json::json!({
-      "id": request.module_name.as_deref().unwrap_or_default(),
-      "meta": {
-        "moduleName": &request.module_name,
-        "cacheDir": request
-          .cache_dir
-          .as_ref()
-          .map(|path| arkdown_path::ArtifactPathSerializer::path_to_slash_string(path))
-          .transpose()?,
-        "compileEnv": &request.compile_env,
-      },
-      "changedFiles": request
-        .changed_files
-        .iter()
-        .map(|path| arkdown_path::ArtifactPathSerializer::path_to_slash_string(path))
-        .collect::<std::result::Result<Vec<_>, _>>()?,
-      "isWatch": request.is_watch,
-      "cacheHit": request.cache_hit,
-    })
-    .to_string();
-    f.call_async(request_json)
-      .await
-      .map_err(|e| anyhow::anyhow!("shouldTransformCachedModule JS error: {e}"))
-  }
-
-  async fn warn(&self, message: &str) -> anyhow::Result<()> {
-    let Some(f) = self.warn_fn.clone() else {
-      return Ok(());
-    };
-    f.call_async(message.to_string())
-      .await
-      .map_err(|e| anyhow::anyhow!("warn JS error: {e}"))?;
-    Ok(())
-  }
-
-  async fn error(&self, message: &str) -> anyhow::Result<()> {
-    let Some(f) = self.error_fn.clone() else {
-      return Ok(());
-    };
-    f.call_async(message.to_string())
-      .await
-      .map_err(|e| anyhow::anyhow!("error JS error: {e}"))?;
-    Ok(())
+  fn has_before_build_end(&self) -> bool {
+    self.before_build_end_fn.is_some()
   }
 
   fn runtime_cache_identity(&self) -> Option<String> {
@@ -988,32 +873,9 @@ impl PackagePluginRuntimeHooks for JsPlugin {
     if self.build_end_fn.is_some() {
       hooks.push("buildEnd");
     }
-    // Cache/transform hooks
+    // Hvigor-only hooks
     if self.should_invalid_cache_fn.is_some() {
       hooks.push("shouldInvalidCache");
-    }
-    if self.should_transform_cached_module_fn.is_some() {
-      hooks.push("shouldTransformCachedModule");
-    }
-    // Coordinator lifecycle hooks
-    if self.before_build_fn.is_some() {
-      hooks.push("beforeBuild");
-    }
-    if self.after_build_start_fn.is_some() {
-      hooks.push("afterBuildStart");
-    }
-    if self.after_build_end_fn.is_some() {
-      hooks.push("afterBuildEnd");
-    }
-    if self.clean_up_fn.is_some() {
-      hooks.push("cleanUp");
-    }
-    // Diagnostic handlers
-    if self.warn_fn.is_some() {
-      hooks.push("warn");
-    }
-    if self.error_fn.is_some() {
-      hooks.push("error");
     }
     (!hooks.is_empty()).then(|| hooks.join(","))
   }
@@ -1083,23 +945,13 @@ pub struct HvigorPluginContext {
   pub get_file_name: Option<String>,
 }
 
-/// Cache invalidation request passed to `shouldInvalidCache` and
-/// `shouldTransformCachedModule`.
+/// Latest-hvigor cache invalidation input.
 #[napi(object)]
 pub struct PluginCacheRequest {
+  #[napi(ts_type = "unknown")]
+  pub ast: Option<String>,
+  pub code: String,
   pub id: String,
-  pub meta: Option<PluginCacheRequestMeta>,
-  pub changed_files: Vec<String>,
-  pub is_watch: bool,
-  pub cache_hit: bool,
-}
-
-/// Cache request metadata.
-#[napi(object)]
-pub struct PluginCacheRequestMeta {
-  pub module_name: Option<String>,
-  pub cache_dir: Option<String>,
-  pub compile_env: Option<String>,
 }
 
 /// Rolldown-compatible arkdown compile plugin.
@@ -1114,12 +966,8 @@ pub struct ArkdownPlugin {
   pub name: Option<String>,
   #[napi(ts_type = "'first' | 'last' | ((nameToIndex: Record<string, number>) => number)")]
   pub order: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
-  pub before_build: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
+  #[napi(ts_type = "(this: HvigorPluginContext) => void | Promise<void>")]
   pub build_start: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
-  pub after_build_start: Option<String>,
   #[napi(
     ts_type = "(id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>"
   )]
@@ -1138,22 +986,12 @@ pub struct ArkdownPlugin {
     ts_type = "(id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>"
   )]
   pub resolve_dynamic_import: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
+  #[napi(ts_type = "(this: HvigorPluginContext, input?: unknown) => unknown")]
   pub before_build_end: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
+  #[napi(ts_type = "(this: HvigorPluginContext, error?: Error) => void | Promise<void>")]
   pub build_end: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
-  pub after_build_end: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, ctxJson?: string) => void | Promise<void>")]
-  pub clean_up: Option<String>,
   #[napi(ts_type = "(request: PluginCacheRequest) => boolean | Promise<boolean>")]
   pub should_invalid_cache: Option<String>,
-  #[napi(ts_type = "(request: PluginCacheRequest) => boolean | Promise<boolean>")]
-  pub should_transform_cached_module: Option<String>,
-  #[napi(ts_type = "(message: string) => void | Promise<void>")]
-  pub warn: Option<String>,
-  #[napi(ts_type = "(message: string) => void | Promise<void>")]
-  pub error: Option<String>,
 }
 
 #[napi(object)]
@@ -1242,13 +1080,15 @@ pub fn build(
       if let Some(obj) = arr.get::<Object<'_>>(i)? {
         match JsPlugin::from_js_object(obj) {
           Ok((p, order)) => {
+            let module_root = p.module_root.clone();
+            let target_name = p.target_name.clone();
             let plugin = p.clone() as rolldown_plugin::__inner::SharedPluginable;
-            let runtime_hooks = p as Arc<dyn PackagePluginRuntimeHooks>;
-            js_plugins.push(PackagePlugin::with_runtime_hooks(
-              plugin,
-              order,
-              runtime_hooks,
-            ));
+            let gap_hooks = p as Arc<dyn HvigorPluginGapHooks>;
+            js_plugins.push(
+              PackagePlugin::with_gap_hooks(plugin, order, gap_hooks)
+                .with_module_root(module_root)
+                .with_target_name(target_name),
+            );
           }
           Err(e) => tracing::warn!(index = i, error = %e, "failed to wrap plugin[{i}]"),
         }

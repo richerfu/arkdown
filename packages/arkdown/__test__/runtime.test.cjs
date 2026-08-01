@@ -8,6 +8,7 @@ const test = require('node:test')
 
 const {
   HvigorRuntimeHost,
+  HvigorCompilePluginPlanner,
   RuntimePluginLoader,
   createBuild,
   normalizePluginList,
@@ -23,8 +24,9 @@ function tempProject() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-runtime-'))
 }
 
-test('runtime loader executes hvigorfile plugins and compilePluginPath modules', async () => {
+test('runtime loader applies hvigorfile plugins and loads compilePluginPath modules', async () => {
   const root = tempProject()
+  const marker = path.join(root, 'plugin-applied.txt')
   fs.writeFileSync(
     path.join(root, 'compile-plugin.js'),
     `
@@ -39,8 +41,10 @@ exports.default = {
     `
 module.exports = {
   plugins: [{
-    name: 'inline-plugin',
-    buildStart() {}
+    pluginId: 'fixture-plugin',
+    apply(node) {
+      require('node:fs').writeFileSync(${JSON.stringify(marker)}, node.getNodeName())
+    }
   }],
   compilePluginPath: './compile-plugin.js'
 }
@@ -50,8 +54,9 @@ module.exports = {
   const plugins = await new RuntimePluginLoader({ project: root }).load()
   assert.deepEqual(
     plugins.map((plugin) => plugin.name),
-    ['inline-plugin', 'compile-plugin'],
+    ['compile-plugin'],
   )
+  assert.equal(fs.readFileSync(marker, 'utf8'), path.basename(root))
 })
 
 test('runtime loader reads configured hvigorPluginFile and compilePluginPath arrays', async () => {
@@ -84,12 +89,8 @@ test('runtime loader reads configured hvigorPluginFile and compilePluginPath arr
 test('createBuild prepends runtime plugins before explicit plugins', async () => {
   const root = tempProject()
   fs.writeFileSync(
-    path.join(root, 'hvigorfile.js'),
-    `
-module.exports = {
-  plugins: [{ name: 'runtime-plugin', load() { return null } }]
-}
-`,
+    path.join(root, 'runtime-plugin.js'),
+    `exports.default = { name: 'runtime-plugin', load() { return null } }\n`,
   )
 
   const seen = []
@@ -98,19 +99,30 @@ module.exports = {
     return { artifacts: [] }
   })
 
-  await build({ project: root }, [{ name: 'explicit-plugin', load() { return null } }])
+  await build({ project: root, compilePluginPath: './runtime-plugin.js' }, [
+    {
+      name: 'explicit-plugin',
+      load() {
+        return null
+      },
+    },
+  ])
   assert.deepEqual(seen, ['runtime-plugin', 'explicit-plugin'])
 })
 
-test('runtime loader discovers module hvigorfiles from package entry', async () => {
+test('runtime loader applies project and module hvigor plugins in node order', async () => {
   const root = tempProject()
   const entry = path.join(root, 'entry')
   fs.mkdirSync(entry)
+  const marker = path.join(root, 'plugin-order.txt')
   fs.writeFileSync(
     path.join(root, 'hvigorfile.js'),
     `
 module.exports = {
-  plugins: [{ name: 'project-plugin', load() { return null } }]
+  plugins: [{
+    pluginId: 'project-plugin',
+    apply(node) { require('node:fs').appendFileSync(${JSON.stringify(marker)}, node.getNodeName() + '\\n') }
+  }]
 }
 `,
   )
@@ -118,22 +130,149 @@ module.exports = {
     path.join(entry, 'hvigorfile.js'),
     `
 module.exports = {
-  plugins: [{ name: 'module-plugin', load() { return null } }]
+  plugins: [{
+    pluginId: 'module-plugin',
+    apply(node) { require('node:fs').appendFileSync(${JSON.stringify(marker)}, node.getNodeName() + '\\n') }
+  }]
 }
 `,
   )
 
   const plugins = await new RuntimePluginLoader({ project: root }).load()
-  assert.deepEqual(
-    plugins.map((plugin) => plugin.name),
-    ['project-plugin', 'module-plugin'],
+  assert.deepEqual(plugins, [])
+  assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split('\n'), [path.basename(root), 'entry'])
+})
+
+test('hvigorfile selection follows 6.24.3 ts js cjs mjs precedence', async () => {
+  const root = tempProject()
+  const marker = path.join(root, 'selected-hvigorfile.txt')
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.js'),
+    `module.exports = { plugins: [{ pluginId: 'js', apply() { require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'js') } }] }\n`,
   )
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.ts'),
+    `export default { plugins: [{ pluginId: 'ts', apply() { require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ts') } }] }\n`,
+  )
+
+  await new RuntimePluginLoader({ project: root }).load()
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ts')
+})
+
+test('latest hvigor mjs files use the CommonJS TypeScript hook and OHOS mocks', async () => {
+  const root = tempProject()
+  const marker = path.join(root, 'mjs-loaded.txt')
+  fs.writeFileSync(
+    path.join(root, 'plugin.mjs'),
+    `
+import * as fs from 'node:fs'
+export const custom = {
+  pluginId: 'mjs-plugin',
+  apply(node) { fs.writeFileSync(${JSON.stringify(marker)}, node.getNodeName()) }
+}
+`,
+  )
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.mjs'),
+    `
+import { hapTasks } from '@ohos/hvigor-ohos-plugin'
+import { custom } from './plugin.mjs'
+export default { system: hapTasks, plugins: [custom] }
+`,
+  )
+
+  await new RuntimePluginLoader({ project: root }).load()
+  assert.equal(fs.readFileSync(marker, 'utf8'), path.basename(root))
+})
+
+test('hvigor beforeNodeEvaluate and afterNodeEvaluate hooks preserve node lifecycle order', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  const marker = path.join(root, 'node-lifecycle.txt')
+  fs.mkdirSync(entry)
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.ts'),
+    `
+import { hvigor } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+hvigor.beforeNodeEvaluate((node: any) => fs.appendFileSync(${JSON.stringify(marker)}, 'before:' + node.getNodeName() + '\\n'))
+hvigor.afterNodeEvaluate((node: any) => fs.appendFileSync(${JSON.stringify(marker)}, 'after:' + node.getNodeName() + '\\n'))
+export default { plugins: [] }
+`,
+  )
+  fs.writeFileSync(path.join(entry, 'hvigorfile.ts'), `export default { plugins: [] }\n`)
+
+  await new RuntimePluginLoader({ project: root }).load()
+  assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split('\n'), [
+    `after:${path.basename(root)}`,
+    'before:entry',
+    'after:entry',
+  ])
+})
+
+test('hvigorconfig.ts mutates descriptors before latest lifecycle phases run', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  const dynamic = path.join(root, 'dynamic')
+  const marker = path.join(root, 'hvigorconfig-lifecycle.txt')
+  fs.mkdirSync(entry)
+  fs.mkdirSync(dynamic)
+  fs.writeFileSync(
+    path.join(root, 'build-profile.json5'),
+    `{
+      app: { products: [{ name: 'default' }] },
+      modules: [{ name: 'entry', srcPath: './entry' }]
+    }\n`,
+  )
+  fs.writeFileSync(
+    path.join(root, 'hvigorconfig.ts'),
+    `
+import { hvigor } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+hvigor.configEvaluated((config: any) => {
+  config.excludeNodeByName('entry')
+  config.includeNode('dynamic', './dynamic', { flavor: 'fixture' })
+  fs.appendFileSync(${JSON.stringify(marker)}, 'configEvaluated\\n')
+})
+hvigor.nodesInitialized((runtime: any) => {
+  const nodes = runtime.getAllNodes().map((node: any) => node.getNodeName() + ':' + node.classKind)
+  const dynamicNode = runtime.getNodeByName('dynamic', 'node')
+  fs.appendFileSync(${JSON.stringify(marker)}, 'nodesInitialized:' + nodes.join(',') + ':' + dynamicNode.getExtraOption('flavor') + '\\n')
+})
+hvigor.nodesEvaluated(() => fs.appendFileSync(${JSON.stringify(marker)}, 'nodesEvaluated\\n'))
+hvigor.taskGraphResolved(() => fs.appendFileSync(${JSON.stringify(marker)}, 'taskGraphResolved\\n'))
+hvigor.buildFinished((result: any) => fs.appendFileSync(${JSON.stringify(marker)}, 'buildFinished:' + (result.getError() === null) + '\\n'))
+`,
+  )
+  fs.writeFileSync(path.join(root, 'hvigorfile.ts'), `export default { plugins: [] }\n`)
+  fs.writeFileSync(path.join(dynamic, 'hvigorfile.ts'), `export default { plugins: [] }\n`)
+
+  const build = createBuild(async () => ({ artifacts: [] }))
+  await build({ project: root })
+
+  assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split('\n'), [
+    'configEvaluated',
+    `nodesInitialized:dynamic:node,${path.basename(root)}:project:fixture`,
+    'nodesEvaluated',
+    'taskGraphResolved',
+    'buildFinished:true',
+  ])
 })
 
 test('normalizePluginList keeps plugin arrays returned by factories', () => {
   const plugins = normalizePluginList(() => [
-    { name: 'factory-a', transform(code) { return code } },
-    () => ({ name: 'factory-b', load() { return null } }),
+    {
+      name: 'factory-a',
+      transform(code) {
+        return code
+      },
+    },
+    () => ({
+      name: 'factory-b',
+      load() {
+        return null
+      },
+    }),
   ])
 
   assert.deepEqual(
@@ -150,17 +289,22 @@ test('shouldInvalidCache receives structured request objects', () => {
     },
   })
 
-  assert.equal(plugin.shouldInvalidCache(JSON.stringify({
-    id: 'entry',
-    meta: {
-      moduleName: 'entry',
-      cacheDir: '/tmp/cache',
-      compileEnv: 'env',
-    },
-    changedFiles: ['entry/src/main/ets/pages/Index.ets'],
-    isWatch: true,
-    cacheHit: true,
-  })), true)
+  assert.equal(
+    plugin.shouldInvalidCache(
+      JSON.stringify({
+        id: 'entry',
+        meta: {
+          moduleName: 'entry',
+          cacheDir: '/tmp/cache',
+          compileEnv: 'env',
+        },
+        changedFiles: ['entry/src/main/ets/pages/Index.ets'],
+        isWatch: true,
+        cacheHit: true,
+      }),
+    ),
+    true,
+  )
   assert.deepEqual(parseShouldInvalidCacheRequest('not-json'), { cacheHit: true })
 })
 
@@ -177,18 +321,24 @@ test('require.cache is cleared before each loadPluginPath reload', async () => {
   let callCount = 0
 
   // Write initial plugin; the module increments a counter on each require
-  fs.writeFileSync(pluginFile, `
+  fs.writeFileSync(
+    pluginFile,
+    `
 let n = ${callCount};
 exports.default = { name: 'cache-plugin', transform(code) { return code; }, _loaded: ++n };
-`)
+`,
+  )
 
   const loader1 = new RuntimePluginLoader({ project: root, compilePluginPath: './cache-plugin.js' })
   const plugins1 = await loader1.loadConfiguredPluginPaths()
 
   // Overwrite with a new version and reload via a fresh loader (seen Set is fresh)
-  fs.writeFileSync(pluginFile, `
+  fs.writeFileSync(
+    pluginFile,
+    `
 exports.default = { name: 'cache-plugin-v2', transform(code) { return code; } };
-`)
+`,
+  )
   const loader2 = new RuntimePluginLoader({ project: root, compilePluginPath: './cache-plugin.js' })
   const plugins2 = await loader2.loadConfiguredPluginPaths()
 
@@ -209,14 +359,31 @@ test('INVALID_PLUGIN_TYPE is thrown when a non-default export object lacks any h
 
 test('PLUGIN_NAME_WITH_UNKNOWN_ORDER is thrown for unknown string order values', () => {
   assert.throws(
-    () => normalizePluginList({ name: 'bad-order', order: 'middle', transform(code) { return code } }),
+    () =>
+      normalizePluginList({
+        name: 'bad-order',
+        order: 'middle',
+        transform(code) {
+          return code
+        },
+      }),
     (err) => err.code === 'PLUGIN_NAME_WITH_UNKNOWN_ORDER',
   )
 })
 
 test('function order receives name-to-index record and returns correct splice position', () => {
-  const alpha = { name: 'alpha', transform(code) { return code } }
-  const gamma = { name: 'gamma', transform(code) { return code } }
+  const alpha = {
+    name: 'alpha',
+    transform(code) {
+      return code
+    },
+  }
+  const gamma = {
+    name: 'gamma',
+    transform(code) {
+      return code
+    },
+  }
   let orderCalls = 0
   // beta should be inserted between alpha and gamma by returning index 1
   const beta = {
@@ -226,11 +393,16 @@ test('function order receives name-to-index record and returns correct splice po
       // alpha is at 0, so 1 inserts after alpha
       return (nameToIndex.alpha ?? 0) + 1
     },
-    transform(code) { return code },
+    transform(code) {
+      return code
+    },
   }
 
   const result = applyFunctionOrder([alpha, gamma, beta])
-  assert.deepEqual(result.map((p) => p.name), ['alpha', 'beta', 'gamma'])
+  assert.deepEqual(
+    result.map((p) => p.name),
+    ['alpha', 'beta', 'gamma'],
+  )
   // order property should be stripped from the resolved plugin
   assert.equal(result[1].order, undefined)
   // Hvigor's getPlugins invokes a function-valued order exactly once.
@@ -245,34 +417,207 @@ test('function order receives hvigor Record shape and safe duplicate names', () 
       received = nameToIndex
       return nameToIndex.alpha_1 + 1
     },
-    transform(code) { return code },
+    transform(code) {
+      return code
+    },
   }
   const result = applyFunctionOrder([
-    { name: 'alpha', transform(code) { return code } },
-    { name: 'alpha', transform(code) { return code } },
+    {
+      name: 'alpha',
+      transform(code) {
+        return code
+      },
+    },
+    {
+      name: 'alpha',
+      transform(code) {
+        return code
+      },
+    },
     ordered,
   ])
 
   assert.equal(received instanceof Map, false)
   assert.deepEqual({ ...received }, { alpha: 0, alpha_1: 1 })
-  assert.deepEqual(result.map((plugin) => plugin.name), ['alpha', 'alpha', 'ordered'])
+  assert.deepEqual(
+    result.map((plugin) => plugin.name),
+    ['alpha', 'alpha', 'ordered'],
+  )
 })
 
-test('shouldTransformCachedModule receives structured request objects', () => {
+test('latest hvigor compile-plugin validation is strict and keeps name-only plugins', () => {
+  assert.throws(
+    () => normalizeSortedPluginList({ transform() {} }, undefined, '/tmp/missing-name.ts'),
+    (error) => error.code === 'PLUGIN_NAME_NOT_EXIST',
+  )
+  assert.throws(
+    () => normalizeSortedPluginList({ name: 42, transform() {} }, undefined, '/tmp/non-string-name.ts'),
+    (error) => error.code === 'PLUGIN_NAME_NOT_STRING',
+  )
+  assert.throws(
+    () => normalizeSortedPluginList({ name: 'bad-hook', transform: 'not-a-function' }, undefined, '/tmp/hook.ts'),
+    (error) => error.code === 'PLUGIN_NAME_WITH_UNKNOWN_HOOK',
+  )
+
+  const [plugin] = normalizeSortedPluginList(
+    {
+      name: 'name-only',
+      resolveDynamicImport() {},
+    },
+    undefined,
+    '/tmp/name-only.ts',
+  )
+  assert.equal(plugin.name, 'name-only')
+  assert.equal(plugin.resolveDynamicImport, undefined)
+})
+
+test('latest hvigor function order observes IDE built-ins and resolves absolute Rust slots', () => {
+  let received
+  const plugins = normalizeSortedPluginList(
+    [
+      { name: 'last-plugin' },
+      { name: 'first-a', order: 'first' },
+      { name: 'first-b', order: 'first' },
+      {
+        name: 'after-module-meta',
+        order(nameToIndex) {
+          received = nameToIndex
+          return nameToIndex.moduleInfoMetaPlugin + 1
+        },
+      },
+    ],
+    undefined,
+    '/tmp/order.ts',
+  )
+
+  new HvigorCompilePluginPlanner({ target: 'hap', compileMode: 'esmodule' }).apply(plugins)
+
+  assert.equal(received instanceof Map, false)
+  assert.equal(typeof received.commonPlugin, 'number')
+  assert.equal(typeof received.etsTransform, 'number')
+  assert.deepEqual(Object.fromEntries(plugins.map((plugin) => [plugin.name, plugin.__arkdownOrderIndex])), {
+    'last-plugin': 11,
+    'first-a': 1,
+    'first-b': 0,
+    'after-module-meta': 4,
+  })
+})
+
+test('latest hvigor plans duplicate compile-plugin names independently per module', () => {
+  const firstRoot = path.resolve('/tmp/arkdown-module-a')
+  const secondRoot = path.resolve('/tmp/arkdown-module-b')
+  const first = normalizeSortedPluginList(
+    {
+      name: 'same-name',
+      transform(code) {
+        return code
+      },
+    },
+    undefined,
+    '/tmp/a-plugin.ts',
+    firstRoot,
+  )[0]
+  const second = normalizeSortedPluginList(
+    {
+      name: 'same-name',
+      transform(code) {
+        return code
+      },
+    },
+    undefined,
+    '/tmp/b-plugin.ts',
+    secondRoot,
+  )[0]
+
+  const result = new HvigorCompilePluginPlanner({ target: 'hap' }).apply([first, second])
+
+  assert.deepEqual(result, [first, second])
+  assert.equal(first.__arkdownModuleRoot, firstRoot)
+  assert.equal(second.__arkdownModuleRoot, secondRoot)
+  assert.equal(first.__arkdownOrderIndex, second.__arkdownOrderIndex)
+})
+
+test('latest hvigor compile buildStart receives no argument and a seeded share context', () => {
+  let receivedArgumentCount
+  let receivedShare
+  const [plugin] = normalizeSortedPluginList(
+    {
+      name: 'strict-build-start',
+      buildStart() {
+        receivedArgumentCount = arguments.length
+        receivedShare = this.share
+      },
+    },
+    undefined,
+    '/tmp/build-start.ts',
+  )
+  const share = { projectConfig: { bundleName: 'com.example.strict' } }
+  plugin.__arkdownSeedHvigorContext(JSON.stringify({ share }))
+  plugin.buildStart('')
+
+  assert.equal(receivedArgumentCount, 0)
+  assert.equal(receivedShare.projectConfig.bundleName, 'com.example.strict')
+})
+
+test('latest hvigor strict lifecycle wrappers discard async return values', () => {
+  const pending = new Promise(() => {})
+  const calls = []
+  const [plugin] = normalizeSortedPluginList(
+    {
+      name: 'strict-async-return-contract',
+      buildStart() {
+        calls.push('buildStart')
+        return pending
+      },
+      moduleParsed() {
+        calls.push('moduleParsed')
+        return pending
+      },
+      beforeBuildEnd() {
+        calls.push('beforeBuildEnd')
+        return pending
+      },
+      buildEnd() {
+        calls.push('buildEnd')
+        return pending
+      },
+    },
+    undefined,
+    '/tmp/strict-async-return.ts',
+  )
+
+  assert.equal(plugin.buildStart(''), undefined)
+  assert.equal(plugin.moduleParsed(JSON.stringify({ id: '/entry.ets' })), undefined)
+  assert.equal(plugin.beforeBuildEnd('{}'), pending)
+  assert.equal(plugin.buildEnd('{}'), undefined)
+  assert.deepEqual(calls, ['buildStart', 'moduleParsed', 'beforeBuildEnd', 'buildEnd'])
+})
+
+test('explicit Rolldown plugin lifecycle preserves async return values', () => {
+  const pending = new Promise(() => {})
   const [plugin] = normalizePluginList({
-    name: 'stcm-plugin',
-    shouldTransformCachedModule(request) {
-      return request.cacheHit === false
+    name: 'rolldown-async-return-contract',
+    buildStart() {
+      return pending
+    },
+    buildEnd() {
+      return pending
     },
   })
 
-  assert.equal(
-    plugin.shouldTransformCachedModule(JSON.stringify({ id: 'mod', cacheHit: false, changedFiles: [], isWatch: false })),
-    true,
-  )
-  assert.equal(
-    plugin.shouldTransformCachedModule(JSON.stringify({ id: 'mod', cacheHit: true, changedFiles: [], isWatch: false })),
-    false,
+  assert.equal(plugin.buildStart('{}'), pending)
+  assert.equal(plugin.buildEnd('{}'), pending)
+})
+
+test('explicit plugin API does not create a parallel shouldTransformCachedModule runner', () => {
+  assert.deepEqual(
+    normalizePluginList({
+      name: 'not-a-rolldown-hook',
+      shouldTransformCachedModule() {
+        return true
+      },
+    }),
+    [],
   )
 })
 
@@ -322,11 +667,16 @@ test('HvigorRuntimeHost._makeOhosPluginMock returns callable task functions', ()
 test('hvigorfile with hapTasks call captures compilePluginPath via HvigorRuntimeHost', async () => {
   const root = tempProject()
   const pluginFile = path.join(root, 'compile-plugin.js')
-  fs.writeFileSync(pluginFile, `
+  fs.writeFileSync(
+    pluginFile,
+    `
 exports.default = { name: 'captured-plugin', transform(code) { return code } }
-`)
+`,
+  )
   // TypeScript hvigorfile that calls hapTasks with compilePluginPath
-  fs.writeFileSync(path.join(root, 'hvigorfile.ts'), `
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.ts'),
+    `
 import { hapTasks } from '@ohos/hvigor-ohos-plugin';
 export default hapTasks({
   buildOption: {
@@ -335,13 +685,265 @@ export default hapTasks({
     }
   }
 });
-`)
+`,
+  )
   const plugins = await new RuntimePluginLoader({ project: root }).load()
   // The captured compilePluginPath should have been loaded
   assert.ok(
     plugins.some((p) => p.name === 'captured-plugin'),
     `expected captured-plugin in [${plugins.map((p) => p.name).join(', ')}]`,
   )
+})
+
+test('hvigor 6.24.3 TypeScript custom plugins bind context before apply and forward OHOS effects', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  const hvigor = path.join(root, 'hvigor')
+  const marker = path.join(root, 'custom-plugin.json')
+  const order = path.join(root, 'custom-plugin-order.txt')
+  fs.mkdirSync(entry, { recursive: true })
+  fs.mkdirSync(hvigor, { recursive: true })
+  fs.writeFileSync(path.join(hvigor, 'hvigor-config.json5'), `{ dependencies: {} }\n`)
+  fs.writeFileSync(
+    path.join(root, 'build-profile.json5'),
+    `{
+      app: { products: [{ name: 'default' }] },
+      modules: [{
+        name: 'entry',
+        srcPath: './entry',
+        targets: [{ name: 'default', applyToProducts: ['default'] }]
+      }]
+    }\n`,
+  )
+  fs.writeFileSync(
+    path.join(entry, 'build-profile.json5'),
+    `{ buildOption: { resOptions: { copyCodeResource: { enable: false } } }, targets: [{ name: 'default' }] }\n`,
+  )
+  fs.writeFileSync(
+    path.join(entry, 'compile-plugin.ts'),
+    `export default { name: 'typescript-compile-plugin', transform(code: string) { return code } }\n`,
+  )
+  fs.writeFileSync(
+    path.join(entry, 'custom-plugin.ts'),
+    `
+import { OhosPluginId } from '@ohos/hvigor-ohos-plugin'
+import * as fs from 'node:fs'
+
+const consumer = {
+  pluginId: 'fixture.consumer',
+  apply(node: any) {
+    const metadata = node.getContext('fixture.metadata')
+    const hap = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN)
+    const targets: string[] = []
+    let buildOptionFrozen = false
+    hap.targets((target: any) => {
+      targets.push(target.getTargetName())
+      const buildOption = target.getBuildOption()
+      buildOptionFrozen = Object.isFrozen(buildOption) && Object.isFrozen(buildOption.resOptions)
+    })
+    const profile = hap.getBuildProfileOpt()
+    profile.buildOption = {
+      ...(profile.buildOption || {}),
+      arkOptions: { byteCodeHar: true },
+    }
+    hap.setBuildProfileOpt(profile)
+    hap.loadCompilePlugin('./compile-plugin.ts')
+    fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({
+      metadata,
+      moduleName: node.getNodeName(),
+      pluginIds: node.getAllPluginIds(),
+      targets,
+      buildOptionFrozen,
+    }))
+    fs.appendFileSync(${JSON.stringify(order)}, 'consumer\\n')
+  },
+}
+
+const metadata = {
+  pluginId: 'fixture.metadata',
+  context() { return { owner: this.pluginId } },
+  apply() { fs.appendFileSync(${JSON.stringify(order)}, 'metadata\\n') },
+}
+
+export default [consumer, metadata]
+`,
+  )
+  fs.writeFileSync(
+    path.join(entry, 'hvigorfile.ts'),
+    `
+import { hapTasks } from '@ohos/hvigor-ohos-plugin'
+import { hvigor } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+import plugins from './custom-plugin'
+
+hvigor.nodesEvaluated(() => fs.appendFileSync(${JSON.stringify(order)}, 'nodesEvaluated\\n'))
+export default { system: hapTasks, plugins }
+`,
+  )
+
+  const loader = new RuntimePluginLoader({
+    project: root,
+    module: 'entry',
+    product: 'default',
+    buildTargetName: 'default',
+  })
+  const plugins = await loader.load()
+  assert.deepEqual(
+    plugins.map((plugin) => plugin.name),
+    ['typescript-compile-plugin'],
+  )
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), {
+    metadata: { owner: 'fixture.metadata' },
+    moduleName: 'entry',
+    pluginIds: ['com.ohos.hap', 'fixture.metadata'],
+    targets: ['default'],
+    buildOptionFrozen: true,
+  })
+  assert.deepEqual(fs.readFileSync(order, 'utf8').trim().split('\n'), ['consumer', 'metadata', 'nodesEvaluated'])
+
+  const nativeConfig = loader.toNativeBuildConfig()
+  const moduleOverrides = JSON.parse(nativeConfig.moduleHvigorOverridesJson)
+  assert.equal(moduleOverrides[entry].arkOptions.byteCodeHar, true)
+})
+
+test('TypeScript custom plugin apply failures retain plugin and hvigorfile diagnostics', async () => {
+  const root = tempProject()
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.ts'),
+    `export default { plugins: [{ pluginId: 'fixture.failure', apply() { throw new Error('boom') } }] }\n`,
+  )
+
+  await assert.rejects(
+    () => new RuntimePluginLoader({ project: root }).load(),
+    (error) => {
+      assert.equal(error.code, 'HVIGOR_CUSTOM_PLUGIN_APPLY_FAILED')
+      assert.equal(error.pluginId, 'fixture.failure')
+      assert.equal(error.hvigorfile, path.join(root, 'hvigorfile.ts'))
+      assert.match(error.message, /boom/)
+      return true
+    },
+  )
+})
+
+test('package-bound custom task preserves hvigor beforeRun run afterRun order', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  const order = path.join(root, 'task-order.txt')
+  fs.mkdirSync(entry)
+  fs.writeFileSync(
+    path.join(root, 'build-profile.json5'),
+    `{
+      app: { products: [{ name: 'default' }] },
+      modules: [{ name: 'entry', srcPath: './entry', targets: [{ name: 'default' }] }]
+    }\n`,
+  )
+  fs.writeFileSync(path.join(entry, 'build-profile.json5'), `{ targets: [{ name: 'default' }] }\n`)
+  fs.writeFileSync(
+    path.join(entry, 'hvigorfile.ts'),
+    `
+import { hapTasks, OhosPluginId } from '@ohos/hvigor-ohos-plugin'
+import { getNode, hvigor } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+const node = getNode(__filename)!
+hvigor.nodesEvaluated(() => {
+  const hap = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN)
+  hap.targets((target: any) => node.registerTask({
+    name: target.getTargetName() + '@fixtureTask',
+    context() { return { value: 'task-context' } },
+    beforeRun(task: any) { fs.appendFileSync(${JSON.stringify(order)}, 'before:' + task.moduleName + ':' + this.context.value + '\\n') },
+    run(task: any) { fs.appendFileSync(${JSON.stringify(order)}, 'run:' + task.modulePath + '\\n') },
+    afterRun() { fs.appendFileSync(${JSON.stringify(order)}, 'after\\n') },
+    postDependencies: [target.getTargetName() + '@PackageHap'],
+  }))
+})
+export default { system: hapTasks, plugins: [] }
+`,
+  )
+
+  const runtime = new RuntimePluginLoader({
+    project: root,
+    module: 'entry',
+    product: 'default',
+    buildTargetName: 'default',
+  })
+  const plugins = await runtime.load()
+  assert.deepEqual(plugins, [])
+  assert.equal(fs.existsSync(order), false)
+  await runtime.hvigorHost.runPackageBoundCustomTasks()
+  await runtime.hvigorHost.runPackageBoundCustomTasks()
+  const expectedRun = ['before:entry:task-context', `run:${entry}`, 'after']
+  assert.deepEqual(fs.readFileSync(order, 'utf8').trim().split('\n'), [...expectedRun, ...expectedRun])
+})
+
+test('Hvigor Task wrappers use LIFO before hooks, FIFO after hooks, and setEnable', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  const order = path.join(root, 'task-wrapper-order.txt')
+  fs.mkdirSync(entry)
+  fs.writeFileSync(
+    path.join(root, 'build-profile.json5'),
+    `{
+      app: { products: [{ name: 'default' }] },
+      modules: [{ name: 'entry', srcPath: './entry', targets: [{ name: 'default' }] }]
+    }\n`,
+  )
+  fs.writeFileSync(path.join(entry, 'build-profile.json5'), `{ targets: [{ name: 'default' }] }\n`)
+  fs.writeFileSync(
+    path.join(entry, 'hvigorfile.ts'),
+    `
+import { hapTasks, OhosPluginId } from '@ohos/hvigor-ohos-plugin'
+import { getNode, hvigor } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+const node = getNode(__filename)!
+hvigor.nodesEvaluated(() => {
+  const context = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN)
+  context.targets((target: any) => {
+    const targetName = target.getTargetName()
+    node.registerTask({
+      name: targetName + '@wrapped',
+      beforeRun() { fs.appendFileSync(${JSON.stringify(order)}, 'declared-before\\n') },
+      run() { fs.appendFileSync(${JSON.stringify(order)}, 'run\\n') },
+      afterRun() { fs.appendFileSync(${JSON.stringify(order)}, 'declared-after\\n') },
+      postDependencies: [targetName + '@PackageHap'],
+    })
+    const wrapped = node.getTaskByName(targetName + '@wrapped')
+    wrapped.beforeRun(function () { fs.appendFileSync(${JSON.stringify(order)}, 'wrapper-before-a:' + this.getName() + '\\n') })
+    wrapped.beforeRun(() => fs.appendFileSync(${JSON.stringify(order)}, 'wrapper-before-b\\n'))
+    wrapped.afterRun(() => fs.appendFileSync(${JSON.stringify(order)}, 'wrapper-after-a\\n'))
+    wrapped.afterRun(() => fs.appendFileSync(${JSON.stringify(order)}, 'wrapper-after-b\\n'))
+
+    node.registerTask({
+      name: targetName + '@disabled',
+      run() { fs.appendFileSync(${JSON.stringify(order)}, 'disabled-run\\n') },
+      postDependencies: [targetName + '@PackageHap'],
+    })
+    node.getTaskByName(targetName + '@disabled').setEnable(false)
+    if (node.getAllTasks().map((task: any) => task.getName()).length !== 2) throw new Error('task wrappers missing')
+  })
+})
+export default { system: hapTasks, plugins: [] }
+`,
+  )
+
+  const runtime = new RuntimePluginLoader({
+    project: root,
+    module: 'entry',
+    product: 'default',
+    buildTargetName: 'default',
+  })
+  const plugins = await runtime.load()
+  assert.deepEqual(plugins, [])
+  await runtime.hvigorHost.runPackageBoundCustomTasks()
+
+  assert.deepEqual(fs.readFileSync(order, 'utf8').trim().split('\n'), [
+    'wrapper-before-b',
+    'wrapper-before-a:default@wrapped',
+    'declared-before',
+    'run',
+    'declared-after',
+    'wrapper-after-a',
+    'wrapper-after-b',
+  ])
 })
 
 test('hvigorfile export object reads buildOption.arkOptions plugin paths', async () => {
@@ -379,15 +981,10 @@ module.exports = {
   )
 })
 
-test('module config.ohos.overrides loads arkOptions.compilePluginFile', async () => {
+test('latest hvigorfile schema rejects declarative arkOptions.compilePluginFile', async () => {
   const root = tempProject()
   const moduleRoot = path.join(root, 'entry')
-  const compileRoot = path.join(moduleRoot, 'hvigorCompile')
-  fs.mkdirSync(compileRoot, { recursive: true })
-  fs.writeFileSync(
-    path.join(compileRoot, 'plugin.js'),
-    `exports.default = { name: 'declarative-compile-plugin', transform(code) { return code } }\n`,
-  )
+  fs.mkdirSync(moduleRoot, { recursive: true })
   fs.writeFileSync(
     path.join(moduleRoot, 'hvigorfile.js'),
     `
@@ -397,7 +994,7 @@ module.exports = {
       overrides: {
         buildOption: {
           arkOptions: {
-            compilePluginFile: './hvigorCompile/plugin.js'
+            compilePluginFile: './build/hvigor_compile/plugin'
           }
         }
       }
@@ -407,10 +1004,128 @@ module.exports = {
 `,
   )
 
-  const plugins = await new RuntimePluginLoader({ project: root }).load()
-  assert.deepEqual(
-    plugins.map((plugin) => plugin.name),
-    ['declarative-compile-plugin'],
+  await assert.rejects(
+    async () => new RuntimePluginLoader({ project: root }).load(),
+    (error) => {
+      assert.equal(error.code, 'HVIGOR_SCHEMA_COMPILE_PLUGIN_FILE')
+      assert.equal(error.fieldPath, 'config.ohos.overrides.buildOption.arkOptions.compilePluginFile')
+      assert.match(error.message, /OhosModuleContext\.loadCompilePlugin/)
+      return true
+    },
+  )
+})
+
+test('latest project and module build-profile schemas reject declarative compilePluginFile', async (context) => {
+  await context.test('project product build option', async () => {
+    const root = tempProject()
+    fs.writeFileSync(
+      path.join(root, 'build-profile.json5'),
+      `{
+        app: { products: [{ name: 'default', buildOption: { arkOptions: {
+          compilePluginFile: './build/hvigor_compile/plugin.ts'
+        } } }] }
+      }\n`,
+    )
+
+    await assert.rejects(
+      async () => new RuntimePluginLoader({ project: root }).load(),
+      (error) =>
+        error.code === 'HVIGOR_SCHEMA_COMPILE_PLUGIN_FILE' &&
+        error.fieldPath === 'app.products[0].buildOption.arkOptions.compilePluginFile',
+    )
+  })
+
+  await context.test('module target build option', async () => {
+    const root = tempProject()
+    const moduleRoot = path.join(root, 'entry')
+    fs.mkdirSync(moduleRoot, { recursive: true })
+    fs.writeFileSync(
+      path.join(root, 'build-profile.json5'),
+      `{
+        app: { products: [{ name: 'default' }] },
+        modules: [{ name: 'entry', srcPath: './entry', targets: [{ name: 'default' }] }]
+      }\n`,
+    )
+    fs.writeFileSync(
+      path.join(moduleRoot, 'build-profile.json5'),
+      `{ targets: [{ name: 'default', config: { buildOption: { arkOptions: {
+        compilePluginFile: './build/hvigor_compile/plugin.ts'
+      } } } }] }\n`,
+    )
+
+    await assert.rejects(
+      async () => new RuntimePluginLoader({ project: root }).load(),
+      (error) =>
+        error.code === 'HVIGOR_SCHEMA_COMPILE_PLUGIN_FILE' &&
+        error.fieldPath === 'targets[0].config.buildOption.arkOptions.compilePluginFile',
+    )
+  })
+})
+
+test('OhosModuleContext.loadCompilePlugin enforces path, suffix, and TypeScript type checks', async () => {
+  const compilePluginError = (error) => error.cause || error
+  const createProject = (configured, pluginSource, pluginFileName = 'compile-plugin.ts') => {
+    const root = tempProject()
+    const moduleRoot = path.join(root, 'entry')
+    fs.mkdirSync(moduleRoot, { recursive: true })
+    fs.writeFileSync(
+      path.join(root, 'build-profile.json5'),
+      `{
+        app: { products: [{ name: 'default' }] },
+        modules: [{ name: 'entry', srcPath: './entry', targets: [{ name: 'default' }] }]
+      }\n`,
+    )
+    fs.writeFileSync(path.join(moduleRoot, 'build-profile.json5'), `{ targets: [{ name: 'default' }] }\n`)
+    if (pluginSource !== undefined) {
+      fs.writeFileSync(path.join(moduleRoot, pluginFileName), pluginSource)
+    }
+    fs.writeFileSync(
+      path.join(moduleRoot, 'hvigorfile.ts'),
+      `
+import { hapTasks, OhosPluginId } from '@ohos/hvigor-ohos-plugin'
+const loader = {
+  pluginId: 'fixture.load-compile-plugin',
+  apply(node: any) {
+    node.getContext(OhosPluginId.OHOS_HAP_PLUGIN).loadCompilePlugin(${JSON.stringify(configured)})
+  },
+}
+export default { system: hapTasks, plugins: [loader] }
+`,
+    )
+    return root
+  }
+
+  await assert.rejects(
+    async () => new RuntimePluginLoader({ project: createProject('') }).load(),
+    (error) => compilePluginError(error).code === 'EMPTY_COMPILE_PLUGIN_PATH',
+  )
+  await assert.rejects(
+    async () => new RuntimePluginLoader({ project: createProject('./missing.ts') }).load(),
+    (error) => {
+      const cause = compilePluginError(error)
+      return cause.code === 'PLUGIN_PATH_NOT_FOUND' && cause.pluginPath.endsWith('missing.ts')
+    },
+  )
+  await assert.rejects(
+    async () =>
+      new RuntimePluginLoader({
+        project: createProject('./compile-plugin.js', 'export default {}', 'compile-plugin.js'),
+      }).load(),
+    (error) => {
+      const cause = compilePluginError(error)
+      return cause.code === 'PLUGIN_FILE_MUST_END_WITH_TS' && cause.pluginPath.endsWith('compile-plugin.js')
+    },
+  )
+  const invalidRoot = createProject(
+    './compile-plugin.ts',
+    `const invalid: string = 1\nexport default { name: invalid }\n`,
+  )
+  await assert.rejects(
+    async () => new RuntimePluginLoader({ project: invalidRoot }).load(),
+    (error) => {
+      const cause = compilePluginError(error)
+      return cause.code === 'TYPE_ERRORS' && cause.diagnostics.some((diagnostic) => diagnostic.code === 2322)
+    },
   )
 })
 
@@ -465,7 +1180,11 @@ test('createBuild forwards native BuildConfig fields and strips runtime plugin p
 
   for (const [key, value] of Object.entries(config)) {
     if (key === 'compilePluginPath' || key === 'hvigorPluginFile') {
-      assert.equal(capturedConfig[key], undefined, `BuildConfig.${key} must be consumed by runtime.js before nativeBuild`)
+      assert.equal(
+        capturedConfig[key],
+        undefined,
+        `BuildConfig.${key} must be consumed by runtime.js before nativeBuild`,
+      )
       continue
     }
     assert.equal(
@@ -629,55 +1348,21 @@ test('buildPluginContext getFileName resolves known refs and rejects unknown ref
   )
 })
 
-test('normalizeHookArguments binds this.share for beforeBuild', () => {
-  const share = { bundleName: 'com.example.test', buildMode: 'debug' }
-  let capturedThis = null
-  const [plugin] = normalizePluginList({
-    name: 'ctx-test',
-    beforeBuild(ctxJson) {
-      capturedThis = this
-    },
-  })
-  plugin.beforeBuild(JSON.stringify({ share }))
-  assert.ok(capturedThis, 'this should be bound')
-  assert.equal(capturedThis.share.bundleName, share.bundleName)
-  assert.equal(typeof capturedThis.getModuleIds, 'function')
-  assert.equal(typeof capturedThis.getModuleInfo, 'function')
-})
-
-test('normalizeHookArguments binds this.share for afterBuildStart', () => {
-  const share = { bundleName: 'com.example.hsp', buildMode: 'release' }
-  let capturedThis = null
-  const [plugin] = normalizePluginList({
-    name: 'ctx-test2',
-    afterBuildStart(ctxJson) {
-      capturedThis = this
-    },
-  })
-  plugin.afterBuildStart(JSON.stringify({ share }))
-  assert.ok(capturedThis)
-  assert.equal(capturedThis.share.bundleName, share.bundleName)
-})
-
-test('share context is propagated from beforeBuild to subsequent hooks', () => {
+test('internal context seed supplies share data without adding a lifecycle hook', () => {
   const share = { bundleName: 'com.example.prop', buildMode: 'debug' }
   const captured = {}
   const plugin = normalizePluginList({
     name: 'propagation-test',
-    beforeBuild(ctxJson) { captured.beforeBuild = this.share },
-    afterBuildStart(ctxJson) { captured.afterBuildStart = this.share },
-    buildStart(ctxJson) { captured.buildStart = this.share },
+    buildStart() {
+      captured.buildStart = this.share
+    },
   })[0]
 
-  // Fire beforeBuild — this captures share into module-level _pluginShareContext
-  plugin.beforeBuild(JSON.stringify({ share }))
-  // Fire subsequent hooks without share (they pick up from _pluginShareContext)
-  plugin.afterBuildStart('')
+  plugin.__arkdownSeedHvigorContext(JSON.stringify({ share }))
   plugin.buildStart('')
 
-  assert.equal(captured.beforeBuild.bundleName, share.bundleName)
-  assert.equal(captured.afterBuildStart.bundleName, share.bundleName)
   assert.equal(captured.buildStart.bundleName, share.bundleName)
+  assert.equal(Object.keys(plugin).includes('__arkdownSeedHvigorContext'), false)
 })
 
 test('share context is bound for resolveId load transform and cache hooks', () => {
@@ -685,13 +1370,21 @@ test('share context is bound for resolveId load transform and cache hooks', () =
   const captured = []
   const plugin = normalizePluginList({
     name: 'all-hook-contexts',
-    beforeBuild() {},
-    resolveId() { captured.push(this.share) },
-    load() { captured.push(this.share) },
-    transform() { captured.push(this.share) },
-    shouldInvalidCache() { captured.push(this.share); return false },
+    resolveId() {
+      captured.push(this.share)
+    },
+    load() {
+      captured.push(this.share)
+    },
+    transform() {
+      captured.push(this.share)
+    },
+    shouldInvalidCache() {
+      captured.push(this.share)
+      return false
+    },
   })[0]
-  plugin.beforeBuild(JSON.stringify({ share }))
+  plugin.__arkdownSeedHvigorContext(JSON.stringify({ share }))
   plugin.resolveId('dep', '/entry.ets')
   plugin.load('/entry.ets')
   plugin.transform('export {}', '/entry.ets')
@@ -736,8 +1429,12 @@ test('load and transform preserve SourceDescription object results', () => {
   }
   const [plugin] = normalizePluginList({
     name: 'source-description-contract',
-    load() { return loadResult },
-    transform() { return transformResult },
+    load() {
+      return loadResult
+    },
+    transform() {
+      return transformResult
+    },
   })
   assert.equal(plugin.load('/entry.ets'), loadResult)
   assert.equal(plugin.transform('source', '/entry.ets'), transformResult)
@@ -753,12 +1450,14 @@ test('moduleParsed receives structured ModuleInfo and bound graph lookup', () =>
       lookedUp = this.getModuleInfo(info.id)
     },
   })[0]
-  plugin.moduleParsed(JSON.stringify({
-    id: '/entry.ets',
-    importedIds: ['/dep.ets'],
-    dynamicallyImportedIds: ['/lazy.ets'],
-    isEntry: true,
-  }))
+  plugin.moduleParsed(
+    JSON.stringify({
+      id: '/entry.ets',
+      importedIds: ['/dep.ets'],
+      dynamicallyImportedIds: ['/lazy.ets'],
+      isEntry: true,
+    }),
+  )
   assert.equal(received.id, '/entry.ets')
   assert.deepEqual(lookedUp.importedIds, ['/dep.ets'])
   assert.deepEqual(lookedUp.dynamicallyImportedIds, ['/lazy.ets'])
@@ -776,18 +1475,6 @@ test('resolveDynamicImport is recognized as a Rolldown hook', () => {
   assert.equal(typeof plugin.resolveDynamicImport, 'function')
 })
 
-test('cleanUp hook is called and this is bound', () => {
-  let cleanUpCalled = false
-  let cleanUpThis = null
-  const [plugin] = normalizePluginList({
-    name: 'cleanup-test',
-    cleanUp(ctxJson) {
-      cleanUpCalled = true
-      cleanUpThis = this
-    },
-  })
-  plugin.cleanUp('')
-  assert.ok(cleanUpCalled)
-  assert.ok(cleanUpThis)
-  assert.equal(typeof cleanUpThis.getModuleIds, 'function')
+test('explicit plugin API ignores non-Rolldown cleanUp instead of running a second lifecycle', () => {
+  assert.deepEqual(normalizePluginList({ name: 'cleanup-test', cleanUp() {} }), [])
 })
