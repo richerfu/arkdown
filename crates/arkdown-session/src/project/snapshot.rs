@@ -3,12 +3,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arkdown_config::RuntimeContextOverrides;
 use arkdown_core::ArkdownConfig;
 use indexmap::IndexMap;
 use thiserror::Error;
 
 use crate::dependency_graph::builder::DependencyGraphBuilder;
-use crate::dependency_graph::snapshot::DependencyGraphSnapshot;
+use crate::dependency_graph::snapshot::{
+    DependencyGraphSnapshot, DependencyParameterError, DependencyParameterSnapshot,
+};
 use crate::module::snapshot::{ModuleSnapshot, ModuleSnapshotError};
 use crate::package::snapshot::{PackageSnapshot, PackageSnapshotError};
 use crate::paths::ProjectPathLayout;
@@ -31,6 +34,9 @@ pub enum ProjectSnapshotError {
     /// Package snapshot error.
     #[error("package snapshot error: {0}")]
     Package(#[from] PackageSnapshotError),
+    /// Project dependency parameter-file error.
+    #[error("dependency parameter error: {0}")]
+    DependencyParameter(#[from] DependencyParameterError),
 }
 
 /// Immutable project-level snapshot.
@@ -66,6 +72,16 @@ pub struct ProjectSnapshot {
 impl ProjectSnapshot {
     /// Build a snapshot from the normalized build config.
     pub fn from_config(config: &ArkdownConfig) -> Result<Self, ProjectSnapshotError> {
+        Self::from_config_with_runtime_overrides(config, None, None)
+    }
+
+    /// Build the immutable project model from disk plus the complete loader
+    /// objects replaced by hvigor plugin context setters.
+    pub fn from_config_with_runtime_overrides(
+        config: &ArkdownConfig,
+        runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
+        parameter_file_override: Option<PathBuf>,
+    ) -> Result<Self, ProjectSnapshotError> {
         let root = &config.project_root;
         let app_json_path = ProjectPathLayout::new(root).app_scope_app_json5();
         let (
@@ -74,7 +90,23 @@ impl ProjectSnapshot {
             app_version_name,
             app_build_version,
             app_bundle_type,
-        ) = if app_json_path.is_file() {
+        ) = if let Some(value) = runtime_overrides
+            .as_ref()
+            .and_then(|overrides| overrides.project.app_json.as_ref())
+        {
+            let app: arkdown_ohos_schema::RawAppJson5 = serde_json::from_value(value.clone())
+                .map_err(|error| ProjectSnapshotError::Parse {
+                    file: app_json_path.clone(),
+                    message: error.to_string(),
+                })?;
+            (
+                app.app.bundle_name,
+                app.app.version_code,
+                app.app.version_name,
+                app.app.build_version,
+                app.app.bundle_type.unwrap_or_else(|| "app".to_string()),
+            )
+        } else if app_json_path.is_file() {
             let content = std::fs::read_to_string(&app_json_path)?;
             let app: arkdown_ohos_schema::RawAppJson5 =
                 json5::from_str(&content).map_err(|e| ProjectSnapshotError::Parse {
@@ -116,26 +148,51 @@ impl ProjectSnapshot {
         let mut module_order = Vec::with_capacity(config.modules.len());
         let mut modules = IndexMap::with_capacity(config.modules.len());
         for module in &config.modules {
-            let snap = ModuleSnapshot::from_root(&module.src_path, &module.name)?;
+            let snap = ModuleSnapshot::from_root_with_runtime_override(
+                &module.src_path,
+                &module.name,
+                runtime_overrides
+                    .as_ref()
+                    .and_then(|overrides| overrides.module_for_root(&module.src_path)),
+            )?;
             module_order.push(module.name.clone());
             modules.insert(module.name.clone(), Arc::new(snap));
         }
+
+        let root_package = if let Some(value) = runtime_overrides
+            .as_ref()
+            .and_then(|overrides| overrides.project.package.as_ref())
+        {
+            Some(Arc::new(PackageSnapshot::from_runtime_value(root, value)?))
+        } else {
+            PackageSnapshot::from_root(root)?.map(Arc::new)
+        };
+        let dependency_parameters = DependencyParameterSnapshot::from_project(
+            root,
+            root_package.as_deref(),
+            parameter_file_override.as_deref(),
+        )?;
 
         let mut dependency_graphs = IndexMap::with_capacity(module_order.len());
         for module_name in &module_order {
             dependency_graphs.insert(
                 module_name.clone(),
-                Arc::new(
-                    DependencyGraphBuilder::new(
+                Arc::new({
+                    let mut builder = DependencyGraphBuilder::new(
                         module_name.clone(),
                         root.clone(),
                         modules
                             .get(module_name)
                             .map(|module| module.root.clone())
                             .unwrap_or_else(|| root.clone()),
-                    )
-                    .build(),
-                ),
+                    );
+                    if let Some(runtime_overrides) = runtime_overrides.as_ref() {
+                        builder = builder.with_runtime_overrides(Arc::clone(runtime_overrides));
+                    }
+                    builder
+                        .with_dependency_parameters(dependency_parameters.clone())
+                        .build()
+                }),
             );
         }
 
@@ -149,7 +206,7 @@ impl ProjectSnapshot {
             product_name: config.product.name.clone(),
             module_order,
             modules,
-            root_package: PackageSnapshot::from_root(root)?.map(Arc::new),
+            root_package,
             dependency_graphs,
         })
     }

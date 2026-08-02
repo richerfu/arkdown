@@ -64,8 +64,13 @@ plugin name are hard errors.
 `hvigorfile.ts` and imported TypeScript plugins configure nodes, tasks, OHOS
 contexts, and compile-plugin paths. They are not Rolldown plugins.
 
-The Node package evaluates them in the same V8 process used by the native addon,
-following latest-hvigor ordering:
+Rust reads and compiles each configuration module through OXC and Rolldown to
+ES2016 CommonJS. User imports remain external so Node retains the latest-hvigor
+per-file module cache, extension hooks, package resolution, and OHOS mocks;
+Rolldown's embedded OXC helpers remain inside the generated module. The Node
+package only calls `Module._compile`, binds plugin callbacks, and evaluates them
+in the same V8 process used by the native addon, following latest-hvigor
+ordering:
 
 ```text
 hvigorconfig evaluation
@@ -83,6 +88,15 @@ buildFinished
 Configuration effects cross into Rust as typed build options or explicit task
 records. The Node runtime is required here because arbitrary TypeScript plugin
 code is an intentional hvigor capability.
+
+The boundary is deliberately narrow. Rust owns OXC/Rolldown compilation,
+runtime model reads, JSON5/schema validation, target/build-option planning,
+plugin path and shape validation, order/slot calculation, task graph and
+command planning, cache identity, CLI parsing, native request sanitization,
+and lossless configuration merging. Node/V8 owns only module execution,
+arbitrary callbacks, live function/object identity, Node-specific public API
+objects, and conversion of native diagnostics/context values into the shapes
+observed by plugin authors.
 
 ### Compile plugins
 
@@ -170,6 +184,9 @@ The following approaches are obsolete and must not return:
 - a standalone lifecycle scheduler or parity-report object that claims to run
   Rolldown hooks itself;
 - separate `arkdown-plugin-*` crates for these adapters.
+- JavaScript implementations of build-script parsing, project discovery,
+  plugin validation/order/path planning, task scheduling, CLI parsing, cache
+  layout, or native build-request planning.
 
 Rust is preferred for built-in business logic and performance-sensitive work.
 Node/V8 is retained only for executing the arbitrary JS/TS behavior that hvigor
@@ -195,10 +212,13 @@ The former plugin-system blockers are covered:
    fixture through both the installed hvigor and Arkdown and compares hook
    events, argument counts, graph-hook activity, and AST shape.
 
-`.mjs` configuration parity is covered: Arkdown pins the IDE's TypeScript
-`4.9.5` and installs the same CommonJS transpile hook for `.ts` and `.mjs`, so
-both extensions use the OHOS module mocks and imported `.mjs` plugins follow
-the latest runtime rather than Node's native ESM loader.
+`.mjs` configuration parity is covered: Arkdown installs the same synchronous
+CommonJS extension boundary for `.ts` and `.mjs`, but compilation is owned by
+Rust/OXC/Rolldown rather than `typescript.transpileModule`. Both extensions use
+the OHOS module mocks and imported `.mjs` plugins follow the latest runtime
+rather than Node's native ESM loader. TypeScript `4.9.5` remains only for the
+latest-hvigor semantic type-check contracts, which OXC intentionally does not
+implement.
 
 ## Verification Contract
 

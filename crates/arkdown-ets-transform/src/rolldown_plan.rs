@@ -26,7 +26,7 @@ use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::{self, CheckerMode, ModuleExportIndex, TransformOptions};
 use crate::typescript_emit::{
     ConstEnumExportCache, ImportedConstEnumRewriter, TypeScriptDirectiveFlags,
-    TypeScriptJavascriptEmitter,
+    TypeScriptJavascriptEmitOutput, TypeScriptJavascriptEmitter,
 };
 use arkdown_core::{ModuleSource, ModuleType, ResolvedId};
 
@@ -188,17 +188,23 @@ impl RolldownEtsTransformer {
 
         if !is_ets {
             let final_code = pipeline.finalize_source(code.as_ref());
-            let final_code =
+            let emitted =
                 self.emit_javascript_if_required(final_code.as_ref(), id, directive_flags)?;
             let source_map = if emits_javascript && directive_flags.is_comment_only() {
                 Some(source_map::TypeScriptCommentOnlySourceMap::new(id).build())
             } else {
-                source_map::HvigorStandardSourceMapBuilder::new(&final_code, original_source, id)
+                emitted.source_map.or_else(|| {
+                    source_map::HvigorStandardSourceMapBuilder::new(
+                        &emitted.code,
+                        original_source,
+                        id,
+                    )
                     .build()
-                    .or_else(|| source_map::TokenSourceMapBuilder::new(&final_code, id).build())
+                    .or_else(|| source_map::TokenSourceMapBuilder::new(&emitted.code, id).build())
+                })
             };
             return Ok(Some(RolldownEtsTransformOutput {
-                code: final_code,
+                code: emitted.code,
                 module_source_code: None,
                 source_map,
                 record_module_source_code: false,
@@ -231,14 +237,15 @@ impl RolldownEtsTransformer {
             // four-space indentation before ModuleMode writes the CompileArkTS
             // cache source consumed by es2abc.
             let formatted_source = pipeline.format_source(final_source.as_ref());
-            let final_source =
+            let emitted =
                 self.emit_javascript_if_required(formatted_source.as_str(), id, directive_flags)?;
-            let source_map =
-                source_map::HvigorStandardSourceMapBuilder::new(&final_source, original_source, id)
+            let source_map = emitted.source_map.or_else(|| {
+                source_map::HvigorStandardSourceMapBuilder::new(&emitted.code, original_source, id)
                     .build()
-                    .or_else(|| source_map::TokenSourceMapBuilder::new(&final_source, id).build());
+                    .or_else(|| source_map::TokenSourceMapBuilder::new(&emitted.code, id).build())
+            });
             return Ok(Some(RolldownEtsTransformOutput {
-                code: final_source,
+                code: emitted.code,
                 module_source_code: None,
                 source_map,
                 record_module_source_code: false,
@@ -247,15 +254,22 @@ impl RolldownEtsTransformer {
             }));
         }
 
-        let gen_code =
+        let emitted =
             self.emit_javascript_if_required(final_source.as_ref(), id, directive_flags)?;
-        let source_map = transformed.source_map.or_else(|| {
-            source_map::HvigorStandardSourceMapBuilder::new(&gen_code, original_source, id)
-                .build()
-                .or_else(|| source_map::TokenSourceMapBuilder::new(&gen_code, id).build())
-        });
+        let source_map = match (transformed.source_map, emitted.source_map) {
+            (Some(transform_map), Some(emit_map)) => {
+                Some(self.collapse_source_maps(id, &transform_map, &emit_map)?)
+            }
+            (Some(transform_map), None) => Some(transform_map),
+            (None, Some(emit_map)) => Some(emit_map),
+            (None, None) => {
+                source_map::HvigorStandardSourceMapBuilder::new(&emitted.code, original_source, id)
+                    .build()
+                    .or_else(|| source_map::TokenSourceMapBuilder::new(&emitted.code, id).build())
+            }
+        };
         Ok(Some(RolldownEtsTransformOutput {
-            code: gen_code,
+            code: emitted.code,
             module_source_code: None,
             source_map,
             record_module_source_code: false,
@@ -269,19 +283,47 @@ impl RolldownEtsTransformer {
         source: &str,
         id: &str,
         directive_flags: TypeScriptDirectiveFlags,
-    ) -> Result<String, EtsTransformError> {
+    ) -> Result<TypeScriptJavascriptEmitOutput, EtsTransformError> {
         if !self.plan.should_emit_js || !directive_flags.should_emit_javascript() {
-            return Ok(source.to_string());
+            return Ok(TypeScriptJavascriptEmitOutput {
+                code: source.to_string(),
+                source_map: None,
+            });
         }
         TypeScriptJavascriptEmitter::new(source, id, &self.plan.sources)
             .with_const_enum_export_cache(&self.plan.const_enum_exports)
             .with_hvigor_emit_wrapper()
-            .emit()
+            .emit_with_source_map()
             .ok_or_else(|| EtsTransformError::Fatal {
                 file: id.to_string(),
                 message: "failed to emit JavaScript for a TypeScript suppression pragma file"
                     .to_string(),
             })
+    }
+
+    fn collapse_source_maps(
+        &self,
+        id: &str,
+        transform_map: &str,
+        emit_map: &str,
+    ) -> Result<String, EtsTransformError> {
+        let transform_map = rolldown_sourcemap::OwnedSourceMap::from_json_string(transform_map)
+            .map_err(|error| EtsTransformError::Fatal {
+                file: id.to_string(),
+                message: format!("failed to decode ArkTS transform source map: {error}"),
+            })?;
+        let emit_map =
+            rolldown_sourcemap::OwnedSourceMap::from_json_string(emit_map).map_err(|error| {
+                EtsTransformError::Fatal {
+                    file: id.to_string(),
+                    message: format!("failed to decode TypeScript emit source map: {error}"),
+                }
+            })?;
+        Ok(rolldown_sourcemap::collapse_sourcemaps(&[
+            transform_map.as_source_map(),
+            emit_map.as_source_map(),
+        ])
+        .to_json_string())
     }
 
     pub fn compile_transform(
@@ -717,9 +759,7 @@ export default class ChannelManager {
             .expect("default import/export barrel must produce transform output");
 
         assert!(
-            output
-                .code
-                .contains("import LX from \"./src/main/ets/LX\";"),
+            output.code.contains("import LX from './src/main/ets/LX';"),
             "hvigor keeps the default import binding:\n{}",
             output.code
         );
@@ -912,6 +952,32 @@ export enum VideoScaleMode {
     }
 
     #[test]
+    fn compile_transform_preserves_latest_typescript_printer_literal_spelling() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let source = "export const a: string = 'single';\nexport const b = \"double\";\nexport const c = 'a\\n\\'b';\n";
+        let output = transformer
+            .compile_transform(source, "/tmp/project/entry/src/main/ets/Index.ets")
+            .unwrap()
+            .expect("plain ETS must produce ModuleMode source");
+
+        // Latest SDK process_module_files.genContentAndSourceMapInfo delegates
+        // unchanged nodes to TypeScript createPrinter, which retains each
+        // source literal's original quote and escape spelling.
+        assert_eq!(output.code, source);
+    }
+
+    #[test]
     fn compile_transform_emits_javascript_for_ts_ignore_file_like_hvigor() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
@@ -976,7 +1042,12 @@ export namespace Zip {
 
         assert_eq!(
             output.code,
-            "\"use strict\";\r\n//# sourceMappingURL=ResourceTable.js.map"
+            concat!(
+                "\"use strict\";\r\n",
+                "/* generated resource table */\r\n",
+                "//@ts-noCheck\r\n",
+                "//# sourceMappingURL=ResourceTable.js.map"
+            )
         );
         let source_map: serde_json::Value = serde_json::from_str(
             output
@@ -986,6 +1057,51 @@ export namespace Zip {
         )
         .expect("valid source map");
         assert_eq!(source_map["mappings"], ";");
+        assert!(output.emits_javascript);
+    }
+
+    #[test]
+    fn compile_transform_matches_latest_module_info_javascript_contract() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            24,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "\n//@ts-noCheck\nexport const __MODULE_NAME__: string = __getCurrentModuleName__()\nexport const __BUNDLE_NAME__: string = __getCurrentBundleName__()\n",
+                "/tmp/project/entry/build/default/generated/profile/default/ModuleInfo.ts",
+            )
+            .unwrap()
+            .expect("ModuleInfo.ts participates in CompileArkTS");
+
+        assert_eq!(
+            output.code,
+            concat!(
+                "//@ts-noCheck\r\n",
+                "export const __MODULE_NAME__ = __getCurrentModuleName__();\r\n",
+                "export const __BUNDLE_NAME__ = __getCurrentBundleName__();\r\n",
+                "//# sourceMappingURL=ModuleInfo.js.map"
+            )
+        );
+        let source_map: serde_json::Value = serde_json::from_str(
+            output
+                .source_map
+                .as_deref()
+                .expect("ModuleInfo TypeScript emit source map"),
+        )
+        .expect("valid ModuleInfo source map");
+        assert_eq!(
+            source_map["mappings"],
+            "AACA,aAAa;AACb,MAAM,CAAC,MAAM,eAAe,GAAW,wBAAwB,EAAE,CAAA;AACjE,MAAM,CAAC,MAAM,eAAe,GAAW,wBAAwB,EAAE,CAAA"
+        );
         assert!(output.emits_javascript);
     }
 

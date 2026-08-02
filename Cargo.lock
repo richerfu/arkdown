@@ -164,6 +164,7 @@ dependencies = [
  "memory-stats",
  "oxc_allocator 0.140.0",
  "oxc_ast 0.140.0",
+ "oxc_ast_visit 0.140.0",
  "oxc_codegen 0.140.0",
  "oxc_index",
  "oxc_minifier 0.140.0",
@@ -279,6 +280,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dhat",
+ "dunce",
  "fast-glob",
  "flate2",
  "fs-err",
@@ -373,9 +375,11 @@ dependencies = [
  "flate2",
  "fs-err",
  "globset",
+ "indexmap",
  "json5",
  "rawzip",
  "rayon",
+ "semver",
  "serde",
  "serde_json",
  "tar",
@@ -473,6 +477,7 @@ dependencies = [
  "oxc_syntax 0.140.0",
  "rayon",
  "rustc-hash 2.1.2",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -2600,7 +2605,9 @@ dependencies = [
  "allocator-api2",
  "hashbrown 0.17.1",
  "oxc_data_structures 0.140.0",
+ "oxc_estree 0.140.0",
  "rustc-hash 2.1.2",
+ "serde",
 ]
 
 [[package]]
@@ -2837,6 +2844,11 @@ dependencies = [
 name = "oxc_estree"
 version = "0.140.0"
 source = "git+https://github.com/ohos-rs/oxc?rev=39b0ce7aeda63ab83ccea796c5c321fbeee36808#39b0ce7aeda63ab83ccea796c5c321fbeee36808"
+dependencies = [
+ "dragonbox_ecma",
+ "itoa",
+ "oxc_data_structures 0.140.0",
+]
 
 [[package]]
 name = "oxc_index"
@@ -3164,6 +3176,7 @@ dependencies = [
  "oxc_ast_macros 0.140.0",
  "oxc_estree 0.140.0",
  "oxc_str 0.140.0",
+ "serde",
 ]
 
 [[package]]
@@ -3188,6 +3201,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "oxc_allocator 0.140.0",
  "oxc_estree 0.140.0",
+ "serde",
 ]
 
 [[package]]
@@ -3227,6 +3241,7 @@ dependencies = [
  "oxc_span 0.140.0",
  "oxc_str 0.140.0",
  "phf 0.14.0",
+ "serde",
  "unicode-id-start",
 ]
 

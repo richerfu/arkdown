@@ -39,8 +39,8 @@ pub struct EtsTransformPlugin {
 #[derive(Debug)]
 pub(crate) struct EtsTransformModuleMetadataEntry {
     pub(crate) module_source_code: Option<Arc<str>>,
-    pub(crate) source_map: Option<Arc<str>>,
     pub(crate) emits_javascript: bool,
+    pub(crate) has_source_map: bool,
     pub(crate) is_shared_module: bool,
 }
 
@@ -54,19 +54,25 @@ impl EtsTransformModuleMetadata {
         &self,
         module_id: String,
         module_source_code: Option<Arc<str>>,
-        source_map: Option<Arc<str>>,
         emits_javascript: bool,
+        has_source_map: bool,
         is_shared_module: bool,
     ) {
         self.entries.insert(
             module_id,
             EtsTransformModuleMetadataEntry {
                 module_source_code,
-                source_map,
                 emits_javascript,
+                has_source_map,
                 is_shared_module,
             },
         );
+    }
+
+    pub(crate) fn javascript_source_map(&self, module_id: &str) -> Option<bool> {
+        self.entries
+            .get(module_id)
+            .and_then(|entry| entry.emits_javascript.then_some(entry.has_source_map))
     }
 
     pub(crate) fn take(&self, module_id: &str) -> Option<EtsTransformModuleMetadataEntry> {
@@ -108,20 +114,30 @@ impl EtsTransformPlugin {
         let Some(output) = result? else {
             return Ok(None);
         };
+        let has_source_map = output.source_map.is_some();
+        let map = output
+            .source_map
+            .as_deref()
+            .map(rolldown_sourcemap::OwnedSourceMap::from_json_string)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("ets-transform: invalid source map: {error}"))?
+            .map_or(HookTransformOutputMap::Null, |map| {
+                HookTransformOutputMap::Sourcemap(Box::new(map.into_inner()))
+            });
         if output.record_module_source_code {
             ctx.meta()
                 .get_or_insert_default::<EtsTransformModuleMetadata>()
                 .record(
                     args.id.to_string(),
                     output.module_source_code.as_deref().map(Arc::from),
-                    output.source_map.as_deref().map(Arc::from),
                     output.emits_javascript,
+                    has_source_map,
                     output.is_shared_module,
                 );
         }
         Ok(Some(HookTransformOutput {
             code: Some(output.code),
-            map: HookTransformOutputMap::Null,
+            map,
             ..Default::default()
         }))
     }

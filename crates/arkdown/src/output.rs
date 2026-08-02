@@ -425,11 +425,26 @@ impl WrittenOutput {
         let value: serde_json::Value =
             serde_json::from_str(&builder.into_sourcemap().to_json_string())
                 .unwrap_or_else(|_| serde_json::json!({ "mappings": "" }));
-        value
+        let mappings = value
             .get("mappings")
             .and_then(|value| value.as_str())
             .unwrap_or_default()
-            .to_string()
+            .to_string();
+        Self::preserve_trailing_mapping_lines(mappings, raw_map)
+    }
+
+    fn preserve_trailing_mapping_lines(mut mappings: String, raw_map: &str) -> String {
+        let raw_line_separators = serde_json::from_str::<serde_json::Value>(raw_map)
+            .ok()
+            .and_then(|value| value.get("mappings")?.as_str().map(str::to_string))
+            .map_or(0, |mappings| {
+                mappings.bytes().filter(|byte| *byte == b';').count()
+            });
+        let mapped_line_separators = mappings.bytes().filter(|byte| *byte == b';').count();
+        for _ in mapped_line_separators..raw_line_separators {
+            mappings.push(';');
+        }
+        mappings
     }
 }
 
@@ -473,9 +488,27 @@ impl HvigorSourceDescriptor {
         if let Ok(module_relative) = source_path.strip_prefix(module_root) {
             if Self::source_file_after_src_main(&components).is_none() {
                 let source_file = ArtifactPathSerializer::rel_to_slash(module_relative);
-                let mut key_path = module_relative.to_path_buf();
+                let direct_local_dependency = module_relative
+                    .components()
+                    .next()
+                    .is_some_and(|component| component.as_os_str() == "oh_modules");
+                let mut key_path = if direct_local_dependency {
+                    module_relative
+                        .file_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| module_relative.to_path_buf())
+                } else {
+                    module_relative.to_path_buf()
+                };
                 if emits_javascript {
                     key_path.set_extension("js");
+                } else if matches!(
+                    source_path
+                        .extension()
+                        .and_then(|extension| extension.to_str()),
+                    Some("ets" | "ts")
+                ) {
+                    key_path.set_extension("ts");
                 }
                 let source_map_source_file = source_path
                     .strip_prefix(project_root)
@@ -500,7 +533,7 @@ impl HvigorSourceDescriptor {
                     package_name: None,
                     package_version: None,
                     key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
-                    include_source_root: false,
+                    include_source_root: direct_local_dependency,
                 });
             }
         }
@@ -641,6 +674,19 @@ mod tests {
     use arkdown_core::ArkChunk;
     use oxc_index::IndexVec;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn per_source_filter_preserves_rollup_trailing_mapping_lines() {
+        let raw_map =
+            r#"{"version":3,"sources":["ModuleInfo.ts"],"names":[],"mappings":"AAAA;AACA;"}"#;
+        let decoded =
+            RolldownOwnedSourceMap::from_json_string(raw_map).expect("source map fixture");
+
+        assert_eq!(
+            WrittenOutput::mappings_for_source(&decoded, 0, "ModuleInfo.ts", raw_map),
+            "AAAA;AACA;"
+        );
+    }
 
     fn temp_output_dir(test_name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -878,6 +924,51 @@ mod tests {
         );
         assert_eq!(value[agc_key]["entry-package-info"], "phone|1.0.0");
         assert_eq!(value[agc_key]["package-info"], "@hw-agconnect/hmcore|1.0.6");
+
+        let _ = fs_err::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn writes_latest_hvigor_key_for_direct_local_har_source() {
+        let output_dir = temp_output_dir("hvigor-local-har-source-map");
+        let source_map = serde_json::json!({
+            "version": 3,
+            "file": "Index.ets",
+            "sources": ["/project/entry/oh_modules/share-config-har/Index.ets"],
+            "names": [],
+            "mappings": "AAAA"
+        })
+        .to_string();
+        let chunk_graph = graph(vec![ArkChunk {
+            name: "Index".to_string(),
+            code: "export const dependencyValue = 'dependency';\n".to_string(),
+            source_map: Some(source_map),
+            ..ArkChunk::default()
+        }]);
+        let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/entry"),
+            module_name: "entry".to_string(),
+            package_name: "entry".to_string(),
+            version: "1.0.0".to_string(),
+            chunk_source_files: FxHashMap::default(),
+            package_versions: FxHashMap::default(),
+        };
+
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
+            .expect("write output");
+        let source_maps = written.source_maps_path.expect("sourceMaps.map path");
+        let value: serde_json::Value = serde_json::from_str(
+            &fs_err::read_to_string(source_maps).expect("read sourceMaps.map"),
+        )
+        .expect("parse sourceMaps.map");
+        let key = "entry|entry|1.0.0|Index.ts";
+
+        assert_eq!(
+            value[key]["sources"][0],
+            "entry/oh_modules/share-config-har/Index.ets"
+        );
+        assert_eq!(value[key]["sourceRoot"], "");
 
         let _ = fs_err::remove_dir_all(output_dir);
     }

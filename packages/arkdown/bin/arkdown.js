@@ -1,7 +1,20 @@
 #!/usr/bin/env node
 
-function createPackageBuild() {
-  return require('..').build
+const { HVIGOR_PARITY_VERSION } = require('../runtime.js')
+const { parseArkdownBuildCliArgs, parseHvigorCliArgs } = require('../index.js')
+
+function decodeCliPlan(response) {
+  const plan = JSON.parse(response)
+  if (plan.error) {
+    const error = new Error(plan.error.message)
+    error.code = plan.error.code
+    throw error
+  }
+  return plan.config
+}
+
+function createPackageRuntime() {
+  return require('..')
 }
 
 function writeStdout(message) {
@@ -13,126 +26,97 @@ function writeStderr(message) {
 }
 
 class ArkdownPackageCli {
-  constructor(argv, build) {
+  constructor(argv, build, runHvigorCommand) {
     this.argv = argv
-    this.build = build || createPackageBuild()
+    this.build = build
+    this.runHvigorCommand = runHvigorCommand
   }
 
   async run() {
     const [command, ...args] = this.argv
-    if (!command || command === '--help' || command === '-h') {
+    if (command === 'build') {
+      if (args.includes('--help') || args.includes('-h')) {
+        this.printBuildHelp()
+        return 0
+      }
+      const config = this.parseBuildArgs(args)
+      const result = await (this.build || createPackageRuntime().build)(config)
+      for (const artifact of result.artifacts ?? []) writeStdout(artifact)
+      return 0
+    }
+    if (this.argv.includes('--help') || this.argv.includes('-h')) {
       this.printHelp()
       return 0
     }
-    if (command === '--version' || command === '-V') {
-      const { version } = require('../package.json')
-      writeStdout(version)
+    if (this.argv.includes('--version') || this.argv.includes('-v')) {
+      writeStdout(HVIGOR_PARITY_VERSION)
       return 0
     }
-    if (command !== 'build') {
-      throw new Error(`unsupported command '${command}'. The npm package currently exposes 'build'.`)
+    if (command === 'version') {
+      writeStdout(`CLI version: ${HVIGOR_PARITY_VERSION}`)
+      writeStdout(`Local version: ${HVIGOR_PARITY_VERSION}`)
+      return 0
     }
 
-    const config = this.parseBuildArgs(args)
-    const result = await this.build(config)
-    for (const artifact of result.artifacts ?? []) {
-      writeStdout(artifact)
+    const config = this.parseHvigorArgs(this.argv)
+    const daemonOutput = this.daemonCommandOutput(config)
+    if (daemonOutput) {
+      for (const message of daemonOutput) writeStdout(message)
+      return 0
     }
+    const result = await (this.runHvigorCommand || createPackageRuntime().runHvigorCommand)(config)
+    for (const message of result.output ?? []) writeStdout(message)
     return 0
   }
 
+  parseHvigorArgs(args) {
+    return decodeCliPlan(parseHvigorCliArgs(args))
+  }
+
+  daemonCommandOutput(config) {
+    // Latest hvigor handles these flags before bootstrapping the project and
+    // exits after the first matching command. Arkdown deliberately has no
+    // daemon registry because every build is process-local, so its registry
+    // view is always empty while preserving the command contract.
+    if (config.stopDaemon || config.stopDaemonAll) return ['Stopped 0 daemon in total.']
+    if (config.statusDaemon) return ['PID\tSTATUS\tPORT\tROOT_PATH']
+    return null
+  }
+
   parseBuildArgs(args) {
-    const config = {}
-    for (let i = 0; i < args.length; i += 1) {
-      const arg = args[i]
-      if (arg === '--help' || arg === '-h') {
-        this.printBuildHelp()
-        process.exit(0)
-      }
-      const nextValue = () => {
-        const value = args[i + 1]
-        if (!value || value.startsWith('-')) {
-          throw new Error(`${arg} requires a value`)
-        }
-        i += 1
-        return value
-      }
-      switch (arg) {
-        case '--project':
-          config.project = nextValue()
-          break
-        case '--target':
-          config.target = nextValue()
-          break
-        case '--mode':
-          config.mode = nextValue()
-          break
-        case '--module':
-        case '-m':
-          config.module = nextValue()
-          break
-        case '--product':
-          config.product = nextValue()
-          break
-        case '--build-target-name':
-          config.buildTargetName = nextValue()
-          break
-        case '--build-version':
-          config.buildVersion = nextValue()
-          break
-        case '--watch':
-          config.watch = true
-          break
-        case '--preview':
-          config.preview = true
-          break
-        case '--coverage':
-          config.coverage = true
-          break
-        case '--ohos-debug-asan':
-          config.ohosDebugAsan = true
-          break
-        case '--ohos-enable-hwasan':
-          config.ohosEnableHwasan = true
-          break
-        case '--disable-abc-cache':
-          config.disableAbcCache = true
-          break
-        case '--cache-file':
-          config.cacheFile = nextValue()
-          break
-        case '--checker':
-          config.checker = nextValue()
-          break
-        case '--module-analyzer':
-          config.moduleAnalyzer = nextValue()
-          break
-        case '--hvigor-plugin-file':
-          appendPathConfig(config, 'hvigorPluginFile', nextValue())
-          break
-        case '--compile-plugin-path':
-          appendPathConfig(config, 'compilePluginPath', nextValue())
-          break
-        case '--cache':
-          config.cache = true
-          break
-        case '--no-cache':
-          config.cache = false
-          break
-        default:
-          throw new Error(`unknown build option '${arg}'`)
-      }
-    }
-    return config
+    return decodeCliPlan(parseArkdownBuildCliArgs(args))
   }
 
   printHelp() {
-    writeStdout(`arkdown
+    writeStdout(`Usage: hvigorw [taskNames...] <options...>
 
-Usage:
-  arkdown build [--project <dir>] [--target hap|hsp|har] [--mode debug|release]
-  arkdown --version
-  arkdown --help`)
+Options:
+  -v, --version                         Shows the version of Hvigor.
+  -e, --error                           Sets the log level to error.
+  -w, --warn                            Sets the log level to warn.
+  -i, --info                            Sets the log level to info.
+  -d, --debug                           Sets the log level to debug.
+  -c, --config <config>                 Overrides hvigor-config.json5 properties.
+  -p, --prop <value>                    Defines extra properties.
+  -m, --mode <module|project>           Sets the command execution domain.
+  -s, --sync                            Syncs plugin information for other platforms.
+  --watch                               Enables watch mode.
+  --[no-]type-check                     Controls hvigorfile.ts type checking.
+  --[no-]parallel                       Controls parallel task execution.
+  --[no-]incremental                    Controls incremental task execution.
+  --[no-]daemon                         Controls the daemon process.
+  -h, --help                            Displays help information.
+
+Commands:
+  version                               Shows the version of Hvigor.
+  tasks                                 Shows all available tasks of selected nodes.
+  taskTree                              Shows all available task trees of selected nodes.
+  prune                                 Cleans old Hvigor caches and package-store entries.
+  collectCoverage                       Generates instrumentation coverage reports.
+
+Examples:
+  hvigorw assembleApp
+  hvigorw --mode module -p module=entry assembleHap`)
   }
 
   printBuildHelp() {
@@ -165,18 +149,6 @@ Options:
                       Load a hvigor compile plugin path. May be repeated.
   --no-cache          Disable coarse build cache and ABC cache.`)
   }
-}
-
-function appendPathConfig(config, key, value) {
-  if (config[key] === undefined) {
-    config[key] = value
-    return
-  }
-  if (Array.isArray(config[key])) {
-    config[key].push(value)
-    return
-  }
-  config[key] = [config[key], value]
 }
 
 if (require.main === module) {

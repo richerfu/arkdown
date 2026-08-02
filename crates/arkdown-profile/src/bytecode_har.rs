@@ -638,9 +638,6 @@ impl ByteCodeHarMetadataWriter {
     /// known package roots, we read their `oh-package.json5` directly instead
     /// of doing an independent `oh_modules/` filesystem scan.
     ///
-    /// Falls back to the filesystem scan when `typed_roots` is empty (e.g.
-    /// the session graph is not yet populated with full HAR metadata).
-    ///
     /// # Upstream correspondence
     ///
     /// Corresponds to hvigor's `DependencyManager.getHspOrByteCodeHarDependencies()`
@@ -648,18 +645,7 @@ impl ByteCodeHarMetadataWriter {
     /// locate ByteCode HAR dependencies without re-scanning the filesystem.
     pub fn scan_from_typed_roots(
         typed_roots: &[ByteCodeHarDependencyRoot],
-        fallback_module_root: &Path,
-        fallback_project_root: &Path,
     ) -> Vec<ByteCodeHarScanEntry> {
-        if typed_roots.is_empty() {
-            // Session graph has no ByteCode HAR nodes — fall back to the
-            // independent filesystem scan.
-            return Self::scan_bytecode_har_deps_from_graph(
-                fallback_module_root,
-                fallback_project_root,
-            );
-        }
-
         let mut seen = FxHashSet::default();
         let mut out = Vec::new();
         for root in typed_roots {
@@ -1287,6 +1273,26 @@ mod tests {
         let results =
             ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn typed_empty_bytecode_har_inventory_is_authoritative() {
+        let tmp = make_temp_dir();
+        let pkg_dir = tmp.path().join("oh_modules/bytecode-har");
+        write_abc(&pkg_dir.join("ets/modules.abc"));
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{ name: "bytecode-har", metadata: { byteCodeHar: true } }"#,
+        );
+        assert_eq!(
+            ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path())
+                .len(),
+            1
+        );
+        assert!(
+            ByteCodeHarMetadataWriter::scan_from_typed_roots(&[]).is_empty(),
+            "GenerateLoaderJson must not revive dependencies excluded by the typed hvigor view"
+        );
     }
 
     #[test]

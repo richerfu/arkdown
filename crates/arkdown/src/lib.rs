@@ -25,11 +25,14 @@ pub mod compile_entry;
 pub mod compile_env;
 pub mod diagnostics;
 pub mod facts;
+pub mod hvigor_json;
+pub mod hvigor_script;
 pub mod manual_chunks;
 #[cfg(feature = "memory-diagnostics")]
 pub mod memory_diagnostics;
 pub mod output;
 pub mod plan;
+pub mod plugin_ast;
 pub mod plugins;
 pub mod watch_config;
 
@@ -41,7 +44,7 @@ pub mod watch_config;
 pub use arkdown_core::source_maps;
 
 // bundler — primary API
-pub use bundler::{BundleOutput, Bundler, PreloadSystemSoTask};
+pub use bundler::{BundleOutput, Bundler, HvigorHarImportees, PreloadSystemSoTask};
 
 // plan — typed bundle plan (SPEC-048 Phase 4 primary input)
 pub use plan::{
@@ -70,3 +73,14 @@ pub use cache_bridge::{
 
 // diagnostics
 pub use diagnostics::{BundlerDiagnostic, RolldownErrorKind};
+
+// hvigor_script — Rust/OXC/Rolldown configuration-script compiler
+pub use hvigor_script::{HvigorScriptCompileError, HvigorScriptCompiler};
+
+// hvigor_json — Rust/OXC implementation of hvigor's public JSON5 reader
+pub use hvigor_json::{HvigorJsonParseError, HvigorJsonParser};
+
+// plugin_ast — OXC-owned ESTree bridge for JavaScript compile plugins
+pub use plugin_ast::{
+    PluginAstParseError, PluginAstParseOptions, PluginAstParseResult, PluginAstParser,
+};

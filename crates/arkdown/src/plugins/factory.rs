@@ -19,8 +19,9 @@
 //! | 5 | `json` | `Json5Plugin` | yes |
 //! | 6 | `wrapperChunk` | `WrapperChunkPlugin` | yes (no-op when `support_chunks = false`) |
 //! | 7 | `sdkPlugins` (etsTransform) | `EtsTransformPlugin` | yes |
-//! | 8 | `HarDedup` (HSP) | `HarDedupPlugin` | HSP builds only |
-//! | 9 | — | `MinifyPlugin` | yes (no-op in debug) |
+//! | 8 | `apiTransform` | `ApiTransformPlugin` | yes |
+//! | 9 | `HarDedup` (HSP) | `HarDedupPlugin` | HSP builds only |
+//! | 10 | SDK `terser` (release) | `MinifyPlugin` | release only |
 //!
 //! hvigor entries without a Rust equivalent (`commonPlugin`, `invalidCachePlugin`,
 //! `routerMap`, `newOhmUrl` absorbed by resolve, `commonjs` Rolldown built-in,
@@ -36,7 +37,6 @@
 //! Replaces `packages/arkdown/src/cmd/build/plugin_factory.rs`. The CLI shim
 //! delegates to this factory once the migration is complete.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -48,19 +48,20 @@ use arkdown_path::{
     lexical_normalize, strip_relative_prefix, AbsPath, ModuleSpecifier, SpecifierKind,
 };
 use arkdown_resolver::{OhosResolver, PkgBriefInfo, ResolverConfig};
-use rolldown_common::ModuleInfo;
 use rolldown_plugin::{
     __inner::SharedPluginable, HookBuildEndArgs, HookNoopReturn, HookUsage, Plugin, PluginContext,
     PluginHookMeta, PluginOrder as RolldownPluginOrder,
 };
 
 use crate::plan::BundlePlan;
+use crate::plugins::api_transform::ApiTransformPlugin;
 use crate::plugins::duplicate_check::DuplicateCheckPlugin;
 use crate::plugins::ets_transform::{
     CheckerMode, ComponentMetadata, EtsTransformPlugin, RolldownEtsTransformPlan,
     TransformEntrySourceId, TransformSourceSnapshot,
 };
 use crate::plugins::har_dedup::HarDedupPlugin;
+use crate::plugins::hvigor_compile::HvigorNativePluginSlot;
 use crate::plugins::import_check::ImportCheckPlugin;
 use crate::plugins::json5::Json5Plugin;
 use crate::plugins::minify::MinifyPlugin;
@@ -72,111 +73,20 @@ use crate::PluginCacheModule;
 /// Placement of a latest-hvigor compile plugin in the Rolldown plugin list.
 ///
 /// String orders map directly to the two outer positions. Function-valued
-/// orders are evaluated by the Node runtime against hvigor's plugin-name map
-/// and arrive here as one absolute slot in Arkdown's Rust-native list.
+/// orders are evaluated by the Rust planner against hvigor's plugin-name map.
+/// The result is anchored to the next canonical native adapter so optional or
+/// disabled adapters cannot shift a custom plugin onto the wrong lifecycle
+/// boundary. `Position` remains for the older public N-API representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HvigorPluginOrder {
     First,
     #[default]
     Last,
+    Anchor {
+        rank: u16,
+        sequence: u32,
+    },
     Position(usize),
-}
-
-/// Read-only module graph exposed as `this.getModuleIds()` and
-/// `this.getModuleInfo(id)` to latest-hvigor compile plugins.
-///
-/// The latest DevEco Studio 6.24.3 Rollup fork invokes `beforeBuildEnd` after
-/// the graph has been built and before any `buildEnd` hook. Keeping this as a
-/// typed snapshot lets the NAPI runtime expose that graph without retaining a
-/// non-`Send` Rolldown [`PluginContext`] across an async JavaScript call.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PackagePluginGraphContext {
-    module_ids: Vec<String>,
-    module_info_map: BTreeMap<String, PackagePluginModuleInfo>,
-}
-
-impl PackagePluginGraphContext {
-    fn from_rolldown(context: &PluginContext) -> Self {
-        let mut module_ids = Vec::new();
-        let mut module_info_map = BTreeMap::new();
-        for module_id in context.get_module_ids() {
-            let id = module_id.as_str().to_string();
-            module_ids.push(id.clone());
-            if let Some(module_info) = context.get_module_info(&id) {
-                module_info_map.insert(id, PackagePluginModuleInfo::from_rolldown(&module_info));
-            }
-        }
-        Self {
-            module_ids,
-            module_info_map,
-        }
-    }
-
-    pub fn to_json(&self) -> anyhow::Result<String> {
-        serde_json::to_string(self).map_err(Into::into)
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PackagePluginModuleInfo {
-    id: String,
-    code: Option<String>,
-    ast: Option<()>,
-    original_code: Option<()>,
-    imported_ids: Vec<String>,
-    importers: Vec<String>,
-    is_entry: bool,
-    is_external: bool,
-    is_included: Option<bool>,
-    has_default_export: bool,
-    exports: Vec<String>,
-    dynamically_imported_ids: Vec<String>,
-    exported_bindings: Option<()>,
-    dynamic_importers: Vec<String>,
-}
-
-impl PackagePluginModuleInfo {
-    fn from_rolldown(module_info: &ModuleInfo) -> Self {
-        let exports = module_info
-            .exports
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        Self {
-            id: module_info.id.to_string(),
-            code: module_info.code.as_ref().map(ToString::to_string),
-            ast: None,
-            original_code: None,
-            imported_ids: module_info
-                .imported_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            importers: module_info
-                .importers
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            is_entry: module_info.is_entry,
-            is_external: false,
-            is_included: None,
-            has_default_export: exports.iter().any(|name| name == "default"),
-            exports,
-            dynamically_imported_ids: module_info
-                .dynamically_imported_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            exported_bindings: None,
-            dynamic_importers: module_info
-                .dynamic_importers
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        }
-    }
 }
 
 /// Input data for `PluginFactory` that supplements `BundlePlan` with
@@ -385,6 +295,9 @@ impl PackagePlugin {
         let order = match self.order {
             HvigorPluginOrder::First => "first".to_string(),
             HvigorPluginOrder::Last => "last".to_string(),
+            HvigorPluginOrder::Anchor { rank, sequence } => {
+                format!("anchor-{rank}-{sequence}")
+            }
             HvigorPluginOrder::Position(position) => format!("position-{position}"),
         };
         let identity = match self
@@ -453,11 +366,8 @@ pub trait HvigorPluginGapHooks: Send + Sync {
         false
     }
 
-    /// `beforeBuildEnd` with the complete post-scan module graph.
-    async fn before_build_end_with_graph_context(
-        &self,
-        _context: &PackagePluginGraphContext,
-    ) -> anyhow::Result<()> {
+    /// `beforeBuildEnd` with Rolldown's live post-scan plugin context.
+    async fn before_build_end_with_context(&self, _context: PluginContext) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -474,6 +384,31 @@ pub trait HvigorPluginGapHooks: Send + Sync {
 struct HvigorPluginGapEntry {
     name: String,
     hooks: Arc<dyn HvigorPluginGapHooks>,
+}
+
+#[derive(Clone)]
+struct PluginFactoryEntry {
+    plugin: SharedPluginable,
+    gap_entry: Option<HvigorPluginGapEntry>,
+    native_rank: Option<u16>,
+}
+
+impl PluginFactoryEntry {
+    fn native(plugin: SharedPluginable, slot: HvigorNativePluginSlot) -> Self {
+        Self {
+            plugin,
+            gap_entry: None,
+            native_rank: Some(slot.rank()),
+        }
+    }
+
+    fn package(plugin: SharedPluginable, gap_entry: Option<HvigorPluginGapEntry>) -> Self {
+        Self {
+            plugin,
+            gap_entry,
+            native_rank: None,
+        }
+    }
 }
 
 struct HvigorBeforeBuildEndPlugin {
@@ -519,12 +454,10 @@ impl Plugin for HvigorBeforeBuildEndPlugin {
         // Latest hvigor does not enter beforeBuildEnd/buildEnd/afterBuildEnd
         // when graph.build() throws. Rolldown reports that path by supplying
         // HookBuildEndArgs, so do not manufacture a success lifecycle here.
-        let graph_context = args
-            .is_none()
-            .then(|| PackagePluginGraphContext::from_rolldown(context));
+        let plugin_context = args.is_none().then(|| context.clone());
         let entries = self.entries.clone();
         async move {
-            let Some(graph_context) = graph_context else {
+            let Some(plugin_context) = plugin_context else {
                 return Ok(());
             };
             // `beforeBuildEnd` is hookSeq in the latest IDE fork: preserve the
@@ -532,7 +465,7 @@ impl Plugin for HvigorBeforeBuildEndPlugin {
             for entry in entries {
                 entry
                     .hooks
-                    .before_build_end_with_graph_context(&graph_context)
+                    .before_build_end_with_context(plugin_context.clone())
                     .await
                     .map_err(|error| {
                         anyhow::anyhow!(
@@ -611,6 +544,71 @@ impl<'a> PluginFactory<'a> {
     /// Create a new factory from a bundle plan and supplemental session input.
     pub fn new(plan: &'a BundlePlan, input: PluginFactoryInput) -> Self {
         Self { plan, input }
+    }
+
+    fn merge_anchored_plugins(
+        built_ins: Vec<PluginFactoryEntry>,
+        mut anchored: Vec<(u16, u32, PluginFactoryEntry)>,
+    ) -> Vec<PluginFactoryEntry> {
+        anchored.sort_by_key(|(rank, sequence, _)| (*rank, *sequence));
+        let mut anchored = anchored.into_iter().peekable();
+        let mut merged = Vec::with_capacity(built_ins.len() + anchored.len());
+        for built_in in built_ins {
+            let native_rank = built_in
+                .native_rank
+                .expect("built-in plugin entries must have a native rank");
+            while anchored
+                .peek()
+                .is_some_and(|(anchor_rank, _, _)| *anchor_rank <= native_rank)
+            {
+                if let Some((_, _, plugin)) = anchored.next() {
+                    merged.push(plugin);
+                }
+            }
+            merged.push(built_in);
+        }
+        merged.extend(anchored.map(|(_, _, plugin)| plugin));
+        merged
+    }
+
+    fn merge_positioned_plugins(
+        built_ins: Vec<PluginFactoryEntry>,
+        mut positioned: Vec<(usize, PluginFactoryEntry)>,
+    ) -> anyhow::Result<Vec<PluginFactoryEntry>> {
+        if positioned.is_empty() {
+            return Ok(built_ins);
+        }
+        positioned.sort_by_key(|(position, _)| *position);
+        let final_len = built_ins.len() + positioned.len();
+        if let Some((position, plugin)) = positioned
+            .iter()
+            .find(|(position, _)| *position >= final_len)
+        {
+            anyhow::bail!(
+                "resolved plugin position {position} for '{}' exceeds pipeline length {final_len}",
+                plugin.plugin.call_name()
+            );
+        }
+
+        let mut built_ins = built_ins.into_iter();
+        let mut positioned = positioned.into_iter().peekable();
+        let mut merged = Vec::with_capacity(final_len);
+        for slot in 0..final_len {
+            if positioned
+                .peek()
+                .is_some_and(|(position, _)| *position == slot)
+            {
+                if let Some((_, plugin)) = positioned.next() {
+                    merged.push(plugin);
+                }
+            } else if let Some(plugin) = built_ins.next() {
+                merged.push(plugin);
+            }
+        }
+        if positioned.peek().is_some() || built_ins.next().is_some() {
+            anyhow::bail!("resolved plugin positions do not form a valid pipeline")
+        }
+        Ok(merged)
     }
 
     /// Build the ordered plugin list.
@@ -712,17 +710,28 @@ impl<'a> PluginFactory<'a> {
             Arc::clone(&ets_transform_plan),
         ));
 
-        let mut plugins: Vec<SharedPluginable> = vec![
-            duplicate_check_plugin,
-            module_meta_plugin,
-            ohos_resolve_plugin,
-            import_check_plugin,
-            json5_plugin,
-            wrapper_chunk_plugin,
-            ets_transform_plugin,
+        // ── 8. ApiTransformPlugin (hvigor SDK: apiTransform) ───────────────
+        //
+        // Structured API rewrites belong to arkdown-ets-transform. This
+        // adapter retains the SDK's distinct post-emit source-map boundary so
+        // the following genAbc-equivalent collector observes Rollup-compatible
+        // combined mappings.
+        let api_transform_plugin: SharedPluginable = Arc::new(ApiTransformPlugin);
+
+        let mut native_plugins = vec![
+            PluginFactoryEntry::native(
+                duplicate_check_plugin,
+                HvigorNativePluginSlot::DuplicateCheck,
+            ),
+            PluginFactoryEntry::native(module_meta_plugin, HvigorNativePluginSlot::ModuleMeta),
+            PluginFactoryEntry::native(ohos_resolve_plugin, HvigorNativePluginSlot::OhosResolve),
+            PluginFactoryEntry::native(import_check_plugin, HvigorNativePluginSlot::ImportCheck),
+            PluginFactoryEntry::native(json5_plugin, HvigorNativePluginSlot::Json),
+            PluginFactoryEntry::native(wrapper_chunk_plugin, HvigorNativePluginSlot::WrapperChunk),
         ];
 
-        // ── 8. HarDedupPlugin (hvigor: HarDedup, HSP only) ───────────────────
+        // HarDedup is an optional phase between wrapperChunk and the SDK
+        // transforms. Native anchors remain correct whether this slot exists.
         if matches!(self.plan.output_target, OutputTarget::Hsp) {
             let har_plugin: Option<SharedPluginable> = match self.input.har_dedup {
                 HarDedupFactoryMode::Disabled => None,
@@ -738,29 +747,51 @@ impl<'a> PluginFactory<'a> {
                 }
             };
             if let Some(har_plugin) = har_plugin {
-                plugins.push(har_plugin);
+                native_plugins.push(PluginFactoryEntry::native(
+                    har_plugin,
+                    HvigorNativePluginSlot::HarDedup,
+                ));
             }
         }
 
-        // ── 9. MinifyPlugin ───────────────────────────────────────────────────
+        native_plugins.extend([
+            PluginFactoryEntry::native(ets_transform_plugin, HvigorNativePluginSlot::EtsTransform),
+            PluginFactoryEntry::native(api_transform_plugin, HvigorNativePluginSlot::ApiTransform),
+        ]);
+
+        // ── 10. MinifyPlugin (hvigor SDK: terser, release only) ───────────────
         let is_release = !self.plan.is_debug();
-        let minify_plugin: SharedPluginable = Arc::new(MinifyPlugin::for_mode(is_release));
-        plugins.push(minify_plugin);
+        if is_release {
+            let minify_plugin: SharedPluginable = Arc::new(MinifyPlugin::for_mode(true));
+            native_plugins.push(PluginFactoryEntry::native(
+                minify_plugin,
+                HvigorNativePluginSlot::Minify,
+            ));
+        }
+
+        let disabled_plugins = self
+            .input
+            .disabled_plugins
+            .into_iter()
+            .collect::<FxHashSet<_>>();
+        native_plugins
+            .retain(|entry| !disabled_plugins.contains(entry.plugin.call_name().as_ref()));
 
         // ── Package API plugins (same-process Node.js NAPI bridge) ──────────
-        let mut package_names = FxHashSet::default();
+        let mut package_names = native_plugins
+            .iter()
+            .map(|entry| entry.plugin.call_name().to_string())
+            .collect::<FxHashSet<_>>();
         for package_plugin in &package_plugins {
             let name = package_plugin.plugin.call_name().to_string();
             if !package_names.insert(name.clone()) {
                 anyhow::bail!("duplicated Rolldown plugin name '{name}'");
             }
         }
-        let mut ordered_plugins = plugins
-            .into_iter()
-            .map(|plugin| (plugin, None))
-            .collect::<Vec<_>>();
+        let mut ordered_plugins = native_plugins;
         let mut package_first_plugins = Vec::new();
         let mut package_last_plugins = Vec::new();
+        let mut package_anchored_plugins = Vec::new();
         let mut package_positioned_plugins = Vec::new();
         for package_plugin in package_plugins {
             let PackagePlugin {
@@ -777,7 +808,7 @@ impl<'a> PluginFactory<'a> {
                     name: plugin.call_name().to_string(),
                     hooks: Arc::clone(hooks),
                 });
-            let entry = (plugin, gap_entry);
+            let entry = PluginFactoryEntry::package(plugin, gap_entry);
             match order {
                 HvigorPluginOrder::First => {
                     package_first_plugins.push(entry);
@@ -785,44 +816,17 @@ impl<'a> PluginFactory<'a> {
                 HvigorPluginOrder::Last => {
                     package_last_plugins.push(entry);
                 }
+                HvigorPluginOrder::Anchor { rank, sequence } => {
+                    package_anchored_plugins.push((rank, sequence, entry));
+                }
                 HvigorPluginOrder::Position(position) => {
                     package_positioned_plugins.push((position, entry));
                 }
             }
         }
-        if !package_positioned_plugins.is_empty() {
-            package_positioned_plugins.sort_by_key(|(position, _)| *position);
-            let final_len = ordered_plugins.len() + package_positioned_plugins.len();
-            if let Some((position, plugin)) = package_positioned_plugins
-                .iter()
-                .find(|(position, _)| *position >= final_len)
-            {
-                anyhow::bail!(
-                    "resolved plugin position {position} for '{}' exceeds pipeline length {final_len}",
-                    plugin.0.call_name()
-                );
-            }
-
-            let mut built_ins = ordered_plugins.into_iter();
-            let mut positioned = package_positioned_plugins.into_iter().peekable();
-            let mut merged = Vec::with_capacity(final_len);
-            for slot in 0..final_len {
-                if positioned
-                    .peek()
-                    .is_some_and(|(position, _)| *position == slot)
-                {
-                    if let Some((_, plugin)) = positioned.next() {
-                        merged.push(plugin);
-                    }
-                } else if let Some(plugin) = built_ins.next() {
-                    merged.push(plugin);
-                }
-            }
-            if positioned.peek().is_some() || built_ins.next().is_some() {
-                anyhow::bail!("resolved plugin positions do not form a valid pipeline")
-            }
-            ordered_plugins = merged;
-        }
+        ordered_plugins = Self::merge_anchored_plugins(ordered_plugins, package_anchored_plugins);
+        ordered_plugins =
+            Self::merge_positioned_plugins(ordered_plugins, package_positioned_plugins)?;
         if !package_first_plugins.is_empty() || !package_last_plugins.is_empty() {
             let built_in_plugins = ordered_plugins;
             ordered_plugins = package_first_plugins;
@@ -832,11 +836,11 @@ impl<'a> PluginFactory<'a> {
 
         let gap_entries = ordered_plugins
             .iter()
-            .filter_map(|(_, gap_entry)| gap_entry.clone())
+            .filter_map(|entry| entry.gap_entry.clone())
             .collect::<Vec<_>>();
         let mut plugins = ordered_plugins
             .into_iter()
-            .map(|(plugin, _)| plugin)
+            .map(|entry| entry.plugin)
             .collect::<Vec<_>>();
         if !gap_entries.is_empty() {
             // This is an ordinary Rolldown plugin. Its `pre` buildEnd metadata
@@ -995,6 +999,138 @@ mod tests {
         assert_eq!(names[0], "before-all");
         assert_eq!(names[2], "module-meta");
         assert_eq!(names[3], "after-module-meta");
+    }
+
+    #[test]
+    fn native_anchor_tracks_the_optional_har_dedup_slot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+
+        let hap_plan = make_plan(&root);
+        let mut hap_input = PluginFactoryInput::from_plan(&hap_plan);
+        hap_input.package_plugins = vec![PackagePlugin::new(
+            Arc::new(NamedTestPlugin("before-ets")),
+            HvigorPluginOrder::Anchor {
+                rank: HvigorNativePluginSlot::EtsTransform.rank(),
+                sequence: 0,
+            },
+        )];
+        let hap_names = PluginFactory::new(&hap_plan, hap_input)
+            .build()
+            .expect("HAP plugin factory")
+            .into_iter()
+            .map(|plugin| plugin.call_name().to_string())
+            .collect::<Vec<_>>();
+
+        let mut hsp_plan = make_plan(&root);
+        hsp_plan.output_target = OutputTarget::Hsp;
+        let mut hsp_input = PluginFactoryInput::from_plan(&hsp_plan);
+        hsp_input.har_dedup = HarDedupFactoryMode::Collect {
+            collect_file: root.join("har-dedup.json"),
+            source_har_roots: Vec::new(),
+        };
+        hsp_input.package_plugins = vec![PackagePlugin::new(
+            Arc::new(NamedTestPlugin("before-ets")),
+            HvigorPluginOrder::Anchor {
+                rank: HvigorNativePluginSlot::EtsTransform.rank(),
+                sequence: 0,
+            },
+        )];
+        let hsp_names = PluginFactory::new(&hsp_plan, hsp_input)
+            .build()
+            .expect("HSP plugin factory")
+            .into_iter()
+            .map(|plugin| plugin.call_name().to_string())
+            .collect::<Vec<_>>();
+
+        for names in [&hap_names, &hsp_names] {
+            let custom = names
+                .iter()
+                .position(|name| name == "before-ets")
+                .expect("custom plugin");
+            let ets = names
+                .iter()
+                .position(|name| name == "ets-transform")
+                .expect("ets transform");
+            assert_eq!(custom + 1, ets);
+        }
+        let har = hsp_names
+            .iter()
+            .position(|name| name == "har-dedup")
+            .expect("HAR dedup plugin");
+        let custom = hsp_names
+            .iter()
+            .position(|name| name == "before-ets")
+            .expect("custom plugin");
+        assert!(har < custom);
+    }
+
+    #[test]
+    fn native_anchor_falls_forward_when_a_builtin_is_disabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let plan = make_plan(&root);
+        let mut input = PluginFactoryInput::from_plan(&plan);
+        input.disabled_plugins = vec!["module-meta".to_string()];
+        input.package_plugins = vec![PackagePlugin::new(
+            Arc::new(NamedTestPlugin("module-meta-anchor")),
+            HvigorPluginOrder::Anchor {
+                rank: HvigorNativePluginSlot::ModuleMeta.rank(),
+                sequence: 0,
+            },
+        )];
+
+        let names = PluginFactory::new(&plan, input)
+            .build()
+            .expect("plugin factory")
+            .into_iter()
+            .map(|plugin| plugin.call_name().to_string())
+            .collect::<Vec<_>>();
+        assert!(!names.iter().any(|name| name == "module-meta"));
+        let custom = names
+            .iter()
+            .position(|name| name == "module-meta-anchor")
+            .expect("custom plugin");
+        let resolve = names
+            .iter()
+            .position(|name| name == "ohos-resolve")
+            .expect("OHOS resolver");
+        assert_eq!(custom + 1, resolve);
+    }
+
+    #[test]
+    fn end_anchor_stays_after_the_optional_release_minifier() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        for mode in [BuildMode::Debug, BuildMode::Release] {
+            let mut plan = make_plan(&root);
+            plan.build_mode = mode;
+            let mut input = PluginFactoryInput::from_plan(&plan);
+            input.package_plugins = vec![PackagePlugin::new(
+                Arc::new(NamedTestPlugin("pipeline-end")),
+                HvigorPluginOrder::Anchor {
+                    rank: HvigorNativePluginSlot::END_RANK,
+                    sequence: 0,
+                },
+            )];
+
+            let names = PluginFactory::new(&plan, input)
+                .build()
+                .expect("plugin factory")
+                .into_iter()
+                .map(|plugin| plugin.call_name().to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(names.last().map(String::as_str), Some("pipeline-end"));
+            if plan.build_mode == BuildMode::Release {
+                let minify = names
+                    .iter()
+                    .position(|name| name == "minify")
+                    .expect("release minifier");
+                assert_eq!(minify + 1, names.len() - 1);
+            } else {
+                assert!(!names.iter().any(|name| name == "minify"));
+            }
+        }
     }
 
     #[test]

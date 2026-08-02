@@ -586,4 +586,34 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.ArkdownRolldownPluginContext = nativeBinding.ArkdownRolldownPluginContext
 module.exports.build = nativeBinding.build
+module.exports.collectBuildScriptPluginPaths = nativeBinding.collectBuildScriptPluginPaths
+module.exports.compileHvigorScript = nativeBinding.compileHvigorScript
+module.exports.compileHvigorScriptSync = nativeBinding.compileHvigorScriptSync
+module.exports.discoverBuildScriptFiles = nativeBinding.discoverBuildScriptFiles
+module.exports.hvigorProjectCacheHash = nativeBinding.hvigorProjectCacheHash
+module.exports.hvigorSyncVersionChanged = nativeBinding.hvigorSyncVersionChanged
+module.exports.inspectHvigorContext = nativeBinding.inspectHvigorContext
+module.exports.loadBuildScriptModuleModel = nativeBinding.loadBuildScriptModuleModel
+module.exports.loadBuildScriptRuntimeModel = nativeBinding.loadBuildScriptRuntimeModel
+module.exports.mergeHvigorConfig = nativeBinding.mergeHvigorConfig
+module.exports.parseArkdownBuildCliArgs = nativeBinding.parseArkdownBuildCliArgs
+module.exports.parseHvigorCliArgs = nativeBinding.parseHvigorCliArgs
+module.exports.parseHvigorJsonText = nativeBinding.parseHvigorJsonText
+module.exports.parsePluginAst = nativeBinding.parsePluginAst
+module.exports.planBuildScriptRuntime = nativeBinding.planBuildScriptRuntime
+module.exports.planHvigorCompilePlugins = nativeBinding.planHvigorCompilePlugins
+module.exports.planRolldownPackagePlugins = nativeBinding.planRolldownPackagePlugins
+module.exports.prepareNativeBuildConfig = nativeBinding.prepareNativeBuildConfig
+module.exports.resolveBuildScriptPluginPath = nativeBinding.resolveBuildScriptPluginPath
+module.exports.runHvigorClean = nativeBinding.runHvigorClean
+module.exports.runHvigorPrune = nativeBinding.runHvigorPrune
+module.exports.runRuntimeTasks = nativeBinding.runRuntimeTasks
+module.exports.runtimeCommandPlan = nativeBinding.runtimeCommandPlan
+module.exports.runtimeTaskCatalog = nativeBinding.runtimeTaskCatalog
+module.exports.runtimeTaskReport = nativeBinding.runtimeTaskReport
+module.exports.validateBuildScriptBuildOption = nativeBinding.validateBuildScriptBuildOption
+module.exports.validateHvigorCompilePlugins = nativeBinding.validateHvigorCompilePlugins
+module.exports.writeHvigorBuildMeta = nativeBinding.writeHvigorBuildMeta
+module.exports.writeHvigorSyncModel = nativeBinding.writeHvigorSyncModel

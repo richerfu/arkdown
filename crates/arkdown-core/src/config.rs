@@ -121,6 +121,12 @@ pub struct ModuleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductConfig {
     pub name: String,
+    /// Product-level output artifact name from `app.products[].output.artifactName`.
+    ///
+    /// Latest hvigor uses this for both module and project package naming. A
+    /// missing value preserves the project/module-derived default names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_name: Option<String>,
     pub bundle_name: String,
     pub compatible_sdk_version: String,
     pub compatible_sdk_version_stage: Option<String>,
@@ -199,6 +205,18 @@ pub struct BuildOption {
     /// `buildOption.packOptions.deduplicateHar`.
     #[serde(default)]
     pub deduplicate_har: bool,
+    /// `buildOption.packOptions.appWithSignedPkg`.
+    ///
+    /// When enabled, hvigor emits an additional APP whose embedded HAP/HSP
+    /// archives are signed before the outer APP is signed.
+    #[serde(default)]
+    pub app_with_signed_pkg: bool,
+    /// `buildOption.generateSharedTgz` for HSP outputs.
+    ///
+    /// `None` preserves hvigor's mode-dependent default: enabled for release
+    /// builds and disabled for debug builds.
+    #[serde(default)]
+    pub generate_shared_tgz: Option<bool>,
     /// Absolute path to `buildOption.packingOptions.customizedOptions.basePackage`.
     ///
     /// Hvigor resolves this HAR base ABC relative to the module root before it
@@ -381,6 +399,10 @@ pub struct NativeLibPackageSelection {
 pub struct StrictModeConfig {
     pub case_sensitive_check: bool,
     pub use_normalized_ohm_url: bool,
+    /// Project APP preflight from hvigor's
+    /// `DuplicateDependencyCheck.doTaskAction`.
+    #[serde(default)]
+    pub duplicate_dependency_check: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,11 +421,13 @@ pub struct ArkOptions {
     /// (`buildOption.arkOptions.supportChunks` in `build-profile.json5`).
     #[serde(default)]
     pub support_chunks: bool,
-    /// Whether this HAR is emitted as a ByteCode HAR. Hvigor owns this switch
-    /// at `buildOption.arkOptions.byteCodeHar`; `artifactType` alone is not a
-    /// reliable ByteCode HAR discriminator.
+    /// Explicit `buildOption.arkOptions.byteCodeHar` value.
+    ///
+    /// Presence is significant in hvigor 6.24.3: when this field is absent,
+    /// `strictMode.useNormalizedOHMUrl=true` makes a HAR a ByteCode HAR by
+    /// default, while an explicit `false` disables that default.
     #[serde(default)]
-    pub byte_code_har: bool,
+    pub byte_code_har: Option<bool>,
     /// Whether a ByteCode HAR embeds and compiles its source-HAR dependencies
     /// (`buildOption.arkOptions.bundledDependencies` in hvigor).
     #[serde(default)]
@@ -570,6 +594,28 @@ impl SdkConfig {
             .join("paccheck")
             .join("pacSchema.json");
         path.is_file().then_some(path)
+    }
+
+    /// Return the PAC schema selected by hvigor for the product runtime OS.
+    ///
+    /// HarmonyOS projects use `HosSdkInfo`, whose PAC schema belongs to the
+    /// sibling `hms` component even though ArkTS compilation still uses the
+    /// OpenHarmony ETS loader. OpenHarmony products continue to use the
+    /// selected component's toolchains schema.
+    pub fn pac_schema_path_for_runtime(&self, runtime_os: &str) -> Option<std::path::PathBuf> {
+        if runtime_os.eq_ignore_ascii_case("HarmonyOS") {
+            let path = self
+                .component_root()?
+                .parent()?
+                .join("hms")
+                .join("toolchains")
+                .join("paccheck")
+                .join("pacSchema.json");
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        self.pac_schema_path()
     }
 
     /// SDK permission oracle used by hvigor for requestPermissions checks.

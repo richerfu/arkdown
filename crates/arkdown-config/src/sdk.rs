@@ -823,6 +823,38 @@ mod tests {
     }
 
     #[test]
+    fn test_sdk_config_selects_harmonyos_pac_schema_from_hms_component() {
+        let root = temp_root("harmonyos-pac-schema");
+        let ets_dir = root.join("default").join("openharmony").join("ets");
+        let ohos_schema = root
+            .join("default")
+            .join("openharmony")
+            .join("toolchains/paccheck/pacSchema.json");
+        let hms_schema = root
+            .join("default")
+            .join("hms")
+            .join("toolchains/paccheck/pacSchema.json");
+        fs::create_dir_all(&ets_dir).expect("create SDK ETS directory");
+        fs::create_dir_all(ohos_schema.parent().unwrap()).expect("create OpenHarmony PAC dir");
+        fs::create_dir_all(hms_schema.parent().unwrap()).expect("create HarmonyOS PAC dir");
+        fs::write(&ohos_schema, "{}").expect("write OpenHarmony PAC schema");
+        fs::write(&hms_schema, "{}").expect("write HarmonyOS PAC schema");
+
+        let cfg = sdk_config_from_root(&root, Some(12));
+
+        assert_eq!(
+            cfg.pac_schema_path_for_runtime("HarmonyOS").as_deref(),
+            Some(hms_schema.as_path())
+        );
+        assert_eq!(
+            cfg.pac_schema_path_for_runtime("OpenHarmony").as_deref(),
+            Some(ohos_schema.as_path())
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_sdk_config_discovers_permission_module_when_present() {
         let root = temp_root("permission-module");
         let ets_dir = root.join("default").join("openharmony").join("ets");

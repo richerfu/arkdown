@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use arkdown_path::ArtifactPathSerializer;
-use rolldown_sourcemap::SourceMapBuilder;
+use rolldown_sourcemap::{OwnedSourceMap, SourceMapBuilder};
 use rustc_hash::FxHashMap;
 
 /// Source Map helpers used by the ETS transforms.
@@ -265,6 +265,46 @@ export default class ArkdownStartupConfig extends StartupConfigEntry {
             "AAAA,MAAM,CAAC,OAAO,OAAO,aAAa;IAChC,KAAK,CAAC,IAAI;IACV,CAAC;CACF"
         );
     }
+
+    #[test]
+    fn standard_export_const_matches_latest_typescript_printer_mappings() {
+        let source = "export const dependencyValue: string = 'dependency';\n";
+        let source_map = HvigorStandardSourceMapBuilder::new(source, source, "Index.ets")
+            .build()
+            .expect("standard source map");
+        let value: serde_json::Value = serde_json::from_str(&source_map).expect("source map JSON");
+
+        assert_eq!(
+            value["mappings"],
+            "AAAA,MAAM,CAAC,MAAM,eAAe,EAAE,MAAM,GAAG,YAAY,CAAC"
+        );
+    }
+
+    #[test]
+    fn standard_named_import_matches_latest_typescript_printer_boundaries() {
+        let original = concat!(
+            "import { dependencyValue } from 'share-config-har';\n",
+            "\n",
+            "export function greet(name: string): string {\n",
+            "  return `Hello, ${name}! ${dependencyValue}`;\n",
+            "}\n",
+        );
+        let generated = concat!(
+            "import { dependencyValue } from \"@normalized:N&&&share-config-har/Index&1.0.0\";\n",
+            "export function greet(name: string): string {\n",
+            "    return `Hello, ${name}! ${dependencyValue}`;\n",
+            "}\n",
+        );
+        let source_map = HvigorStandardSourceMapBuilder::new(generated, original, "Index.ets")
+            .build()
+            .expect("standard source map");
+        let value: serde_json::Value = serde_json::from_str(&source_map).expect("source map JSON");
+
+        assert_eq!(
+            value["mappings"],
+            "OAAO,EAAE,eAAe,EAAE;AAE1B,MAAM,UAAU,KAAK,CAAC,IAAI,EAAE,MAAM,GAAG,MAAM;IACzC,OAAO,UAAU,IAAI,KAAK,eAAe,EAAE,CAAC;AAC9C,CAAC"
+        );
+    }
 }
 
 use oxc_allocator::Allocator;
@@ -284,6 +324,225 @@ pub struct TokenSourceMapBuilder<'a> {
 
 pub struct TypeScriptCommentOnlySourceMap<'a> {
     id: &'a str,
+}
+
+/// Reproduce the source-map boundaries emitted by the installed SDK's
+/// TypeScript `Program.emit` path after OXC has erased TypeScript syntax.
+///
+/// OXC supplies the authoritative transformed-node positions. TypeScript adds
+/// a small set of end boundaries around retained comments, identifiers,
+/// modifiers, closing parentheses, and synthesized semicolons. Keeping this as
+/// a post-processor over OXC's real map avoids reconstructing erased type spans
+/// from source text.
+pub struct TypeScriptJavaScriptSourceMapBuilder<'a> {
+    generated: &'a str,
+    original: &'a str,
+    id: &'a str,
+    oxc_source_map: &'a str,
+    generated_line_offset: u32,
+}
+
+impl<'a> TypeScriptJavaScriptSourceMapBuilder<'a> {
+    pub fn new(
+        generated: &'a str,
+        original: &'a str,
+        id: &'a str,
+        oxc_source_map: &'a str,
+    ) -> Self {
+        Self {
+            generated,
+            original,
+            id,
+            oxc_source_map,
+            generated_line_offset: 0,
+        }
+    }
+
+    pub fn with_generated_line_offset(mut self, generated_line_offset: u32) -> Self {
+        self.generated_line_offset = generated_line_offset;
+        self
+    }
+
+    pub fn build(&self) -> Option<String> {
+        let decoded = OwnedSourceMap::from_json_string(self.oxc_source_map).ok()?;
+        let generated_tokens = SourceMapTokenCollector::new(self.generated, self.id).collect()?;
+        let original_tokens = SourceMapTokenCollector::new(self.original, self.id).collect()?;
+        let generated_by_position = generated_tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| ((token.line, token.col), index))
+            .collect::<FxHashMap<_, _>>();
+        let original_by_position = original_tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| ((token.line, token.col), index))
+            .collect::<FxHashMap<_, _>>();
+        let mut mappings = FxHashMap::<(u32, u32), (u32, u32)>::default();
+        let mut resolved_token_ends = FxHashMap::<(u32, u32), (u32, u32)>::default();
+
+        for mapping in decoded.get_tokens() {
+            let Some(source_id) = mapping.get_source_id() else {
+                continue;
+            };
+            if source_id != 0 {
+                continue;
+            }
+            let generated_position = (mapping.get_dst_line(), mapping.get_dst_col());
+            let source_position = (mapping.get_src_line(), mapping.get_src_col());
+            let generated_token = generated_by_position
+                .get(&generated_position)
+                .and_then(|index| generated_tokens.get(*index));
+            let original_token = original_by_position
+                .get(&source_position)
+                .and_then(|index| original_tokens.get(*index));
+
+            if !generated_token.is_some_and(|token| token.kind == Kind::RParen) {
+                mappings.insert(
+                    (
+                        generated_position.0 + self.generated_line_offset,
+                        generated_position.1,
+                    ),
+                    source_position,
+                );
+            }
+
+            let (Some(generated_token), Some(original_token)) = (generated_token, original_token)
+            else {
+                continue;
+            };
+            resolved_token_ends.insert(
+                (generated_token.line, generated_token.col),
+                (original_token.end_line, original_token.end_col),
+            );
+            if Self::maps_token_end(generated_token) {
+                mappings.insert(
+                    (
+                        generated_token.end_line + self.generated_line_offset,
+                        generated_token.end_col,
+                    ),
+                    (original_token.end_line, original_token.end_col),
+                );
+            }
+        }
+
+        self.add_retained_comment_boundaries(&mut mappings);
+        self.add_synthesized_semicolon_boundaries(
+            &generated_tokens,
+            &resolved_token_ends,
+            &mut mappings,
+        );
+
+        let source = decoded
+            .get_source(0)
+            .filter(|source| !source.is_empty())
+            .unwrap_or(self.id);
+        let mut builder = SourceMapBuilder::default();
+        if let Some(file) = decoded.get_file() {
+            builder.set_file(file);
+        }
+        let source_id = builder.set_source_and_content(source, "");
+        let mut mappings = mappings.into_iter().collect::<Vec<_>>();
+        mappings
+            .sort_by_key(|((generated_line, generated_col), _)| (*generated_line, *generated_col));
+        for ((generated_line, generated_col), (source_line, source_col)) in mappings {
+            builder.add_token(
+                generated_line,
+                generated_col,
+                source_line,
+                source_col,
+                Some(source_id),
+                None,
+            );
+        }
+        let mut source_map = builder.into_sourcemap();
+        source_map.set_source_contents(vec![None]);
+        Some(source_map.to_json_string())
+    }
+
+    fn maps_token_end(token: &TokenInfo<'_>) -> bool {
+        token.kind == Kind::Ident
+            || token.kind.is_number()
+            || matches!(
+                token.kind,
+                Kind::Export
+                    | Kind::Default
+                    | Kind::Async
+                    | Kind::Void
+                    | Kind::Arrow
+                    | Kind::RParen
+            )
+    }
+
+    fn add_retained_comment_boundaries(&self, mappings: &mut FxHashMap<(u32, u32), (u32, u32)>) {
+        let original_lines = self
+            .original
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .collect::<Vec<_>>();
+        let mut original_line_index = 0usize;
+        for (generated_line_index, generated_line) in self.generated.split('\n').enumerate() {
+            let generated_line = generated_line.strip_suffix('\r').unwrap_or(generated_line);
+            let generated_trimmed = generated_line.trim_start();
+            if !generated_trimmed.starts_with("//") {
+                continue;
+            }
+            let Some(relative_original_index) = original_lines[original_line_index..]
+                .iter()
+                .position(|line| line.trim_start() == generated_trimmed)
+            else {
+                continue;
+            };
+            original_line_index += relative_original_index;
+            let original_line = original_lines[original_line_index];
+            let generated_col = generated_line.len() - generated_trimmed.len();
+            let original_col = original_line.len() - original_line.trim_start().len();
+            mappings.insert(
+                (
+                    generated_line_index as u32 + self.generated_line_offset,
+                    generated_col as u32,
+                ),
+                (original_line_index as u32, original_col as u32),
+            );
+            mappings.insert(
+                (
+                    generated_line_index as u32 + self.generated_line_offset,
+                    generated_line.len() as u32,
+                ),
+                (original_line_index as u32, original_line.len() as u32),
+            );
+            original_line_index += 1;
+        }
+    }
+
+    fn add_synthesized_semicolon_boundaries(
+        &self,
+        generated_tokens: &[TokenInfo<'_>],
+        resolved_token_ends: &FxHashMap<(u32, u32), (u32, u32)>,
+        mappings: &mut FxHashMap<(u32, u32), (u32, u32)>,
+    ) {
+        for (index, token) in generated_tokens.iter().enumerate() {
+            if token.kind != Kind::Semicolon {
+                continue;
+            }
+            let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|index| generated_tokens.get(index))
+                .filter(|previous| previous.end_line == token.line)
+            else {
+                continue;
+            };
+            let Some((source_line, source_col)) = resolved_token_ends
+                .get(&(previous.line, previous.col))
+                .copied()
+            else {
+                continue;
+            };
+            mappings.insert(
+                (token.end_line + self.generated_line_offset, token.end_col),
+                (source_line, source_col),
+            );
+        }
+    }
 }
 
 impl<'a> TypeScriptCommentOnlySourceMap<'a> {
@@ -361,6 +620,11 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
         let original_bindings =
             OriginalImportBindingCollector::new(self.original, self.id).collect();
         let mut entries = MapEntryCollector::default();
+        let original_import_tokens = original_tokens
+            .iter()
+            .filter(|token| token.start < original_import_end)
+            .collect::<Vec<_>>();
+        let mut original_import_token_index = 0usize;
 
         for token in generated_tokens
             .iter()
@@ -371,6 +635,28 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
                 entries.push(token.line, token.col, src_line, src_col);
                 let (src_line, src_col) = offset_to_line_col(self.original, *source_end);
                 entries.push(token.end_line, token.end_col, src_line, src_col);
+                continue;
+            }
+            if token.is_open_brace() || token.is_close_brace() {
+                let Some(relative_index) = original_import_tokens[original_import_token_index..]
+                    .iter()
+                    .position(|original| original.kind == token.kind)
+                else {
+                    continue;
+                };
+                original_import_token_index += relative_index;
+                let original = original_import_tokens[original_import_token_index];
+                original_import_token_index += 1;
+                if token.is_open_brace() {
+                    entries.push(token.line, token.col, original.line, original.col);
+                } else {
+                    entries.push(
+                        token.end_line,
+                        token.end_col,
+                        original.end_line,
+                        original.end_col,
+                    );
+                }
             }
         }
 
@@ -950,7 +1236,7 @@ impl SourceMapTokenInfo for TokenInfo<'_> {
     }
 
     fn starts_type_name(&self) -> bool {
-        matches!(self.kind, Kind::Class | Kind::Extends)
+        matches!(self.kind, Kind::Class | Kind::Extends | Kind::Colon)
     }
 
     fn is_identifier_name(&self) -> bool {

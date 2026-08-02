@@ -19,14 +19,14 @@ fn source_har_declarations_preserve_public_signatures_and_tree() {
   )
   .expect("write ArkTS source");
 
-  HarDeclarationGenerator::new_har(temp.path(), &source_dir)
+  HarDeclarationGenerator::new_har(temp.path(), &source_dir, "library")
     .generate()
     .expect("generate declarations");
 
   let declaration = std::fs::read_to_string(
     ModuleBuildLayout::new(temp.path())
       .declarations_dir()
-      .join("model/User.d.ets"),
+      .join("library/src/main/ets/model/User.d.ets"),
   )
   .expect("read generated declaration");
   assert!(declaration.contains("interface User"), "{declaration}");
@@ -52,7 +52,7 @@ fn invalid_source_har_declaration_input_fails_the_build() {
   std::fs::write(source_dir.join("Invalid.ets"), "export interface {")
     .expect("write invalid source");
 
-  let error = HarDeclarationGenerator::new_har(temp.path(), &source_dir)
+  let error = HarDeclarationGenerator::new_har(temp.path(), &source_dir, "library")
     .generate()
     .expect_err("invalid source must fail declaration generation")
     .to_string();

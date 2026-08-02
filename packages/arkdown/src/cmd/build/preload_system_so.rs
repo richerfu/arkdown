@@ -127,8 +127,14 @@ impl<'a> PreloadSystemSoArtifactWriter<'a> {
     }
   }
 
-  pub(super) fn write(&self) -> Result<()> {
-    self.write_preload_json()?;
+  /// Materialize the CompileArkTS sidecar consumed by hvigor's later
+  /// `ProcessCompiledResources` task without mutating compiled resources yet.
+  pub(super) fn write_preload_artifact(&self) -> Result<()> {
+    self.write_preload_json()
+  }
+
+  /// Apply hvigor `ProcessCompiledResources` after `GeneratePkgModuleJson`.
+  pub(super) fn process_compiled_resources(&self) -> Result<()> {
     if self.tasks.is_empty()
       || !matches!(
         self.module_type,
@@ -276,15 +282,15 @@ mod tests {
       ohm_url: "@ohos:hilog".to_string(),
     }];
 
-    PreloadSystemSoArtifactWriter::new(
+    let writer = PreloadSystemSoArtifactWriter::new(
       &preload,
       &profile,
       &module_json,
       &OhosModuleType::Entry,
       &tasks,
-    )
-    .write()
-    .unwrap();
+    );
+    writer.write_preload_artifact().unwrap();
+    writer.process_compiled_resources().unwrap();
 
     let preload_value: serde_json::Value =
       serde_json::from_slice(&fs_err::read(preload).unwrap()).unwrap();

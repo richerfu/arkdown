@@ -62,6 +62,21 @@ impl PackageSnapshot {
         Ok(Some(Self::from_parsed(root, pkg)?))
     }
 
+    /// Build from the complete object held by hvigor's in-memory
+    /// `OhPackageLoader` after a plugin context mutation.
+    pub fn from_runtime_value(
+        root: &Path,
+        value: &serde_json::Value,
+    ) -> Result<Self, PackageSnapshotError> {
+        let path = root.join("oh-package.json5");
+        let package =
+            serde_json::from_value(value.clone()).map_err(|error| PackageSnapshotError::Parse {
+                path,
+                message: error.to_string(),
+            })?;
+        Self::from_parsed(root, package)
+    }
+
     pub(crate) fn from_parsed(
         root: &Path,
         pkg: RawOhPackage,

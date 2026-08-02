@@ -27,11 +27,11 @@ pub(super) struct HarDeclarationGenerator<'a> {
 }
 
 impl<'a> HarDeclarationGenerator<'a> {
-  pub(super) fn new_har(module_root: &'a Path, source_dir: &'a Path) -> Self {
+  pub(super) fn new_har(module_root: &'a Path, source_dir: &'a Path, module_name: &str) -> Self {
     Self {
       module_root,
       source_dir,
-      output_prefix: PathBuf::new(),
+      output_prefix: PathBuf::from(module_name).join("src/main/ets"),
     }
   }
 

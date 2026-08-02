@@ -41,11 +41,17 @@ impl HvigorTypescriptPrinter {
     ) -> HvigorTypescriptPrintOutput {
         let mut numeric_literals = NumericLiteralInventory::default();
         numeric_literals.visit_program(program);
+        let mut string_literals = StringLiteralInventory::new(program.source_text);
+        string_literals.visit_program(program);
         let mut original_boundaries = TypeScriptSourceBoundaryInventory::default();
         original_boundaries.visit_program(program);
         let generated = Codegen::new().with_options(options).build(program);
-        let layout =
-            HvigorTypescriptLayout::new(generated.code, numeric_literals.raw_literals).format();
+        let layout = HvigorTypescriptLayout::new(
+            generated.code,
+            numeric_literals.raw_literals,
+            string_literals.literals,
+        )
+        .format();
         let source_map = generated.map.map(|source_map| {
             let supplemental = source_text
                 .map(|source_text| {
@@ -371,16 +377,63 @@ struct HvigorRawNumericLiteral {
     raw: String,
 }
 
+struct StringLiteralInventory<'a> {
+    source: &'a str,
+    literals: Vec<HvigorSourceStringLiteral>,
+}
+
+impl<'a> StringLiteralInventory<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            literals: Vec::new(),
+        }
+    }
+
+    fn raw_literal(&self, literal: &StringLiteral<'_>) -> Option<String> {
+        if literal.span.is_empty() {
+            return None;
+        }
+        let raw = self
+            .source
+            .get(literal.span.start as usize..literal.span.end as usize)?;
+        let bytes = raw.as_bytes();
+        let quote = *bytes.first()?;
+        (bytes.len() >= 2 && matches!(quote, b'\'' | b'"') && bytes.last().copied() == Some(quote))
+            .then(|| raw.to_string())
+    }
+}
+
+impl<'a> Visit<'a> for StringLiteralInventory<'_> {
+    fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+        self.literals.push(HvigorSourceStringLiteral {
+            value: literal.value.to_string(),
+            raw: self.raw_literal(literal),
+        });
+    }
+}
+
+struct HvigorSourceStringLiteral {
+    value: String,
+    raw: Option<String>,
+}
+
 struct HvigorTypescriptLayout {
     code: String,
     raw_numeric_literals: Vec<HvigorRawNumericLiteral>,
+    source_string_literals: Vec<HvigorSourceStringLiteral>,
 }
 
 impl HvigorTypescriptLayout {
-    fn new(code: String, raw_numeric_literals: Vec<HvigorRawNumericLiteral>) -> Self {
+    fn new(
+        code: String,
+        raw_numeric_literals: Vec<HvigorRawNumericLiteral>,
+        source_string_literals: Vec<HvigorSourceStringLiteral>,
+    ) -> Self {
         Self {
             code,
             raw_numeric_literals,
+            source_string_literals,
         }
     }
 
@@ -397,6 +450,7 @@ impl HvigorTypescriptLayout {
         let mut layout = HvigorLayoutInventory::new(&self.code);
         layout.visit_program(&parsed.program);
         layout.add_numeric_literal_edits(&self.raw_numeric_literals);
+        layout.add_string_literal_edits(&self.source_string_literals);
         layout.apply()
     }
 }
@@ -528,6 +582,7 @@ struct HvigorLayoutInventory<'a> {
     source: &'a str,
     edits: Vec<HvigorTextEdit>,
     numeric_literals: Vec<(Span, f64)>,
+    string_literals: Vec<(Span, String)>,
 }
 
 impl<'a> HvigorLayoutInventory<'a> {
@@ -536,6 +591,7 @@ impl<'a> HvigorLayoutInventory<'a> {
             source,
             edits: Vec::new(),
             numeric_literals: Vec::new(),
+            string_literals: Vec::new(),
         }
     }
 
@@ -558,6 +614,29 @@ impl<'a> HvigorLayoutInventory<'a> {
                 self.edits.push(HvigorTextEdit {
                     span,
                     replacement: raw_literal.raw.clone(),
+                    kind: HvigorTextEditKind::Other,
+                });
+            }
+        }
+    }
+
+    fn add_string_literal_edits(&mut self, source_literals: &[HvigorSourceStringLiteral]) {
+        for (source_literal, (span, generated_value)) in
+            source_literals.iter().zip(&self.string_literals)
+        {
+            if source_literal.value != *generated_value {
+                continue;
+            }
+            let Some(raw) = source_literal.raw.as_ref() else {
+                continue;
+            };
+            let Some(current) = self.source.get(span.start as usize..span.end as usize) else {
+                continue;
+            };
+            if current != raw {
+                self.edits.push(HvigorTextEdit {
+                    span: *span,
+                    replacement: raw.clone(),
                     kind: HvigorTextEditKind::Other,
                 });
             }
@@ -645,6 +724,11 @@ impl<'a> HvigorLayoutInventory<'a> {
 impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
     fn visit_numeric_literal(&mut self, literal: &NumericLiteral<'a>) {
         self.numeric_literals.push((literal.span, literal.value));
+    }
+
+    fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+        self.string_literals
+            .push((literal.span, literal.value.to_string()));
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {

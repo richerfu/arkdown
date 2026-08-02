@@ -18,4 +18,18 @@ pub enum PackError {
     InvalidPattern { pattern: String, message: String },
     #[error("Unsupported ZIP compression for {entry}: {method}")]
     UnsupportedZipCompression { entry: String, method: String },
+    #[error("Invalid APP packaging plan: {0}")]
+    InvalidAppPlan(String),
+    #[error("Duplicate APP artifact output name: {0}")]
+    DuplicateAppArtifactName(String),
+    #[error("Invalid remote HSP layout at {path}: {message}")]
+    InvalidRemoteHsp { path: String, message: String },
+    #[error(
+        "SDK APP packing tool failed with status {status:?}; stdout: {stdout}; stderr: {stderr}"
+    )]
+    AppPackingToolFailed {
+        status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
 }

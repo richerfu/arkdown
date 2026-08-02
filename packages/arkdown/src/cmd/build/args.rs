@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use arkdown::plugins::ets_transform::ModuleAnalyzerKind;
@@ -39,6 +40,19 @@ impl From<ModuleAnalyzerChoice> for ModuleAnalyzerKind {
       ModuleAnalyzerChoice::Yuku => Self::Yuku,
     }
   }
+}
+
+/// One selected native hvigor command root.
+///
+/// The Node task graph serializes only explicit partial-task roots here. The
+/// coordinator completes their dependency closure and stops after every root
+/// boundary has completed, matching hvigor's selected DAG execution.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTaskRoot {
+  pub module_name: String,
+  pub target_name: Option<String>,
+  pub task_name: String,
 }
 
 #[derive(Args, Clone, Default)]
@@ -165,14 +179,63 @@ pub struct BuildArgs {
   #[clap(skip)]
   pub module_hvigor_overrides: BTreeMap<String, serde_json::Value>,
 
+  /// Complete in-memory OHOS context replacements owned by the TypeScript
+  /// plugin runtime. Watch rebuilds must retain these values instead of
+  /// silently reloading the original files.
+  #[clap(skip)]
+  pub runtime_context_overrides: Option<Arc<arkdown_config::RuntimeContextOverrides>>,
+
+  /// Custom task input paths declared through Hvigor TaskInput. The Rust
+  /// watcher adds these to its typed watch inventory.
+  #[clap(skip)]
+  pub custom_task_input_paths: Vec<PathBuf>,
+
+  /// Numeric SDK compression level mapped from hvigor-config's
+  /// `ohos.pack.compressLevel` (`fast`/`standard`/`ultimate`).
+  #[clap(skip)]
+  pub pack_compress_level: Option<u32>,
+
+  /// Device types injected by DevEco through `ohos.align.deviceTypes`.
+  #[clap(skip)]
+  pub align_device_types: Vec<String>,
+
+  /// Explicit `ohos.collect.debugSymbol` override.
+  #[clap(skip)]
+  pub collect_debug_symbol: Option<bool>,
+
+  /// Runtime-owned `ohos.uiTransform.Optimization` property.
+  #[clap(skip)]
+  pub ui_transform_optimization: bool,
+
+  /// Runtime-owned `ohos.integratedHsp.useGetCurrentBundleName` property.
+  #[clap(skip)]
+  pub integrated_hsp_use_get_current_bundle_name: bool,
+
+  /// Runtime-owned `ohos.byteCodeHar.integratedOptimization` property.
+  #[clap(skip)]
+  pub byte_code_har_integrated_optimization: bool,
+
+  /// Runtime-owned `hvigor.keepDependency` property.
+  #[clap(skip = true)]
+  pub keep_dependency: bool,
+
+  /// Hvigor CLI `parameterFile` extra-parameter override.
+  #[clap(skip)]
+  pub parameter_file_override: Option<PathBuf>,
+
   /// Node executable supplied by the same-process JavaScript runtime.
   #[clap(skip)]
   pub node_executable: Option<PathBuf>,
+
+  /// Explicit partial hvigor roots selected by the Node task graph.
+  #[clap(skip)]
+  pub native_task_roots: Vec<NativeTaskRoot>,
 }
 
 pub struct BuildCommand {
   args: BuildArgs,
   package_plugins: Vec<PackagePlugin>,
+  task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
 }
 
 impl BuildCommand {
@@ -180,6 +243,7 @@ impl BuildCommand {
     Self {
       args,
       package_plugins: Vec::new(),
+      task_observer: None,
     }
   }
 
@@ -188,12 +252,21 @@ impl BuildCommand {
     self
   }
 
+  pub fn with_task_observer(
+    mut self,
+    task_observer: Arc<dyn super::coordinator::BuildTaskObserver>,
+  ) -> Self {
+    self.task_observer = Some(task_observer);
+    self
+  }
+
   pub async fn execute(self) -> Result<()> {
-    use arkdown_config::load_config;
+    use arkdown_config::ArkdownConfigLoader;
     use arkdown_session::{BuildScriptOverrideInventory, BuildSessionBuilder};
 
     let mut args = self.args;
     let package_plugins = self.package_plugins;
+    let task_observer = self.task_observer;
     let project_root = args
       .project
       .clone()
@@ -208,8 +281,16 @@ impl BuildCommand {
       );
     }
 
-    let mut config = load_config(&project_root, mode, target, args.product.as_deref(), None)
-      .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let config_loader =
+      ArkdownConfigLoader::new(&project_root, mode, target, args.product.as_deref(), None);
+    let mut config = if let Some(runtime_overrides) = args.runtime_context_overrides.as_deref() {
+      config_loader
+        .with_runtime_overrides(runtime_overrides)
+        .load()
+    } else {
+      config_loader.load()
+    }
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
     let static_inventory =
       if args.project_hvigor_overrides.is_none() && args.module_hvigor_overrides.is_empty() {
         Some(
@@ -239,15 +320,24 @@ impl BuildCommand {
       config.product.build_version = Some(build_version.clone());
     }
     let config = std::sync::Arc::new(config);
+    let mut session_builder = BuildSessionBuilder::new(config.clone());
+    if let Some(runtime_overrides) = args.runtime_context_overrides.clone() {
+      session_builder = session_builder.with_runtime_overrides(runtime_overrides);
+    }
+    if let Some(parameter_file_override) = args.parameter_file_override.clone() {
+      session_builder = session_builder.with_parameter_file_override(parameter_file_override);
+    }
     let session = std::sync::Arc::new(
-      BuildSessionBuilder::new(config.clone())
+      session_builder
         .build()
         .map_err(|e| anyhow::anyhow!("{}", e))?,
     );
-    let output = super::coordinator::BuildCoordinator::new(session, config, args)
-      .with_package_plugins(package_plugins)
-      .execute()
-      .await?;
+    let mut coordinator = super::coordinator::BuildCoordinator::new(session, config, args)
+      .with_package_plugins(package_plugins);
+    if let Some(task_observer) = task_observer {
+      coordinator = coordinator.with_task_observer(task_observer);
+    }
+    let output = coordinator.execute().await?;
     tracing::debug!(
       artifacts = output.artifact_paths.len(),
       "build command completed"

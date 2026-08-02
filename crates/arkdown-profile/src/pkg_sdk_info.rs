@@ -183,6 +183,7 @@ mod tests {
                 package_name: package_name.to_string(),
                 package_root: PathBuf::from(format!("/{package_name}")),
                 kind: DependencyEdgeKind::Dependency,
+                is_transitive: package_name == "shared-hsp",
             });
         }
 

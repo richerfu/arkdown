@@ -504,6 +504,13 @@ pub struct ParallelDeflatedFiles {
 
 impl ParallelDeflatedFiles {
     pub fn compress_hvigor_default(entries: Vec<(String, PathBuf)>) -> Result<Self, PackError> {
+        Self::compress(entries, HVIGOR_DEFAULT_COMPRESS_LEVEL)
+    }
+
+    pub fn compress(
+        entries: Vec<(String, PathBuf)>,
+        compress_level: u32,
+    ) -> Result<Self, PackError> {
         let temp_dir = tempfile::Builder::new()
             .prefix("parallelscatter")
             .tempdir()?;
@@ -512,7 +519,13 @@ impl ParallelDeflatedFiles {
             .into_par_iter()
             .enumerate()
             .map(|(index, (archive_path, source_path))| {
-                ParallelDeflatedEntry::compress(index, archive_path, source_path, &temp_root)
+                ParallelDeflatedEntry::compress(
+                    index,
+                    archive_path,
+                    source_path,
+                    &temp_root,
+                    compress_level,
+                )
             })
             .collect::<Result<Vec<_>, PackError>>()?;
         compressed.sort_by_key(|entry| entry.index);
@@ -543,16 +556,14 @@ impl ParallelDeflatedEntry {
         archive_path: String,
         source_path: PathBuf,
         temp_root: &Path,
+        compress_level: u32,
     ) -> Result<Self, PackError> {
         let compressed_path = temp_root.join(format!("n{}", index + 1));
         let source = fs_err::File::open(&source_path)?;
         let mut reader = BufReader::with_capacity(PACK_WRITE_BUFFER_SIZE, source);
         let output = fs_err::File::create(&compressed_path)?;
         let output = BufWriter::with_capacity(PACK_WRITE_BUFFER_SIZE, output);
-        let encoder = DeflateEncoder::new(
-            output,
-            flate2::Compression::new(HVIGOR_DEFAULT_COMPRESS_LEVEL),
-        );
+        let encoder = DeflateEncoder::new(output, flate2::Compression::new(compress_level));
         let mut data_writer = TrackingWriter::new(encoder);
         std::io::copy(&mut reader, &mut data_writer)?;
         let (encoder, stats) = data_writer.finish()?;

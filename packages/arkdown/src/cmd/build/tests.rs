@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use tempfile::TempDir;
 
 use super::intermediates::IntermediateArtifactWriter;
@@ -7,13 +9,19 @@ use super::layout::RestoolLayout;
 fn release_source_maps_move_out_of_loader_output_like_hvigor() {
   let temp = TempDir::new().expect("create source-map fixture root");
   let origin = temp.path().join("loader_out/default/ets/sourceMaps.map");
+  let compile_cache = temp.path().join("CompileArkTS/sourceMaps.json");
   let intermediate = temp.path().join("source_map/default/sourceMaps.map");
   std::fs::create_dir_all(origin.parent().unwrap()).expect("create loader output");
   std::fs::write(&origin, b"source-map").expect("write source map");
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
-    .stage_source_maps(&origin, &intermediate, &arkdown_core::BuildMode::Release)
+    .stage_source_maps(
+      &origin,
+      &compile_cache,
+      &intermediate,
+      &arkdown_core::BuildMode::Release,
+    )
     .expect("stage release source map");
 
   assert_eq!(
@@ -21,23 +29,113 @@ fn release_source_maps_move_out_of_loader_output_like_hvigor() {
     b"source-map"
   );
   assert!(!origin.exists());
+  assert_eq!(
+    std::fs::read(&compile_cache).expect("read CompileArkTS source map"),
+    b"source-map"
+  );
 }
 
 #[test]
 fn debug_source_maps_remain_in_loader_output_after_staging() {
   let temp = TempDir::new().expect("create source-map fixture root");
   let origin = temp.path().join("loader_out/default/ets/sourceMaps.map");
+  let compile_cache = temp.path().join("CompileArkTS/sourceMaps.json");
   let intermediate = temp.path().join("source_map/default/sourceMaps.map");
   std::fs::create_dir_all(origin.parent().unwrap()).expect("create loader output");
   std::fs::write(&origin, b"source-map").expect("write source map");
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
-    .stage_source_maps(&origin, &intermediate, &arkdown_core::BuildMode::Debug)
+    .stage_source_maps(
+      &origin,
+      &compile_cache,
+      &intermediate,
+      &arkdown_core::BuildMode::Debug,
+    )
     .expect("stage debug source map");
 
   assert!(origin.is_file());
   assert!(intermediate.is_file());
+  assert!(compile_cache.is_file());
+}
+
+#[test]
+fn package_har_publishes_source_maps_to_outputs_mapping_like_latest_hvigor() {
+  let temp = TempDir::new().expect("create PackageHar source-map fixture root");
+  let module_layout = super::layout::ModuleBuildLayout::new(temp.path());
+  let intermediate = module_layout.source_maps_intermediate();
+  std::fs::create_dir_all(intermediate.parent().unwrap()).expect("create source-map directory");
+  std::fs::write(&intermediate, b"package-har-source-map").expect("write source map");
+  let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+  writer
+    .publish_package_source_maps(
+      &intermediate,
+      None,
+      &module_layout.output_mapping_source_maps(),
+    )
+    .expect("publish PackageHar source map");
+
+  assert_eq!(
+    std::fs::read(module_layout.output_mapping_source_maps())
+      .expect("read published PackageHar source map"),
+    b"package-har-source-map"
+  );
+}
+
+#[test]
+fn empty_router_map_writes_latest_process_router_map_task_outputs() {
+  let temp = TempDir::new().expect("create empty router-map fixture root");
+  let module_layout = super::layout::ModuleBuildLayout::new(temp.path());
+  let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+  writer
+    .write_empty_router_map_intermediates(temp.path())
+    .expect("write empty ProcessRouterMap outputs");
+
+  for output in [
+    module_layout.router_map_loader(),
+    module_layout.router_map_temp(),
+  ] {
+    assert_eq!(
+      std::fs::read_to_string(&output).expect("read empty router-map output"),
+      r#"{"routerMap":[]}"#
+    );
+  }
+}
+
+#[test]
+fn module_info_writer_matches_latest_conditional_output_and_stale_cleanup() {
+  let temp = TempDir::new().expect("create module-info fixture root");
+  let module_root = temp.path().join("entry");
+  let output = module_root.join("build/default/generated/profile/default/ModuleInfo.ts");
+  let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+  writer
+    .write_module_info(&module_root, "default", true)
+    .expect("write enabled ModuleInfo.ts");
+  assert_eq!(
+    std::fs::read_to_string(&output).expect("read ModuleInfo.ts"),
+    "\n//@ts-noCheck\nexport const __MODULE_NAME__: string = __getCurrentModuleName__()\nexport const __BUNDLE_NAME__: string = __getCurrentBundleName__()\n"
+  );
+
+  writer
+    .write_module_info(&module_root, "default", false)
+    .expect("remove stale disabled ModuleInfo.ts");
+  assert!(!output.exists());
+}
+
+#[test]
+fn package_har_cache_path_matches_latest_target_scoped_task_cache() {
+  let module_root = PathBuf::from("project").join("entry");
+  let layout = super::layout::ModuleBuildLayout::new(&module_root);
+
+  assert_eq!(
+    layout.package_har_cache_dir("default"),
+    module_root
+      .join("build/default/cache/default")
+      .join("default@PackageHar")
+  );
 }
 
 #[test]
@@ -225,4 +323,67 @@ fn platform_image_transcoder_name() -> &'static str {
   } else {
     "libimage_transcoder_shared.dylib"
   }
+}
+
+#[tokio::test]
+async fn partial_hvigor_execution_stops_only_after_every_selected_root() {
+  use super::args::NativeTaskRoot;
+  use super::coordinator::{BuildTaskLifecycle, NativeTaskCutoffReached};
+
+  let mut lifecycle = BuildTaskLifecycle::new(
+    None,
+    vec![
+      NativeTaskRoot {
+        module_name: "entry".to_string(),
+        target_name: Some("default".to_string()),
+        task_name: "CreateBuildProfile".to_string(),
+      },
+      NativeTaskRoot {
+        module_name: "entry".to_string(),
+        target_name: Some("default".to_string()),
+        task_name: "CompileArkTS".to_string(),
+      },
+    ],
+  );
+
+  lifecycle
+    .after("entry", Some("default"), "CreateBuildProfile")
+    .await
+    .expect("the first selected root must not stop a multi-root command");
+  lifecycle
+    .after("entry", Some("default"), "GenerateLoaderJson")
+    .await
+    .expect("an unrelated dependency boundary must not stop the command");
+  let cutoff = lifecycle
+    .after("entry", Some("default"), "CompileArkTS")
+    .await
+    .expect_err("the final selected root must stop the native pipeline");
+
+  assert!(cutoff.is::<NativeTaskCutoffReached>());
+}
+
+#[tokio::test]
+async fn unqualified_module_hook_root_matches_a_targetless_boundary() {
+  use super::args::NativeTaskRoot;
+  use super::coordinator::{BuildTaskLifecycle, NativeTaskCutoffReached};
+
+  let mut lifecycle = BuildTaskLifecycle::new(
+    None,
+    vec![NativeTaskRoot {
+      module_name: "entry".to_string(),
+      target_name: None,
+      task_name: "GenerateBuildProfile".to_string(),
+    }],
+  );
+
+  lifecycle
+    .after("entry", Some("default"), "CreateBuildProfile")
+    .await
+    .expect("the qualified dependency must not complete the unqualified hook root");
+  let cutoff = lifecycle
+    .after("entry", None, "GenerateBuildProfile")
+    .await
+    .expect_err("the unqualified module hook boundary must stop the partial command");
+
+  assert!(cutoff.is::<NativeTaskCutoffReached>());
 }

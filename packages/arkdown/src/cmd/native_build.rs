@@ -50,7 +50,7 @@ use std::time::UNIX_EPOCH;
 
 use arkdown_core::{
   BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibFilterOption, NativeLibOption,
-  NativeLibPackageSelection,
+  NativeLibPackageSelection, OhosModuleType,
 };
 use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer, HvigorNativeLibraryPattern};
 use arkdown_session::dependency_graph::snapshot::{
@@ -254,6 +254,14 @@ impl NativeSdkToolchain {
     }
   }
 
+  /// Construct the subset of the SDK toolchain needed by hvigor `clean`.
+  pub fn for_clean(ninja: Option<PathBuf>) -> Self {
+    Self {
+      ninja,
+      ..Self::default()
+    }
+  }
+
   fn require(&self) -> Result<ResolvedNativeSdkToolchain<'_>, String> {
     let cmake = self
       .cmake
@@ -306,6 +314,10 @@ impl NativeSdkToolchain {
   fn llvm_strip_path(&self) -> Option<PathBuf> {
     self.llvm_strip.clone()
   }
+
+  fn ninja_path(&self) -> Option<&Path> {
+    self.ninja.as_deref()
+  }
 }
 
 struct ResolvedNativeSdkToolchain<'a> {
@@ -353,6 +365,10 @@ pub enum NativeBuildError {
     libs: Vec<PathBuf>,
   },
   DebugSymbolCollectionFailed {
+    path: PathBuf,
+    message: String,
+  },
+  CleanFailed {
     path: PathBuf,
     message: String,
   },
@@ -438,11 +454,256 @@ impl fmt::Display for NativeBuildError {
         path.display(),
         message
       ),
+      Self::CleanFailed { path, message } => write!(
+        f,
+        "failed to clean hvigor build path '{}': {}",
+        path.display(),
+        message
+      ),
     }
   }
 }
 
 impl Error for NativeBuildError {}
+
+/// Owns the latest-hvigor module `clean` action selected dynamically by
+/// `hvigorOrToolChainsChanged`. Build outputs are removed with Windows-safe
+/// retries, then valid CMake/Ninja trees under `.cxx` receive `ninja clean`
+/// and have their stale `CMakeCache.txt` removed.
+pub struct HvigorModuleCleanStage<'a> {
+  project_root: &'a Path,
+  module_root: &'a Path,
+  ninja: Option<&'a Path>,
+  project_task: bool,
+  configured_build_dir: Option<PathBuf>,
+  native_product_names: Vec<String>,
+  native_target_names: Vec<String>,
+  native_build_mode: String,
+}
+
+impl<'a> HvigorModuleCleanStage<'a> {
+  pub fn new(
+    project_root: &'a Path,
+    module_root: &'a Path,
+    sdk_toolchain: &'a NativeSdkToolchain,
+  ) -> Self {
+    Self {
+      project_root,
+      module_root,
+      ninja: sdk_toolchain.ninja_path(),
+      project_task: false,
+      configured_build_dir: None,
+      native_product_names: vec!["default".to_string()],
+      native_target_names: vec!["default".to_string()],
+      native_build_mode: "debug".to_string(),
+    }
+  }
+
+  pub fn for_project(project_root: &'a Path) -> Self {
+    Self {
+      project_root,
+      module_root: project_root,
+      ninja: None,
+      project_task: true,
+      configured_build_dir: None,
+      native_product_names: Vec::new(),
+      native_target_names: Vec::new(),
+      native_build_mode: String::new(),
+    }
+  }
+
+  pub fn with_configured_build_dir(
+    mut self,
+    configured_build_dir: Option<&Path>,
+  ) -> NativeBuildResult<Self> {
+    self.configured_build_dir = match configured_build_dir.filter(|path| path.is_absolute()) {
+      Some(path) if path.exists() => {
+        Some(
+          dunce::canonicalize(path).map_err(|error| NativeBuildError::CleanFailed {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+          })?,
+        )
+      }
+      Some(path) => Some(path.to_path_buf()),
+      None => None,
+    };
+    Ok(self)
+  }
+
+  pub fn with_native_variants(
+    mut self,
+    product_names: Vec<String>,
+    target_names: Vec<String>,
+    build_mode: impl Into<String>,
+  ) -> Self {
+    if !product_names.is_empty() {
+      self.native_product_names = product_names;
+    }
+    if !target_names.is_empty() {
+      self.native_target_names = target_names;
+    }
+    self.native_build_mode = build_mode.into();
+    self
+  }
+
+  pub fn execute(&self) -> NativeBuildResult<()> {
+    let mut directories = vec![self.project_root.join("build")];
+    if !self.project_task {
+      directories.push(self.module_root.join("build"));
+      directories.push(self.module_root.join(".test"));
+    }
+    let normal_build_directories = directories
+      .iter()
+      .filter(|directory| directory.file_name() == Some(OsStr::new("build")))
+      .cloned()
+      .collect::<Vec<_>>();
+    for directory in normal_build_directories {
+      if let Some(configured) = self.configured_build_directory(&directory) {
+        if configured != directory {
+          if Self::is_ci_environment() {
+            directories.push(
+              configured
+                .parent()
+                .map_or_else(|| configured.join(".cxx"), |parent| parent.join(".cxx")),
+            );
+          }
+          directories.push(configured);
+        }
+      }
+    }
+    directories.sort();
+    directories.dedup();
+    for directory in directories {
+      self.remove_directory(&directory)?;
+    }
+    if !self.project_task {
+      self.clean_native_trees();
+    }
+    Ok(())
+  }
+
+  fn configured_build_directory(&self, build_directory: &Path) -> Option<PathBuf> {
+    let configured = self.configured_build_dir.as_ref()?;
+    let project_name = self.project_root.file_name()?;
+    let relative = build_directory.strip_prefix(self.project_root).ok()?;
+    Some(configured.join(project_name).join(relative))
+  }
+
+  fn is_ci_environment() -> bool {
+    if std::env::var_os("CI").as_deref() == Some(OsStr::new("false")) {
+      return false;
+    }
+    [
+      "BUILD_ID",
+      "BUILD_NUMBER",
+      "CI",
+      "CI_APP_ID",
+      "CI_BUILD_ID",
+      "CI_BUILD_NUMBER",
+      "CI_NAME",
+      "CONTINUOUS_INTEGRATION",
+      "RUN_ID",
+    ]
+    .into_iter()
+    .any(|variable| std::env::var_os(variable).is_some())
+  }
+
+  fn remove_directory(&self, directory: &Path) -> NativeBuildResult<()> {
+    for attempt in 0..=3 {
+      match std::fs::remove_dir_all(directory) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if attempt < 3 => {
+          tracing::debug!(
+            path = %directory.display(),
+            attempt = attempt + 1,
+            error = %error,
+            "retrying hvigor clean path removal"
+          );
+          std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Err(error) => {
+          return Err(NativeBuildError::CleanFailed {
+            path: directory.to_path_buf(),
+            message: error.to_string(),
+          });
+        }
+      }
+    }
+    Ok(())
+  }
+
+  fn clean_native_trees(&self) {
+    let Some(ninja) = self.ninja.filter(|path| path.is_file()) else {
+      return;
+    };
+    let cxx_root = self.module_root.join(".cxx");
+    if !cxx_root.is_dir() {
+      return;
+    }
+    let mut build_directories = Vec::new();
+    for product_name in &self.native_product_names {
+      for target_name in &self.native_target_names {
+        let variant_root = cxx_root
+          .join(product_name)
+          .join(target_name)
+          .join(&self.native_build_mode);
+        let Ok(entries) = std::fs::read_dir(&variant_root) else {
+          continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+          let directory = entry.path();
+          if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| KNOWN_ABI_DIRS.contains(&name))
+            || std::fs::read_dir(&directory).is_err()
+            || !directory.join("CMakeCache.txt").is_file()
+            || !directory.join("build.ninja").is_file()
+            || !(directory.join("rules.ninja").is_file()
+              || directory.join("CMakeFiles").join("rules.ninja").is_file())
+          {
+            continue;
+          }
+          build_directories.push(directory);
+        }
+      }
+    }
+    build_directories.sort();
+    build_directories.dedup();
+    for directory in build_directories {
+      match Command::new(ninja)
+        .arg("-C")
+        .arg(&directory)
+        .arg("clean")
+        .status()
+      {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::warn!(
+          path = %directory.display(),
+          exit_status = %status,
+          "hvigor native clean command failed; the native tree is retained"
+        ),
+        Err(error) => tracing::warn!(
+          path = %directory.display(),
+          error = %error,
+          "hvigor native clean command could not start; the native tree is retained"
+        ),
+      }
+      let cache_path = directory.join("CMakeCache.txt");
+      if let Err(error) = std::fs::remove_file(&cache_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+          tracing::warn!(
+            path = %cache_path.display(),
+            error = %error,
+            "failed to remove native CMake cache after clean"
+          );
+        }
+      }
+    }
+  }
+}
 
 #[derive(Debug, Clone)]
 pub struct InvalidSanitizerNativeLib {
@@ -672,6 +933,9 @@ pub struct DebugSymbolCollector {
   source_map_intermediate: PathBuf,
   source_map_origin: Option<PathBuf>,
   name_cache: PathBuf,
+  should_collect: bool,
+  product_name: String,
+  target_name: String,
 }
 
 impl DebugSymbolCollector {
@@ -683,6 +947,7 @@ impl DebugSymbolCollector {
     source_map_origin: Option<PathBuf>,
     name_cache: PathBuf,
   ) -> Self {
+    let should_collect = matches!(build_mode, BuildMode::Release);
     Self {
       module_root,
       module_name,
@@ -690,20 +955,45 @@ impl DebugSymbolCollector {
       source_map_intermediate,
       source_map_origin,
       name_cache,
+      should_collect,
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
     }
   }
 
+  pub fn with_collection_override(mut self, enabled: Option<bool>) -> Self {
+    if let Some(enabled) = enabled {
+      self.should_collect = enabled;
+    }
+    self
+  }
+
+  pub fn with_output_variant(
+    mut self,
+    product_name: impl Into<String>,
+    target_name: impl Into<String>,
+  ) -> Self {
+    self.product_name = product_name.into();
+    self.target_name = target_name.into();
+    self
+  }
+
   pub fn collect(&self) -> NativeBuildResult<DebugSymbolOutput> {
-    if !matches!(self.build_mode, BuildMode::Release) {
+    if !self.should_collect {
       return Ok(DebugSymbolOutput::default());
     }
 
-    let destination = NativeModuleLayout::new(&self.module_root)
-      .build_default()
+    let destination = self
+      .module_root
+      .join("build")
+      .join(&self.product_name)
       .join("outputs")
-      .join("default")
+      .join(&self.target_name)
       .join("symbol")
-      .join("release");
+      .join(match self.build_mode {
+        BuildMode::Debug => "debug",
+        BuildMode::Release => "release",
+      });
     std::fs::create_dir_all(&destination).map_err(|error| {
       NativeBuildError::DebugSymbolCollectionFailed {
         path: destination.clone(),
@@ -802,6 +1092,10 @@ impl DebugSymbolCollector {
   }
 
   fn symlink_directory(&self, source: &Path, destination: &Path) -> std::io::Result<()> {
+    Self::link_directory(source, destination)
+  }
+
+  fn link_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
       std::os::unix::fs::symlink(source, destination)
@@ -821,6 +1115,248 @@ impl DebugSymbolCollector {
         "directory symlinks are unsupported on this platform",
       ))
     }
+  }
+}
+
+/// APP-scope symbol directory and ZIP emitted by latest `PackageApp`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectDebugSymbolOutput {
+  pub destination: Option<PathBuf>,
+  pub archive: Option<PathBuf>,
+  pub module_links: Vec<PathBuf>,
+}
+
+/// Aggregates per-module symbol directories into
+/// `build/outputs/<product>/symbol/<mode>/app-symbol.zip`.
+pub struct ProjectDebugSymbolCollector {
+  project_root: PathBuf,
+  product_name: String,
+  target_name: String,
+  build_mode: BuildMode,
+  modules: Vec<ModuleConfig>,
+  should_collect: bool,
+}
+
+impl ProjectDebugSymbolCollector {
+  pub fn new(
+    project_root: PathBuf,
+    product_name: String,
+    target_name: String,
+    build_mode: BuildMode,
+    modules: Vec<ModuleConfig>,
+    enabled: Option<bool>,
+  ) -> Self {
+    let should_collect = enabled.unwrap_or(matches!(build_mode, BuildMode::Release));
+    Self {
+      project_root,
+      product_name,
+      target_name,
+      build_mode,
+      modules,
+      should_collect,
+    }
+  }
+
+  pub fn collect(&self) -> NativeBuildResult<ProjectDebugSymbolOutput> {
+    if !self.should_collect {
+      return Ok(ProjectDebugSymbolOutput::default());
+    }
+    let destination = self.destination();
+    std::fs::create_dir_all(&destination).map_err(|error| {
+      NativeBuildError::DebugSymbolCollectionFailed {
+        path: destination.clone(),
+        message: error.to_string(),
+      }
+    })?;
+
+    let mut module_links = Vec::new();
+    for module in self.modules.iter().filter(|module| {
+      matches!(
+        module.module_type,
+        OhosModuleType::Entry | OhosModuleType::Feature | OhosModuleType::Shared
+      )
+    }) {
+      let source = self.module_destination(module);
+      std::fs::create_dir_all(&source).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: source.clone(),
+          message: error.to_string(),
+        }
+      })?;
+      let link = destination.join(&module.name);
+      if link.exists() {
+        module_links.push(link);
+        continue;
+      }
+      match DebugSymbolCollector::link_directory(&source, &link) {
+        Ok(()) => module_links.push(link),
+        Err(error) => tracing::warn!(
+          source = %source.display(),
+          destination = %link.display(),
+          error = %error,
+          "failed to create project debug-symbol directory link"
+        ),
+      }
+    }
+
+    let archive = self.build_zip(&destination)?;
+    Ok(ProjectDebugSymbolOutput {
+      destination: Some(destination),
+      archive: Some(archive),
+      module_links,
+    })
+  }
+
+  fn destination(&self) -> PathBuf {
+    self
+      .project_root
+      .join("build")
+      .join("outputs")
+      .join(&self.product_name)
+      .join("symbol")
+      .join(self.mode_name())
+  }
+
+  fn module_destination(&self, module: &ModuleConfig) -> PathBuf {
+    module
+      .src_path
+      .join("build")
+      .join(&self.product_name)
+      .join("outputs")
+      .join(&self.target_name)
+      .join("symbol")
+      .join(self.mode_name())
+  }
+
+  fn mode_name(&self) -> &'static str {
+    match self.build_mode {
+      BuildMode::Debug => "debug",
+      BuildMode::Release => "release",
+    }
+  }
+
+  fn build_zip(&self, destination: &Path) -> NativeBuildResult<PathBuf> {
+    let archive = destination.join("app-symbol.zip");
+    if archive.is_file() {
+      std::fs::remove_file(&archive).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: archive.clone(),
+          message: error.to_string(),
+        }
+      })?;
+    }
+    let temp_dir = destination
+      .parent()
+      .expect("project symbol mode directory has a parent")
+      .join("temp");
+    if temp_dir.exists() {
+      std::fs::remove_dir_all(&temp_dir).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: temp_dir.clone(),
+          message: error.to_string(),
+        }
+      })?;
+    }
+    std::fs::create_dir_all(&temp_dir).map_err(|error| {
+      NativeBuildError::DebugSymbolCollectionFailed {
+        path: temp_dir.clone(),
+        message: error.to_string(),
+      }
+    })?;
+    let temporary_archive = temp_dir.join("app-symbol.zip");
+    let result = self
+      .write_zip(destination, &temporary_archive)
+      .and_then(|()| {
+        std::fs::rename(&temporary_archive, &archive).map_err(|error| {
+          NativeBuildError::DebugSymbolCollectionFailed {
+            path: temporary_archive.clone(),
+            message: error.to_string(),
+          }
+        })
+      });
+    let cleanup_result = std::fs::remove_dir_all(&temp_dir).map_err(|error| {
+      NativeBuildError::DebugSymbolCollectionFailed {
+        path: temp_dir,
+        message: error.to_string(),
+      }
+    });
+    result?;
+    cleanup_result?;
+    Ok(archive)
+  }
+
+  fn write_zip(&self, source: &Path, output: &Path) -> NativeBuildResult<()> {
+    let mut entries = walkdir::WalkDir::new(source)
+      .follow_links(true)
+      .min_depth(1)
+      .into_iter()
+      .collect::<Result<Vec<_>, _>>()
+      .map_err(|error| NativeBuildError::DebugSymbolCollectionFailed {
+        path: error
+          .path()
+          .map(Path::to_path_buf)
+          .unwrap_or_else(|| source.to_path_buf()),
+        message: error.to_string(),
+      })?;
+    entries.sort_by_key(|entry| ArtifactPathSerializer::rel_to_slash(entry.path()));
+
+    let file = std::fs::File::create(output).map_err(|error| {
+      NativeBuildError::DebugSymbolCollectionFailed {
+        path: output.to_path_buf(),
+        message: error.to_string(),
+      }
+    })?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options =
+      zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for entry in entries {
+      let relative = entry.path().strip_prefix(source).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: entry.path().to_path_buf(),
+          message: error.to_string(),
+        }
+      })?;
+      let name = ArtifactPathSerializer::path_to_slash_string(relative).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: entry.path().to_path_buf(),
+          message: error.to_string(),
+        }
+      })?;
+      if entry.file_type().is_dir() {
+        archive
+          .add_directory(format!("{name}/"), options)
+          .map_err(|error| NativeBuildError::DebugSymbolCollectionFailed {
+            path: entry.path().to_path_buf(),
+            message: error.to_string(),
+          })?;
+        continue;
+      }
+      archive.start_file(name, options).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: entry.path().to_path_buf(),
+          message: error.to_string(),
+        }
+      })?;
+      let mut input = std::fs::File::open(entry.path()).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: entry.path().to_path_buf(),
+          message: error.to_string(),
+        }
+      })?;
+      std::io::copy(&mut input, &mut archive).map_err(|error| {
+        NativeBuildError::DebugSymbolCollectionFailed {
+          path: entry.path().to_path_buf(),
+          message: error.to_string(),
+        }
+      })?;
+    }
+    archive
+      .finish()
+      .map(|_| ())
+      .map_err(|error| NativeBuildError::DebugSymbolCollectionFailed {
+        path: output.to_path_buf(),
+        message: error.to_string(),
+      })
   }
 }
 
@@ -932,26 +1468,34 @@ impl<'a> NativeLibCollector<'a> {
   }
 
   pub fn collect(&self) -> NativeBuildResult<Vec<PathBuf>> {
+    self.configure_native()?;
+    self.build_native()?;
+    let processed = self.process_libs()?;
+    let stripped = self.strip_libs(&processed)?;
+    self.cache_libs()?;
+    self.validate_libs(&stripped)?;
+    Ok(stripped)
+  }
+
+  pub(crate) fn configure_native(&self) -> NativeBuildResult<()> {
+    self.native_build_config().configure()
+  }
+
+  pub(crate) fn build_native(&self) -> NativeBuildResult<()> {
+    self.native_build_config().build()
+  }
+
+  pub(crate) fn process_libs(&self) -> NativeBuildResult<Vec<PathBuf>> {
     let mut candidates = Vec::new();
     let mut seen = FxHashSet::default();
 
-    let native_cfg = NativeBuildConfig {
-      module_root: self.module.src_path.clone(),
-      abi_filters: self.abi_filters.to_vec(),
-      enable_cmake_build: self.policy.enable_cmake_build(),
-      external_native_options: self.policy.external_native_options.clone(),
-      sanitizer: self.policy.sanitizer,
-      build_mode: self.policy.build_mode.clone(),
-      sdk_toolchain: self.policy.sdk_toolchain.clone(),
-      collect_all_libs: self.policy.native_lib.collect_all_libs,
-    };
     if self.policy.native_lib.filter.has_order_sensitive_rules() {
       return Err(NativeBuildError::UnsupportedNativeLibOrderSensitiveFilter);
     }
     if NativeModuleLayout::new(&self.module.src_path).has_native_code() {
       tracing::debug!(module = %self.module.src_path.display(), "native: scanning for pre-built .so files");
     }
-    let native_out = native_cfg.run()?;
+    let native_out = self.native_build_config().scan()?;
     for warning in &native_out.warnings {
       tracing::warn!("{}", warning);
     }
@@ -979,17 +1523,37 @@ impl<'a> NativeLibCollector<'a> {
     let result_libs =
       NativeLibSelectionResolver::new(&self.module.name, &self.policy.native_lib.filter)
         .resolve(candidates)?;
-    let result_libs =
-      NativeProcessLibWriter::new(&self.module.src_path).materialize(&result_libs)?;
-    let result_libs = NativeStripProcessor::new(
+    NativeProcessLibWriter::new(&self.module.src_path).materialize(&result_libs)
+  }
+
+  pub(crate) fn strip_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
+    NativeStripProcessor::new(
       &self.module.src_path,
       self.policy.sdk_toolchain.llvm_strip_path(),
       &self.policy.native_lib,
     )
-    .process(&result_libs)?;
-    NativeLibCacheWriter::new(&self.module.src_path, &self.policy.native_lib).write()?;
-    self.policy.validate_packaged_libs(&result_libs)?;
-    Ok(result_libs)
+    .process(libs)
+  }
+
+  pub(crate) fn cache_libs(&self) -> NativeBuildResult<()> {
+    NativeLibCacheWriter::new(&self.module.src_path, &self.policy.native_lib).write()
+  }
+
+  pub(crate) fn validate_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<()> {
+    self.policy.validate_packaged_libs(libs)
+  }
+
+  fn native_build_config(&self) -> NativeBuildConfig {
+    NativeBuildConfig {
+      module_root: self.module.src_path.clone(),
+      abi_filters: self.abi_filters.to_vec(),
+      enable_cmake_build: self.policy.enable_cmake_build(),
+      external_native_options: self.policy.external_native_options.clone(),
+      sanitizer: self.policy.sanitizer,
+      build_mode: self.policy.build_mode.clone(),
+      sdk_toolchain: self.policy.sdk_toolchain.clone(),
+      collect_all_libs: self.policy.native_lib.collect_all_libs,
+    }
   }
 
   fn self_package_info(&self) -> NativeLibPackageInfo {
@@ -1864,50 +2428,53 @@ impl NativeBuildConfig {
   ///    (CMake output, Cangjie output, and module-root `libs/`).
   /// 3. Return all discovered shared libraries whose ABI matches `abi_filters`.
   pub fn run(&self) -> NativeBuildResult<NativeBuildOutput> {
-    let mut output = NativeBuildOutput::default();
-    let layout = NativeModuleLayout::new(&self.module_root);
-    let abi_filters = NativeAbiFilters::new(&self.abi_filters).package_abis();
+    self.configure()?;
+    self.build()?;
+    self.scan()
+  }
 
-    // ── Step 1: detect CMakeLists.txt ──────────────────────────────────
+  /// Execute the latest-hvigor `BuildNativeWithCmake` action: validate and
+  /// generate the ABI-specific CMake/Ninja build trees without compiling.
+  pub fn configure(&self) -> NativeBuildResult<()> {
+    if !self.enable_cmake_build {
+      return Ok(());
+    }
+    self.validate_cmake_script()?;
+    self
+      .run_cmake_configure()
+      .map_err(|message| NativeBuildError::CmakeFailed {
+        module_root: self.module_root.clone(),
+        message,
+      })
+  }
+
+  /// Execute the latest-hvigor `BuildNativeWithNinja` action for every
+  /// effective ABI. Configuration is intentionally not repeated here.
+  pub fn build(&self) -> NativeBuildResult<()> {
+    if !self.enable_cmake_build {
+      return Ok(());
+    }
+    self.validate_cmake_script()?;
+    self
+      .run_ninja_build()
+      .map_err(|message| NativeBuildError::CmakeFailed {
+        module_root: self.module_root.clone(),
+        message,
+      })?;
+    tracing::info!(
+        module = %self.module_root.display(),
+        "native: CMake/Ninja build succeeded"
+    );
+    Ok(())
+  }
+
+  /// Execute only the latest-hvigor `ProcessLibs` import scan. Native command
+  /// execution is owned by [`Self::configure`] and [`Self::build`].
+  pub fn scan(&self) -> NativeBuildResult<NativeBuildOutput> {
+    let mut output = NativeBuildOutput::default();
+    let abi_filters = NativeAbiFilters::new(&self.abi_filters).package_abis();
     let cmake_file = self.cmake_lists_path();
     let has_cmake = cmake_file.is_file();
-
-    if self.enable_cmake_build {
-      if cmake_file.file_name() != Some(OsStr::new("CMakeLists.txt")) {
-        return Err(NativeBuildError::CmakeFailed {
-          module_root: self.module_root.clone(),
-          message: format!(
-            "externalNativeOptions.path must name CMakeLists.txt: {}",
-            cmake_file.display()
-          ),
-        });
-      }
-      if !has_cmake {
-        return Err(NativeBuildError::CmakeFailed {
-          module_root: self.module_root.clone(),
-          message: format!(
-            "configured CMake script does not exist: {}",
-            cmake_file.display()
-          ),
-        });
-      }
-      match self.run_cmake_build() {
-        Ok(()) => {
-          tracing::info!(
-              module = %self.module_root.display(),
-              "native: CMake build succeeded"
-          );
-        }
-        Err(e) => {
-          return Err(NativeBuildError::CmakeFailed {
-            module_root: self.module_root.clone(),
-            message: e,
-          });
-        }
-      }
-    }
-
-    // ── Step 2: collect pre-built native shared libraries ──────────────
     let search_roots = self.so_search_roots();
     for root in &search_roots {
       for abi in &abi_filters {
@@ -1950,16 +2517,35 @@ impl NativeBuildConfig {
     Ok(output)
   }
 
+  fn validate_cmake_script(&self) -> NativeBuildResult<()> {
+    let cmake_file = self.cmake_lists_path();
+    if cmake_file.file_name() != Some(OsStr::new("CMakeLists.txt")) {
+      return Err(NativeBuildError::CmakeFailed {
+        module_root: self.module_root.clone(),
+        message: format!(
+          "externalNativeOptions.path must name CMakeLists.txt: {}",
+          cmake_file.display()
+        ),
+      });
+    }
+    if !cmake_file.is_file() {
+      return Err(NativeBuildError::CmakeFailed {
+        module_root: self.module_root.clone(),
+        message: format!(
+          "configured CMake script does not exist: {}",
+          cmake_file.display()
+        ),
+      });
+    }
+    Ok(())
+  }
+
   /// Directories to scan for pre-built `.so` files, in priority order.
   fn so_search_roots(&self) -> Vec<PathBuf> {
     NativeModuleLayout::new(&self.module_root).so_search_roots()
   }
 
-  /// Attempt a CMake build using the OHOS NDK toolchain.
-  ///
-  /// Uses the CMake, Ninja, and native toolchain paths resolved from the
-  /// active SDK snapshot, matching hvigor's `sdkInfo` accessors.
-  fn run_cmake_build(&self) -> Result<(), String> {
+  fn run_cmake_configure(&self) -> Result<(), String> {
     let toolchain = self.sdk_toolchain.require()?;
     let layout = NativeModuleLayout::new(&self.module_root);
     let cmake_lists = self.cmake_lists_path();
@@ -2044,7 +2630,15 @@ impl NativeBuildConfig {
           "cmake configure for ABI {abi} exited with status {configure_status}"
         ));
       }
+    }
+    Ok(())
+  }
 
+  fn run_ninja_build(&self) -> Result<(), String> {
+    let toolchain = self.sdk_toolchain.require()?;
+    let layout = NativeModuleLayout::new(&self.module_root);
+    for abi in NativeAbiFilters::new(&self.abi_filters).build_abis() {
+      let build_dir = layout.cmake_intermediate_dir().join(&abi);
       let mut build_cmd = std::process::Command::new(toolchain.cmake);
       build_cmd.arg("--build").arg(&build_dir);
       if let Some(options) = self.external_native_options.as_ref() {
@@ -2075,7 +2669,6 @@ impl NativeBuildConfig {
         ));
       }
     }
-
     Ok(())
   }
 
@@ -2125,6 +2718,66 @@ mod tests {
         direct_deps: Vec::new(),
       },
     );
+  }
+
+  #[test]
+  fn hvigor_module_clean_removes_outputs_and_cmake_cache_cross_platform() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let module_root = project_root.join("entry");
+    let configured_build_root = tmp.path().join("custom-build");
+    let configured_project_build = configured_build_root.join("project").join("build");
+    let configured_module_build = configured_build_root
+      .join("project")
+      .join("entry")
+      .join("build");
+    let native_tree = module_root
+      .join(".cxx/default/default/debug")
+      .join("arm64-v8a");
+    let inactive_native_tree = module_root
+      .join(".cxx/default/default/release")
+      .join("arm64-v8a");
+    for directory in [
+      project_root.join("build"),
+      module_root.join("build"),
+      module_root.join(".test"),
+      configured_build_root.clone(),
+      configured_project_build.clone(),
+      configured_module_build.clone(),
+      native_tree.clone(),
+      inactive_native_tree.clone(),
+    ] {
+      fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(project_root.join("build/project.bin"), b"project").unwrap();
+    fs::write(module_root.join("build/module.bin"), b"module").unwrap();
+    fs::write(module_root.join(".test/result.bin"), b"test").unwrap();
+    fs::write(configured_project_build.join("project.bin"), b"project").unwrap();
+    fs::write(configured_module_build.join("module.bin"), b"module").unwrap();
+    fs::write(native_tree.join("CMakeCache.txt"), b"cache").unwrap();
+    fs::write(native_tree.join("build.ninja"), b"ninja").unwrap();
+    fs::write(native_tree.join("rules.ninja"), b"rules").unwrap();
+    fs::write(inactive_native_tree.join("CMakeCache.txt"), b"cache").unwrap();
+    fs::write(inactive_native_tree.join("build.ninja"), b"ninja").unwrap();
+    fs::write(inactive_native_tree.join("rules.ninja"), b"rules").unwrap();
+
+    let toolchain = NativeSdkToolchain::for_clean(Some(std::env::current_exe().unwrap()));
+    HvigorModuleCleanStage::new(&project_root, &module_root, &toolchain)
+      .with_configured_build_dir(Some(&configured_build_root))
+      .unwrap()
+      .execute()
+      .expect("hvigor clean stage must remove build outputs");
+
+    assert!(!project_root.join("build").exists());
+    assert!(!module_root.join("build").exists());
+    assert!(!module_root.join(".test").exists());
+    assert!(!configured_project_build.exists());
+    assert!(!configured_module_build.exists());
+    assert!(!native_tree.join("CMakeCache.txt").exists());
+    assert!(native_tree.join("build.ninja").is_file());
+    // DevEco Studio 6.1.1 Clean.getArchDirectories only visits the active
+    // build mode; a debug clean must not invalidate a release CMake cache.
+    assert!(inactive_native_tree.join("CMakeCache.txt").is_file());
   }
 
   #[test]
@@ -2191,6 +2844,52 @@ mod tests {
     assert_eq!(output, DebugSymbolOutput::default());
     assert!(!module_root
       .join("build/default/outputs/default/symbol")
+      .exists());
+  }
+
+  #[test]
+  fn project_debug_symbols_link_modules_and_build_app_symbol_zip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let module_symbols = module_root.join("build/default/outputs/default/symbol/release");
+    fs::create_dir_all(&module_symbols).unwrap();
+    fs::write(module_symbols.join("entry-sourceMaps.map"), b"source-map").unwrap();
+    let modules = vec![ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root,
+      module_type: OhosModuleType::Entry,
+    }];
+
+    let output = ProjectDebugSymbolCollector::new(
+      tmp.path().to_path_buf(),
+      "default".to_string(),
+      "default".to_string(),
+      BuildMode::Release,
+      modules,
+      None,
+    )
+    .collect()
+    .expect("PackageApp must aggregate project debug symbols");
+
+    let archive_path = output.archive.expect("app-symbol.zip");
+    assert_eq!(
+      archive_path,
+      tmp
+        .path()
+        .join("build/outputs/default/symbol/release/app-symbol.zip")
+    );
+    let file = fs::File::open(archive_path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut source_map = Vec::new();
+    archive
+      .by_name("entry/entry-sourceMaps.map")
+      .unwrap()
+      .read_to_end(&mut source_map)
+      .unwrap();
+    assert_eq!(source_map, b"source-map");
+    assert!(!tmp
+      .path()
+      .join("build/outputs/default/symbol/temp")
       .exists());
   }
 

@@ -21,6 +21,7 @@ fn default_config() -> Arc<ArkdownConfig> {
         output_target: OutputTarget::Hap,
         product: ProductConfig {
             name: "default".to_string(),
+            artifact_name: None,
             bundle_name: "com.example.profiletest".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
             compatible_sdk_version_stage: None,
@@ -31,6 +32,7 @@ fn default_config() -> Arc<ArkdownConfig> {
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,
+                    duplicate_dependency_check: false,
                 },
                 ark_options: None,
                 res_options: None,
@@ -38,6 +40,8 @@ fn default_config() -> Arc<ArkdownConfig> {
                 preload_system_so: false,
                 preload_so: vec![],
                 deduplicate_har: false,
+                app_with_signed_pkg: false,
+                generate_shared_tgz: None,
                 customized_har_base_package: None,
                 remove_permissions: vec![],
                 aot_compile_mode: None,
@@ -1092,6 +1096,80 @@ fn test_write_module_json_package_name_from_oh_package_json5() {
         parsed["module"]["packageName"].as_str(),
         Some("my-scoped-package"),
         "packageName must be read from oh-package.json5#name"
+    );
+}
+
+/// DevEco Studio 6.1.1's resource-profile merger materializes empty
+/// `metadata` and `requestPermissions` arrays for a minimal HAR. ProcessProfile
+/// preserves both arrays and their insertion positions in the packaged file.
+#[test]
+fn test_write_minimal_har_module_json_keeps_hvigor_empty_arrays_and_order() {
+    use arkdown_core::{CompileMode, HapManifest, ModuleConfig, OhosModuleType};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_src = tmp.path().join("entry");
+    std::fs::create_dir_all(module_src.join("src/main")).expect("create dirs");
+    std::fs::write(
+        module_src.join("oh-package.json5"),
+        r#"{ "name": "entry", "version": "1.0.0" }"#,
+    )
+    .expect("write oh-package.json5");
+    std::fs::write(
+        module_src.join("src/main/module.json5"),
+        r#"{ "module": { "name": "entry", "type": "har", "deviceTypes": ["phone"] } }"#,
+    )
+    .expect("write module.json5");
+
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    config.modules = vec![ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_src,
+        module_type: OhosModuleType::Har,
+    }];
+    let processor = ProfileProcessor::new(Arc::new(config));
+    let manifest = HapManifest {
+        module_name: "entry".to_string(),
+        module_type: OhosModuleType::Har,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark12.0.6.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        src_entry: None,
+        abilities: vec![],
+        extension_abilities: vec![],
+        dependencies: vec![],
+        router_map: None,
+        pages: None,
+        main_element: None,
+        description: None,
+    };
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, None)
+        .expect("write minimal HAR module.json");
+    let parsed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out_path).expect("read minimal HAR module.json"),
+    )
+    .expect("parse minimal HAR module.json");
+    let module = parsed["module"].as_object().expect("module object");
+
+    assert_eq!(module["metadata"], serde_json::json!([]));
+    assert_eq!(module["requestPermissions"], serde_json::json!([]));
+    assert_eq!(
+        module.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "name",
+            "type",
+            "deviceTypes",
+            "packageName",
+            "metadata",
+            "requestPermissions",
+            "installationFree",
+            "virtualMachine",
+            "compileMode",
+            "dependencies",
+        ]
     );
 }
 

@@ -15,7 +15,8 @@ use arkdown::plugins::ets_transform::{ModuleAnalyzerKind, RolldownEtsTransformPl
 use arkdown::{
   BundleCachePolicy, BundleInput, BundleModuleMetaInfoFile, BundleOutput, BundleOutputOptions,
   BundlePlan, BundlePluginSet, BundleRuntimePackageContext, BundleRuntimePackageInfo,
-  BundleSourceMapPackageInfo, Bundler, LoaderResourceJoin, SourceMapPolicy,
+  BundleSourceMapPackageInfo, Bundler, HvigorHarImportees, LoaderResourceJoin, PreloadSystemSoTask,
+  SourceMapPolicy,
 };
 use arkdown_core::ArkdownConfig;
 use arkdown_path::{ArtifactPathSerializer, NormalizedOhmUrl};
@@ -429,6 +430,7 @@ pub(super) enum BundleStageState {
 pub(super) struct BundlePackageOutput {
   pub(super) modules_abc_path: PathBuf,
   pub(super) source_maps_path: Option<PathBuf>,
+  pub(super) preload_system_so_tasks: Vec<PreloadSystemSoTask>,
 }
 
 impl BundleStageOutput {
@@ -445,6 +447,7 @@ impl BundleStageOutput {
         entry_module_ids: vec![],
         module_imports: rustc_hash::FxHashMap::default(),
         external_module_requests: vec![],
+        har_importees: HvigorHarImportees::default(),
         preload_system_so_tasks: vec![],
         npm_entries: vec![],
         modules_abc_path,
@@ -472,6 +475,7 @@ impl BundleStageOutput {
     BundlePackageOutput {
       modules_abc_path: self.bundle_output.modules_abc_path,
       source_maps_path: self.bundle_output.source_maps_path,
+      preload_system_so_tasks: self.bundle_output.preload_system_so_tasks,
     }
   }
 }

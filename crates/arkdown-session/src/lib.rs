@@ -39,7 +39,9 @@ pub mod context;
 pub mod dependency_graph;
 pub mod dependency_views;
 pub mod diagnostics;
+pub mod duplicate_dependency;
 pub mod fingerprint;
+pub mod hvigor_context;
 pub mod mode_inventory;
 pub mod module;
 pub mod native_inventory;
@@ -67,8 +69,12 @@ pub use artifacts::layout::ArtifactLayout;
 
 // build_script
 pub use build_script::{
-    BuildScriptEffect, BuildScriptFingerprint, BuildScriptKind, BuildScriptOverrideError,
-    BuildScriptOverrideInventory, BuildScriptParser, BuildScriptSnapshot, ParseBuildScriptError,
+    BuildScriptEffect, BuildScriptFileInventory, BuildScriptFileInventoryRequest,
+    BuildScriptFingerprint, BuildScriptKind, BuildScriptModuleModelLoader,
+    BuildScriptModuleModelRequest, BuildScriptOverrideError, BuildScriptOverrideInventory,
+    BuildScriptParser, BuildScriptProjectCacheIdentity, BuildScriptProjectCacheIdentityError,
+    BuildScriptRuntimeModelError, BuildScriptRuntimeModelLoader, BuildScriptRuntimeModelRequest,
+    BuildScriptRuntimeModelSnapshot, BuildScriptSnapshot, ParseBuildScriptError,
 };
 
 // builder
@@ -82,6 +88,11 @@ pub use dependency_graph::snapshot::DependencyGraphSnapshot;
 
 // diagnostics
 pub use diagnostics::SessionDiagnostics;
+
+// duplicate_dependency
+pub use duplicate_dependency::{
+    DuplicateDependencyError, DuplicateDependencyValidator, DuplicateHarDependency,
+};
 
 // fingerprint
 pub use fingerprint::InputFingerprintSet;
@@ -132,6 +143,10 @@ pub use source_store::{
 pub use dependency_views::{
     ByteCodeHarDependencyView, DynamicDependencyView, HarDependencyView, HspDependencyView,
     NativeSoDependencyView, RemoteHspDependencyView,
+};
+pub use hvigor_context::{
+    HvigorContextInspectError, HvigorContextInspector, HvigorContextSnapshot,
+    HvigorDependencyContextSnapshot, OhpmDependencyInfo,
 };
 
 // sdk_tools

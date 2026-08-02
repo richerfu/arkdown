@@ -269,7 +269,9 @@ impl SdkEs2abcBackend {
     if options.enable_annotations {
       command.arg("--enable-annotations");
     }
-    command.arg("--enable-release-column");
+    command
+      .arg("--enable-release-column")
+      .arg("--enable-callable-name");
     if let Some(cache_file) = &options.cache_file {
       command
         .arg("--cache-file")

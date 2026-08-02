@@ -21,7 +21,7 @@ use anyhow::Result;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::ArkdownConfig;
-use arkdown_path::ArtifactPathSerializer;
+use arkdown_path::{lexical_normalize, AbsPath, ArtifactPathSerializer};
 use arkdown_session::BuildSession;
 use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalidationBatch};
 
@@ -63,6 +63,17 @@ pub(super) struct WatchStageInput {
   pub(super) project_hvigor_overrides: Option<arkdown_config::ProjectHvigorOverrides>,
   pub(super) module_hvigor_overrides: BTreeMap<String, serde_json::Value>,
   pub(super) node_executable: Option<PathBuf>,
+  pub(super) runtime_context_overrides: Option<Arc<arkdown_config::RuntimeContextOverrides>>,
+  pub(super) custom_task_input_paths: Vec<PathBuf>,
+  pub(super) pack_compress_level: Option<u32>,
+  pub(super) align_device_types: Vec<String>,
+  pub(super) collect_debug_symbol: Option<bool>,
+  pub(super) ui_transform_optimization: bool,
+  pub(super) integrated_hsp_use_get_current_bundle_name: bool,
+  pub(super) byte_code_har_integrated_optimization: bool,
+  pub(super) keep_dependency: bool,
+  pub(super) parameter_file_override: Option<PathBuf>,
+  pub(super) task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
   /// When `true`, only `src/main/resources/` directories are watched.
   pub(super) preview_mode: bool,
 }
@@ -75,7 +86,7 @@ impl WatchStage {
   ///
   /// This call blocks until the user sends `Ctrl+C` or the watcher
   /// encounters a fatal error.
-  pub(super) fn run(input: WatchStageInput) -> Result<()> {
+  pub(super) async fn run(input: WatchStageInput) -> Result<()> {
     let config_for_watch = input.config.clone();
     let session = input.session;
     let preview_mode = input.preview_mode;
@@ -99,9 +110,24 @@ impl WatchStage {
     let project_hvigor_overrides = input.project_hvigor_overrides;
     let module_hvigor_overrides = input.module_hvigor_overrides;
     let node_executable = input.node_executable;
+    let runtime_context_overrides = input.runtime_context_overrides;
+    let custom_task_input_paths = input.custom_task_input_paths;
+    let pack_compress_level = input.pack_compress_level;
+    let align_device_types = input.align_device_types;
+    let collect_debug_symbol = input.collect_debug_symbol;
+    let ui_transform_optimization = input.ui_transform_optimization;
+    let integrated_hsp_use_get_current_bundle_name =
+      input.integrated_hsp_use_get_current_bundle_name;
+    let byte_code_har_integrated_optimization = input.byte_code_har_integrated_optimization;
+    let keep_dependency = input.keep_dependency;
+    let parameter_file_override = input.parameter_file_override;
+    let task_observer = input.task_observer;
 
-    let watch_plan = WatchSessionPlan::from_session(&session, preview_mode);
+    let watch_plan =
+      WatchSessionPlan::from_session(&session, preview_mode, &custom_task_input_paths);
     let fingerprint_baseline = watch_plan.input.fingerprint_baseline.clone();
+    let custom_input_files = watch_plan.custom_input_files;
+    let custom_input_dirs = watch_plan.custom_input_dirs;
     let watcher = SessionWatcher::new(watch_plan.input);
 
     tracing::info!("watching for changes");
@@ -111,9 +137,14 @@ impl WatchStage {
 
     let rt = tokio::runtime::Handle::current();
 
-    watcher
-      .watch(move |events| {
-        let invalidation = WatchInvalidationBatch::from_watch_events(events, &fingerprint_baseline);
+    tokio::task::spawn_blocking(move || {
+      watcher.watch(move |events| {
+        let invalidation = WatchInvalidationBatch::from_watch_events_with_custom_inputs(
+          events,
+          &fingerprint_baseline,
+          &custom_input_files,
+          &custom_input_dirs,
+        );
         if invalidation.is_empty() {
           return Ok(());
         }
@@ -222,29 +253,52 @@ impl WatchStage {
           watch_invalidation: Some(invalidation),
           project_hvigor_overrides: project_hvigor_overrides.clone(),
           module_hvigor_overrides: module_hvigor_overrides.clone(),
+          runtime_context_overrides: runtime_context_overrides.clone(),
+          custom_task_input_paths: custom_task_input_paths.clone(),
+          pack_compress_level,
+          align_device_types: align_device_types.clone(),
+          collect_debug_symbol,
+          ui_transform_optimization,
+          integrated_hsp_use_get_current_bundle_name,
+          byte_code_har_integrated_optimization,
+          keep_dependency,
+          parameter_file_override: parameter_file_override.clone(),
           node_executable: node_executable.clone(),
+          native_task_roots: Vec::new(),
         };
-        if let Err(e) = rt.block_on(
-          BuildCommand::new(rebuild_args)
-            .with_package_plugins(package_plugins.clone())
-            .execute(),
-        ) {
+        let mut command =
+          BuildCommand::new(rebuild_args).with_package_plugins(package_plugins.clone());
+        if let Some(observer) = task_observer.clone() {
+          command = command.with_task_observer(observer);
+        }
+        if let Err(e) = rt.block_on(command.execute()) {
           tracing::error!(error = %format!("{e:#}"), "watch rebuild failed");
         }
         Ok(())
       })
-      .map_err(|e| anyhow::anyhow!("watch stage error: {e}"))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("watch stage task failed: {error}"))?
+    .map_err(|error| anyhow::anyhow!("watch stage error: {error}"))
   }
 }
 
 struct WatchSessionPlan {
   input: WatchInput,
+  custom_input_files: Vec<PathBuf>,
+  custom_input_dirs: Vec<PathBuf>,
 }
 
 impl WatchSessionPlan {
-  fn from_session(session: &BuildSession, preview_mode: bool) -> Self {
+  fn from_session(
+    session: &BuildSession,
+    preview_mode: bool,
+    custom_task_input_paths: &[PathBuf],
+  ) -> Self {
     let mut watch_dirs = FxHashSet::default();
     let mut watch_files = FxHashSet::default();
+    let mut custom_input_files = FxHashSet::default();
+    let mut custom_input_dirs = FxHashSet::default();
     for plan in session.watch_inputs.iter() {
       watch_dirs.extend(plan.resource_roots.iter().cloned());
       if !preview_mode {
@@ -252,16 +306,38 @@ impl WatchSessionPlan {
         watch_files.extend(plan.config_files.iter().cloned());
       }
     }
+    for input in custom_task_input_paths {
+      let input = Self::normalize_custom_input(input);
+      if input.is_dir() {
+        watch_dirs.insert(input.clone());
+        custom_input_dirs.insert(input);
+      } else {
+        watch_files.insert(input.clone());
+        custom_input_files.insert(input);
+      }
+    }
 
     let mut watch_dirs = watch_dirs.into_iter().collect::<Vec<_>>();
     watch_dirs.sort();
     let mut watch_files = watch_files.into_iter().collect::<Vec<_>>();
     watch_files.sort();
+    let mut custom_input_files = custom_input_files.into_iter().collect::<Vec<_>>();
+    custom_input_files.sort();
+    let mut custom_input_dirs = custom_input_dirs.into_iter().collect::<Vec<_>>();
+    custom_input_dirs.sort();
     Self {
       input: WatchInput::new()
         .with_dirs(watch_dirs)
         .with_files(watch_files),
+      custom_input_files,
+      custom_input_dirs,
     }
+  }
+
+  fn normalize_custom_input(input: &Path) -> PathBuf {
+    AbsPath::canonicalize(input)
+      .map(AbsPath::into_path_buf)
+      .unwrap_or_else(|_| lexical_normalize(input))
   }
 }
 

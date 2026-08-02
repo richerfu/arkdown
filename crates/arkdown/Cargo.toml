@@ -11,7 +11,8 @@ arkdown-ets-transform = { workspace = true }
 arkdown-resolver = { workspace = true }
 json5 = { workspace = true }
 oxc_allocator = { workspace = true }
-oxc_ast = { workspace = true }
+oxc_ast = { workspace = true, features = ["serialize"] }
+oxc_ast_visit = { workspace = true, features = ["serialize"] }
 oxc_parser = { workspace = true }
 oxc_codegen = { workspace = true }
 oxc_minifier = { workspace = true }
