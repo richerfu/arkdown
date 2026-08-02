@@ -21,6 +21,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use arkdown_path::ModuleSpecifierText;
+use rayon::prelude::*;
 
 use crate::error::PackError;
 use crate::zip_writer;
@@ -288,12 +289,10 @@ pub fn normalize_integrated_hsps(
     build_version: Option<&str>,
     output_dir: &Path,
 ) -> Result<Vec<PathBuf>, PackError> {
-    let mut output_paths = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let out_path = entry.normalize(bundle_name, version_code, build_version, output_dir)?;
-        output_paths.push(out_path);
-    }
-    Ok(output_paths)
+    entries
+        .par_iter()
+        .map(|entry| entry.normalize(bundle_name, version_code, build_version, output_dir))
+        .collect()
 }
 
 #[cfg(test)]

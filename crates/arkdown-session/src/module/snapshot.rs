@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arkdown_config::RuntimeModuleContextOverrides;
 use arkdown_core::ModuleJson5;
 use thiserror::Error;
 
@@ -92,12 +93,33 @@ pub struct ModuleSnapshot {
 impl ModuleSnapshot {
     /// Build a module snapshot from its root directory.
     pub fn from_root(root: &std::path::Path, name: &str) -> Result<Self, ModuleSnapshotError> {
+        Self::from_root_with_runtime_override(root, name, None)
+    }
+
+    /// Build a module snapshot using complete loader objects replaced through
+    /// `OhosModuleContext` setters.
+    pub fn from_root_with_runtime_override(
+        root: &std::path::Path,
+        name: &str,
+        runtime_override: Option<&RuntimeModuleContextOverrides>,
+    ) -> Result<Self, ModuleSnapshotError> {
         let layout = ModulePathLayout::new(root);
         let src_main = layout.src_main();
 
         // Read module.json5.
         let module_json_path = layout.module_json5();
-        let (module_json_path_opt, module_json, module_type) = if module_json_path.is_file() {
+        let (module_json_path_opt, module_json, module_type) = if let Some(value) =
+            runtime_override.and_then(|overrides| overrides.module_json.as_ref())
+        {
+            let parsed: ModuleJson5 = serde_json::from_value(value.clone()).map_err(|error| {
+                ModuleSnapshotError::ModuleJsonParse {
+                    path: module_json_path.clone(),
+                    message: error.to_string(),
+                }
+            })?;
+            let module_type = OhosModuleType::parse(&parsed.module.type_);
+            (Some(module_json_path), Some(parsed), module_type)
+        } else if module_json_path.is_file() {
             let content = std::fs::read_to_string(&module_json_path).map_err(|source| {
                 ModuleSnapshotError::Io {
                     path: module_json_path.clone(),
@@ -118,7 +140,13 @@ impl ModuleSnapshot {
 
         // Read oh-package.json5.
         let package_path = layout.oh_package_json5();
-        let (package_path_opt, package) = if package_path.is_file() {
+        let (package_path_opt, package) = if let Some(value) =
+            runtime_override.and_then(|overrides| overrides.package.as_ref())
+        {
+            let snapshot = PackageSnapshot::from_runtime_value(root, value)
+                .map_err(Self::package_snapshot_error)?;
+            (Some(package_path), Some(Arc::new(snapshot)))
+        } else if package_path.is_file() {
             let snapshot = PackageSnapshot::from_root(root)
                 .map_err(Self::package_snapshot_error)?
                 .map(Arc::new);

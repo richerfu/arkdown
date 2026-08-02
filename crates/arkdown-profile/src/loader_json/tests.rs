@@ -16,6 +16,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
         output_target: OutputTarget::Hap,
         product: ProductConfig {
             name: "default".to_string(),
+            artifact_name: None,
             bundle_name: "com.example.app".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
             compatible_sdk_version_stage: None,
@@ -26,6 +27,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url,
+                    duplicate_dependency_check: false,
                 },
                 ark_options: None,
                 res_options: None,
@@ -33,6 +35,8 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 preload_system_so: false,
                 preload_so: vec![],
                 deduplicate_har: false,
+                app_with_signed_pkg: false,
+                generate_shared_tgz: None,
                 customized_har_base_package: None,
                 remove_permissions: vec![],
                 aot_compile_mode: None,
@@ -724,6 +728,46 @@ fn test_loader_json_serializes_minimal_hvigor_shape() {
     );
 }
 
+/// Installed hvigor 6.24.3 `GenerateLoaderJson.processByteCodeHar()` appends
+/// both the marker and the generated ModuleInfo source only for ByteCode HAR.
+#[test]
+fn bytecode_har_loader_serializes_marker_and_module_info_entry() {
+    let temp = tempfile::tempdir().expect("create project");
+    let module_root = temp.path().join("entry");
+    let source_root = module_root.join("src/main/ets");
+    let module_info = module_root.join("build/default/generated/profile/default/ModuleInfo.ts");
+    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(module_info.parent().unwrap()).expect("create generated profile root");
+    fs::write(source_root.join("Index.ets"), "export class Index {}").expect("write HAR source");
+    fs::write(&module_info, "export const __MODULE_NAME__ = ''\n").expect("write ModuleInfo.ts");
+
+    let mut config = make_config(true);
+    config.project_root = temp.path().to_path_buf();
+    config.output_target = OutputTarget::Har;
+    config.product.build_option.har_artifact_type = arkdown_core::HarArtifactType::Bytecode;
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Har,
+    };
+    let mut manifest = make_manifest();
+    manifest.module_type = OhosModuleType::Har;
+
+    let mut loader = LoaderJson::generate(&config, &module_cfg, &manifest);
+    loader.include_byte_code_har_module_info(&module_info);
+
+    let value = serde_json::to_value(&loader).expect("serialize loader");
+    assert_eq!(value["byteCodeHar"], true);
+    assert_eq!(
+        loader.hvigor_compile_entry.last(),
+        Some(&to_absolute_path_string(&module_info))
+    );
+    assert_eq!(
+        loader.compile_entry.last(),
+        Some(&to_absolute_path_string(&module_info))
+    );
+}
+
 #[test]
 fn test_loader_json_pkg_brief_info_populated() {
     let config = make_config(false);
@@ -762,6 +806,21 @@ fn test_loader_json_cache_and_build_paths() {
     assert_eq!(
         loader.ace_module_build,
         "/project/entry/build/default/intermediates/loader_out/default/ets/"
+    );
+}
+
+#[test]
+fn har_loader_uses_har_compile_arkts_cache_owner() {
+    let mut config = make_config(false);
+    config.output_target = OutputTarget::Har;
+    let mut module_cfg = make_module_cfg();
+    module_cfg.module_type = OhosModuleType::Har;
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert_eq!(
+        loader.cache_path,
+        "/project/entry/build/default/cache/default/default@HarCompileArkTS/esmodule/debug/"
     );
 }
 
@@ -1675,10 +1734,15 @@ fn test_loader_json_hsp_har_ohm_maps_normalized_mode() {
     // Test normalized mode.
     let mut config = make_config(true); // use_normalized_ohm_url = true
     config.project_root = project_root.to_path_buf();
+    config.output_target = OutputTarget::Har;
+    config.product.build_option.har_artifact_type = arkdown_core::HarArtifactType::Bytecode;
     let mut module_cfg = make_module_cfg();
     module_cfg.src_path = module_root.clone();
+    module_cfg.module_type = OhosModuleType::Har;
+    let mut manifest = make_manifest();
+    manifest.module_type = OhosModuleType::Har;
 
-    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let loader = LoaderJson::generate(&config, &module_cfg, &manifest);
 
     let ohm = loader
         .hsp_name_ohm_map
@@ -1700,10 +1764,13 @@ fn test_loader_json_hsp_har_ohm_maps_normalized_mode() {
     // Test non-normalized mode.
     let mut config2 = make_config(false);
     config2.project_root = project_root.to_path_buf();
+    config2.output_target = OutputTarget::Har;
+    config2.product.build_option.har_artifact_type = arkdown_core::HarArtifactType::Bytecode;
     let mut module_cfg2 = make_module_cfg();
     module_cfg2.src_path = module_root;
+    module_cfg2.module_type = OhosModuleType::Har;
 
-    let loader2 = LoaderJson::generate(&config2, &module_cfg2, &make_manifest());
+    let loader2 = LoaderJson::generate(&config2, &module_cfg2, &manifest);
 
     let ohm2 = loader2
         .hsp_name_ohm_map
@@ -2643,7 +2710,7 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
         }),
         build_profile_fields: serde_json::Map::new(),
         support_chunks: false,
-        byte_code_har: false,
+        byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
     });
@@ -2699,7 +2766,7 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
         }),
         build_profile_fields: serde_json::Map::new(),
         support_chunks: false,
-        byte_code_har: false,
+        byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
     });
@@ -2858,7 +2925,7 @@ fn runtime_only_exclude_packages_skips_only_remote_source_har_code() {
         }),
         build_profile_fields: serde_json::Map::new(),
         support_chunks: false,
-        byte_code_har: false,
+        byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
     });

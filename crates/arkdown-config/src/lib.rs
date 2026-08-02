@@ -3,6 +3,9 @@
 //! Entry point: [`load_config`].
 
 pub mod build_profile;
+pub mod build_script_plugin;
+pub mod build_script_runtime;
+pub mod build_script_schema;
 pub mod error;
 pub mod hvigor_overrides;
 pub mod module_json;
@@ -10,9 +13,20 @@ pub mod oh_package;
 pub mod resolve;
 pub mod sdk;
 
+pub use build_script_plugin::BuildScriptPluginPathResolver;
+pub use build_script_runtime::{
+    BuildScriptCompilePluginRecord, BuildScriptModuleSelection, BuildScriptRuntimeModulePlan,
+    BuildScriptRuntimeModulePlanRequest, BuildScriptRuntimePlan, BuildScriptRuntimePlanDiagnostic,
+    BuildScriptRuntimePlanRequest, BuildScriptRuntimePlanner,
+};
+pub use build_script_schema::{
+    BuildScriptBuildOptionValidationRequest, BuildScriptSchemaDiagnostic,
+    BuildScriptSchemaValidator,
+};
 pub use error::ConfigError;
 pub use hvigor_overrides::{
     HvigorAppOptionOverride, HvigorSigningConfigOverride, HvigorSigningMaterialOverride,
-    ModuleHvigorOverrides, ProjectHvigorOverrides,
+    ModuleHvigorOverrides, ProjectHvigorOverrides, RuntimeContextOverrides,
+    RuntimeModuleContextOverrides, RuntimeProjectContextOverrides,
 };
-pub use resolve::load_config;
+pub use resolve::{load_config, ArkdownConfigLoader};

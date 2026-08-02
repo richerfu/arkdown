@@ -1,3 +1,4 @@
+pub mod app_coordinator;
 pub mod args;
 mod bundle_plan;
 pub(crate) mod bytecode;
@@ -15,6 +16,9 @@ mod generate_har_declarations_tests;
 mod har_dedup;
 #[cfg(test)]
 mod har_dedup_tests;
+mod har_importee_cache;
+#[cfg(test)]
+mod har_importee_cache_tests;
 mod intermediates;
 mod layout;
 mod module_plan;

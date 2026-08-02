@@ -11,6 +11,28 @@ The behavioral baseline is the plugin pipeline bundled with the latest
 installed DevEco Studio (`@ohos/hvigor-arkts-compose@6.24.3` and its SDK
 plugins), not the repository's historical hvigor copy.
 
+## Rust/V8 Ownership Boundary
+
+JavaScript is an ABI and plugin-authoring façade, not a build engine. The
+production ownership split is:
+
+| Behavior | Owner |
+| --- | --- |
+| ArkTS/TypeScript parse, transform, CommonJS emission, ESTree parse | Rust/OXC |
+| module graph, standard hook scheduling, plugin contexts | Rust/Rolldown |
+| project/model inventory, JSON5, schemas, targets and build options | Rust session/config crates |
+| plugin shape, order, native slots, paths and extension precedence | Rust plugin/config planners |
+| task catalog/graph/command plan, cache identity, CLI/native request planning | Rust runtime/session planners |
+| loading user modules and invoking arbitrary user functions | Node/V8 glue |
+| preserving function/object identity and adapting live Rolldown arguments | Node/V8 glue |
+| Node-specific public façades (`Module`, `Buffer`, `Promise`, log4js, iconv) | Node/V8 glue |
+
+The bridge may materialize JavaScript `Error`, warning, iterator, AST literal,
+and façade objects because those are observable plugin API values. It must not
+reimplement a parser, resolver, plugin scheduler, task graph, cache layout, or
+build-option planner. Callback-produced plain configuration is merged by Rust
+without JSON serialization so live JavaScript function identity is retained.
+
 ## External Compile Plugins
 
 The current public hvigor entry is a module custom plugin calling
@@ -119,9 +141,13 @@ context adapters. Their effects become typed native build inputs or custom task
 records. They do not implement Rolldown hooks unless they explicitly load a
 compile plugin.
 
-`.ts` and `.mjs` use the same CommonJS TypeScript hook as the installed hvigor
-runtime (TypeScript `4.9.5`), including imported `.mjs` modules and mocked
-`@ohos/hvigor*` packages.
+`.ts` and `.mjs` use the same synchronous CommonJS loading boundary as the
+installed hvigor runtime. Rust/OXC/Rolldown reads and compiles each file to the
+latest ES2016 target, preserves user imports for Node resolution, and embeds
+OXC runtime helpers. JavaScript passes the generated text to `Module._compile`,
+exposes plugin-facing classes/functions, and forwards callback effects to typed
+Rust planners while the live mock layer supplies `@ohos/hvigor*` packages.
+TypeScript `4.9.5` is retained only for latest-hvigor semantic type checking.
 
 The installed `build-opt.d.ts` still contains a legacy
 `arkOptions.compilePluginFile`, but that field is absent from the latest

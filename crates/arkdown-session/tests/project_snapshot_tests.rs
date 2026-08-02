@@ -11,6 +11,7 @@ fn config(project_root: &std::path::Path, build_version: Option<&str>) -> Arkdow
         output_target: OutputTarget::Hap,
         product: ProductConfig {
             name: "default".to_string(),
+            artifact_name: None,
             bundle_name: String::new(),
             compatible_sdk_version: "12".to_string(),
             compatible_sdk_version_stage: None,
@@ -21,6 +22,7 @@ fn config(project_root: &std::path::Path, build_version: Option<&str>) -> Arkdow
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,
+                    duplicate_dependency_check: false,
                 },
                 ark_options: None,
                 res_options: None,
@@ -28,6 +30,8 @@ fn config(project_root: &std::path::Path, build_version: Option<&str>) -> Arkdow
                 preload_system_so: false,
                 preload_so: Vec::new(),
                 deduplicate_har: false,
+                app_with_signed_pkg: false,
+                generate_shared_tgz: None,
                 customized_har_base_package: None,
                 remove_permissions: Vec::new(),
                 aot_compile_mode: None,
@@ -85,4 +89,34 @@ fn project_snapshot_matches_hvigor_build_version_product_then_app_precedence() {
         product_override.build_version.as_deref(),
         Some("product-build")
     );
+}
+
+#[test]
+fn project_parameter_file_matches_latest_hvigor_missing_file_and_cli_override_precedence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("oh-package.json5"),
+        r#"{
+            "modelVersion": "6.0.0",
+            "name": "app",
+            "parameterFile": "missing-params.json5"
+        }"#,
+    )
+    .expect("write project package");
+
+    let error = ProjectSnapshot::from_config(&config(temp.path(), None))
+        .expect_err("latest hvigor rejects a configured missing parameter file");
+    assert!(error.to_string().contains("missing-params.json5"));
+
+    std::fs::write(
+        temp.path().join("params.json5"),
+        r#"{ "versions.lib": "1.0.0" }"#,
+    )
+    .expect("write CLI parameter file");
+    ProjectSnapshot::from_config_with_runtime_overrides(
+        &config(temp.path(), None),
+        None,
+        Some("params.json5".into()),
+    )
+    .expect("CLI parameterFile overrides the project declaration");
 }

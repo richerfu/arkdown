@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use arkdown_core::{AppOptionOverride, ArkdownConfig, SigningConfig};
 use arkdown_path::canonicalize_or_owned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 
@@ -25,6 +25,46 @@ pub struct ProjectHvigorOverrides {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct ModuleHvigorOverrides(BTreeMap<PathBuf, serde_json::Value>);
+
+/// In-memory model mutations performed through the latest hvigor OHOS plugin
+/// contexts.
+///
+/// `OhosProjectContextImpl` and `OhosModuleContextImpl` update loader-owned
+/// JSON objects without writing their source files.  The Node runtime captures
+/// those complete objects and this typed overlay forwards them into arkdown's
+/// immutable startup snapshot.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeContextOverrides {
+    #[serde(default)]
+    pub project: RuntimeProjectContextOverrides,
+    #[serde(default)]
+    pub modules: BTreeMap<PathBuf, RuntimeModuleContextOverrides>,
+}
+
+/// Project model values replaced by `OhosProjectContext` setters.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeProjectContextOverrides {
+    #[serde(default)]
+    pub build_profile: Option<serde_json::Value>,
+    #[serde(default)]
+    pub app_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub package: Option<serde_json::Value>,
+}
+
+/// Module model values replaced by `OhosModuleContext` setters.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeModuleContextOverrides {
+    #[serde(default)]
+    pub build_profile: Option<serde_json::Value>,
+    #[serde(default)]
+    pub module_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub package: Option<serde_json::Value>,
+}
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -127,6 +167,33 @@ impl ModuleHvigorOverrides {
                     .map(|module_name| ((*module_name).to_string(), build_option.clone()))
             })
             .collect()
+    }
+}
+
+impl RuntimeContextOverrides {
+    /// Return a module overlay using canonical path identity when possible.
+    /// Runtime keys are absolute Node paths; canonical comparison also handles
+    /// Windows drive-letter/case normalization and symlinked workspaces.
+    pub fn module_for_root(&self, root: &Path) -> Option<&RuntimeModuleContextOverrides> {
+        if let Some(value) = self.modules.get(root) {
+            return Some(value);
+        }
+        let normalized_root = canonicalize_or_owned(root);
+        self.modules.iter().find_map(|(candidate, value)| {
+            (canonicalize_or_owned(candidate) == normalized_root).then_some(value)
+        })
+    }
+
+    /// Whether the runtime supplied any model replacement.
+    pub fn is_empty(&self) -> bool {
+        self.project.build_profile.is_none()
+            && self.project.app_json.is_none()
+            && self.project.package.is_none()
+            && self.modules.values().all(|module| {
+                module.build_profile.is_none()
+                    && module.module_json.is_none()
+                    && module.package.is_none()
+            })
     }
 }
 
@@ -291,6 +358,7 @@ mod tests {
             output_target: OutputTarget::Hap,
             product: ProductConfig {
                 name: "default".to_string(),
+                artifact_name: None,
                 bundle_name: "com.example.product".to_string(),
                 compatible_sdk_version: "12".to_string(),
                 compatible_sdk_version_stage: None,

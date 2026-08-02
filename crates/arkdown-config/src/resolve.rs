@@ -9,16 +9,268 @@ use crate::build_profile::{parse_api_version, BuildOptionDecoder, RawAppJson5, R
 use crate::error::ConfigError;
 use crate::module_json::RawModuleJson;
 use crate::sdk::{discover_sdk_with_selection, SdkSelection};
+use crate::RuntimeContextOverrides;
 use serde::Deserialize;
 
+/// Owns one complete configuration load, including optional in-memory model
+/// replacements produced by hvigor OHOS plugin contexts.
+pub struct ArkdownConfigLoader<'a> {
+    root: &'a Path,
+    mode: BuildMode,
+    target: OutputTarget,
+    product_name: Option<&'a str>,
+    module_name: Option<&'a str>,
+    runtime_overrides: Option<&'a RuntimeContextOverrides>,
+}
+
+impl<'a> ArkdownConfigLoader<'a> {
+    pub fn new(
+        root: &'a Path,
+        mode: BuildMode,
+        target: OutputTarget,
+        product_name: Option<&'a str>,
+        module_name: Option<&'a str>,
+    ) -> Self {
+        Self {
+            root,
+            mode,
+            target,
+            product_name,
+            module_name,
+            runtime_overrides: None,
+        }
+    }
+
+    pub fn with_runtime_overrides(
+        mut self,
+        runtime_overrides: &'a RuntimeContextOverrides,
+    ) -> Self {
+        self.runtime_overrides = Some(runtime_overrides);
+        self
+    }
+
+    /// Parse and resolve the complete project configuration.
+    pub fn load(self) -> Result<ArkdownConfig, ConfigError> {
+        let Self {
+            root,
+            mode,
+            target,
+            product_name,
+            module_name,
+            runtime_overrides,
+        } = self;
+        if !root.is_dir() {
+            return Err(ConfigError::FileNotFound(root.join("build-profile.json5")));
+        }
+        let root = arkdown_path::AbsPath::canonicalize(root)?.into_path_buf();
+        let root = root.as_path();
+
+        // -----------------------------------------------------------------------
+        // 1. Parse build-profile.json5 and AppScope/app.json5
+        // -----------------------------------------------------------------------
+        let profile_path = root.join("build-profile.json5");
+        let profile = if let Some(value) =
+            runtime_overrides.and_then(|overrides| overrides.project.build_profile.as_ref())
+        {
+            RawBuildProfile::from_value(value, &profile_path)?
+        } else {
+            RawBuildProfile::load(root)?
+        };
+        let app_json_path = root.join("AppScope").join("app.json5");
+        let app_json5 = if let Some(value) =
+            runtime_overrides.and_then(|overrides| overrides.project.app_json.as_ref())
+        {
+            RawAppJson5::from_value(value, &app_json_path)?
+        } else {
+            RawAppJson5::load(root)?
+        };
+
+        // -----------------------------------------------------------------------
+        // 2. Destructure app-level fields before consuming products
+        // -----------------------------------------------------------------------
+        // We destructure here so we can access both products and app.signing_configs
+        // without partial-move issues.
+        let app_signing_configs = profile.app.signing_configs;
+        let raw_modules_list = profile.modules;
+
+        // -----------------------------------------------------------------------
+        // 3. Select product
+        // -----------------------------------------------------------------------
+        let raw_product = match product_name {
+            Some(name) => profile
+                .app
+                .products
+                .into_iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| ConfigError::ProductNotFound(name.to_string()))?,
+            None => profile
+                .app
+                .products
+                .into_iter()
+                .next()
+                .ok_or_else(|| ConfigError::ProductNotFound("<first>".to_string()))?,
+        };
+
+        // -----------------------------------------------------------------------
+        // 4. Bundle name: product takes priority over AppScope/app.json5.
+        //
+        // Upstream: AbstractMergeProfile constructor resolves
+        // hvigorfile appOpt.bundleName → product.bundleName → app.json5.
+        // -----------------------------------------------------------------------
+        let bundle_name = if !raw_product.bundle_name.is_empty() {
+            raw_product.bundle_name.clone()
+        } else {
+            app_json5.app.bundle_name
+        };
+
+        // -----------------------------------------------------------------------
+        // 5. Build ProductConfig
+        // -----------------------------------------------------------------------
+
+        // Extract old-format per-product signing_configs before other field moves.
+        let raw_signing_configs_compat = raw_product.signing_configs;
+
+        // Resolve signing config: new format references by name under app.signingConfigs;
+        // fall back to old per-product embedded signingConfigs for backward compat.
+        let signing_config = raw_product
+            .signing_config
+            .as_deref()
+            .and_then(|name| {
+                app_signing_configs
+                    .iter()
+                    .find(|sc| sc.name == name)
+                    .and_then(|sc| sc.material.as_ref())
+                    .map(|m| SigningConfig {
+                        cert_path: m.cert_path.clone().into(),
+                        key_alias: m.key_alias.clone(),
+                        key_password: m.key_password.clone(),
+                        profile_path: m.profile.clone().into(),
+                        sign_alg: m.sign_alg.clone(),
+                        store_file: m.store_file.clone().into(),
+                        store_password: m.store_password.clone(),
+                    })
+            })
+            .or_else(|| {
+                // Backward compat: old format had signing_configs embedded in products.
+                raw_signing_configs_compat
+                    .into_iter()
+                    .next()
+                    .and_then(|sc| sc.material)
+                    .map(|m| SigningConfig {
+                        cert_path: m.cert_path.into(),
+                        key_alias: m.key_alias,
+                        key_password: m.key_password,
+                        profile_path: m.profile.into(),
+                        sign_alg: m.sign_alg,
+                        store_file: m.store_file.into(),
+                        store_password: m.store_password,
+                    })
+            });
+
+        let build_option = BuildOptionDecoder::new(
+            raw_product.build_option.as_ref(),
+            root,
+            &root.join("build-profile.json5"),
+        )
+        .decode()?;
+
+        let product = ProductConfig {
+            name: raw_product.name,
+            artifact_name: raw_product
+                .output
+                .and_then(|output| output.artifact_name)
+                .filter(|name| !name.is_empty()),
+            bundle_name,
+            compatible_sdk_version: raw_product.compatible_sdk_version.clone(),
+            compatible_sdk_version_stage: raw_product.compatible_sdk_version_stage.clone(),
+            target_sdk_version: raw_product.target_sdk_version.clone(),
+            runtime_os: raw_product.runtime_os,
+            signing_config,
+            build_option,
+            version_code: raw_product.version_code,
+            version_name: raw_product.version_name,
+            build_version: raw_product.build_version,
+            app_options: AppOptionOverride {
+                vendor: raw_product.vendor,
+                bundle_type: raw_product.bundle_type,
+                icon: raw_product.icon,
+                label: raw_product.label,
+            },
+        };
+
+        // -----------------------------------------------------------------------
+        // 6. Filter & build ModuleConfig list
+        // -----------------------------------------------------------------------
+        let raw_modules: Vec<_> = match module_name {
+            Some(name) => raw_modules_list
+                .into_iter()
+                .filter(|m| m.name == name)
+                .collect(),
+            None => raw_modules_list,
+        };
+
+        let mut modules: Vec<ModuleConfig> = Vec::with_capacity(raw_modules.len());
+        for raw_mod in raw_modules {
+            let module_root = root.join(&raw_mod.src_path);
+
+            // module.json5 is optional — if absent we fall back to Entry.
+            let module_json_path = module_root.join("src").join("main").join("module.json5");
+            let runtime_module_json = runtime_overrides
+                .and_then(|overrides| overrides.module_for_root(&module_root))
+                .and_then(|overrides| overrides.module_json.as_ref());
+            let module_type = match runtime_module_json.map_or_else(
+                || RawModuleJson::load(&module_root),
+                |value| RawModuleJson::from_value(value, &module_json_path),
+            ) {
+                Ok(mj) => OhosModuleType::from_type_str(&mj.module.module_type),
+                Err(ConfigError::FileNotFound(_)) => arkdown_core::OhosModuleType::Entry,
+                Err(e) => return Err(e),
+            };
+
+            modules.push(ModuleConfig {
+                name: raw_mod.name,
+                src_path: module_root,
+                module_type,
+            });
+        }
+
+        // -----------------------------------------------------------------------
+        // 7. Discover SDK
+        // -----------------------------------------------------------------------
+        // Explicit targetSdkVersion overrides the SDK component apiVersion. When
+        // targetSdkVersion is absent, hvigor compiles for the selected SDK API.
+        let explicit_target_api_version = raw_product
+            .target_sdk_version
+            .as_deref()
+            .and_then(parse_api_version);
+        let hvigor_sdk_cache = HvigorSdkCache::load(root);
+        let target_api_version = explicit_target_api_version.or_else(|| {
+            hvigor_sdk_cache
+                .as_ref()
+                .and_then(|cache| cache.compile_api_version)
+        });
+        let sdk_config = discover_sdk_with_selection(SdkSelection {
+            target_api_version,
+            compile_sdk_version: hvigor_sdk_cache
+                .as_ref()
+                .and_then(|cache| cache.toolchains_version.clone()),
+        })?;
+
+        // -----------------------------------------------------------------------
+        // 6. Assemble and return
+        // -----------------------------------------------------------------------
+        Ok(ArkdownConfig {
+            project_root: root.to_path_buf(),
+            build_mode: mode,
+            output_target: target,
+            product,
+            modules,
+            sdk_config,
+        })
+    }
+}
+
 /// Parse the project at `root` and return a fully resolved [`ArkdownConfig`].
-///
-/// # Parameters
-/// - `root` — project root directory (contains `build-profile.json5`)
-/// - `mode` — debug or release build
-/// - `target` — output artifact type
-/// - `product_name` — select a specific product; `None` → first product
-/// - `module_name` — restrict to a single module; `None` → all modules
 pub fn load_config(
     root: &Path,
     mode: BuildMode,
@@ -26,189 +278,7 @@ pub fn load_config(
     product_name: Option<&str>,
     module_name: Option<&str>,
 ) -> Result<ArkdownConfig, ConfigError> {
-    if !root.is_dir() {
-        return Err(ConfigError::FileNotFound(root.join("build-profile.json5")));
-    }
-    let root = arkdown_path::AbsPath::canonicalize(root)?.into_path_buf();
-    let root = root.as_path();
-
-    // -----------------------------------------------------------------------
-    // 1. Parse build-profile.json5 and AppScope/app.json5
-    // -----------------------------------------------------------------------
-    let profile = RawBuildProfile::load(root)?;
-    let app_json5 = RawAppJson5::load(root)?;
-
-    // -----------------------------------------------------------------------
-    // 2. Destructure app-level fields before consuming products
-    // -----------------------------------------------------------------------
-    // We destructure here so we can access both products and app.signing_configs
-    // without partial-move issues.
-    let app_signing_configs = profile.app.signing_configs;
-    let raw_modules_list = profile.modules;
-
-    // -----------------------------------------------------------------------
-    // 3. Select product
-    // -----------------------------------------------------------------------
-    let raw_product = match product_name {
-        Some(name) => profile
-            .app
-            .products
-            .into_iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| ConfigError::ProductNotFound(name.to_string()))?,
-        None => profile
-            .app
-            .products
-            .into_iter()
-            .next()
-            .ok_or_else(|| ConfigError::ProductNotFound("<first>".to_string()))?,
-    };
-
-    // -----------------------------------------------------------------------
-    // 4. Bundle name: product takes priority over AppScope/app.json5.
-    //
-    // Upstream: AbstractMergeProfile constructor resolves
-    // hvigorfile appOpt.bundleName → product.bundleName → app.json5.
-    // -----------------------------------------------------------------------
-    let bundle_name = if !raw_product.bundle_name.is_empty() {
-        raw_product.bundle_name.clone()
-    } else {
-        app_json5.app.bundle_name
-    };
-
-    // -----------------------------------------------------------------------
-    // 5. Build ProductConfig
-    // -----------------------------------------------------------------------
-
-    // Extract old-format per-product signing_configs before other field moves.
-    let raw_signing_configs_compat = raw_product.signing_configs;
-
-    // Resolve signing config: new format references by name under app.signingConfigs;
-    // fall back to old per-product embedded signingConfigs for backward compat.
-    let signing_config = raw_product
-        .signing_config
-        .as_deref()
-        .and_then(|name| {
-            app_signing_configs
-                .iter()
-                .find(|sc| sc.name == name)
-                .and_then(|sc| sc.material.as_ref())
-                .map(|m| SigningConfig {
-                    cert_path: m.cert_path.clone().into(),
-                    key_alias: m.key_alias.clone(),
-                    key_password: m.key_password.clone(),
-                    profile_path: m.profile.clone().into(),
-                    sign_alg: m.sign_alg.clone(),
-                    store_file: m.store_file.clone().into(),
-                    store_password: m.store_password.clone(),
-                })
-        })
-        .or_else(|| {
-            // Backward compat: old format had signing_configs embedded in products.
-            raw_signing_configs_compat
-                .into_iter()
-                .next()
-                .and_then(|sc| sc.material)
-                .map(|m| SigningConfig {
-                    cert_path: m.cert_path.into(),
-                    key_alias: m.key_alias,
-                    key_password: m.key_password,
-                    profile_path: m.profile.into(),
-                    sign_alg: m.sign_alg,
-                    store_file: m.store_file.into(),
-                    store_password: m.store_password,
-                })
-        });
-
-    let build_option = BuildOptionDecoder::new(
-        raw_product.build_option.as_ref(),
-        root,
-        &root.join("build-profile.json5"),
-    )
-    .decode()?;
-
-    let product = ProductConfig {
-        name: raw_product.name,
-        bundle_name,
-        compatible_sdk_version: raw_product.compatible_sdk_version.clone(),
-        compatible_sdk_version_stage: raw_product.compatible_sdk_version_stage.clone(),
-        target_sdk_version: raw_product.target_sdk_version.clone(),
-        runtime_os: raw_product.runtime_os,
-        signing_config,
-        build_option,
-        version_code: raw_product.version_code,
-        version_name: raw_product.version_name,
-        build_version: raw_product.build_version,
-        app_options: AppOptionOverride {
-            vendor: raw_product.vendor,
-            bundle_type: raw_product.bundle_type,
-            icon: raw_product.icon,
-            label: raw_product.label,
-        },
-    };
-
-    // -----------------------------------------------------------------------
-    // 6. Filter & build ModuleConfig list
-    // -----------------------------------------------------------------------
-    let raw_modules: Vec<_> = match module_name {
-        Some(name) => raw_modules_list
-            .into_iter()
-            .filter(|m| m.name == name)
-            .collect(),
-        None => raw_modules_list,
-    };
-
-    let mut modules: Vec<ModuleConfig> = Vec::with_capacity(raw_modules.len());
-    for raw_mod in raw_modules {
-        let module_root = root.join(&raw_mod.src_path);
-
-        // module.json5 is optional — if absent we fall back to Entry.
-        let module_type = match RawModuleJson::load(&module_root) {
-            Ok(mj) => OhosModuleType::from_type_str(&mj.module.module_type),
-            Err(ConfigError::FileNotFound(_)) => arkdown_core::OhosModuleType::Entry,
-            Err(e) => return Err(e),
-        };
-
-        modules.push(ModuleConfig {
-            name: raw_mod.name,
-            src_path: module_root,
-            module_type,
-        });
-    }
-
-    // -----------------------------------------------------------------------
-    // 7. Discover SDK
-    // -----------------------------------------------------------------------
-    // Explicit targetSdkVersion overrides the SDK component apiVersion. When
-    // targetSdkVersion is absent, hvigor compiles for the selected SDK API.
-    let explicit_target_api_version = raw_product
-        .target_sdk_version
-        .as_deref()
-        .and_then(parse_api_version);
-    let hvigor_sdk_cache = HvigorSdkCache::load(root);
-    let target_api_version = explicit_target_api_version.or_else(|| {
-        hvigor_sdk_cache
-            .as_ref()
-            .and_then(|cache| cache.compile_api_version)
-    });
-    let sdk_config = discover_sdk_with_selection(SdkSelection {
-        target_api_version,
-        compile_sdk_version: hvigor_sdk_cache
-            .as_ref()
-            .and_then(|cache| cache.toolchains_version.clone()),
-    })?;
-
-    // -----------------------------------------------------------------------
-    // 6. Assemble and return
-    // -----------------------------------------------------------------------
-    Ok(ArkdownConfig {
-        project_root: root.to_path_buf(),
-        build_mode: mode,
-        output_target: target,
-        product,
-        modules,
-        sdk_config,
-    })
+    ArkdownConfigLoader::new(root, mode, target, product_name, module_name).load()
 }
 
 #[derive(Debug)]

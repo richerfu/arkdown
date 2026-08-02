@@ -161,10 +161,6 @@ impl PrivacyProfileProcessor {
             }
         }
 
-        if pac_files.is_empty() && dependency_packages.is_empty() {
-            return Ok(None);
-        }
-
         let mut pac_values = Vec::new();
         for path in &pac_files {
             if let Some(value) = Self::read_json5_value(path)? {
@@ -179,10 +175,12 @@ impl PrivacyProfileProcessor {
         if let Some(parent) = processed_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(
-            &processed_path,
-            serde_json::to_vec(&merged).expect("serializing project PAC should not fail"),
-        )?;
+        let mut serialized =
+            serde_json::to_vec(&merged).expect("serializing project PAC should not fail");
+        // fs-extra outputJSONSync, used by hvigor 6.24.3, terminates the
+        // compact project PAC document with a line feed on every host.
+        serialized.push(b'\n');
+        std::fs::write(&processed_path, serialized)?;
 
         Ok(Some(ProjectPrivacyProfileOutput { processed_path }))
     }
@@ -583,6 +581,9 @@ impl PrivacyProfileProcessor {
     }
 
     fn merge_dependency_metadata(packages: &[serde_json::Value], merged: &mut serde_json::Value) {
+        if packages.is_empty() {
+            return;
+        }
         let mut seen = IndexSet::new();
         let dependencies = merged
             .as_object_mut()
@@ -950,6 +951,27 @@ mod tests {
         assert!(error
             .to_string()
             .contains("PRIVACY_PROFILE_VALIDATION_FAILED"));
+    }
+
+    #[test]
+    fn test_process_project_privacy_profile_writes_latest_hvigor_empty_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = write_schema(tmp.path());
+
+        let output = PrivacyProfileProcessor::new()
+            .process_project_privacy_profile(ProjectPrivacyProfileInput {
+                project_root: tmp.path(),
+                product_name: "default",
+                modules: &[],
+                pac_schema_path: Some(&schema),
+            })
+            .unwrap()
+            .expect("latest hvigor always writes pac.json when the SDK schema exists");
+
+        assert_eq!(
+            std::fs::read(output.processed_path).unwrap(),
+            b"{\"dataProcess\":[],\"specialAPIs\":[]}\n"
+        );
     }
 
     #[test]

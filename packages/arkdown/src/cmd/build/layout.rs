@@ -63,6 +63,12 @@ impl<'a> ModuleBuildLayout<'a> {
     self.build_default().join("cache").join(cache_name)
   }
 
+  pub(super) fn package_har_cache_dir(&self, target_name: &str) -> PathBuf {
+    self
+      .default_cache_dir(target_name)
+      .join(format!("{target_name}@PackageHar"))
+  }
+
   pub(super) fn outputs_default(&self) -> PathBuf {
     self.build_default().join("outputs").join("default")
   }
@@ -208,6 +214,24 @@ impl<'a> ModuleBuildLayout<'a> {
       .join("profile")
       .join(target_name)
       .join("BuildProfile.ets")
+  }
+
+  pub(super) fn generated_module_info(&self, target_name: &str) -> PathBuf {
+    self
+      .build_default()
+      .join("generated")
+      .join("profile")
+      .join(target_name)
+      .join("ModuleInfo.ts")
+  }
+
+  pub(super) fn generated_pm_oh_package(&self, target_name: &str) -> PathBuf {
+    self
+      .build_default()
+      .join("generated")
+      .join("pm")
+      .join(target_name)
+      .join("oh-package.json5")
   }
 
   pub(super) fn base_native_libs_json(&self) -> PathBuf {

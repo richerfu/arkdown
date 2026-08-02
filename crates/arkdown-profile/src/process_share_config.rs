@@ -54,6 +54,10 @@ pub struct ShareConfigInput<'a> {
 pub struct ShareConfigDependencyInput {
     pub package_name: String,
     pub package_root: PathBuf,
+    /// Whether hvigor resolved this dependency to a workspace module model.
+    /// Remote/install-state HARs read their compiled `module.json` first;
+    /// local modules read the source `module.json5` selected by the target.
+    pub is_local: bool,
 }
 
 impl ShareConfigInput<'_> {
@@ -88,6 +92,7 @@ impl ShareConfigInput<'_> {
             let entries = Self::read_cross_app_shared_config_from_pkg(
                 &dependency.package_root,
                 &dependency.package_name,
+                dependency.is_local,
             );
             all_entries.extend(entries);
         }
@@ -255,14 +260,27 @@ impl ShareConfigInput<'_> {
     fn read_cross_app_shared_config_from_pkg(
         pkg_dir: &Path,
         pkg_name: &str,
+        is_local: bool,
     ) -> Vec<CrossAppSharedConfigEntry> {
-        // Candidate paths in priority order.
+        // Installed hvigor 6.24.3 uses the project module model for local
+        // dependencies, but `getModuleObjByRemoteDependency()` selects the
+        // compiled src/main/module.json before module.json5 for installed HARs.
         let layout = ProfileModuleLayout::new(pkg_dir);
-        let candidates = [
-            layout.module_json5(),
-            layout.package_module_json5(),
-            layout.package_module_json(),
-        ];
+        let candidates = if is_local {
+            [
+                layout.module_json5(),
+                layout.module_json(),
+                layout.package_module_json5(),
+                layout.package_module_json(),
+            ]
+        } else {
+            [
+                layout.module_json(),
+                layout.module_json5(),
+                layout.package_module_json(),
+                layout.package_module_json5(),
+            ]
+        };
 
         for candidate in &candidates {
             if !candidate.exists() {
@@ -425,6 +443,7 @@ mod tests {
         ShareConfigDependencyInput {
             package_name: package_name.to_string(),
             package_root: package_root.to_path_buf(),
+            is_local: false,
         }
     }
 
@@ -628,6 +647,65 @@ mod tests {
         assert_eq!(output.entries.len(), 1);
         assert_eq!(output.entries[0].uri, "myapp://shared/DepProfile");
         assert_eq!(output.entries[0].package_name, "profile-har");
+    }
+
+    #[test]
+    fn remote_har_uses_compiled_module_json_before_shipped_source_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let har_pkg = tmp.path().join("oh_modules/remote-har");
+        write_module_json5(
+            &har_pkg,
+            r#"{
+                "module": {
+                    "name": "remote-har",
+                    "type": "har",
+                    "crossAppSharedConfig": "$profile:cross_app_shared_config"
+                }
+            }"#,
+        );
+        fs::write(
+            har_pkg.join("src/main/module.json"),
+            r#"{"module":{"name":"remote-har","type":"har"}}"#,
+        )
+        .unwrap();
+        let profile_dir = har_pkg.join("src/main/resources/base/profile");
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("cross_app_shared_config.json"),
+            r#"{"crossAppSharedConfig":[{"uri":"arkdown://remote/source-only"}]}"#,
+        )
+        .unwrap();
+
+        let remote_output = ShareConfigProcessor::new()
+            .merge_share_config(ShareConfigInput {
+                module_root: tmp.path(),
+                dependency_packages: vec![ShareConfigDependencyInput {
+                    package_name: "remote-har".to_string(),
+                    package_root: har_pkg.clone(),
+                    is_local: false,
+                }],
+                self_entries: vec![],
+                self_profile_name: None,
+            })
+            .unwrap();
+        assert!(
+            remote_output.entries.is_empty(),
+            "DependencyManager.getModuleObjByRemoteDependency treats compiled module.json as authoritative"
+        );
+
+        let local_output = ShareConfigProcessor::new()
+            .merge_share_config(ShareConfigInput {
+                module_root: tmp.path(),
+                dependency_packages: vec![ShareConfigDependencyInput {
+                    package_name: "remote-har".to_string(),
+                    package_root: har_pkg,
+                    is_local: true,
+                }],
+                self_entries: vec![],
+                self_profile_name: None,
+            })
+            .unwrap();
+        assert_eq!(local_output.entries.len(), 1);
     }
 
     #[test]

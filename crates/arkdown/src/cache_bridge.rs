@@ -27,12 +27,39 @@ use arkdown_core::HvigorModuleSourceFile;
 use arkdown_path::{ArtifactPathSerializer, RelPath};
 use serde::{Deserialize, Serialize};
 
+use crate::{PluginAstParseOptions, PluginAstParser};
+
 /// A cached transformed module passed to latest-hvigor
 /// `shouldInvalidCache({ ast, code, id })` hooks.
 #[derive(Debug, Clone)]
 pub struct PluginCacheModule {
     pub id: String,
     pub code: String,
+}
+
+impl PluginCacheModule {
+    /// Serialize the exact object passed to latest-hvigor
+    /// `shouldInvalidCache({ ast, code, id })` hooks.
+    ///
+    /// The AST envelope remains private transport metadata until the thin
+    /// JavaScript bridge revives JSON-inexpressible literal values. A parser
+    /// rejection leaves `ast` absent, matching hvigor's optional AST contract
+    /// for transformed ArkTS syntax.
+    pub fn hook_request_json(&self) -> anyhow::Result<String> {
+        let mut request = serde_json::Map::from_iter([
+            (
+                "code".to_string(),
+                serde_json::Value::String(self.code.clone()),
+            ),
+            ("id".to_string(), serde_json::Value::String(self.id.clone())),
+        ]);
+        if let Ok(parsed) =
+            PluginAstParser::new(&self.code, PluginAstParseOptions::default()).parse()
+        {
+            request.insert("__arkdownOxcAst".to_string(), parsed.into_ast());
+        }
+        serde_json::to_string(&request).map_err(Into::into)
+    }
 }
 
 /// Persistent module inventory for custom compile-plugin cache decisions.

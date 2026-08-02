@@ -18,7 +18,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
-use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, SPAN};
@@ -28,6 +28,7 @@ use oxc_transformer::{TransformOptions, Transformer};
 use crate::source::{
     CompileArktsSourceType, SourceClassifier, TransformSourceFile, TransformSourceSnapshot,
 };
+use crate::source_map::TypeScriptJavaScriptSourceMapBuilder;
 use crate::ModuleExportNameText;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +79,11 @@ pub(crate) struct TypeScriptJavascriptEmitter<'a> {
     hvigor_emit_wrapper: bool,
 }
 
+pub(crate) struct TypeScriptJavascriptEmitOutput {
+    pub(crate) code: String,
+    pub(crate) source_map: Option<String>,
+}
+
 impl<'a> TypeScriptJavascriptEmitter<'a> {
     pub(crate) fn new(source: &'a str, id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
         Self {
@@ -100,12 +106,21 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
     }
 
     pub(crate) fn emit(&self) -> Option<String> {
+        self.emit_with_source_map().map(|output| output.code)
+    }
+
+    pub(crate) fn emit_with_source_map(&self) -> Option<TypeScriptJavascriptEmitOutput> {
         let allocator = Allocator::default();
         let source_type = self.source_type();
         let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return None;
         }
+        let is_external_module = parsed
+            .program
+            .body
+            .iter()
+            .any(Statement::is_module_declaration);
 
         let rewriter = ImportedConstEnumRewriter::new(self.id, self.sources);
         let rewriter = match self.const_enum_exports {
@@ -137,34 +152,43 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             return None;
         }
 
-        let options = if self.hvigor_emit_wrapper {
-            CodegenOptions {
-                comments: CommentOptions::disabled(),
-                ..CodegenOptions::default()
-            }
-        } else {
-            CodegenOptions::default()
+        let options = CodegenOptions {
+            source_map_path: Some(self.id.into()),
+            ..CodegenOptions::default()
         };
-        let code = Codegen::new()
-            .with_options(options)
-            .build(&parsed.program)
-            .code;
-        Some(if self.hvigor_emit_wrapper {
-            self.wrap_hvigor_emit(code)
+        let generated = Codegen::new().with_options(options).build(&parsed.program);
+        let generated_line_offset = u32::from(
+            self.hvigor_emit_wrapper
+                && self.should_prepend_use_strict(&generated.code, is_external_module),
+        );
+        let source_map = generated.map.as_ref().and_then(|source_map| {
+            let source_map = source_map.to_json_string();
+            TypeScriptJavaScriptSourceMapBuilder::new(
+                &generated.code,
+                self.source,
+                self.id,
+                &source_map,
+            )
+            .with_generated_line_offset(generated_line_offset)
+            .build()
+        });
+        let code = if self.hvigor_emit_wrapper {
+            self.wrap_hvigor_emit(generated.code, is_external_module)
         } else {
-            code
-        })
+            generated.code
+        };
+        Some(TypeScriptJavascriptEmitOutput { code, source_map })
     }
 
-    fn wrap_hvigor_emit(&self, code: String) -> String {
+    fn wrap_hvigor_emit(&self, code: String, is_external_module: bool) -> String {
         let code = code.replace("\r\n", "\n").replace('\r', "\n");
         let code = code.trim();
         let mut sections = Vec::with_capacity(3);
-        if !code.starts_with("\"use strict\";") && !code.starts_with("'use strict';") {
+        if self.should_prepend_use_strict(code, is_external_module) {
             sections.push("\"use strict\";".to_string());
         }
         if !code.is_empty() {
-            sections.push(code.to_string());
+            sections.push(code.replace('\n', "\r\n"));
         }
         sections.push(format!(
             "//# sourceMappingURL={}.js.map",
@@ -174,6 +198,12 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
                 .unwrap_or("module")
         ));
         sections.join("\r\n")
+    }
+
+    fn should_prepend_use_strict(&self, code: &str, is_external_module: bool) -> bool {
+        !is_external_module
+            && !code.starts_with("\"use strict\";")
+            && !code.starts_with("'use strict';")
     }
 
     fn source_type(&self) -> SourceType {

@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
+use arkdown_config::RuntimeContextOverrides;
 use arkdown_core::ArkdownConfig;
 use arkdown_path::{lexical_normalize, to_slash};
 use rayon::prelude::*;
@@ -119,10 +120,21 @@ impl InputFingerprintSet {
         profiles: &ProfileStore,
         sdk: &SdkSnapshot,
     ) -> Result<Self, FingerprintError> {
+        Self::build_with_runtime_overrides(config, project, profiles, sdk, None)
+    }
+
+    /// Build fingerprints while including in-memory hvigor loader values.
+    pub fn build_with_runtime_overrides(
+        config: &ArkdownConfig,
+        project: &ProjectSnapshot,
+        profiles: &ProfileStore,
+        sdk: &SdkSnapshot,
+        runtime_overrides: Option<&RuntimeContextOverrides>,
+    ) -> Result<Self, FingerprintError> {
         let project_inputs = ProjectFingerprintInventory::new(project).build()?;
         Ok(Self {
-            config: Self::compute_config_hash(config, project)?,
-            package_graph: Self::compute_package_hash(project)?,
+            config: Self::compute_config_hash(config, project, runtime_overrides)?,
+            package_graph: Self::compute_package_hash(project, runtime_overrides)?,
             profiles: profiles.fingerprint(),
             resources: project_inputs.resources,
             sources: project_inputs.sources,
@@ -140,6 +152,7 @@ impl InputFingerprintSet {
     fn compute_config_hash(
         config: &ArkdownConfig,
         project: &ProjectSnapshot,
+        runtime_overrides: Option<&RuntimeContextOverrides>,
     ) -> Result<Fingerprint, FingerprintError> {
         let mut builder = FingerprintBuilder::new("config", &project.root);
         let encoded = serde_json::to_vec(config).map_err(|source| FingerprintError::Serialize {
@@ -147,6 +160,15 @@ impl InputFingerprintSet {
             source,
         })?;
         builder.add_value("normalized_config", &encoded);
+        if let Some(runtime_overrides) = runtime_overrides {
+            let encoded = serde_json::to_vec(runtime_overrides).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "RuntimeContextOverrides",
+                    source,
+                }
+            })?;
+            builder.add_value("runtime_context_overrides", &encoded);
+        }
         builder.add_file_if_present(&project.root.join("build-profile.json5"))?;
         builder
             .add_file_if_present(&ProjectPathLayout::new(&project.root).app_scope_app_json5())?;
@@ -158,10 +180,22 @@ impl InputFingerprintSet {
         Ok(builder.finish())
     }
 
-    fn compute_package_hash(project: &ProjectSnapshot) -> Result<Fingerprint, FingerprintError> {
+    fn compute_package_hash(
+        project: &ProjectSnapshot,
+        runtime_overrides: Option<&RuntimeContextOverrides>,
+    ) -> Result<Fingerprint, FingerprintError> {
         let mut builder = FingerprintBuilder::new("package_graph", &project.root);
         for path in builder.named_files_under(&project.root, "oh-package.json5")? {
             builder.add_file(&path)?;
+        }
+        if let Some(runtime_overrides) = runtime_overrides {
+            let encoded = serde_json::to_vec(runtime_overrides).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "RuntimeContextOverrides",
+                    source,
+                }
+            })?;
+            builder.add_value("runtime_context_overrides", &encoded);
         }
         Ok(builder.finish())
     }

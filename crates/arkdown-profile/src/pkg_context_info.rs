@@ -109,11 +109,24 @@ impl PkgContextInfoGenerator {
         input: &PkgContextInfoInput,
         output_path: &Path,
     ) -> Result<(), ArkdownError> {
+        let entries = self.generate(input)?;
+        self.write_generated(&entries, output_path)
+    }
+
+    /// Serialize an already generated package-context snapshot.
+    ///
+    /// Profile orchestration uses the same immutable map for loader OHM maps
+    /// and the on-disk `pkgContextInfo.json`, avoiding a second dependency
+    /// inventory pass.
+    pub fn write_generated(
+        &self,
+        entries: &BTreeMap<String, PkgContextInfoOpt>,
+        output_path: &Path,
+    ) -> Result<(), ArkdownError> {
         if let Some(parent) = output_path.parent() {
             fs_err::create_dir_all(parent)?;
         }
-        let entries = self.generate(input)?;
-        let json = serde_json::to_string(&entries)
+        let json = serde_json::to_string(entries)
             .map_err(|error| ArkdownError::Io(std::io::Error::other(error.to_string())))?;
         fs_err::write(output_path, json)?;
         Ok(())

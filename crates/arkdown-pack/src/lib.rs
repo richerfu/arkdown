@@ -1,15 +1,23 @@
+pub mod app;
 pub mod error;
 pub mod integrated_hsp;
 pub mod packager;
 pub mod plan;
 pub mod zip_writer;
 
+pub use app::{
+    AppArchiveUnpacker, AppArtifactInput, AppArtifactRole, AppArtifactStager, AppNormalizePlan,
+    AppPackagePlan, AppPackageRunner, AppPackingCommand, ProjectPackInfoBuilder,
+    ProjectPackInfoOutput, RemoteHspCollector, RemoteHspDependencyScope, StagedAppArtifacts,
+    UnpackedAppArtifacts,
+};
 pub use error::PackError;
 pub use integrated_hsp::{
     normalize_integrated_hsps, IntegratedHspCandidate, IntegratedHspCollector, IntegratedHspEntry,
 };
 pub use packager::{
-    minify_package_intermediate_module_json, HarPackInput, HarVariantInput, HspInterfaceHarInput,
+    minify_package_intermediate_module_json, BundledHarResourceInput, HarBundledDependencyInput,
+    HarPackInput, HarPackageParameterInput, HarVariantInput, HspInterfaceHarInput, HspTgzInput,
     PackAbility, PackInput, Packager,
 };
 pub use plan::{
@@ -36,6 +44,7 @@ mod tests {
             output_target: OutputTarget::Hap,
             product: ProductConfig {
                 name: "default".to_string(),
+                artifact_name: None,
                 bundle_name: "com.test.app".to_string(),
                 compatible_sdk_version: "5.0.0(12)".to_string(),
                 compatible_sdk_version_stage: None,
@@ -46,6 +55,8 @@ mod tests {
                     preload_system_so: false,
                     preload_so: vec![],
                     deduplicate_har: false,
+                    app_with_signed_pkg: false,
+                    generate_shared_tgz: None,
                     customized_har_base_package: None,
                     remove_permissions: vec![],
                     aot_compile_mode: None,
@@ -58,6 +69,7 @@ mod tests {
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
+                        duplicate_dependency_check: false,
                     },
                     ark_options: None,
                     res_options: None,

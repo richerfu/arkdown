@@ -58,9 +58,9 @@ pub struct LoaderJson {
     /// The OHOS module name (e.g. `"entry"`).
     pub module_name: String,
     /// HSP package name → OHM URL map.
-    pub hsp_name_ohm_map: FxHashMap<String, String>,
+    pub hsp_name_ohm_map: IndexMap<String, String>,
     /// HAR package name → OHM URL map.
-    pub har_name_ohm_map: FxHashMap<String, String>,
+    pub har_name_ohm_map: IndexMap<String, String>,
     /// Package manager type — `"ohpm"` for OHOS projects.
     pub package_manager_type: String,
     /// hvigor's serialized compile entries. Empty for the minimal HAP fixture.
@@ -78,6 +78,12 @@ pub struct LoaderJson {
     pub update_version_info: IndexMap<String, serde_json::Value>,
     /// Whether HAR compilation uses `packingOptions.customizedOptions.basePackage`.
     pub customized_har: bool,
+    /// Present only for the HAR currently being emitted as ByteCode HAR.
+    ///
+    /// Latest `GenerateLoaderJson` appends this field after constructing the
+    /// common loader object; source HAR/HAP/HSP loader files omit it.
+    #[serde(rename = "byteCodeHar", skip_serializing_if = "Option::is_none")]
+    pub byte_code_har: Option<bool>,
     /// Ark Native output path emitted by hvigor when AOT is enabled for this module.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub an_build_out_put: Option<String>,
@@ -556,6 +562,24 @@ impl LoaderJson {
         }
     }
 
+    /// Add the generated `ModuleInfo.ts` required by a ByteCode HAR.
+    ///
+    /// Mirrors `GenerateLoaderJson.processByteCodeHar()` from the installed
+    /// hvigor 6.24.3. The path participates in both the serialized loader
+    /// contract and Arkdown's in-process compiler input inventory.
+    pub fn include_byte_code_har_module_info(&mut self, path: &Path) {
+        if !path.is_file() {
+            return;
+        }
+        let absolute = to_absolute_path_string(path);
+        if !self.hvigor_compile_entry.contains(&absolute) {
+            self.hvigor_compile_entry.push(absolute.clone());
+        }
+        if !self.compile_entry.contains(&absolute) {
+            self.compile_entry.push(absolute);
+        }
+    }
+
     /// Apply the final ByteCode HAR scan result to this loader.
     ///
     /// Profile generation can run before the session-backed dependency graph is
@@ -571,6 +595,22 @@ impl LoaderJson {
         project_root: &Path,
         output_target: OutputTarget,
     ) {
+        let previous_other_compile_files = std::mem::take(&mut self.other_compile_files);
+        self.compile_entry
+            .retain(|entry| !previous_other_compile_files.contains(entry));
+
+        // Installed hvigor 6.24.3
+        // `GenerateLoaderJson.setByteCodeHarInfoAndOtherCompileFiles()` gates
+        // this entire surface on normalized OHM URLs and `isHapOrHsp()`.
+        // A normal HAR target therefore keeps these fields empty even when it
+        // is itself emitted as a ByteCode HAR.
+        if !self.use_normalized_ohm_url || matches!(output_target, OutputTarget::Har) {
+            self.byte_code_har_info.clear();
+            self.declaration_entry.clear();
+            self.update_version_info.clear();
+            return;
+        }
+
         self.byte_code_har_info = deps
             .iter()
             .cloned()
@@ -582,9 +622,10 @@ impl LoaderJson {
             project_root,
         );
 
-        if self.use_normalized_ohm_url
-            && matches!(output_target, OutputTarget::Hap | OutputTarget::Hsp)
-        {
+        if matches!(
+            output_target,
+            OutputTarget::Hap | OutputTarget::Hsp | OutputTarget::Preview | OutputTarget::Test
+        ) {
             let mut entries = deps
                 .iter()
                 .flat_map(|dep| dep.declaration_entry.iter())
@@ -607,6 +648,28 @@ impl LoaderJson {
         let mut seen = FxHashSet::default();
         self.compile_entry
             .retain(|entry| seen.insert(entry.clone()));
+    }
+
+    /// Replace `harNameOhmMap` from the exact dependency view selected by
+    /// hvigor's ByteCode HAR task service.
+    pub fn apply_bytecode_har_ohm_packages(
+        &mut self,
+        package_names: &[String],
+        pkg_context_info: &std::collections::BTreeMap<String, PkgContextInfoOpt>,
+    ) {
+        if self.byte_code_har != Some(true) || !self.use_normalized_ohm_url {
+            return;
+        }
+        self.har_name_ohm_map.clear();
+        for package_name in package_names {
+            let Some(context) = pkg_context_info.get(package_name) else {
+                continue;
+            };
+            self.har_name_ohm_map.insert(
+                package_name.clone(),
+                Self::normalized_ohm_from_pkg_context(context),
+            );
+        }
     }
 
     fn compile_entry_from_src_main_rel(path: &Path) -> String {
@@ -879,13 +942,25 @@ impl LoaderJson {
             .build_option
             .strict_mode
             .use_normalized_ohm_url;
+        let module_is_bytecode_har = matches!(config.output_target, OutputTarget::Har)
+            && matches!(module_cfg.module_type, OhosModuleType::Har)
+            && matches!(
+                config.product.build_option.har_artifact_type,
+                arkdown_core::HarArtifactType::Bytecode
+            );
+        let collects_bytecode_har_inputs =
+            use_normalized_ohm_url && !matches!(config.output_target, OutputTarget::Har);
         let bundles_bytecode_har_dependencies = matches!(config.output_target, OutputTarget::Har)
+            && matches!(
+                config.product.build_option.har_artifact_type,
+                arkdown_core::HarArtifactType::Bytecode
+            )
             && config
                 .product
                 .build_option
                 .ark_options
                 .as_ref()
-                .is_some_and(|options| options.byte_code_har && options.bundled_dependencies);
+                .is_some_and(|options| options.bundled_dependencies);
         let pkg_contexts = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "dependency_pkg_contexts");
             use_normalized_ohm_url
@@ -992,12 +1067,14 @@ impl LoaderJson {
             }
         }
 
-        let bytecode_har_deps = {
+        let bytecode_har_deps = if collects_bytecode_har_inputs {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_har_graph_scan");
             ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(
                 &module_cfg.src_path,
                 &config.project_root,
             )
+        } else {
+            Vec::new()
         };
         let other_compile_paths = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_other_compile_files");
@@ -1064,8 +1141,6 @@ impl LoaderJson {
             .map(|e| e.into_loader_entry())
             .collect();
 
-        let module_is_bytecode_har = Self::is_bytecode_har_package(&module_cfg.src_path);
-
         let declaration_entry = if use_normalized_ohm_url {
             let mut entries: Vec<String> = bytecode_har_deps
                 .iter()
@@ -1101,14 +1176,21 @@ impl LoaderJson {
         } else {
             Vec::new()
         };
-        let update_version_info = ByteCodeHarScanEntry::collect_bytecode_har_update_version_info(
-            &bytecode_har_deps,
-            &module_cfg.src_path,
-            &config.project_root,
-        );
+        let update_version_info = if matches!(config.output_target, OutputTarget::Har) {
+            IndexMap::new()
+        } else {
+            ByteCodeHarScanEntry::collect_bytecode_har_update_version_info(
+                &bytecode_har_deps,
+                &module_cfg.src_path,
+                &config.project_root,
+            )
+        };
 
         // --- TASK-LOADER-02: populate dynamicImportLibInfo from oh-package.json5 ---
-        let dynamic_import_lib_info: IndexMap<String, serde_json::Value> = {
+        let dynamic_import_lib_info: IndexMap<String, serde_json::Value> = if module_is_bytecode_har
+        {
+            IndexMap::new()
+        } else {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "dynamic_import_lib_info");
             let dynamic_dep_names = runtime_only_collector.collect_dynamic_import_dep_names();
             let entries = LoaderByteCodeHarFields::collect_dynamic_import_lib_info(
@@ -1158,11 +1240,16 @@ impl LoaderJson {
 
         let loader_out_root = module_layout.loader_out_default_dir();
         let node_modules_path = to_absolute_path_string(&loader_out_root.join("node_modules"));
+        let compile_task_name = if matches!(config.output_target, OutputTarget::Har) {
+            "HarCompileArkTS"
+        } else {
+            "CompileArkTS"
+        };
         let compile_arkts_cache = module_layout
             .build_default()
             .join("cache")
             .join("default")
-            .join("default@CompileArkTS")
+            .join(format!("default@{compile_task_name}"))
             .join(&compile_mode)
             .join(&build_mode_str);
         let cache_path = Self::absolute_dir_path_string(&compile_arkts_cache);
@@ -1199,6 +1286,7 @@ impl LoaderJson {
                 .build_option
                 .customized_har_base_package
                 .is_some(),
+            byte_code_har: module_is_bytecode_har.then_some(true),
             an_build_out_put: aot_fields.an_build_out_put,
             an_build_mode: aot_fields.an_build_mode,
             ap_path: aot_fields.ap_path,
@@ -2203,7 +2291,7 @@ impl LoaderJson {
         module_cfg: &ModuleConfig,
         graph: &crate::dependency_graph::LocalDependencyGraph,
         module_is_bytecode_har: bool,
-    ) -> (FxHashMap<String, String>, FxHashMap<String, String>) {
+    ) -> (IndexMap<String, String>, IndexMap<String, String>) {
         use crate::dependency_graph::DependencyNodeType;
         let bundle_name = &config.product.bundle_name;
         let use_normalized = config
@@ -2212,16 +2300,32 @@ impl LoaderJson {
             .strict_mode
             .use_normalized_ohm_url;
 
-        let mut hsp_map: FxHashMap<String, String> = FxHashMap::default();
-        let mut har_map: FxHashMap<String, String> = FxHashMap::default();
+        let mut hsp_map = IndexMap::new();
+        let mut har_map = IndexMap::new();
         let pkg_contexts = use_normalized
             .then(|| Self::dependency_pkg_contexts(config, module_cfg, graph))
             .flatten();
 
         for node in graph.nodes.values() {
             let is_hsp = node.node_type == DependencyNodeType::SharedHsp;
-            let is_har = node.node_type == DependencyNodeType::SourceHar;
-            if !is_hsp && !(module_is_bytecode_har && use_normalized && is_har) {
+            let is_har_map_dependency = match node.node_type {
+                // A bundled ByteCode HAR compiles source HARs into its ABC and
+                // maps the remaining ByteCode HAR / OTHER barriers. The
+                // coordinator replaces this coarse local-graph selection with
+                // the exact session-tree view before serialization.
+                DependencyNodeType::SourceHar => !config
+                    .product
+                    .build_option
+                    .ark_options
+                    .as_ref()
+                    .is_some_and(|options| options.bundled_dependencies),
+                DependencyNodeType::BytecodeHar
+                | DependencyNodeType::NativeSo
+                | DependencyNodeType::RuntimeOnly
+                | DependencyNodeType::RemoteOrUnknown => true,
+                DependencyNodeType::SharedHsp => false,
+            };
+            if !is_hsp && !(module_is_bytecode_har && use_normalized && is_har_map_dependency) {
                 continue;
             }
             if node.pkg_root.as_os_str().is_empty() {
@@ -2243,7 +2347,7 @@ impl LoaderJson {
                 };
                 Self::normalized_ohm_from_pkg_context(context)
             } else {
-                if is_har {
+                if is_har_map_dependency {
                     continue;
                 }
                 let module_name = parsed
@@ -2296,9 +2400,14 @@ impl LoaderJson {
         let mut dependencies = Vec::new();
         for node in graph.nodes.values() {
             let kind = match node.node_type {
-                DependencyNodeType::SourceHar => PkgContextDependencyKind::Har,
+                DependencyNodeType::SourceHar | DependencyNodeType::BytecodeHar => {
+                    PkgContextDependencyKind::Har
+                }
                 DependencyNodeType::SharedHsp => PkgContextDependencyKind::Hsp,
-                _ => continue,
+                DependencyNodeType::NativeSo => PkgContextDependencyKind::So,
+                DependencyNodeType::RuntimeOnly | DependencyNodeType::RemoteOrUnknown => {
+                    PkgContextDependencyKind::Other
+                }
             };
             if node.pkg_root.as_os_str().is_empty() {
                 continue;

@@ -205,6 +205,7 @@ mod tests {
             output_target: OutputTarget::Hap,
             product: ProductConfig {
                 name: "default".to_string(),
+                artifact_name: None,
                 bundle_name: "com.example".to_string(),
                 compatible_sdk_version: "12".to_string(),
                 compatible_sdk_version_stage: None,
@@ -215,6 +216,7 @@ mod tests {
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
+                        duplicate_dependency_check: false,
                     },
                     ark_options: None,
                     res_options: None,
@@ -222,6 +224,8 @@ mod tests {
                     preload_system_so: false,
                     preload_so: Vec::new(),
                     deduplicate_har: false,
+                    app_with_signed_pkg: false,
+                    generate_shared_tgz: None,
                     customized_har_base_package: None,
                     remove_permissions: Vec::new(),
                     aot_compile_mode: None,

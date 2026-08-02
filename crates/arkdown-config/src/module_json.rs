@@ -30,6 +30,13 @@ impl RawModuleJson {
         let content = fs_err::read_to_string(&path)?;
         Self::parse(&content, &path)
     }
+
+    pub fn from_value(value: &serde_json::Value, file: &Path) -> Result<Self, ConfigError> {
+        serde_json::from_value(value.clone()).map_err(|error| ConfigError::ParseError {
+            file: file.to_path_buf(),
+            message: error.to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]

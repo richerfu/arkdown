@@ -47,6 +47,8 @@ pub struct RolldownBytecodeCompileInput {
   pub cache_file: Option<PathBuf>,
   pub abc_input_files: Vec<BytecodeAbcInput>,
   pub compile_context_info_path: Option<PathBuf>,
+  /// Whether the current output module is a ByteCode HAR.
+  pub byte_code_har: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,13 +136,16 @@ impl RolldownBytecodeCompiler {
       .with_annotations()
       .with_opt_level(if self.is_debug { 0 } else { 2 });
 
-    let npm_entry_manifest = NpmModuleEntryManifest::from_hvigor_entries_and_external_requests(
-      input.npm_entries,
-      &input.external_module_requests,
-    );
     let npm_entries_path = input.cache_dir.join("npmEntries.txt");
-    npm_entry_manifest.write_at(&npm_entries_path)?;
-    builder = builder.with_npm_module_entry_list(npm_entries_path);
+    builder = builder.with_npm_module_cache_entry(npm_entries_path.clone());
+    if !input.byte_code_har {
+      let npm_entry_manifest = NpmModuleEntryManifest::from_hvigor_entries_and_external_requests(
+        input.npm_entries,
+        &input.external_module_requests,
+      );
+      npm_entry_manifest.write_at(&npm_entries_path)?;
+      builder = builder.with_npm_module_entry_list(npm_entries_path);
+    }
 
     if self.is_debug {
       builder = builder.with_debug_info();
@@ -424,7 +429,7 @@ impl Ts2abcCompiler {
       return Ok(());
     };
     let writer = CacheFileManifestWriter::new(parent, "modules.cache");
-    writer.write_with_npm_entries(&plan.compile_units, plan.npm_module_entry_list.as_deref())?;
+    writer.write_with_npm_entries(&plan.compile_units, plan.npm_module_cache_entry.as_deref())?;
     Ok(())
   }
 }
@@ -472,6 +477,7 @@ mod tests {
       dump_deps_info: false,
       remove_redundant_file: false,
       npm_module_entry_list: None,
+      npm_module_cache_entry: None,
       enable_abc_input: false,
     }
   }
@@ -563,6 +569,7 @@ mod tests {
       cache_file: None,
       abc_input_files: Vec::new(),
       compile_context_info_path: None,
+      byte_code_har: false,
     };
 
     let err = compiler.compile(input).unwrap_err();
@@ -602,6 +609,7 @@ mod tests {
         cache_file: None,
         abc_input_files: Vec::new(),
         compile_context_info_path: None,
+        byte_code_har: false,
       })
       .unwrap();
 
@@ -622,8 +630,58 @@ mod tests {
     let args = fs::read_to_string(args_log).unwrap();
     assert!(args.contains("--file-threads\n"), "{args}");
     assert!(args.contains("--enable-release-column\n"), "{args}");
-    assert!(!args.contains("--enable-callable-name\n"), "{args}");
+    assert!(args.contains("--enable-callable-name\n"), "{args}");
     assert!(!args.contains("--module\n"), "{args}");
+  }
+
+  #[test]
+  fn byte_code_har_omits_npm_entry_manifest_and_argument_but_keeps_cache_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_source = tmp.path().join("module_sources/har/ets/Index.js");
+    fs::create_dir_all(module_source.parent().unwrap()).unwrap();
+    fs::write(&module_source, "export {};").unwrap();
+    let args_log = tmp.path().join("es2abc.args");
+    let es2abc = FakeEs2abc::write(tmp.path(), Some(&args_log));
+
+    let compiler =
+      RolldownBytecodeCompiler::new(RolldownBytecodeBackendChoice::Sdk, es2abc, 12, true);
+    compiler
+      .compile(RolldownBytecodeCompileInput {
+        module_source_files: vec![HvigorModuleSourceFile {
+          module_id: "/project/har/src/main/ets/Index.ets".to_string(),
+          path: module_source,
+          record_name: "@normalized:N&&&har/Index&".to_string(),
+          source_file: "har|har|1.0.0|src/main/ets/Index.ets".to_string(),
+          package_name: Some("har".to_string()),
+          is_commonjs: false,
+          is_shared_module: false,
+          origin_source_lang: "ets".to_string(),
+          imported_record_names: vec![],
+        }],
+        external_module_requests: vec!["@ohos.app".to_string()],
+        modules_abc_path: tmp.path().join("modules.abc"),
+        cache_dir: tmp.path().join("cache"),
+        npm_entries: Vec::new(),
+        cache_file: None,
+        abc_input_files: Vec::new(),
+        compile_context_info_path: None,
+        byte_code_har: true,
+      })
+      .unwrap();
+
+    let npm_entries = tmp.path().join("cache/npmEntries.txt");
+    assert!(
+      !npm_entries.exists(),
+      "SDK ModuleMode.genDescriptionsForMergedEs2abc skips npmEntries.txt for ByteCode HAR"
+    );
+    let modules_cache = fs::read_to_string(tmp.path().join("cache/modules.cache")).unwrap();
+    assert!(modules_cache.contains("npmEntries.txt;"), "{modules_cache}");
+    assert!(
+      modules_cache.contains("npmEntries.protoBin"),
+      "{modules_cache}"
+    );
+    let args = fs::read_to_string(args_log).unwrap();
+    assert!(!args.contains("--npm-module-entry-list\n"), "{args}");
   }
 
   #[test]

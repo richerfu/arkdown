@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use arkdown_config::RuntimeContextOverrides;
 use arkdown_core::OhosModuleType;
 use arkdown_path::canonicalize_or_owned;
 use serde::Deserialize;
@@ -11,6 +12,7 @@ use serde::Deserialize;
 use crate::dependency_graph::snapshot::{
     DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot,
     DependencyModuleProfileSnapshot, DependencyNodeSnapshot, DependencyNodeType,
+    DependencyParameterSnapshot,
 };
 use crate::package::snapshot::PackageSnapshot;
 use crate::paths::ModulePathLayout;
@@ -20,6 +22,9 @@ pub struct DependencyGraphBuilder {
     host_module: String,
     project_root: PathBuf,
     host_root: PathBuf,
+    runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
+    parameter_file_override: Option<PathBuf>,
+    dependency_parameters: Option<DependencyParameterSnapshot>,
 }
 
 impl DependencyGraphBuilder {
@@ -32,13 +37,54 @@ impl DependencyGraphBuilder {
             host_module: host_module.into(),
             project_root: project_root.into(),
             host_root: host_root.into(),
+            runtime_overrides: None,
+            parameter_file_override: None,
+            dependency_parameters: None,
         }
+    }
+
+    /// Apply the loader objects mutated by OHOS plugin contexts while keeping
+    /// dependency traversal and classification in Rust.
+    pub fn with_runtime_overrides(
+        mut self,
+        runtime_overrides: Arc<RuntimeContextOverrides>,
+    ) -> Self {
+        self.runtime_overrides = Some(runtime_overrides);
+        self
+    }
+
+    /// Override the project `parameterFile` with hvigor's `-p parameterFile=`
+    /// extra parameter.
+    pub fn with_parameter_file_override(mut self, path: PathBuf) -> Self {
+        self.parameter_file_override = Some(path);
+        self
+    }
+
+    /// Reuse the project-level parameter snapshot loaded by
+    /// [`crate::ProjectSnapshot`]. This prevents one parameter-file read per
+    /// module while retaining the standalone graph-builder API.
+    pub fn with_dependency_parameters(
+        mut self,
+        dependency_parameters: DependencyParameterSnapshot,
+    ) -> Self {
+        self.dependency_parameters = Some(dependency_parameters);
+        self
     }
 
     /// Build the dependency graph snapshot.
     pub fn build(self) -> DependencyGraphSnapshot {
+        let dependency_parameters = self.dependency_parameters.clone().unwrap_or_else(|| {
+            let project_package = self.read_package(&self.project_root);
+            DependencyParameterSnapshot::from_project_deferred(
+                &self.project_root,
+                project_package.as_deref(),
+                self.parameter_file_override.as_deref(),
+            )
+        });
         let mut graph = DependencyGraphSnapshot {
             host_module: self.host_module.clone(),
+            host_root: canonicalize_or_owned(&self.host_root),
+            dependency_parameters,
             ..Default::default()
         };
         self.collect_dependencies(&mut graph);
@@ -64,14 +110,14 @@ impl DependencyGraphBuilder {
                     false,
                 ),
                 (
-                    &package.package_json.dev_dependencies,
-                    DependencyEdgeKind::DevDependency,
-                    false,
-                ),
-                (
                     &package.package_json.dynamic_dependencies,
                     DependencyEdgeKind::DynamicDependency,
                     true,
+                ),
+                (
+                    &package.package_json.dev_dependencies,
+                    DependencyEdgeKind::DevDependency,
+                    false,
                 ),
             ] {
                 for (alias, spec) in dependencies {
@@ -86,6 +132,7 @@ impl DependencyGraphBuilder {
                         &dep_root,
                         dep_package.as_deref(),
                         edge_kind,
+                        depth > 0,
                     ));
                     if !seen_roots.insert(dep_root.clone()) {
                         continue;
@@ -114,18 +161,40 @@ impl DependencyGraphBuilder {
         root: &Path,
         package: Option<&PackageSnapshot>,
         kind: DependencyEdgeKind,
+        is_transitive: bool,
     ) -> DependencyEdgeSnapshot {
         DependencyEdgeSnapshot {
-            issuer_root: issuer_root.to_path_buf(),
+            // Keep issuer identity in the same canonical domain as host_root
+            // and resolved package roots. This is observable on macOS where
+            // `/tmp` aliases `/private/tmp`, and avoids equivalent Windows
+            // drive/case spellings being misclassified as project globals.
+            issuer_root: canonicalize_or_owned(issuer_root),
             alias: alias.to_string(),
             version_spec: Some(spec.to_string()),
             package_name: self.package_name(alias, package),
             package_root: root.to_path_buf(),
             kind,
+            is_transitive,
         }
     }
 
     fn read_package(&self, package_root: &Path) -> Option<Arc<PackageSnapshot>> {
+        if let Some(runtime_overrides) = self.runtime_overrides.as_ref() {
+            let value = if canonicalize_or_owned(package_root)
+                == canonicalize_or_owned(&self.project_root)
+            {
+                runtime_overrides.project.package.as_ref()
+            } else {
+                runtime_overrides
+                    .module_for_root(package_root)
+                    .and_then(|module| module.package.as_ref())
+            };
+            if let Some(value) = value {
+                return PackageSnapshot::from_runtime_value(package_root, value)
+                    .ok()
+                    .map(Arc::new);
+            }
+        }
         PackageSnapshot::from_root(package_root)
             .ok()
             .flatten()
@@ -206,7 +275,7 @@ impl DependencyGraphBuilder {
         }
         if package
             .and_then(|package| package.package_json.extra.get("metadata"))
-            .and_then(|metadata| metadata.get("isIntegratedHsp"))
+            .and_then(|metadata| metadata.get("integratedHsp"))
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
         {
@@ -305,8 +374,8 @@ impl DependencyGraphBuilder {
             .package_json
             .dependencies
             .keys()
-            .chain(package.package_json.dev_dependencies.keys())
             .chain(package.package_json.dynamic_dependencies.keys())
+            .chain(package.package_json.dev_dependencies.keys())
             .cloned()
             .collect::<Vec<_>>();
         aliases.sort();
@@ -428,8 +497,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("runtime-lib", DependencyEdgeKind::Dependency),
-                ("dev-lib", DependencyEdgeKind::DevDependency),
                 ("dynamic-lib", DependencyEdgeKind::DynamicDependency),
+                ("dev-lib", DependencyEdgeKind::DevDependency),
             ]
         );
     }
@@ -566,6 +635,223 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_har_ohm_view_matches_latest_hvigor_tree_barriers_and_section_order() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": {
+                "source-har": "1.0.0",
+                "direct-byte": "1.0.0",
+                "direct-other": "1.0.0",
+                "direct-hsp": "1.0.0"
+              },
+              "dynamicDependencies": { "dynamic-other": "1.0.0" },
+              "devDependencies": { "dev-other": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/source-har",
+            r#"{
+              "name": "source-har",
+              "version": "1.0.0",
+              "dependencies": { "nested-byte": "1.0.0" }
+            }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/source-har",
+            "module.json",
+            r#"{ "module": { "name": "source", "type": "har" } }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-byte",
+            r#"{ "name": "direct-byte", "version": "1.0.0", "metadata": { "byteCodeHar": true } }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-other",
+            r#"{
+              "name": "direct-other",
+              "version": "1.0.0",
+              "dependencies": { "hidden-byte": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-hsp",
+            r#"{ "name": "direct-hsp", "version": "1.0.0" }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/direct-hsp",
+            "module.json",
+            r#"{ "module": { "name": "shared", "type": "shared" } }"#,
+        );
+        for name in ["dynamic-other", "dev-other"] {
+            fixture.write_package(
+                &format!("entry/oh_modules/{name}"),
+                &format!(r#"{{ "name": "{name}", "version": "1.0.0" }}"#),
+            );
+        }
+        fixture.write_package(
+            "entry/oh_modules/source-har/oh_modules/nested-byte",
+            r#"{ "name": "nested-byte", "version": "1.0.0", "metadata": { "byteCodeHar": true } }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-other/oh_modules/hidden-byte",
+            r#"{ "name": "hidden-byte", "version": "1.0.0", "metadata": { "byteCodeHar": true } }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        let names = |bundled, optimized| {
+            graph
+                .bytecode_har_ohm_nodes_in_traversal_order(bundled, optimized)
+                .into_iter()
+                .map(|node| node.package_name.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(true, true),
+            [
+                "direct-byte",
+                "direct-other",
+                "dynamic-other",
+                "dev-other",
+                "nested-byte",
+            ]
+        );
+        assert_eq!(
+            names(true, false),
+            [
+                "direct-byte",
+                "direct-other",
+                "dynamic-other",
+                "dev-other",
+                "nested-byte",
+                "hidden-byte",
+            ]
+        );
+        assert_eq!(
+            names(false, true),
+            [
+                "source-har",
+                "direct-byte",
+                "direct-other",
+                "dynamic-other",
+                "dev-other",
+            ]
+        );
+        assert_eq!(
+            names(false, false),
+            ["source-har", "direct-byte", "direct-other", "dynamic-other",]
+        );
+    }
+
+    #[test]
+    fn bytecode_har_dependency_versions_match_direct_and_bundled_hvigor_views() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": {
+                "direct-other": "2.0.0",
+                "direct-har": "1.0.0",
+                "shared": "3.0.0"
+              }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-other",
+            r#"{
+              "name": "direct-other",
+              "version": "2.0.0",
+              "dependencies": { "nested-other": "4.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-other/oh_modules/nested-other",
+            r#"{ "name": "nested-other", "version": "4.0.0" }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/direct-har",
+            r#"{ "name": "direct-har", "version": "1.0.0" }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/direct-har",
+            "module.json",
+            r#"{ "module": { "name": "directhar", "type": "har" } }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/shared",
+            r#"{ "name": "shared", "version": "3.0.0", "metadata": { "integratedHsp": true } }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        assert_eq!(
+            graph
+                .bytecode_har_dependency_versions(
+                    false,
+                    false,
+                    &Default::default(),
+                    &Default::default(),
+                )
+                .expect("direct dependency versions")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [
+                ("direct-other".to_string(), "2.0.0".to_string()),
+                ("direct-har".to_string(), "1.0.0".to_string()),
+            ]
+        );
+
+        let compiled = ["direct-har".to_string()].into_iter().collect();
+        assert_eq!(
+            graph
+                .bytecode_har_dependency_versions(true, false, &compiled, &Default::default(),)
+                .expect("bundled dependency versions")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [
+                ("direct-other".to_string(), "2.0.0".to_string()),
+                ("nested-other".to_string(), "4.0.0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn classifies_latest_metadata_integrated_hsp_key() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "shared": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/shared",
+            r#"{
+              "name": "shared",
+              "version": "1.0.0",
+              "metadata": { "integratedHsp": true }
+            }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+
+        assert_eq!(
+            graph.nodes["shared"].node_type,
+            DependencyNodeType::IntegratedHsp
+        );
+    }
+
+    #[test]
     fn classifies_source_har_from_packaged_module_json() {
         let fixture = DependencyGraphFixture::new();
         fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
@@ -623,5 +909,249 @@ mod tests {
             graph.nodes["legacy-har"].node_type,
             DependencyNodeType::SourceHar
         );
+    }
+
+    #[test]
+    fn bundled_har_importees_and_resources_follow_process_har_artifacts() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "source-har": "1.0.0", "plain-pkg": "2.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/source-har",
+            r#"{
+              "name": "source-har",
+              "version": "1.0.0",
+              "metadata": { "resource": { "directories": ["src/main/custom"] } }
+            }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/source-har",
+            "module.json",
+            r#"{ "module": { "name": "sourcehar", "type": "har" } }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/plain-pkg",
+            r#"{ "name": "plain-pkg", "version": "2.0.0" }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        let metadata = graph.har_importee_metadata(
+            &[],
+            &["source-har".into(), "plain-pkg/feature".into()],
+            &["source-har".into(), "plain-pkg/feature".into()],
+            true,
+            true,
+            &[],
+        );
+
+        assert_eq!(metadata.compiled_package_names, ["source-har"]);
+        assert_eq!(metadata.extra_importees, ["plain-pkg/feature"]);
+        assert!(metadata
+            .affects_compilation_dependency_keys
+            .contains(&"source-har".to_string()));
+        let resources = graph.bundled_har_resources();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources[0].metadata_directory.as_str(),
+            "src/main/custom-source-har"
+        );
+        assert_eq!(
+            resources[0].archive_directory.as_str(),
+            "src/main/custom-source-har"
+        );
+    }
+
+    #[test]
+    fn optimized_importees_mark_project_root_direct_dependencies_global() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package(
+            "",
+            r#"{
+              "name": "app",
+              "version": "1.0.0",
+              "dependencies": { "global-lib": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package("entry", r#"{ "name": "entry", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "oh_modules/global-lib",
+            r#"{ "name": "global-lib", "version": "1.0.0" }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        let metadata = graph.har_importee_metadata(
+            &[],
+            &["global-lib".into()],
+            &["global-lib".into()],
+            true,
+            true,
+            &[],
+        );
+
+        assert_eq!(metadata.global_dependencies, ["global-lib"]);
+    }
+
+    #[test]
+    fn bundled_bytecode_har_keep_dependency_false_merges_then_filters_like_hvigor() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": {
+                "source-har": "1.0.0",
+                "byte-har": "1.0.0"
+              },
+              "devDependencies": { "dev-source": "1.0.0" },
+              "dynamicDependencies": {
+                "dyn-source": "1.0.0",
+                "dyn-byte": "1.0.0"
+              }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/source-har",
+            r#"{
+              "name": "source-har",
+              "version": "1.0.0",
+              "dependencies": { "byte-har": "2.0.0" }
+            }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/source-har",
+            "module.json",
+            r#"{ "module": { "name": "source-har", "type": "har" } }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/byte-har",
+            r#"{
+              "name": "byte-har",
+              "version": "1.0.0",
+              "metadata": { "byteCodeHar": true }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/dev-source",
+            r#"{ "name": "dev-source", "version": "1.0.0" }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/dyn-source",
+            r#"{
+              "name": "dyn-source",
+              "version": "1.0.0",
+              "dynamicDependencies": { "dyn-byte": "2.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/dyn-byte",
+            r#"{
+              "name": "dyn-byte",
+              "version": "1.0.0",
+              "metadata": { "byteCodeHar": true }
+            }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        let metadata = graph.har_importee_metadata(
+            &[],
+            &["source-har".into()],
+            &["source-har".into()],
+            true,
+            true,
+            &[],
+        );
+        assert_eq!(metadata.compiled_package_names, ["source-har"]);
+        assert!(metadata.global_dependencies.is_empty());
+        let versions = graph
+            .bytecode_har_dependency_versions(
+                true,
+                true,
+                &metadata.compiled_package_names.iter().cloned().collect(),
+                &metadata
+                    .affects_compilation_dependency_keys
+                    .iter()
+                    .cloned()
+                    .collect(),
+            )
+            .expect("collect optimized bundled dependency versions");
+        assert!(versions.is_empty());
+        let package = PackageSnapshot::from_root(&fixture.root().join("entry"))
+            .expect("read entry package")
+            .expect("entry package");
+        let retained = graph
+            .bundled_har_retained_dependencies(&package.package_json)
+            .expect("rewrite bundled dependencies");
+
+        assert_eq!(
+            retained.dependencies.into_iter().collect::<Vec<_>>(),
+            vec![("byte-har".to_string(), "2.0.0".to_string())]
+        );
+        assert_eq!(
+            retained
+                .dynamic_dependencies
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![("dyn-byte".to_string(), "2.0.0".to_string())]
+        );
+    }
+
+    #[test]
+    fn bytecode_har_dependency_versions_resolve_project_parameter_file() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package(
+            "",
+            r#"{
+              "name": "app",
+              "version": "1.0.0",
+              "parameterFile": "${paths.parameters}",
+              "properties": { "paths": { "parameters": "ohpm-params.json5" } }
+            }"#,
+        );
+        fs::write(
+            fixture.root().join("ohpm-params.json5"),
+            r#"{ "versions.lib": "^1.2.3" }"#,
+        )
+        .expect("parameter file");
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "lib": "@param:versions.lib" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/lib",
+            r#"{ "name": "lib", "version": "1.2.3" }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        let versions = graph
+            .bytecode_har_dependency_versions(
+                false,
+                false,
+                &Default::default(),
+                &Default::default(),
+            )
+            .expect("resolve parameterized dependency version");
+
+        assert_eq!(versions["lib"], "^1.2.3");
+        let package = PackageSnapshot::from_root(&fixture.root().join("entry"))
+            .expect("read entry package")
+            .expect("entry package");
+        let resolved = graph
+            .dependency_parameters
+            .resolve_package_parameters(&package.package_json)
+            .expect("resolve generated package parameters");
+        assert_eq!(resolved.dependencies["lib"], "^1.2.3");
     }
 }

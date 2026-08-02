@@ -185,6 +185,12 @@ pub struct Ts2abcPlan {
   pub remove_redundant_file: bool,
   /// Optional path to the `npmModuleEntryList.txt` for npm entries.
   pub npm_module_entry_list: Option<PathBuf>,
+  /// Path recorded for npm entries in `modules.cache`.
+  ///
+  /// Latest SDK `ModuleMode.generateAbcCacheFilesInfo()` always records this
+  /// row, including ByteCode HAR builds where the file itself is deliberately
+  /// not generated or passed to es2abc.
+  pub npm_module_cache_entry: Option<PathBuf>,
   /// Whether ABC input mode is enabled (merge existing `.abc` files).
   pub enable_abc_input: bool,
 }
@@ -252,6 +258,7 @@ pub struct Ts2abcPlanBuilder {
   dump_deps_info: bool,
   remove_redundant_file: bool,
   npm_module_entry_list: Option<PathBuf>,
+  npm_module_cache_entry: Option<PathBuf>,
   enable_abc_input: bool,
 }
 
@@ -274,6 +281,7 @@ impl Ts2abcPlanBuilder {
       dump_deps_info: false,
       remove_redundant_file: false,
       npm_module_entry_list: None,
+      npm_module_cache_entry: None,
       enable_abc_input: false,
     }
   }
@@ -310,7 +318,15 @@ impl Ts2abcPlanBuilder {
 
   /// Set the npm module entry manifest path passed to SDK es2abc.
   pub fn with_npm_module_entry_list(mut self, path: PathBuf) -> Self {
+    self.npm_module_cache_entry = Some(path.clone());
     self.npm_module_entry_list = Some(path);
+    self
+  }
+
+  /// Record the npm module entry path in `modules.cache` without passing it
+  /// to es2abc. Latest hvigor uses this split behavior for ByteCode HAR.
+  pub fn with_npm_module_cache_entry(mut self, path: PathBuf) -> Self {
+    self.npm_module_cache_entry = Some(path);
     self
   }
 
@@ -378,6 +394,7 @@ impl Ts2abcPlanBuilder {
       dump_deps_info: self.dump_deps_info,
       remove_redundant_file: self.remove_redundant_file,
       npm_module_entry_list: self.npm_module_entry_list,
+      npm_module_cache_entry: self.npm_module_cache_entry,
       enable_abc_input: self.enable_abc_input,
     };
     plan.validate()?;

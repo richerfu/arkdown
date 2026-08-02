@@ -7,6 +7,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use arkdown_config::build_profile::BuildOptionProfileInventory;
+use arkdown_config::RuntimeContextOverrides;
 use arkdown_core::ArkdownConfig;
 
 use crate::fingerprint::{FingerprintError, InputFingerprintSet};
@@ -62,6 +63,10 @@ pub struct BuildSessionBuilder {
     pub config: Arc<ArkdownConfig>,
     /// OHPM resolution mode (offline/prefer-offline/online).
     pub ohpm_mode: crate::package::acquisition::AcquisitionMode,
+    /// Complete in-memory model replacements made by hvigor OHOS contexts.
+    pub runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
+    /// Hvigor CLI `parameterFile` extra-parameter override.
+    pub parameter_file_override: Option<PathBuf>,
 }
 
 impl BuildSessionBuilder {
@@ -70,12 +75,28 @@ impl BuildSessionBuilder {
         Self {
             config,
             ohpm_mode: crate::package::acquisition::AcquisitionMode::Online,
+            runtime_overrides: None,
+            parameter_file_override: None,
         }
     }
 
     /// Set the OHPM resolution mode.
     pub fn with_ohpm_mode(mut self, mode: crate::package::acquisition::AcquisitionMode) -> Self {
         self.ohpm_mode = mode;
+        self
+    }
+
+    /// Forward plugin context model mutations into every startup inventory.
+    pub fn with_runtime_overrides(
+        mut self,
+        runtime_overrides: Arc<RuntimeContextOverrides>,
+    ) -> Self {
+        self.runtime_overrides = Some(runtime_overrides);
+        self
+    }
+
+    pub fn with_parameter_file_override(mut self, path: PathBuf) -> Self {
+        self.parameter_file_override = Some(path);
         self
     }
 
@@ -95,8 +116,12 @@ impl BuildSessionBuilder {
         }
 
         // Phase 1: Build project and module snapshots.
-        let project = ProjectSnapshot::from_config(&self.config)
-            .map_err(|e| BuildSessionError::Config(e.to_string()))?;
+        let project = ProjectSnapshot::from_config_with_runtime_overrides(
+            &self.config,
+            self.runtime_overrides.clone(),
+            self.parameter_file_override.clone(),
+        )
+        .map_err(|e| BuildSessionError::Config(e.to_string()))?;
 
         // Phase 2: Build SDK snapshot.
         let sdk = SdkSnapshot::from_config(&self.config.sdk_config)?;
@@ -108,12 +133,21 @@ impl BuildSessionBuilder {
         let profiles = ProfileStore::discover_project(&project)?;
 
         // Phase 5: Parse project/module target and build-option models once.
-        let build_options =
-            BuildOptionProfileInventory::load(&self.config.project_root, &self.config.modules)
-                .map_err(|error| BuildSessionError::Config(error.to_string()))?;
+        let build_options = BuildOptionProfileInventory::load_with_runtime_overrides(
+            &self.config.project_root,
+            &self.config.modules,
+            self.runtime_overrides.as_deref(),
+        )
+        .map_err(|error| BuildSessionError::Config(error.to_string()))?;
 
         // Phase 6: Build input fingerprints.
-        let fingerprints = InputFingerprintSet::build(&self.config, &project, &profiles, &sdk)?;
+        let fingerprints = InputFingerprintSet::build_with_runtime_overrides(
+            &self.config,
+            &project,
+            &profiles,
+            &sdk,
+            self.runtime_overrides.as_deref(),
+        )?;
 
         Ok(BuildSession {
             watch_inputs: Arc::new(WatchPlanInput::from_project(&project)),

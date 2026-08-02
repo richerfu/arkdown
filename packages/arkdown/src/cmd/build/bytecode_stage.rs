@@ -31,6 +31,8 @@ pub(super) struct BytecodeStageInput {
   pub(super) abc_input_files: Vec<BytecodeAbcInput>,
   /// Optional upstream `compileContextInfo.json` path.
   pub(super) compile_context_info_path: Option<PathBuf>,
+  /// Latest loader `byteCodeHar` mode for this compilation pass.
+  pub(super) byte_code_har: bool,
 }
 
 /// Bytecode compilation stage runner.
@@ -50,6 +52,7 @@ impl BytecodeStage {
         cache_file: input.cache_file,
         abc_input_files: input.abc_input_files,
         compile_context_info_path: input.compile_context_info_path,
+        byte_code_har: input.byte_code_har,
       })
       .map(|_| ())
       .map_err(|e| anyhow::anyhow!("bytecode stage failed: {}", e))

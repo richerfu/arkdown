@@ -71,6 +71,17 @@ impl RawBuildProfile {
         let content = fs_err::read_to_string(&path)?;
         Self::parse(&content, &path)
     }
+
+    /// Parse a complete in-memory replacement supplied by a hvigor context.
+    pub fn from_value(
+        value: &serde_json::Value,
+        file: &std::path::Path,
+    ) -> Result<RawBuildProfile, ConfigError> {
+        serde_json::from_value(value.clone()).map_err(|error| ConfigError::ParseError {
+            file: file.to_path_buf(),
+            message: error.to_string(),
+        })
+    }
 }
 
 impl RawAppJson5 {
@@ -88,6 +99,21 @@ impl RawAppJson5 {
             message: e.to_string(),
         })?;
         Self::validate(&app, &path)?;
+        Ok(app)
+    }
+
+    /// Parse and validate a complete in-memory replacement supplied by a
+    /// project OHOS plugin context.
+    pub fn from_value(
+        value: &serde_json::Value,
+        path: &std::path::Path,
+    ) -> Result<RawAppJson5, ConfigError> {
+        let app =
+            serde_json::from_value(value.clone()).map_err(|error| ConfigError::ParseError {
+                file: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+        Self::validate(&app, path)?;
         Ok(app)
     }
 
@@ -219,6 +245,8 @@ pub struct RawSigningConfig {
 #[serde(rename_all = "camelCase")]
 pub struct RawProduct {
     pub name: String,
+    #[serde(default)]
+    pub output: Option<RawProductOutput>,
     /// Product-level app profile override.
     ///
     /// Hvigor resolves `hvigorfile appOpt` → product → `AppScope/app.json5`.
@@ -268,6 +296,13 @@ pub struct RawProduct {
     /// build invocation's extra config may override both.
     #[serde(default)]
     pub build_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawProductOutput {
+    #[serde(default)]
+    pub artifact_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,6 +364,10 @@ pub struct RawBuildOption {
     /// HSP/source-HAR deduplication policy.
     #[serde(rename = "packOptions", default)]
     pub pack_options: Option<RawPackOptions>,
+    /// Whether HSP packaging emits the combined `.tgz` distribution artifact.
+    /// When omitted, hvigor enables it only for release builds.
+    #[serde(default)]
+    pub generate_shared_tgz: Option<bool>,
     /// HAR compiler/packing options from `buildOption.packingOptions`.
     #[serde(default)]
     pub packing_options: Option<RawPackingOptions>,
@@ -368,6 +407,8 @@ pub struct RawBuildOption {
 pub struct RawPackOptions {
     #[serde(default)]
     pub deduplicate_har: bool,
+    #[serde(default)]
+    pub app_with_signed_pkg: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -584,6 +625,8 @@ pub struct RawStrictMode {
     /// JSON key is `useNormalizedOHMUrl` (all-caps OHM — not camelCase).
     #[serde(rename = "useNormalizedOHMUrl", default)]
     pub use_normalized_ohm_url: bool,
+    #[serde(rename = "duplicateDependencyCheck", default)]
+    pub duplicate_dependency_check: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -639,10 +682,12 @@ impl<'a> BuildOptionDecoder<'a> {
             .map(|strict| arkdown_core::StrictModeConfig {
                 case_sensitive_check: strict.case_sensitive_check,
                 use_normalized_ohm_url: strict.use_normalized_ohm_url,
+                duplicate_dependency_check: strict.duplicate_dependency_check,
             })
             .unwrap_or(arkdown_core::StrictModeConfig {
                 case_sensitive_check: false,
                 use_normalized_ohm_url: false,
+                duplicate_dependency_check: false,
             });
         let raw_ark_options = self.raw.and_then(|option| option.ark_options.as_ref());
         let ark_options = raw_ark_options.map(|options| arkdown_core::ArkOptions {
@@ -660,7 +705,7 @@ impl<'a> BuildOptionDecoder<'a> {
             }),
             build_profile_fields: options.build_profile_fields.clone().unwrap_or_default(),
             support_chunks: options.support_chunks.unwrap_or(false),
-            byte_code_har: options.byte_code_har.unwrap_or(false),
+            byte_code_har: options.byte_code_har,
             bundled_dependencies: options.bundled_dependencies.unwrap_or(false),
             integrated_hsp: options.integrated_hsp,
         });
@@ -675,18 +720,25 @@ impl<'a> BuildOptionDecoder<'a> {
                     .map(|worker| self.resolve_path(Path::new(worker)))
                     .collect(),
             });
-        let har_artifact_type =
-            if raw_ark_options.and_then(|options| options.byte_code_har) == Some(true) {
-                arkdown_core::HarArtifactType::Bytecode
-            } else {
-                HarArtifactTypeParser::new(
-                    self.raw
-                        .and_then(|option| option.artifact_type.as_deref())
-                        .unwrap_or("original"),
-                    self.profile_path,
-                )
-                .parse()?
-            };
+        // TargetTaskService.isByteCodeHar()/getByteCodeHar() in the installed
+        // hvigor 6.24.3 treats an absent byteCodeHar as enabled only when
+        // normalized OHM URLs are enabled. An explicit false must therefore
+        // remain distinguishable from absence through the merged option
+        // layers.
+        let har_artifact_type = if raw_ark_options
+            .and_then(|options| options.byte_code_har)
+            .unwrap_or(strict_mode.use_normalized_ohm_url)
+        {
+            arkdown_core::HarArtifactType::Bytecode
+        } else {
+            HarArtifactTypeParser::new(
+                self.raw
+                    .and_then(|option| option.artifact_type.as_deref())
+                    .unwrap_or("original"),
+                self.profile_path,
+            )
+            .parse()?
+        };
         let mut native_build_option = resolve_product_native_build_option(self.raw);
         native_build_option.normalize_module_paths(self.path_root);
         let res_options =
@@ -743,6 +795,11 @@ impl<'a> BuildOptionDecoder<'a> {
                 .raw
                 .and_then(|option| option.pack_options.as_ref())
                 .is_some_and(|options| options.deduplicate_har),
+            app_with_signed_pkg: self
+                .raw
+                .and_then(|option| option.pack_options.as_ref())
+                .is_some_and(|options| options.app_with_signed_pkg),
+            generate_shared_tgz: self.raw.and_then(|option| option.generate_shared_tgz),
             customized_har_base_package,
             remove_permissions: self
                 .raw
@@ -1031,23 +1088,61 @@ struct ModuleBuildProfileSnapshot {
     profile: Option<BuildProfileValue>,
 }
 
+/// Lossless in-memory module profile supplied by the build-script runtime.
+///
+/// This is the zero-reread counterpart to [`arkdown_core::ModuleConfig`]: the
+/// startup session has already parsed the JSON5 file and passes its immutable
+/// value into the build-option resolver.
+#[derive(Debug, Clone)]
+pub struct BuildOptionProfileModuleValue {
+    pub name: String,
+    pub root: PathBuf,
+    pub profile: serde_json::Value,
+}
+
 impl BuildOptionProfileInventory {
     /// Load project and module build profiles exactly once.
     pub fn load(
         project_root: &Path,
         modules: &[arkdown_core::ModuleConfig],
     ) -> Result<Self, ConfigError> {
+        Self::load_with_runtime_overrides(project_root, modules, None)
+    }
+
+    /// Load project and module build profiles once, replacing loader values
+    /// changed through `OhosProjectContext` / `OhosModuleContext`.
+    pub fn load_with_runtime_overrides(
+        project_root: &Path,
+        modules: &[arkdown_core::ModuleConfig],
+        runtime_overrides: Option<&crate::RuntimeContextOverrides>,
+    ) -> Result<Self, ConfigError> {
         let project_path = project_root.join("build-profile.json5");
-        if !project_path.is_file() {
-            return Err(ConfigError::FileNotFound(project_path));
-        }
-        let project_content = fs_err::read_to_string(&project_path)?;
-        let project = BuildProfileValue::parse(&project_content, &project_path)?;
-        let raw_project = RawBuildProfile::parse(&project_content, &project_path)?;
+        let project_override =
+            runtime_overrides.and_then(|overrides| overrides.project.build_profile.as_ref());
+        let (project, raw_project) = if let Some(value) = project_override {
+            (
+                BuildProfileValue::from_value(value.clone()),
+                RawBuildProfile::from_value(value, &project_path)?,
+            )
+        } else {
+            if !project_path.is_file() {
+                return Err(ConfigError::FileNotFound(project_path));
+            }
+            let project_content = fs_err::read_to_string(&project_path)?;
+            (
+                BuildProfileValue::parse(&project_content, &project_path)?,
+                RawBuildProfile::parse(&project_content, &project_path)?,
+            )
+        };
         let mut module_profiles = BTreeMap::new();
         for module in modules {
             let path = module.src_path.join("build-profile.json5");
-            let profile = if path.is_file() {
+            let profile = if let Some(value) = runtime_overrides
+                .and_then(|overrides| overrides.module_for_root(&module.src_path))
+                .and_then(|overrides| overrides.build_profile.as_ref())
+            {
+                Some(BuildProfileValue::from_value(value.clone()))
+            } else if path.is_file() {
                 let content = fs_err::read_to_string(&path)?;
                 Some(BuildProfileValue::parse(&content, &path)?)
             } else {
@@ -1068,6 +1163,57 @@ impl BuildOptionProfileInventory {
             project,
             raw_project,
             modules: module_profiles,
+        })
+    }
+
+    /// Construct an inventory from the Rust startup snapshot without reading
+    /// project files again.
+    pub fn from_values(
+        project_root: &Path,
+        project_profile: serde_json::Value,
+        modules: &[BuildOptionProfileModuleValue],
+    ) -> Result<Self, ConfigError> {
+        let project_path = project_root.join("build-profile.json5");
+        let mut typed_project = project_profile.clone();
+        let object = typed_project
+            .as_object_mut()
+            .ok_or_else(|| ConfigError::ValidationError {
+                file: project_path.clone(),
+                message: "project build profile must be an object".to_string(),
+            })?;
+        object
+            .entry("app")
+            .or_insert_with(|| serde_json::json!({ "products": [] }));
+        if let Some(app) = object
+            .get_mut("app")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            app.entry("products")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        }
+        object
+            .entry("modules")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        let raw_project = RawBuildProfile::from_value(&typed_project, &project_path)?;
+        let modules = modules
+            .iter()
+            .map(|module| {
+                (
+                    module.name.clone(),
+                    ModuleBuildProfileSnapshot {
+                        root: module.root.clone(),
+                        path: module.root.join("build-profile.json5"),
+                        profile: Some(BuildProfileValue::from_value(module.profile.clone())),
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            project_path,
+            project: BuildProfileValue::from_value(project_profile),
+            raw_project,
+            modules,
         })
     }
 
@@ -1162,6 +1308,19 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
 
     pub fn resolve(&self) -> Result<arkdown_core::BuildOption, ConfigError> {
         let module_snapshot = self.inventory.module(self.module_name)?;
+        let effective = self.resolve_value()?;
+        let raw = serde_json::from_value(effective).map_err(|error| ConfigError::ParseError {
+            file: module_snapshot.path.clone(),
+            message: error.to_string(),
+        })?;
+        BuildOptionDecoder::new(Some(&raw), &module_snapshot.root, &module_snapshot.path).decode()
+    }
+
+    /// Return the complete lossless build option for plugin-facing hvigor
+    /// facades. Path-bearing fields are normalized by the same Rust merger
+    /// used by the native build pipeline.
+    pub fn resolve_value(&self) -> Result<serde_json::Value, ConfigError> {
+        let module_snapshot = self.inventory.module(self.module_name)?;
         let project = &self.inventory.project;
         let module = module_snapshot.profile.as_ref();
         let mut effective = BuildOptionValue::default();
@@ -1189,9 +1348,11 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
             );
         }
         effective.merge_layer(self.build_script_override.as_ref(), &module_snapshot.root);
-
-        let raw = effective.deserialize(&module_snapshot.path)?;
-        BuildOptionDecoder::new(Some(&raw), &module_snapshot.root, &module_snapshot.path).decode()
+        if let Some(object) = effective.value.as_object_mut() {
+            object.remove("name");
+            object.remove("copyFrom");
+        }
+        Ok(effective.value)
     }
 }
 
@@ -1201,6 +1362,10 @@ struct BuildProfileValue {
 }
 
 impl BuildProfileValue {
+    fn from_value(value: serde_json::Value) -> Self {
+        Self { value }
+    }
+
     fn parse(content: &str, path: &Path) -> Result<Self, ConfigError> {
         let value = json5::from_str::<serde_json::Value>(content).map_err(|error| {
             ConfigError::ParseError {
@@ -1367,13 +1532,6 @@ impl BuildOptionValue {
         let mut normalized = layer.clone();
         Self::normalize_paths(&mut normalized, path_root);
         self.value = Self::merge_values(&self.value, &normalized, "");
-    }
-
-    fn deserialize(&self, file: &Path) -> Result<RawBuildOption, ConfigError> {
-        serde_json::from_value(self.value.clone()).map_err(|error| ConfigError::ParseError {
-            file: file.to_path_buf(),
-            message: error.to_string(),
-        })
     }
 
     fn merge_values(
@@ -2552,6 +2710,7 @@ mod tests {
                         strictMode: {
                             caseSensitiveCheck: true,
                             useNormalizedOHMUrl: true,
+                            duplicateDependencyCheck: true,
                         },
                         arkOptions: {
                             types: ["./types/runtime"],
@@ -2584,6 +2743,7 @@ mod tests {
         let strict = build_option.strict_mode.as_ref().unwrap();
         assert!(strict.case_sensitive_check);
         assert!(strict.use_normalized_ohm_url);
+        assert!(strict.duplicate_dependency_check);
         let runtime_only = build_option
             .ark_options
             .as_ref()
@@ -3544,6 +3704,81 @@ mod tests {
                 .unwrap()
                 .packages,
             ["product-runtime"]
+        );
+    }
+
+    /// Installed DevEco Studio 6.1.1 / hvigor 6.24.3:
+    /// `TargetTaskService.isByteCodeHar()` delegates to `getByteCodeHar()` and
+    /// distinguishes an absent `arkOptions.byteCodeHar` from explicit false.
+    #[test]
+    fn byte_code_har_default_matches_normalized_ohm_presence_semantics() {
+        let decode = |source: &str| {
+            let raw: RawBuildOption = json5::from_str(source).unwrap();
+            BuildOptionDecoder::new(
+                Some(&raw),
+                std::path::Path::new("entry"),
+                std::path::Path::new("entry/build-profile.json5"),
+            )
+            .decode()
+            .unwrap()
+        };
+
+        let normalized_absent = decode(
+            r#"{
+                strictMode: { useNormalizedOHMUrl: true },
+                arkOptions: {}
+            }"#,
+        );
+        assert_eq!(
+            normalized_absent.har_artifact_type,
+            arkdown_core::HarArtifactType::Bytecode
+        );
+        assert_eq!(
+            normalized_absent
+                .ark_options
+                .as_ref()
+                .and_then(|options| options.byte_code_har),
+            None
+        );
+
+        let normalized_false = decode(
+            r#"{
+                strictMode: { useNormalizedOHMUrl: true },
+                arkOptions: { byteCodeHar: false }
+            }"#,
+        );
+        assert_eq!(
+            normalized_false.har_artifact_type,
+            arkdown_core::HarArtifactType::Original
+        );
+        assert_eq!(
+            normalized_false
+                .ark_options
+                .as_ref()
+                .and_then(|options| options.byte_code_har),
+            Some(false)
+        );
+
+        let legacy_absent = decode(
+            r#"{
+                strictMode: { useNormalizedOHMUrl: false },
+                arkOptions: {}
+            }"#,
+        );
+        assert_eq!(
+            legacy_absent.har_artifact_type,
+            arkdown_core::HarArtifactType::Original
+        );
+
+        let explicit_true = decode(
+            r#"{
+                strictMode: { useNormalizedOHMUrl: false },
+                arkOptions: { byteCodeHar: true }
+            }"#,
+        );
+        assert_eq!(
+            explicit_true.har_artifact_type,
+            arkdown_core::HarArtifactType::Bytecode
         );
     }
 }

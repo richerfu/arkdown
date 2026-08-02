@@ -32,14 +32,6 @@ impl<'a> RouterMapSourcePath<'a> {
   }
 }
 
-struct IntermediateText;
-
-impl IntermediateText {
-  fn from_parts<const N: usize>(parts: [&str; N]) -> String {
-    parts.into_iter().collect()
-  }
-}
-
 struct RouterMapOwnership<'a> {
   package_name: &'a str,
   module_root: &'a Path,
@@ -53,6 +45,29 @@ impl IntermediateArtifactWriter {
     }
   }
 
+  /// Match hvigor 6.24.3 CreateModuleInfo/CreateHarModuleInfo.
+  ///
+  /// Their `beforeTask()` always removes a stale output before `taskShouldDo()`
+  /// decides whether the exact SDK helper module must be regenerated.
+  pub(super) fn write_module_info(
+    &self,
+    module_root: &Path,
+    target_name: &str,
+    should_write: bool,
+  ) -> Result<()> {
+    let output = ModuleBuildLayout::new(module_root).generated_module_info(target_name);
+    if output.is_file() {
+      fs_err::remove_file(&output)?;
+    }
+    if should_write {
+      self.write_bytes(
+        &output,
+        b"\n//@ts-noCheck\nexport const __MODULE_NAME__: string = __getCurrentModuleName__()\nexport const __BUNDLE_NAME__: string = __getCurrentBundleName__()\n",
+      )?;
+    }
+    Ok(())
+  }
+
   pub(super) fn write_router_map_intermediates(
     &self,
     module: &ModuleConfig,
@@ -61,7 +76,7 @@ impl IntermediateArtifactWriter {
     res_out: &Path,
   ) -> Result<()> {
     if loader_json.router_map.is_empty() {
-      return Ok(());
+      return self.write_empty_router_map_intermediates(&module.src_path);
     }
 
     let loader_router_map = serde_json::json!({
@@ -90,18 +105,40 @@ impl IntermediateArtifactWriter {
             .collect::<Vec<_>>()
     });
     let module_layout = ModuleBuildLayout::new(&module.src_path);
-    self.write_bytes(
-      &module_layout.router_map_loader(),
-      &serde_json::to_vec(&loader_router_map)?,
-    )?;
-    self.write_bytes(
-      &module_layout.router_map_temp(),
-      &serde_json::to_vec(&temp_router_map)?,
-    )?;
+    self.write_router_map_task_outputs(&module_layout, &loader_router_map, &temp_router_map)?;
     let resource_layout = ResourceOutputLayout::new(res_out);
     self.write_bytes(
       &resource_layout.profile_router_map(),
       &serde_json::to_vec(&resource_router_map)?,
+    )?;
+    Ok(())
+  }
+
+  /// Latest IDE owner: `ProcessRouterMap.generateTempRouterMap` always writes
+  /// both task outputs when its router-map input is an empty array. The
+  /// resource profile remains absent because there is no route to advertise.
+  pub(super) fn write_empty_router_map_intermediates(&self, module_root: &Path) -> Result<()> {
+    let empty_router_map = serde_json::json!({ "routerMap": [] });
+    self.write_router_map_task_outputs(
+      &ModuleBuildLayout::new(module_root),
+      &empty_router_map,
+      &empty_router_map,
+    )
+  }
+
+  fn write_router_map_task_outputs(
+    &self,
+    layout: &ModuleBuildLayout<'_>,
+    loader_router_map: &serde_json::Value,
+    temp_router_map: &serde_json::Value,
+  ) -> Result<()> {
+    self.write_bytes(
+      &layout.router_map_loader(),
+      &serde_json::to_vec(loader_router_map)?,
+    )?;
+    self.write_bytes(
+      &layout.router_map_temp(),
+      &serde_json::to_vec(temp_router_map)?,
     )?;
     Ok(())
   }
@@ -916,15 +953,6 @@ impl IntermediateArtifactWriter {
 }
 
 impl IntermediateArtifactWriter {
-  pub(super) fn write_static_intermediate_files(&self, module_root: &Path) -> Result<()> {
-    let module_layout = ModuleBuildLayout::new(module_root);
-    self.write_bytes_if_missing(&module_layout.router_map_loader(), br#"{"routerMap":[]}"#)?;
-    self.write_bytes_if_missing(&module_layout.router_map_temp(), br#"{"routerMap":[]}"#)?;
-    // Router/share config files are written by their owning processors before
-    // this default pass. Missing-only writes preserve real hvigor outputs.
-    Ok(())
-  }
-
   pub(super) fn write_json_pretty(&self, path: &Path, value: &serde_json::Value) -> Result<()> {
     let content = serde_json::to_string_pretty(value)?;
     self.write_bytes(path, content.as_bytes())
@@ -1020,18 +1048,41 @@ impl IntermediateArtifactWriter {
     Ok(())
   }
 
-  /// Materialize the source-map handoff consumed by `PackageHap` and
-  /// `CollectDebugSymbol`. Hvigor writes release maps outside `loader_out`, so
-  /// remove Arkdown's temporary loader copy after the intermediate is safe.
+  /// Publish the source map after packaging. Latest IDE owner:
+  /// `AbstractPackageHar.moveSourceMap`; HAP/HSP packaging has the same output
+  /// mapping handoff. Arkdown's durable intermediate is preferred because a
+  /// release build removes the loader-output copy after staging.
+  pub(super) fn publish_package_source_maps(
+    &self,
+    intermediate: &Path,
+    package_source_maps: Option<&Path>,
+    output: &Path,
+  ) -> Result<()> {
+    let source_maps = intermediate
+      .is_file()
+      .then_some(intermediate)
+      .or_else(|| package_source_maps.filter(|path| path.is_file()));
+    if let Some(source_maps) = source_maps {
+      self.copy_if_exists(source_maps, output)?;
+    }
+    Ok(())
+  }
+
+  /// Materialize the source-map handoffs consumed by CompileArkTS,
+  /// `PackageHap`, and `CollectDebugSymbol`. Hvigor writes release maps outside
+  /// `loader_out`, so remove Arkdown's temporary loader copy only after both
+  /// durable copies are safe.
   pub(super) fn stage_source_maps(
     &self,
     origin: &Path,
+    compile_cache: &Path,
     intermediate: &Path,
     build_mode: &arkdown_core::BuildMode,
   ) -> Result<()> {
     if !origin.is_file() {
       return Ok(());
     }
+    self.copy_if_exists(origin, compile_cache)?;
     if origin != intermediate {
       self.copy_if_exists(origin, intermediate)?;
       if matches!(build_mode, arkdown_core::BuildMode::Release) {
@@ -1052,13 +1103,6 @@ impl IntermediateArtifactWriter {
     }
     fs_err::write(path, bytes)?;
     Ok(())
-  }
-
-  fn write_bytes_if_missing(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.exists() {
-      return Ok(());
-    }
-    self.write_bytes(path, bytes)
   }
 
   pub(super) fn write_json_minified(&self, path: &Path, value: &serde_json::Value) -> Result<()> {

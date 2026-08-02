@@ -181,13 +181,16 @@ impl<'a> ByteCodeHarDeclarationCollector<'a> {
   }
 
   fn bundles_dependencies(&self) -> bool {
-    self
+    matches!(
+      self.config.product.build_option.har_artifact_type,
+      arkdown_core::HarArtifactType::Bytecode
+    ) && self
       .config
       .product
       .build_option
       .ark_options
       .as_ref()
-      .is_some_and(|options| options.byte_code_har && options.bundled_dependencies)
+      .is_some_and(|options| options.bundled_dependencies)
   }
 
   fn collect_current_ability_sources(
