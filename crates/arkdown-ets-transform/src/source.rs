@@ -221,6 +221,21 @@ impl TransformSourceSnapshot {
         self.files.get(path).map(Arc::clone)
     }
 
+    /// Return the external OHM URL declared by an inventoried SDK declaration.
+    ///
+    /// HarmonyOS SDK component declarations encode an external runtime target
+    /// in their header as `@bundle <record> <version>`. The coordinator has
+    /// already read those declarations into this snapshot, so transform hooks
+    /// can consume that SDK metadata without filesystem access.
+    pub(crate) fn sdk_bundle_ohm_url(
+        &self,
+        specifier: &str,
+        compatible_api_version: u32,
+    ) -> Option<String> {
+        let declaration = self.resolve_sdk_declaration(specifier)?;
+        SdkBundleDeclarationMetadata::new(&declaration.source).ohm_url(compatible_api_version)
+    }
+
     pub(crate) fn declaration_has_runtime_source(&self, declaration: &Path) -> bool {
         SourceFileName::new(declaration)
             .declaration_runtime_candidates()
@@ -322,6 +337,67 @@ impl TransformSourceSnapshot {
             let canonical = canonicalize_or_owned(path);
             self.indexed_path(&canonical).cloned()
         })
+    }
+}
+
+/// SDK declaration-header metadata consumed by the final ETS source pass.
+///
+/// The declaration format is owned by the SDK. This parser intentionally only
+/// recognizes the JSDoc line shape used by SDK component declarations rather
+/// than interpreting application source comments.
+struct SdkBundleDeclarationMetadata<'a> {
+    declaration: &'a str,
+}
+
+impl<'a> SdkBundleDeclarationMetadata<'a> {
+    fn new(declaration: &'a str) -> Self {
+        Self { declaration }
+    }
+
+    fn ohm_url(&self, compatible_api_version: u32) -> Option<String> {
+        self.declaration.lines().find_map(|line| {
+            let annotation = line.trim_start().strip_prefix('*')?.trim_start();
+            let mut fields = annotation.split_ascii_whitespace();
+            if fields.next()? != "@bundle" {
+                return None;
+            }
+            let record = fields.next()?;
+            let version = fields.next()?;
+            if fields.next().is_some()
+                || !SdkBundleVersion::new(version).is_compatible_with(compatible_api_version)
+            {
+                return None;
+            }
+            Some(["@bundle:", record].concat())
+        })
+    }
+}
+
+/// API-level requirement encoded in an SDK declaration's `@bundle` version.
+///
+/// This mirrors `api_check_utils.js::checkBundleVersion`: the number inside
+/// parentheses is the minimum compatible API level; a non-numeric SDK version
+/// without that suffix cannot select an external bundle target.
+struct SdkBundleVersion<'a> {
+    raw: &'a str,
+}
+
+impl<'a> SdkBundleVersion<'a> {
+    fn new(raw: &'a str) -> Self {
+        Self { raw }
+    }
+
+    fn is_compatible_with(&self, compatible_api_version: u32) -> bool {
+        if compatible_api_version == 0 {
+            return true;
+        }
+        let api_version = self
+            .raw
+            .rsplit_once('(')
+            .and_then(|(_, value)| value.strip_suffix(')'))
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| self.raw.parse::<u32>().ok());
+        api_version.is_some_and(|api_version| api_version <= compatible_api_version)
     }
 }
 
@@ -740,5 +816,38 @@ mod tests {
                 arkdown_path::canonicalize_or_owned(&declaration)
             );
         }
+    }
+
+    #[test]
+    fn snapshot_reads_harmony_component_bundle_annotation_from_sdk_declaration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hms_api_root = tmp.path().join("hms/ets/api");
+        std::fs::create_dir_all(&hms_api_root).unwrap();
+        let component_declaration = hms_api_root.join("@hms.core.map.MapComponent.d.ets");
+        let navi_declaration = hms_api_root.join("@hms.core.map.navi.d.ts");
+        let component_source = r#"/**
+ * @bundle com.huawei.hms.mapservice.kit/mapLibrary/ets/MapComponent 5.0.0(12)
+ * @kit MapKit
+ */
+export struct MapComponent {}"#;
+        std::fs::write(&component_declaration, component_source).unwrap();
+        std::fs::write(&navi_declaration, "export default navi;").unwrap();
+
+        let mut files = FxHashMap::default();
+        files.insert(component_declaration, Arc::<str>::from(component_source));
+        files.insert(navi_declaration, Arc::<str>::from("export default navi;"));
+        let sources =
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![hms_api_root]);
+
+        assert_eq!(
+            sources.sdk_bundle_ohm_url("@hms.core.map.MapComponent", 12),
+            Some("@bundle:com.huawei.hms.mapservice.kit/mapLibrary/ets/MapComponent".to_string())
+        );
+        assert_eq!(
+            sources.sdk_bundle_ohm_url("@hms.core.map.MapComponent", 11),
+            None,
+            "latest SDK api_check_utils::checkBundleVersion rejects an annotation above compatibleSdkVersion"
+        );
+        assert_eq!(sources.sdk_bundle_ohm_url("@hms.core.map.navi", 12), None);
     }
 }

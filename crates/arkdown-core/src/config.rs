@@ -436,6 +436,69 @@ pub struct ArkOptions {
     /// hvigor switch is explicitly enabled.
     #[serde(default)]
     pub integrated_hsp: Option<bool>,
+    /// TypeScript emission settings from `arkOptions.tscConfig`.
+    ///
+    /// The installed ets-loader accepts only `ES2017` and `ES2021`; absent or
+    /// unsupported values fall back to `ES2021` in
+    /// `ets_checker.js::getTargetESVersion`.
+    #[serde(default)]
+    pub tsc_config: ArkTscConfig,
+}
+
+/// TypeScript emission configuration owned by `arkOptions.tscConfig`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArkTscConfig {
+    #[serde(default)]
+    pub target_es_version: ArkTscTarget,
+}
+
+/// The two JavaScript targets accepted by the installed hvigor ets checker.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ArkTscTarget {
+    Es2017,
+    #[default]
+    Es2021,
+}
+
+impl ArkTscTarget {
+    /// Apply `ets_checker.js::getTargetESVersion`'s accepted-value contract.
+    pub fn from_hvigor_option(value: Option<&str>) -> Self {
+        match value {
+            Some("ES2017") => Self::Es2017,
+            Some("ES2021") | None | Some(_) => Self::Es2021,
+        }
+    }
+
+    /// Return the target spelling consumed by OXC's structured transformer.
+    pub fn es_target(self) -> &'static str {
+        match self {
+            Self::Es2017 => "es2017",
+            Self::Es2021 => "es2021",
+        }
+    }
+}
+
+#[cfg(test)]
+mod ark_tsc_target_tests {
+    use super::ArkTscTarget;
+
+    #[test]
+    fn matches_latest_ets_checker_target_contract() {
+        assert_eq!(
+            ArkTscTarget::from_hvigor_option(Some("ES2017")),
+            ArkTscTarget::Es2017
+        );
+        assert_eq!(
+            ArkTscTarget::from_hvigor_option(Some("ES2021")),
+            ArkTscTarget::Es2021
+        );
+        assert_eq!(
+            ArkTscTarget::from_hvigor_option(Some("ES2022")),
+            ArkTscTarget::Es2021
+        );
+        assert_eq!(ArkTscTarget::default(), ArkTscTarget::Es2021);
+    }
 }
 
 /// Obfuscation configuration (from `buildOption.arkOptions.obfuscation` in

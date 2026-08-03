@@ -38,6 +38,7 @@ pub struct ComponentMetadata {
     gesture_type_names: FxHashSet<String>,
     enum_names: FxHashSet<String>,
     sdk_components: FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
+    sdk_builder_functions: FxHashMap<String, FxHashSet<String>>,
     sdk_enum_exports: FxHashMap<String, FxHashSet<String>>,
     sdk_namespace_enum_exports: FxHashMap<String, FxHashMap<String, FxHashSet<String>>>,
     runtime_names: ArkuiRuntimeNames,
@@ -45,7 +46,22 @@ pub struct ComponentMetadata {
 
 impl ComponentMetadata {
     pub fn from_ets_loader_path(ets_loader_path: &Path) -> anyhow::Result<Self> {
-        ComponentMetadataLoader::new(ets_loader_path).load()
+        Self::from_ets_loader_path_with_external_declaration_roots(ets_loader_path, &[])
+    }
+
+    /// Builds the semantic snapshot that ets-loader obtains from its own API
+    /// declarations plus `globalModulePaths` supplied by the build plan.
+    ///
+    /// HarmonyOS builds keep the OpenHarmony ets-loader as the compiler owner
+    /// but add sibling SDK declaration roots (for example `hms/ets/api`) to
+    /// the TypeScript program. Those declarations may export `@Builder`
+    /// functions, so the transform must include them before lowering ArkUI
+    /// child calls.
+    pub fn from_ets_loader_path_with_external_declaration_roots(
+        ets_loader_path: &Path,
+        external_declaration_roots: &[PathBuf],
+    ) -> anyhow::Result<Self> {
+        ComponentMetadataLoader::new(ets_loader_path, external_declaration_roots).load()
     }
 
     pub fn needs_pop(&self, name: &str) -> bool {
@@ -138,6 +154,12 @@ impl ComponentMetadata {
             .and_then(|components| components.get(binding))
     }
 
+    pub(crate) fn is_sdk_builder_function(&self, specifier: &str, binding: &str) -> bool {
+        self.sdk_builder_functions
+            .get(specifier)
+            .is_some_and(|builders| builders.contains(binding))
+    }
+
     pub(crate) fn is_sdk_enum_export(&self, specifier: &str, binding: &str) -> bool {
         self.sdk_enum_exports
             .get(specifier)
@@ -200,6 +222,7 @@ pub struct ArkuiRuntimeNames {
     pub component_grid_item: String,
     pub component_arc_list_item: String,
     pub component_button: String,
+    pub component_tab_content: String,
     pub component_navigation: String,
     pub component_nav_destination: String,
     pub component_gesture_group: String,
@@ -287,6 +310,7 @@ pub enum ArkuiRuntimeComponentKind {
     GridItem,
     ArcListItem,
     Button,
+    TabContent,
     Navigation,
     NavDestination,
     GestureGroup,
@@ -315,6 +339,10 @@ impl ArkuiRuntimeComponentKind {
         matches!(self, Self::NavDestination | Self::Navigation)
     }
 
+    pub fn creates_child_body(self) -> bool {
+        matches!(self, Self::TabContent)
+    }
+
     pub fn is_navigation(self) -> bool {
         matches!(self, Self::Navigation)
     }
@@ -336,6 +364,7 @@ impl Default for ArkuiRuntimeNames {
             component_grid_item: "GridItem".to_string(),
             component_arc_list_item: "ArcListItem".to_string(),
             component_button: "Button".to_string(),
+            component_tab_content: "TabContent".to_string(),
             component_navigation: "Navigation".to_string(),
             component_nav_destination: "NavDestination".to_string(),
             component_gesture_group: "GestureGroup".to_string(),
@@ -440,6 +469,9 @@ impl ArkuiRuntimeNames {
         if name == self.component_button {
             return ArkuiRuntimeComponentKind::Button;
         }
+        if name == self.component_tab_content {
+            return ArkuiRuntimeComponentKind::TabContent;
+        }
         if name == self.component_navigation {
             return ArkuiRuntimeComponentKind::Navigation;
         }
@@ -475,11 +507,15 @@ impl ArkuiRuntimeNames {
 
 struct ComponentMetadataLoader<'a> {
     ets_loader_path: &'a Path,
+    external_declaration_roots: &'a [PathBuf],
 }
 
 impl<'a> ComponentMetadataLoader<'a> {
-    fn new(ets_loader_path: &'a Path) -> Self {
-        Self { ets_loader_path }
+    fn new(ets_loader_path: &'a Path, external_declaration_roots: &'a [PathBuf]) -> Self {
+        Self {
+            ets_loader_path,
+            external_declaration_roots,
+        }
     }
 
     fn load(&self) -> anyhow::Result<ComponentMetadata> {
@@ -489,7 +525,9 @@ impl<'a> ComponentMetadataLoader<'a> {
         let atomic_components = self.load_atomic_components()?;
         let semantics = SdkArkUiSemanticSnapshot::bundled();
         let enum_names = SdkEnumNameLoader::new(self.ets_loader_path).load()?;
-        let sdk_declarations = SdkComponentLoader::new(self.ets_loader_path).load()?;
+        let sdk_declarations =
+            SdkComponentLoader::new(self.ets_loader_path, self.external_declaration_roots)
+                .load()?;
 
         let mut bind_object_properties = semantics.bind_object_properties;
         if !semantics.custom_builder_properties.is_empty() {
@@ -514,6 +552,7 @@ impl<'a> ComponentMetadataLoader<'a> {
             gesture_type_names: semantics.gesture_type_names,
             enum_names,
             sdk_components: sdk_declarations.components,
+            sdk_builder_functions: sdk_declarations.builder_functions,
             sdk_enum_exports: sdk_declarations.enum_exports,
             sdk_namespace_enum_exports: sdk_declarations.namespace_enum_exports,
             runtime_names: ArkuiRuntimeNames::default(),
@@ -638,33 +677,81 @@ struct SdkAttributeUiCallback {
 
 struct SdkComponentLoader<'a> {
     ets_loader_path: &'a Path,
+    external_declaration_roots: &'a [PathBuf],
 }
 
 #[derive(Default)]
 struct SdkDeclarationMetadata {
     components: FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
+    builder_functions: FxHashMap<String, FxHashSet<String>>,
     enum_exports: FxHashMap<String, FxHashSet<String>>,
     namespace_enum_exports: FxHashMap<String, FxHashMap<String, FxHashSet<String>>>,
 }
 
 impl<'a> SdkComponentLoader<'a> {
-    fn new(ets_loader_path: &'a Path) -> Self {
-        Self { ets_loader_path }
+    fn new(ets_loader_path: &'a Path, external_declaration_roots: &'a [PathBuf]) -> Self {
+        Self {
+            ets_loader_path,
+            external_declaration_roots,
+        }
     }
 
     fn load(&self) -> anyhow::Result<SdkDeclarationMetadata> {
-        let mut declarations = self.load_api_declarations()?;
-        self.load_kit_declarations(&mut declarations)?;
+        let mut declarations = SdkDeclarationMetadata::default();
+        let primary_ets_root = self.primary_ets_root();
+        self.load_api_declarations(&primary_ets_root.join("api"), &mut declarations)?;
+        for root in self.external_declaration_roots {
+            if root.starts_with(&primary_ets_root) {
+                continue;
+            }
+            self.load_api_declarations(root, &mut declarations)?;
+        }
+        for kit_root in self.kit_config_roots(&primary_ets_root) {
+            self.load_kit_declarations(&kit_root, &mut declarations)?;
+        }
         Ok(declarations)
     }
 
-    fn load_api_declarations(&self) -> anyhow::Result<SdkDeclarationMetadata> {
-        let api_root = self.ets_loader_path.join("..").join("..").join("api");
+    fn primary_ets_root(&self) -> PathBuf {
+        self.ets_loader_path
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.ets_loader_path.join("../.."))
+    }
+
+    fn kit_config_roots(&self, primary_ets_root: &Path) -> Vec<PathBuf> {
+        let mut roots = vec![self.ets_loader_path.join("kit_configs")];
+        for declaration_root in self.external_declaration_roots {
+            let Some(ets_root) = declaration_root
+                .ancestors()
+                .find(|path| path.join("sdkConfig.json").is_file())
+            else {
+                continue;
+            };
+            if ets_root == primary_ets_root {
+                continue;
+            }
+            let kit_root = ets_root
+                .join("build-tools")
+                .join("ets-loader")
+                .join("kit_configs");
+            if !roots.contains(&kit_root) {
+                roots.push(kit_root);
+            }
+        }
+        roots
+    }
+
+    fn load_api_declarations(
+        &self,
+        api_root: &Path,
+        declarations: &mut SdkDeclarationMetadata,
+    ) -> anyhow::Result<()> {
         let mut paths = Vec::new();
         self.collect_declaration_files(&api_root, &mut paths)?;
         paths.sort();
 
-        let mut declarations = SdkDeclarationMetadata::default();
         for path in paths {
             let source = fs::read_to_string(&path)?;
             let allocator = Allocator::default();
@@ -678,6 +765,7 @@ impl<'a> SdkComponentLoader<'a> {
             // unavailable to a build.
 
             let components = SdkComponentDeclarationCollector::new(&parsed.program).collect();
+            let builders = SdkBuilderFunctionDeclarationCollector::new(&parsed.program).collect();
             let enums = SdkModuleEnumDeclarationCollector::new(&parsed.program).collect();
 
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -688,6 +776,11 @@ impl<'a> SdkComponentLoader<'a> {
                     declarations
                         .components
                         .insert(specifier.clone(), components.clone());
+                }
+                if !builders.is_empty() {
+                    declarations
+                        .builder_functions
+                        .insert(specifier.clone(), builders.clone());
                 }
                 if !enums.exports.is_empty() {
                     declarations
@@ -703,14 +796,14 @@ impl<'a> SdkComponentLoader<'a> {
                 }
             }
         }
-        Ok(declarations)
+        Ok(())
     }
 
     fn load_kit_declarations(
         &self,
+        kit_root: &Path,
         declarations: &mut SdkDeclarationMetadata,
     ) -> anyhow::Result<()> {
-        let kit_root = self.ets_loader_path.join("kit_configs");
         if !kit_root.is_dir() {
             return Ok(());
         }
@@ -749,6 +842,18 @@ impl<'a> SdkComponentLoader<'a> {
                         .entry(kit_specifier.to_string())
                         .or_default()
                         .insert(local_name.clone(), info);
+                }
+                if source_specifiers.iter().any(|specifier| {
+                    declarations
+                        .builder_functions
+                        .get(specifier)
+                        .is_some_and(|builders| builders.contains(binding))
+                }) {
+                    declarations
+                        .builder_functions
+                        .entry(kit_specifier.to_string())
+                        .or_default()
+                        .insert(local_name.clone());
                 }
                 if source_specifiers.iter().any(|specifier| {
                     declarations
@@ -815,21 +920,18 @@ impl<'a> SdkDeclarationSpecifier<'a> {
     }
 
     fn forms(&self) -> Vec<String> {
-        let Some(dot_form) = self.without_declaration_suffix() else {
-            return Vec::new();
-        };
-        let mut forms = vec![dot_form.clone()];
-        if let Some(colon_form) = Self::colon_form(&dot_form) {
+        let dot_form = self.without_declaration_suffix().unwrap_or(self.raw);
+        let mut forms = vec![dot_form.to_string()];
+        if let Some(colon_form) = Self::colon_form(dot_form) {
             forms.push(colon_form);
         }
         forms
     }
 
-    fn without_declaration_suffix(&self) -> Option<String> {
+    fn without_declaration_suffix(&self) -> Option<&str> {
         self.raw
             .strip_suffix(".d.ets")
             .or_else(|| self.raw.strip_suffix(".d.ts"))
-            .map(str::to_string)
     }
 
     fn colon_form(dot_form: &str) -> Option<String> {
@@ -838,6 +940,51 @@ impl<'a> SdkDeclarationSpecifier<'a> {
             return None;
         }
         Some(format!("{prefix}:{module}"))
+    }
+}
+
+struct SdkBuilderFunctionDeclarationCollector<'a> {
+    program: &'a Program<'a>,
+}
+
+impl<'a> SdkBuilderFunctionDeclarationCollector<'a> {
+    fn new(program: &'a Program<'a>) -> Self {
+        Self { program }
+    }
+
+    fn collect(&self) -> FxHashSet<String> {
+        let mut builders = FxHashSet::default();
+        for statement in &self.program.body {
+            match statement {
+                Statement::FunctionDeclaration(function) => {
+                    self.collect_function(function, &mut builders);
+                }
+                Statement::ExportNamedDeclaration(export) => {
+                    if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
+                        self.collect_function(function, &mut builders);
+                    }
+                }
+                _ => {}
+            }
+        }
+        builders
+    }
+
+    fn collect_function(
+        &self,
+        function: &oxc_ast::ast::Function<'_>,
+        builders: &mut FxHashSet<String>,
+    ) {
+        if !function
+            .decorators
+            .iter()
+            .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::BUILDER)
+        {
+            return;
+        }
+        if let Some(id) = &function.id {
+            builders.insert(id.name.to_string());
+        }
     }
 }
 
@@ -1157,5 +1304,60 @@ mod tests {
         assert!(metadata
             .sdk_namespace_enum_exports("@kit.MediaLibraryKit", "photoAccessHelper")
             .is_some_and(|enums| enums.contains("PhotoViewMIMETypes")));
+    }
+
+    #[test]
+    fn maps_external_sdk_builder_functions_through_kit_configs() {
+        let temp = tempfile::tempdir().expect("temporary external SDK");
+        let external_ets = temp.path().join("hms").join("ets");
+        let api_root = external_ets.join("api");
+        let kit_root = external_ets
+            .join("build-tools")
+            .join("ets-loader")
+            .join("kit_configs");
+        std::fs::create_dir_all(&api_root).expect("external API directory");
+        std::fs::create_dir_all(&kit_root).expect("external kit-config directory");
+        std::fs::write(
+            external_ets.join("sdkConfig.json"),
+            r#"{"apiPath":"./api"}"#,
+        )
+        .expect("external SDK config");
+        std::fs::write(
+            api_root.join("@hms.collaboration.service.d.ets"),
+            r#"@Builder
+declare function createCollaborationServiceMenuItems(): void;
+export { createCollaborationServiceMenuItems };"#,
+        )
+        .expect("external Builder declaration");
+        std::fs::write(
+            kit_root.join("@kit.ServiceCollaborationKit.json"),
+            r#"{
+  "symbols": {
+    "createCollaborationServiceMenuItems": {
+      "source": "@hms.collaboration.service",
+      "bindings": "createCollaborationServiceMenuItems"
+    }
+  }
+}"#,
+        )
+        .expect("external kit config");
+
+        let metadata = ComponentMetadata::from_ets_loader_path_with_external_declaration_roots(
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/ets-loader"
+            )),
+            &[api_root],
+        )
+        .expect("metadata with HarmonyOS external API path");
+
+        assert!(metadata.is_sdk_builder_function(
+            "@hms.collaboration.service",
+            "createCollaborationServiceMenuItems"
+        ));
+        assert!(metadata.is_sdk_builder_function(
+            "@kit.ServiceCollaborationKit",
+            "createCollaborationServiceMenuItems"
+        ));
     }
 }

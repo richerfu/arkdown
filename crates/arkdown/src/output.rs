@@ -1,9 +1,9 @@
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownError, ChunkGraph, HvigorSourceMapEntry, HvigorSourceMapOptions};
-use arkdown_path::ArtifactPathSerializer;
+use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
 use rolldown_sourcemap::{OwnedSourceMap as RolldownOwnedSourceMap, SourceMapBuilder};
 
 pub const MODULES_ABC_FILE_NAME: &str = "modules.abc";
@@ -99,6 +99,22 @@ pub struct SourceMapOptions {
     /// Package versions keyed by package name. OHPM store directory names are
     /// opaque, so source maps must not infer versions from `.ohpm` folders.
     pub package_versions: FxHashMap<String, String>,
+    /// Local source HAR roots that latest module-meta attributes to their own
+    /// package identity in source maps, even though they are compiled into the
+    /// entry module's ABC.
+    pub local_dependency_roots: Vec<SourceMapLocalDependencyRoot>,
+    /// Original source IDs that ets-loader emits as JavaScript because a
+    /// TypeScript directive selected its JS path. A source map can contain
+    /// more than one original source, so the extension cannot be inferred
+    /// solely from the map-producing module.
+    pub javascript_source_paths: FxHashSet<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceMapLocalDependencyRoot {
+    pub root: PathBuf,
+    pub package_name: String,
+    pub package_version: String,
 }
 
 impl From<&SourceMapOptions> for HvigorSourceMapOptions {
@@ -334,6 +350,8 @@ impl WrittenOutput {
                 &opts.module_root,
                 source_map.emits_javascript,
                 &opts.package_versions,
+                &opts.local_dependency_roots,
+                &opts.javascript_source_paths,
             )?;
             entries.push(HvigorSourceMapEntry {
                 chunk_name: source_map.chunk_name.to_string(),
@@ -465,20 +483,35 @@ impl HvigorSourceDescriptor {
         module_root: &Path,
         emits_javascript: bool,
         package_versions: &FxHashMap<String, String>,
+        local_dependency_roots: &[SourceMapLocalDependencyRoot],
+        javascript_source_paths: &FxHashSet<PathBuf>,
     ) -> Result<Self, ArkdownError> {
         let normalized = ArtifactPathSerializer::rel_to_slash(&PathBuf::from(source));
+        let emits_javascript =
+            emits_javascript || Self::source_emits_javascript(&normalized, javascript_source_paths);
+        if let Some(local_dependency) = Self::local_dependency_descriptor(
+            Path::new(&normalized),
+            project_root,
+            emits_javascript,
+            local_dependency_roots,
+        ) {
+            return Ok(local_dependency);
+        }
         let components = Path::new(&normalized)
             .components()
             .filter_map(|component| component.as_os_str().to_str().map(str::to_string))
             .collect::<Vec<_>>();
 
         if let Some(package) = HvigorOhpmSourceDescriptor::new(&components, package_versions)? {
+            let source_file = PathBuf::from(package.source_file);
+            let key_path =
+                Self::intermediate_source_path(Path::new(&package.key_path), emits_javascript);
             return Ok(Self {
-                source_file: package.source_file,
+                source_file: ArtifactPathSerializer::rel_to_slash(&source_file),
                 source_map_source_file: Some(package.source_map_source_file),
                 package_name: Some(package.package_name),
                 package_version: Some(package.package_version),
-                key_path: None,
+                key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
                 file: None,
                 include_source_root: true,
             });
@@ -538,14 +571,111 @@ impl HvigorSourceDescriptor {
             }
         }
 
+        let mut source_file = PathBuf::from(
+            Self::source_file_after_src_main(&components).unwrap_or_else(|| normalized.clone()),
+        );
+        if emits_javascript {
+            source_file.set_extension("js");
+        }
         Ok(Self {
-            source_file: Self::source_file_after_src_main(&components)
-                .unwrap_or_else(|| normalized.clone()),
+            source_file: ArtifactPathSerializer::rel_to_slash(&source_file),
             source_map_source_file: None,
             package_name: None,
             package_version: None,
             key_path: None,
             file: None,
+            include_source_root: true,
+        })
+    }
+
+    fn source_emits_javascript(source: &str, javascript_source_paths: &FxHashSet<PathBuf>) -> bool {
+        let source_path = Path::new(source);
+        if matches!(
+            source_path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("js" | "mjs" | "cjs")
+        ) {
+            return true;
+        }
+        javascript_source_paths.contains(&canonicalize_or_owned(source_path))
+    }
+
+    fn intermediate_source_path(source_path: &Path, emits_javascript: bool) -> PathBuf {
+        let mut source_path = source_path.to_path_buf();
+        if emits_javascript {
+            source_path.set_extension("js");
+        } else if matches!(
+            source_path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("ets")
+        ) {
+            source_path.set_extension("ts");
+        } else if matches!(
+            source_path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("mjs" | "cjs")
+        ) {
+            source_path.set_extension("js");
+        }
+        source_path
+    }
+
+    /// Matches `generate_sourcemap.js::getPkgInfoByModuleId` for project-model
+    /// source HARs. Their module id is outside the consuming module path, so
+    /// `module-meta-info-plugin.js::addModuleInfoData` supplies
+    /// `dependencyPkgInfo`; the source-map key is relative to the HAR root,
+    /// while the map's `sources` entry stays relative to the project root.
+    fn local_dependency_descriptor(
+        source_path: &Path,
+        project_root: &Path,
+        emits_javascript: bool,
+        local_dependency_roots: &[SourceMapLocalDependencyRoot],
+    ) -> Option<Self> {
+        let source_path = canonicalize_or_owned(source_path);
+        let local_dependency = local_dependency_roots.iter().find(|root| {
+            source_path
+                .strip_prefix(&root.root)
+                .ok()
+                .is_some_and(|relative| !relative.as_os_str().is_empty())
+        })?;
+        let relative = source_path.strip_prefix(&local_dependency.root).ok()?;
+        let mut key_path = relative.to_path_buf();
+        if emits_javascript {
+            key_path.set_extension("js");
+        } else if matches!(
+            key_path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("ets" | "ts")
+        ) {
+            key_path.set_extension("ts");
+        }
+        let source_map_source_file = source_path
+            .strip_prefix(project_root)
+            .map(ArtifactPathSerializer::rel_to_slash)
+            .unwrap_or_else(|_| {
+                let mut fallback = local_dependency
+                    .root
+                    .file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                fallback.push(relative);
+                ArtifactPathSerializer::rel_to_slash(&fallback)
+            });
+
+        Some(Self {
+            source_file: ArtifactPathSerializer::rel_to_slash(relative),
+            source_map_source_file: Some(source_map_source_file),
+            package_name: Some(local_dependency.package_name.clone()),
+            package_version: Some(local_dependency.package_version.clone()),
+            key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
+            file: source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string),
             include_source_root: true,
         })
     }
@@ -564,6 +694,7 @@ impl HvigorSourceDescriptor {
 
 struct HvigorOhpmSourceDescriptor {
     source_file: String,
+    key_path: String,
     source_map_source_file: String,
     package_name: String,
     package_version: String,
@@ -602,7 +733,11 @@ impl HvigorOhpmSourceDescriptor {
             )));
         };
         let package_end_index = package_oh_modules_index + 1 + package_components.len();
-        let source_components = components.get(package_end_index..).unwrap_or_default();
+        let key_components = components.get(package_end_index..).unwrap_or_default();
+        let Some(key_path) = HvigorSourceDescriptor::join_components(key_components) else {
+            return Ok(None);
+        };
+        let source_components = key_components;
         let source_components = if source_components
             .windows(2)
             .next()
@@ -633,6 +768,7 @@ impl HvigorOhpmSourceDescriptor {
 
         Ok(Some(Self {
             source_file,
+            key_path,
             source_map_source_file,
             package_name,
             package_version,
@@ -836,6 +972,8 @@ mod tests {
             version: "1.0.0".to_string(),
             chunk_source_files,
             package_versions: FxHashMap::default(),
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::default(),
         };
 
         let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
@@ -900,6 +1038,8 @@ mod tests {
             version: "1.0.0".to_string(),
             chunk_source_files: FxHashMap::default(),
             package_versions,
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::default(),
         };
 
         let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
@@ -929,6 +1069,66 @@ mod tests {
     }
 
     #[test]
+    fn source_map_extensions_follow_materialized_module_source_language() {
+        // `generate_sourcemap.js::getIntermediateModuleId` is per original
+        // source, not per Rolldown combined map. A pragma-emitted JS source
+        // can therefore share a map with a normal ETS/TS source.
+        let output_dir = temp_output_dir("hvigor-source-map-source-language");
+        let source_map = serde_json::json!({
+            "version": 3,
+            "sources": [
+                "/project/entry/src/main/ets/pages/Index.ets",
+                "/project/entry/src/main/ets/pages/Runtime.ts"
+            ],
+            "names": [],
+            "mappings": "AAAA"
+        })
+        .to_string();
+        let chunk_graph = graph(vec![ArkChunk {
+            name: "Index".to_string(),
+            code: "export const value = true;\n".to_string(),
+            source_map: Some(source_map),
+            ..ArkChunk::default()
+        }]);
+        let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/entry"),
+            module_name: "entry".to_string(),
+            package_name: "entry".to_string(),
+            version: "1.0.0".to_string(),
+            chunk_source_files: FxHashMap::default(),
+            package_versions: FxHashMap::default(),
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::from_iter([PathBuf::from(
+                "/project/entry/src/main/ets/pages/Runtime.ts",
+            )]),
+        };
+
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
+            .expect("write output");
+        let source_maps = written.source_maps_path.expect("sourceMaps.map path");
+        let value: serde_json::Value = serde_json::from_str(
+            &fs_err::read_to_string(source_maps).expect("read sourceMaps.map"),
+        )
+        .expect("parse sourceMaps.map");
+
+        assert!(
+            value
+                .get("entry|entry|1.0.0|src/main/ets/pages/Index.ts")
+                .is_some(),
+            "{value}"
+        );
+        assert!(
+            value
+                .get("entry|entry|1.0.0|src/main/ets/pages/Runtime.js")
+                .is_some(),
+            "{value}"
+        );
+
+        let _ = fs_err::remove_dir_all(output_dir);
+    }
+
+    #[test]
     fn writes_latest_hvigor_key_for_direct_local_har_source() {
         let output_dir = temp_output_dir("hvigor-local-har-source-map");
         let source_map = serde_json::json!({
@@ -953,6 +1153,8 @@ mod tests {
             version: "1.0.0".to_string(),
             chunk_source_files: FxHashMap::default(),
             package_versions: FxHashMap::default(),
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::default(),
         };
 
         let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
@@ -969,6 +1171,67 @@ mod tests {
             "entry/oh_modules/share-config-har/Index.ets"
         );
         assert_eq!(value[key]["sourceRoot"], "");
+
+        let _ = fs_err::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn writes_hvigor_source_map_scope_for_project_model_source_har() {
+        // `generate_sourcemap.js::getPkgInfoByModuleId` makes the key package
+        // relative and uses dependencyPkgInfo when this project-model HAR is
+        // outside the consumer's modulePath.
+        let output_dir = temp_output_dir("hvigor-project-model-source-har-source-map");
+        let source_map = serde_json::json!({
+            "version": 3,
+            "sources": [
+                "/project/features/discover/Index.ets",
+                "/project/features/discover/src/main/ets/views/DiscoverView.ets"
+            ],
+            "names": [],
+            "mappings": "AAAA"
+        })
+        .to_string();
+        let chunk_graph = graph(vec![ArkChunk {
+            name: "Discover".to_string(),
+            code: "export const discover = true;\n".to_string(),
+            source_map: Some(source_map),
+            ..ArkChunk::default()
+        }]);
+        let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/phone"),
+            module_name: "phone".to_string(),
+            package_name: "phone".to_string(),
+            version: "1.0.0".to_string(),
+            chunk_source_files: FxHashMap::default(),
+            package_versions: FxHashMap::default(),
+            local_dependency_roots: vec![SourceMapLocalDependencyRoot {
+                root: PathBuf::from("/project/features/discover"),
+                package_name: "discover".to_string(),
+                package_version: "1.0.0".to_string(),
+            }],
+            javascript_source_paths: FxHashSet::default(),
+        };
+
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
+            .expect("write output");
+        let source_maps = written.source_maps_path.expect("sourceMaps.map path");
+        let value: serde_json::Value = serde_json::from_str(
+            &fs_err::read_to_string(source_maps).expect("read sourceMaps.map"),
+        )
+        .expect("parse sourceMaps.map");
+
+        let root_key = "phone|discover|1.0.0|Index.ts";
+        assert_eq!(value[root_key]["sources"][0], "features/discover/Index.ets");
+        assert_eq!(value[root_key]["package-info"], "discover|1.0.0");
+        assert_eq!(value[root_key]["entry-package-info"], "phone|1.0.0");
+
+        let source_key = "phone|discover|1.0.0|src/main/ets/views/DiscoverView.ts";
+        assert_eq!(
+            value[source_key]["sources"][0],
+            "features/discover/src/main/ets/views/DiscoverView.ets"
+        );
+        assert_eq!(value[source_key]["package-info"], "discover|1.0.0");
 
         let _ = fs_err::remove_dir_all(output_dir);
     }
@@ -1001,6 +1264,8 @@ mod tests {
             version: "1.0.0".to_string(),
             chunk_source_files: FxHashMap::default(),
             package_versions,
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::default(),
         };
 
         let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
@@ -1011,7 +1276,7 @@ mod tests {
             &fs_err::read_to_string(source_maps).expect("read sourceMaps.map"),
         )
         .expect("parse sourceMaps.map");
-        let key = "phone|@protobufjs/base64|1.1.2|src/main/index.ts";
+        let key = "phone|@protobufjs/base64|1.1.2|index.js";
         assert!(value.get(key).is_some(), "{value}");
         assert_eq!(
             value[key]["sources"][0],

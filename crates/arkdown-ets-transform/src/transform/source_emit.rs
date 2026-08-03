@@ -9,15 +9,17 @@ use std::collections::{HashMap, VecDeque};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrowFunctionExpression, BindingIdentifier, IdentifierName, IdentifierReference,
-    MethodDefinition, MethodDefinitionKind, NumericLiteral, ObjectExpression, Program,
+    ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, BindingIdentifier, Comment,
+    IdentifierName, IdentifierReference, IfStatement, ImportDeclaration, MethodDefinition,
+    MethodDefinitionKind, NumericLiteral, ObjectExpression, ObjectPropertyKind, Program,
     PropertyDefinition, PropertyKey, StringLiteral, TSType, ThisExpression,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_codegen::{Codegen, CodegenOptions};
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use rolldown_sourcemap::SourceMapBuilder;
+use rustc_hash::FxHashMap;
 
 pub(crate) struct HvigorTypescriptPrinter;
 
@@ -45,11 +47,19 @@ impl HvigorTypescriptPrinter {
         string_literals.visit_program(program);
         let mut original_boundaries = TypeScriptSourceBoundaryInventory::default();
         original_boundaries.visit_program(program);
+        let source_comments = if options.comments == CommentOptions::disabled() {
+            TypeScriptSourceCommentSnapshot::default()
+        } else {
+            TypeScriptSourceCommentSnapshot::from_program(program)
+        };
+        let source_layouts = TypeScriptSourceLayoutInventory::from_program_source(program);
         let generated = Codegen::new().with_options(options).build(program);
         let layout = HvigorTypescriptLayout::new(
             generated.code,
             numeric_literals.raw_literals,
             string_literals.literals,
+            source_layouts,
+            source_comments,
         )
         .format();
         let source_map = generated.map.map(|source_map| {
@@ -356,19 +366,18 @@ impl<'a> Visit<'a> for NumericLiteralInventory {
             return;
         };
         let raw = raw.as_str();
-        let preserves_source_notation = raw.starts_with("0x")
-            || raw.starts_with("0X")
-            || raw.starts_with("0o")
-            || raw.starts_with("0O")
-            || raw.starts_with("0b")
-            || raw.starts_with("0B")
-            || raw.contains('_');
-        if literal.span.start > 0 && preserves_source_notation {
-            self.raw_literals.push(HvigorRawNumericLiteral {
-                value: literal.value,
-                raw: raw.to_string(),
-            });
-        }
+        // TypeScript's printer keeps the raw spelling of every source-backed
+        // numeric literal. That includes ordinary decimal spellings such as
+        // `0.5` and `1000`, not only base-prefixed forms. OXC intentionally
+        // chooses shorter equivalent spellings (`.5`, `1e3`), which changes
+        // CompileArkTS cache text and shifts downstream debug positions.
+        // Synthetic resource literals have an empty span and must retain the
+        // explicit decimal spelling created by the transform as well. A raw
+        // spelling is present at this point, so preserve every one.
+        self.raw_literals.push(HvigorRawNumericLiteral {
+            value: literal.value,
+            raw: raw.to_string(),
+        });
     }
 }
 
@@ -380,6 +389,7 @@ struct HvigorRawNumericLiteral {
 struct StringLiteralInventory<'a> {
     source: &'a str,
     literals: Vec<HvigorSourceStringLiteral>,
+    synthetic_type_import_literals: VecDeque<HvigorSourceStringLiteral>,
 }
 
 impl<'a> StringLiteralInventory<'a> {
@@ -387,6 +397,7 @@ impl<'a> StringLiteralInventory<'a> {
         Self {
             source,
             literals: Vec::new(),
+            synthetic_type_import_literals: VecDeque::new(),
         }
     }
 
@@ -397,18 +408,57 @@ impl<'a> StringLiteralInventory<'a> {
         let raw = self
             .source
             .get(literal.span.start as usize..literal.span.end as usize)?;
+        Self::quoted_raw(raw)
+    }
+
+    fn synthetic_type_import_literal(&self, literal: &StringLiteral<'_>) -> Option<String> {
+        literal.raw.as_ref().and_then(|raw| Self::quoted_raw(raw))
+    }
+
+    fn quoted_raw(raw: &str) -> Option<String> {
         let bytes = raw.as_bytes();
         let quote = *bytes.first()?;
         (bytes.len() >= 2 && matches!(quote, b'\'' | b'"') && bytes.last().copied() == Some(quote))
             .then(|| raw.to_string())
     }
+
+    fn take_synthetic_type_import_raw(&mut self, literal: &StringLiteral<'_>) -> Option<String> {
+        let position = self
+            .synthetic_type_import_literals
+            .iter()
+            .position(|candidate| literal.value == candidate.value)?;
+        self.synthetic_type_import_literals
+            .remove(position)
+            .and_then(|candidate| candidate.raw)
+    }
 }
 
 impl<'a> Visit<'a> for StringLiteralInventory<'_> {
+    fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
+        // TypeOnlyNamedImportSplitter builds a fresh `import type` declaration
+        // with `SPAN`, while preserving the source literal in `raw`. TypeScript
+        // keeps that raw quote spelling. Other synthetic literal kinds (notably
+        // `import lazy` after ArkUI lowering) are generated by etsTransform and
+        // intentionally use the printer's double-quote style.
+        if declaration.import_kind.is_type() && declaration.source.span.is_empty() {
+            if let Some(raw) = self.synthetic_type_import_literal(&declaration.source) {
+                self.synthetic_type_import_literals
+                    .push_back(HvigorSourceStringLiteral {
+                        value: declaration.source.value.to_string(),
+                        raw: Some(raw),
+                    });
+            }
+        }
+        walk::walk_import_declaration(self, declaration);
+    }
+
     fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+        let raw = self
+            .raw_literal(literal)
+            .or_else(|| self.take_synthetic_type_import_raw(literal));
         self.literals.push(HvigorSourceStringLiteral {
             value: literal.value.to_string(),
-            raw: self.raw_literal(literal),
+            raw,
         });
     }
 }
@@ -418,10 +468,316 @@ struct HvigorSourceStringLiteral {
     raw: Option<String>,
 }
 
+/// Raw source text for comments that OXC keeps at the correct AST location.
+///
+/// The OXC printer can normalize interior block-comment whitespace while the
+/// TypeScript printer used by ets-loader retains the original text. We only
+/// restore a comment after codegen emitted a comment with the same content;
+/// comments attached to replaced ArkUI nodes remain deliberately untouched.
+#[derive(Default)]
+struct TypeScriptSourceCommentSnapshot {
+    comments: Vec<HvigorSourceComment>,
+}
+
+struct HvigorSourceComment {
+    fingerprint: String,
+    raw: String,
+    source_indent: usize,
+}
+
+impl TypeScriptSourceCommentSnapshot {
+    fn from_program(program: &Program<'_>) -> Self {
+        let mut comments = Vec::with_capacity(program.comments.len());
+        for comment in &program.comments {
+            let Some(raw) = Self::raw_comment(program.source_text, comment) else {
+                continue;
+            };
+            comments.push(HvigorSourceComment {
+                fingerprint: Self::fingerprint(raw),
+                raw: raw.to_string(),
+                source_indent: Self::line_indent_width(program.source_text, comment.span.start),
+            });
+        }
+        Self { comments }
+    }
+
+    fn raw_comment<'a>(source: &'a str, comment: &Comment) -> Option<&'a str> {
+        source.get(comment.span.start as usize..comment.span.end as usize)
+    }
+
+    fn fingerprint(raw: &str) -> String {
+        let (kind, content) = if let Some(content) = raw.strip_prefix("//") {
+            ("line", content)
+        } else if let Some(content) = raw
+            .strip_prefix("/*")
+            .and_then(|content| content.strip_suffix("*/"))
+        {
+            ("block", content)
+        } else {
+            ("other", raw)
+        };
+        let mut fingerprint = String::from(kind);
+        fingerprint.push(':');
+        fingerprint.extend(content.split_whitespace());
+        fingerprint
+    }
+
+    fn line_indent_width(source: &str, offset: u32) -> usize {
+        let offset = offset as usize;
+        let line_start = source[..offset.min(source.len())]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        source[line_start..offset.min(source.len())]
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .count()
+    }
+}
+
+impl HvigorSourceComment {
+    fn text_at_generated_indent(&self, generated_indent: usize) -> String {
+        let adjustment = generated_indent as isize - self.source_indent as isize;
+        if adjustment == 0 || !self.raw.contains('\n') {
+            return self.raw.clone();
+        }
+
+        let mut adjusted = String::with_capacity(
+            self.raw
+                .len()
+                .saturating_add(adjustment.max(0) as usize * self.raw.lines().count()),
+        );
+        for (line_index, line) in self.raw.split_inclusive('\n').enumerate() {
+            if line_index == 0 {
+                adjusted.push_str(line);
+                continue;
+            }
+            let prefix_end = line
+                .find(|character: char| !matches!(character, ' ' | '\t'))
+                .unwrap_or(line.len());
+            if prefix_end == 0 {
+                adjusted.push_str(line);
+            } else if adjustment > 0 {
+                adjusted.push_str(&" ".repeat(adjustment as usize));
+                adjusted.push_str(line);
+            } else {
+                let mut remaining = (-adjustment) as usize;
+                let mut cut = 0;
+                for (offset, character) in line.char_indices() {
+                    if remaining == 0 || !matches!(character, ' ' | '\t') {
+                        break;
+                    }
+                    remaining -= 1;
+                    cut = offset + character.len_utf8();
+                }
+                adjusted.push_str(&line[cut..]);
+            }
+        }
+        adjusted
+    }
+}
+
+/// Source-shape metadata that TypeScript's printer retains on original literal
+/// nodes. `etsTransform` replaces resource-call children with synthetic nodes,
+/// but the surrounding object and array nodes retain their original spans and
+/// `multiLine`/trailing-comma behavior. OXC intentionally does not store that
+/// printer metadata, so capture it before codegen and match it structurally
+/// after reparsing OXC's output.
+#[derive(Default)]
+struct TypeScriptSourceLayoutInventory<'a> {
+    source: &'a str,
+    object_layouts: FxHashMap<HvigorObjectLayoutKey, VecDeque<HvigorCollectionLayout>>,
+    array_layouts: FxHashMap<HvigorArrayLayoutKey, VecDeque<HvigorCollectionLayout>>,
+    collection_depth: usize,
+}
+
+impl<'a> TypeScriptSourceLayoutInventory<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            object_layouts: FxHashMap::default(),
+            array_layouts: FxHashMap::default(),
+            collection_depth: 0,
+        }
+    }
+
+    fn from_program_source(program: &Program<'a>) -> HvigorSourceLayoutSnapshot {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, program.source_text, program.source_type).parse();
+        if parsed.panicked || !parsed.diagnostics.is_empty() {
+            return HvigorSourceLayoutSnapshot::default();
+        }
+        let mut inventory = Self::new(program.source_text);
+        inventory.visit_program(&parsed.program);
+        inventory.into_snapshot()
+    }
+
+    fn collection_layout(
+        &self,
+        span: Span,
+        item_spans: &[Span],
+        opening: u8,
+        closing: u8,
+    ) -> Option<HvigorCollectionLayout> {
+        if span.is_empty() {
+            return None;
+        }
+        let source = self.source.get(span.start as usize..span.end as usize)?;
+        if source.as_bytes().first().copied() != Some(opening)
+            || source.as_bytes().last().copied() != Some(closing)
+        {
+            return None;
+        }
+        let first = item_spans.first().copied()?;
+        let last = item_spans.last().copied()?;
+        if first.start < span.start + 1 || last.end > span.end.saturating_sub(1) {
+            return None;
+        }
+        Some(HvigorCollectionLayout {
+            leading_newline: self.has_line_break(span.start + 1, first.start),
+            separator_newlines: item_spans
+                .windows(2)
+                .map(|pair| self.has_line_break(pair[0].end, pair[1].start))
+                .collect(),
+            closing_newline: self.has_line_break(last.end, span.end - 1),
+            trailing_comma: self
+                .source
+                .get(last.end as usize..span.end.saturating_sub(1) as usize)?
+                .trim_end()
+                .ends_with(','),
+            collection_depth: self.collection_depth,
+        })
+    }
+
+    fn has_line_break(&self, start: u32, end: u32) -> bool {
+        self.source
+            .get(start as usize..end as usize)
+            .is_some_and(|source| source.contains('\n') || source.contains('\r'))
+    }
+
+    fn record_object(&mut self, object: &ObjectExpression<'_>) {
+        let spans = object
+            .properties
+            .iter()
+            .map(GetSpan::span)
+            .collect::<Vec<_>>();
+        let Some(layout) = self.collection_layout(object.span, &spans, b'{', b'}') else {
+            return;
+        };
+        self.object_layouts
+            .entry(HvigorObjectLayoutKey::from_object(object))
+            .or_default()
+            .push_back(layout);
+    }
+
+    fn record_array(&mut self, array: &ArrayExpression<'_>) {
+        let spans = array.elements.iter().map(GetSpan::span).collect::<Vec<_>>();
+        let Some(layout) = self.collection_layout(array.span, &spans, b'[', b']') else {
+            return;
+        };
+        if !layout.requires_array_edit() {
+            return;
+        };
+        self.array_layouts
+            .entry(HvigorArrayLayoutKey::from_array(array))
+            .or_default()
+            .push_back(layout);
+    }
+
+    fn into_snapshot(self) -> HvigorSourceLayoutSnapshot {
+        HvigorSourceLayoutSnapshot {
+            object_layouts: self.object_layouts,
+            array_layouts: self.array_layouts,
+        }
+    }
+}
+
+impl<'a> Visit<'a> for TypeScriptSourceLayoutInventory<'a> {
+    fn visit_object_expression(&mut self, object: &ObjectExpression<'a>) {
+        self.record_object(object);
+        self.collection_depth += 1;
+        walk::walk_object_expression(self, object);
+        self.collection_depth -= 1;
+    }
+
+    fn visit_array_expression(&mut self, array: &ArrayExpression<'a>) {
+        self.record_array(array);
+        self.collection_depth += 1;
+        walk::walk_array_expression(self, array);
+        self.collection_depth -= 1;
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct HvigorObjectLayoutKey(Vec<HvigorObjectPropertyLayoutKey>);
+
+impl HvigorObjectLayoutKey {
+    fn from_object(object: &ObjectExpression<'_>) -> Self {
+        Self(
+            object
+                .properties
+                .iter()
+                .map(|property| match property {
+                    ObjectPropertyKind::ObjectProperty(property) if !property.computed => property
+                        .key
+                        .static_name()
+                        .map(|name| HvigorObjectPropertyLayoutKey::Named(name.into_owned()))
+                        .unwrap_or(HvigorObjectPropertyLayoutKey::Computed),
+                    ObjectPropertyKind::ObjectProperty(_) => {
+                        HvigorObjectPropertyLayoutKey::Computed
+                    }
+                    ObjectPropertyKind::SpreadProperty(_) => HvigorObjectPropertyLayoutKey::Spread,
+                })
+                .collect(),
+        )
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum HvigorObjectPropertyLayoutKey {
+    Named(String),
+    Computed,
+    Spread,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct HvigorArrayLayoutKey(usize);
+
+impl HvigorArrayLayoutKey {
+    fn from_array(array: &ArrayExpression<'_>) -> Self {
+        Self(array.elements.len())
+    }
+}
+
+#[derive(Clone)]
+struct HvigorCollectionLayout {
+    leading_newline: bool,
+    separator_newlines: Vec<bool>,
+    closing_newline: bool,
+    trailing_comma: bool,
+    collection_depth: usize,
+}
+
+impl HvigorCollectionLayout {
+    fn requires_array_edit(&self) -> bool {
+        self.leading_newline
+            || self.separator_newlines.iter().any(|newline| *newline)
+            || self.closing_newline
+            || self.trailing_comma
+    }
+}
+
+#[derive(Default)]
+struct HvigorSourceLayoutSnapshot {
+    object_layouts: FxHashMap<HvigorObjectLayoutKey, VecDeque<HvigorCollectionLayout>>,
+    array_layouts: FxHashMap<HvigorArrayLayoutKey, VecDeque<HvigorCollectionLayout>>,
+}
+
 struct HvigorTypescriptLayout {
     code: String,
     raw_numeric_literals: Vec<HvigorRawNumericLiteral>,
     source_string_literals: Vec<HvigorSourceStringLiteral>,
+    source_layouts: HvigorSourceLayoutSnapshot,
+    source_comments: TypeScriptSourceCommentSnapshot,
 }
 
 impl HvigorTypescriptLayout {
@@ -429,11 +785,15 @@ impl HvigorTypescriptLayout {
         code: String,
         raw_numeric_literals: Vec<HvigorRawNumericLiteral>,
         source_string_literals: Vec<HvigorSourceStringLiteral>,
+        source_layouts: HvigorSourceLayoutSnapshot,
+        source_comments: TypeScriptSourceCommentSnapshot,
     ) -> Self {
         Self {
             code,
             raw_numeric_literals,
             source_string_literals,
+            source_layouts,
+            source_comments,
         }
     }
 
@@ -447,8 +807,9 @@ impl HvigorTypescriptLayout {
             };
         }
 
-        let mut layout = HvigorLayoutInventory::new(&self.code);
+        let mut layout = HvigorLayoutInventory::new(&self.code, self.source_layouts);
         layout.visit_program(&parsed.program);
+        layout.add_source_comment_spelling_edits(&self.source_comments, &parsed.program.comments);
         layout.add_numeric_literal_edits(&self.raw_numeric_literals);
         layout.add_string_literal_edits(&self.source_string_literals);
         layout.apply()
@@ -583,15 +944,19 @@ struct HvigorLayoutInventory<'a> {
     edits: Vec<HvigorTextEdit>,
     numeric_literals: Vec<(Span, f64)>,
     string_literals: Vec<(Span, String)>,
+    object_layouts: FxHashMap<HvigorObjectLayoutKey, VecDeque<HvigorCollectionLayout>>,
+    array_layouts: FxHashMap<HvigorArrayLayoutKey, VecDeque<HvigorCollectionLayout>>,
 }
 
 impl<'a> HvigorLayoutInventory<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, source_layouts: HvigorSourceLayoutSnapshot) -> Self {
         Self {
             source,
             edits: Vec::new(),
             numeric_literals: Vec::new(),
             string_literals: Vec::new(),
+            object_layouts: source_layouts.object_layouts,
+            array_layouts: source_layouts.array_layouts,
         }
     }
 
@@ -621,12 +986,17 @@ impl<'a> HvigorLayoutInventory<'a> {
     }
 
     fn add_string_literal_edits(&mut self, source_literals: &[HvigorSourceStringLiteral]) {
-        for (source_literal, (span, generated_value)) in
-            source_literals.iter().zip(&self.string_literals)
-        {
-            if source_literal.value != *generated_value {
+        let mut output_index = 0;
+        for source_literal in source_literals {
+            let Some(relative_index) = self.string_literals[output_index..]
+                .iter()
+                .position(|(_, generated_value)| source_literal.value == *generated_value)
+            else {
                 continue;
-            }
+            };
+            output_index += relative_index;
+            let (span, _) = &self.string_literals[output_index];
+            output_index += 1;
             let Some(raw) = source_literal.raw.as_ref() else {
                 continue;
             };
@@ -637,6 +1007,47 @@ impl<'a> HvigorLayoutInventory<'a> {
                 self.edits.push(HvigorTextEdit {
                     span: *span,
                     replacement: raw.clone(),
+                    kind: HvigorTextEditKind::Other,
+                });
+            }
+        }
+    }
+
+    fn add_source_comment_spelling_edits(
+        &mut self,
+        source_comments: &TypeScriptSourceCommentSnapshot,
+        generated_comments: &[Comment],
+    ) {
+        let mut source_by_fingerprint =
+            FxHashMap::<String, VecDeque<&HvigorSourceComment>>::with_capacity_and_hasher(
+                source_comments.comments.len(),
+                Default::default(),
+            );
+        for comment in &source_comments.comments {
+            source_by_fingerprint
+                .entry(comment.fingerprint.clone())
+                .or_default()
+                .push_back(comment);
+        }
+        for comment in generated_comments {
+            let Some(current) = TypeScriptSourceCommentSnapshot::raw_comment(self.source, comment)
+            else {
+                continue;
+            };
+            let fingerprint = TypeScriptSourceCommentSnapshot::fingerprint(current);
+            let Some(source_comment) = source_by_fingerprint
+                .get_mut(&fingerprint)
+                .and_then(VecDeque::pop_front)
+            else {
+                continue;
+            };
+            let generated_indent =
+                TypeScriptSourceCommentSnapshot::line_indent_width(self.source, comment.span.start);
+            let raw = source_comment.text_at_generated_indent(generated_indent);
+            if current != raw {
+                self.edits.push(HvigorTextEdit {
+                    span: comment.span,
+                    replacement: raw,
                     kind: HvigorTextEditKind::Other,
                 });
             }
@@ -656,20 +1067,116 @@ impl<'a> HvigorLayoutInventory<'a> {
             .0
     }
 
-    fn simple_object_replacement(&self, object: &ObjectExpression<'_>) -> Option<String> {
-        if object.properties.len() <= 1 {
-            return None;
+    fn source_object_layout(
+        &mut self,
+        object: &ObjectExpression<'_>,
+    ) -> Option<HvigorCollectionLayout> {
+        self.object_layouts
+            .get_mut(&HvigorObjectLayoutKey::from_object(object))
+            .and_then(VecDeque::pop_front)
+    }
+
+    fn source_array_layout(
+        &mut self,
+        array: &ArrayExpression<'_>,
+    ) -> Option<HvigorCollectionLayout> {
+        self.array_layouts
+            .get_mut(&HvigorArrayLayoutKey::from_array(array))
+            .and_then(VecDeque::pop_front)
+    }
+
+    fn can_compact_object(&self, object: &ObjectExpression<'_>) -> bool {
+        object.properties.len() > 1
+            && object.properties.iter().all(|property| {
+                self.source
+                    .get(property.span().start as usize..property.span().end as usize)
+                    .is_some_and(|source| !source.contains('\n') && !source.contains('\r'))
+            })
+    }
+
+    /// Apply TypeScript's source-derived literal-list boundaries with narrow
+    /// punctuation-span edits. Keeping the edits outside child spans lets a
+    /// source object and its nested source array preserve their layouts in the
+    /// same pass, just as the SDK printer does.
+    fn add_collection_layout_edits(
+        &mut self,
+        span: Span,
+        item_spans: Vec<Span>,
+        layout: HvigorCollectionLayout,
+        opening: u8,
+        closing: u8,
+    ) {
+        let Some(first) = item_spans.first().copied() else {
+            return;
+        };
+        let Some(last) = item_spans.last().copied() else {
+            return;
+        };
+        let start = span.start as usize;
+        let end = span.end as usize;
+        if start >= end
+            || self.source.as_bytes().get(start).copied() != Some(opening)
+            || self.source.as_bytes().get(end.saturating_sub(1)).copied() != Some(closing)
+            || first.start < span.start + 1
+            || last.end > span.end.saturating_sub(1)
+        {
+            return;
         }
-        let mut properties = Vec::with_capacity(object.properties.len());
-        for property in &object.properties {
-            let span = property.span();
-            let source = self.source.get(span.start as usize..span.end as usize)?;
-            if source.contains('\n') || source.contains('\r') {
-                return None;
+
+        let indent = self.line_indent_at(start).to_string();
+        let item_indent = format!("{indent}{}", "    ".repeat(layout.collection_depth + 1));
+        let has_object_brace_spacing = opening == b'{';
+        let prefix = if layout.leading_newline {
+            format!("\n{item_indent}")
+        } else if has_object_brace_spacing {
+            " ".to_string()
+        } else {
+            String::new()
+        };
+        self.edits.push(HvigorTextEdit {
+            span: Span::new(span.start + 1, first.start),
+            replacement: prefix,
+            kind: HvigorTextEditKind::Object,
+        });
+        for (index, pair) in item_spans.windows(2).enumerate() {
+            let [previous, next] = pair else {
+                continue;
+            };
+            if previous.end > next.start {
+                continue;
             }
-            properties.push(source.trim());
+            let separator = if layout
+                .separator_newlines
+                .get(index)
+                .copied()
+                .unwrap_or(false)
+            {
+                format!(",\n{item_indent}")
+            } else {
+                ", ".to_string()
+            };
+            self.edits.push(HvigorTextEdit {
+                span: Span::new(previous.end, next.start),
+                replacement: separator,
+                kind: HvigorTextEditKind::Object,
+            });
         }
-        Some(format!("{{ {} }}", properties.join(", ")))
+        let suffix = if layout.closing_newline {
+            format!("{}\n{indent}", if layout.trailing_comma { "," } else { "" })
+        } else if has_object_brace_spacing {
+            format!("{} ", if layout.trailing_comma { "," } else { "" })
+        } else {
+            if layout.trailing_comma {
+                ",".to_string()
+            } else {
+                String::new()
+            }
+        };
+        self.edits.push(HvigorTextEdit {
+            span: Span::new(last.end, span.end - 1),
+            replacement: suffix,
+            kind: HvigorTextEditKind::Object,
+        });
     }
 
     fn apply(mut self) -> HvigorTypescriptLayoutOutput {
@@ -742,6 +1249,25 @@ impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
         walk::walk_arrow_function_expression(self, arrow);
     }
 
+    fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
+        if let Some(alternate) = &statement.alternate {
+            let consequent_end = statement.consequent.span().end;
+            let alternate_start = alternate.span().start;
+            let between = self
+                .source
+                .get(consequent_end as usize..alternate_start as usize);
+            if between.is_some_and(|between| between.contains("else")) {
+                let indent = self.line_indent_at(statement.span.start as usize);
+                self.edits.push(HvigorTextEdit {
+                    span: Span::new(consequent_end, alternate_start),
+                    replacement: format!("\n{indent}else "),
+                    kind: HvigorTextEditKind::Other,
+                });
+            }
+        }
+        walk::walk_if_statement(self, statement);
+    }
+
     fn visit_method_definition(&mut self, method: &MethodDefinition<'a>) {
         if let Some(body) = &method.value.body {
             if body.is_empty() {
@@ -757,14 +1283,49 @@ impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
     }
 
     fn visit_object_expression(&mut self, object: &ObjectExpression<'a>) {
-        if let Some(replacement) = self.simple_object_replacement(object) {
-            self.edits.push(HvigorTextEdit {
-                span: object.span,
-                replacement,
-                kind: HvigorTextEditKind::Object,
-            });
+        if let Some(layout) = self.source_object_layout(object) {
+            self.add_collection_layout_edits(
+                object.span,
+                object.properties.iter().map(GetSpan::span).collect(),
+                layout,
+                b'{',
+                b'}',
+            );
+        } else if self.can_compact_object(object) {
+            self.add_collection_layout_edits(
+                object.span,
+                object.properties.iter().map(GetSpan::span).collect(),
+                HvigorCollectionLayout {
+                    leading_newline: false,
+                    separator_newlines: vec![false; object.properties.len().saturating_sub(1)],
+                    closing_newline: false,
+                    trailing_comma: false,
+                    collection_depth: 0,
+                },
+                b'{',
+                b'}',
+            );
         }
         walk::walk_object_expression(self, object);
+    }
+
+    fn visit_array_expression(&mut self, array: &ArrayExpression<'a>) {
+        if !array
+            .elements
+            .iter()
+            .any(|element| matches!(element, ArrayExpressionElement::Elision(_)))
+        {
+            if let Some(layout) = self.source_array_layout(array) {
+                self.add_collection_layout_edits(
+                    array.span,
+                    array.elements.iter().map(GetSpan::span).collect(),
+                    layout,
+                    b'[',
+                    b']',
+                );
+            }
+        }
+        walk::walk_array_expression(self, array);
     }
 }
 

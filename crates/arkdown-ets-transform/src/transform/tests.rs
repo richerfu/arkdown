@@ -50,6 +50,29 @@ fn test_non_component_passthrough() {
 }
 
 #[test]
+fn test_component_transform_preserves_decimal_literal_spelling() {
+    let src = r#"
+@Component
+struct DecimalPrinter {
+  build() {
+    Text(`${0.5}`)
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/DecimalPrinter.ets",
+        src,
+    ))
+    .expect("component source must transform");
+
+    // Latest ets-loader delegates retained source nodes to TypeScript's
+    // printer, which preserves ordinary decimal spellings while emitting
+    // generated ViewPU statements around them.
+    assert!(result.contains("0.5"), "{result}");
+    assert!(!result.contains("${.5}"), "{result}");
+}
+
+#[test]
 fn test_concurrent_function_inserts_directive_and_strips_decorator() {
     let src = "@Concurrent\nexport async function reportAppStorage(context: Context) {\n  await run(context);\n}";
     let result = TransformHarness::transform(&make_source(
@@ -581,12 +604,15 @@ fn test_transforms_component_v2_property_decorators() {
     assert!(result.contains("this.initParam(\"title\""));
     assert!(result.contains("this.updateParam(\"title\", params.title);"));
     assert!(result.contains("this.resetParam(\"title\""));
-    assert!(result.contains("@Provider(\"theme\")"));
+    assert!(result.contains("@Provider('theme')"));
     assert!(result.contains("theme: string;"));
-    assert!(result.contains("this.theme = \"dark\";"));
-    assert!(result.contains("@Consumer(\"theme\")"));
+    assert!(result.contains("this.theme = 'dark';"));
+    assert!(result.contains("@Consumer('theme')"));
     assert!(result.contains("incoming: string;"));
-    assert!(result.contains("this.resetConsumer(\"incoming\", \"\");"));
+    assert!(
+        result.contains("this.resetConsumer(\"incoming\", '');"),
+        "@Consumer reset must preserve the source literal spelling:\n{result}"
+    );
     assert!(result.contains("@Event"));
     assert!(result.contains("onTap: () => void;"));
     assert!(result.contains("this.onTap ="));
@@ -656,11 +682,11 @@ struct MyView {
             .expect("direct build block and if block must lower with hvigor block semantics");
 
     assert!(
-        !result.contains("Text.create(\"skipped\")"),
+        !result.contains("Text.create('skipped')"),
         "direct build block must be skipped like hvigor processComponentChild:\n{result}"
     );
     assert!(
-        result.contains("Text.create(\"kept\")"),
+        result.contains("Text.create('kept')"),
         "if branch block must still lower ArkUI children:\n{result}"
     );
 }
@@ -918,7 +944,7 @@ struct MyView {
     assert!(result.contains("Column.create();"));
     assert!(result.contains("Row.create();"));
     assert!(result.contains("Text.create(this.title);"));
-    assert!(result.contains("Column.width(\"100%\");"));
+    assert!(result.contains("Column.width('100%');"));
     assert!(
         !result.contains("Column() {") && !result.contains("Row() {"),
         "@ComponentV2 build/@Builder bodies must not leak ArkUI block DSL:\n{result}"
@@ -997,7 +1023,7 @@ struct MyView {
         "Repeat.each callback ArkUI body must be lowered:\n{result}"
     );
     assert!(
-        result.contains(".template(\"card\", (repeatItem: RepeatItem<Item>) => {")
+        result.contains(".template('card', (repeatItem: RepeatItem<Item>) => {")
             && result.contains("Row.create();"),
         "Repeat.template callback ArkUI body must be lowered while preserving chain:\n{result}"
     );
@@ -1192,6 +1218,41 @@ struct StyledCard {
 }
 
 #[test]
+fn test_top_level_styles_expand_for_lazy_list_item_creation() {
+    let src = r#"
+@Styles
+function itemStyle() {
+  .padding(12)
+    .borderRadius(8)
+}
+
+@Component
+struct StyledList {
+  build() {
+    List() {
+      ListItem() {
+        Text('row')
+      }
+      .itemStyle()
+    }
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/StyledList.ets", src))
+            .expect("SDK lazy ListItem creation must expand top-level @Styles");
+
+    assert!(
+        result.contains("ListItem.padding(12);") && result.contains("ListItem.borderRadius(8);"),
+        "lazy ListItem must receive expanded style attributes:\n{result}"
+    );
+    assert!(
+        !result.contains("ListItem.itemStyle()"),
+        "raw @Styles call must not leak through lazy ListItem creation:\n{result}"
+    );
+}
+
+#[test]
 fn test_component_source_methods_keep_hvigor_member_order() {
     let src = r#"
 @Component
@@ -1311,8 +1372,8 @@ struct Parent {
             .expect("if branch component IDs must lower");
 
     assert!(
-        result.contains("if (!If.canRetake(\"stable-column\"))")
-            && result.contains("if (!If.canRetake(\"stable-child\"))"),
+        result.contains("if (!If.canRetake('stable-column'))")
+            && result.contains("if (!If.canRetake('stable-child'))"),
         "SDK process_component_build.ifRetakeId must guard system and custom components in If branches:\n{result}"
     );
     assert_eq!(
@@ -1538,7 +1599,7 @@ struct Page {
         TransformHarness::transform(&make_source("entry/src/main/ets/pages/Page.ets", src))
             .unwrap();
     assert!(result.contains("interface RouteMeta"));
-    assert!(result.contains("import lazy LazyPage, { Helper } from \"./lazy\";"));
+    assert!(result.contains("import lazy LazyPage, { Helper } from './lazy';"));
     assert!(result.contains("class Page extends ViewPU"));
     assert!(!result.contains("@interface"));
     assert!(!result.contains("struct Page"));
@@ -1571,6 +1632,74 @@ fn test_transforms_export_builder_function_decorator() {
     );
     assert!(!result.contains("@Builder"));
     assert!(!result.contains("Column() {"));
+    assert!(
+        !result.contains("NavigationBuilderRegister"),
+        "an ordinary global @Builder must not be registered without a routerMap source record:\n{result}"
+    );
+}
+
+#[test]
+fn test_router_map_registers_only_the_source_local_global_builder_like_hvigor() {
+    let source_id = "entry/src/main/ets/pages/NavigationPage.ets";
+    let src = r#"
+@Builder
+export function PageBuilder(): void {
+  Text("page")
+}
+"#;
+    let options = TransformOptions {
+        navigation_routes: NavigationRouteMap::from_routes([NavigationRoute::new(
+            source_id,
+            "NavigationPage",
+            "PageBuilder",
+        )]),
+        ..Default::default()
+    };
+
+    let result = TransformHarness::transform_with_options(&make_source(source_id, src), &options)
+        .expect("router-map global @Builder must transform");
+
+    assert!(
+        result.contains("if (typeof NavigationBuilderRegister === \"function\")"),
+        "SDK createNavigationInit must retain its runtime availability guard:\n{result}"
+    );
+    assert!(
+        result.contains("NavigationBuilderRegister(\"NavigationPage\", wrapBuilder(PageBuilder));"),
+        "SDK createNavigationRegister must preserve the routerMap name and builder function:\n{result}"
+    );
+    assert!(
+        result.trim_end().ends_with("})();"),
+        "SDK appends the guarded navigation registration IIFE after transformed source:\n{result}"
+    );
+}
+
+#[test]
+fn test_router_map_missing_local_builder_is_a_typed_hvigor_parity_error() {
+    let source_id = "entry/src/main/ets/pages/NavigationPage.ets";
+    let src = r#"
+@Builder
+export function DifferentBuilder(): void {
+  Text("page")
+}
+"#;
+    let options = TransformOptions {
+        navigation_routes: NavigationRouteMap::from_routes([NavigationRoute::new(
+            source_id,
+            "NavigationPage",
+            "MissingBuilder",
+        )]),
+        ..Default::default()
+    };
+
+    let error = TransformHarness::transform_with_options(&make_source(source_id, src), &options)
+        .expect_err("routerMap must reject an unavailable source-local @Builder");
+    assert!(matches!(error, EtsTransformError::Fatal { .. }));
+    assert!(
+        error.to_string().contains(
+            "The buildFunction 'MissingBuilder' configured in the routerMap json file does not exist."
+        ),
+        "must match ets-loader process_ui_syntax.js::createNavigationInit diagnostic: {error}"
+    );
 }
 
 #[test]
@@ -1802,7 +1931,7 @@ struct SearchBarItem {
         "@Extend attributes do not exist on the runtime component object:\n{result}"
     );
     assert!(
-        result.contains("Text.fontSize(13);\n    Text.fontColor(\"#575859\");\n    Text.height(\"100%\");"),
+        result.contains("Text.fontSize(13);\n    Text.fontColor('#575859');\n    Text.height('100%');"),
         "SDK process_component_build.js emits each @Extend attribute as an independent component call:\n{result}"
     );
     assert!(
@@ -1907,6 +2036,7 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
         module_exports: ModuleExportIndex::default(),
+        navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
         partial_update: true,
         checker_mode: crate::CheckerMode::Oxc,
@@ -1983,6 +2113,7 @@ export struct SecureModePage {
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
         module_exports: ModuleExportIndex::default(),
+        navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
         partial_update: true,
         checker_mode: crate::CheckerMode::Oxc,
@@ -2094,6 +2225,7 @@ export struct SecureModePage {
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
         sources,
+        navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
         partial_update: true,
         checker_mode: crate::CheckerMode::Oxc,
@@ -2482,7 +2614,7 @@ struct Page {
         "hvigor type-checks imported SDK UI declarations as custom components: got:\n{result}"
     );
     assert!(
-        result.contains("__Common__.height(44);") && result.contains("__Common__.width(\"100%\");"),
+        result.contains("__Common__.height(44);") && result.contains("__Common__.width('100%');"),
         "SDK custom component common attributes must use __Common__: got:\n{result}"
     );
     assert!(
@@ -2673,6 +2805,43 @@ fn test_minimal_index_component_lowers_arkui_semantics() {
         "lowered output must be valid TypeScript: {:?}\n{}",
         parsed.diagnostics,
         result
+    );
+}
+
+#[test]
+fn test_tab_content_children_lower_into_create_builder_like_hvigor() {
+    // ets-loader `process_component_build.js::processTabAndNav` gives
+    // TabContent's ArkUI body to `TabContent.create(() => { ... })`. Keeping
+    // it outside the create callback changes generated anonymous functions
+    // and ViewPU mounting semantics in large applications.
+    let src = r#"
+@Component
+struct TabHost {
+  build() {
+    Tabs() {
+      TabContent() {
+        Text('inside')
+      }
+    }
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/TabHost.ets", src))
+            .expect("TabContent builder body must lower like latest ets-loader");
+
+    let create = result
+        .find("TabContent.create(() => {")
+        .expect("TabContent.create must receive a builder callback");
+    let text = result
+        .find("Text.create")
+        .unwrap_or_else(|| panic!("TabContent callback must contain its lowered child:\n{result}"));
+    let pop = result
+        .find("TabContent.pop()")
+        .expect("TabContent must still close after the creation observer");
+    assert!(
+        create < text && text < pop,
+        "TabContent callback and pop order must match hvigor:\n{result}"
     );
 }
 
@@ -2914,6 +3083,82 @@ struct Page {
             && result
                 .contains("private __qualifiedObject: ObservedPropertyObjectPU<cips.Channel>"),
         "SDK getDeclarationType applies TypeScript union normalization before inspecting TypeFlags:\n{result}"
+    );
+}
+
+#[test]
+fn test_external_sdk_builder_function_is_lowered_as_hvigor_builder() {
+    let temp = tempfile::tempdir().unwrap();
+    let external_ets = temp.path().join("hms").join("ets");
+    let api_root = external_ets.join("api");
+    let kit_root = external_ets
+        .join("build-tools")
+        .join("ets-loader")
+        .join("kit_configs");
+    std::fs::create_dir_all(&api_root).unwrap();
+    std::fs::create_dir_all(&kit_root).unwrap();
+    std::fs::write(
+        external_ets.join("sdkConfig.json"),
+        r#"{"apiPath":"./api"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        api_root.join("@hms.collaboration.service.d.ets"),
+        r#"@Builder
+declare function createCollaborationServiceMenuItems(): void;
+export { createCollaborationServiceMenuItems };"#,
+    )
+    .unwrap();
+    std::fs::write(
+        kit_root.join("@kit.ServiceCollaborationKit.json"),
+        r#"{
+  "symbols": {
+    "createCollaborationServiceMenuItems": {
+      "source": "@hms.collaboration.service",
+      "bindings": "createCollaborationServiceMenuItems"
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    let component_metadata =
+        ComponentMetadata::from_ets_loader_path_with_external_declaration_roots(
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/ets-loader"
+            )),
+            &[api_root],
+        )
+        .unwrap();
+    let options = TransformOptions {
+        component_metadata: std::sync::Arc::new(component_metadata),
+        ..Default::default()
+    };
+    let source = r#"
+import { createCollaborationServiceMenuItems } from '@kit.ServiceCollaborationKit';
+
+@Component
+struct Page {
+  build() {
+    Menu() {
+      createCollaborationServiceMenuItems()
+    }
+  }
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/Page.ets", source),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("createCollaborationServiceMenuItems.bind(this)();"),
+        "HMS @Builder declarations from ets-loader externalApiPaths must use transferBuilderCall: {result}"
+    );
+    assert!(
+        !result.contains("createCollaborationServiceMenuItems.create("),
+        "an SDK @Builder must not be lowered as an ArkUI component: {result}"
     );
 }
 
@@ -3406,7 +3651,7 @@ struct Parent {
     );
     assert!(
         result.contains("Stack.create()")
-            && result.contains("Text.create(\"child\")")
+            && result.contains("Text.create('child')")
             && result.contains("Stack.pop()"),
         "the trailing builder must contain the lowered ArkUI child body:\n{result}"
     );
@@ -3821,10 +4066,17 @@ struct Parent {
     ))
     .unwrap();
     assert!(
-        result.contains(
-            "const __lazyForEachItemGenFunction = (_item, index: number) => {\n            const item = _item;"
-        ),
+        result.contains("const __lazyForEachItemGenFunction = (_item, index: number) => {")
+            && result.contains("const item = _item;"),
         "LazyForEach must use hvigor's untyped _item binding contract:\n{}",
+        result
+    );
+    let generated_lazy_for_each = result
+        .find("const __lazyForEachItemGenFunction")
+        .expect("LazyForEach generator must be present");
+    assert!(
+        result[..generated_lazy_for_each].trim_end().ends_with('{'),
+        "SDK process_component_build.js scopes generated LazyForEach declarations in a block:\n{}",
         result
     );
     assert!(
@@ -3844,6 +4096,35 @@ struct Parent {
         !result.contains("ListItem.create(deepRenderFunction, true);"),
         "LazyForEach must not use the eager/ForEach ListItem deepRenderFunction path:\n{}",
         result
+    );
+}
+
+#[test]
+fn test_global_builder_list_item_observer_uses_lexical_this() {
+    let src = r#"
+@Builder
+function RenderItems() {
+  List() {
+    ForEach(["one"], (item: string) => {
+      ListItem() {
+        Text(item)
+      }
+    })
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/RenderItems.ets",
+        src,
+    ))
+    .expect("global builder ListItem lowering must match process_component_build.js");
+
+    assert!(
+        result.contains("this.observeComponentCreation2(itemCreation2, ListItem);")
+            && !result.contains(
+                "(parent ? parent : this).observeComponentCreation2(itemCreation2, ListItem);"
+            ),
+        "the ListItem itemCreation2 observer is lexical-this scoped even inside a global @Builder:\n{result}"
     );
 }
 
@@ -3892,7 +4173,7 @@ struct Child {
 struct Parent {
   @State value: string = "a";
   build() {
-    Child({ itemData: this.value }).reuseId('child')
+    Child({ itemData: this.value }).reuseId('child').width(100)
   }
 }
 "#;
@@ -3902,13 +4183,26 @@ struct Parent {
     ))
     .unwrap();
     assert!(
-        result.contains("this.observeRecycleComponentCreation(\"child\"")
-            && result
-                .contains("ViewPU.createRecycle(componentCall, recycleNode !== null, \"child\"")
+        result.contains("this.observeRecycleComponentCreation(")
+            && result.contains("ViewPU.createRecycle(componentCall, recycleNode !== null,")
             && result.contains("new Child(this,")
             && result.contains("itemData: this.value")
-            && result.contains("recycleNode.aboutToReuse({"),
+            && result.contains("recycleNode.aboutToReuse({")
+            && result.contains(
+                "recycleNode && typeof recycleNode.aboutToReuseInternal === \"function\""
+            )
+            && result.contains(
+                "recycleNode.aboutToReuse && typeof recycleNode.aboutToReuse === \"function\""
+            )
+            && !result.contains("recycleNode && typeof recycleNode.aboutToReuse === \"function\""),
         "expected @Reusable custom component recycle path, got:\n{}",
+        result
+    );
+    let common_pop = result.find("__Common__.pop();").expect("__Common__.pop");
+    let recycle_pop = result.find("__Recycle__.pop();").expect("__Recycle__.pop");
+    assert!(
+        common_pop < recycle_pop,
+        "process_custom_component.js closes __Common__ before reusable __Recycle__:\n{}",
         result
     );
     assert!(
@@ -3971,6 +4265,7 @@ struct WidgetCard {
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
+            navigation_routes: NavigationRouteMap::default(),
             form_entry: true,
             partial_update: true,
             checker_mode: crate::CheckerMode::Oxc,
@@ -4110,6 +4405,7 @@ struct ModalPage {
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
+            navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
             partial_update: true,
             checker_mode: crate::CheckerMode::Oxc,
@@ -4338,6 +4634,45 @@ struct Host {
 }
 
 #[test]
+fn test_custom_dialog_controller_builder_uses_link_backing_property() {
+    let src = r#"
+@CustomDialog
+struct TimeDialog {
+  @Link selectedTime: number
+  build() {
+    Column()
+  }
+}
+
+@Component
+struct Host {
+  @State selectedTime: number = 10
+  controller: CustomDialogController = new CustomDialogController({
+    builder: TimeDialog({ selectedTime: this.selectedTime })
+  })
+
+  build() {
+    Column()
+  }
+}
+"#;
+    let result =
+        TransformHarness::transform(&make_source("entry/src/main/ets/pages/Host.ets", src))
+            .expect("custom dialog @Link parameters must lower");
+
+    assert!(
+        result.contains("let jsDialog = new TimeDialog(this, { selectedTime: this.__selectedTime },")
+            && result.contains("return { selectedTime: this.__selectedTime };"),
+        "custom dialog constructor and params lambda must receive the @Link backing property:\n{result}"
+    );
+    assert!(
+        !result.contains("TimeDialog(this, { selectedTime: this.selectedTime }")
+            && !result.contains("return { selectedTime: this.selectedTime };"),
+        "the public @State getter cannot preserve custom-dialog two-way linkage:\n{result}"
+    );
+}
+
+#[test]
 fn test_custom_dialog_controller_builder_in_method_assignment_is_lazy_dialog_factory() {
     let src = r#"
 @CustomDialog
@@ -4552,6 +4887,35 @@ struct Demo {
 }
 
 #[test]
+fn test_top_level_builder_expands_file_level_styles() {
+    let src = r#"
+@Styles
+function topicStyle() {
+  .height(24)
+  .backgroundColor(Color.White)
+}
+
+@Builder
+export function LoadingRow() {
+  Row()
+    .topicStyle()
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/LoadingRow.ets",
+        src,
+    ))
+    .expect("top-level @Builder must receive file-level @Styles metadata");
+
+    assert!(
+        result.contains("Row.height(24);")
+            && result.contains("Row.backgroundColor(Color.White);")
+            && !result.contains("Row.topicStyle();"),
+        "global @Styles must expand in a top-level builder like process_component_build.js:\n{result}"
+    );
+}
+
+#[test]
 fn test_state_styles_expand_local_and_global_styles_in_source_order() {
     let src = r#"
 @Styles
@@ -4594,7 +4958,7 @@ struct Demo {
         .find("ViewStackProcessor.visualState(\"pressed\");")
         .expect("pressed visual state");
     let pressed_color = result[pressed..]
-        .find("Text.backgroundColor(\"#eeeeee\");")
+        .find("Text.backgroundColor('#eeeeee');")
         .map(|offset| pressed + offset)
         .expect("pressed color expansion");
     let pressed_scale = result[pressed..]
@@ -4605,7 +4969,7 @@ struct Demo {
         .find("ViewStackProcessor.visualState(\"disabled\");")
         .expect("disabled visual state");
     let disabled_attr = result[disabled..]
-        .find("Text.opacity(.5);")
+        .find("Text.opacity(0.5);")
         .map(|offset| disabled + offset)
         .expect("global style expansion");
     let reset = result[disabled..]

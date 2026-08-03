@@ -52,11 +52,11 @@ pub use chunk::{ArkChunk, ChunkGraph, ChunkIdx, ChunkSourceFile, CrossChunkImpor
 // SPEC-048: these will migrate to `arkdown-config` in Phase 3; kept here for
 // migration period.
 pub use config::{
-    AppOptionOverride, ArkOptions, ArkdownConfig, BuildMode, BuildOption, CompileMode,
-    CopyCodeResource, ExternalNativeOptions, HarArtifactType, ModuleConfig,
-    NativeDebugSymbolOption, NativeLibFilterOption, NativeLibOption, NativeLibPackageSelection,
-    ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig, ResOptions, RuntimeOnlyConfig,
-    SdkConfig, SigningConfig, SourceOption, StrictModeConfig,
+    AppOptionOverride, ArkOptions, ArkTscConfig, ArkTscTarget, ArkdownConfig, BuildMode,
+    BuildOption, CompileMode, CopyCodeResource, ExternalNativeOptions, HarArtifactType,
+    ModuleConfig, NativeDebugSymbolOption, NativeLibFilterOption, NativeLibOption,
+    NativeLibPackageSelection, ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig,
+    ResOptions, RuntimeOnlyConfig, SdkConfig, SigningConfig, SourceOption, StrictModeConfig,
 };
 
 // diagnostic

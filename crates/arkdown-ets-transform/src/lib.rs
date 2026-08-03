@@ -48,7 +48,9 @@ pub use source::{
     TransformSourceSnapshot,
 };
 pub use sys_resource::SystemResourceReferenceLoader;
-pub use transform::{ArktsTransformer, ArkuiComponentNameCollector, CheckerMode};
+pub use transform::{
+    ArktsTransformer, ArkuiComponentNameCollector, CheckerMode, NavigationRoute, NavigationRouteMap,
+};
 pub use typescript_emit::TypeScriptDirectiveFlags;
 
 pub(crate) use module_name::ModuleExportNameText;

@@ -21,12 +21,13 @@ use std::time::Instant;
 
 use arcstr::ArcStr;
 use oxc_allocator::Allocator;
-use oxc_ast::ast::Statement;
+use oxc_ast::ast::{Expression, ImportExpression, StringLiteral};
+use oxc_ast_visit::{walk, Visit};
 use oxc_index::IndexVec;
 use oxc_parser::Parser;
 use rayon::prelude::*;
 
-use arkdown_ets_transform::{CompileArktsSourceType, RolldownEtsTransformPlan};
+use arkdown_ets_transform::{CompileArktsSourceType, RolldownEtsTransformPlan, SourceClassifier};
 
 use arkdown_core::{
     ArkdownConfig, ArkdownError, ChunkGraph, ChunkSourceFile, HvigorModuleSourceFile,
@@ -54,7 +55,9 @@ use crate::compile_entry::CompileEntryNamer;
 use crate::diagnostics::RolldownBuildDiagnostics;
 use crate::manual_chunks::{ChunkName, ManualChunkPolicy};
 use crate::output;
-use crate::plan::{BundlePlan, BundleRuntimePackageContext, BundleRuntimePackageInfo};
+use crate::plan::{
+    BundlePlan, BundleRuntimePackageContext, BundleRuntimePackageInfo, SourceMapPolicy,
+};
 use crate::plugins::ets_transform::EtsTransformModuleMetadata;
 use crate::plugins::module_meta::ModuleMetaPlugin;
 
@@ -339,41 +342,16 @@ impl Bundler {
             .iter()
             .find_map(|(name, root)| (name == &plan.input.module_name).then_some(root))
             .unwrap_or(&plan.input.module_root);
-        let source_map_opts = output::SourceMapOptions {
-            project_root: Self::canonical_project_root(&plan.input.project_root),
-            module_root: Self::canonical_project_root(source_map_module_root),
-            module_name: source_map_packages.entry_package_name.clone(),
-            package_name: source_map_packages.entry_package_name.clone(),
-            version: source_map_packages.entry_package_version.clone(),
-            chunk_source_files: input_plan.chunk_source_file_map(&chunk_source_files),
-            package_versions,
+        // `SourceMapGenerator::getIntermediateModuleId` determines an ETS/TS
+        // source-map extension from the materialized ModuleMode cache path.
+        // Move raw maps out without cloning so the source writer can publish
+        // that authoritative path before we serialize the map manifest.
+        let raw_source_maps = if plan.source_map == SourceMapPolicy::External {
+            std::mem::take(&mut module_source_state.source_maps)
+        } else {
+            module_source_state.source_maps.clear();
+            FxHashMap::default()
         };
-
-        let source_map_start = Instant::now();
-        let mut raw_source_maps = module_source_state
-            .source_maps
-            .iter()
-            .map(|(module_id, source_map)| {
-                (
-                    module_id.as_str(),
-                    source_map.as_ref(),
-                    module_source_state
-                        .javascript_module_ids
-                        .contains(module_id),
-                )
-            })
-            .collect::<Vec<_>>();
-        raw_source_maps.sort_by(|left, right| left.0.cmp(right.0));
-        let source_maps_path = output::WrittenOutput::write_hvigor_source_maps_from_raw(
-            &output_dir,
-            raw_source_maps,
-            &source_map_opts,
-        )?;
-        module_source_state.source_maps.clear();
-        tracing::info!(
-            elapsed_ms = source_map_start.elapsed().as_millis(),
-            "source map output written"
-        );
         let module_source_write_start = Instant::now();
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump("bundle:before-module-source-write");
@@ -408,6 +386,39 @@ impl Bundler {
             elapsed_ms = module_source_write_start.elapsed().as_millis(),
             "hvigor module sources written"
         );
+        let source_map_start = Instant::now();
+        let source_map_opts = output::SourceMapOptions {
+            project_root: Self::canonical_project_root(&plan.input.project_root),
+            module_root: Self::canonical_project_root(source_map_module_root),
+            module_name: source_map_packages.entry_package_name.clone(),
+            package_name: source_map_packages.entry_package_name.clone(),
+            version: source_map_packages.entry_package_version.clone(),
+            chunk_source_files: input_plan.chunk_source_file_map(&chunk_source_files),
+            package_versions,
+            local_dependency_roots: input_plan
+                .module_path_map
+                .source_map_local_dependency_roots(),
+            javascript_source_paths: Self::source_map_javascript_paths(&module_source_files),
+        };
+        let source_maps_path = if plan.source_map == SourceMapPolicy::External {
+            let mut source_maps = raw_source_maps
+                .iter()
+                .map(|(module_id, source_map)| (module_id.as_str(), source_map.as_ref(), false))
+                .collect::<Vec<_>>();
+            source_maps.sort_by(|left, right| left.0.cmp(right.0));
+            output::WrittenOutput::write_hvigor_source_maps_from_raw(
+                &output_dir,
+                source_maps,
+                &source_map_opts,
+            )?
+        } else {
+            None
+        };
+        tracing::info!(
+            elapsed_ms = source_map_start.elapsed().as_millis(),
+            source_map_policy = ?plan.source_map,
+            "source map output written"
+        );
         let npm_entries_start = Instant::now();
         // `module_mode.js::collectModuleFileList` only records package entry
         // mappings for the legacy OHM URL mode. Normalized mode derives package
@@ -418,7 +429,8 @@ impl Bundler {
         } else {
             input_plan.module_path_map.npm_entries(
                 &plan.input.project_root,
-                &plan.input.runtime_packages,
+                plan.bundle_name.as_str(),
+                &entry_module_ids,
                 &module_source_files,
             )?
         };
@@ -479,9 +491,13 @@ impl Bundler {
     ) -> Vec<String> {
         let mut seen = FxHashSet::default();
         let mut ids = Vec::new();
-        // Latest hvigor forwards Rollup's `getModuleIds()` insertion order to
-        // ModuleMode. Compile entries are registered first, in compileEntry
-        // order, before the remaining scanned graph.
+        // Latest ets-loader forwards Rollup `getModuleIds()` directly to
+        // ModuleMode. Rollup inserts into `modulesById` after an async native
+        // resolver completes, so the remaining Map iteration order is not a
+        // reproducible output contract. Keep Rolldown's stable input/graph
+        // order for declared modules and sort only collector fallbacks. This
+        // gives the same module set and ModuleMode metadata without making an
+        // Arkdown build depend on resolver timing.
         for id in entry_module_ids {
             if seen.insert(id.clone()) {
                 ids.push(id.clone());
@@ -533,6 +549,24 @@ impl Bundler {
                 .or_insert(package_version);
         }
         package_versions
+    }
+
+    fn source_map_javascript_paths(
+        module_source_files: &[HvigorModuleSourceFile],
+    ) -> FxHashSet<PathBuf> {
+        module_source_files
+            .iter()
+            .filter(|source| {
+                matches!(
+                    source
+                        .path
+                        .extension()
+                        .and_then(|extension| extension.to_str()),
+                    Some("js" | "mjs" | "cjs")
+                )
+            })
+            .map(|source| Self::canonical_project_root(Path::new(&source.module_id)))
+            .collect()
     }
 
     /// Build `ManualCodeSplittingOptions` that mirrors hvigor's `manualChunks` callback.
@@ -1057,13 +1091,12 @@ struct HvigorSourceSpan {
 
 impl HvigorSourceSpan {
     #[cfg(test)]
-    fn for_literal(source: &str, specifier: &str) -> Option<Self> {
-        HvigorModuleSourceLiteralScanner::new(source, None)
-            .find(specifier)
-            .map(|literal| Self {
-                start: literal.start as u32,
-                end: literal.end as u32,
-            })
+    fn for_module_request_literal(source: &str, module_id: &str, specifier: &str) -> Option<Self> {
+        HvigorModuleRequestSpecifiers::new(source, module_id)
+            .collect_literals()
+            .into_iter()
+            .find(|literal| literal.specifier == specifier)
+            .map(|literal| literal.source_span)
     }
 }
 
@@ -1104,6 +1137,14 @@ impl HvigorModuleTransformCollector {
         value["mappings"] = serde_json::Value::String(mappings);
         serde_json::to_string(&value).unwrap_or(raw_map)
     }
+
+    /// `transform.js::preserveSourceMap` ignores Rollup/CommonJS virtual
+    /// modules. Only a materializable runtime JavaScript module can own a
+    /// ModuleMode source-map entry.
+    fn is_runtime_javascript_source(module_id: &str) -> bool {
+        HvigorModuleSourceId::new(module_id).should_compile()
+            && arkdown_ets_transform::SourceClassifier::classify(module_id).is_javascript_runtime()
+    }
 }
 
 impl Plugin for HvigorModuleTransformCollector {
@@ -1126,15 +1167,26 @@ impl Plugin for HvigorModuleTransformCollector {
             .meta()
             .get::<EtsTransformModuleMetadata>()
             .and_then(|metadata| metadata.take(&module_id));
-        let source_map = metadata.as_ref().map(|metadata| {
+        let is_runtime_javascript = Self::is_runtime_javascript_source(&module_id);
+        let source_map = if let Some(metadata) = metadata.as_ref() {
             let raw_map = ctx.get_combined_sourcemap().to_json_string();
             let raw_map = if metadata.emits_javascript {
                 Self::preserve_rollup_generated_lines(raw_map, args.code.as_str())
             } else {
                 raw_map
             };
-            Arc::<str>::from(raw_map)
-        });
+            Some(Arc::<str>::from(raw_map))
+        } else if is_runtime_javascript {
+            // ets-loader's SourceMapGenerator records runtime JavaScript as
+            // well as ETS/TS transform inputs. JS bypasses EtsTransformPlugin,
+            // so retain Rolldown's identity/combined map here instead of
+            // silently losing every package JS source from sourceMaps.json.
+            Some(Arc::<str>::from(
+                ctx.get_combined_sourcemap().to_json_string(),
+            ))
+        } else {
+            None
+        };
         async move {
             if let Some(metadata) = metadata {
                 store.record(
@@ -1144,6 +1196,8 @@ impl Plugin for HvigorModuleTransformCollector {
                     metadata.emits_javascript,
                     metadata.is_shared_module,
                 );
+            } else if let Some(source_map) = source_map {
+                store.record(module_id, None, Some(source_map), true, false);
             }
             Ok(None)
         }
@@ -1364,16 +1418,8 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         let ownership = &module_record.ownership;
         let (imports, imported_record_names) =
             self.imports_for_module(module_id, module_records)?;
-        let code = HvigorModuleSourceImportRewriter::new(
-            source.code.as_ref(),
-            module_id,
-            self.state
-                .resolved_import_records
-                .get(module_id)
-                .map(Vec::as_slice),
-            &imports,
-        )
-        .rewrite();
+        let code = HvigorModuleSourceImportRewriter::new(source.code.as_ref(), module_id, &imports)
+            .rewrite();
         let emits_javascript = self.state.javascript_module_ids.contains(module_id);
         if let Some(parent) = job.path.parent() {
             fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Bundler(e.to_string()))?;
@@ -1405,7 +1451,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                 self.module_path_map.has_dependency_package_info(module_id),
                 emits_javascript,
             ),
-            package_name: Some(self.file_info_package_name(ownership)),
+            package_name: Some(self.file_info_package_name(module_id, ownership)?),
             is_commonjs: self
                 .module_graph_facts
                 .full_module_is_commonjs
@@ -1544,8 +1590,32 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         })
     }
 
-    fn file_info_package_name(&self, ownership: &HvigorChunkSource) -> String {
-        ownership.module_name.clone()
+    fn file_info_package_name(
+        &self,
+        module_id: &str,
+        ownership: &HvigorChunkSource,
+    ) -> Result<String, ArkdownError> {
+        match &ownership.kind {
+            // `ModuleMode.processModuleInfos` uses `getPkgModulesFilePkgName`
+            // for ordinary OHPM packages. The value is the physical OHPM
+            // record root (for example `pkg_modules/.ohpm/foo@1/pkg_modules/foo`),
+            // not the logical package name exposed in pkgContextInfo.
+            //
+            // Evidence: DevEco Studio 6.24.3 ets-loader
+            // `module/module_mode.js::processModuleInfos`.
+            HvigorChunkSourceKind::PackageModule(package) => self
+                .module_path_map
+                .package_record_for_path(self.project_root, &package.package_root)
+                .ok_or_else(|| {
+                    ArkdownError::Bundler(format!(
+                        "cannot derive hvigor packageName for module '{}' rooted at {}",
+                        module_id,
+                        package.package_root.display()
+                    ))
+                }),
+            HvigorChunkSourceKind::SourceModule
+            | HvigorChunkSourceKind::LocalDependencyModule(_) => Ok(ownership.module_name.clone()),
+        }
     }
 
     fn imports_for_module(
@@ -1572,7 +1642,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         }
         if let Some(source) = self.state.sources.get(module_id) {
             for specifier in
-                HvigorStaticModuleSpecifiers::new(source.code.as_ref(), module_id).collect()
+                HvigorModuleRequestSpecifiers::new(source.code.as_ref(), module_id).collect()
             {
                 if !seen_specifiers.insert(specifier.clone()) {
                     continue;
@@ -1618,11 +1688,11 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             imports.insert(specifier.to_string(), sdk_request);
             return Ok(());
         }
-        let resolved_ohm_url = self.ohm_url_for_resolved_id(resolved_id)?;
+        let resolved_ohm_url = self.ohm_url_for_resolved_id(resolved_id, module_records)?;
         let specifier_ohm_url = if resolved_ohm_url.is_some() {
             None
         } else {
-            self.ohm_url_for_resolved_id(specifier)?
+            self.ohm_url_for_resolved_id(specifier, module_records)?
         };
         if let Some(ohm_url) = resolved_ohm_url.or(specifier_ohm_url) {
             imports.insert(specifier.to_string(), ohm_url);
@@ -1633,8 +1703,13 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         Ok(())
     }
 
-    fn ohm_url_for_resolved_id(&self, resolved_id: &str) -> Result<Option<String>, ArkdownError> {
+    fn ohm_url_for_resolved_id(
+        &self,
+        resolved_id: &str,
+        module_records: &HvigorModuleSourceRecordIndex,
+    ) -> Result<Option<String>, ArkdownError> {
         if resolved_id.starts_with("@bundle:")
+            || resolved_id.starts_with("@package:")
             || resolved_id.starts_with("@shared:")
             || resolved_id.starts_with("@app:")
             || resolved_id.starts_with("@normalized:")
@@ -1652,44 +1727,68 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         if !path.has_root() {
             return Ok(None);
         }
+        if let Some(record) = Self::record_for_resolved_id(module_records, resolved_id) {
+            return self.ohm_url_for_module_record(record).map(Some);
+        }
         let ownership = self.module_path_map.source_file_for_entry(resolved_id)?;
         if ownership.module_name.is_empty() {
             return Ok(None);
         }
-        let request = match &ownership.kind {
-            HvigorChunkSourceKind::SourceModule => {
-                ownership.to_normalized_request(self.runtime_packages, self.module_name)?
+        if self.use_normalized_ohm_url {
+            return ownership
+                .to_normalized_request(self.runtime_packages, self.module_name)
+                .map(Some);
+        }
+        let record_name = self.module_path_map.non_normalized_record_name(
+            self.project_root,
+            resolved_id,
+            self.bundle_name,
+            self.module_name,
+            &ownership,
+        )?;
+        Ok(Some(self.legacy_ohm_url(&ownership, &record_name)))
+    }
+
+    fn ohm_url_for_module_record(
+        &self,
+        record: &HvigorModuleSourceRecord,
+    ) -> Result<String, ArkdownError> {
+        if self.use_normalized_ohm_url {
+            return record
+                .ownership
+                .to_normalized_request(self.runtime_packages, self.module_name);
+        }
+        Ok(self.legacy_ohm_url(&record.ownership, &record.record_name))
+    }
+
+    fn legacy_ohm_url(&self, ownership: &HvigorChunkSource, record_name: &str) -> String {
+        if record_name.starts_with('@') {
+            return record_name.to_string();
+        }
+        match &ownership.kind {
+            HvigorChunkSourceKind::PackageModule(_) => format!("@package:{record_name}"),
+            HvigorChunkSourceKind::SourceModule
+            | HvigorChunkSourceKind::LocalDependencyModule(_) => {
+                format!("@bundle:{record_name}")
             }
-            HvigorChunkSourceKind::PackageModule(package) => {
-                package.to_normalized_request(self.runtime_packages)?
-            }
-            HvigorChunkSourceKind::LocalDependencyModule(package) => {
-                package.to_normalized_request(self.runtime_packages)?
-            }
-        };
-        Ok(Some(request))
+        }
     }
 }
 
 struct HvigorModuleSourceImportRewriter<'a> {
     source: &'a str,
     module_id: &'a str,
-    import_records: &'a [HvigorResolvedImportRecord],
     imports: &'a HvigorChunkImportMap,
+    request_rewrite_kind: HvigorModuleRequestRewriteKind,
 }
 
 impl<'a> HvigorModuleSourceImportRewriter<'a> {
-    fn new(
-        source: &'a str,
-        module_id: &'a str,
-        import_records: Option<&'a [HvigorResolvedImportRecord]>,
-        imports: &'a HvigorChunkImportMap,
-    ) -> Self {
+    fn new(source: &'a str, module_id: &'a str, imports: &'a HvigorChunkImportMap) -> Self {
         Self {
             source,
             module_id,
-            import_records: import_records.unwrap_or(&[]),
             imports,
+            request_rewrite_kind: HvigorModuleRequestRewriteKind::from_module_id(module_id),
         }
     }
 
@@ -1698,12 +1797,7 @@ impl<'a> HvigorModuleSourceImportRewriter<'a> {
             return Cow::Borrowed(self.source);
         }
 
-        let mut patches = self.collect_static_module_literal_patches();
-        if self.import_records.is_empty() && patches.is_empty() {
-            patches = self.collect_global_literal_patches();
-        } else {
-            patches.extend(self.collect_import_record_patches());
-        }
+        let mut patches = self.collect_module_request_literal_patches();
         if patches.is_empty() {
             return Cow::Borrowed(self.source);
         }
@@ -1724,51 +1818,8 @@ impl<'a> HvigorModuleSourceImportRewriter<'a> {
         Cow::Owned(rewritten)
     }
 
-    fn collect_import_record_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
-        let mut patches = Vec::new();
-        for record in self.import_records {
-            let Some(replacement) = self.imports.get(record.specifier.as_str()) else {
-                continue;
-            };
-            if replacement == record.specifier.as_str() {
-                continue;
-            }
-            let Some(literal) =
-                HvigorModuleSourceLiteralScanner::new(self.source, Some(record.source_span))
-                    .find(record.specifier.as_str())
-            else {
-                continue;
-            };
-            patches.push(HvigorModuleSourceImportPatch {
-                start: literal.start,
-                end: literal.end,
-                replacement: replacement.clone(),
-            });
-        }
-        patches
-    }
-
-    fn collect_global_literal_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
-        let mut scanner = HvigorModuleSourceLiteralScanner::new(self.source, None);
-        let mut patches = Vec::new();
-        while let Some(literal) = scanner.next() {
-            let Some(replacement) = self.imports.get(literal.value) else {
-                continue;
-            };
-            if replacement == literal.value {
-                continue;
-            }
-            patches.push(HvigorModuleSourceImportPatch {
-                start: literal.start,
-                end: literal.end,
-                replacement: replacement.clone(),
-            });
-        }
-        patches
-    }
-
-    fn collect_static_module_literal_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
-        HvigorStaticModuleSpecifiers::new(self.source, self.module_id)
+    fn collect_module_request_literal_patches(&self) -> Vec<HvigorModuleSourceImportPatch> {
+        HvigorModuleRequestSpecifiers::new(self.source, self.module_id)
             .collect_literals()
             .into_iter()
             .filter_map(|literal| {
@@ -1778,23 +1829,63 @@ impl<'a> HvigorModuleSourceImportRewriter<'a> {
                 }
                 let start = literal.source_span.start as usize;
                 let end = literal.source_span.end as usize;
-                self.source.get(start..end)?;
+                let source_literal = self.source.get(start..end)?;
                 Some(HvigorModuleSourceImportPatch {
                     start,
                     end,
                     replacement: replacement.clone(),
+                    quote: self.request_rewrite_kind.source_quote(source_literal),
                 })
             })
             .collect()
     }
 }
 
-struct HvigorStaticModuleSpecifiers<'a> {
+/// Latest ets-loader uses two different module-request paths. Runtime
+/// JavaScript takes the regular-expression path and retains its delimiter,
+/// while transformed `.ets`/`.ts` is rewritten through
+/// `ts.factory.createStringLiteral`, which emits a generated double-quoted
+/// literal. The two paths must not be collapsed into one source-preservation
+/// rule: es2abc includes source text in anonymous function identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HvigorModuleRequestRewriteKind {
+    JavaScript,
+    TransformedTypeScript,
+}
+
+impl HvigorModuleRequestRewriteKind {
+    fn from_module_id(module_id: &str) -> Self {
+        if SourceClassifier::classify(module_id).is_javascript_runtime() {
+            Self::JavaScript
+        } else {
+            Self::TransformedTypeScript
+        }
+    }
+
+    fn source_quote(self, source_literal: &str) -> Option<char> {
+        if self != Self::JavaScript {
+            return None;
+        }
+        match source_literal.as_bytes() {
+            [b'\'', .., b'\''] => Some('\''),
+            [b'"', .., b'"'] => Some('"'),
+            _ => None,
+        }
+    }
+}
+
+/// AST inventory of requests which hvigor's `ModuleSourceFile` may rewrite.
+///
+/// `processTransformedTsModuleRequest` visits ESM static imports/exports and
+/// `import()` expressions. It deliberately does not rewrite CommonJS
+/// `require()` calls, whose relative runtime resolution must survive in the
+/// materialized module source.
+struct HvigorModuleRequestSpecifiers<'a> {
     source: &'a str,
     module_id: &'a str,
 }
 
-impl<'a> HvigorStaticModuleSpecifiers<'a> {
+impl<'a> HvigorModuleRequestSpecifiers<'a> {
     fn new(source: &'a str, module_id: &'a str) -> Self {
         Self { source, module_id }
     }
@@ -1806,151 +1897,130 @@ impl<'a> HvigorStaticModuleSpecifiers<'a> {
             .collect()
     }
 
-    fn collect_literals(&self) -> Vec<HvigorStaticModuleLiteral> {
+    fn collect_literals(&self) -> Vec<HvigorModuleRequestLiteral> {
         let allocator = Allocator::default();
         let source_type = CompileArktsSourceType::from_id(self.module_id);
         let parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return Vec::new();
         }
-        let mut literals = Vec::new();
-        for statement in &parsed.program.body {
-            match statement {
-                Statement::ImportDeclaration(import) => {
-                    literals.push(HvigorStaticModuleLiteral {
-                        specifier: import.source.value.to_string(),
-                        source_span: HvigorSourceSpan {
-                            start: import.source.span.start,
-                            end: import.source.span.end,
-                        },
-                    });
-                }
-                Statement::LazyImportDeclaration(import) => {
-                    literals.push(HvigorStaticModuleLiteral {
-                        specifier: import.source.value.to_string(),
-                        source_span: HvigorSourceSpan {
-                            start: import.source.span.start,
-                            end: import.source.span.end,
-                        },
-                    });
-                }
-                Statement::ExportAllDeclaration(export) => {
-                    literals.push(HvigorStaticModuleLiteral {
-                        specifier: export.source.value.to_string(),
-                        source_span: HvigorSourceSpan {
-                            start: export.source.span.start,
-                            end: export.source.span.end,
-                        },
-                    });
-                }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(source) = &export.source {
-                        literals.push(HvigorStaticModuleLiteral {
-                            specifier: source.value.to_string(),
-                            source_span: HvigorSourceSpan {
-                                start: source.span.start,
-                                end: source.span.end,
-                            },
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-        literals
+        let mut inventory = HvigorModuleRequestLiteralInventory::default();
+        inventory.visit_program(&parsed.program);
+        inventory.literals
     }
 }
 
-struct HvigorStaticModuleLiteral {
+#[derive(Default)]
+struct HvigorModuleRequestLiteralInventory {
+    literals: Vec<HvigorModuleRequestLiteral>,
+}
+
+impl HvigorModuleRequestLiteralInventory {
+    fn push(&mut self, literal: &StringLiteral<'_>) {
+        self.literals.push(HvigorModuleRequestLiteral {
+            specifier: literal.value.to_string(),
+            source_span: HvigorSourceSpan {
+                start: literal.span.start,
+                end: literal.span.end,
+            },
+        });
+    }
+}
+
+impl<'a> Visit<'a> for HvigorModuleRequestLiteralInventory {
+    fn visit_import_declaration(&mut self, declaration: &oxc_ast::ast::ImportDeclaration<'a>) {
+        self.push(&declaration.source);
+        walk::walk_import_declaration(self, declaration);
+    }
+
+    fn visit_lazy_import_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::LazyImportDeclaration<'a>,
+    ) {
+        self.push(&declaration.source);
+        walk::walk_lazy_import_declaration(self, declaration);
+    }
+
+    fn visit_export_all_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::ExportAllDeclaration<'a>,
+    ) {
+        self.push(&declaration.source);
+        walk::walk_export_all_declaration(self, declaration);
+    }
+
+    fn visit_export_named_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::ExportNamedDeclaration<'a>,
+    ) {
+        if let Some(source) = &declaration.source {
+            self.push(source);
+        }
+        walk::walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
+        if let Expression::StringLiteral(source) = &expression.source {
+            self.push(source);
+        }
+        walk::walk_import_expression(self, expression);
+    }
+}
+
+struct HvigorModuleRequestLiteral {
     specifier: String,
     source_span: HvigorSourceSpan,
-}
-
-struct HvigorModuleSourceLiteralScanner<'a> {
-    source: &'a str,
-    cursor: usize,
-    end: usize,
-}
-
-impl<'a> HvigorModuleSourceLiteralScanner<'a> {
-    fn new(source: &'a str, span: Option<HvigorSourceSpan>) -> Self {
-        let start = span.map_or(0, |span| span.start as usize).min(source.len());
-        let end = span
-            .map_or(source.len(), |span| span.end as usize)
-            .min(source.len());
-        Self {
-            source,
-            cursor: start,
-            end: end.max(start),
-        }
-    }
-
-    fn find(mut self, value: &str) -> Option<HvigorModuleSourceLiteral<'a>> {
-        while let Some(literal) = self.next() {
-            if literal.value == value {
-                return Some(literal);
-            }
-        }
-        None
-    }
-
-    fn next(&mut self) -> Option<HvigorModuleSourceLiteral<'a>> {
-        let bytes = self.source.as_bytes();
-        while self.cursor < self.end {
-            let quote = bytes[self.cursor];
-            if !matches!(quote, b'"' | b'\'' | b'`') {
-                self.cursor += 1;
-                continue;
-            }
-
-            let literal_start = self.cursor;
-            let mut cursor = self.cursor + 1;
-            let mut escaped = false;
-            while cursor < self.end {
-                let byte = bytes[cursor];
-                if escaped {
-                    escaped = false;
-                    cursor += 1;
-                    continue;
-                }
-                if byte == b'\\' {
-                    escaped = true;
-                    cursor += 1;
-                    continue;
-                }
-                if byte == quote {
-                    let literal = HvigorModuleSourceLiteral {
-                        start: literal_start,
-                        end: cursor + 1,
-                        value: &self.source[literal_start + 1..cursor],
-                    };
-                    self.cursor = cursor + 1;
-                    return Some(literal);
-                }
-                cursor += 1;
-            }
-            self.cursor = literal_start + 1;
-        }
-        None
-    }
-}
-
-struct HvigorModuleSourceLiteral<'a> {
-    start: usize,
-    end: usize,
-    value: &'a str,
 }
 
 struct HvigorModuleSourceImportPatch {
     start: usize,
     end: usize,
     replacement: String,
+    quote: Option<char>,
 }
 
 impl HvigorModuleSourceImportPatch {
     fn quoted_replacement(&self) -> String {
-        serde_json::to_string(&self.replacement)
-            .expect("module request replacement must serialize as a JSON string")
+        let Some(quote) = self.quote else {
+            return serde_json::to_string(&self.replacement)
+                .expect("module request replacement must serialize as a JSON string");
+        };
+
+        // `module_source_file.js::processJsModuleRequest` retains the capture
+        // from `(['"])` when it replaces a JavaScript request. Transformed
+        // TypeScript deliberately leaves `quote` empty above and follows
+        // `ts.factory.createStringLiteral` through the JSON double-quote path.
+        // Apart from matching the source-cache text, this matters to es2abc:
+        // anonymous-function names are derived from source text and a
+        // different quote character changes those names even when the parsed
+        // program is otherwise equal.
+        let mut replacement = String::with_capacity(self.replacement.len() + 2);
+        replacement.push(quote);
+        for character in self.replacement.chars() {
+            match character {
+                '\\' => replacement.push_str("\\\\"),
+                '\n' => replacement.push_str("\\n"),
+                '\r' => replacement.push_str("\\r"),
+                '\t' => replacement.push_str("\\t"),
+                '\u{0008}' => replacement.push_str("\\b"),
+                '\u{000c}' => replacement.push_str("\\f"),
+                '\u{2028}' => replacement.push_str("\\u2028"),
+                '\u{2029}' => replacement.push_str("\\u2029"),
+                character if character == quote => {
+                    replacement.push('\\');
+                    replacement.push(character);
+                }
+                character if character.is_control() => {
+                    use std::fmt::Write;
+
+                    write!(&mut replacement, "\\u{:04x}", character as u32)
+                        .expect("writing into a String cannot fail");
+                }
+                character => replacement.push(character),
+            }
+        }
+        replacement.push(quote);
+        replacement
     }
 }
 
@@ -2537,6 +2607,22 @@ impl HvigorModulePathMap {
             .map(|root| (root.package_name.as_str(), root.package_version.as_str()))
     }
 
+    /// Source-map ownership for project-model source HARs is derived from
+    /// `module-meta-info-plugin.js::addModuleInfoData`, not from their module
+    /// record URL. Keep this list in the same most-specific-first root order
+    /// used by ModuleMode source attribution.
+    fn source_map_local_dependency_roots(&self) -> Vec<output::SourceMapLocalDependencyRoot> {
+        self.roots
+            .iter()
+            .filter(|root| root.kind == HvigorModuleRootKind::LocalDependencyModule)
+            .map(|root| output::SourceMapLocalDependencyRoot {
+                root: root.path.clone(),
+                package_name: root.package_name.clone(),
+                package_version: root.package_version.clone(),
+            })
+            .collect()
+    }
+
     fn canonical_root(path: &Path) -> PathBuf {
         AbsPath::canonicalize(path)
             .map(AbsPath::into_path_buf)
@@ -2589,7 +2675,8 @@ impl HvigorModulePathMap {
     fn npm_entries(
         &self,
         project_root: &Path,
-        runtime_packages: &BundleRuntimePackageInfo,
+        bundle_name: &str,
+        entry_module_ids: &[String],
         module_source_files: &[HvigorModuleSourceFile],
     ) -> Result<Vec<HvigorNpmEntry>, ArkdownError> {
         let active_records = module_source_files
@@ -2598,14 +2685,17 @@ impl HvigorModulePathMap {
             .collect::<FxHashSet<_>>();
         let mut entries = Vec::new();
         let mut active_package_roots = FxHashSet::default();
+        let compile_entry_paths = entry_module_ids
+            .iter()
+            .map(|entry| Self::canonical_root(Path::new(entry)))
+            .collect::<FxHashSet<_>>();
 
         for root in self
             .roots
             .iter()
             .filter(|root| root.kind == HvigorModuleRootKind::PackageModule)
         {
-            let Some((entry_path, build_path)) =
-                self.package_root_entry(project_root, runtime_packages, root)?
+            let Some((entry_path, build_path)) = self.package_root_entry(project_root, root)?
             else {
                 continue;
             };
@@ -2621,19 +2711,18 @@ impl HvigorModulePathMap {
 
         self.add_package_symlink_entries(project_root, &active_package_roots, &mut entries)?;
         self.add_local_dependency_entries(
-            project_root,
-            runtime_packages,
+            bundle_name,
+            &compile_entry_paths,
             &active_records,
             &mut entries,
         )?;
 
-        entries.sort_by(|left, right| {
-            left.entry_path
-                .cmp(&right.entry_path)
-                .then_with(|| left.build_path.cmp(&right.build_path))
-        });
-        entries.dedup_by(|left, right| {
-            left.entry_path == right.entry_path && left.build_path == right.build_path
+        // `ModuleMode.generateNpmEntriesInfo` preserves Map insertion order.
+        // Keep the graph/root traversal order and only collapse exact duplicate
+        // mappings, instead of sorting an order-sensitive npm entry manifest.
+        let mut seen_entries = FxHashSet::default();
+        entries.retain(|entry| {
+            seen_entries.insert((entry.entry_path.clone(), entry.build_path.clone()))
         });
         Ok(entries)
     }
@@ -2641,7 +2730,6 @@ impl HvigorModulePathMap {
     fn package_root_entry(
         &self,
         project_root: &Path,
-        runtime_packages: &BundleRuntimePackageInfo,
         root: &HvigorModuleRoot,
     ) -> Result<Option<(String, String)>, ArkdownError> {
         let Some(entry_path) = self.package_record_for_path(project_root, &root.path) else {
@@ -2655,16 +2743,13 @@ impl HvigorModulePathMap {
             })
             .unwrap_or_else(|| "index".to_string());
         let entry_rel = strip_relative_prefix(&entry_rel);
-        let context = runtime_packages
-            .packages
-            .get(root.package_name.as_str())
-            .ok_or_else(|| {
-                ArkdownError::Bundler(format!(
-                    "pkgContextInfo is missing runtime package context for '{}'",
-                    root.package_name
-                ))
-            })?;
-        let build_path = HvigorNormalizedOhmUrl::new(context, entry_rel).to_record();
+        // In legacy mode `ModuleMode.getPackageEntryInfo` writes the physical
+        // `pkg_modules` path for both sides of a package entry mapping. It does
+        // not use the normalized pkgContextInfo record that is valid only when
+        // `useNormalizedOHMUrl` is enabled.
+        let build_path = ArtifactPathSerializer::rel_to_slash(
+            &Path::new(&entry_path).join(entry_rel).with_extension(""),
+        );
         Ok(Some((entry_path, build_path)))
     }
 
@@ -2690,62 +2775,116 @@ impl HvigorModulePathMap {
         }
 
         for oh_modules_root in self.oh_modules_scan_roots(project_root) {
-            self.scan_symlink_entries(
+            self.scan_hvigor_oh_modules_dir(
                 project_root,
                 &oh_modules_root,
                 &canonical_package_roots,
                 entries,
             )?;
+            let store_root = oh_modules_root.join(".ohpm");
+            let Ok(store_entries) = fs_err::read_dir(&store_root) else {
+                continue;
+            };
+            for store_entry in store_entries {
+                let store_entry = store_entry?;
+                let package_oh_modules = store_entry.path().join("oh_modules");
+                self.scan_hvigor_oh_modules_dir(
+                    project_root,
+                    &package_oh_modules,
+                    &canonical_package_roots,
+                    entries,
+                )?;
+            }
         }
         Ok(())
     }
 
-    fn scan_symlink_entries(
+    /// Mirrors `resolve-ohmodules.js::resolveProjectOhModules`. Hvigor records
+    /// only direct OHPM links from each project/module `oh_modules` directory,
+    /// followed by the direct links in every immediate `.ohpm/*/oh_modules`
+    /// directory. It deliberately does not recursively walk package trees.
+    fn scan_hvigor_oh_modules_dir(
         &self,
         project_root: &Path,
         root: &Path,
         canonical_package_roots: &FxHashMap<PathBuf, String>,
         entries: &mut Vec<HvigorNpmEntry>,
     ) -> Result<(), ArkdownError> {
-        if !root.is_dir() {
+        let Ok(read_dir) = fs_err::read_dir(root) else {
             return Ok(());
-        }
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let read_dir = match fs_err::read_dir(&dir) {
-                Ok(read_dir) => read_dir,
-                Err(_) => continue,
-            };
-            for entry in read_dir {
-                let entry = entry?;
-                let path = entry.path();
-                let metadata = fs_err::symlink_metadata(&path)?;
-                if metadata.file_type().is_symlink() {
-                    let target = Self::canonical_root(&path);
-                    let Some(build_path) = canonical_package_roots.get(&target) else {
-                        continue;
-                    };
-                    let Some(entry_path) = self.package_record_for_path(project_root, &path) else {
-                        continue;
-                    };
-                    entries.push(HvigorNpmEntry {
-                        entry_path,
-                        build_path: build_path.clone(),
-                    });
-                    continue;
-                }
-                if metadata.is_dir() {
-                    stack.push(path);
-                }
+        };
+        for entry in read_dir {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if !fs_err::metadata(&entry_path)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
             }
+            let entry_name = entry.file_name();
+            let entry_name = entry_name.to_string_lossy();
+            if entry_name == ".ohpm" {
+                continue;
+            }
+            if entry_name.starts_with('@') {
+                let Ok(scoped_entries) = fs_err::read_dir(&entry_path) else {
+                    continue;
+                };
+                for scoped_entry in scoped_entries {
+                    let scoped_path = scoped_entry?.path();
+                    if !fs_err::metadata(&scoped_path)
+                        .map(|metadata| metadata.is_dir())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    self.record_hvigor_symlink_entry(
+                        project_root,
+                        &scoped_path,
+                        canonical_package_roots,
+                        entries,
+                    );
+                }
+                continue;
+            }
+            self.record_hvigor_symlink_entry(
+                project_root,
+                &entry_path,
+                canonical_package_roots,
+                entries,
+            );
         }
         Ok(())
     }
 
-    fn add_local_dependency_entries(
+    fn record_hvigor_symlink_entry(
         &self,
         project_root: &Path,
-        runtime_packages: &BundleRuntimePackageInfo,
+        link_path: &Path,
+        canonical_package_roots: &FxHashMap<PathBuf, String>,
+        entries: &mut Vec<HvigorNpmEntry>,
+    ) {
+        let canonical_link = Self::canonical_root(link_path);
+        if canonical_link == lexical_normalize(link_path) {
+            return;
+        }
+        let Some(build_path) = canonical_package_roots.get(&canonical_link) else {
+            return;
+        };
+        let Some(entry_path) = self.package_record_for_path(project_root, link_path) else {
+            return;
+        };
+        entries.push(HvigorNpmEntry {
+            entry_path,
+            build_path: build_path.clone(),
+        });
+    }
+
+    fn add_local_dependency_entries(
+        &self,
+        bundle_name: &str,
+        compile_entry_paths: &FxHashSet<PathBuf>,
         active_records: &FxHashSet<&str>,
         entries: &mut Vec<HvigorNpmEntry>,
     ) -> Result<(), ArkdownError> {
@@ -2796,17 +2935,18 @@ impl HvigorModulePathMap {
                 .and_then(|package| package.main_field().map(str::to_string))
                 .filter(|main| !main.is_empty())
                 .unwrap_or_else(|| "Index.ets".to_string());
-            let context = runtime_packages
-                .packages
-                .get(root.package_name.as_str())
-                .ok_or_else(|| {
-                    ArkdownError::Bundler(format!(
-                        "pkgContextInfo is missing runtime package context for '{}'",
-                        root.package_name
-                    ))
-                })?;
-            let build_record =
-                HvigorNormalizedOhmUrl::new(context, entry_source.as_str()).to_record();
+            // `ModuleMode.getPackageEntryInfo` only receives a local package
+            // entry when the original module metadata marks it as a node
+            // entry. In the compose pipeline that corresponds to the
+            // compile-entry inventory, not every active local HAR module.
+            // HmosWorld, for example, compiles `conference/Index.ets` through
+            // graph traversal but does not add a bare `@ohos/conference`
+            // npm-entry mapping.
+            let source_entry = Self::canonical_root(&root.path.join(&entry_source));
+            if !compile_entry_paths.contains(&source_entry) {
+                continue;
+            }
+            let build_record = self.local_dependency_record_name(bundle_name, root, &entry_source);
             if !active_records.contains(build_record.as_str()) {
                 continue;
             }
@@ -2816,16 +2956,32 @@ impl HvigorModulePathMap {
             });
             entries.push(HvigorNpmEntry {
                 entry_path: alias.to_string(),
-                build_path: format!("@normalized.{}", build_record),
+                build_path: format!("@bundle.{build_record}"),
             });
         }
-
-        let _ = project_root;
         Ok(())
     }
 
+    fn local_dependency_record_name(
+        &self,
+        bundle_name: &str,
+        root: &HvigorModuleRoot,
+        entry_source: &str,
+    ) -> String {
+        let source_file =
+            HvigorModuleRelativeSourceFile::new(Path::new(entry_source)).source_file();
+        let source_file =
+            ArtifactPathSerializer::rel_to_slash(&Path::new(&source_file).with_extension(""));
+        let module_segment = if root.module_name == self.current_module_name {
+            self.current_module_name.clone()
+        } else {
+            format!("{}@{}", self.current_module_name, root.module_name)
+        };
+        format!("{bundle_name}/{module_segment}/{source_file}")
+    }
+
     fn oh_modules_scan_roots(&self, project_root: &Path) -> Vec<PathBuf> {
-        let mut roots = vec![project_root.join("oh_modules")];
+        let mut roots = vec![Self::canonical_root(project_root).join("oh_modules")];
         roots.extend(
             self.roots
                 .iter()
@@ -2838,12 +2994,12 @@ impl HvigorModulePathMap {
     }
 
     fn package_record_for_path(&self, project_root: &Path, path: &Path) -> Option<String> {
-        let project_oh_modules = project_root.join("oh_modules");
-        if let Ok(relative) = path.strip_prefix(&project_oh_modules) {
+        let project_oh_modules = Self::canonical_root(project_root).join("oh_modules");
+        if let Some(relative) = Self::relative_to_root_preserving_links(path, &project_oh_modules) {
             if relative.starts_with(Path::new(".ohpm").join("oh_modules")) {
                 return None;
             }
-            return Some(Self::pkg_modules_record("pkg_modules", relative));
+            return Some(Self::pkg_modules_record("pkg_modules", &relative));
         }
 
         for root in self
@@ -2852,14 +3008,39 @@ impl HvigorModulePathMap {
             .filter(|root| root.kind.is_project_oh_modules_owner())
         {
             let oh_modules = root.path.join("oh_modules");
-            if let Ok(relative) = path.strip_prefix(&oh_modules) {
+            if let Some(relative) = Self::relative_to_root_preserving_links(path, &oh_modules) {
                 return Some(Self::pkg_modules_record(
                     &format!("pkg_modules@{}", root.module_name),
-                    relative,
+                    &relative,
                 ));
             }
         }
         None
+    }
+
+    fn relative_to_root_preserving_links(path: &Path, root: &Path) -> Option<PathBuf> {
+        let lexical_path = lexical_normalize(path);
+        let lexical_root = lexical_normalize(root);
+        if let Ok(relative) = lexical_path.strip_prefix(&lexical_root) {
+            return Some(relative.to_path_buf());
+        }
+
+        // `/var` -> `/private/var` on macOS is a common project-root alias.
+        // Resolve that alias only for non-link terminal paths; resolving a
+        // package link here would erase the OHPM alias that ModuleMode stores
+        // in npmEntries.
+        let is_terminal_link = fs_err::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_terminal_link {
+            return None;
+        }
+        let canonical_path = Self::canonical_root(path);
+        let canonical_root = Self::canonical_root(root);
+        canonical_path
+            .strip_prefix(canonical_root)
+            .ok()
+            .map(Path::to_path_buf)
     }
 
     fn pkg_modules_record(prefix: &str, relative: &Path) -> String {
@@ -3197,6 +3378,7 @@ impl HvigorChunkSource {
 
 struct HvigorPackageModuleSource {
     package_name: String,
+    package_root: PathBuf,
     project_file_path: String,
 }
 
@@ -3229,6 +3411,7 @@ impl HvigorPackageModuleSource {
         }
         Ok(Self {
             package_name: package_name.to_string(),
+            package_root: package_root.to_path_buf(),
             project_file_path,
         })
     }
@@ -3345,6 +3528,18 @@ mod tests {
         assert_eq!(value["mappings"], "AAAA;AACA;AACA;");
     }
 
+    #[test]
+    fn transform_collector_excludes_rollup_virtual_runtime_source_maps() {
+        assert!(
+            HvigorModuleTransformCollector::is_runtime_javascript_source(
+                "/project/oh_modules/runtime/index.js"
+            )
+        );
+        assert!(
+            !HvigorModuleTransformCollector::is_runtime_javascript_source("\0rolldown/runtime.js")
+        );
+    }
+
     fn runtime_packages(
         contexts: &[(&str, &str, &str, &str, &str, bool)],
     ) -> BundleRuntimePackageInfo {
@@ -3380,11 +3575,9 @@ mod tests {
             .entry(importer.to_string())
             .or_default()
             .insert(specifier.to_string(), resolved_id.to_string());
-        if let Some(source_span) = state
-            .sources
-            .get(importer)
-            .and_then(|source| HvigorSourceSpan::for_literal(source.code.as_ref(), specifier))
-        {
+        if let Some(source_span) = state.sources.get(importer).and_then(|source| {
+            HvigorSourceSpan::for_module_request_literal(source.code.as_ref(), importer, specifier)
+        }) {
             state
                 .resolved_import_records
                 .entry(importer.to_string())
@@ -3877,11 +4070,12 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
     }
 
     #[test]
-    fn module_source_ids_include_scanned_graph_and_collected_source_modules() {
+    fn module_source_ids_use_stable_graph_order_and_sorted_collector_fallbacks() {
         let entry_id = "/project/entry/src/main/ets/EntryAbility.ets".to_string();
         let profile_id = "/project/entry/build/generated/profile/ModuleInfo.ets".to_string();
         let dependency_id = "/project/oh_modules/@scope/pkg/Index.ets".to_string();
-        let collected_id = "/project/oh_modules/@scope/extra/Index.ets".to_string();
+        let collected_id = "/project/oh_modules/@scope/z-extra/Index.ets".to_string();
+        let earlier_collected_id = "/project/oh_modules/@scope/a-extra/Index.ets".to_string();
         let facts = ModuleGraphFacts {
             full_module_ids: vec![dependency_id.clone(), profile_id.clone(), entry_id.clone()],
             full_module_is_commonjs: FxHashMap::default(),
@@ -3893,10 +4087,22 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
                 code: "export const value = 1;".to_string().into(),
             },
         );
+        state.sources.insert(
+            earlier_collected_id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const value = 2;".to_string().into(),
+            },
+        );
 
         assert_eq!(
             Bundler::module_source_ids(&[entry_id.clone(), profile_id.clone()], &facts, &state),
-            vec![entry_id, profile_id, dependency_id, collected_id]
+            vec![
+                entry_id,
+                profile_id,
+                dependency_id,
+                earlier_collected_id,
+                collected_id
+            ]
         );
     }
 
@@ -6252,7 +6458,7 @@ textToSpeech.createEngine({});"#;
         let stored_source = state.sources.get(module_id).expect("module source");
         assert_eq!(stored_source.code.as_str(), lazy_source);
         assert_eq!(
-            HvigorStaticModuleSpecifiers::new(stored_source.code.as_str(), module_id).collect(),
+            HvigorModuleRequestSpecifiers::new(stored_source.code.as_str(), module_id).collect(),
             vec!["@hms.ai.textToSpeech".to_string()]
         );
 
@@ -6260,21 +6466,46 @@ textToSpeech.createEngine({});"#;
             "@hms.ai.textToSpeech".to_string(),
             "@hms:ai.textToSpeech".to_string(),
         )]);
-        let records = [HvigorResolvedImportRecord {
-            specifier: "@hms.ai.textToSpeech".to_string(),
-            source_span: HvigorSourceSpan::for_literal(standard_source, "@hms.ai.textToSpeech")
-                .expect("standard import literal"),
-        }];
-        let rewritten = HvigorModuleSourceImportRewriter::new(
-            stored_source.code.as_str(),
-            module_id,
-            Some(&records),
-            &imports,
-        )
-        .rewrite();
+        let rewritten =
+            HvigorModuleSourceImportRewriter::new(stored_source.code.as_str(), module_id, &imports)
+                .rewrite();
         assert!(
             rewritten.contains("import lazy textToSpeech from \"@hms:ai.textToSpeech\";"),
             "the final CompileArkTS writer must normalize lazy SDK requests: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn module_source_state_prefers_ets_transform_snapshot_over_rolldown_printer_output() {
+        let module_id = "/workspace/entry/src/main/ets/model/Local.ets";
+        let ets_transform_source = "import type { Local } from './LocalTypes';\nexport const value: Local = {} as Local;\n";
+        let rolldown_scanned_source = "import type { Local } from \"./LocalTypes\";\nexport const value: Local = {} as Local;\n";
+        let state = HvigorModuleSourceState::from_rolldown_scan(
+            rolldown::ModuleSourceScanOutput {
+                warnings: Vec::new(),
+                modules: vec![rolldown::ModuleSourceScanModule {
+                    id: module_id.into(),
+                    source: rolldown_scanned_source.into(),
+                    module_type: rolldown_common::ModuleType::Ts,
+                    exports_kind: rolldown_common::ExportsKind::Esm,
+                    imports: Vec::new(),
+                }],
+            },
+            HvigorModuleTransformSnapshot {
+                module_source_overrides: FxHashMap::from_iter([(
+                    module_id.to_string(),
+                    Arc::<str>::from(ets_transform_source),
+                )]),
+                source_maps: FxHashMap::default(),
+                javascript_module_ids: FxHashSet::default(),
+                shared_module_ids: FxHashSet::default(),
+            },
+        );
+
+        assert_eq!(
+            state.sources.get(module_id).map(|source| source.code.as_str()),
+            Some(ets_transform_source),
+            "ModuleMode must materialize etsTransform output instead of Rolldown's parser-normalized source"
         );
     }
 
@@ -6285,7 +6516,7 @@ textToSpeech.createEngine({});"#;
 nativePlayer.cacheInit();"#;
 
         assert_eq!(
-            HvigorStaticModuleSpecifiers::new(source, module_id).collect(),
+            HvigorModuleRequestSpecifiers::new(source, module_id).collect(),
             vec!["libaemonplayer.so".to_string()],
             "SDK ModuleSourceFile.processTransformedTsModuleRequest recognizes lazy imports in .ts"
         );
@@ -6309,12 +6540,122 @@ nativePlayer.cacheInit();"#;
             normalized_request,
         )]);
         let rewritten =
-            HvigorModuleSourceImportRewriter::new(source, module_id, None, &imports).rewrite();
+            HvigorModuleSourceImportRewriter::new(source, module_id, &imports).rewrite();
 
         assert!(
             rewritten
                 .contains("import lazy nativePlayer from \"@normalized:Y&&&libaemonplayer.so&\";"),
             "CompileArkTS must retain lazy semantics and rewrite native requests: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn module_source_rewriter_preserves_commonjs_relative_require_like_hvigor() {
+        let module_id = "/workspace/oh_modules/protobufjs/src/converter.js";
+        let source = r#"var Enum = require("./enum");
+import staticValue from "./static";
+const lazyValue = import("./lazy");"#;
+        let imports = HvigorChunkImportMap::from_iter([
+            (
+                "./enum".to_string(),
+                "@package:pkg_modules/protobufjs/src/enum".to_string(),
+            ),
+            (
+                "./static".to_string(),
+                "@package:pkg_modules/protobufjs/src/static".to_string(),
+            ),
+            (
+                "./lazy".to_string(),
+                "@package:pkg_modules/protobufjs/src/lazy".to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            HvigorModuleRequestSpecifiers::new(source, module_id).collect(),
+            vec!["./static".to_string(), "./lazy".to_string()],
+            "latest ets-loader ModuleSourceFile only visits static ESM and import() requests"
+        );
+        let rewritten =
+            HvigorModuleSourceImportRewriter::new(source, module_id, &imports).rewrite();
+
+        assert!(
+            rewritten.contains("require(\"./enum\")"),
+            "CommonJS relative require must retain runtime resolution: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("@package:pkg_modules/protobufjs/src/enum"),
+            "CommonJS require must not become an es2abc package request: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("@package:pkg_modules/protobufjs/src/static")
+                && rewritten.contains("@package:pkg_modules/protobufjs/src/lazy"),
+            "hvigor still rewrites static ESM and dynamic import requests: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn module_source_rewriter_preserves_js_request_quote_style_like_latest_hvigor() {
+        let module_id = "/workspace/oh_modules/@ohos/lottie/src/main/js/modules/full.js";
+        let source = r#"import lottie from './main';
+export { registerRenderer } from "../renderers/main";
+const lazyRenderer = import('./renderers/lazy');"#;
+        let imports = HvigorChunkImportMap::from_iter([
+            (
+                "./main".to_string(),
+                "@package:pkg_modules/@ohos/lottie/src/main/js/modules/main".to_string(),
+            ),
+            (
+                "../renderers/main".to_string(),
+                "@package:pkg_modules/@ohos/lottie/src/main/js/renderers/main".to_string(),
+            ),
+            (
+                "./renderers/lazy".to_string(),
+                "@package:pkg_modules/@ohos/lottie/src/main/js/modules/renderers/lazy".to_string(),
+            ),
+        ]);
+
+        let rewritten =
+            HvigorModuleSourceImportRewriter::new(source, module_id, &imports).rewrite();
+
+        assert_eq!(
+            rewritten,
+            r#"import lottie from '@package:pkg_modules/@ohos/lottie/src/main/js/modules/main';
+export { registerRenderer } from "@package:pkg_modules/@ohos/lottie/src/main/js/renderers/main";
+const lazyRenderer = import('@package:pkg_modules/@ohos/lottie/src/main/js/modules/renderers/lazy');"#,
+            "latest ets-loader module_source_file.js::processJsModuleRequest reuses its captured quote delimiter"
+        );
+    }
+
+    #[test]
+    fn module_source_rewriter_uses_generated_double_quotes_for_transformed_ts_like_hvigor() {
+        let module_id = "/workspace/entry/src/main/ets/pages/MainPage.ets";
+        let source = r#"import page from './Page';
+export { ViewModel } from '../model/ViewModel';
+const lazyPage = import('./lazy/Page');"#;
+        let imports = HvigorChunkImportMap::from_iter([
+            (
+                "./Page".to_string(),
+                "@bundle:com.example/entry/ets/pages/Page".to_string(),
+            ),
+            (
+                "../model/ViewModel".to_string(),
+                "@bundle:com.example/entry/ets/model/ViewModel".to_string(),
+            ),
+            (
+                "./lazy/Page".to_string(),
+                "@bundle:com.example/entry/ets/pages/lazy/Page".to_string(),
+            ),
+        ]);
+
+        let rewritten =
+            HvigorModuleSourceImportRewriter::new(source, module_id, &imports).rewrite();
+
+        assert_eq!(
+            rewritten,
+            r#"import page from "@bundle:com.example/entry/ets/pages/Page";
+export { ViewModel } from "@bundle:com.example/entry/ets/model/ViewModel";
+const lazyPage = import("@bundle:com.example/entry/ets/pages/lazy/Page");"#,
+            "latest ets-loader ModuleSourceFile.processTransformedTsModuleRequest uses ts.factory.createStringLiteral for import, export, and import() requests"
         );
     }
 

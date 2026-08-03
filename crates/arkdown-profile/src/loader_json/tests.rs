@@ -2713,6 +2713,7 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
         byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
+        tsc_config: Default::default(),
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -2769,6 +2770,7 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
         byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
+        tsc_config: Default::default(),
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -2928,6 +2930,7 @@ fn runtime_only_exclude_packages_skips_only_remote_source_har_code() {
         byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
+        tsc_config: Default::default(),
     });
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),

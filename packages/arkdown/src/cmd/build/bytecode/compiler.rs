@@ -44,6 +44,12 @@ pub struct RolldownBytecodeCompileInput {
   pub npm_entries: Vec<HvigorNpmEntry>,
   pub modules_abc_path: PathBuf,
   pub cache_dir: PathBuf,
+  /// SDK ProgramCache manifest passed as `--cache-file @...`.
+  ///
+  /// `None` is an explicit no-cache compile. The coordinator selects it for
+  /// `--cache false` / `--disable-abc-cache`, where reusing an old `.protoBin`
+  /// would compile stale ModuleMode source despite the caller requesting a
+  /// full rebuild.
   pub cache_file: Option<PathBuf>,
   pub abc_input_files: Vec<BytecodeAbcInput>,
   pub compile_context_info_path: Option<PathBuf>,
@@ -92,6 +98,7 @@ pub struct RolldownBytecodeCompiler {
   backend: RolldownBytecodeBackendChoice,
   sdk_es2abc_path: PathBuf,
   target_api_version: u32,
+  target_api_sub_version: Option<String>,
   is_debug: bool,
 }
 
@@ -106,8 +113,16 @@ impl RolldownBytecodeCompiler {
       backend,
       sdk_es2abc_path,
       target_api_version,
+      target_api_sub_version: None,
       is_debug,
     }
+  }
+
+  /// Add hvigor's optional `compatibleSdkVersionStage` to the module-mode
+  /// `es2abc` command.
+  pub fn with_target_api_sub_version(mut self, target_api_sub_version: Option<String>) -> Self {
+    self.target_api_sub_version = target_api_sub_version;
+    self
   }
 
   pub fn compile(&self, input: RolldownBytecodeCompileInput) -> Result<Ts2abcOutput, Ts2abcError> {
@@ -126,13 +141,9 @@ impl RolldownBytecodeCompiler {
         abc_output: input.modules_abc_path.clone(),
         proto_output: None,
         files_info_path: Some(input.cache_dir.join("filesInfo.txt")),
-        cache_file: Some(
-          input
-            .cache_file
-            .clone()
-            .unwrap_or_else(|| input.cache_dir.join("modules.cache")),
-        ),
+        cache_file: input.cache_file.clone(),
       })
+      .with_target_api_sub_version(self.target_api_sub_version.clone())
       .with_annotations()
       .with_opt_level(if self.is_debug { 0 } else { 2 });
 
@@ -588,6 +599,65 @@ mod tests {
     let es2abc = FakeEs2abc::write(tmp.path(), Some(&args_log));
 
     let compiler =
+      RolldownBytecodeCompiler::new(RolldownBytecodeBackendChoice::Sdk, es2abc, 12, true)
+        .with_target_api_sub_version(Some("beta3".to_string()));
+    compiler
+      .compile(RolldownBytecodeCompileInput {
+        module_source_files: vec![HvigorModuleSourceFile {
+          module_id: "/project/phone/src/main/ets/pages/Index.ets".to_string(),
+          path: module_source,
+          record_name: "&phone/src/main/ets/pages/Index&".to_string(),
+          source_file: "src/main/ets/pages/Index.ets".to_string(),
+          package_name: Some("com.example.hmosworld".to_string()),
+          is_commonjs: false,
+          is_shared_module: false,
+          origin_source_lang: "ets".to_string(),
+          imported_record_names: vec![],
+        }],
+        external_module_requests: vec![],
+        modules_abc_path: tmp.path().join("modules.abc"),
+        cache_dir: tmp.path().join("cache"),
+        npm_entries: Vec::new(),
+        cache_file: Some(tmp.path().join("cache/modules.cache")),
+        abc_input_files: Vec::new(),
+        compile_context_info_path: None,
+        byte_code_har: false,
+      })
+      .unwrap();
+
+    let files_info = fs::read_to_string(tmp.path().join("cache/filesInfo.txt")).unwrap();
+    assert!(
+            files_info.contains("&phone/src/main/ets/pages/Index&;esm;src/main/ets/pages/Index.ets;com.example.hmosworld;false;ets"),
+            "{files_info}"
+        );
+    assert!(fs::read_to_string(tmp.path().join("cache/modules.cache"))
+      .unwrap()
+      .contains("module_sources/phone/ets/pages/Index.js"));
+    let modules_cache = fs::read_to_string(tmp.path().join("cache/modules.cache")).unwrap();
+    assert!(modules_cache.contains("npmEntries.txt;"), "{modules_cache}");
+    assert!(
+      modules_cache.contains("npmEntries.protoBin"),
+      "{modules_cache}"
+    );
+    let args = fs::read_to_string(args_log).unwrap();
+    assert!(args.contains("--file-threads\n"), "{args}");
+    assert!(args.contains("--target-api-version=12\n"), "{args}");
+    assert!(args.contains("--target-api-sub-version=beta3\n"), "{args}");
+    assert!(args.contains("--enable-release-column\n"), "{args}");
+    assert!(args.contains("--enable-callable-name\n"), "{args}");
+    assert!(!args.contains("--module\n"), "{args}");
+  }
+
+  #[test]
+  fn rolldown_bytecode_omits_program_cache_for_explicit_no_cache_compile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_source = tmp.path().join("module_sources/phone/ets/pages/Index.js");
+    fs::create_dir_all(module_source.parent().unwrap()).unwrap();
+    fs::write(&module_source, "export {};").unwrap();
+    let args_log = tmp.path().join("es2abc.args");
+    let es2abc = FakeEs2abc::write(tmp.path(), Some(&args_log));
+
+    let compiler =
       RolldownBytecodeCompiler::new(RolldownBytecodeBackendChoice::Sdk, es2abc, 12, true);
     compiler
       .compile(RolldownBytecodeCompileInput {
@@ -613,25 +683,15 @@ mod tests {
       })
       .unwrap();
 
-    let files_info = fs::read_to_string(tmp.path().join("cache/filesInfo.txt")).unwrap();
     assert!(
-            files_info.contains("&phone/src/main/ets/pages/Index&;esm;src/main/ets/pages/Index.ets;com.example.hmosworld;false;ets"),
-            "{files_info}"
-        );
-    assert!(fs::read_to_string(tmp.path().join("cache/modules.cache"))
-      .unwrap()
-      .contains("module_sources/phone/ets/pages/Index.js"));
-    let modules_cache = fs::read_to_string(tmp.path().join("cache/modules.cache")).unwrap();
-    assert!(modules_cache.contains("npmEntries.txt;"), "{modules_cache}");
-    assert!(
-      modules_cache.contains("npmEntries.protoBin"),
-      "{modules_cache}"
+      !tmp.path().join("cache/modules.cache").exists(),
+      "an explicit no-cache build must not recreate the ProgramCache manifest"
     );
     let args = fs::read_to_string(args_log).unwrap();
-    assert!(args.contains("--file-threads\n"), "{args}");
-    assert!(args.contains("--enable-release-column\n"), "{args}");
-    assert!(args.contains("--enable-callable-name\n"), "{args}");
-    assert!(!args.contains("--module\n"), "{args}");
+    assert!(
+      !args.contains("--cache-file\n"),
+      "--cache false must not hand stale protoBin records back to es2abc: {args}"
+    );
   }
 
   #[test]
@@ -662,7 +722,7 @@ mod tests {
         modules_abc_path: tmp.path().join("modules.abc"),
         cache_dir: tmp.path().join("cache"),
         npm_entries: Vec::new(),
-        cache_file: None,
+        cache_file: Some(tmp.path().join("cache/modules.cache")),
         abc_input_files: Vec::new(),
         compile_context_info_path: None,
         byte_code_har: true,

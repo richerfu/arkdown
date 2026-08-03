@@ -9,15 +9,18 @@ use oxc_ast::{
     ast::{
         BindingPattern, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier, Program, Statement,
-        StringLiteral,
+        StringLiteral, TSImportEqualsDeclaration, TSModuleReference, TSTypeName,
     },
     AstBuilder,
 };
+use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
 #[cfg(test)]
 use oxc_span::SourceType;
+use oxc_span::SPAN;
+use oxc_syntax::reference::ReferenceId;
 use oxc_syntax::symbol::SymbolId;
 
 use crate::module_emit::{
@@ -83,7 +86,30 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
         program: &mut Program<'ast>,
         scoping: &Scoping,
     ) -> bool {
+        self.split_program_with_inlined_const_enum_imports(
+            allocator,
+            program,
+            scoping,
+            &FxHashSet::default(),
+        )
+    }
+
+    /// Split imports after the SDK const-enum pass has replaced property
+    /// accesses with literals. The latest SDK's
+    /// `transformTypeExportImportAndConstEnumInTypeScript::visitImportClause`
+    /// asks its emit resolver about the alias before that replacement. The
+    /// resolver retains a type alias even when its rewritten OXC AST has no
+    /// remaining reference. `inlined_const_enum_import_locals` carries that
+    /// pre-substitution fact into the OXC AST pass.
+    pub(crate) fn split_program_with_inlined_const_enum_imports<'ast>(
+        &self,
+        allocator: &'ast Allocator,
+        program: &mut Program<'ast>,
+        scoping: &Scoping,
+        inlined_const_enum_import_locals: &FxHashSet<String>,
+    ) -> bool {
         let local_bindings = TopLevelBindingKindCollector::new(program).collect();
+        let import_equals_usage = TypeOnlyImportEqualsUsage::new(program, scoping);
         let mut type_import_locals = FxHashSet::default();
         let mut binding_classifier =
             ModuleBindingClassifier::new(self.sources, self.module_analyzer);
@@ -96,6 +122,8 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
                         self.id,
                         &mut binding_classifier,
                         scoping,
+                        &import_equals_usage,
+                        inlined_const_enum_import_locals,
                     )
                     .split();
                     split.map(|split| {
@@ -143,6 +171,8 @@ struct ImportDeclarationSplit<'a, 'source, 'classifier> {
     id: &'source str,
     binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
     scoping: &'source oxc_semantic::Scoping,
+    import_equals_usage: &'source TypeOnlyImportEqualsUsage,
+    inlined_const_enum_import_locals: &'source FxHashSet<String>,
 }
 
 impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> {
@@ -151,12 +181,16 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
         id: &'source str,
         binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
         scoping: &'source oxc_semantic::Scoping,
+        import_equals_usage: &'source TypeOnlyImportEqualsUsage,
+        inlined_const_enum_import_locals: &'source FxHashSet<String>,
     ) -> Self {
         Self {
             import,
             id,
             binding_classifier,
             scoping,
+            import_equals_usage,
+            inlined_const_enum_import_locals,
         }
     }
 
@@ -182,6 +216,7 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
                     };
                     match self.binding_decision(
                         specifier.import_kind.is_type(),
+                        &local_name,
                         specifier.local.symbol_id.get(),
                         &imported_name,
                     ) {
@@ -199,7 +234,12 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
                     let local_name = specifier.local.name.to_string();
-                    match self.binding_decision(false, specifier.local.symbol_id.get(), "default") {
+                    match self.binding_decision(
+                        false,
+                        &local_name,
+                        specifier.local.symbol_id.get(),
+                        "default",
+                    ) {
                         ImportBindingDecision::Value => {
                             value_bindings.push(ValueImportBinding::Default(local_name));
                         }
@@ -250,6 +290,7 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
     fn binding_decision(
         &mut self,
         explicit_type: bool,
+        local_name: &str,
         symbol_id: Option<SymbolId>,
         imported_name: &str,
     ) -> ImportBindingDecision {
@@ -263,9 +304,14 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
                 ImportBindingDecision::Value
             };
         };
-        let usage = ImportLocalReferenceUsage::new(self.scoping, symbol_id);
+        let usage =
+            ImportLocalReferenceUsage::new(self.scoping, symbol_id, self.import_equals_usage);
         if usage.is_unused() {
-            return ImportBindingDecision::Drop;
+            return self
+                .inlined_const_enum_import_locals
+                .contains(local_name)
+                .then_some(ImportBindingDecision::Type)
+                .unwrap_or(ImportBindingDecision::Drop);
         }
         if usage.has_value {
             return if self.imported_binding_is_declared_type(imported_name) {
@@ -295,9 +341,22 @@ struct ImportLocalReferenceUsage {
 }
 
 impl ImportLocalReferenceUsage {
-    fn new(scoping: &oxc_semantic::Scoping, symbol_id: SymbolId) -> Self {
+    fn new(
+        scoping: &oxc_semantic::Scoping,
+        symbol_id: SymbolId,
+        import_equals_usage: &TypeOnlyImportEqualsUsage,
+    ) -> Self {
         let mut usage = Self::default();
-        for reference in scoping.get_resolved_references(symbol_id) {
+        for &reference_id in scoping.get_resolved_reference_ids(symbol_id) {
+            if import_equals_usage.is_type_only_reference(reference_id) {
+                // The semantic graph marks an import-equals module reference as
+                // a value read even when its alias is used only in type space.
+                // Preserve that semantic use so the import becomes `import
+                // type`, rather than being dropped as unused.
+                usage.has_type = true;
+                continue;
+            }
+            let reference = scoping.get_reference(reference_id);
             usage.has_value |= reference.flags().is_value();
             usage.has_type |= reference.flags().is_type();
         }
@@ -306,6 +365,131 @@ impl ImportLocalReferenceUsage {
 
     fn is_unused(self) -> bool {
         !self.has_value && !self.has_type
+    }
+}
+
+/// Semantic references in `import Alias = Namespace.Type` declarations that
+/// must not keep their source import at runtime.
+///
+/// The SDK's TypeScript emitter marks an ESM named import as `import type` when
+/// every import-equals alias rooted at that binding is used only in type
+/// positions. OXC marks the root reference itself as a value reference, so the
+/// ordinary reference flags alone would retain an unnecessary runtime namespace
+/// import. Resolve the alias graph once before splitting imports and exclude
+/// only those proven type-only roots.
+struct TypeOnlyImportEqualsUsage {
+    type_only_references: FxHashSet<ReferenceId>,
+}
+
+impl TypeOnlyImportEqualsUsage {
+    fn new(program: &Program<'_>, scoping: &Scoping) -> Self {
+        let aliases = ImportEqualsAliasCollector::collect(program);
+        let mut type_only_aliases = FxHashSet::default();
+
+        // Alias chains are legal (`import B = A.Member`). Resolve them to a
+        // fixed point so an outer import becomes type-only only after every
+        // dependent alias has been proven type-only as well. Cycles remain
+        // value-bearing conservatively.
+        loop {
+            let mut changed = false;
+            for &alias_symbol in aliases.keys() {
+                if type_only_aliases.contains(&alias_symbol)
+                    || !Self::alias_is_type_only(
+                        alias_symbol,
+                        scoping,
+                        &aliases,
+                        &type_only_aliases,
+                    )
+                {
+                    continue;
+                }
+                type_only_aliases.insert(alias_symbol);
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let type_only_references = aliases
+            .into_iter()
+            .filter_map(|(alias_symbol, root_reference)| {
+                type_only_aliases
+                    .contains(&alias_symbol)
+                    .then_some(root_reference)
+            })
+            .collect();
+        Self {
+            type_only_references,
+        }
+    }
+
+    fn is_type_only_reference(&self, reference_id: ReferenceId) -> bool {
+        self.type_only_references.contains(&reference_id)
+    }
+
+    fn alias_is_type_only(
+        alias_symbol: SymbolId,
+        scoping: &Scoping,
+        aliases: &FxHashMap<SymbolId, ReferenceId>,
+        type_only_aliases: &FxHashSet<SymbolId>,
+    ) -> bool {
+        scoping
+            .get_resolved_reference_ids(alias_symbol)
+            .iter()
+            .all(|&reference_id| {
+                let reference = scoping.get_reference(reference_id);
+                reference.flags().is_type()
+                    || aliases.iter().any(|(&dependent_alias, &root_reference)| {
+                        root_reference == reference_id
+                            && type_only_aliases.contains(&dependent_alias)
+                    })
+            })
+    }
+}
+
+struct ImportEqualsAliasCollector {
+    aliases: FxHashMap<SymbolId, ReferenceId>,
+}
+
+impl ImportEqualsAliasCollector {
+    fn collect(program: &Program<'_>) -> FxHashMap<SymbolId, ReferenceId> {
+        let mut collector = Self {
+            aliases: FxHashMap::default(),
+        };
+        collector.visit_program(program);
+        collector.aliases
+    }
+
+    fn root_reference_id(module_reference: &TSModuleReference<'_>) -> Option<ReferenceId> {
+        match module_reference {
+            TSModuleReference::IdentifierReference(identifier) => identifier.reference_id.get(),
+            TSModuleReference::QualifiedName(qualified) => {
+                Self::type_name_reference_id(&qualified.left)
+            }
+            TSModuleReference::ExternalModuleReference(_) => None,
+        }
+    }
+
+    fn type_name_reference_id(type_name: &TSTypeName<'_>) -> Option<ReferenceId> {
+        match type_name {
+            TSTypeName::IdentifierReference(identifier) => identifier.reference_id.get(),
+            TSTypeName::QualifiedName(qualified) => Self::type_name_reference_id(&qualified.left),
+            TSTypeName::ThisExpression(_) => None,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ImportEqualsAliasCollector {
+    fn visit_ts_import_equals_declaration(
+        &mut self,
+        declaration: &TSImportEqualsDeclaration<'ast>,
+    ) {
+        if let Some(reference_id) = Self::root_reference_id(&declaration.module_reference) {
+            self.aliases
+                .insert(declaration.id.symbol_id(), reference_id);
+        }
+        walk::walk_ts_import_equals_declaration(self, declaration);
     }
 }
 
@@ -558,6 +742,13 @@ where
         }
         literal.value = self.ast.str(&replacement);
         literal.raw = None;
+        // TypeScript's printer emits a freshly rewritten module request with
+        // its normal double-quote style. Keeping the old source span lets the
+        // source-shape preservation pass recover the single quotes from the
+        // *old* relative request, which makes the CompileArkTS text (and thus
+        // es2abc's anonymous-function names) diverge from hvigor. A rewritten
+        // request is a generated node, so it must not retain that provenance.
+        literal.span = SPAN;
         self.changed = true;
     }
 }
@@ -1719,6 +1910,56 @@ let typed: UsedType;
             parsed.diagnostics.is_empty(),
             "type-only import split must emit valid TypeScript: {:?}\n{split}",
             parsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn import_equals_aliases_used_only_as_types_elide_their_namespace_import() {
+        let importer = PathBuf::from("/project/pkg/src/main/ets/SnapshotUpdateTask.ts");
+        let source = r#"import { generated } from '../../generated/syncmessage';
+import OperationData = generated.OperationData;
+import SubscribePushMessage = generated.SubscribePushMessage;
+
+export class SnapshotUpdateTask {
+    onResponse(data: OperationData[], message: SubscribePushMessage) {}
+}"#;
+
+        let split = split_type_only_named_imports(
+            source,
+            importer.to_str().expect("UTF-8 fixture path"),
+            &TransformSourceSnapshot::default(),
+        );
+        assert!(
+            split.contains("import type { generated } from \"../../generated/syncmessage\";"),
+            "hvigor emits the namespace as a type import when import-equals aliases only flow into types:\n{split}"
+        );
+        assert!(
+            split.contains("import OperationData = generated.OperationData;")
+                && split.contains("import SubscribePushMessage = generated.SubscribePushMessage;"),
+            "the type aliases themselves must remain in CompileArkTS source:\n{split}"
+        );
+    }
+
+    #[test]
+    fn import_equals_aliases_used_as_values_keep_their_namespace_import() {
+        let importer = PathBuf::from("/project/pkg/src/main/ets/RuntimeAlias.ts");
+        let source = r#"import { generated } from '../../generated/syncmessage';
+import OperationData = generated.OperationData;
+
+const data = new OperationData();"#;
+
+        let split = split_type_only_named_imports(
+            source,
+            importer.to_str().expect("UTF-8 fixture path"),
+            &TransformSourceSnapshot::default(),
+        );
+        assert!(
+            split.contains("import { generated } from"),
+            "runtime import-equals aliases must retain their source import:\n{split}"
+        );
+        assert!(
+            !split.contains("import type { generated }"),
+            "runtime import must not be rewritten as type-only:\n{split}"
         );
     }
 

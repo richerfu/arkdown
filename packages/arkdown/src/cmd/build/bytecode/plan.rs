@@ -310,6 +310,13 @@ impl Ts2abcPlanBuilder {
     self
   }
 
+  /// Set the optional API stage passed by latest hvigor as
+  /// `--target-api-sub-version=<compatibleSdkVersionStage>`.
+  pub fn with_target_api_sub_version(mut self, stage: Option<String>) -> Self {
+    self.target_api_sub_version = stage;
+    self
+  }
+
   /// Enable ArkTS annotation support.
   pub fn with_annotations(mut self) -> Self {
     self.enable_annotations = true;

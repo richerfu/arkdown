@@ -23,12 +23,14 @@ use crate::source::{
 };
 use crate::source_map;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
-use crate::transform::{self, CheckerMode, ModuleExportIndex, TransformOptions};
+use crate::transform::{
+    self, CheckerMode, ModuleExportIndex, NavigationRouteMap, TransformOptions,
+};
 use crate::typescript_emit::{
     ConstEnumExportCache, ImportedConstEnumRewriter, TypeScriptDirectiveFlags,
-    TypeScriptJavascriptEmitOutput, TypeScriptJavascriptEmitter,
+    TypeScriptEnumValueRewriter, TypeScriptJavascriptEmitOutput, TypeScriptJavascriptEmitter,
 };
-use arkdown_core::{ModuleSource, ModuleType, ResolvedId};
+use arkdown_core::{ArkTscTarget, ModuleSource, ModuleType, ResolvedId};
 
 /// Narrow transform plan consumed by the Rolldown ETS transform adapter.
 ///
@@ -49,8 +51,12 @@ pub struct RolldownEtsTransformPlan {
     const_enum_exports: Arc<ConstEnumExportCache>,
     pub(crate) module_exports: ModuleExportIndex,
     form_entry_source_ids: Arc<FxHashSet<String>>,
+    navigation_routes: NavigationRouteMap,
     pub checker_mode: CheckerMode,
     pub should_emit_js: bool,
+    /// `arkOptions.tscConfig.targetESVersion` selected by the latest SDK
+    /// checker before `etsTransform` emits JavaScript for suppression-pragmas.
+    pub tsc_target: ArkTscTarget,
     pub module_analyzer: ModuleAnalyzerKind,
 }
 
@@ -81,8 +87,10 @@ impl RolldownEtsTransformPlan {
             const_enum_exports,
             module_exports,
             form_entry_source_ids: Arc::default(),
+            navigation_routes: NavigationRouteMap::default(),
             checker_mode: CheckerMode::Oxc,
             should_emit_js: true,
+            tsc_target: ArkTscTarget::default(),
             module_analyzer: ModuleAnalyzerKind::default(),
         }
     }
@@ -97,6 +105,12 @@ impl RolldownEtsTransformPlan {
         self
     }
 
+    /// Set the target used by the SDK's TypeScript JavaScript-emission path.
+    pub fn with_tsc_target(mut self, tsc_target: ArkTscTarget) -> Self {
+        self.tsc_target = tsc_target;
+        self
+    }
+
     pub fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
         self.module_analyzer = module_analyzer;
         self
@@ -104,6 +118,14 @@ impl RolldownEtsTransformPlan {
 
     pub fn with_form_entry_source_ids(mut self, form_entry_source_ids: FxHashSet<String>) -> Self {
         self.form_entry_source_ids = Arc::new(form_entry_source_ids);
+        self
+    }
+
+    /// Attach router-map metadata prepared by the coordinator before Rolldown
+    /// starts. This preserves the SDK `createNavigationInit` lifecycle without
+    /// allowing transform hooks to read profile artifacts.
+    pub fn with_navigation_routes(mut self, navigation_routes: NavigationRouteMap) -> Self {
+        self.navigation_routes = navigation_routes;
         self
     }
 
@@ -117,6 +139,7 @@ impl RolldownEtsTransformPlan {
             component_metadata: Arc::clone(&self.component_metadata),
             sources: self.sources.clone(),
             module_exports: self.module_exports.clone(),
+            navigation_routes: self.navigation_routes.clone(),
             form_entry: self.is_form_entry(id),
             partial_update: true,
             checker_mode: self.checker_mode,
@@ -135,9 +158,12 @@ impl RolldownEtsTransformPlan {
 #[derive(Debug, Clone)]
 pub struct RolldownEtsTransformOutput {
     pub code: String,
-    /// Hvigor-compatible CompileArkTS source when Rolldown needs a parser-only
-    /// adaptation such as lowering `import lazy` to a standard import.
-    pub module_source_code: Option<String>,
+    /// Hvigor-compatible CompileArkTS source snapshot. When Rolldown needs a
+    /// parser-only adaptation such as lowering `import lazy` to a standard
+    /// import, this retains the pre-adaptation ArkTS form. It is shared with
+    /// the ModuleMode collector instead of copying it again after Rolldown's
+    /// internal TypeScript scan.
+    pub module_source_code: Option<Arc<str>>,
     pub source_map: Option<String>,
     pub record_module_source_code: bool,
     pub emits_javascript: bool,
@@ -292,6 +318,7 @@ impl RolldownEtsTransformer {
         }
         TypeScriptJavascriptEmitter::new(source, id, &self.plan.sources)
             .with_const_enum_export_cache(&self.plan.const_enum_exports)
+            .with_tsc_target(self.plan.tsc_target)
             .with_hvigor_emit_wrapper()
             .emit_with_source_map()
             .ok_or_else(|| EtsTransformError::Fatal {
@@ -337,10 +364,19 @@ impl RolldownEtsTransformer {
         output.record_module_source_code = SourceClassifier::classify(id).is_ets_transform_input();
         if output.record_module_source_code {
             let rolldown_source = LazyImportRolldownAdapter::new(&output.code, id).lower();
-            if let Cow::Owned(rolldown_source) = rolldown_source {
-                output.module_source_code =
-                    Some(std::mem::replace(&mut output.code, rolldown_source));
-            }
+            // ModuleMode writes the code produced by etsTransform, then
+            // `ModuleSourceFile` rewrites its static requests. Rolldown's
+            // internal TypeScript scan is allowed to normalize syntax for its
+            // graph, but it must not become the CompileArkTS cache source:
+            // it loses raw literal spelling on replacement AST nodes. Keep a
+            // source snapshot for every ETS/TS input; for `import lazy`, pass
+            // the lowered copy to Rolldown while retaining the ArkTS form for
+            // the ModuleMode writer.
+            let module_source_code = match rolldown_source {
+                Cow::Owned(rolldown_source) => std::mem::replace(&mut output.code, rolldown_source),
+                Cow::Borrowed(_) => output.code.clone(),
+            };
+            output.module_source_code = Some(Arc::from(module_source_code));
         }
         // Hvigor normally writes transformed TypeScript for es2abc, but its
         // `hasTsNoCheckOrTsIgnoreFiles` path writes JavaScript instead. Both
@@ -480,7 +516,13 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             return Cow::Borrowed(source);
         }
 
-        let semantic_ret = SemanticBuilder::new().build(&parsed.program);
+        // The SDK transformer resolves local enum member values through the
+        // TypeScript emit resolver before it writes ModuleSourceFile. Enable
+        // OXC's matching enum evaluation so the Rust pass can make the same
+        // substitution without a JavaScript-side compatibility layer.
+        let semantic_ret = SemanticBuilder::new()
+            .with_enum_eval(true)
+            .build(&parsed.program);
         if !semantic_ret.diagnostics.is_empty() {
             return Cow::Borrowed(source);
         }
@@ -488,14 +530,78 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
 
         let mut changed = false;
 
-        // Hvigor runs SDK `etsTransform` before `apiTransform`. Kit import
-        // lowering is part of SDK etsTransform after UI syntax lowering, while
-        // legacy system API migration runs in the later apiTransform plugin.
+        let imported_const_enum_rewrite = ImportedConstEnumRewriter::new(
+            self.pipeline.id,
+            &self.pipeline.transformer.plan.sources,
+        )
+        .with_const_enum_export_cache(&self.pipeline.transformer.plan.const_enum_exports)
+        .rewrite_program_with_inlined_imports(&allocator, &mut parsed.program);
+        let imported_const_enum_changed = imported_const_enum_rewrite.changed;
+        changed |= imported_const_enum_changed;
+
+        let enum_value_changed =
+            TypeScriptEnumValueRewriter::rewrite_program(&allocator, &mut parsed.program, &scoping);
+        changed |= enum_value_changed;
+
+        // The preceding enum passes replace value references with literals.
+        // `ModuleSourceFile` decides whether an import is type-only after that
+        // substitution, so its binding usage must come from the mutated AST
+        // rather than the scope built from the original source. Rebuild only
+        // for the modules whose enum substitutions changed a reference.
+        let rewritten_scoping = (imported_const_enum_changed || enum_value_changed)
+            .then(|| {
+                let semantic_ret = SemanticBuilder::new()
+                    .with_enum_eval(true)
+                    .build(&parsed.program);
+                semantic_ret
+                    .diagnostics
+                    .is_empty()
+                    .then(|| semantic_ret.semantic.into_scoping())
+            })
+            .flatten();
+        let scoping_for_type_imports = rewritten_scoping.as_ref().unwrap_or(&scoping);
+
+        changed |= TypeOnlyNamedImportSplitter::new(
+            self.pipeline.id,
+            &self.pipeline.transformer.plan.sources,
+        )
+        .with_module_analyzer(self.pipeline.transformer.plan.module_analyzer)
+        .split_program_with_inlined_const_enum_imports(
+            &allocator,
+            &mut parsed.program,
+            scoping_for_type_imports,
+            &imported_const_enum_rewrite.inlined_import_locals,
+        );
+
+        // Latest SDK `process_kit_import.js::processKitImport` invokes
+        // `getTypeExportImportAndConstEnumTransformer` before it replaces a
+        // `@kit.*` declaration with factory-created system imports. Preserve
+        // that ordering: the TypeScript resolver must see the original kit
+        // alias while deciding whether it is a value or type import.
         changed |= api_transform::KitImportRewriter::new(source).rewrite_program(
             &allocator,
             &mut parsed.program,
             &scoping,
         );
+
+        // SDK `ModuleSourceFile::processTransformedTsModuleRequest` revisits
+        // every static import/export after kit lowering. For extend-SDK APIs,
+        // `api_check_utils::moduleRequestCallback` resolves the inventoried
+        // declaration header's `@bundle` target when its API requirement is
+        // compatible with `compatibleSdkVersion`.
+        let compatible_api_version = self.pipeline.transformer.plan.api_version;
+        changed |= crate::StaticModuleSpecifierRewrite::new(
+            source,
+            self.pipeline.id,
+            |specifier: &str| {
+                self.pipeline
+                    .transformer
+                    .plan
+                    .sources
+                    .sdk_bundle_ohm_url(specifier, compatible_api_version)
+            },
+        )
+        .rewrite_program(&allocator, &mut parsed.program);
 
         changed |= crate::StaticModuleSpecifierRewrite::new(
             source,
@@ -517,20 +623,6 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             },
         )
         .rewrite_program(&allocator, &mut parsed.program);
-
-        changed |= ImportedConstEnumRewriter::new(
-            self.pipeline.id,
-            &self.pipeline.transformer.plan.sources,
-        )
-        .with_const_enum_export_cache(&self.pipeline.transformer.plan.const_enum_exports)
-        .rewrite_program(&allocator, &mut parsed.program);
-
-        changed |= TypeOnlyNamedImportSplitter::new(
-            self.pipeline.id,
-            &self.pipeline.transformer.plan.sources,
-        )
-        .with_module_analyzer(self.pipeline.transformer.plan.module_analyzer)
-        .split_program(&allocator, &mut parsed.program, &scoping);
 
         changed |= ResourceReferenceRewriter::new(
             source,
@@ -605,6 +697,86 @@ preferences.getPreferencesSync(undefined, { name: "x" });"#,
     }
 
     #[test]
+    fn hms_sdk_bundle_annotations_rewrite_static_value_and_type_requests_like_hvigor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hms_api_root = tmp.path().join("hms/ets/api");
+        std::fs::create_dir_all(&hms_api_root).unwrap();
+        let declarations = [
+            (
+                "@hms.core.map.MapComponent.d.ets",
+                r#"/**
+ * @bundle com.huawei.hms.mapservice.kit/mapLibrary/ets/MapComponent 5.0.0(12)
+ */
+export struct MapComponent {}"#,
+            ),
+            (
+                "@hms.core.map.map.d.ts",
+                r#"/**
+ * @bundle com.huawei.hms.mapservice.kit/mapLibrary/ets/map 5.0.0(12)
+ */
+declare const map: object;
+export default map;"#,
+            ),
+            (
+                "@hms.core.map.mapCommon.d.ts",
+                r#"/**
+ * @bundle com.huawei.hms.mapservice.kit/mapLibrary/ets/mapCommon 5.0.0(12)
+ */
+declare const mapCommon: object;
+export default mapCommon;"#,
+            ),
+            (
+                "@hms.core.map.navi.d.ts",
+                "declare const navi: object;\nexport default navi;",
+            ),
+        ];
+        let mut files = FxHashMap::default();
+        for (file_name, source) in declarations {
+            let path = hms_api_root.join(file_name);
+            std::fs::write(&path, source).unwrap();
+            files.insert(path, Arc::<str>::from(source));
+        }
+        let sources =
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![hms_api_root]);
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            tmp.path().to_path_buf(),
+            tmp.path().join("entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            sources,
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .transform(
+                r#"import { MapComponent, map, mapCommon, navi } from "@kit.MapKit";
+export type { MapComponent as ExternalMapComponent } from "@hms.core.map.MapComponent";
+const allMapApis = [MapComponent, map, mapCommon, navi];"#,
+                "@bundle:com.example/entry/ets/MapView",
+            )
+            .unwrap()
+            .expect("MapKit source must be finalized");
+
+        for record in ["MapComponent", "map", "mapCommon"] {
+            assert!(
+                output.code.contains(&format!(
+                    "@bundle:com.huawei.hms.mapservice.kit/mapLibrary/ets/{record}"
+                )),
+                "SDK declaration annotation must produce the external bundle record for {record}:\n{}",
+                output.code
+            );
+        }
+        assert!(
+            output.code.contains("@hms.core.map.navi"),
+            "an SDK declaration without @bundle metadata remains a system API request:\n{}",
+            output.code
+        );
+    }
+
+    #[test]
     fn unclassified_js_source_finalizes_legacy_emitter_imports() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
@@ -620,7 +792,7 @@ preferences.getPreferencesSync(undefined, { name: "x" });"#,
         let transformer = RolldownEtsTransformer::new(Arc::new(plan));
         let output = transformer
             .transform(
-                r#"import emitter from "@system.emitter";
+                r#"import emitter from '@system.emitter';
 export { emitter };"#,
                 "entry/src/main/ets/pages/emitter.js",
             )
@@ -635,6 +807,13 @@ export { emitter };"#,
         assert!(
             !output.code.contains("@system.emitter"),
             "got: {}",
+            output.code
+        );
+        assert!(
+            output
+                .code
+                .contains("import emitter from \"@ohos.events.emitter\";"),
+            "latest ets-loader prints a rewritten module request as a generated double-quoted literal: {}",
             output.code
         );
     }
@@ -662,21 +841,21 @@ export const raw = $rawfile("data/config.json");"#,
             .unwrap()
             .expect("unclassified JS resource calls must be finalized");
 
-        assert!(output.code.contains("id: -1"), "got: {}", output.code);
-        assert!(output.code.contains("type: -1"), "got: {}", output.code);
-        assert!(output.code.contains("id: 0"), "got: {}", output.code);
+        assert!(output.code.contains("\"id\": -1"), "got: {}", output.code);
+        assert!(output.code.contains("\"type\": -1"), "got: {}", output.code);
+        assert!(output.code.contains("\"id\": 0"), "got: {}", output.code);
         assert!(
-            output.code.contains("type: 30000") || output.code.contains("type: 3e4"),
+            output.code.contains("\"type\": 30000") || output.code.contains("\"type\": 3e4"),
             "got: {}",
             output.code
         );
         assert!(
-            output.code.contains("bundleName: \"com.example\""),
+            output.code.contains("\"bundleName\": \"com.example\""),
             "got: {}",
             output.code
         );
         assert!(
-            output.code.contains("moduleName: \"entry\""),
+            output.code.contains("\"moduleName\": \"entry\""),
             "got: {}",
             output.code
         );
@@ -910,8 +1089,120 @@ export enum VideoScaleMode {
         assert!(
             output
                 .code
-                .contains("import media from \"@ohos.multimedia.media\";"),
-            "Kit import lowering remains part of the same hvigor stage:\n{}",
+                .contains("import type media from \"@ohos.multimedia.media\";"),
+            "SDK process_kit_import preserves the type-only fact produced by its prior const-enum transformer:\n{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn compile_transform_inlines_local_const_enum_members_like_hvigor_module_source_file() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                r#"export const enum ConditionType {
+    EqualTo = 'EqualTo',
+    Limit = 'Limit',
+}
+export enum Sequence {
+    First,
+    Second,
+    Third = Second + 1,
+}
+export const values = [ConditionType.EqualTo, ConditionType['Limit']];
+export const runtimeValue = Sequence.Second;
+function shadow(ConditionType: { EqualTo: string }) {
+    return ConditionType.EqualTo;
+}"#,
+                "/tmp/project/oh_modules/@scope/cloud/DatabaseZoneQuery.ts",
+            )
+            .unwrap()
+            .expect("local const enum source must produce CompileArkTS output");
+
+        assert!(
+            output.code.contains("export const enum ConditionType"),
+            "latest TypeScript keeps the declaration in ModuleSourceFile:\n{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("[\"EqualTo\", \"Limit\"]"),
+            "latest TypeScript's getTypeExportImportAndConstEnumTransformer must inline local const enum members before es2abc:\n{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("return ConditionType.EqualTo;"),
+            "semantic binding identity must protect shadowed values:\n{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("First = 0")
+                && output.code.contains("Second = 1")
+                && output.code.contains("Third = 2")
+                && output.code.contains("runtimeValue = Sequence.Second"),
+            "the source cache must normalize enum initializers but preserve regular enum runtime access:\n{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn compile_transform_elides_imports_after_const_enum_substitution() {
+        let project_root = PathBuf::from("/tmp/project");
+        let source_path = project_root.join("oh_modules/@scope/cloud/SignInResponse.ts");
+        let constants_path = project_root.join("oh_modules/@scope/cloud/Constants.ts");
+        let mut files = FxHashMap::default();
+        files.insert(
+            constants_path,
+            Arc::<str>::from(
+                "export namespace Constant { export const enum Key { MapUidKey = 'uid' } }\n",
+            ),
+        );
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            project_root.clone(),
+            project_root.join("entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::new(files),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                r#"import { Constant } from "./Constants";
+export const uid = Constant.Key.MapUidKey;"#,
+                source_path.to_str().expect("test path is UTF-8"),
+            )
+            .unwrap()
+            .expect("const enum source must produce CompileArkTS output");
+
+        assert!(
+            output
+                .code
+                .contains("import type { Constant } from \"./Constants\";"),
+            "hvigor turns an import whose values were all inlined into a type import:\n{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("uid = \"uid\""),
+            "hvigor's enum pass substitutes the imported const enum member:\n{}",
+            output.code
+        );
+        assert!(
+            !output.code.contains("import { Constant }"),
+            "the runtime import must not survive after const enum substitution:\n{}",
             output.code
         );
     }
@@ -975,6 +1266,144 @@ export enum VideoScaleMode {
         // unchanged nodes to TypeScript createPrinter, which retains each
         // source literal's original quote and escape spelling.
         assert_eq!(output.code, source);
+    }
+
+    #[test]
+    fn compile_transform_preserves_unrewritten_string_quotes_after_module_rewrite() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "import type { Local } from './Local';\nimport emitter from '@ohos.util.emitter';\nemitter.on('event', () => {});\nexport const value = 1;\n",
+                "/tmp/project/entry/src/main/ets/Index.ets",
+            )
+            .unwrap()
+            .expect("ETS source must produce ModuleMode source");
+
+        // ets-loader's module-specifier rewrite creates a fresh literal for
+        // the rewritten request, but TypeScript preserves the raw spelling of
+        // the unrelated relative type import that remains in the same file.
+        assert!(
+            output
+                .code
+                .contains("import type { Local } from './Local';"),
+            "{output:?}"
+        );
+        assert!(
+            output
+                .code
+                .contains("import emitter from \"@ohos.events.emitter\";"),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn compile_transform_preserves_raw_quote_when_type_import_split_rebuilds_declaration() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "import { Local } from './Local';\nexport const value: Local = {} as Local;\n",
+                "/tmp/project/entry/src/main/ets/Index.ets",
+            )
+            .unwrap()
+            .expect("ETS source must produce ModuleMode source");
+
+        // `TypeOnlyNamedImportSplitter` creates a replacement import AST
+        // node. Its source literal has a synthetic span but retains the raw
+        // text, matching TypeScript's printer used by latest ets-loader.
+        assert!(
+            output
+                .code
+                .contains("import type { Local } from './Local';"),
+            "{output:?}"
+        );
+        assert_eq!(
+            output.module_source_code.as_deref(),
+            Some(output.code.as_str()),
+            "CompileArkTS must retain etsTransform output before Rolldown's internal TypeScript scan"
+        );
+    }
+
+    #[test]
+    fn compile_transform_preserves_typescript_block_comment_text_after_codegen() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let source = "export class CommentedValue {\n  /**\n   * Retain the source spacing inside a block comment.\n   */\n  static readonly opacity = 0.5;\n}\n";
+        let output = transformer
+            .compile_transform(source, "/tmp/project/entry/src/main/ets/Index.ets")
+            .unwrap()
+            .expect("plain ETS must produce ModuleMode source");
+
+        // Latest SDK TypeScript `createPrinter` leaves retained comments as
+        // source text. OXC otherwise emits the same comment body without the
+        // leading space after each newline.
+        assert_eq!(
+            output.code,
+            "export class CommentedValue {\n    /**\n     * Retain the source spacing inside a block comment.\n     */\n    static readonly opacity = 0.5;\n}\n"
+        );
+    }
+
+    #[test]
+    fn compile_transform_preserves_typescript_source_literal_layout_after_codegen() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "export const compact = { left: make('x'), right: make('y') };\nexport const multiline = {\n  colors: [[make('a'), 0],\n    [make('b'), 1]]\n};\nexport const trailing = {\n  span: { xs: 1 },\n};\n",
+                "/tmp/project/entry/src/main/ets/Index.ets",
+            )
+            .unwrap()
+            .expect("plain ETS must produce ModuleMode source");
+
+        // The installed SDK's TypeScript printer keeps `ObjectLiteralExpression`
+        // and `ArrayLiteralExpression` `multiLine` plus trailing-comma metadata
+        // after etsTransform replaces child nodes. The same layout determines
+        // es2abc's generated method-name hashes for transformed ViewPU files.
+        assert_eq!(
+            output.code,
+            "export const compact = { left: make('x'), right: make('y') };\nexport const multiline = {\n    colors: [[make('a'), 0],\n        [make('b'), 1]]\n};\nexport const trailing = {\n    span: { xs: 1 },\n};\n"
+        );
     }
 
     #[test]

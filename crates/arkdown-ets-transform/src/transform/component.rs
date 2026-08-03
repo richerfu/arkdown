@@ -15,7 +15,9 @@ use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::{Span, SPAN};
 use oxc_syntax::operator::AssignmentOperator;
 
-use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError, BuildSourceMetadata};
+use crate::transform::build_fn::{
+    BuildBodyInfo, BuildLoweringError, BuildSourceMetadata, CustomComponentUpdateProps,
+};
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::decorator::{ArkuiDecoratorName, ArkuiStateDecorator, ConstructorInitKind};
 use crate::transform::entry::EntryRegistrationInfo;
@@ -146,6 +148,7 @@ pub(super) struct CustomDialogControllerLowerer<'a, 'b> {
     builder: ViewpuAstBuilder<'a>,
     runtime_names: &'b ArkuiRuntimeNames,
     custom_dialog_components: &'b FxHashSet<String>,
+    custom_component_update_props: &'b CustomComponentUpdateProps,
     source_metadata: BuildSourceMetadata<'b>,
     changed: bool,
 }
@@ -155,6 +158,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         allocator: &'a Allocator,
         runtime_names: &'b ArkuiRuntimeNames,
         custom_dialog_components: &'b FxHashSet<String>,
+        custom_component_update_props: &'b CustomComponentUpdateProps,
         source_text: &'b str,
         source_id: &'b str,
     ) -> Self {
@@ -164,6 +168,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             builder: ViewpuAstBuilder::new(allocator),
             runtime_names,
             custom_dialog_components,
+            custom_component_update_props,
             source_metadata: BuildSourceMetadata::new(source_text, source_id),
             changed: false,
         }
@@ -206,11 +211,12 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             {
                 continue;
             }
-            let Some((dialog_name, params, source_span)) =
+            let Some((dialog_name, mut params, source_span)) =
                 self.custom_dialog_builder_call(&property.value)
             else {
                 continue;
             };
+            self.rewrite_custom_dialog_params(&dialog_name, &mut params);
             property.value = self.custom_dialog_builder_arrow(
                 &dialog_name,
                 params,
@@ -244,6 +250,57 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             _ => return None,
         };
         Some((dialog_name.to_string(), params, call.span))
+    }
+
+    /// SDK `createCustomComponentBuilderArrowFunction` materializes a custom
+    /// dialog with the same constructor-parameter rules as an ordinary custom
+    /// component.  The dialog controller pass owns this earlier lowering, so
+    /// it must not bypass `@Link` backing properties or legacy `$prop`
+    /// references while synthesizing the lazy builder.
+    fn rewrite_custom_dialog_params(&self, dialog_name: &str, params: &mut Expression<'a>) {
+        let Some(component_info) = self.custom_component_update_props.get(dialog_name) else {
+            return;
+        };
+        let Expression::ObjectExpression(params) = params else {
+            return;
+        };
+        for property in &mut params.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                continue;
+            };
+            let property_name = property.key.static_name();
+            let backing_name = Self::dollar_reference_name(&property.value).or_else(|| {
+                property_name
+                    .as_deref()
+                    .filter(|name| component_info.link_props.contains(*name))
+                    .and_then(|_| Self::this_member_name(&property.value))
+            });
+            if let Some(backing_name) = backing_name {
+                property.value = self.builder.this_backing_member_expression(&backing_name);
+            }
+        }
+    }
+
+    fn this_member_name(value: &Expression<'_>) -> Option<String> {
+        let Expression::StaticMemberExpression(member) = value else {
+            return None;
+        };
+        matches!(&member.object, Expression::ThisExpression(_))
+            .then(|| member.property.name.to_string())
+    }
+
+    fn dollar_reference_name(value: &Expression<'_>) -> Option<String> {
+        match value {
+            Expression::Identifier(identifier) => {
+                identifier.name.strip_prefix('$').map(str::to_string)
+            }
+            Expression::StaticMemberExpression(member)
+                if matches!(&member.object, Expression::ThisExpression(_)) =>
+            {
+                member.property.name.strip_prefix('$').map(str::to_string)
+            }
+            _ => None,
+        }
     }
 
     fn custom_dialog_builder_arrow(
