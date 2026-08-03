@@ -343,7 +343,6 @@ pub enum NativeBuildError {
   HwasanDisabled {
     libs: Vec<InvalidSanitizerNativeLib>,
   },
-  UnsupportedNativeLibOrderSensitiveFilter,
   NativeLibRelativePath {
     path: PathBuf,
     message: String,
@@ -410,10 +409,6 @@ impl fmt::Display for NativeBuildError {
                     "rebuild these native libraries with -DOHOS_ENABLE_HWASAN=ON or disable ohos-enable-hwasan"
                 )
       }
-      Self::UnsupportedNativeLibOrderSensitiveFilter => write!(
-        f,
-        "buildOption.nativeLib.filter pickFirsts, pickLasts, or enableOverride requires hvigor dependency order, which is not represented in the current dependency snapshot"
-      ),
       Self::NativeLibRelativePath { path, message } => write!(
         f,
         "failed to compute hvigor native library relativePath for '{}': {}",
@@ -1489,9 +1484,6 @@ impl<'a> NativeLibCollector<'a> {
     let mut candidates = Vec::new();
     let mut seen = FxHashSet::default();
 
-    if self.policy.native_lib.filter.has_order_sensitive_rules() {
-      return Err(NativeBuildError::UnsupportedNativeLibOrderSensitiveFilter);
-    }
     if NativeModuleLayout::new(&self.module.src_path).has_native_code() {
       tracing::debug!(module = %self.module.src_path.display(), "native: scanning for pre-built .so files");
     }
@@ -1500,6 +1492,20 @@ impl<'a> NativeLibCollector<'a> {
       tracing::warn!("{}", warning);
     }
     let self_package = self.self_package_info();
+
+    if !(self.module.module_type == arkdown_core::OhosModuleType::Har
+      && self.policy.native_lib.exclude_from_har)
+    {
+      for dep_libs_dir in self.dependency_default_lib_dirs() {
+        self.collect_from_libs_dir(&dep_libs_dir, &mut seen, &mut candidates)?;
+      }
+    }
+    // DevEco Studio 6.24.3 `worker/process-libs.js::processLibs` evaluates
+    // dependency libraries before the module's local output. Its
+    // `pickFirsts`, `pickLasts`, and `enableOverride` behavior is therefore
+    // defined by that traversal order. `DependencyGraphSnapshot::edges`
+    // retains the session-owned hvigor dependency order; do not sort this
+    // inventory by host path before resolving the filter.
     for (_, so_path) in native_out.libs_by_abi {
       let canonical = canonicalize_or_owned(&so_path);
       if seen.insert(canonical) {
@@ -1509,15 +1515,6 @@ impl<'a> NativeLibCollector<'a> {
         )?);
       }
     }
-
-    if !(self.module.module_type == arkdown_core::OhosModuleType::Har
-      && self.policy.native_lib.exclude_from_har)
-    {
-      for dep_libs_dir in self.dependency_default_lib_dirs() {
-        self.collect_from_libs_dir(&dep_libs_dir, &mut seen, &mut candidates)?;
-      }
-    }
-    candidates.sort_by(|left, right| left.path.cmp(&right.path));
     NativeLibFilterApplier::new(&self.policy.native_lib.filter).apply(&mut candidates);
 
     let result_libs =
@@ -1620,6 +1617,29 @@ impl<'a> NativeLibCollector<'a> {
         });
       }
     };
+    for edge in &self.deps.edges {
+      let node = self.deps.nodes.get(&edge.package_name).or_else(|| {
+        self.deps.nodes.values().find(|node| {
+          node.package_root.as_deref().is_some_and(|root| {
+            canonicalize_or_owned(root) == canonicalize_or_owned(&edge.package_root)
+          })
+        })
+      });
+      let Some(node) = node else {
+        continue;
+      };
+      let root = node.package_root.as_deref().unwrap_or(&edge.package_root);
+      if self
+        .excluded_dependency_roots
+        .contains(&arkdown_path::canonicalize_or_owned(root))
+      {
+        continue;
+      }
+      push_default_libs_dir(root, NativeLibPackageInfo::dependency(node));
+    }
+    // Older snapshots and focused callers may not have dependency edges. Keep
+    // their deterministic node fallback, while production sessions take the
+    // edge-order path above.
     for node in self.deps.nodes.values() {
       let Some(root) = node.package_root.as_deref() else {
         continue;
@@ -2238,27 +2258,47 @@ impl<'a> NativeLibSelectionResolver<'a> {
   }
 
   fn resolve(&self, candidates: Vec<NativeLibCandidate>) -> NativeBuildResult<Vec<PathBuf>> {
-    let mut groups = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut groups = Vec::<(String, Vec<PathBuf>)>::new();
+    let mut group_indexes = rustc_hash::FxHashMap::<String, usize>::default();
     let mut selected_relative_paths = FxHashSet::default();
     for candidate in candidates {
       if matches!(candidate.selected, NativeLibSelectionState::Exclude) {
         continue;
       }
-      if selected_relative_paths.contains(candidate.relative_path.as_str()) {
+      let relative_path = candidate.relative_path.clone();
+      if selected_relative_paths.contains(relative_path.as_str()) {
         continue;
       }
       if matches!(candidate.selected, NativeLibSelectionState::Include) {
-        groups.insert(candidate.relative_path.clone(), vec![candidate.path]);
-        selected_relative_paths.insert(candidate.relative_path);
+        self.replace_group(
+          &mut groups,
+          &mut group_indexes,
+          relative_path.clone(),
+          candidate.path,
+        );
+        selected_relative_paths.insert(relative_path);
         continue;
       }
       if self.is_excluded(&candidate) {
         continue;
       }
-      groups
-        .entry(candidate.relative_path.clone())
-        .or_default()
-        .push(candidate.path);
+      if self.should_replace_with_last(&candidate, &group_indexes)
+        || self.should_replace_with_first_or_override(&candidate)
+      {
+        self.replace_group(
+          &mut groups,
+          &mut group_indexes,
+          relative_path,
+          candidate.path,
+        );
+      } else {
+        self.append_to_group(
+          &mut groups,
+          &mut group_indexes,
+          relative_path,
+          candidate.path,
+        );
+      }
     }
 
     let mut resolved = Vec::new();
@@ -2306,6 +2346,64 @@ impl<'a> NativeLibSelectionResolver<'a> {
 
   fn filter_excludes(&self) -> &[String] {
     &self.filter.excludes
+  }
+
+  fn should_replace_with_last(
+    &self,
+    candidate: &NativeLibCandidate,
+    group_indexes: &rustc_hash::FxHashMap<String, usize>,
+  ) -> bool {
+    group_indexes.contains_key(candidate.relative_path.as_str())
+      && self.filter.pick_lasts.iter().any(|pattern| {
+        HvigorNativeLibraryPattern::matches_filter_pattern(
+          candidate.relative_path_as_path(),
+          pattern,
+          false,
+        )
+      })
+  }
+
+  fn should_replace_with_first_or_override(&self, candidate: &NativeLibCandidate) -> bool {
+    self.filter.enable_override
+      || self.filter.pick_firsts.iter().any(|pattern| {
+        HvigorNativeLibraryPattern::matches_filter_pattern(
+          candidate.relative_path_as_path(),
+          pattern,
+          false,
+        )
+      })
+  }
+
+  fn replace_group(
+    &self,
+    groups: &mut Vec<(String, Vec<PathBuf>)>,
+    group_indexes: &mut rustc_hash::FxHashMap<String, usize>,
+    relative_path: String,
+    path: PathBuf,
+  ) {
+    if let Some(index) = group_indexes.get(relative_path.as_str()).copied() {
+      groups[index].1 = vec![path];
+      return;
+    }
+    let index = groups.len();
+    group_indexes.insert(relative_path.clone(), index);
+    groups.push((relative_path, vec![path]));
+  }
+
+  fn append_to_group(
+    &self,
+    groups: &mut Vec<(String, Vec<PathBuf>)>,
+    group_indexes: &mut rustc_hash::FxHashMap<String, usize>,
+    relative_path: String,
+    path: PathBuf,
+  ) {
+    if let Some(index) = group_indexes.get(relative_path.as_str()).copied() {
+      groups[index].1.push(path);
+      return;
+    }
+    let index = groups.len();
+    group_indexes.insert(relative_path.clone(), index);
+    groups.push((relative_path, vec![path]));
   }
 }
 
@@ -3440,37 +3538,73 @@ mod tests {
   }
 
   #[test]
-  fn test_native_collector_rejects_order_sensitive_filter_without_hvigor_dependency_order() {
+  fn test_native_collector_applies_order_sensitive_filters_in_dependency_edge_order() {
     let tmp = tempfile::tempdir().unwrap();
     let module_root = tmp.path().join("entry");
+    let dep_a = tmp.path().join("oh_modules/a");
+    let dep_b = tmp.path().join("oh_modules/b");
+    fs::create_dir_all(dep_a.join("libs/arm64-v8a")).unwrap();
+    fs::create_dir_all(dep_b.join("libs/arm64-v8a")).unwrap();
     fs::create_dir_all(&module_root).unwrap();
+    fs::write(dep_a.join("libs/arm64-v8a/libdup.so"), b"ELF A").unwrap();
+    fs::write(dep_b.join("libs/arm64-v8a/libdup.so"), b"ELF B").unwrap();
 
     let module = ModuleConfig {
       name: "entry".to_string(),
       src_path: module_root,
       module_type: arkdown_core::OhosModuleType::Entry,
     };
-    let deps = DependencyGraphSnapshot::default();
-    let err = NativeLibCollector::new(&module, &[], &deps)
+    let mut deps = DependencyGraphSnapshot::default();
+    add_dependency_node(&mut deps, "a", "a", "1.0.0", dep_a.clone());
+    add_dependency_node(&mut deps, "b", "b", "1.0.0", dep_b.clone());
+    // The BTreeMap node fallback would visit `a`, then `b`. Latest hvigor
+    // consumes dependency traversal order instead, so make it observably
+    // different here: `b`, then `a`.
+    for (alias, root) in [("b", dep_b), ("a", dep_a)] {
+      deps.edges.push(
+        arkdown_session::dependency_graph::snapshot::DependencyEdgeSnapshot {
+          issuer_root: tmp.path().join("entry"),
+          alias: alias.to_string(),
+          version_spec: Some("1.0.0".to_string()),
+          package_name: alias.to_string(),
+          package_root: root,
+          kind: arkdown_session::dependency_graph::snapshot::DependencyEdgeKind::Dependency,
+          is_transitive: false,
+        },
+      );
+    }
+
+    let libs = NativeLibCollector::new(&module, &[], &deps)
       .with_policy(
         NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
           collect_all_libs: false,
           filter: NativeLibFilterOption {
-            pick_firsts: vec!["**/libdup.so".to_string()],
+            enable_override: true,
             ..Default::default()
           },
           ..Default::default()
         }),
       )
       .collect()
-      .expect_err("order-sensitive nativeLib.filter rules require hvigor dependency order");
-    assert!(
-      matches!(
-        err,
-        NativeBuildError::UnsupportedNativeLibOrderSensitiveFilter
-      ),
-      "unexpected error: {err}"
-    );
+      .expect("enableOverride must use latest hvigor dependency traversal order");
+    assert_eq!(libs.len(), 1);
+    assert_eq!(fs::read(&libs[0]).unwrap(), b"ELF A");
+
+    let libs = NativeLibCollector::new(&module, &[], &deps)
+      .with_policy(
+        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+          collect_all_libs: false,
+          filter: NativeLibFilterOption {
+            pick_lasts: vec!["**/libdup.so".to_string()],
+            ..Default::default()
+          },
+          ..Default::default()
+        }),
+      )
+      .collect()
+      .expect("pickLasts must use latest hvigor dependency traversal order");
+    assert_eq!(libs.len(), 1);
+    assert_eq!(fs::read(&libs[0]).unwrap(), b"ELF A");
   }
 
   #[test]
