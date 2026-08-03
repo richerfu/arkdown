@@ -660,21 +660,23 @@ struct Foo {
 }"#;
     let out = parse_and_lower(source).unwrap();
     assert!(
-        out.contains("Context.animation({ duration: 300 });"),
+        out.contains("globalThis.Context.animation({ duration: 300 });"),
         "missing animation context start; got:\n{out}"
     );
     assert!(
-        out.contains("Context.animation(null);"),
+        out.contains("globalThis.Context.animation(null);"),
         "missing animation context reset; got:\n{out}"
     );
     assert!(
         !out.contains("Row.animation("),
         "animation must not be emitted as a component attribute; got:\n{out}"
     );
-    let animation = out.find("Context.animation({ duration: 300 });").unwrap();
+    let animation = out
+        .find("globalThis.Context.animation({ duration: 300 });")
+        .unwrap();
     let width = out.find("Row.width(100);").unwrap();
     let height = out.find("Row.height(40);").unwrap();
-    let clear = out.find("Context.animation(null);").unwrap();
+    let clear = out.find("globalThis.Context.animation(null);").unwrap();
     let appear = out.find("Row.onAppear(").unwrap();
     assert!(
         animation < width && width < height && height < clear && clear < appear,
@@ -1188,6 +1190,32 @@ struct Foo {
     assert!(
         out.contains("MenuItem.create(this.ItemBuilder.bind(this));"),
         "CUSTOM_BUILDER_PROPERTIES_WITHOUTKEY attributes must not wrap {{ builder }}; got:\n{out}"
+    );
+}
+
+#[test]
+fn menu_item_create_wraps_builder_invocations_like_hvigor() {
+    let source = r#"@Component
+struct Foo {
+  @Builder ItemBuilder() {}
+
+  build() {
+    MenuItem(this.ItemBuilder())
+  }
+}"#;
+    let out = parse_and_lower_with_visible_builder_methods(
+        source,
+        &FxHashSet::default(),
+        false,
+        &FxHashSet::from_iter(["ItemBuilder".to_string()]),
+        &FxHashSet::default(),
+    )
+    .unwrap();
+    assert!(
+        out.contains("MenuItem.create(() => {")
+            && out.contains("this.ItemBuilder.call(this);")
+            && !out.contains("MenuItem.create(this.ItemBuilder());"),
+        "ets-loader checkCreateArgumentBuilder wraps a builder invocation in a lexical callback; got:\n{out}"
     );
 }
 
@@ -2030,7 +2058,7 @@ struct Foo {
     );
     // Gesture wrapper must be emitted.
     assert!(
-        out.contains("Gesture.create(GesturePriority.Low);"),
+        out.contains("globalThis.Gesture.create(GesturePriority.Low);"),
         "Gesture.create missing; got:\n{out}"
     );
     // Inner gesture type must be emitted.
@@ -2049,11 +2077,11 @@ struct Foo {
         "LongPressGesture.pop missing; got:\n{out}"
     );
     assert!(
-        out.contains("Gesture.pop();"),
+        out.contains("globalThis.Gesture.pop();"),
         "Gesture.pop missing; got:\n{out}"
     );
     let inner_pop = out.find("LongPressGesture.pop();").unwrap();
-    let outer_pop = out.find("Gesture.pop();").unwrap();
+    let outer_pop = out.find("globalThis.Gesture.pop();").unwrap();
     assert!(
         inner_pop < outer_pop,
         "LongPressGesture.pop must precede Gesture.pop; got:\n{out}"
@@ -2091,12 +2119,16 @@ struct Foo {
         "gestures before visibility attr; got:\n{out}"
     );
     assert_eq!(
-        out.matches("Gesture.create(GesturePriority.Low);").count(),
+        out.matches("globalThis.Gesture.create(GesturePriority.Low);")
+            .count(),
         2,
         "two Gesture.create; got:\n{out}"
     );
-    // Count only standalone "Gesture.pop()" lines, not "XxxGesture.pop()".
-    let gesture_pop_count = out.match_indices("\n            Gesture.pop();").count();
+    // Latest process_component_build.js::createFunction emits standalone
+    // generated Gesture calls via globalThis, never XxxGesture calls.
+    let gesture_pop_count = out
+        .match_indices("\n            globalThis.Gesture.pop();")
+        .count();
     assert_eq!(
         gesture_pop_count, 2,
         "two standalone Gesture.pop; got:\n{out}"
@@ -2127,11 +2159,11 @@ struct Foo {
     let out = parse_and_lower(source).unwrap();
     // Outer wrapper.
     assert!(
-        out.contains("Gesture.create(GesturePriority.Low);"),
+        out.contains("globalThis.Gesture.create(GesturePriority.Low);"),
         "Gesture.create missing; got:\n{out}"
     );
     assert!(
-        out.contains("Gesture.pop();"),
+        out.contains("globalThis.Gesture.pop();"),
         "Gesture.pop missing; got:\n{out}"
     );
     // GestureGroup create must only contain the mode arg, not the child gestures.
@@ -2181,17 +2213,9 @@ struct Foo {
     let pan_create = out.find("PanGesture.create(").unwrap();
     let pan_pop = out.find("PanGesture.pop();").unwrap();
     let gg_pop = out.find("GestureGroup.pop();").unwrap();
-    // Find the standalone "Gesture.pop();" that is NOT part of "GestureGroup.pop();"
     let gesture_pop = out
-        .match_indices("Gesture.pop();")
-        .find(|(pos, _)| {
-            // Ensure the character before "Gesture" is not a word char (i.e. not "Group")
-            pos.checked_sub(1)
-                .map(|p| !out.as_bytes()[p].is_ascii_alphabetic())
-                .unwrap_or(true)
-        })
-        .map(|(pos, _)| pos)
-        .expect("standalone Gesture.pop() not found");
+        .find("globalThis.Gesture.pop();")
+        .expect("standalone globalThis.Gesture.pop() not found");
     assert!(
         gg_create < swipe_create,
         "GestureGroup.create before SwipeGesture.create; got:\n{out}"
@@ -2218,7 +2242,8 @@ struct Foo {
     );
     // Only one Gesture.create/Gesture.pop pair (not one per child).
     assert_eq!(
-        out.matches("Gesture.create(GesturePriority.Low);").count(),
+        out.matches("globalThis.Gesture.create(GesturePriority.Low);")
+            .count(),
         1,
         "one Gesture.create; got:\n{out}"
     );

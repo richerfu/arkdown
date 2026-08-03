@@ -616,6 +616,11 @@ pub(super) struct BuilderFunctionNameCollector<'a> {
     options: &'a TransformOptions,
 }
 
+pub(super) struct BuilderFunctionNames {
+    pub(super) local: FxHashSet<String>,
+    pub(super) all: FxHashSet<String>,
+}
+
 impl<'a> BuilderFunctionNameCollector<'a> {
     pub(super) fn new(
         program: &'a Program<'a>,
@@ -629,11 +634,12 @@ impl<'a> BuilderFunctionNameCollector<'a> {
         }
     }
 
-    pub(super) fn collect(&self) -> FxHashSet<String> {
-        let mut names = FxHashSet::default();
-        self.collect_local(&mut names);
-        self.collect_imported(&mut names);
-        names
+    pub(super) fn collect(&self) -> BuilderFunctionNames {
+        let mut local = FxHashSet::default();
+        self.collect_local(&mut local);
+        let mut all = local.clone();
+        self.collect_imported(&mut all);
+        BuilderFunctionNames { local, all }
     }
 
     fn collect_local(&self, names: &mut FxHashSet<String>) {
@@ -672,9 +678,28 @@ impl<'a> BuilderFunctionNameCollector<'a> {
             let Statement::ImportDeclaration(import) = statement else {
                 continue;
             };
+            if import.import_kind.is_type() {
+                continue;
+            }
             let Some(specifiers) = &import.specifiers else {
                 continue;
             };
+            for specifier in specifiers {
+                let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                    continue;
+                };
+                if specifier.import_kind.is_type() {
+                    continue;
+                }
+                let imported = ComponentModuleExportName::value(&specifier.imported);
+                if self
+                    .options
+                    .component_metadata
+                    .is_sdk_builder_function(import.source.value.as_str(), &imported)
+                {
+                    names.insert(specifier.local.name.to_string());
+                }
+            }
             let Some(target) = resolver.resolve(import.source.value.as_str()) else {
                 continue;
             };
@@ -689,6 +714,9 @@ impl<'a> BuilderFunctionNameCollector<'a> {
                 let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
                     continue;
                 };
+                if specifier.import_kind.is_type() {
+                    continue;
+                }
                 let imported = ComponentModuleExportName::value(&specifier.imported);
                 if target_builders.contains(&imported) {
                     names.insert(specifier.local.name.to_string());

@@ -60,16 +60,17 @@ impl HvigorSourceMapScope {
             )
         });
         let src_path = if source_file.starts_with(Self::src_main_dir()) {
-            Self::with_ts_extension_path(&source_file)
+            Self::with_intermediate_source_extension_path(&source_file)
         } else {
-            Self::src_main_dir().join(Self::with_ts_extension_path(&source_file))
+            Self::src_main_dir().join(Self::with_intermediate_source_extension_path(&source_file))
         };
         scope.source_file_with_src_main_path(&Self::path_to_slash(&src_path))
     }
 
     pub fn key_for_source_file(&self, source_file: &str) -> String {
         let source_file = Self::source_file_path(source_file);
-        let src_path = Self::src_main_dir().join(Self::with_ts_extension_path(&source_file));
+        let src_path =
+            Self::src_main_dir().join(Self::with_intermediate_source_extension_path(&source_file));
         self.source_file_with_src_main_path(&Self::path_to_slash(&src_path))
     }
 
@@ -108,16 +109,31 @@ impl HvigorSourceMapScope {
     fn src_main_path(ets_rel: &str) -> String {
         let ets_rel = Self::source_file_path(ets_rel);
         let src_path = if ets_rel.starts_with(Self::ets_dir()) {
-            Self::src_main_dir().join(Self::with_ts_extension_path(&ets_rel))
+            Self::src_main_dir().join(Self::with_intermediate_source_extension_path(&ets_rel))
         } else {
-            Self::src_main_ets_dir().join(Self::with_ts_extension_path(&ets_rel))
+            Self::src_main_ets_dir().join(Self::with_intermediate_source_extension_path(&ets_rel))
         };
         Self::path_to_slash(&src_path)
     }
 
-    fn with_ts_extension_path(path: &Path) -> PathBuf {
+    /// Mirrors `generate_sourcemap.js::getIntermediateModuleId`: ETS/TS cache
+    /// sources use TypeScript unless their producer already materialized a JS
+    /// path, while MJS/CJS normalize to JS and non-code artifacts retain their
+    /// own extension.
+    fn with_intermediate_source_extension_path(path: &Path) -> PathBuf {
         let mut path = path.to_path_buf();
-        path.set_extension("ts");
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("ets") => {
+                path.set_extension("ts");
+            }
+            Some("mjs" | "cjs") => {
+                path.set_extension("js");
+            }
+            Some(_) => {}
+            None => {
+                path.set_extension("ts");
+            }
+        }
         path
     }
 
@@ -445,6 +461,23 @@ mod tests {
                 "generated/Index.js"
             ),
             "generated/Index.js"
+        );
+    }
+
+    #[test]
+    fn preserves_materialized_javascript_source_map_extension() {
+        let scope = HvigorSourceMapScope::new(
+            "entry".to_string(),
+            "entry".to_string(),
+            "1.0.0".to_string(),
+        );
+        assert_eq!(
+            scope.key_for_source_file("ets/pages/Runtime.js"),
+            "entry|entry|1.0.0|src/main/ets/pages/Runtime.js"
+        );
+        assert_eq!(
+            scope.key_for_source_file("ets/pages/Legacy.cjs"),
+            "entry|entry|1.0.0|src/main/ets/pages/Legacy.js"
         );
     }
 }

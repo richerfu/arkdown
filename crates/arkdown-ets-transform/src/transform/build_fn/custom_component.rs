@@ -62,7 +62,8 @@ impl CustomComponentStatementEmitter {
                 common_stmts,
             ),
         );
-        let custom_component_stmts = Self::custom(
+        let is_reusable = component_info.is_some_and(|info| info.reusable);
+        let mut custom_component_stmts = Self::custom(
             allocator,
             name,
             arguments,
@@ -73,16 +74,19 @@ impl CustomComponentStatementEmitter {
             source_metadata,
             context,
         );
-        // SDK process_custom_component.js::processCustomComponent appends the block
-        // returned by createCustomComponent() directly after the __Common__ observer.
-        // Self::custom already returns that block, so wrapping it again changes the
-        // generated tree and source map.
+        // Latest process_custom_component.js closes __Common__ before the
+        // enclosing reusable __Recycle__ scope. Keep the recycle pop outside
+        // the common wrapper so es2abc receives the same call ordering.
+        let recycle_pop = is_reusable.then(|| custom_component_stmts.pop()).flatten();
         statements.extend(custom_component_stmts);
         statements.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_common,
             &context.runtime_names().method_pop,
         ));
+        if let Some(recycle_pop) = recycle_pop {
+            statements.push(recycle_pop);
+        }
         statements
     }
 
@@ -983,6 +987,10 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
         let mut alternate = OxcVec::new_in(&self.allocator);
         alternate.push(self.ast.statement_if(
             SPAN,
+            // The callback is installed by ViewPU.createRecycle only for a
+            // recycled node. Latest process_custom_component.js therefore
+            // probes the public hook directly here, after the guarded
+            // aboutToReuseInternal branch.
             self.method_function_test(&self.context.runtime_names().about_to_reuse),
             self.ast.statement_block(SPAN, about_to_reuse_consequent),
             None,
@@ -999,7 +1007,9 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
         let mut statements = OxcVec::new_in(&self.allocator);
         statements.push(self.ast.statement_if(
             SPAN,
-            self.method_function_test(&self.context.runtime_names().about_to_reuse_internal),
+            self.recycle_node_method_function_test(
+                &self.context.runtime_names().about_to_reuse_internal,
+            ),
             self.ast.statement_block(SPAN, internal_consequent),
             Some(self.ast.statement_block(SPAN, alternate)),
         ));
@@ -1023,9 +1033,10 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
             ),
             method,
         );
+        let method_for_typeof = method_expression.clone_in(&self.allocator);
         let typeof_method =
             self.ast
-                .expression_unary(SPAN, UnaryOperator::Typeof, method_expression);
+                .expression_unary(SPAN, UnaryOperator::Typeof, method_for_typeof);
         let type_check = self.ast.expression_binary(
             SPAN,
             typeof_method,
@@ -1036,6 +1047,11 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
                 None,
             ),
         );
+        self.ast
+            .expression_logical(SPAN, method_expression, LogicalOperator::And, type_check)
+    }
+
+    fn recycle_node_method_function_test(&self, method: &str) -> Expression<'a> {
         self.ast.expression_logical(
             SPAN,
             self.ast.expression_identifier(
@@ -1043,7 +1059,30 @@ impl<'a, 'b> ReusableCustomComponentAstEmitter<'a, 'b> {
                 self.ast.str(&self.context.runtime_names().recycle_node),
             ),
             LogicalOperator::And,
-            type_check,
+            self.typeof_method_function_test(method),
+        )
+    }
+
+    fn typeof_method_function_test(&self, method: &str) -> Expression<'a> {
+        let method_expression = self.member_expression(
+            self.ast.expression_identifier(
+                SPAN,
+                self.ast.str(&self.context.runtime_names().recycle_node),
+            ),
+            method,
+        );
+        let typeof_method =
+            self.ast
+                .expression_unary(SPAN, UnaryOperator::Typeof, method_expression);
+        self.ast.expression_binary(
+            SPAN,
+            typeof_method,
+            BinaryOperator::StrictEquality,
+            self.ast.expression_string_literal(
+                SPAN,
+                self.ast.str(&self.context.runtime_names().function_type),
+                None,
+            ),
         )
     }
 

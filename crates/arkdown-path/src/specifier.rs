@@ -439,6 +439,7 @@ impl<'a> SdkDeclarationSpecifier<'a> {
     const OHOS_DOT_PREFIX: &'static str = "@ohos.";
     const OHOS_COLON_PREFIX: &'static str = "@ohos:";
     const HMS_COLON_PREFIX: &'static str = "@hms:";
+    const HMS_DOT_PREFIX: &'static str = "@hms.";
     const KIT_PREFIX: &'static str = "@kit.";
     const ARKTS_DOT_PREFIX: &'static str = "@arkts.";
 
@@ -449,6 +450,7 @@ impl<'a> SdkDeclarationSpecifier<'a> {
     fn is_match(&self) -> bool {
         self.raw.starts_with(Self::OHOS_SLASH_PREFIX)
             || self.raw.starts_with(Self::OHOS_DOT_PREFIX)
+            || self.raw.starts_with(Self::HMS_DOT_PREFIX)
             || self.raw.starts_with(Self::KIT_PREFIX)
             || self.raw.starts_with(Self::ARKTS_DOT_PREFIX)
     }
@@ -458,6 +460,9 @@ impl<'a> SdkDeclarationSpecifier<'a> {
             return Self::declaration_filenames("@ohos.", api_name);
         }
         if self.raw.starts_with(Self::OHOS_DOT_PREFIX) {
+            return Self::declaration_filenames("", self.raw);
+        }
+        if self.raw.starts_with(Self::HMS_DOT_PREFIX) {
             return Self::declaration_filenames("", self.raw);
         }
         Vec::new()
@@ -634,6 +639,7 @@ mod tests {
     fn test_sdk_declaration_specifiers() {
         assert!(ModuleSpecifier::new("@ohos/hilog").is_sdk_declaration_specifier());
         assert!(ModuleSpecifier::new("@ohos.hilog").is_sdk_declaration_specifier());
+        assert!(ModuleSpecifier::new("@hms.core.map.MapComponent").is_sdk_declaration_specifier());
         assert!(ModuleSpecifier::new("@kit.ArkUI").is_sdk_declaration_specifier());
         assert!(ModuleSpecifier::new("@arkts.utils").is_sdk_declaration_specifier());
         assert!(!ModuleSpecifier::new("@ohos:hilog").is_sdk_declaration_specifier());
@@ -656,6 +662,13 @@ mod tests {
         assert_eq!(
             ModuleSpecifier::new("@ohos.data.preferences").sdk_api_filename(),
             Some("@ohos.data.preferences.d.ts".to_string())
+        );
+        assert_eq!(
+            ModuleSpecifier::new("@hms.core.map.MapComponent").sdk_api_filenames(),
+            vec![
+                "@hms.core.map.MapComponent.d.ts".to_string(),
+                "@hms.core.map.MapComponent.d.ets".to_string()
+            ]
         );
         assert_eq!(
             ModuleSpecifier::new("@kit.ArkUI").sdk_kit_filename(),

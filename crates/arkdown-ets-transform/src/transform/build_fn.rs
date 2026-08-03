@@ -771,6 +771,10 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         if component_kind.is_nav_router() {
             return self.push_nav_component(statements, component, &name, allocator, context);
         }
+        if component_kind.creates_child_body() && !component.children.is_empty() {
+            return self
+                .push_child_body_component(statements, component, &name, allocator, context);
+        }
 
         let ast = AstBuilder::new(allocator);
         let mut creation_stmts = OxcVec::new_in(&allocator);
@@ -810,6 +814,61 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             statements.push(ComponentCallStatementEmitter::empty_with_source(
                 ast,
                 &name,
+                &context.runtime_names().method_pop,
+                component.callee.span(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Mirrors ets-loader `process_component_build.js::processTabAndNav` for
+    /// `TabContent`: nested ArkUI statements belong to the `create` builder
+    /// callback, rather than following the creation observer as siblings.
+    fn push_child_body_component<'b>(
+        &self,
+        statements: &mut OxcVec<'b, Statement<'b>>,
+        component: &ArkUIComponentExpression<'_>,
+        name: &str,
+        allocator: &'b Allocator,
+        context: &BuildContext,
+    ) -> Result<(), BuildLoweringError> {
+        let ast = AstBuilder::new(allocator);
+        let mut child_body = OxcVec::new_in(&allocator);
+        for child in &component.children {
+            self.push_child(&mut child_body, child, allocator, context)?;
+        }
+
+        let mut creation_stmts = OxcVec::new_in(&allocator);
+        creation_stmts.push(ComponentCallStatementEmitter::create_with_child_body(
+            ast,
+            name,
+            &context.runtime_names().method_create,
+            child_body,
+            component.callee.span(),
+        ));
+        let resolved_attrs = self.component_chain_attributes(component, context)?;
+        LeafAttributeStatementEmitter::new(
+            name,
+            component.callee.span(),
+            &resolved_attrs,
+            &self.plan.builder_methods,
+            context,
+        )
+        .push_statements(&mut creation_stmts, ast, allocator);
+        statements.push(
+            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
+                ast,
+                context.use_parent_context,
+                context.global_builder_parameter.as_deref(),
+                name,
+                context.runtime_names(),
+                creation_stmts,
+            ),
+        );
+        if context.component_needs_pop(name, component.arguments.iter()) {
+            statements.push(ComponentCallStatementEmitter::empty_with_source(
+                ast,
+                name,
                 &context.runtime_names().method_pop,
                 component.callee.span(),
             ));
@@ -1420,6 +1479,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         };
 
         let ast = AstBuilder::new(allocator);
+        // SDK process_component_build.js scopes every generated LazyForEach
+        // declaration in its own block. Besides preventing generated names
+        // from leaking into sibling lowering output, that lexical scope is
+        // observable in es2abc register allocation.
+        let mut lazy_for_each_body = OxcVec::new_in(&allocator);
         let mut item_body = OxcVec::new_in(&allocator);
         let item_param = item_gen.params.items.first();
         let index_param = item_gen.params.items.get(1);
@@ -1430,7 +1494,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         }
         let lazy_context = context.clone().with_inside_lazy_for_each();
         self.push_lazy_arrow_body(&mut item_body, item_gen, allocator, &lazy_context)?;
-        statements.push(IterationAstStatement::const_arrow_function_with_params(
+        lazy_for_each_body.push(IterationAstStatement::const_arrow_function_with_params(
             ast,
             &context.runtime_names().lazy_foreach_item_gen_function,
             IterationFormalParameters::for_each_generator(
@@ -1448,7 +1512,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             let id_func =
                 IterationArgument::expression_with_context(id_func_arg, context, allocator)
                     .ok_or(BuildLoweringError::UnsupportedStatement)?;
-            statements.push(IterationAstStatement::const_declaration(
+            lazy_for_each_body.push(IterationAstStatement::const_declaration(
                 ast,
                 &context.runtime_names().lazy_foreach_item_id_func,
                 id_func,
@@ -1457,18 +1521,19 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         } else {
             false
         };
-        statements.push(IterationAstStatement::lazy_for_each_create(
+        lazy_for_each_body.push(IterationAstStatement::lazy_for_each_create(
             ast,
             allocator,
             context,
             data,
             has_id_func,
         ));
-        statements.push(ComponentCallStatementEmitter::empty(
+        lazy_for_each_body.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_lazy_for_each,
             &context.runtime_names().method_pop,
         ));
+        statements.push(ast.statement_block(SPAN, lazy_for_each_body));
         Ok(())
     }
 
@@ -1480,6 +1545,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
         let ast = AstBuilder::new(allocator);
+        let resolved_attrs = self.component_chain_attributes(component, context)?;
         let mut block_body = OxcVec::new_in(&allocator);
         block_body.push(IterationAstStatement::lazy_list_item_creation(
             ast, allocator, component, context,
@@ -1488,6 +1554,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             IterationComponent::new(component).lazy_list_item_creation2_statement(
                 ast,
                 allocator,
+                &resolved_attrs,
                 &self.plan.builder_methods,
                 context,
             )?,
@@ -1513,7 +1580,10 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         block_body.push(IterationAstStatement::member_call(
             ast,
             allocator,
-            IterationAstStatement::view_context(ast, context),
+            // process_component_build.js uses the lexical `this` for the
+            // ListItem itemCreation2 observer, even when its surrounding
+            // global @Builder emits other observers through `parent`.
+            ast.expression_this(SPAN),
             &context.runtime_names().observe_component_creation2,
             ast.vec_from_iter([
                 Argument::from(
@@ -3564,6 +3634,43 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
         expression: &Expression<'_>,
         allocator: &'b Allocator,
     ) -> Expression<'b> {
+        // ets-loader `checkCreateArgumentBuilder` consumes both the explicit
+        // CREATE_BIND_COMPONENT set and component-specific `create` entries in
+        // BIND_OBJECT_PROPERTY. ComponentMetadata merges those SDK-owned rules
+        // behind `is_builder_attribute_method`.
+        let needs_builder = self.context.is_builder_attribute_method(
+            self.component_name,
+            &self.context.runtime_names().method_create,
+        );
+        let attribute_emitter = AttributeBindingArgumentEmitter::new(
+            self.component_name,
+            &self.context.runtime_names().method_create,
+            self.builder_methods,
+            self.context,
+        );
+        if needs_builder {
+            if let Expression::CallExpression(call) = expression {
+                if let Some((callee, builder_name)) =
+                    attribute_emitter.builder_call_target(call, allocator)
+                {
+                    return attribute_emitter.builder_call_arrow(
+                        callee,
+                        &builder_name,
+                        call,
+                        allocator,
+                    );
+                }
+            }
+            if let Some(target) =
+                attribute_emitter.builder_reference_expression(expression, allocator)
+            {
+                return attribute_emitter.bound_expression(
+                    target,
+                    AstBuilder::new(allocator).vec(),
+                    allocator,
+                );
+            }
+        }
         let Expression::ObjectExpression(object) = expression else {
             return self.plain_expression(expression, allocator);
         };
@@ -3579,24 +3686,10 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
                         .is_some()
             })
         });
-        // ets-loader `checkCreateArgumentBuilder` consumes both the explicit
-        // CREATE_BIND_COMPONENT set and component-specific `create` entries in
-        // BIND_OBJECT_PROPERTY. ComponentMetadata merges those SDK-owned rules
-        // behind `is_builder_attribute_method`.
-        let needs_builder = self.context.is_builder_attribute_method(
-            self.component_name,
-            &self.context.runtime_names().method_create,
-        );
         if !has_double_dollar && !needs_builder {
             return self.plain_expression(expression, allocator);
         }
         let ast = AstBuilder::new(allocator);
-        let attribute_emitter = AttributeBindingArgumentEmitter::new(
-            self.component_name,
-            &self.context.runtime_names().method_create,
-            self.builder_methods,
-            self.context,
-        );
         let properties = ast.vec_from_iter(object.properties.iter().map(|property| {
             let ObjectPropertyKind::ObjectProperty(property) = property else {
                 return attribute_emitter.plain_object_property(property, allocator);
@@ -3887,6 +3980,32 @@ impl ComponentCallStatementEmitter {
             component_name,
             create_method,
             arguments,
+            component_span,
+            SPAN,
+        )
+    }
+
+    fn create_with_child_body<'b>(
+        ast: AstBuilder<'b>,
+        component_name: &str,
+        create_method: &str,
+        child_body: OxcVec<'b, Statement<'b>>,
+        component_span: Span,
+    ) -> Statement<'b> {
+        let parameters = ast.formal_parameters(
+            SPAN,
+            FormalParameterKind::ArrowFormalParameters,
+            ast.vec(),
+            NONE,
+        );
+        let body = ast.function_body(SPAN, ast.vec(), child_body);
+        let callback =
+            ast.expression_arrow_function(SPAN, false, false, NONE, parameters, NONE, body);
+        Self::raw_call_with_source(
+            ast,
+            component_name,
+            create_method,
+            ast.vec1(Argument::from(callback)),
             component_span,
             SPAN,
         )
@@ -4224,7 +4343,23 @@ impl ComponentCallStatementEmitter {
         component_span: Span,
         method_span: Span,
     ) -> Statement<'b> {
-        let object = ast.expression_identifier(component_span, ast.str(component_name));
+        let component = ast.expression_identifier(component_span, ast.str(component_name));
+        // Latest SDK `process_component_build.js::createFunction` emits
+        // generated calls through `globalThis` for `COMPONENT_GESTURE` and
+        // `GLOBAL_CONTEXT`. This is deliberately limited to calls constructed
+        // by the lowering pass: source-level `Context.animateTo(...)` remains
+        // source-owned and is not rewritten by this emitter.
+        let object = if matches!(component_name, "Gesture" | "Context") {
+            let global_this = ast.expression_identifier(SPAN, "globalThis");
+            Expression::from(ast.member_expression_static(
+                SPAN,
+                global_this,
+                ast.identifier_name(component_span, ast.str(component_name)),
+                false,
+            ))
+        } else {
+            component
+        };
         let property = ast.identifier_name(method_span, ast.str(method_name));
         let member = ast.member_expression_static(SPAN, object, property, false);
         let call = ast.expression_call(SPAN, Expression::from(member), NONE, arguments, false);

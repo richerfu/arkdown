@@ -18,6 +18,7 @@ use arkdown::{
   BundleSourceMapPackageInfo, Bundler, HvigorHarImportees, LoaderResourceJoin, PreloadSystemSoTask,
   SourceMapPolicy,
 };
+use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::ArkdownConfig;
 use arkdown_path::{ArtifactPathSerializer, NormalizedOhmUrl};
 use arkdown_profile::{LoaderJson, PkgContextInfoOpt};
@@ -32,6 +33,50 @@ use super::custom_config::ArkdownCustomConfig;
 pub(super) struct BundlePlanPackageInfo {
   pub(super) source_map: BundleSourceMapPackageInfo,
   pub(super) runtime: BundleRuntimePackageInfo,
+}
+
+/// Effective Ark bytecode target selected by latest hvigor's ModuleMode path.
+///
+/// `module_mode.js::generateEs2AbcCmd` uses
+/// `projectConfig.compatibleSdkVersion` (and its stage), rather than the API
+/// level of the SDK installation that provides `es2abc`. Keeping this in one
+/// value object prevents the ETS transform and SDK compiler from targeting
+/// different language/runtime versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HvigorCompileTarget {
+  api_version: u32,
+  api_sub_version: Option<String>,
+}
+
+impl HvigorCompileTarget {
+  pub(super) fn from_loader_json(loader_json: &LoaderJson, config: &ArkdownConfig) -> Self {
+    Self::from_compatible_sdk_version(
+      &config.product.compatible_sdk_version,
+      config.product.compatible_sdk_version_stage.as_deref(),
+      loader_json.api_version,
+    )
+  }
+
+  pub(super) fn from_compatible_sdk_version(
+    compatible_sdk_version: &str,
+    compatible_sdk_version_stage: Option<&str>,
+    fallback_api_version: u32,
+  ) -> Self {
+    Self {
+      api_version: parse_api_version(compatible_sdk_version).unwrap_or(fallback_api_version),
+      api_sub_version: compatible_sdk_version_stage
+        .filter(|stage| !stage.is_empty())
+        .map(str::to_string),
+    }
+  }
+
+  pub(super) fn api_version(&self) -> u32 {
+    self.api_version
+  }
+
+  pub(super) fn api_sub_version(&self) -> Option<String> {
+    self.api_sub_version.clone()
+  }
 }
 
 /// Build a [`BundlePlan`] from a `loader.json` and the active config.
@@ -58,6 +103,7 @@ pub(super) fn make_bundle_plan(
   let module_meta_info_files =
     BundleModuleMetaInfoFileCollector::new(loader_json, config.product.bundle_name.as_str())
       .collect(&entries);
+  let compile_target = HvigorCompileTarget::from_loader_json(loader_json, config);
   BundlePlan {
     input: BundleInput {
       loader_json_path: loader_json_path.as_ref().to_path_buf(),
@@ -99,9 +145,7 @@ pub(super) fn make_bundle_plan(
     },
     plugins: BundlePluginSet::default(),
     build_mode: config.build_mode.clone(),
-    target_api_version: loader_json
-      .api_version
-      .max(config.sdk_config.compile_api_version),
+    target_api_version: compile_target.api_version(),
     bundle_name: config.product.bundle_name.clone(),
     use_normalized_ohm_url: loader_json.use_normalized_ohm_url,
     should_emit_js: true,

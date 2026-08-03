@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap;
 use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, CallExpression, Expression, NumberBase, ObjectPropertyKind,
-    PropertyKind,
+    PropertyKey, PropertyKind,
 };
 use oxc_ast::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
@@ -161,10 +161,20 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
         name: &'static str,
         value: Expression<'c>,
     ) -> ObjectPropertyKind<'c> {
+        let key = if ResourceObjectPropertyName::uses_string_literal_key(name) {
+            // Latest `process_ui_syntax.js::createResourceParam` constructs
+            // id/type/bundle/module keys with `createStringLiteral`; `params`
+            // alone is created with `createIdentifier`. Keeping this AST shape
+            // matters because CompileArkTS feeds the emitted source into
+            // es2abc, including generated closure-name hashing.
+            PropertyKey::StringLiteral(ast.alloc_string_literal(SPAN, ast.str(name), None))
+        } else {
+            ast.property_key_static_identifier(SPAN, ast.str(name))
+        };
         ast.object_property_kind_object_property(
             SPAN,
             PropertyKind::Init,
-            ast.property_key_static_identifier(SPAN, ast.str(name)),
+            key,
             value,
             false,
             false,
@@ -181,6 +191,13 @@ impl ResourceObjectPropertyName {
     const PARAMS: &'static str = "params";
     const BUNDLE_NAME: &'static str = "bundleName";
     const MODULE_NAME: &'static str = "moduleName";
+
+    fn uses_string_literal_key(name: &str) -> bool {
+        matches!(
+            name,
+            Self::ID | Self::TYPE | Self::BUNDLE_NAME | Self::MODULE_NAME
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

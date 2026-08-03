@@ -11,18 +11,26 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use arkdown_core::ArkTscTarget;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Declaration, ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration,
-    ImportDeclarationSpecifier, Statement, TSModuleDeclarationBody, TSModuleDeclarationName,
+    Argument, AssignmentTarget, ChainElement, ComputedMemberExpression, Declaration,
+    ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
+    IdentifierReference, ImportDeclaration, ImportDeclarationSpecifier, Program, Statement,
+    StaticMemberExpression, TSModuleDeclarationBody, TSModuleDeclarationName, VariableDeclaration,
+    VariableDeclarationKind,
 };
 use oxc_ast::AstBuilder;
-use oxc_ast_visit::{walk_mut, VisitMut};
+use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, SPAN};
-use oxc_syntax::{number::NumberBase, operator::UnaryOperator};
+use oxc_syntax::{
+    number::NumberBase,
+    operator::{AssignmentOperator, LogicalOperator, UnaryOperator},
+    symbol::SymbolId,
+};
 use oxc_transformer::{TransformOptions, Transformer};
 
 use crate::source::{
@@ -77,6 +85,7 @@ pub(crate) struct TypeScriptJavascriptEmitter<'a> {
     sources: &'a TransformSourceSnapshot,
     const_enum_exports: Option<&'a ConstEnumExportCache>,
     hvigor_emit_wrapper: bool,
+    tsc_target: ArkTscTarget,
 }
 
 pub(crate) struct TypeScriptJavascriptEmitOutput {
@@ -92,6 +101,7 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             sources,
             const_enum_exports: None,
             hvigor_emit_wrapper: false,
+            tsc_target: ArkTscTarget::default(),
         }
     }
 
@@ -102,6 +112,12 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
 
     pub(crate) fn with_hvigor_emit_wrapper(mut self) -> Self {
         self.hvigor_emit_wrapper = true;
+        self
+    }
+
+    /// Match the target selected by latest `ets_checker.js::getTargetESVersion`.
+    pub(crate) fn with_tsc_target(mut self, tsc_target: ArkTscTarget) -> Self {
+        self.tsc_target = tsc_target;
         self
     }
 
@@ -139,7 +155,14 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             semantic_ret.semantic.into_scoping()
         };
 
-        let mut options = TransformOptions::default();
+        // `ets_checker.js::getTargetESVersion` defaults to ES2021 (or accepts
+        // an explicit ES2017). With `useDefineForClassFields: false`, the
+        // TypeScript printer emits static field initializers as assignments
+        // after the class. Selecting OXC's same target enables its structured
+        // class-properties lowering; leaving EnvOptions at its default instead
+        // emits ES2022 static blocks and changes es2abc function records.
+        let mut options = TransformOptions::from_target(self.tsc_target.es_target())
+            .expect("ArkTscTarget always maps to an OXC ES target");
         options.assumptions.set_public_class_fields = true;
         options.typescript.optimize_const_enums = true;
         options.typescript.remove_class_fields_without_initializer = true;
@@ -151,6 +174,7 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
         if result.is_err() {
             return None;
         }
+        TypeScriptEmitParityCanonicalizer::new(&allocator).canonicalize(&mut parsed.program);
 
         let options = CodegenOptions {
             source_map_path: Some(self.id.into()),
@@ -208,6 +232,388 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
 
     fn source_type(&self) -> SourceType {
         CompileArktsSourceType::from_id(self.id)
+    }
+}
+
+/// Canonicalize the small, observable gaps between OXC's TypeScript lowering
+/// and the latest SDK TypeScript emitter before `es2abc` consumes the cache.
+///
+/// This remains an OXC AST pass: no generated-source string patches are used.
+/// The pass deliberately recognizes only OXC's synthesized enum-IIFE and
+/// class-static-alias shapes, so ordinary user-written code is untouched.
+struct TypeScriptEmitParityCanonicalizer<'a> {
+    ast: AstBuilder<'a>,
+}
+
+impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
+    fn new(allocator: &'a Allocator) -> Self {
+        Self {
+            ast: AstBuilder::new(allocator),
+        }
+    }
+
+    fn canonicalize(&self, program: &mut Program<'a>) {
+        self.canonicalize_regular_enum_declarations(program);
+        self.canonicalize_class_static_self_references(program);
+    }
+
+    /// The SDK TypeScript emitter writes a regular enum as a hoisted `var`
+    /// followed by `(function (Enum) { ... })(Enum || (Enum = {}));`. OXC
+    /// emits a `let` initialized from a pure IIFE that returns the enum object.
+    /// The latter adds different ABC records even though it is value-equivalent.
+    fn canonicalize_regular_enum_declarations(&self, program: &mut Program<'a>) {
+        let old_body = std::mem::replace(&mut program.body, self.ast.vec());
+        let mut body = self.ast.vec_with_capacity(old_body.len());
+        for mut statement in old_body {
+            let enum_iife = self.take_oxc_enum_iife_declaration(&mut statement);
+            body.push(statement);
+            if let Some(enum_iife) = enum_iife {
+                body.push(self.ast.statement_expression(SPAN, enum_iife));
+            }
+        }
+        program.body = body;
+    }
+
+    fn take_oxc_enum_iife_declaration(
+        &self,
+        statement: &mut Statement<'a>,
+    ) -> Option<Expression<'a>> {
+        let declaration = match statement {
+            Statement::VariableDeclaration(declaration) => declaration,
+            Statement::ExportNamedDeclaration(export) => {
+                let Some(Declaration::VariableDeclaration(declaration)) =
+                    export.declaration.as_mut()
+                else {
+                    return None;
+                };
+                declaration
+            }
+            _ => return None,
+        };
+        self.take_oxc_enum_iife_from_variable_declaration(declaration)
+    }
+
+    fn take_oxc_enum_iife_from_variable_declaration(
+        &self,
+        declaration: &mut VariableDeclaration<'a>,
+    ) -> Option<Expression<'a>> {
+        if declaration.declarations.len() != 1 {
+            return None;
+        }
+        let declarator = &mut declaration.declarations[0];
+        let enum_name = declarator
+            .id
+            .get_binding_identifier()
+            .map(|identifier| identifier.name.to_string())?;
+        if !Self::is_oxc_enum_iife(declarator.init.as_ref()?, &enum_name) {
+            return None;
+        }
+        let Expression::CallExpression(mut call) = declarator
+            .init
+            .take()
+            .expect("validated OXC enum IIFE initializer")
+        else {
+            unreachable!("validated OXC enum IIFE initializer")
+        };
+
+        let function = match &mut call.callee {
+            Expression::FunctionExpression(function) => function,
+            _ => unreachable!("validated OXC enum IIFE callee"),
+        };
+        function
+            .body
+            .as_mut()
+            .expect("validated OXC enum IIFE body")
+            .statements
+            .pop();
+        call.pure = false;
+        call.arguments = self.ast.vec1(Argument::from(
+            self.ast.expression_logical(
+                SPAN,
+                self.ast
+                    .expression_identifier(SPAN, self.ast.str(&enum_name)),
+                LogicalOperator::Or,
+                self.ast.expression_assignment(
+                    SPAN,
+                    AssignmentOperator::Assign,
+                    self.ast
+                        .simple_assignment_target_assignment_target_identifier(
+                            SPAN,
+                            self.ast.str(&enum_name),
+                        )
+                        .into(),
+                    self.ast.expression_object(SPAN, self.ast.vec()),
+                ),
+            ),
+        ));
+        declaration.kind = VariableDeclarationKind::Var;
+        declarator.kind = VariableDeclarationKind::Var;
+        Some(Expression::CallExpression(call))
+    }
+
+    fn is_oxc_enum_iife(expression: &Expression<'_>, enum_name: &str) -> bool {
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        if !matches!(call.arguments.as_slice(), [Argument::ObjectExpression(object)] if object.properties.is_empty())
+        {
+            return false;
+        }
+        let Expression::FunctionExpression(function) = &call.callee else {
+            return false;
+        };
+        let Some(parameter) = function
+            .params
+            .items
+            .as_slice()
+            .first()
+            .and_then(|parameter| parameter.pattern.get_binding_identifier())
+        else {
+            return false;
+        };
+        if function.id.is_some()
+            || function.params.items.len() != 1
+            || parameter.name.as_str() != enum_name
+        {
+            return false;
+        }
+        let Some(body) = &function.body else {
+            return false;
+        };
+        matches!(
+            body.statements.last(),
+            Some(Statement::ReturnStatement(statement))
+                if matches!(
+                    &statement.argument,
+                    Some(Expression::Identifier(identifier)) if identifier.name.as_str() == enum_name
+                )
+        )
+    }
+
+    /// OXC's class-fields lowering creates `var _Class; _Class = Class;` for
+    /// a declaration whose static initializer refers to its own name. The SDK
+    /// TypeScript emitter writes the direct class reference in its post-class
+    /// assignment instead. Canonicalize only the exact synthesized pair and
+    /// only inside assignments to that class's static members.
+    fn canonicalize_class_static_self_references(&self, program: &mut Program<'a>) {
+        let aliases = self.collect_oxc_class_static_aliases(program);
+        if aliases.is_empty() {
+            return;
+        }
+
+        let old_body = std::mem::replace(&mut program.body, self.ast.vec());
+        let mut body = self.ast.vec_with_capacity(old_body.len());
+        for mut statement in old_body {
+            if Self::is_oxc_class_alias_assignment(&statement, &aliases)
+                || !self.retain_non_alias_variable_declarators(&mut statement, &aliases)
+            {
+                continue;
+            }
+            self.rewrite_oxc_class_static_assignment(&mut statement, &aliases);
+            body.push(statement);
+        }
+        program.body = body;
+    }
+
+    fn collect_oxc_class_static_aliases(&self, program: &Program<'a>) -> FxHashMap<String, String> {
+        let class_names = program
+            .body
+            .iter()
+            .filter_map(Self::declared_class_name)
+            .collect::<FxHashSet<_>>();
+        if class_names.is_empty() {
+            return FxHashMap::default();
+        }
+
+        let alias_declarations = program
+            .body
+            .iter()
+            .filter_map(Self::uninitialized_var_declaration)
+            .flat_map(|declaration| declaration.declarations.iter())
+            .filter(|declarator| declarator.init.is_none())
+            .filter_map(|declarator| {
+                declarator
+                    .id
+                    .get_binding_identifier()
+                    .map(|identifier| identifier.name.to_string())
+            })
+            .collect::<FxHashSet<_>>();
+        if alias_declarations.is_empty() {
+            return FxHashMap::default();
+        }
+
+        program
+            .body
+            .iter()
+            .filter_map(Self::simple_identifier_assignment)
+            .filter(|(alias, class_name)| {
+                alias_declarations.contains(alias)
+                    && class_names.contains(class_name)
+                    && Self::is_oxc_class_static_alias(alias, class_name)
+            })
+            .collect()
+    }
+
+    fn declared_class_name(statement: &Statement<'a>) -> Option<String> {
+        match statement {
+            Statement::ClassDeclaration(class) => class
+                .id
+                .as_ref()
+                .map(|identifier| identifier.name.to_string()),
+            Statement::ExportNamedDeclaration(export) => {
+                let Some(Declaration::ClassDeclaration(class)) = &export.declaration else {
+                    return None;
+                };
+                class
+                    .id
+                    .as_ref()
+                    .map(|identifier| identifier.name.to_string())
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration
+                else {
+                    return None;
+                };
+                class
+                    .id
+                    .as_ref()
+                    .map(|identifier| identifier.name.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn uninitialized_var_declaration<'statement>(
+        statement: &'statement Statement<'a>,
+    ) -> Option<&'statement VariableDeclaration<'a>> {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            return None;
+        };
+        (declaration.kind == VariableDeclarationKind::Var).then_some(declaration)
+    }
+
+    fn simple_identifier_assignment(statement: &Statement<'a>) -> Option<(String, String)> {
+        let Statement::ExpressionStatement(statement) = statement else {
+            return None;
+        };
+        let Expression::AssignmentExpression(assignment) = &statement.expression else {
+            return None;
+        };
+        if assignment.operator != AssignmentOperator::Assign {
+            return None;
+        }
+        let AssignmentTarget::AssignmentTargetIdentifier(left) = &assignment.left else {
+            return None;
+        };
+        let Expression::Identifier(right) = &assignment.right else {
+            return None;
+        };
+        Some((left.name.to_string(), right.name.to_string()))
+    }
+
+    fn is_oxc_class_static_alias(alias: &str, class_name: &str) -> bool {
+        let Some(alias) = alias.strip_prefix('_') else {
+            return false;
+        };
+        let Some(disambiguator) = alias.strip_prefix(class_name) else {
+            return false;
+        };
+        disambiguator.is_empty() || disambiguator.bytes().all(|byte| byte.is_ascii_digit())
+    }
+
+    fn is_oxc_class_alias_assignment(
+        statement: &Statement<'a>,
+        aliases: &FxHashMap<String, String>,
+    ) -> bool {
+        Self::simple_identifier_assignment(statement)
+            .is_some_and(|(alias, class_name)| aliases.get(&alias) == Some(&class_name))
+    }
+
+    fn retain_non_alias_variable_declarators(
+        &self,
+        statement: &mut Statement<'a>,
+        aliases: &FxHashMap<String, String>,
+    ) -> bool {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            return true;
+        };
+        if declaration.kind != VariableDeclarationKind::Var {
+            return true;
+        }
+
+        let old_declarations = std::mem::replace(&mut declaration.declarations, self.ast.vec());
+        let mut declarations = self.ast.vec_with_capacity(old_declarations.len());
+        for declarator in old_declarations {
+            let is_alias = declarator.init.is_none()
+                && declarator
+                    .id
+                    .get_binding_identifier()
+                    .is_some_and(|identifier| aliases.contains_key(identifier.name.as_str()));
+            if !is_alias {
+                declarations.push(declarator);
+            }
+        }
+        declaration.declarations = declarations;
+        !declaration.declarations.is_empty()
+    }
+
+    fn rewrite_oxc_class_static_assignment(
+        &self,
+        statement: &mut Statement<'a>,
+        aliases: &FxHashMap<String, String>,
+    ) {
+        let Statement::ExpressionStatement(statement) = statement else {
+            return;
+        };
+        let Expression::AssignmentExpression(assignment) = &mut statement.expression else {
+            return;
+        };
+        let AssignmentTarget::StaticMemberExpression(member) = &assignment.left else {
+            return;
+        };
+        let Expression::Identifier(class_identifier) = &member.object else {
+            return;
+        };
+        let class_name = class_identifier.name.to_string();
+        if !aliases.values().any(|target| target == &class_name) {
+            return;
+        }
+
+        let mut rewriter =
+            OxcClassStaticAliasReferenceRewriter::new(self.ast, aliases, class_name.as_str());
+        rewriter.visit_expression(&mut assignment.right);
+    }
+}
+
+struct OxcClassStaticAliasReferenceRewriter<'ast, 'aliases, 'class> {
+    ast: AstBuilder<'ast>,
+    aliases: &'aliases FxHashMap<String, String>,
+    class_name: &'class str,
+}
+
+impl<'ast, 'aliases, 'class> OxcClassStaticAliasReferenceRewriter<'ast, 'aliases, 'class> {
+    fn new(
+        ast: AstBuilder<'ast>,
+        aliases: &'aliases FxHashMap<String, String>,
+        class_name: &'class str,
+    ) -> Self {
+        Self {
+            ast,
+            aliases,
+            class_name,
+        }
+    }
+}
+
+impl<'ast> VisitMut<'ast> for OxcClassStaticAliasReferenceRewriter<'ast, '_, '_> {
+    fn visit_identifier_reference(&mut self, identifier: &mut IdentifierReference<'ast>) {
+        if self
+            .aliases
+            .get(identifier.name.as_str())
+            .is_some_and(|target| target == self.class_name)
+        {
+            identifier.name = self.ast.str(self.class_name).into();
+        }
     }
 }
 
@@ -330,6 +736,199 @@ pub(crate) struct ImportedConstEnumRewriter<'a> {
     const_enum_exports: Option<&'a ConstEnumExportCache>,
 }
 
+/// Facts retained from the SDK const-enum pass for its later import pass.
+///
+/// `transformTypeExportImportAndConstEnumInTypeScript::visitImportSpecifier`
+/// asks its emit resolver whether an alias was referenced before it replaces
+/// the corresponding const-enum property access with a literal. Keep that
+/// dependency fact separately because it is intentionally no longer present
+/// in the rewritten OXC AST.
+#[derive(Debug, Default)]
+pub(crate) struct ImportedConstEnumRewriteResult {
+    pub(crate) changed: bool,
+    pub(crate) inlined_import_locals: FxHashSet<String>,
+}
+
+/// Preserve the SDK TypeScript emitter's local enum substitutions in
+/// CompileArkTS source. Latest
+/// `typescript.js::transformTypeExportImportAndConstEnumInTypeScript` asks its
+/// emit resolver to normalize every enum-member initializer and to replace a
+/// resolved local `const enum` property/element access with a newly-created
+/// literal before `es2abc` reads the cache file. Local binding identity is
+/// available from OXC semantic analysis, so use symbols rather than names and
+/// never substitute a shadowing value parameter or local variable.
+pub(crate) struct TypeScriptEnumValueRewriter;
+
+impl TypeScriptEnumValueRewriter {
+    pub(crate) fn rewrite_program<'ast>(
+        allocator: &'ast Allocator,
+        program: &mut oxc_ast::ast::Program<'ast>,
+        scoping: &oxc_semantic::Scoping,
+    ) -> bool {
+        let enums = LocalEnumValueCollector::new(scoping).collect(program);
+        if enums.is_empty() {
+            return false;
+        }
+
+        let mut visitor = LocalEnumValueMutator {
+            ast: AstBuilder::new(allocator),
+            scoping,
+            enums,
+            current_enum: None,
+            changed: false,
+        };
+        visitor.visit_program(program);
+        visitor.changed
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LocalEnumValues {
+    members: FxHashMap<String, EnumValue>,
+    is_const: bool,
+}
+
+struct LocalEnumValueCollector<'s> {
+    scoping: &'s oxc_semantic::Scoping,
+    enums: FxHashMap<SymbolId, LocalEnumValues>,
+}
+
+impl<'s> LocalEnumValueCollector<'s> {
+    fn new(scoping: &'s oxc_semantic::Scoping) -> Self {
+        Self {
+            scoping,
+            enums: FxHashMap::default(),
+        }
+    }
+
+    fn collect<'ast>(
+        mut self,
+        program: &oxc_ast::ast::Program<'ast>,
+    ) -> FxHashMap<SymbolId, LocalEnumValues> {
+        self.visit_program(program);
+        self.enums
+    }
+}
+
+impl<'ast> Visit<'ast> for LocalEnumValueCollector<'_> {
+    fn visit_ts_enum_declaration(&mut self, declaration: &oxc_ast::ast::TSEnumDeclaration<'ast>) {
+        if let Some(members) = ConstEnumMemberCollector::new(declaration, self.scoping).collect() {
+            self.enums.insert(
+                declaration.id.symbol_id(),
+                LocalEnumValues {
+                    members,
+                    is_const: declaration.r#const,
+                },
+            );
+        }
+        walk::walk_ts_enum_declaration(self, declaration);
+    }
+}
+
+struct LocalEnumValueMutator<'ast, 'scope> {
+    ast: AstBuilder<'ast>,
+    scoping: &'scope oxc_semantic::Scoping,
+    enums: FxHashMap<SymbolId, LocalEnumValues>,
+    current_enum: Option<SymbolId>,
+    changed: bool,
+}
+
+impl<'ast> VisitMut<'ast> for LocalEnumValueMutator<'ast, '_> {
+    fn visit_expression(&mut self, expr: &mut Expression<'ast>) {
+        if let Some(replacement) = self.const_enum_replacement(expr).cloned() {
+            *expr = ConstEnumValueEmitter::new(&replacement).expression(self.ast);
+            self.changed = true;
+            return;
+        }
+        walk_mut::walk_expression(self, expr);
+    }
+
+    fn visit_ts_enum_declaration(
+        &mut self,
+        declaration: &mut oxc_ast::ast::TSEnumDeclaration<'ast>,
+    ) {
+        let previous = self.current_enum;
+        self.current_enum = Some(declaration.id.symbol_id());
+        walk_mut::walk_ts_enum_declaration(self, declaration);
+        self.current_enum = previous;
+    }
+
+    fn visit_ts_enum_member(&mut self, member: &mut oxc_ast::ast::TSEnumMember<'ast>) {
+        if let Some(replacement) = self.enum_member_replacement(member).cloned() {
+            member.initializer =
+                Some(ConstEnumValueEmitter::new(&replacement).expression(self.ast));
+            self.changed = true;
+            return;
+        }
+        walk_mut::walk_ts_enum_member(self, member);
+    }
+}
+
+impl LocalEnumValueMutator<'_, '_> {
+    fn const_enum_replacement<'a>(&'a self, expr: &Expression<'_>) -> Option<&'a EnumValue> {
+        match expr {
+            Expression::StaticMemberExpression(member) => self.static_member_replacement(member),
+            Expression::ComputedMemberExpression(member) => {
+                self.computed_member_replacement(member)
+            }
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::StaticMemberExpression(member) => {
+                    self.static_member_replacement(member)
+                }
+                ChainElement::ComputedMemberExpression(member) => {
+                    self.computed_member_replacement(member)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn static_member_replacement<'a>(
+        &'a self,
+        member: &StaticMemberExpression<'_>,
+    ) -> Option<&'a EnumValue> {
+        self.member_replacement(&member.object, member.property.name.as_str())
+    }
+
+    fn computed_member_replacement<'a>(
+        &'a self,
+        member: &ComputedMemberExpression<'_>,
+    ) -> Option<&'a EnumValue> {
+        let Expression::StringLiteral(property) = &member.expression else {
+            return None;
+        };
+        self.member_replacement(&member.object, property.value.as_str())
+    }
+
+    fn member_replacement<'a>(
+        &'a self,
+        object: &Expression<'_>,
+        member_name: &str,
+    ) -> Option<&'a EnumValue> {
+        let Expression::Identifier(identifier) = object else {
+            return None;
+        };
+        let reference_id = identifier.reference_id.get()?;
+        let symbol_id = self.scoping.get_reference(reference_id).symbol_id()?;
+        let enum_values = self.enums.get(&symbol_id)?;
+        enum_values
+            .is_const
+            .then(|| enum_values.members.get(member_name))?
+    }
+
+    fn enum_member_replacement<'a>(
+        &'a self,
+        member: &oxc_ast::ast::TSEnumMember<'_>,
+    ) -> Option<&'a EnumValue> {
+        let enum_symbol = self.current_enum?;
+        self.enums
+            .get(&enum_symbol)?
+            .members
+            .get(member.id.static_name().as_ref())
+    }
+}
+
 impl<'a> ImportedConstEnumRewriter<'a> {
     pub(crate) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
         Self {
@@ -349,13 +948,22 @@ impl<'a> ImportedConstEnumRewriter<'a> {
         allocator: &'ast Allocator,
         program: &mut oxc_ast::ast::Program<'ast>,
     ) -> bool {
+        self.rewrite_program_with_inlined_imports(allocator, program)
+            .changed
+    }
+
+    pub(crate) fn rewrite_program_with_inlined_imports<'ast>(
+        &self,
+        allocator: &'ast Allocator,
+        program: &mut oxc_ast::ast::Program<'ast>,
+    ) -> ImportedConstEnumRewriteResult {
         let imports = {
             let collector = ConstEnumImportCollector::new(&program.body, self.id, self.sources);
             let collector = collector.with_const_enum_export_cache_opt(self.const_enum_exports);
             collector.collect()
         };
         if imports.is_empty() {
-            return false;
+            return ImportedConstEnumRewriteResult::default();
         }
 
         let mut visitor = ConstEnumInlineMutator {
@@ -363,9 +971,13 @@ impl<'a> ImportedConstEnumRewriter<'a> {
             imports,
             in_enum_initializer: false,
             changed: false,
+            inlined_import_locals: FxHashSet::default(),
         };
         visitor.visit_program(program);
-        visitor.changed
+        ImportedConstEnumRewriteResult {
+            changed: visitor.changed,
+            inlined_import_locals: visitor.inlined_import_locals,
+        }
     }
 }
 
@@ -1020,11 +1632,15 @@ struct ConstEnumInlineMutator<'a> {
     imports: FxHashMap<String, ConstEnumImport>,
     in_enum_initializer: bool,
     changed: bool,
+    inlined_import_locals: FxHashSet<String>,
 }
 
 impl<'a> VisitMut<'a> for ConstEnumInlineMutator<'a> {
     fn visit_expression(&mut self, expr: &mut Expression<'a>) {
         if let Some(replacement) = self.const_enum_replacement(expr).cloned() {
+            if let Some(local_name) = self.inlined_import_local_name(expr) {
+                self.inlined_import_locals.insert(local_name.to_string());
+            }
             *expr = ConstEnumValueEmitter::new(&replacement).expression(self.ast);
             self.changed = true;
             return;
@@ -1041,6 +1657,22 @@ impl<'a> VisitMut<'a> for ConstEnumInlineMutator<'a> {
 }
 
 impl ConstEnumInlineMutator<'_> {
+    fn inlined_import_local_name<'a>(&self, expr: &'a Expression<'a>) -> Option<&'a str> {
+        let Expression::StaticMemberExpression(member) = expr else {
+            return None;
+        };
+        match &member.object {
+            Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+            Expression::StaticMemberExpression(namespace_member) => {
+                let Expression::Identifier(identifier) = &namespace_member.object else {
+                    return None;
+                };
+                Some(identifier.name.as_str())
+            }
+            _ => None,
+        }
+    }
+
     fn const_enum_replacement<'a>(&'a self, expr: &Expression<'_>) -> Option<&'a EnumValue> {
         let Expression::StaticMemberExpression(member) = expr else {
             return None;
@@ -1187,6 +1819,165 @@ mod tests {
         assert!(
             !output.contains(": ErrorCode"),
             "Type annotations must be stripped; got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn mirrors_hvigor_local_enum_value_substitution_with_symbol_identity() {
+        let source = r#"
+export const enum ConditionType {
+    EqualTo = 'EqualTo',
+    Limit = 'Limit',
+}
+export enum Sequence {
+    First,
+    Second,
+    Third = Second + 1,
+}
+const direct = ConditionType.EqualTo;
+const computed = ConditionType['Limit'];
+const runtimeEnumValue = Sequence.Second;
+function shadow(ConditionType: { EqualTo: string }) {
+    return ConditionType.EqualTo;
+}
+"#;
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let semantic = SemanticBuilder::new()
+            .with_enum_eval(true)
+            .build(&parsed.program);
+        assert!(
+            semantic.diagnostics.is_empty(),
+            "{:?}",
+            semantic.diagnostics
+        );
+        let scoping = semantic.semantic.into_scoping();
+
+        let changed =
+            TypeScriptEnumValueRewriter::rewrite_program(&allocator, &mut parsed.program, &scoping);
+        let output = Codegen::new().build(&parsed.program).code;
+
+        assert!(changed, "local const enum members must be substituted");
+        assert!(
+            output.contains("export const enum ConditionType"),
+            "the SDK retains the enum declaration in CompileArkTS source:\n{output}"
+        );
+        assert!(
+            output.contains("const direct = \"EqualTo\";")
+                && output.contains("const computed = \"Limit\";"),
+            "property and element const-enum access must become literals:\n{output}"
+        );
+        assert!(
+            output.contains("return ConditionType.EqualTo;"),
+            "a shadowing parameter must not be mistaken for the enum:\n{output}"
+        );
+        assert!(
+            output.contains("First = 0")
+                && output.contains("Second = 1")
+                && output.contains("Third = 2"),
+            "the SDK emit resolver normalizes every local enum member initializer:\n{output}"
+        );
+        assert!(
+            output.contains("const runtimeEnumValue = Sequence.Second;"),
+            "regular enum property access remains a runtime access:\n{output}"
+        );
+    }
+
+    #[test]
+    fn emits_suppressed_typescript_static_fields_as_hvigor_post_class_assignments() {
+        let source_path = PathBuf::from("/tmp/project/oh_modules/example/StaticFields.ts");
+        let source = r#"// @ts-ignore
+export class StaticFields {
+  static answer: number = 42;
+}
+"#;
+        let output = TypeScriptJavascriptEmitter::new(
+            source,
+            source_path.to_str().expect("utf-8 source path"),
+            &TransformSourceSnapshot::default(),
+        )
+        .emit()
+        .expect("TypeScript JavaScript emission");
+
+        // Latest ets-loader `ets_checker.js::getTargetESVersion` defaults to
+        // ES2021. TypeScript emits this as a post-class assignment, while the
+        // former OXC default introduced an ES2022 static block and an extra
+        // es2abc function record.
+        assert!(
+            output.contains("StaticFields.answer = 42"),
+            "expected hvigor-style static field assignment:\n{output}"
+        );
+        assert!(
+            !output.contains("static {"),
+            "static block changes the SDK ABC function shape:\n{output}"
+        );
+    }
+
+    #[test]
+    fn emits_regular_enums_with_hvigor_var_iife_shape() {
+        let source_path = PathBuf::from("/tmp/project/oh_modules/example/QueryType.ts");
+        let source = r#"// @ts-ignore
+export enum QueryType {
+  CONVENTIONAL_QUERY = 0,
+  AVG_QUERY
+}
+"#;
+        let output = TypeScriptJavascriptEmitter::new(
+            source,
+            source_path.to_str().expect("UTF-8 fixture path"),
+            &TransformSourceSnapshot::default(),
+        )
+        .emit()
+        .expect("TypeScript JavaScript emission");
+
+        // Latest ets-loader delegates suppression-pragma emission to the
+        // TypeScript printer, which uses a hoisted var and an enum IIFE with
+        // no return value. OXC's default `let = /* @__PURE__ */ IIFE({})`
+        // form changes the generated es2abc function records.
+        assert!(
+            output.contains("export var QueryType;"),
+            "expected SDK enum declaration shape:\n{output}"
+        );
+        assert!(
+            output.contains("})(QueryType || (QueryType = {}));"),
+            "expected SDK enum IIFE argument shape:\n{output}"
+        );
+        assert!(
+            !output.contains("return QueryType") && !output.contains("@__PURE__"),
+            "OXC-only enum return/pure annotation must be removed:\n{output}"
+        );
+    }
+
+    #[test]
+    fn emits_static_self_references_without_oxc_class_aliases() {
+        let source_path = PathBuf::from("/tmp/project/oh_modules/example/OpeTypeConversion.ts");
+        let source = r#"// @ts-ignore
+export class OpeTypeConversion {
+  private static readonly NUMBER_RADIX_DECIMAL = 10;
+  private static readonly NUMBER_RADIX_DECIMAL_LOG2 = Math.log2(OpeTypeConversion.NUMBER_RADIX_DECIMAL);
+}
+"#;
+        let output = TypeScriptJavascriptEmitter::new(
+            source,
+            source_path.to_str().expect("UTF-8 fixture path"),
+            &TransformSourceSnapshot::default(),
+        )
+        .emit()
+        .expect("TypeScript JavaScript emission");
+
+        // TypeScript emits the post-class static assignment against the class
+        // itself. OXC's temporary `_OpeTypeConversion` binding adds an extra
+        // module initializer and changes the ABC main function.
+        assert!(
+            output.contains(
+                "OpeTypeConversion.NUMBER_RADIX_DECIMAL_LOG2 = Math.log2(OpeTypeConversion.NUMBER_RADIX_DECIMAL);"
+            ),
+            "expected SDK static self-reference shape:\n{output}"
+        );
+        assert!(
+            !output.contains("_OpeTypeConversion"),
+            "OXC-only class alias must be absent:\n{output}"
         );
     }
 

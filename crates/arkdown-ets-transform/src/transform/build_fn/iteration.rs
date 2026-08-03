@@ -7,14 +7,14 @@ use oxc_ast::ast::{
 };
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
-use oxc_span::SPAN;
+use oxc_span::{GetSpan, SPAN};
 use oxc_syntax::operator::UnaryOperator;
 
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 
 use super::{
-    ArkuiCallName, BuildArgumentEmitter, BuildContext, BuildLoweringError,
-    ComponentCallStatementEmitter,
+    BuildArgumentEmitter, BuildContext, BuildLoweringError, LeafAttribute,
+    LeafAttributeStatementEmitter,
 };
 
 pub(super) struct IterationComponent<'a, 'b> {
@@ -39,6 +39,7 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
         &self,
         ast: AstBuilder<'c>,
         allocator: &'c Allocator,
+        attributes: &[LeafAttribute<'_>],
         builder_methods: &FxHashSet<String>,
         context: &BuildContext,
     ) -> Result<Statement<'c>, BuildLoweringError> {
@@ -64,74 +65,22 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
                 arguments
             },
         ));
-        let chain_names = self
-            .component
-            .chain_expressions
-            .iter()
-            .map(ArkuiCallName::chain)
-            .collect::<Result<Vec<_>, _>>()?;
-        let last_animation_index = chain_names
-            .iter()
-            .rposition(|name| ComponentCallStatementEmitter::is_animation_attribute(name));
-        if let Some(last_animation_index) = last_animation_index {
-            let mut animation_segment = OxcVec::new_in(&allocator);
-            let mut has_preceding_attribute = false;
-            for (index, (chain, name)) in self
-                .component
-                .chain_expressions
-                .iter()
-                .zip(&chain_names)
-                .enumerate()
-            {
-                if ComponentCallStatementEmitter::is_animation_attribute(name) {
-                    ComponentCallStatementEmitter::push_animation_segment(
-                        &mut statements,
-                        &mut animation_segment,
-                        ast,
-                        allocator,
-                        &chain.arguments,
-                        context,
-                        has_preceding_attribute,
-                        !ComponentCallStatementEmitter::is_null_animation(&chain.arguments)
-                            || index < last_animation_index,
-                    );
-                    has_preceding_attribute = true;
-                    continue;
-                }
-                animation_segment.push(ComponentCallStatementEmitter::attribute(
-                    ast,
-                    allocator,
-                    &context.runtime_names().component_list_item,
-                    &name,
-                    &chain.arguments,
-                    builder_methods,
-                    context,
-                ));
-                has_preceding_attribute = true;
-            }
-            ComponentCallStatementEmitter::flush_animation_segment(
-                &mut statements,
-                &mut animation_segment,
-                allocator,
-            );
-            return Ok(IterationAstStatement::const_arrow_function(
-                ast,
-                &context.runtime_names().item_creation2,
-                IterationFormalParameters::render_callback(ast, context),
-                statements,
-            ));
-        }
-        for (chain, name) in self.component.chain_expressions.iter().zip(&chain_names) {
-            statements.push(ComponentCallStatementEmitter::attribute(
-                ast,
-                allocator,
-                &context.runtime_names().component_list_item,
-                name,
-                &chain.arguments,
-                builder_methods,
-                context,
-            ));
-        }
+        // `process_component_build.js::processItemComponent` runs the same
+        // attribute lowering as an ordinary ArkUI component before it wraps
+        // ListItem in the lazy deep-render callback.  Feeding the already
+        // expanded attributes through the shared emitter is significant for
+        // global/component @Styles, stateStyles, gestures, and animation
+        // boundaries; iterating the raw chain leaked calls such as
+        // `ListItem.itemStyle()` into the generated module.
+        LeafAttributeStatementEmitter::new(
+            &context.runtime_names().component_list_item,
+            self.component.callee.span(),
+            attributes,
+            builder_methods,
+            context,
+        )
+        .without_reusable_immutable_guard()
+        .push_statements(&mut statements, ast, allocator);
         Ok(IterationAstStatement::const_arrow_function(
             ast,
             &context.runtime_names().item_creation2,

@@ -24,7 +24,7 @@
 //! | 10 | SDK `terser` (release) | `MinifyPlugin` | release only |
 //!
 //! hvigor entries without a Rust equivalent (`commonPlugin`, `invalidCachePlugin`,
-//! `routerMap`, `newOhmUrl` absorbed by resolve, `commonjs` Rolldown built-in,
+//! `routerMap` planning, `newOhmUrl` absorbed by resolve, `commonjs` Rolldown built-in,
 //! `gc` no-op, `waitAsync` no-op, `collectImporters` post-bundle coordinator)
 //! are omitted from this list.
 //!
@@ -43,7 +43,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 
-use arkdown_core::OutputTarget;
+use arkdown_core::{ArkTscTarget, OutputTarget};
 use arkdown_path::{
     lexical_normalize, strip_relative_prefix, AbsPath, ModuleSpecifier, SpecifierKind,
 };
@@ -57,8 +57,8 @@ use crate::plan::BundlePlan;
 use crate::plugins::api_transform::ApiTransformPlugin;
 use crate::plugins::duplicate_check::DuplicateCheckPlugin;
 use crate::plugins::ets_transform::{
-    CheckerMode, ComponentMetadata, EtsTransformPlugin, RolldownEtsTransformPlan,
-    TransformEntrySourceId, TransformSourceSnapshot,
+    CheckerMode, ComponentMetadata, EtsTransformPlugin, NavigationRouteMap,
+    RolldownEtsTransformPlan, TransformEntrySourceId, TransformSourceSnapshot,
 };
 use crate::plugins::har_dedup::HarDedupPlugin;
 use crate::plugins::hvigor_compile::HvigorNativePluginSlot;
@@ -120,6 +120,11 @@ pub struct PluginFactoryInput {
     pub component_metadata: ComponentMetadata,
     /// Source files loaded before Rolldown hooks run for cross-file AST analysis.
     pub transform_sources: TransformSourceSnapshot,
+    /// Router-map metadata indexed before transform hooks begin.
+    ///
+    /// This feeds the SDK-equivalent `NavigationBuilderRegister` emission for
+    /// local global `@Builder` functions.
+    pub navigation_routes: NavigationRouteMap,
     /// Package roots resolved from the current module's declared dependency graph.
     ///
     /// ImportCheck treats these roots as legal package-interface targets even
@@ -138,6 +143,8 @@ pub struct PluginFactoryInput {
     pub source_set_overlays: Vec<(PathBuf, PathBuf)>,
     /// ArkTS checker mode forwarded from package/CLI config.
     pub checker_mode: CheckerMode,
+    /// `arkOptions.tscConfig.targetESVersion` selected for source emission.
+    pub tsc_target: ArkTscTarget,
     /// Whether import path casing must match the filesystem exactly.
     pub case_sensitive_check: bool,
     /// Explicit phase for hvigor-compatible HSP HAR deduplication.
@@ -173,10 +180,12 @@ impl PluginFactoryInput {
             resource_refs: FxHashMap::default(),
             component_metadata: ComponentMetadata::default(),
             transform_sources: TransformSourceSnapshot::default(),
+            navigation_routes: NavigationRouteMap::default(),
             allowed_package_roots: vec![],
             pkg_name_to_pkg_info: FxHashMap::default(),
             source_set_overlays: vec![],
             checker_mode: CheckerMode::Oxc,
+            tsc_target: ArkTscTarget::default(),
             case_sensitive_check: false,
             har_dedup: HarDedupFactoryMode::Disabled,
             disabled_plugins: vec![],
@@ -702,8 +711,10 @@ impl<'a> PluginFactory<'a> {
             self.input.transform_sources,
         )
         .with_form_entry_source_ids(TransformEntrySources::new(&self.plan).form_source_ids())
+        .with_navigation_routes(self.input.navigation_routes)
         .with_checker_mode(self.input.checker_mode)
         .with_should_emit_js(self.plan.should_emit_js)
+        .with_tsc_target(self.input.tsc_target)
         .with_module_analyzer(self.plan.module_analyzer);
         let ets_transform_plan = Arc::new(ets_transform_plan);
         let ets_transform_plugin: SharedPluginable = Arc::new(EtsTransformPlugin::from_plan(

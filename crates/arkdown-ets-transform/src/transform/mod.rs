@@ -7,6 +7,7 @@ mod declaration_emit;
 pub(crate) mod decorator;
 mod entry;
 mod global_rewrite;
+mod navigation;
 pub(crate) mod source_emit;
 mod source_text;
 mod syntax;
@@ -57,12 +58,14 @@ use crate::transform::declaration_emit::{ParamsInterfaceEmitter, TopLevelFunctio
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::entry::{EntryOptions, EntryRegistrationBlock, EntryRegistrationInfo};
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
+use crate::transform::navigation::NavigationBuilderRegistrationBlock;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
 pub(crate) use component_analysis::ModuleExportIndex;
+pub use navigation::{NavigationRoute, NavigationRouteMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckerMode {
@@ -85,6 +88,11 @@ pub struct TransformOptions {
     pub component_metadata: Arc<ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
     pub(crate) module_exports: ModuleExportIndex,
+    /// Source-indexed `routerMap` data supplied by the build coordinator.
+    ///
+    /// The ETS hook only looks this up; profile files are never read during a
+    /// Rolldown transform callback.
+    pub navigation_routes: NavigationRouteMap,
     /// Whether this source was declared in a referenced form profile.
     ///
     /// Mirrors SDK `projectConfig.cardObj[resourceFileName]`.
@@ -108,6 +116,7 @@ impl Default for TransformOptions {
             component_metadata: Arc::new(ComponentMetadata::default()),
             sources: TransformSourceSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
+            navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
             partial_update: true,
             checker_mode: CheckerMode::Oxc,
@@ -302,8 +311,15 @@ impl<'a> ArktsTransformer<'a> {
             &mut custom_component_update_props,
         )
         .collect();
-        let builder_functions =
+        let builder_function_names =
             BuilderFunctionNameCollector::new(&parsed.program, &source.id.id, options).collect();
+        let local_builder_functions = builder_function_names.local;
+        let builder_functions = builder_function_names.all;
+        let navigation_registrations = NavigationBuilderRegistrationBlock::for_source(
+            options.navigation_routes.routes_for_source(&source.id.id),
+            &local_builder_functions,
+            &source.id.id,
+        )?;
         // SDK process_component_build.js::getComponentType only reaches the
         // custom-component branch when the symbol is present in
         // validate_ui_syntax.customComponents. Arkdown's unresolved-package
@@ -343,6 +359,7 @@ impl<'a> ArktsTransformer<'a> {
             &allocator,
             options.component_metadata.runtime_names(),
             &custom_dialog_components,
+            &custom_component_update_props,
             content,
             &hvigor_source_id,
         )
@@ -392,6 +409,7 @@ impl<'a> ArktsTransformer<'a> {
         if concurrent_directives_lowered
             || global_context_calls_lowered
             || custom_dialog_controllers_lowered
+            || !navigation_registrations.is_empty()
             || replacement_plans.iter().any(Option::is_some)
         {
             let entry_registration_statements = entry_registrations.statements(
@@ -417,6 +435,10 @@ impl<'a> ArktsTransformer<'a> {
                 }
             }
             body.extend(entry_registration_statements);
+            body.extend(
+                navigation_registrations
+                    .statements(oxc_ast::AstBuilder::new(&allocator), &allocator),
+            );
             parsed.program.body = body;
             ViewpuProgramFinalizer::new(&allocator, &mut parsed.program).finalize();
 
@@ -844,7 +866,11 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     self.options.bundle_name.as_deref(),
                     self.module_name.as_deref(),
                 )
-                .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
+                .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                // Top-level @Builder functions share the same file-level
+                // @Styles registry as component build methods in
+                // process_component_build.js.
+                .with_styles_methods(&self.global_styles);
                 TopLevelFunctionEmitter::decorated_with_params_statement(
                     self.allocator,
                     exported,

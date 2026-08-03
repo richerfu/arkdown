@@ -47,7 +47,7 @@ use arkdown_sign::SignBackendRunner;
 use super::args::{AbcBackendChoice, BuildArgs, NativeTaskRoot};
 use super::bundle_plan::{
   make_bundle_plan, BundlePackageOutput, BundlePlanPackageInfo, BundleRuntimePackageInfoBuilder,
-  BundleStage, BundleStageInput, BundleStageOutput,
+  BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
 };
 use super::bytecode::{BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompiler};
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
@@ -82,7 +82,7 @@ use crate::progress::Progress;
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 
 use arkdown::plugins::ets_transform::{
-  CheckerMode, ComponentMetadata, ModuleAnalyzerKind, ResourceReference,
+  CheckerMode, ComponentMetadata, ModuleAnalyzerKind, NavigationRouteMap, ResourceReference,
   SystemResourceReferenceLoader, TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
@@ -2132,6 +2132,14 @@ mod compile_context_info_tests {
   use indexmap::IndexMap;
 
   #[test]
+  fn compile_target_uses_hvigor_compatible_sdk_version_over_installed_sdk_api() {
+    let target = HvigorCompileTarget::from_compatible_sdk_version("5.0.0(12)", Some("beta3"), 24);
+
+    assert_eq!(target.api_version(), 12);
+    assert_eq!(target.api_sub_version().as_deref(), Some("beta3"));
+  }
+
+  #[test]
   fn compile_entries_preserve_latest_hvigor_entry_obj_insertion_order() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("entry");
@@ -3329,9 +3337,20 @@ impl BuildCoordinator {
     let pac_schema_path = config
       .sdk_config
       .pac_schema_path_for_runtime(&config.product.runtime_os);
+    // Match ets-loader's `globalModulePaths`: HarmonyOS component SDKs add
+    // declaration roots through `ets/sdkConfig.json`. The same snapshot must
+    // feed both semantic metadata and the transform source store so SDK
+    // `@Builder` functions are classified before ArkUI lowering.
+    let sdk_declaration_roots = config
+      .sdk_config
+      .arkguard_api_dirs(&config.product.runtime_os);
     let component_metadata = {
       let _timer = BuildTimingProbe::global("component_metadata");
-      ComponentMetadata::from_ets_loader_path(&config.sdk_config.ets_loader_path).map_err(|e| {
+      ComponentMetadata::from_ets_loader_path_with_external_declaration_roots(
+        &config.sdk_config.ets_loader_path,
+        &sdk_declaration_roots,
+      )
+      .map_err(|e| {
         anyhow::anyhow!(
           "SDK component metadata load failed from {}: {}",
           config.sdk_config.ets_loader_path.display(),
@@ -4863,9 +4882,6 @@ impl BuildCoordinator {
         .filter(|node| matches!(node.node_type, DependencyNodeType::NativeSo))
         .filter_map(|node| node.package_root.clone())
         .collect();
-      let mut sdk_declaration_roots = config.sdk_config.ets_api_dirs();
-      sdk_declaration_roots.extend(config.sdk_config.ets_kits_dirs());
-      sdk_declaration_roots.extend(config.sdk_config.ets_arkts_dirs());
       let transform_snapshot_start = Instant::now();
       let transform_sources = TransformSourceSnapshotBuilder::new(
         &all_module_roots,
@@ -4892,10 +4908,16 @@ impl BuildCoordinator {
         resource_refs: resource_refs.clone(),
         component_metadata: component_metadata.clone(),
         transform_sources,
+        navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
         allowed_package_roots,
         pkg_name_to_pkg_info,
         source_set_overlays: source_set_overlays.clone(),
         checker_mode,
+        tsc_target: module_build_option
+          .ark_options
+          .as_ref()
+          .map(|options| options.tsc_config.target_es_version)
+          .unwrap_or_default(),
         case_sensitive_check: module_build_option.strict_mode.case_sensitive_check,
         har_dedup: HarDedupFactoryMode::Disabled,
         disabled_plugins: custom_cfg.plugins.disabled.clone(),
@@ -5384,6 +5406,7 @@ impl BuildCoordinator {
       if bundle_out.bypasses_compilation() {
         continue;
       }
+      let compile_target = HvigorCompileTarget::from_loader_json(loader_json, module_config);
       let effective_cache_file = if disable_abc_cache {
         None
       } else {
@@ -5451,9 +5474,10 @@ impl BuildCoordinator {
         compiler: RolldownBytecodeCompiler::new(
           abc_ts2abc_backend_inner,
           config.sdk_config.es2abc_path.clone(),
-          config.sdk_config.compile_api_version,
+          compile_target.api_version(),
           matches!(config.build_mode, BuildMode::Debug),
-        ),
+        )
+        .with_target_api_sub_version(compile_target.api_sub_version()),
         module_source_files: bundle_out.bundle_output.module_source_files.clone(),
         external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
         npm_entries: bundle_out.bundle_output.npm_entries.clone(),
@@ -5550,9 +5574,10 @@ impl BuildCoordinator {
           compiler: RolldownBytecodeCompiler::new(
             abc_ts2abc_backend_inner,
             config.sdk_config.es2abc_path.clone(),
-            config.sdk_config.compile_api_version,
+            compile_target.api_version(),
             matches!(config.build_mode, BuildMode::Debug),
-          ),
+          )
+          .with_target_api_sub_version(compile_target.api_sub_version()),
           module_source_files: widget_out
             .bundle_out
             .bundle_output

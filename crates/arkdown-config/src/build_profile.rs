@@ -206,6 +206,9 @@ impl<'a> HvigorBundleNameSegment<'a> {
 
 /// Parse the numeric API version from a `compatibleSdkVersion` string.
 pub fn parse_api_version(compatible_sdk_version: &str) -> Option<u32> {
+    if let Ok(version) = compatible_sdk_version.trim().parse::<u32>() {
+        return Some(version);
+    }
     // Find the last '(' and ')' pair and parse the contained digits.
     let open = compatible_sdk_version.rfind('(')?;
     let close = compatible_sdk_version.rfind(')')?;
@@ -654,6 +657,15 @@ pub struct RawArkOptions {
     pub ap_path: Option<std::path::PathBuf>,
     #[serde(rename = "hostPGO", default)]
     pub host_pgo: Option<bool>,
+    #[serde(rename = "tscConfig", default)]
+    pub tsc_config: Option<RawArkTscConfig>,
+}
+
+/// Raw `arkOptions.tscConfig` values accepted by the latest ets checker.
+#[derive(Debug, Deserialize, Default)]
+pub struct RawArkTscConfig {
+    #[serde(rename = "targetESVersion", default)]
+    pub target_es_version: Option<String>,
 }
 
 pub(crate) struct BuildOptionDecoder<'a> {
@@ -708,6 +720,14 @@ impl<'a> BuildOptionDecoder<'a> {
             byte_code_har: options.byte_code_har,
             bundled_dependencies: options.bundled_dependencies.unwrap_or(false),
             integrated_hsp: options.integrated_hsp,
+            tsc_config: arkdown_core::ArkTscConfig {
+                target_es_version: arkdown_core::ArkTscTarget::from_hvigor_option(
+                    options
+                        .tsc_config
+                        .as_ref()
+                        .and_then(|config| config.target_es_version.as_deref()),
+                ),
+            },
         });
         let source_option = self
             .raw
@@ -2434,6 +2454,8 @@ mod tests {
     fn test_parse_compatible_sdk_version() {
         assert_eq!(parse_api_version("5.0.0(12)"), Some(12));
         assert_eq!(parse_api_version("4.1.0(9)"), Some(9));
+        assert_eq!(parse_api_version("12"), Some(12));
+        assert_eq!(parse_api_version(" 17 "), Some(17));
         assert_eq!(parse_api_version("5.0.0"), None);
         assert_eq!(parse_api_version(""), None);
         assert_eq!(parse_api_version("(abc)"), None);
@@ -2635,7 +2657,8 @@ mod tests {
                         arkOptions: {
                             aotCompileMode: "partial",
                             apPath: "./modules.ap",
-                            hostPGO: true
+                            hostPGO: true,
+                            tscConfig: { targetESVersion: "ES2017" }
                         }
                     }
                 }],
@@ -2657,6 +2680,13 @@ mod tests {
             Some(std::path::Path::new("./modules.ap"))
         );
         assert_eq!(ark_options.host_pgo, Some(true));
+        assert_eq!(
+            ark_options
+                .tsc_config
+                .as_ref()
+                .and_then(|config| config.target_es_version.as_deref()),
+            Some("ES2017")
+        );
     }
 
     #[test]
