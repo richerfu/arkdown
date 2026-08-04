@@ -1099,11 +1099,11 @@ fn test_write_module_json_package_name_from_oh_package_json5() {
     );
 }
 
-/// DevEco Studio 6.1.1's resource-profile merger materializes empty
-/// `metadata` and `requestPermissions` arrays for a minimal HAR. ProcessProfile
-/// preserves both arrays and their insertion positions in the packaged file.
+/// Latest hvigor `MergeProfile.mergeAllHarModuleOpt` leaves absent HAR
+/// `metadata` and `requestPermissions` fields absent. It only assigns either
+/// field when the resolved dependency merge is non-empty.
 #[test]
-fn test_write_minimal_har_module_json_keeps_hvigor_empty_arrays_and_order() {
+fn test_write_minimal_har_module_json_omits_absent_hvigor_optional_arrays() {
     use arkdown_core::{CompileMode, HapManifest, ModuleConfig, OhosModuleType};
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1154,8 +1154,14 @@ fn test_write_minimal_har_module_json_keeps_hvigor_empty_arrays_and_order() {
     .expect("parse minimal HAR module.json");
     let module = parsed["module"].as_object().expect("module object");
 
-    assert_eq!(module["metadata"], serde_json::json!([]));
-    assert_eq!(module["requestPermissions"], serde_json::json!([]));
+    assert!(
+        module.get("metadata").is_none(),
+        "hvigor MergeProfile does not materialize an absent HAR metadata array"
+    );
+    assert!(
+        module.get("requestPermissions").is_none(),
+        "hvigor MergeProfile does not materialize an absent HAR requestPermissions array"
+    );
     assert_eq!(
         module.keys().map(String::as_str).collect::<Vec<_>>(),
         [
@@ -1163,8 +1169,6 @@ fn test_write_minimal_har_module_json_keeps_hvigor_empty_arrays_and_order() {
             "type",
             "deviceTypes",
             "packageName",
-            "metadata",
-            "requestPermissions",
             "installationFree",
             "virtualMachine",
             "compileMode",

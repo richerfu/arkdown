@@ -18,6 +18,24 @@ pub struct WrittenOutput {
     pub source_maps_path: Option<PathBuf>,
 }
 
+/// One serialized entry in the latest-Hvigor `sourceMaps.map` object.
+///
+/// The bundler keeps this lightweight provenance alongside the emitted map so
+/// the incremental cache can compare source inputs without reading generated
+/// source-map files back from disk.
+#[derive(Debug, Clone)]
+pub struct HvigorSourceMapOutputEntry {
+    pub key: String,
+    pub source_path: Option<String>,
+}
+
+/// Result of serializing an Hvigor-format source-map object.
+#[derive(Debug, Clone)]
+pub struct HvigorSourceMapOutput {
+    pub path: PathBuf,
+    pub entries: Vec<HvigorSourceMapOutputEntry>,
+}
+
 impl WrittenOutput {
     /// Write JavaScript chunks from `chunk_graph` to `output_dir`.
     ///
@@ -56,6 +74,24 @@ impl WrittenOutput {
     where
         I: IntoIterator<Item = (&'a str, &'a str, bool)>,
     {
+        Ok(Self::write_hvigor_source_maps_with_metadata_from_raw(
+            output_dir,
+            source_maps,
+            source_map_opts,
+        )?
+        .map(|output| output.path))
+    }
+
+    /// Write an Hvigor-format source-map object and retain the serialized
+    /// entry-to-source relation needed by the native incremental cache layer.
+    pub fn write_hvigor_source_maps_with_metadata_from_raw<'a, I>(
+        output_dir: &Path,
+        source_maps: I,
+        source_map_opts: &SourceMapOptions,
+    ) -> Result<Option<HvigorSourceMapOutput>, ArkdownError>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str, bool)>,
+    {
         let source_maps = source_maps
             .into_iter()
             .map(|(chunk_name, raw_map, emits_javascript)| ChunkSourceMap {
@@ -70,8 +106,8 @@ impl WrittenOutput {
         }
         fs_err::create_dir_all(output_dir).map_err(ArkdownError::Io)?;
         let path = Self::source_maps_path(output_dir);
-        Self::write_hvigor_source_maps(&path, &source_maps, source_map_opts)?;
-        Ok(Some(path))
+        let entries = Self::write_hvigor_source_maps(&path, &source_maps, source_map_opts)?;
+        Ok(Some(HvigorSourceMapOutput { path, entries }))
     }
 }
 
@@ -292,12 +328,13 @@ impl WrittenOutput {
         path: &Path,
         source_maps: &[ChunkSourceMap<'_>],
         opts: &SourceMapOptions,
-    ) -> Result<(), ArkdownError> {
+    ) -> Result<Vec<HvigorSourceMapOutputEntry>, ArkdownError> {
         let file = fs_err::File::create(path).map_err(ArkdownError::Io)?;
         let mut writer = BufWriter::with_capacity(1024 * 1024, file);
         let hvigor_opts = HvigorSourceMapOptions::from(opts);
         writer.write_all(b"{").map_err(ArkdownError::Io)?;
         let mut first = true;
+        let mut output_entries = Vec::new();
         for source_map in source_maps {
             for entry in Self::hvigor_source_map_entries(source_map, opts)? {
                 if first {
@@ -308,6 +345,7 @@ impl WrittenOutput {
                 }
                 writer.write_all(b"  ").map_err(ArkdownError::Io)?;
                 let (key, value) = hvigor_opts.entry_json(&entry);
+                let source_path = Self::source_map_output_source_path(&value);
                 serde_json::to_writer(&mut writer, &key).map_err(|e| {
                     ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}"))
                 })?;
@@ -316,13 +354,24 @@ impl WrittenOutput {
                 serde_json::to_writer_pretty(&mut value_writer, &value).map_err(|e| {
                     ArkdownError::Bundler(format!("failed to serialize sourceMaps.map: {e}"))
                 })?;
+                output_entries.push(HvigorSourceMapOutputEntry { key, source_path });
             }
         }
         if !first {
             writer.write_all(b"\n").map_err(ArkdownError::Io)?;
         }
         writer.write_all(b"}").map_err(ArkdownError::Io)?;
-        writer.flush().map_err(ArkdownError::Io)
+        writer.flush().map_err(ArkdownError::Io)?;
+        Ok(output_entries)
+    }
+
+    fn source_map_output_source_path(value: &serde_json::Value) -> Option<String> {
+        value
+            .get("sources")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|sources| sources.first())
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
     }
 
     fn hvigor_source_map_entries(
@@ -577,13 +626,27 @@ impl HvigorSourceDescriptor {
         if emits_javascript {
             source_file.set_extension("js");
         }
+        // `SourceMapGenerator` keeps the source path project-relative even
+        // when the map key is scoped by a different package identity. A
+        // ByteCode HAR is the observable case: the key belongs to its
+        // `oh-package.json5#name`, while the original `.ets` still lives below
+        // the consuming module directory (for example `entry/src/main/...`).
+        // Do not reconstruct this from the package scope; retain the actual
+        // project-relative source path that Rollup supplied.
+        let source_map_source_file = source_path
+            .strip_prefix(project_root)
+            .ok()
+            .map(ArtifactPathSerializer::rel_to_slash);
         Ok(Self {
             source_file: ArtifactPathSerializer::rel_to_slash(&source_file),
-            source_map_source_file: None,
+            source_map_source_file,
             package_name: None,
             package_version: None,
             key_path: None,
-            file: None,
+            file: source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string),
             include_source_root: true,
         })
     }
@@ -1124,6 +1187,53 @@ mod tests {
                 .is_some(),
             "{value}"
         );
+
+        let _ = fs_err::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn bytecode_har_source_map_keeps_consuming_module_source_path() {
+        // Latest ets-loader `SourceMapGenerator` scopes the record by the
+        // ByteCode HAR package but leaves `sources` relative to the consuming
+        // project root. See `generate_sourcemap.js::getIntermediateModuleId`.
+        let output_dir = temp_output_dir("bytecode-har-source-map");
+        let source_map = serde_json::json!({
+            "version": 3,
+            "file": "Index.ets",
+            "sources": ["/project/entry/src/main/ets/Index.ets"],
+            "names": [],
+            "mappings": "AAAA"
+        })
+        .to_string();
+        let chunk_graph = graph(vec![ArkChunk {
+            name: "Index".to_string(),
+            code: "export const bytecodeHar = true;\n".to_string(),
+            source_map: Some(source_map),
+            ..ArkChunk::default()
+        }]);
+        let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/entry"),
+            module_name: "bytecode-har".to_string(),
+            package_name: "bytecode-har".to_string(),
+            version: "1.0.0".to_string(),
+            chunk_source_files: FxHashMap::default(),
+            package_versions: FxHashMap::default(),
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::default(),
+        };
+
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
+            .expect("write ByteCode HAR source map");
+        let source_maps = written.source_maps_path.expect("sourceMaps.map");
+        let value: serde_json::Value = serde_json::from_str(
+            &fs_err::read_to_string(source_maps).expect("read sourceMaps.map"),
+        )
+        .expect("parse sourceMaps.map");
+        let key = "bytecode-har|bytecode-har|1.0.0|src/main/ets/Index.ts";
+
+        assert_eq!(value[key]["sources"][0], "entry/src/main/ets/Index.ets");
+        assert_eq!(value[key]["entry-package-info"], "bytecode-har|1.0.0");
 
         let _ = fs_err::remove_dir_all(output_dir);
     }

@@ -496,6 +496,7 @@ impl BundleStageOutput {
         npm_entries: vec![],
         modules_abc_path,
         source_maps_path: None,
+        source_map_input_fingerprints: vec![],
       },
       state: BundleStageState::CacheHit,
     }

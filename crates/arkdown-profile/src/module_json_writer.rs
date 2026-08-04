@@ -734,17 +734,6 @@ impl ModuleJsonWriter {
                 );
             }
         }
-        // The API 17 resource-profile merger materializes these two empty
-        // arrays for HAR modules even when module.json5 omits them. They are
-        // retained by ProcessProfile and packaged verbatim.
-        if matches!(manifest.module_type, arkdown_core::OhosModuleType::Har)
-            && !obj.contains_key("requestPermissions")
-        {
-            obj.insert(
-                "requestPermissions".into(),
-                serde_json::Value::Array(Vec::new()),
-            );
-        }
         // definePermissions: preserved verbatim from module.json5.
         if let Some(defs) = raw_module5.and_then(|v| v.get("definePermissions")) {
             if defs.as_array().map_or(false, |a| !a.is_empty()) {
@@ -836,11 +825,6 @@ impl ModuleJsonWriter {
                     serde_json::Value::Array(metadata.clone()),
                 );
             }
-        }
-        if matches!(manifest.module_type, arkdown_core::OhosModuleType::Har)
-            && !obj.contains_key("metadata")
-        {
-            obj.insert("metadata".into(), serde_json::Value::Array(Vec::new()));
         }
         serde_json::Value::Object(obj)
     }

@@ -1,0 +1,1336 @@
+//! SDK-backed ArkTS semantic checking.
+//!
+//! The installed ets-loader owns TypeScript semantic diagnostics and the
+//! ArkTS linter.  Rust owns the stage plan, process lifecycle, path
+//! serialization, and deterministic diagnostic aggregation; the adjacent CJS
+//! file only loads `compile_plugin.js` and invokes `etsStandaloneChecker`.
+//!
+//! Upstream evidence:
+//! - `hvigor-arkts-compose/load-sdk-functions.js::runEtsStandaloneChecker`
+//! - `ets-loader/lib/ets_checker.js::etsStandaloneChecker`
+//! - `hvigor-ohos-plugin/tasks/worker/util.js::generateLoaderEnv`
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::{Context, Result};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+use arkdown_config::build_profile::parse_api_version;
+use arkdown_core::{ArkdownConfig, BuildMode, BuildOption, ModuleConfig, OhosModuleType};
+use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
+use arkdown_profile::LoaderJson;
+use arkdown_session::{BuildSession, ModuleCompileContext};
+
+static CHECKER_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// All filesystem paths supplied to the SDK checker for one module.
+///
+/// Build callers pass the same generated paths used by CompileArkTS.  The
+/// standalone `check` command uses an isolated temporary workspace for files
+/// the SDK writes, while retaining the original module manifest/source roots.
+#[derive(Debug, Clone)]
+pub(crate) struct SdkEtsCheckerPaths {
+  pub(crate) ace_profile_path: PathBuf,
+  pub(crate) ace_module_json_path: PathBuf,
+  pub(crate) app_resource_path: PathBuf,
+  pub(crate) raw_file_resource_path: PathBuf,
+  pub(crate) ace_module_root: PathBuf,
+  pub(crate) ace_super_visual_path: PathBuf,
+  pub(crate) ace_build_json_path: PathBuf,
+  pub(crate) cache_path: PathBuf,
+  pub(crate) ace_module_build: PathBuf,
+  pub(crate) generated_profile_path: PathBuf,
+  pub(crate) resource_table_typescript_path: PathBuf,
+  workspace: PathBuf,
+}
+
+impl SdkEtsCheckerPaths {
+  /// Construct an isolated no-build-output workspace for `arkdown check`.
+  pub(crate) fn standalone(module_root: &Path, module_json_path: PathBuf) -> Self {
+    let workspace = Self::next_workspace(&std::env::temp_dir());
+    let source_main = module_root.join("src").join("main");
+    Self {
+      ace_profile_path: workspace.join("resources").join("base").join("profile"),
+      ace_module_json_path: module_json_path,
+      app_resource_path: workspace.join("ResourceTable.txt"),
+      raw_file_resource_path: workspace.join("resources").join("rawfile"),
+      ace_module_root: source_main.join("ets"),
+      ace_super_visual_path: source_main.join("supervisual"),
+      ace_build_json_path: workspace.join("loader.json"),
+      cache_path: workspace.join("cache"),
+      ace_module_build: workspace.join("loader_out").join("ets"),
+      generated_profile_path: workspace.join("generated").join("profile").join("default"),
+      resource_table_typescript_path: workspace.join("generated").join("ResourceTable.ts"),
+      workspace,
+    }
+  }
+
+  /// Construct a transport workspace below the existing CompileArkTS cache.
+  ///
+  /// It is intentionally distinct from `cache_path`: the SDK owns cache files
+  /// at that path, while Arkdown owns and removes only the uniquely named
+  /// bridge/request/response directory.
+  pub(crate) fn build(
+    ace_profile_path: PathBuf,
+    ace_module_json_path: PathBuf,
+    app_resource_path: PathBuf,
+    raw_file_resource_path: PathBuf,
+    ace_module_root: PathBuf,
+    ace_super_visual_path: PathBuf,
+    ace_build_json_path: PathBuf,
+    cache_path: PathBuf,
+    ace_module_build: PathBuf,
+    generated_profile_path: PathBuf,
+    resource_table_typescript_path: PathBuf,
+  ) -> Self {
+    let workspace = Self::next_workspace(&cache_path);
+    Self {
+      ace_profile_path,
+      ace_module_json_path,
+      app_resource_path,
+      raw_file_resource_path,
+      ace_module_root,
+      ace_super_visual_path,
+      ace_build_json_path,
+      cache_path,
+      ace_module_build,
+      generated_profile_path,
+      resource_table_typescript_path,
+      workspace,
+    }
+  }
+
+  fn next_workspace(parent: &Path) -> PathBuf {
+    let sequence = CHECKER_WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+      "arkdown-sdk-ets-checker-{}-{sequence}",
+      std::process::id()
+    ))
+  }
+}
+
+/// Typed inputs collected by the Rust build/check planners before invoking the
+/// SDK.  No filesystem or configuration reads occur in the Node bridge.
+pub(crate) struct SdkEtsCheckerInput<'a> {
+  pub(crate) config: &'a ArkdownConfig,
+  pub(crate) session: &'a BuildSession,
+  pub(crate) module: &'a ModuleConfig,
+  pub(crate) module_context: &'a ModuleCompileContext,
+  pub(crate) module_build_option: &'a BuildOption,
+  pub(crate) loader_json: Option<&'a LoaderJson>,
+  pub(crate) target_name: &'a str,
+  pub(crate) node_executable: PathBuf,
+  pub(crate) paths: SdkEtsCheckerPaths,
+  pub(crate) entries: Vec<PathBuf>,
+  pub(crate) coverage_enabled: bool,
+  pub(crate) debug_line: bool,
+  pub(crate) byte_code_har_integrated_optimization: bool,
+}
+
+/// Collect the same root source set that latest `rollup-plugin-ets-checker`
+/// passes to `serviceChecker`: CompileArkTS entries plus `oh-exports` code
+/// roots. `LoaderJson::compile_entry` is intentionally retained in its
+/// src/main-relative form for Arkdown's bundler, so this owner resolves it
+/// once for the SDK service.
+pub(crate) struct SdkEtsCheckerEntryCollector<'a> {
+  loader_json: &'a LoaderJson,
+}
+
+impl<'a> SdkEtsCheckerEntryCollector<'a> {
+  pub(crate) fn new(loader_json: &'a LoaderJson) -> Self {
+    Self { loader_json }
+  }
+
+  pub(crate) fn collect(&self) -> Vec<PathBuf> {
+    let source_main = PathBuf::from(&self.loader_json.module_root_path);
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    for entry in self
+      .loader_json
+      .hvigor_compile_entry
+      .iter()
+      .chain(self.loader_json.compile_entry.iter())
+      .chain(self.loader_json.oh_exports.iter())
+    {
+      let path = PathBuf::from(entry);
+      let path = if path.is_absolute() {
+        path
+      } else {
+        source_main.join(path)
+      };
+      let path = lexical_normalize(&path);
+      if seen.insert(path.clone()) {
+        entries.push(path);
+      }
+    }
+    entries
+  }
+}
+
+/// Rust-owned plan builder for an installed SDK semantic-check invocation.
+pub(crate) struct SdkEtsCheckerPlanBuilder<'a> {
+  input: SdkEtsCheckerInput<'a>,
+}
+
+impl<'a> SdkEtsCheckerPlanBuilder<'a> {
+  pub(crate) fn new(input: SdkEtsCheckerInput<'a>) -> Self {
+    Self { input }
+  }
+
+  pub(crate) fn build(self) -> Result<SdkEtsCheckerPlan> {
+    let ets_loader_path = self.path(&self.input.config.sdk_config.ets_loader_path)?;
+    let entries = self.entries()?;
+    let project_config = self.project_config()?;
+    let loader_env = self.loader_env()?;
+    let working_directory = self.input.config.project_root.clone();
+
+    let request = SdkEtsCheckerRequest {
+      ets_loader_path,
+      working_directory: self.path(&working_directory)?,
+      entries,
+      project_config,
+      loader_env,
+    };
+    Ok(SdkEtsCheckerPlan {
+      module_name: self.input.module.name.clone(),
+      node_executable: self.input.node_executable,
+      workspace: self.input.paths.workspace.clone(),
+      checker_cache_path: self.input.paths.cache_path.clone(),
+      checker_output_path: self.input.paths.ace_module_build.clone(),
+      request,
+    })
+  }
+
+  fn entries(&self) -> Result<BTreeMap<String, String>> {
+    let mut entries = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for (index, path) in self.input.entries.iter().enumerate() {
+      let path = self.path(path)?;
+      if seen.insert(path.clone()) {
+        entries.insert(format!("entry_{index:05}"), path);
+      }
+    }
+    Ok(entries)
+  }
+
+  fn project_config(&self) -> Result<SdkEtsCheckerProjectConfig> {
+    let module_package = self
+      .input
+      .module_context
+      .module
+      .package
+      .as_ref()
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "ARKDOWN_ETS_CHECKER_PACKAGE_METADATA: module '{}' requires oh-package.json5 metadata",
+          self.input.module.name
+        )
+      })?;
+    let component_metadata = self
+      .input
+      .session
+      .sdk
+      .compile_plugin()
+      .component_metadata()
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "ARKDOWN_ETS_CHECKER_SDK_METADATA: cannot read ETS component version from {}",
+          self.input.config.sdk_config.ets_loader_path.display()
+        )
+      })?;
+    let compatible_sdk_version =
+      parse_api_version(&self.input.config.product.compatible_sdk_version)
+        .unwrap_or(self.input.config.sdk_config.compile_api_version);
+    let module_type = self.input.module.module_type.to_string();
+    let package_manager_type = self
+      .input
+      .loader_json
+      .map(|loader| loader.package_manager_type.clone())
+      .unwrap_or_else(|| "ohpm".to_string());
+    let build_mode = match self.input.config.build_mode {
+      BuildMode::Debug => "Debug",
+      BuildMode::Release => "Release",
+    }
+    .to_string();
+    let project_path = self.input.paths.ace_module_root.clone();
+    let module_root = self.input.module_context.module.root.clone();
+    let resource_table_hash = self.input.session.fingerprints.resources.to_hex();
+    let ark_options = self.input.module_build_option.ark_options.as_ref();
+    let is_bytecode_har = matches!(
+      self.input.module_build_option.har_artifact_type,
+      arkdown_core::HarArtifactType::Bytecode
+    );
+    let mut extras = BTreeMap::new();
+    extras.insert("ohPackagePathMap".to_string(), self.oh_package_path_map()?);
+    extras.insert(
+      "dependencyAliasMap".to_string(),
+      self.dependency_alias_map(),
+    );
+    extras.insert("permission".to_string(), Value::Object(Map::new()));
+    extras.insert("useGetCurrentBundleName".to_string(), Value::Bool(false));
+    // `etsStandaloneChecker()` does not call `main.js::initProjectConfig()`.
+    // Hvigor has already run `initConfig()` before its lint worker invokes it,
+    // so this flag is present in the real projectConfig.  Without it the SDK
+    // TypeScript fork parses SDK `@interface` declarations as ordinary TS and
+    // reports false semantic errors (for example `@arkts.lang.d.ets`).
+    // Upstream: ets-loader/main.js::initProjectConfig().
+    extras.insert("allowEtsAnnotations".to_string(), Value::Bool(true));
+    extras.insert("projectArkOption".to_string(), Value::Object(Map::new()));
+    extras.insert("sourceMapDir".to_string(), Value::String(String::new()));
+    extras.insert("branchElimination".to_string(), Value::Bool(false));
+    extras.insert("tsImportSendable".to_string(), Value::Bool(false));
+    extras.insert("resolveConflictMode".to_string(), Value::Bool(true));
+    extras.insert("depName2RootPath".to_string(), self.dependency_root_map()?);
+    extras.insert("depName2DepInfo".to_string(), Value::Object(Map::new()));
+    extras.insert("depName2OhExports".to_string(), Value::Object(Map::new()));
+    extras.insert(
+      "rootPathSet".to_string(),
+      Value::Array(vec![Value::String(
+        self.path(&self.input.config.project_root)?,
+      )]),
+    );
+    extras.insert("useNativeResolver".to_string(), Value::Bool(true));
+    extras.insert("shouldEmitJs".to_string(), Value::Bool(true));
+    extras.insert("useTscResolve".to_string(), Value::Bool(false));
+    extras.insert("singleFileEmit".to_string(), Value::Bool(false));
+    extras.insert("userProjectConfig".to_string(), self.user_project_config());
+    extras.insert(
+      "executionMode".to_string(),
+      Value::String("memory".to_string()),
+    );
+    extras.insert(
+      "arkCompileCachePath".to_string(),
+      Value::String(
+        self.path(
+          &self
+            .input
+            .paths
+            .cache_path
+            .parent()
+            .unwrap_or(&self.input.paths.cache_path),
+        )?,
+      ),
+    );
+    extras.insert(
+      "isHarDeduplicateEnabled".to_string(),
+      Value::Bool(self.input.module_build_option.deduplicate_har),
+    );
+    extras.insert("autoLazyImport".to_string(), Value::Bool(false));
+    extras.insert("allowEmptyBundleName".to_string(), Value::Bool(false));
+    extras.insert(
+      "reExportCheckMode".to_string(),
+      Value::String("noCheck".to_string()),
+    );
+    extras.insert("usePathPlaceholder".to_string(), Value::Bool(false));
+    extras.insert("writeRollupCache".to_string(), Value::Bool(true));
+    extras.insert("isExpandImportEnabled".to_string(), Value::Bool(false));
+    extras.insert(
+      "expandImportExclude".to_string(),
+      Value::String(String::new()),
+    );
+    extras.insert(
+      "lazyImportExclude".to_string(),
+      Value::String(String::new()),
+    );
+    extras.insert(
+      "lazyImportInclude".to_string(),
+      Value::String(String::new()),
+    );
+    extras.insert("ignoreCrossplatformCheck".to_string(), Value::Bool(false));
+    extras.insert("skipOhModulesLint".to_string(), Value::Bool(false));
+    extras.insert("enableStrictCheckOHModule".to_string(), Value::Bool(false));
+    extras.insert(
+      "disableSendableCheckRules".to_string(),
+      Value::Array(Vec::new()),
+    );
+    extras.insert(
+      "useDeclarationFileSignature".to_string(),
+      Value::Bool(false),
+    );
+    extras.insert(
+      "integratedHsp".to_string(),
+      Value::Bool(
+        ark_options
+          .and_then(|options| options.integrated_hsp)
+          .unwrap_or(false),
+      ),
+    );
+    extras.insert(
+      "isPreloadSoEnabled".to_string(),
+      Value::Bool(self.input.module_build_option.preload_system_so),
+    );
+    extras.insert("strictMode".to_string(), self.strict_mode());
+    extras.insert(
+      "useNormalizedOHMUrl".to_string(),
+      Value::Bool(
+        self
+          .input
+          .module_build_option
+          .strict_mode
+          .use_normalized_ohm_url,
+      ),
+    );
+    extras.insert(
+      "caseSensitiveCheck".to_string(),
+      Value::Bool(
+        self
+          .input
+          .module_build_option
+          .strict_mode
+          .case_sensitive_check,
+      ),
+    );
+    extras.insert("strictCheckerOnly".to_string(), Value::Bool(false));
+    extras.insert(
+      "aceModuleJsonPath".to_string(),
+      Value::String(self.path(&self.input.paths.ace_module_json_path)?),
+    );
+    extras.insert(
+      "appResource".to_string(),
+      Value::String(self.path(&self.input.paths.app_resource_path)?),
+    );
+    extras.insert(
+      "rawFileResource".to_string(),
+      Value::String(self.path(&self.input.paths.raw_file_resource_path)?),
+    );
+    extras.insert(
+      "resourceTableHash".to_string(),
+      Value::String(resource_table_hash),
+    );
+    extras.insert(
+      "runtimeOS".to_string(),
+      Value::String(self.input.config.product.runtime_os.clone()),
+    );
+    extras.insert(
+      "sdkInfo".to_string(),
+      Value::String(format!(
+        "{}:{}:{}:{}",
+        self
+          .input
+          .config
+          .product
+          .runtime_os
+          .eq_ignore_ascii_case("OpenHarmony"),
+        self.input.config.sdk_config.compile_api_version,
+        component_metadata.version,
+        component_metadata.release_type
+      )),
+    );
+    extras.insert(
+      "aceModuleRoot".to_string(),
+      Value::String(self.path(&self.input.paths.ace_module_root)?),
+    );
+    extras.insert(
+      "projectPath".to_string(),
+      Value::String(self.path(&project_path)?),
+    );
+    extras.insert(
+      "compileMode".to_string(),
+      Value::String(self.compile_mode()),
+    );
+    extras.insert(
+      "aceSuperVisualPath".to_string(),
+      Value::String(self.path(&self.input.paths.ace_super_visual_path)?),
+    );
+    extras.insert(
+      "aceBuildJson".to_string(),
+      Value::String(self.path(&self.input.paths.ace_build_json_path)?),
+    );
+    extras.insert(
+      "cachePath".to_string(),
+      Value::String(self.path(&self.input.paths.cache_path)?),
+    );
+    extras.insert(
+      "aceModuleBuild".to_string(),
+      Value::String(self.path(&self.input.paths.ace_module_build)?),
+    );
+    extras.insert(
+      "supportChunks".to_string(),
+      Value::Bool(
+        self
+          .input
+          .loader_json
+          .map(|loader| loader.support_chunks)
+          .unwrap_or_else(|| ark_options.is_some_and(|options| options.support_chunks)),
+      ),
+    );
+    extras.insert(
+      "shouldCollectDirectImportees".to_string(),
+      Value::Bool(false),
+    );
+    extras.insert(
+      "isByteCodeHarOptimize".to_string(),
+      Value::Bool(self.input.byte_code_har_integrated_optimization),
+    );
+    extras.insert(
+      "resourceTableTs".to_string(),
+      Value::String(self.path(&self.input.paths.resource_table_typescript_path)?),
+    );
+    extras.insert(
+      "moduleMetaInfoFiles".to_string(),
+      self.module_meta_info_files()?,
+    );
+    extras.insert(
+      "pkgNameToPkgBriefInfo".to_string(),
+      self.package_brief_info()?,
+    );
+    extras.insert("projectModel".to_string(), self.project_model()?);
+    extras.insert(
+      "pkgJsonFileHash".to_string(),
+      Value::String(self.input.session.fingerprints.package_graph.to_hex()),
+    );
+    extras.insert("allModulePaths".to_string(), self.all_module_paths()?);
+    extras.insert("routerMap".to_string(), Value::Object(Map::new()));
+    extras.insert("compileBlockPkg".to_string(), Value::Array(Vec::new()));
+    extras.insert(
+      "mockParams".to_string(),
+      json!({
+        "decorator": "@MockSetup",
+        "packageName": "@ohos/hamock",
+        "etsSourceRootPath": "src/main/ets",
+        "mockConfigKey2ModuleInfo": {},
+        "source2ModuleIdMap": {},
+      }),
+    );
+    extras.insert("copyCodeResourceEnable".to_string(), Value::Bool(false));
+    extras.insert(
+      "copyCodeResourceExcludes".to_string(),
+      Value::Array(Vec::new()),
+    );
+    extras.insert("uiTransformOptimization".to_string(), Value::Bool(false));
+    extras.insert("sdkPath".to_string(), Value::String(self.sdk_root_path()?));
+    extras.insert(
+      "needPreloadSoFileSet".to_string(),
+      Value::Object(Map::new()),
+    );
+    extras.insert(
+      "preloadSoFilePath".to_string(),
+      Value::String(self.path(&self.input.paths.workspace.join("preload.json"))?),
+    );
+    extras.insert("useSourceHash".to_string(), Value::Bool(false));
+    extras.insert("localModuleParamMap".to_string(), Value::Object(Map::new()));
+    extras.insert("otherPaths".to_string(), self.other_paths(&project_path)?);
+    extras.insert(
+      "globalModulePaths".to_string(),
+      Value::Array(
+        self
+          .input
+          .config
+          .sdk_config
+          .arkguard_api_dirs(&self.input.config.product.runtime_os)
+          .iter()
+          .map(|path| self.path(path).map(Value::String))
+          .collect::<Result<Vec<_>>>()?,
+      ),
+    );
+    extras.insert(
+      "resolveModulePaths".to_string(),
+      self.resolve_module_paths()?,
+    );
+    extras.insert(
+      "compileHar".to_string(),
+      Value::Bool(matches!(self.input.module.module_type, OhosModuleType::Har)),
+    );
+    extras.insert(
+      "compileShared".to_string(),
+      Value::Bool(matches!(
+        self.input.module.module_type,
+        OhosModuleType::Shared
+      )),
+    );
+    extras.insert("byteCodeHar".to_string(), Value::Bool(is_bytecode_har));
+    extras.insert("useTsHar".to_string(), Value::Bool(false));
+    extras.insert("entryObj".to_string(), self.entry_obj()?);
+
+    Ok(SdkEtsCheckerProjectConfig {
+      module_type,
+      perf: 0,
+      target_name: format!(".{0}", self.input.target_name),
+      package_manager_type,
+      local_properties_path: self.path(&self.input.config.project_root.join("local.properties"))?,
+      is_preview: false,
+      is_ohos_test: false,
+      is_local_test: false,
+      build_mode,
+      watch_mode: "false".to_string(),
+      ace_profile_path: self.path(&self.input.paths.ace_profile_path)?,
+      ets_loader_path: self.path(&self.input.config.sdk_config.ets_loader_path)?,
+      module_path: self.path(&module_root)?,
+      test_framework_par: Value::Object(Map::new()),
+      need_coverage_insert: self.input.coverage_enabled,
+      debug_line: self.input.debug_line,
+      project_top_dir: self.path(&self.input.config.project_root)?,
+      compile_sdk_version: self.input.config.sdk_config.compile_api_version,
+      compatible_sdk_version,
+      origin_compatible_sdk_version: self.input.config.product.compatible_sdk_version.clone(),
+      compatible_sdk_version_stage: self
+        .input
+        .config
+        .product
+        .compatible_sdk_version_stage
+        .clone(),
+      bundle_name: self.input.config.product.bundle_name.clone(),
+      ets_loader_version: component_metadata.version.clone(),
+      ets_loader_release_type: component_metadata.release_type.clone(),
+      aot_compile_mode: self
+        .input
+        .module_build_option
+        .aot_compile_mode
+        .clone()
+        .unwrap_or_else(|| "type".to_string()),
+      ap_path: self
+        .input
+        .module_build_option
+        .ap_path
+        .as_ref()
+        .map(|path| self.path(path))
+        .transpose()?
+        .unwrap_or_default(),
+      entry_module_name: self.input.module.name.clone(),
+      entry_module_version: module_package.version.clone(),
+      entry_package_name: module_package.name.clone(),
+      all_module_name_hash: self.all_module_name_hash()?,
+      external_api_paths: self.external_api_paths()?,
+      compiler_types: self
+        .input
+        .loader_json
+        .map(|loader| loader.compiler_types.clone())
+        .unwrap_or_else(|| {
+          ark_options
+            .map(|options| options.types.clone())
+            .unwrap_or_default()
+        }),
+      is_crossplatform: false,
+      build_generated_profile_path: self.path(&self.input.paths.generated_profile_path)?,
+      bundle_type: self.input.session.project.bundle_type.clone(),
+      api_version: self.input.config.sdk_config.compile_api_version,
+      need_complete_sources_map: false,
+      is_fa_mode: false,
+      build_dir: self.path(&module_root.join("build"))?,
+      device_types: self.device_types(),
+      extras,
+    })
+  }
+
+  fn loader_env(&self) -> Result<SdkEtsCheckerLoaderEnvironment> {
+    let external_api_paths = self.external_api_paths()?;
+    let external_api_path_separator = if cfg!(windows) { ";" } else { ":" };
+    Ok(SdkEtsCheckerLoaderEnvironment {
+      runtime_os: self.input.config.product.runtime_os.clone(),
+      sdk_info: self.sdk_info()?,
+      watch_mode: "false".to_string(),
+      is_preview: None,
+      ace_manifest_path: None,
+      app_resource: self.path(&self.input.paths.app_resource_path)?,
+      raw_file_resource: self.path(&self.input.paths.raw_file_resource_path)?,
+      ace_module_build: self.path(&self.input.paths.ace_module_build)?,
+      ace_module_root: self.path(&self.input.paths.ace_module_root)?,
+      cache_path: self.path(&self.input.paths.cache_path)?,
+      ace_profile_path: self.path(&self.input.paths.ace_profile_path)?,
+      ace_module_json_path: self.path(&self.input.paths.ace_module_json_path)?,
+      ace_super_visual_path: self.path(&self.input.paths.ace_super_visual_path)?,
+      ace_build_json: self.path(&self.input.paths.ace_build_json_path)?,
+      compile_tool: "rollup".to_string(),
+      ability_type: String::new(),
+      ace_compile_mode: self.compile_mode(),
+      external_api_paths: external_api_paths.join(external_api_path_separator),
+      enable_debug_line: self.input.debug_line,
+      is_fa_mode: None,
+      is_first_build: "true".to_string(),
+      widget_compile: "false".to_string(),
+    })
+  }
+
+  fn sdk_info(&self) -> Result<String> {
+    let component_metadata = self
+      .input
+      .session
+      .sdk
+      .compile_plugin()
+      .component_metadata()
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "ARKDOWN_ETS_CHECKER_SDK_METADATA: cannot read ETS component metadata from {}",
+          self.input.config.sdk_config.ets_loader_path.display()
+        )
+      })?;
+    Ok(format!(
+      "{}:{}:{}:{}",
+      self
+        .input
+        .config
+        .product
+        .runtime_os
+        .eq_ignore_ascii_case("OpenHarmony"),
+      self.input.config.sdk_config.compile_api_version,
+      component_metadata.version,
+      component_metadata.release_type
+    ))
+  }
+
+  fn compile_mode(&self) -> String {
+    self
+      .input
+      .loader_json
+      .map(|loader| loader.compile_mode.clone())
+      .unwrap_or_else(|| "esmodule".to_string())
+  }
+
+  fn device_types(&self) -> Vec<String> {
+    let types = self
+      .input
+      .module_context
+      .module
+      .module_json
+      .as_ref()
+      .map(|module| module.module.device_types.clone())
+      .unwrap_or_default();
+    if types.is_empty() {
+      vec!["phone".to_string()]
+    } else {
+      types
+    }
+  }
+
+  fn user_project_config(&self) -> Value {
+    let ark_options = self.input.module_build_option.ark_options.as_ref();
+    json!({
+      "autoLazyImport": false,
+      "allowEmptyBundleName": false,
+      "reExportCheckMode": "noCheck",
+      "executionMode": "memory",
+      "usePathPlaceholder": false,
+      "writeRollupCache": true,
+      "isExpandImportEnabled": false,
+      "expandImportExclude": "",
+      "lazyImportExclude": "",
+      "lazyImportInclude": "",
+      "ignoreCrossplatformCheck": false,
+      "isHarDeduplicateEnabled": self.input.module_build_option.deduplicate_har,
+      "skipOhModulesLint": false,
+      "enableStrictCheckOHModule": false,
+      "disableSendableCheckRules": [],
+      "useDeclarationFileSignature": false,
+      "integratedHsp": ark_options.and_then(|options| options.integrated_hsp).unwrap_or(false),
+      "isPreloadSoEnabled": self.input.module_build_option.preload_system_so,
+    })
+  }
+
+  fn strict_mode(&self) -> Value {
+    json!({
+      "caseSensitiveCheck": self.input.module_build_option.strict_mode.case_sensitive_check,
+      "useNormalizedOHMUrl": self.input.module_build_option.strict_mode.use_normalized_ohm_url,
+    })
+  }
+
+  fn oh_package_path_map(&self) -> Result<Value> {
+    let mut output = Map::new();
+    for node in self.input.module_context.deps.nodes.values() {
+      let Some(root) = node.package_root.as_ref() else {
+        continue;
+      };
+      output.insert(node.package_name.clone(), Value::String(self.path(root)?));
+      if node.alias != node.package_name {
+        output.insert(node.alias.clone(), Value::String(self.path(root)?));
+      }
+    }
+    Ok(Value::Object(output))
+  }
+
+  fn dependency_alias_map(&self) -> Value {
+    let mut output = Map::new();
+    for node in self.input.module_context.deps.nodes.values() {
+      if node.alias != node.package_name {
+        output.insert(node.alias.clone(), Value::String(node.package_name.clone()));
+      }
+    }
+    Value::Object(output)
+  }
+
+  fn dependency_root_map(&self) -> Result<Value> {
+    let mut output = Map::new();
+    for node in self.input.module_context.deps.nodes.values() {
+      let Some(root) = node.package_root.as_ref() else {
+        continue;
+      };
+      let path = Value::String(self.path(root)?);
+      output.insert(node.package_name.clone(), path.clone());
+      if node.alias != node.package_name {
+        output.insert(node.alias.clone(), path);
+      }
+    }
+    Ok(Value::Object(output))
+  }
+
+  fn package_brief_info(&self) -> Result<Value> {
+    let mut output = Map::new();
+    let current = self
+      .input
+      .module_context
+      .module
+      .package
+      .as_ref()
+      .ok_or_else(|| {
+        anyhow::anyhow!("ARKDOWN_ETS_CHECKER_PACKAGE_METADATA: missing module package")
+      })?;
+    output.insert(
+      current.name.clone(),
+      json!({
+        "pkgRoot": self.path(&current.root)?,
+        "sourceRoots": ["src/main", self.relative_glob(&self.input.paths.ace_module_root, &self.input.paths.generated_profile_path)?.trim_end_matches("/*")],
+        "pkgName": current.name,
+      }),
+    );
+    for node in self.input.module_context.deps.nodes.values() {
+      let Some(root) = node.package_root.as_ref() else {
+        continue;
+      };
+      let package = json!({
+        "pkgRoot": self.path(root)?,
+        "sourceRoots": ["src/main"],
+        "pkgName": node.package_name,
+      });
+      output
+        .entry(node.package_name.clone())
+        .or_insert_with(|| package.clone());
+      if node.alias != node.package_name {
+        output.entry(node.alias.clone()).or_insert(package);
+      }
+    }
+    Ok(Value::Object(output))
+  }
+
+  fn project_model(&self) -> Result<Value> {
+    let mut output = Map::new();
+    for module in &self.input.config.modules {
+      let module_root = self.path(&module.src_path)?;
+      let source_main = self.path(&module.src_path.join("src").join("main"))?;
+      let details = json!({
+        "moduleName": module.name,
+        "modulePkgPath": module_root,
+        "belongProjectPath": self.path(&self.input.config.project_root)?,
+      });
+      output.insert(source_main, details.clone());
+      output.insert(module_root, details);
+    }
+    let project_path = self.path(&self.input.config.project_root)?;
+    let project_name = self
+      .input
+      .config
+      .project_root
+      .file_name()
+      .and_then(|name| name.to_str())
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "ARKDOWN_ETS_CHECKER_PROJECT_NAME: project root has no UTF-8 final component: {}",
+          self.input.config.project_root.display()
+        )
+      })?;
+    output.insert(
+      project_path.clone(),
+      json!({
+        "moduleName": project_name,
+        "modulePkgPath": project_path,
+        "belongProjectPath": self.path(&self.input.config.project_root)?,
+      }),
+    );
+    Ok(Value::Object(output))
+  }
+
+  fn module_meta_info_files(&self) -> Result<Value> {
+    let file_path = self.path(&self.input.paths.resource_table_typescript_path)?;
+    let ohmurl = if self
+      .input
+      .module_build_option
+      .strict_mode
+      .use_normalized_ohm_url
+    {
+      format!(
+        "&{}/build/generated/r/ResourceTable&",
+        self.input.module.name
+      )
+    } else {
+      format!(
+        "{}/{}/build/generated/r/ResourceTable",
+        self.input.config.product.bundle_name, self.input.module.name
+      )
+    };
+    Ok(Value::Array(vec![
+      json!({ "filePath": file_path, "ohmurl": ohmurl }),
+    ]))
+  }
+
+  fn all_module_paths(&self) -> Result<Value> {
+    Ok(Value::Array(
+      self
+        .input
+        .config
+        .modules
+        .iter()
+        .map(|module| self.path(&module.src_path).map(Value::String))
+        .collect::<Result<Vec<_>>>()?,
+    ))
+  }
+
+  fn other_paths(&self, project_path: &Path) -> Result<Value> {
+    let mut output = Map::new();
+    let current_package = self
+      .input
+      .module_context
+      .module
+      .package
+      .as_ref()
+      .ok_or_else(|| {
+        anyhow::anyhow!("ARKDOWN_ETS_CHECKER_PACKAGE_METADATA: missing module package")
+      })?;
+    output.insert(
+      format!("{}/*", current_package.name),
+      Value::Array(vec![
+        Value::String(
+          self.relative_glob(project_path, &self.input.module_context.module.src_main)?,
+        ),
+        Value::String(self.relative_glob(project_path, &self.input.paths.generated_profile_path)?),
+      ]),
+    );
+    for node in self.input.module_context.deps.nodes.values() {
+      let Some(root) = node.package_root.as_ref() else {
+        continue;
+      };
+      let source_root = root.join("src").join("main");
+      let values = Value::Array(vec![Value::String(
+        self.relative_glob(project_path, &source_root)?,
+      )]);
+      output
+        .entry(format!("{}/*", node.package_name))
+        .or_insert_with(|| values.clone());
+      if node.alias != node.package_name {
+        output.entry(format!("{}/*", node.alias)).or_insert(values);
+      }
+    }
+    Ok(Value::Object(output))
+  }
+
+  fn resolve_module_paths(&self) -> Result<Value> {
+    let module_root = &self.input.module_context.module.root;
+    Ok(Value::Array(
+      [
+        self.input.module_context.module.src_main.clone(),
+        self.input.paths.generated_profile_path.clone(),
+        module_root.join("oh_modules"),
+        self.input.config.project_root.join("oh_modules"),
+      ]
+      .iter()
+      .map(|path| self.path(path).map(Value::String))
+      .collect::<Result<Vec<_>>>()?,
+    ))
+  }
+
+  fn entry_obj(&self) -> Result<Value> {
+    let mut output = Map::new();
+    for (index, entry) in self.input.entries.iter().enumerate() {
+      output.insert(
+        format!("entry_{index:05}"),
+        Value::String(self.path(entry)?),
+      );
+    }
+    Ok(Value::Object(output))
+  }
+
+  fn external_api_paths(&self) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    if self
+      .input
+      .config
+      .product
+      .runtime_os
+      .eq_ignore_ascii_case("HarmonyOS")
+    {
+      if let Some(sdk_root) = self
+        .input
+        .session
+        .sdk
+        .sdk_root
+        .parent()
+        .and_then(Path::parent)
+      {
+        let hms_ets = sdk_root.join("hms").join("ets");
+        if hms_ets.is_dir() {
+          paths.push(self.path(&hms_ets)?);
+        }
+      }
+    }
+    Ok(paths)
+  }
+
+  fn sdk_root_path(&self) -> Result<String> {
+    let sdk_root = self
+      .input
+      .session
+      .sdk
+      .sdk_root
+      .parent()
+      .and_then(Path::parent)
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "ARKDOWN_ETS_CHECKER_SDK_ROOT: cannot derive SDK root from {}",
+          self.input.session.sdk.sdk_root.display()
+        )
+      })?;
+    self.path(sdk_root)
+  }
+
+  fn all_module_name_hash(&self) -> Result<String> {
+    let mut names = String::new();
+    for module in &self.input.config.modules {
+      let module_name = self
+        .input
+        .session
+        .project
+        .modules
+        .get(&module.name)
+        .and_then(|snapshot| snapshot.module_json.as_ref())
+        .map(|module_json| module_json.module.name.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(module.name.as_str());
+      names.push_str(module_name);
+    }
+    let project_name = self
+      .input
+      .config
+      .project_root
+      .file_name()
+      .and_then(|name| name.to_str())
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "ARKDOWN_ETS_CHECKER_PROJECT_NAME: project root has no UTF-8 final component: {}",
+          self.input.config.project_root.display()
+        )
+      })?;
+    names.push_str(project_name);
+    Ok(format!("{:x}", Sha256::digest(names.as_bytes())))
+  }
+
+  fn relative_glob(&self, from: &Path, to: &Path) -> Result<String> {
+    let relative = self.relative_path(from, to)?;
+    let mut text = ArtifactPathSerializer::rel_to_slash(&relative);
+    if text.is_empty() || text == "." {
+      text = ".".to_string();
+    }
+    if !text.ends_with('/') {
+      text.push('/');
+    }
+    text.push('*');
+    Ok(text)
+  }
+
+  fn relative_path(&self, from: &Path, to: &Path) -> Result<PathBuf> {
+    let from = lexical_normalize(from);
+    let to = lexical_normalize(to);
+    let from_components = from.components().collect::<Vec<_>>();
+    let to_components = to.components().collect::<Vec<_>>();
+    let mut common = 0usize;
+    while common < from_components.len()
+      && common < to_components.len()
+      && from_components[common] == to_components[common]
+    {
+      common += 1;
+    }
+    let incompatible_roots = from_components
+      .first()
+      .zip(to_components.first())
+      .is_some_and(|(left, right)| {
+        matches!(left, Component::Prefix(_) | Component::RootDir)
+          && matches!(right, Component::Prefix(_) | Component::RootDir)
+          && left != right
+      });
+    if incompatible_roots {
+      anyhow::bail!(
+        "ARKDOWN_ETS_CHECKER_CROSS_VOLUME: cannot create TypeScript path mapping from {} to {}",
+        from.display(),
+        to.display()
+      );
+    }
+    let mut output = PathBuf::new();
+    for component in &from_components[common..] {
+      if matches!(component, Component::Normal(_)) {
+        output.push("..");
+      }
+    }
+    for component in &to_components[common..] {
+      if matches!(component, Component::Normal(_)) {
+        output.push(component.as_os_str());
+      }
+    }
+    if output.as_os_str().is_empty() {
+      output.push(".");
+    }
+    Ok(output)
+  }
+
+  fn path(&self, path: &Path) -> Result<String> {
+    ArtifactPathSerializer::path_to_slash_string(path)
+      .map_err(|error| anyhow::anyhow!("ARKDOWN_ETS_CHECKER_PATH: {error}"))
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct SdkEtsCheckerPlan {
+  module_name: String,
+  node_executable: PathBuf,
+  workspace: PathBuf,
+  checker_cache_path: PathBuf,
+  checker_output_path: PathBuf,
+  request: SdkEtsCheckerRequest,
+}
+
+#[derive(Debug)]
+pub(crate) struct SdkEtsCheckerBatch {
+  plans: Vec<SdkEtsCheckerPlan>,
+}
+
+impl SdkEtsCheckerBatch {
+  pub(crate) fn new(plans: Vec<SdkEtsCheckerPlan>) -> Self {
+    Self { plans }
+  }
+
+  /// SDK checker processes have isolated Node globals and module-specific
+  /// caches, so module plans can run in parallel. `par_iter()` over a `Vec`
+  /// retains input order when collected, which keeps diagnostics deterministic.
+  pub(crate) fn run(&self) -> Result<Vec<SdkEtsCheckerOutput>> {
+    self
+      .plans
+      .par_iter()
+      .map(|plan| SdkEtsCheckerRunner::new(plan).run())
+      .collect()
+  }
+}
+
+pub(crate) struct SdkEtsCheckerRunner<'a> {
+  plan: &'a SdkEtsCheckerPlan,
+}
+
+impl<'a> SdkEtsCheckerRunner<'a> {
+  pub(crate) fn new(plan: &'a SdkEtsCheckerPlan) -> Self {
+    Self { plan }
+  }
+
+  pub(crate) fn run(&self) -> Result<SdkEtsCheckerOutput> {
+    let result = self.run_inner();
+    self.cleanup_workspace();
+    result
+  }
+
+  fn run_inner(&self) -> Result<SdkEtsCheckerOutput> {
+    std::fs::create_dir_all(&self.plan.workspace).with_context(|| {
+      format!(
+        "ARKDOWN_ETS_CHECKER_WORKSPACE: create {}",
+        self.plan.workspace.display()
+      )
+    })?;
+    std::fs::create_dir_all(&self.plan.checker_cache_path).with_context(|| {
+      format!(
+        "ARKDOWN_ETS_CHECKER_CACHE: create {}",
+        self.plan.checker_cache_path.display()
+      )
+    })?;
+    std::fs::create_dir_all(&self.plan.checker_output_path).with_context(|| {
+      format!(
+        "ARKDOWN_ETS_CHECKER_OUTPUT: create {}",
+        self.plan.checker_output_path.display()
+      )
+    })?;
+    let bridge_path = self.plan.workspace.join("ets-checker-bridge.cjs");
+    let request_path = self.plan.workspace.join("request.json");
+    let response_path = self.plan.workspace.join("response.json");
+    std::fs::write(&bridge_path, include_str!("ets_checker_bridge.cjs")).with_context(|| {
+      format!(
+        "ARKDOWN_ETS_CHECKER_BRIDGE_WRITE: write {}",
+        bridge_path.display()
+      )
+    })?;
+    std::fs::write(&request_path, serde_json::to_vec(&self.plan.request)?).with_context(|| {
+      format!(
+        "ARKDOWN_ETS_CHECKER_REQUEST_WRITE: write {}",
+        request_path.display()
+      )
+    })?;
+    let output = Command::new(&self.plan.node_executable)
+      .arg(&bridge_path)
+      .arg(&request_path)
+      .arg(&response_path)
+      .current_dir(PathBuf::from(&self.plan.request.working_directory))
+      .output()
+      .with_context(|| {
+        format!(
+          "ARKDOWN_ETS_CHECKER_PROCESS_START: start {} for module '{}'",
+          self.plan.node_executable.display(),
+          self.plan.module_name
+        )
+      })?;
+    if !output.status.success() {
+      anyhow::bail!(
+        "ARKDOWN_ETS_CHECKER_PROCESS_FAILED: module '{}' exited {:?}: {}",
+        self.plan.module_name,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).trim()
+      );
+    }
+    let response: SdkEtsCheckerResponse =
+      serde_json::from_slice(&std::fs::read(&response_path).with_context(|| {
+        format!(
+          "ARKDOWN_ETS_CHECKER_RESPONSE_READ: read {}",
+          response_path.display()
+        )
+      })?)
+      .with_context(|| {
+        format!(
+          "ARKDOWN_ETS_CHECKER_RESPONSE_PARSE: parse {}",
+          response_path.display()
+        )
+      })?;
+    Ok(SdkEtsCheckerOutput {
+      module_name: self.plan.module_name.clone(),
+      diagnostics: response.diagnostics,
+    })
+  }
+
+  fn cleanup_workspace(&self) {
+    let owned = self
+      .plan
+      .workspace
+      .file_name()
+      .and_then(|name| name.to_str())
+      .is_some_and(|name| name.starts_with("arkdown-sdk-ets-checker-"));
+    if owned && self.plan.workspace.exists() {
+      if let Err(error) = std::fs::remove_dir_all(&self.plan.workspace) {
+        tracing::debug!(
+          workspace = %self.plan.workspace.display(),
+          error = %error,
+          "could not remove SDK etsChecker transport workspace"
+        );
+      }
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SdkEtsCheckerOutput {
+  pub(crate) module_name: String,
+  pub(crate) diagnostics: Vec<SdkEtsCheckerDiagnostic>,
+}
+
+impl SdkEtsCheckerOutput {
+  pub(crate) fn error_count(&self) -> usize {
+    self
+      .diagnostics
+      .iter()
+      .filter(|diagnostic| diagnostic.level.eq_ignore_ascii_case("error"))
+      .count()
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SdkEtsCheckerDiagnostic {
+  pub(crate) level: String,
+  pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SdkEtsCheckerRequest {
+  ets_loader_path: String,
+  working_directory: String,
+  entries: BTreeMap<String, String>,
+  project_config: SdkEtsCheckerProjectConfig,
+  loader_env: SdkEtsCheckerLoaderEnvironment,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SdkEtsCheckerProjectConfig {
+  module_type: String,
+  perf: u8,
+  target_name: String,
+  package_manager_type: String,
+  local_properties_path: String,
+  is_preview: bool,
+  is_ohos_test: bool,
+  is_local_test: bool,
+  build_mode: String,
+  watch_mode: String,
+  ace_profile_path: String,
+  ets_loader_path: String,
+  module_path: String,
+  test_framework_par: Value,
+  need_coverage_insert: bool,
+  debug_line: bool,
+  project_top_dir: String,
+  compile_sdk_version: u32,
+  compatible_sdk_version: u32,
+  origin_compatible_sdk_version: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  compatible_sdk_version_stage: Option<String>,
+  bundle_name: String,
+  ets_loader_version: String,
+  ets_loader_release_type: String,
+  aot_compile_mode: String,
+  ap_path: String,
+  entry_module_name: String,
+  entry_module_version: String,
+  entry_package_name: String,
+  all_module_name_hash: String,
+  external_api_paths: Vec<String>,
+  compiler_types: Vec<String>,
+  is_crossplatform: bool,
+  build_generated_profile_path: String,
+  bundle_type: String,
+  api_version: u32,
+  need_complete_sources_map: bool,
+  is_fa_mode: bool,
+  build_dir: String,
+  device_types: Vec<String>,
+  #[serde(flatten)]
+  extras: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SdkEtsCheckerLoaderEnvironment {
+  runtime_os: String,
+  sdk_info: String,
+  watch_mode: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  is_preview: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  ace_manifest_path: Option<String>,
+  app_resource: String,
+  raw_file_resource: String,
+  ace_module_build: String,
+  ace_module_root: String,
+  cache_path: String,
+  ace_profile_path: String,
+  ace_module_json_path: String,
+  ace_super_visual_path: String,
+  ace_build_json: String,
+  compile_tool: String,
+  ability_type: String,
+  ace_compile_mode: String,
+  external_api_paths: String,
+  enable_debug_line: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  is_fa_mode: Option<String>,
+  is_first_build: String,
+  widget_compile: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SdkEtsCheckerResponse {
+  #[serde(default)]
+  diagnostics: Vec<SdkEtsCheckerDiagnostic>,
+}

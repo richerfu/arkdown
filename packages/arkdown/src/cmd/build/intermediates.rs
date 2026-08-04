@@ -1,9 +1,11 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout, RestoolLayout,
 };
 use anyhow::{Context, Result};
+use arkdown::SourceMapInputFingerprint;
 use arkdown_core::{ArkdownConfig, ModuleConfig, OhosModuleType, OutputTarget};
 use arkdown_pack::minify_package_intermediate_module_json;
 use arkdown_path::{
@@ -12,6 +14,77 @@ use arkdown_path::{
 
 pub(super) struct IntermediateArtifactWriter {
   restool_layout: RestoolLayout,
+}
+
+/// SDK-specific package handoff for the aggregated source map.
+///
+/// HAP/HSP and source HAR stages materialize `intermediates/source_map`, while
+/// current ByteCode HAR packaging reads the compiler-owned map directly and
+/// removes that stale intermediate when a project switches artifact kind.
+pub(super) enum SourceMapPackageHandoff<'a> {
+  Materialize(&'a Path),
+  Suppress(&'a Path),
+}
+
+/// Arkdown-owned cache sidecar for the source inputs behind `sourceMaps.json`.
+///
+/// The SDK records only serialized source maps. A source edit can keep that
+/// JSON byte-identical (for example when it changes a string literal without
+/// moving a mapped span), while `SourceMapGenerator` still puts that freshly
+/// generated entry before cached entries. This compact sidecar carries the
+/// already-inventoried source fingerprints needed to preserve that observable
+/// insertion order without adding source reads to the Rolldown/plugin path.
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct SourceMapInputFingerprintCache {
+  #[serde(default)]
+  schema_version: u32,
+  #[serde(default)]
+  entries: BTreeMap<String, String>,
+}
+
+impl SourceMapInputFingerprintCache {
+  const SCHEMA_VERSION: u32 = 1;
+  const FILE_NAME: &'static str = ".arkdown_source_map_inputs.json";
+
+  fn load(compile_cache: &Path) -> Self {
+    let path = Self::path(compile_cache);
+    let Ok(content) = fs_err::read_to_string(path) else {
+      return Self::default();
+    };
+    let Ok(cache) = serde_json::from_str::<Self>(&content) else {
+      return Self::default();
+    };
+    (cache.schema_version == Self::SCHEMA_VERSION)
+      .then_some(cache)
+      .unwrap_or_default()
+  }
+
+  fn changed_keys(&self, current: &[SourceMapInputFingerprint]) -> BTreeSet<String> {
+    current
+      .iter()
+      .filter(|entry| self.entries.get(&entry.key) != Some(&entry.content_hash))
+      .map(|entry| entry.key.clone())
+      .collect()
+  }
+
+  fn replace(&mut self, current: &[SourceMapInputFingerprint]) {
+    self.schema_version = Self::SCHEMA_VERSION;
+    self.entries = current
+      .iter()
+      .map(|entry| (entry.key.clone(), entry.content_hash.clone()))
+      .collect();
+  }
+
+  fn save(&self, writer: &IntermediateArtifactWriter, compile_cache: &Path) -> Result<()> {
+    writer.write_json_pretty(
+      &Self::path(compile_cache),
+      &serde_json::to_value(self).context("serialize source-map input cache")?,
+    )
+  }
+
+  fn path(compile_cache: &Path) -> PathBuf {
+    compile_cache.with_file_name(Self::FILE_NAME)
+  }
 }
 
 struct RouterMapSourcePath<'a> {
@@ -1050,51 +1123,206 @@ impl IntermediateArtifactWriter {
 
   /// Publish the source map after packaging. Latest IDE owner:
   /// `AbstractPackageHar.moveSourceMap`; HAP/HSP packaging has the same output
-  /// mapping handoff. Arkdown's durable intermediate is preferred because a
-  /// release build removes the loader-output copy after staging.
+  /// mapping handoff. The map path is the compiler output in debug and the
+  /// `HarCompileArkTS/.../<mode>/sourceMaps.map` cache artifact in release.
   pub(super) fn publish_package_source_maps(
     &self,
-    intermediate: &Path,
-    package_source_maps: Option<&Path>,
+    source_maps: Option<&Path>,
     output: &Path,
   ) -> Result<()> {
-    let source_maps = intermediate
-      .is_file()
-      .then_some(intermediate)
-      .or_else(|| package_source_maps.filter(|path| path.is_file()));
-    if let Some(source_maps) = source_maps {
+    if let Some(source_maps) = source_maps.filter(|path| path.is_file()) {
       self.copy_if_exists(source_maps, output)?;
     }
     Ok(())
   }
 
   /// Materialize the source-map handoffs consumed by CompileArkTS,
-  /// `PackageHap`, and `CollectDebugSymbol`. Hvigor writes release maps outside
-  /// `loader_out`, so remove Arkdown's temporary loader copy only after both
-  /// durable copies are safe.
+  /// `PackageHap`, and `CollectDebugSymbol`. Latest hvigor materializes the
+  /// `intermediates/source_map` handoff for HAP/HSP and source-HAR targets,
+  /// while ByteCode HAR's `ProcessHarArtifacts` bypasses that handoff. It
+  /// leaves debug maps in `loader_out/.../ets`, but moves release maps to its
+  /// `CompileArkTS/.../<mode>/sourceMaps.map` cache output.
   pub(super) fn stage_source_maps(
     &self,
     origin: &Path,
     compile_cache: &Path,
-    intermediate: &Path,
+    release_output: &Path,
+    package_handoff: SourceMapPackageHandoff<'_>,
     build_mode: &arkdown_core::BuildMode,
-  ) -> Result<()> {
+    source_map_input_fingerprints: &[SourceMapInputFingerprint],
+  ) -> Result<PathBuf> {
+    let package_intermediate = match package_handoff {
+      SourceMapPackageHandoff::Materialize(path) => Some(path),
+      SourceMapPackageHandoff::Suppress(stale_path) => {
+        if stale_path.is_file() {
+          fs_err::remove_file(stale_path).with_context(|| {
+            format!(
+              "failed to remove stale ByteCode HAR source-map intermediate {}",
+              stale_path.display()
+            )
+          })?;
+        }
+        None
+      }
+    };
     if !origin.is_file() {
+      return Ok(origin.to_path_buf());
+    }
+    let fingerprint_cache = SourceMapInputFingerprintCache::load(compile_cache);
+    let regenerated_keys = fingerprint_cache.changed_keys(source_map_input_fingerprints);
+    self.merge_incremental_source_maps(origin, compile_cache, &regenerated_keys)?;
+    self.copy_if_exists(origin, compile_cache)?;
+    if let Some(package_intermediate) = package_intermediate {
+      self.copy_if_exists(origin, package_intermediate)?;
+    }
+    if matches!(build_mode, arkdown_core::BuildMode::Release) {
+      self.copy_if_exists(origin, release_output)?;
+      fs_err::remove_file(origin).with_context(|| {
+        format!(
+          "failed to remove release source map from loader output {}",
+          origin.display()
+        )
+      })?;
+      return Ok(package_intermediate.unwrap_or(release_output).to_path_buf());
+    }
+    Ok(package_intermediate.unwrap_or(origin).to_path_buf())
+  }
+
+  /// Commit source fingerprints only after CompileArkTS succeeds.
+  ///
+  /// The early source-map handoff consumes the previous successful snapshot;
+  /// delaying this write ensures a failed ABC pass cannot mark an uncompiled
+  /// source map as reusable on the next build.
+  pub(super) fn commit_source_map_input_fingerprints(
+    &self,
+    compile_cache: &Path,
+    source_map_input_fingerprints: &[SourceMapInputFingerprint],
+  ) -> Result<()> {
+    let cache_path = SourceMapInputFingerprintCache::path(compile_cache);
+    if source_map_input_fingerprints.is_empty() {
+      if cache_path.is_file() {
+        fs_err::remove_file(cache_path)?;
+      }
       return Ok(());
     }
-    self.copy_if_exists(origin, compile_cache)?;
-    if origin != intermediate {
-      self.copy_if_exists(origin, intermediate)?;
-      if matches!(build_mode, arkdown_core::BuildMode::Release) {
-        fs_err::remove_file(origin).with_context(|| {
-          format!(
-            "failed to remove release source map from loader output {}",
-            origin.display()
-          )
-        })?;
-      }
+    let mut fingerprint_cache = SourceMapInputFingerprintCache::default();
+    fingerprint_cache.replace(source_map_input_fingerprints);
+    fingerprint_cache.save(self, compile_cache)
+  }
+
+  /// Match latest ets-loader `SourceMapGenerator` incremental serialization.
+  ///
+  /// `writeModifiedSourceMapToFile()` first inserts source maps generated in
+  /// the current Rollup pass, then
+  /// `writeUsedAndUnmodifiedSourceMapToFile()` appends valid cached entries in
+  /// their previous insertion order. A process-local Rolldown scan collects
+  /// maps for every reachable module, so restore the SDK-visible distinction
+  /// at the cache handoff: entries with an already-inventoried changed source,
+  /// a changed structured map, or a new key are current-pass entries; equal
+  /// entries retain the cached value and order. Deleted entries are omitted
+  /// because they are not present in the current compile-file set.
+  ///
+  /// Installed SDK 6.1.1 ets-loader source:
+  /// `fast_build/ark_compiler/generate_sourcemap.js::
+  /// SourceMapGenerator.writeModifiedSourceMapToFile` and
+  /// `writeUsedAndUnmodifiedSourceMapToFile`.
+  fn merge_incremental_source_maps(
+    &self,
+    origin: &Path,
+    compile_cache: &Path,
+    regenerated_keys: &BTreeSet<String>,
+  ) -> Result<()> {
+    if origin == compile_cache || !compile_cache.is_file() {
+      return Ok(());
+    }
+
+    let current = self.read_source_map_object(origin)?;
+    let Some(cached) = self.read_cached_source_map_object(compile_cache)? else {
+      return Ok(());
+    };
+    let merged = self.merge_source_map_objects(&current, &cached, regenerated_keys);
+    if !self.source_map_object_order_matches(&merged, &current) {
+      self.write_json_pretty(origin, &serde_json::Value::Object(merged))?;
     }
     Ok(())
+  }
+
+  fn source_map_object_order_matches(
+    &self,
+    left: &serde_json::Map<String, serde_json::Value>,
+    right: &serde_json::Map<String, serde_json::Value>,
+  ) -> bool {
+    left.len() == right.len()
+      && left
+        .iter()
+        .zip(right)
+        .all(|((left_key, left_value), (right_key, right_value))| {
+          left_key == right_key && left_value == right_value
+        })
+  }
+
+  fn read_source_map_object(
+    &self,
+    path: &Path,
+  ) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let source = fs_err::read_to_string(path)
+      .with_context(|| format!("failed to read source map {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&source)
+      .with_context(|| format!("failed to parse source map {}", path.display()))?;
+    value
+      .as_object()
+      .cloned()
+      .with_context(|| format!("source map {} must be a JSON object", path.display()))
+  }
+
+  fn read_cached_source_map_object(
+    &self,
+    path: &Path,
+  ) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
+    let source = fs_err::read_to_string(path)
+      .with_context(|| format!("failed to read cached source map {}", path.display()))?;
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+      // ets-loader catches a stale/corrupt cache parse and continues with the
+      // new maps rather than failing CompileArkTS.
+      return Ok(None);
+    };
+    Ok(value.as_object().cloned())
+  }
+
+  fn merge_source_map_objects(
+    &self,
+    current: &serde_json::Map<String, serde_json::Value>,
+    cached: &serde_json::Map<String, serde_json::Value>,
+    regenerated_keys: &BTreeSet<String>,
+  ) -> serde_json::Map<String, serde_json::Value> {
+    let mut merged = serde_json::Map::new();
+
+    // The SDK's current-pass `sourceMaps` object is inserted before its cache.
+    // Source content fingerprints distinguish a fresh map whose JSON happens
+    // to be byte-identical from an unchanged cached map. A changed/new map is
+    // also a current-pass entry if no input fingerprint was available.
+    for (key, current_value) in current {
+      if regenerated_keys.contains(key) || cached.get(key) != Some(current_value) {
+        merged.insert(key.clone(), current_value.clone());
+      }
+    }
+
+    // Preserve the prior cache insertion order for source maps that remain
+    // valid and were not regenerated in this compile pass.
+    for (key, cached_value) in cached {
+      if current.contains_key(key) && !merged.contains_key(key) {
+        merged.insert(key.clone(), cached_value.clone());
+      }
+    }
+
+    // Be conservative for an entry absent from a malformed/partial cache:
+    // it is a current map and must not disappear from the compiler handoff.
+    for (key, current_value) in current {
+      merged
+        .entry(key.clone())
+        .or_insert_with(|| current_value.clone());
+    }
+    merged
   }
 
   fn write_bytes(&self, path: &Path, bytes: &[u8]) -> Result<()> {

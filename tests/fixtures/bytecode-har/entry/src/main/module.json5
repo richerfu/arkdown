@@ -1,0 +1,7 @@
+{
+  module: {
+    name: "entry",
+    type: "har",
+    deviceTypes: ["phone"]
+  }
+}

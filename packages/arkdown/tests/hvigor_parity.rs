@@ -120,6 +120,19 @@ fn minimal_hsp_hvigor_parity_report() {
   );
 }
 
+/// Real ComponentV2 lifecycle golden. This fixture imports the lifecycle
+/// decorators from `@kit.ArkUI`, exercises both appearance boundaries, and
+/// compares the complete debug source-map / ABC handoff against latest hvigor.
+#[test]
+fn component_v2_lifecycle_hap_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/component-v2-lifecycle-hap",
+    "component-v2-lifecycle-hap",
+    ArtifactType::Hap,
+    ParityBuildMode::Debug,
+  );
+}
+
 /// Parity test for ByteCode HAR dependency — validates that BC HAR packages
 /// with `metadata.byteCodeHar: true` are detected, their OHM URLs appear
 /// in `compiledImportees`, and `byteCodeHarInfo` references the correct .abc path.
@@ -188,6 +201,91 @@ fn minimal_hap_release_hvigor_parity_report() {
   );
 }
 
+/// Release HSP golden: validates the shared-package archive and release
+/// CompileArkTS/source-map layout against latest hvigor.
+#[test]
+fn minimal_hsp_release_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/minimal-hsp",
+    "minimal-hsp-release",
+    ArtifactType::Hsp,
+    ParityBuildMode::Release,
+  );
+}
+
+/// Release source HAR golden: validates the HAR task graph, declaration
+/// output, release BuildProfile location, and source-map handling.
+#[test]
+fn minimal_har_release_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/minimal-har",
+    "minimal-har-release",
+    ArtifactType::Har,
+    ParityBuildMode::Release,
+  );
+}
+
+/// ByteCode HAR producer golden. Existing consumer coverage only verifies a
+/// prebuilt dependency; this validates the producer's own `modules.abc`,
+/// declaration metadata, source map, and archive layout.
+#[test]
+fn bytecode_har_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/bytecode-har",
+    "bytecode-har",
+    ArtifactType::Har,
+    ParityBuildMode::Debug,
+  );
+}
+
+#[test]
+fn bytecode_har_release_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/bytecode-har",
+    "bytecode-har-release",
+    ArtifactType::Har,
+    ParityBuildMode::Release,
+  );
+}
+
+/// ComponentV2 release golden extends source-map coverage beyond minimal HAP
+/// and verifies lifecycle lowering survives the release task graph.
+#[test]
+fn component_v2_lifecycle_hap_release_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/component-v2-lifecycle-hap",
+    "component-v2-lifecycle-hap-release",
+    ArtifactType::Hap,
+    ParityBuildMode::Release,
+  );
+}
+
+/// Same-root cache golden. It runs a cold build, an unchanged rebuild, then a
+/// source mutation on both hvigor and arkdown copies. This guards cache reuse
+/// and invalidation without conflating them with fresh-build parity.
+#[test]
+fn component_v2_lifecycle_incremental_hvigor_parity_report() {
+  run_incremental_parity_report_test(
+    "tests/fixtures/component-v2-lifecycle-hap",
+    "component-v2-lifecycle-incremental",
+    ArtifactType::Hap,
+    ParityBuildMode::Debug,
+    ParitySourceMutation::new(
+      "entry/src/main/ets/pages/Index.ets",
+      "\"initial\"",
+      "\"updated-after-incremental-build\"",
+    ),
+  );
+}
+
+/// Lifecycle diagnostics are semantic contracts too: latest hvigor rejects a
+/// `@ComponentAppear` method with input parameters before any package output
+/// exists. Keep arkdown's SDK checker tied to that real diagnostic boundary.
+#[test]
+fn component_v2_lifecycle_parameter_diagnostic_matches_hvigor() {
+  run_component_v2_lifecycle_diagnostic_parity_test();
+}
+
 fn run_parity_report_test(
   fixture: &str,
   report_name: &str,
@@ -208,6 +306,64 @@ fn run_parity_report_test(
     .expect("parity harness failed before report generation");
   print_report_summary(&report);
   assert_strict_parity(report_name, &report);
+}
+
+fn run_incremental_parity_report_test(
+  fixture: &str,
+  report_name: &str,
+  artifact_type: ArtifactType,
+  build_mode: ParityBuildMode,
+  mutation: ParitySourceMutation,
+) {
+  let repo_root = repo_root();
+  let fixture_abs = repo_root.join(fixture);
+  if !should_run_parity(&fixture_abs) {
+    tracing::error!(
+      "skipping hvigor incremental parity [{fixture}]; set {ENV_HVIGORW}, {ENV_RUN}=1, or {ENV_STRICT}=1"
+    );
+    return;
+  }
+
+  let report_path = report_path_for(&repo_root, report_name);
+  let report =
+    incremental_parity_for_fixture(fixture, artifact_type, build_mode, mutation, report_path)
+      .expect("incremental parity harness failed before report generation");
+  print_report_summary(&report);
+  assert_strict_parity(report_name, &report);
+}
+
+#[derive(Debug, Clone)]
+struct ParitySourceMutation {
+  relative_path: PathBuf,
+  before: String,
+  after: String,
+}
+
+impl ParitySourceMutation {
+  fn new(
+    relative_path: impl Into<PathBuf>,
+    before: impl Into<String>,
+    after: impl Into<String>,
+  ) -> Self {
+    Self {
+      relative_path: relative_path.into(),
+      before: before.into(),
+      after: after.into(),
+    }
+  }
+
+  fn apply(&self, root: &Path) -> io::Result<()> {
+    let path = root.join(&self.relative_path);
+    let source = fs::read_to_string(&path)?;
+    if !source.contains(&self.before) {
+      return Err(io::Error::other(format!(
+        "incremental parity mutation marker {:?} is missing from {}",
+        self.before,
+        path.display()
+      )));
+    }
+    fs::write(&path, source.replacen(&self.before, &self.after, 1))
+  }
 }
 
 fn assert_strict_parity(report_name: &str, report: &Value) {
@@ -403,6 +559,8 @@ fn parity_referenced_fixtures_exist() {
     "tests/fixtures/minimal-hap",
     "tests/fixtures/minimal-har",
     "tests/fixtures/minimal-hsp",
+    "tests/fixtures/component-v2-lifecycle-hap",
+    "tests/fixtures/bytecode-har",
     "tests/fixtures/share-config-hap",
     "tests/fixtures/startup-config-hap",
     "tests/fixtures/release-obfuscation-hap",
@@ -489,6 +647,215 @@ fn parity_for_fixture(
     let _ = temp.keep();
   }
   Ok(report)
+}
+
+/// Run cold, unchanged, and invalidated builds in the same project copies.
+///
+/// Hvigor's cache is intentionally preserved between each invocation.  The
+/// resulting snapshots compare compiler handoff/cache content as well as final
+/// archives, so a stale transform or ABC cache cannot be hidden by a correct
+/// fresh build.
+fn incremental_parity_for_fixture(
+  fixture: &str,
+  artifact_type: ArtifactType,
+  build_mode: ParityBuildMode,
+  mutation: ParitySourceMutation,
+  report_path: PathBuf,
+) -> Result<Value, Box<dyn std::error::Error>> {
+  let repo_root = repo_root();
+  let fixture_abs = repo_root.join(fixture);
+  let fixture_name = fixture_abs
+    .file_name()
+    .map(|name| name.to_string_lossy().into_owned())
+    .unwrap_or_else(|| fixture.to_string());
+
+  fs::create_dir_all(report_path.parent().expect("report path has parent"))?;
+  let temp = tempfile::Builder::new()
+    .prefix("arkdown-hvigor-incremental-parity-")
+    .tempdir()?;
+  let temp_root = temp.path().to_path_buf();
+  let hvigor_root = temp_root.join(format!("hvigor/{fixture_name}"));
+  let arkdown_root = temp_root.join(format!("arkdown/{fixture_name}"));
+  copy_clean_fixture(&fixture_abs, &hvigor_root)?;
+  copy_clean_fixture(&fixture_abs, &arkdown_root)?;
+
+  let hvigorw = hvigorw_program(&hvigor_root);
+  let arkdown_bin = arkdown_program();
+  let hvigor_args = hvigor_args(artifact_type, build_mode);
+  let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
+  let mut arkdown_args = arkdown_args(artifact_type, build_mode);
+  arkdown_args.push("--project");
+  arkdown_args.push(arkdown_project_arg.as_str());
+
+  let cold_hvigor = collect_build(
+    "hvigor",
+    &hvigor_root,
+    run_command("hvigor", &hvigorw, &hvigor_args, &hvigor_root),
+    artifact_type,
+  )?;
+  let cold_arkdown = collect_build(
+    "arkdown",
+    &arkdown_root,
+    run_command("arkdown", &arkdown_bin, &arkdown_args, &arkdown_root),
+    artifact_type,
+  )?;
+  let cold_diffs = compare_builds(&cold_hvigor, &cold_arkdown);
+
+  let unchanged_hvigor = collect_build(
+    "hvigor",
+    &hvigor_root,
+    run_command("hvigor", &hvigorw, &hvigor_args, &hvigor_root),
+    artifact_type,
+  )?;
+  let unchanged_arkdown = collect_build(
+    "arkdown",
+    &arkdown_root,
+    run_command("arkdown", &arkdown_bin, &arkdown_args, &arkdown_root),
+    artifact_type,
+  )?;
+  let unchanged_diffs = compare_builds(&unchanged_hvigor, &unchanged_arkdown);
+
+  mutation.apply(&hvigor_root)?;
+  mutation.apply(&arkdown_root)?;
+  let changed_hvigor = collect_build(
+    "hvigor",
+    &hvigor_root,
+    run_command("hvigor", &hvigorw, &hvigor_args, &hvigor_root),
+    artifact_type,
+  )?;
+  let changed_arkdown = collect_build(
+    "arkdown",
+    &arkdown_root,
+    run_command("arkdown", &arkdown_bin, &arkdown_args, &arkdown_root),
+    artifact_type,
+  )?;
+  let changed_diffs = compare_builds(&changed_hvigor, &changed_arkdown);
+
+  let hvigor_cache_stable = compare_builds(&cold_hvigor, &unchanged_hvigor).is_empty();
+  let arkdown_cache_stable = compare_builds(&cold_arkdown, &unchanged_arkdown).is_empty();
+  let hvigor_cache_invalidated = !compare_builds(&cold_hvigor, &changed_hvigor).is_empty();
+  let arkdown_cache_invalidated = !compare_builds(&cold_arkdown, &changed_arkdown).is_empty();
+  let equal = cold_diffs.is_empty()
+    && unchanged_diffs.is_empty()
+    && changed_diffs.is_empty()
+    && hvigor_cache_stable
+    && arkdown_cache_stable
+    && hvigor_cache_invalidated
+    && arkdown_cache_invalidated;
+
+  let mut report = json!({
+      "fixture": fixture,
+      "artifact_type": artifact_type.ext(),
+      "build_mode": build_mode.as_str(),
+      "report_path": report_path.to_string_lossy(),
+      "equal": equal,
+      "strict": env_truthy(ENV_STRICT),
+      "mutation": {
+          "path": mutation.relative_path.to_string_lossy(),
+          "before": mutation.before,
+          "after": mutation.after,
+      },
+      "workdir": env_truthy(ENV_KEEP_WORKDIR).then(|| temp_root.to_string_lossy().into_owned()),
+      "builds": {
+          "cold": {
+              "hvigor": cold_hvigor.to_json(),
+              "arkdown": cold_arkdown.to_json(),
+          },
+          "unchanged": {
+              "hvigor": unchanged_hvigor.to_json(),
+              "arkdown": unchanged_arkdown.to_json(),
+          },
+          "changed": {
+              "hvigor": changed_hvigor.to_json(),
+              "arkdown": changed_arkdown.to_json(),
+          },
+      },
+      "cache_contract": {
+          "hvigor_stable_on_unchanged_rebuild": hvigor_cache_stable,
+          "arkdown_stable_on_unchanged_rebuild": arkdown_cache_stable,
+          "hvigor_invalidates_after_source_change": hvigor_cache_invalidated,
+          "arkdown_invalidates_after_source_change": arkdown_cache_invalidated,
+      },
+      "diffs": {
+          "cold": cold_diffs,
+          "unchanged": unchanged_diffs,
+          "changed": changed_diffs,
+      },
+  });
+
+  fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
+  report["report_path"] = json!(report_path.to_string_lossy());
+  if env_truthy(ENV_KEEP_WORKDIR) {
+    let _ = temp.keep();
+  }
+  Ok(report)
+}
+
+fn run_component_v2_lifecycle_diagnostic_parity_test() {
+  let fixture = "tests/fixtures/component-v2-lifecycle-hap";
+  let repo_root = repo_root();
+  let fixture_abs = repo_root.join(fixture);
+  if !should_run_parity(&fixture_abs) {
+    tracing::error!(
+      "skipping ComponentV2 lifecycle diagnostic parity; set {ENV_HVIGORW}, {ENV_RUN}=1, or {ENV_STRICT}=1"
+    );
+    return;
+  }
+
+  let temp = tempfile::Builder::new()
+    .prefix("arkdown-hvigor-component-v2-diagnostic-")
+    .tempdir()
+    .expect("create diagnostic parity workspace");
+  let hvigor_root = temp.path().join("hvigor/component-v2-lifecycle-hap");
+  let arkdown_root = temp.path().join("arkdown/component-v2-lifecycle-hap");
+  copy_clean_fixture(&fixture_abs, &hvigor_root).expect("copy hvigor diagnostic fixture");
+  copy_clean_fixture(&fixture_abs, &arkdown_root).expect("copy arkdown diagnostic fixture");
+  let mutation = ParitySourceMutation::new(
+    "entry/src/main/ets/pages/Index.ets",
+    "whenComponentAppears(): void",
+    "whenComponentAppears(value: number): void",
+  );
+  mutation
+    .apply(&hvigor_root)
+    .expect("mutate hvigor ComponentV2 source");
+  mutation
+    .apply(&arkdown_root)
+    .expect("mutate arkdown ComponentV2 source");
+
+  let artifact_type = ArtifactType::Hap;
+  let build_mode = ParityBuildMode::Debug;
+  let hvigor = run_command(
+    "hvigor",
+    &hvigorw_program(&hvigor_root),
+    &hvigor_args(artifact_type, build_mode),
+    &hvigor_root,
+  );
+  let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
+  let mut arkdown_args = arkdown_args(artifact_type, build_mode);
+  arkdown_args.push("--project");
+  arkdown_args.push(arkdown_project_arg.as_str());
+  let arkdown = run_command("arkdown", &arkdown_program(), &arkdown_args, &arkdown_root);
+  let expected = "Methods decorated with '@ComponentAppear' cannot have input parameters.";
+  assert!(
+    !hvigor.success,
+    "latest hvigor accepted invalid ComponentV2 lifecycle method:\n{}",
+    hvigor.output_text()
+  );
+  assert!(
+    hvigor.output_text().contains(expected),
+    "latest hvigor did not emit the lifecycle boundary diagnostic {expected:?}:\n{}",
+    hvigor.output_text()
+  );
+  assert!(
+    !arkdown.success,
+    "arkdown accepted a ComponentV2 lifecycle method that hvigor rejects:\n{}",
+    arkdown.output_text()
+  );
+  assert!(
+    arkdown.output_text().contains(expected),
+    "arkdown did not preserve hvigor's lifecycle boundary diagnostic {expected:?}:\n{}",
+    arkdown.output_text()
+  );
 }
 
 fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
@@ -679,6 +1046,10 @@ fn tail_string(bytes: &[u8], max_len: usize) -> String {
 }
 
 impl CommandReport {
+  fn output_text(&self) -> String {
+    format!("{}\n{}", self.stdout_tail, self.stderr_tail)
+  }
+
   fn to_json(&self) -> Value {
     json!({
         "tool": self.tool,
@@ -914,6 +1285,18 @@ fn collect_build(
         &["intermediates/ets", "intermediates/loader_out"],
         true,
       )?;
+      // ByteCode HAR's current package entry is `ets/modules.abc`.
+      // Keep `index.abc` above for legacy SDK layouts, but compare the modern
+      // producer artifact directly as well.
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "modules.abc",
+        Some("ets/modules.abc"),
+        &["intermediates/ets", "intermediates/loader_out"],
+        true,
+      )?;
       collect_named_artifact(
         &mut artifacts,
         root,
@@ -923,6 +1306,9 @@ fn collect_build(
         &["intermediates/source_map", "intermediates/loader_out"],
         false,
       )?;
+      // HAR uses `default@HarCompileArkTS`, not the HAP/HSP task cache name.
+      // Include its full compiler handoff root in the strict golden.
+      collect_all_cache_root_files(&mut artifacts, root)?;
     }
   }
 
@@ -1228,7 +1614,9 @@ fn build_default_key(root: &Path, path: &Path) -> Option<String> {
 fn is_binary_build_file(path: &Path) -> bool {
   matches!(
     path.extension().and_then(OsStr::to_str),
-    Some("abc" | "hap" | "hsp" | "har" | "index" | "info" | "png" | "jpg" | "jpeg" | "webp")
+    Some(
+      "abc" | "hap" | "hsp" | "har" | "tgz" | "index" | "info" | "png" | "jpg" | "jpeg" | "webp"
+    )
   )
 }
 
@@ -1315,7 +1703,11 @@ impl ArtifactNormalization {
   fn for_path(path: &Path) -> Self {
     match path.extension().and_then(OsStr::to_str) {
       Some("hap" | "hsp") => return Self::ZipContainerTimestamps,
-      Some("har") => return Self::TarContainerMetadata,
+      // `PackageSharedTgz` writes an HSP and its interface HAR into this
+      // gzip-compressed tar container. Both hvigor and arkdown intentionally
+      // preserve the member payloads, while their compression libraries and
+      // build-local archive timestamps are not a parity contract.
+      Some("har" | "tgz") => return Self::TarContainerMetadata,
       _ => {}
     }
     path
@@ -1397,6 +1789,7 @@ impl ArtifactNormalization {
       let entry_type = entry.header().entry_type().as_byte();
       let mut content = Vec::new();
       entry.read_to_end(&mut content).ok()?;
+      let content = Self::for_path(Path::new(&path)).normalize_binary(content);
       members.insert(path, (entry_type, content));
     }
 
@@ -1622,6 +2015,127 @@ fn archive_comparison_ignores_only_sdk_generated_dos_timestamps() {
   );
   assert_eq!(
     compare_artifact("entry.hap", &hvigor, &structurally_different)["equal"],
+    false
+  );
+}
+
+#[test]
+fn shared_tgz_comparison_normalizes_nested_hsp_and_interface_har_containers() {
+  let zip_bytes = |timestamp: zip::DateTime, module_json: &[u8]| {
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+      .compression_method(zip::CompressionMethod::Stored)
+      .last_modified_time(timestamp);
+    writer
+      .start_file("module.json", options)
+      .expect("start HSP module.json");
+    writer
+      .write_all(module_json)
+      .expect("write HSP module.json");
+    writer.finish().expect("finish HSP").into_inner()
+  };
+  let gzip_tar = |members: &[(&str, &[u8])], mtime: u32, compression: flate2::Compression| {
+    let gzip = flate2::GzBuilder::new()
+      .mtime(mtime)
+      .write(Vec::new(), compression);
+    let mut archive = tar::Builder::new(gzip);
+    for (name, content) in members {
+      let mut header = tar::Header::new_gnu();
+      header.set_entry_type(tar::EntryType::Regular);
+      header.set_size(content.len() as u64);
+      header.set_mode(0o644);
+      header.set_uid(0);
+      header.set_gid(0);
+      header.set_mtime(u64::from(mtime));
+      header.set_cksum();
+      archive
+        .append_data(&mut header, name, Cursor::new(*content))
+        .expect("append tar member");
+    }
+    archive.finish().expect("finish tar");
+    archive
+      .into_inner()
+      .expect("take gzip writer")
+      .finish()
+      .expect("finish gzip")
+  };
+
+  let first_hsp = zip_bytes(
+    zip::DateTime::from_date_and_time(2026, 8, 4, 9, 29, 46).expect("timestamp"),
+    br#"{"module":"entry"}"#,
+  );
+  let second_hsp = zip_bytes(
+    zip::DateTime::from_date_and_time(2026, 8, 4, 9, 29, 50).expect("timestamp"),
+    br#"{"module":"entry"}"#,
+  );
+  let first_har = gzip_tar(
+    &[("package/Index.d.ets", b"export {};\n")],
+    1,
+    flate2::Compression::fast(),
+  );
+  let second_har = gzip_tar(
+    &[("package/Index.d.ets", b"export {};\n")],
+    2,
+    flate2::Compression::best(),
+  );
+  let first = gzip_tar(
+    &[
+      ("entry-default.hsp", first_hsp.as_slice()),
+      ("entry.har", first_har.as_slice()),
+    ],
+    3,
+    flate2::Compression::fast(),
+  );
+  let second = gzip_tar(
+    &[
+      ("entry-default.hsp", second_hsp.as_slice()),
+      ("entry.har", second_har.as_slice()),
+    ],
+    4,
+    flate2::Compression::best(),
+  );
+  let root = tempfile::tempdir().expect("tempdir");
+  let normalization = ArtifactNormalization::for_path(Path::new("entry-default.tgz"));
+  let hvigor = ArtifactSnapshot::from_bytes_with_normalization(
+    "entry-default.tgz".to_string(),
+    first,
+    root.path(),
+    true,
+    normalization,
+  );
+  let arkdown = ArtifactSnapshot::from_bytes_with_normalization(
+    "entry-default.tgz".to_string(),
+    second,
+    root.path(),
+    true,
+    normalization,
+  );
+  assert_eq!(
+    compare_artifact("entry-default.tgz", &hvigor, &arkdown)["equal"],
+    true
+  );
+
+  let changed_hsp = zip_bytes(
+    zip::DateTime::from_date_and_time(2026, 8, 4, 9, 29, 50).expect("timestamp"),
+    br#"{"module":"changed"}"#,
+  );
+  let changed = gzip_tar(
+    &[
+      ("entry-default.hsp", changed_hsp.as_slice()),
+      ("entry.har", second_har.as_slice()),
+    ],
+    4,
+    flate2::Compression::best(),
+  );
+  let changed = ArtifactSnapshot::from_bytes_with_normalization(
+    "entry-default.tgz".to_string(),
+    changed,
+    root.path(),
+    true,
+    normalization,
+  );
+  assert_eq!(
+    compare_artifact("entry-default.tgz", &hvigor, &changed)["equal"],
     false
   );
 }
@@ -1923,23 +2437,34 @@ fn collect_all_cache_root_files(
   artifacts: &mut BTreeMap<String, ArtifactSnapshot>,
   root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-  // Look for the CompileArkTS cache root under known paths.
-  let cache_roots: Vec<PathBuf> = [
-    root
-      .join("build")
-      .join("default")
-      .join("cache")
-      .join("default")
-      .join("default@CompileArkTS"),
-    root
-      .join("build")
-      .join("default")
-      .join("cache")
-      .join("default"),
-  ]
-  .into_iter()
-  .filter(|p| p.is_dir())
-  .collect();
+  let cache_parent = root
+    .join("build")
+    .join("default")
+    .join("cache")
+    .join("default");
+  // Latest hvigor uses `default@CompileArkTS` for HAP/HSP and
+  // `default@HarCompileArkTS` for HAR. Discover task-scoped roots instead of
+  // hardcoding a single module type; this also covers configured targets.
+  let mut cache_roots = std::fs::read_dir(&cache_parent)
+    .ok()
+    .into_iter()
+    .flatten()
+    .filter_map(Result::ok)
+    .map(|entry| entry.path())
+    .filter(|path| {
+      path.is_dir()
+        && path
+          .file_name()
+          .and_then(OsStr::to_str)
+          .is_some_and(|name| name.ends_with("CompileArkTS"))
+    })
+    .collect::<Vec<_>>();
+  cache_roots.sort();
+  // Old IDEs used the parent directly. Fall back only when no compiler task
+  // root exists so files are not collected twice under different keys.
+  if cache_roots.is_empty() && cache_parent.is_dir() {
+    cache_roots.push(cache_parent);
+  }
 
   for cache_root in &cache_roots {
     let entries = WalkDir::new(cache_root)
@@ -1980,8 +2505,6 @@ fn collect_all_cache_root_files(
         );
       }
     }
-    // Only use the first existing cache root found.
-    break;
   }
   Ok(())
 }

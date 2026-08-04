@@ -198,6 +198,17 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
         if self.import.import_kind.is_type() {
             return None;
         }
+        // `process_kit_import.js` makes the per-binding type/value decision
+        // while it expands a `@kit.*` declaration.  Splitting it here would
+        // first group every value binding ahead of every type binding, losing
+        // the original specifier order.  Latest ets-loader consequently emits
+        // `AbilityConstant`, `UIAbility`, `Want` in that source order even
+        // though the first and last imports are type-only.  Leave kit imports
+        // intact for `KitImportRewriter`, which owns both the classification
+        // and factory-created individual declarations.
+        if crate::kit_map::is_kit_specifier(self.import.source.value.as_str()) {
+            return None;
+        }
         let specifiers = self.import.specifiers.as_ref()?;
         let source = ModuleStringLiteral::from_string_literal(&self.import.source);
         let mut value_bindings = Vec::new();

@@ -58,7 +58,7 @@ use super::custom_config::ArkdownCustomConfigLoader;
 use super::generate_har_declarations::HarDeclarationGenerator;
 use super::har_dedup::HarDedupProjectPlan;
 use super::har_importee_cache::HarImporteeCache;
-use super::intermediates::IntermediateArtifactWriter;
+use super::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
 use super::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
 };
@@ -74,6 +74,10 @@ use arkdown::{
   ShouldInvalidCacheRequest, SourceMapPolicy,
 };
 
+use crate::cmd::ets_checker::{
+  SdkEtsCheckerBatch, SdkEtsCheckerEntryCollector, SdkEtsCheckerInput, SdkEtsCheckerPaths,
+  SdkEtsCheckerPlan, SdkEtsCheckerPlanBuilder,
+};
 use crate::cmd::native_build::{
   DebugSymbolCollector, HvigorModuleCleanStage, NativeLibCollectionPolicy, NativeLibCollector,
   NativeLibPackageInfo, NativeSdkToolchain,
@@ -100,9 +104,9 @@ use arkdown_obfuscate::{
   ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator,
 };
 use arkdown_pack::{
-  BundledHarResourceInput, HarBundledDependencyInput, HarPackInput, HarPackageParameterInput,
-  HarVariantInput, HspInterfaceHarInput, HspTgzInput, IntegratedHspCandidate,
-  IntegratedHspCollector, PackAbility, PackInput, Packager,
+  minify_package_intermediate_module_json, BundledHarResourceInput, HarBundledDependencyInput,
+  HarPackInput, HarPackageParameterInput, HarVariantInput, HspInterfaceHarInput, HspTgzInput,
+  IntegratedHspCandidate, IntegratedHspCollector, PackAbility, PackInput, Packager,
 };
 use arkdown_profile::{
   BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarDependencyRoot,
@@ -122,6 +126,86 @@ use arkdown_resource::{ResourceBackendRunner, ResourceCompileConfig, ResourceCom
 pub struct BuildOutput {
   /// Absolute paths to all produced artifacts (signed HAP/HSP/HAR files).
   pub artifact_paths: Vec<PathBuf>,
+}
+
+/// Selected ArkTS diagnostic policy.
+///
+/// `sdk` is the parity default: it runs the installed ets-loader semantic
+/// checker before Rolldown while retaining Rust/OXC structural diagnostics in
+/// the transform adapter. `oxc` is an explicit fast structural-only mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArkTsCheckerSelection {
+  Sdk,
+  Oxc,
+  Off,
+}
+
+impl ArkTsCheckerSelection {
+  fn parse(value: Option<&str>) -> Result<Self> {
+    match value.unwrap_or("sdk") {
+      "sdk" => Ok(Self::Sdk),
+      "oxc" => Ok(Self::Oxc),
+      "off" => Ok(Self::Off),
+      checker => anyhow::bail!("unsupported checker '{checker}'; expected 'sdk', 'oxc', or 'off'"),
+    }
+  }
+
+  fn oxc_mode(self) -> CheckerMode {
+    match self {
+      Self::Sdk | Self::Oxc => CheckerMode::Oxc,
+      Self::Off => CheckerMode::Off,
+    }
+  }
+
+  fn runs_sdk_semantic_checker(self) -> bool {
+    matches!(self, Self::Sdk)
+  }
+}
+
+/// Runs the installed SDK checker from fully prepared Rust plans before any
+/// Rolldown transform hook executes. Keeping this outside a Rolldown hook
+/// mirrors `etsChecker.buildStart` without introducing SDK I/O into the hot
+/// transform path.
+struct SdkSemanticCheckStage {
+  plans: Vec<SdkEtsCheckerPlan>,
+}
+
+impl SdkSemanticCheckStage {
+  fn new(plans: Vec<SdkEtsCheckerPlan>) -> Self {
+    Self { plans }
+  }
+
+  fn run(self) -> Result<()> {
+    let outputs = SdkEtsCheckerBatch::new(self.plans).run()?;
+    let mut errors = 0usize;
+    for output in outputs {
+      errors += output.error_count();
+      for diagnostic in output.diagnostics {
+        match diagnostic.level.to_ascii_lowercase().as_str() {
+          "error" => tracing::error!(
+            module = %output.module_name,
+            "ArkTS semantic check: {}",
+            diagnostic.message
+          ),
+          "warn" | "warning" => tracing::warn!(
+            module = %output.module_name,
+            "ArkTS semantic check: {}",
+            diagnostic.message
+          ),
+          _ => tracing::debug!(
+            module = %output.module_name,
+            level = %diagnostic.level,
+            "ArkTS semantic check: {}",
+            diagnostic.message
+          ),
+        }
+      }
+    }
+    if errors > 0 {
+      anyhow::bail!("ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported {errors} error(s)");
+    }
+    Ok(())
+  }
 }
 
 /// One observed hvigor task boundary in Arkdown's native build pipeline.
@@ -1915,7 +1999,13 @@ impl<'a> PackageModuleJsonOptions<'a> {
     if let Some(parent) = output.parent() {
       fs_err::create_dir_all(parent)?;
     }
-    fs_err::write(output, serde_json::to_vec(&value)?)?;
+    // GeneratePkgModuleJson is the PackageHap input in hvigor. It writes the
+    // schema-ordered compact form before app_packing_tool parses it into its
+    // HashMap-backed archive entry. Passing the resource-stage insertion order
+    // through here changes collision order in that final serializer.
+    let generated = serde_json::to_string(&value)?;
+    let generated = minify_package_intermediate_module_json(&generated)?;
+    fs_err::write(output, generated.as_bytes())?;
     Ok(output.to_path_buf())
   }
 }
@@ -3189,11 +3279,8 @@ impl BuildCoordinator {
     let named_target = args.build_target_name.clone();
     let module_analyzer = ModuleAnalyzerKind::from(args.module_analyzer);
 
-    let checker_mode = match args.checker.as_deref().unwrap_or("oxc") {
-      "oxc" => CheckerMode::Oxc,
-      "off" => CheckerMode::Off,
-      checker => anyhow::bail!("unsupported checker '{checker}'; expected 'oxc' or 'off'"),
-    };
+    let checker_selection = ArkTsCheckerSelection::parse(args.checker.as_deref())?;
+    let checker_mode = checker_selection.oxc_mode();
 
     let project_root = args
       .project
@@ -3371,8 +3458,6 @@ impl BuildCoordinator {
         anyhow::anyhow!("missing build session module context for {}", module.name)
       })?;
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
-      let module_requires_arkts_compilation =
-        BuildPolicy::new(module_config.as_ref()).module_requires_arkts_compilation(module)?;
       let skip_profile_writes = args.skip_profile;
 
       if task_lifecycle.is_observed() && task_lifecycle.before(&module.name, None, "clean").await? {
@@ -3524,7 +3609,8 @@ impl BuildCoordinator {
         .await?
       {
         let _timer = BuildTimingProbe::module(&module.name, "build_profile");
-        let build_profile_path = module_layout.generated_build_profile(&module_target_name);
+        let build_profile_path =
+          module_layout.build_profile_for_module(&module.module_type, &module_target_name);
         let module_profile_path = module.src_path.join("build-profile.json5");
         let empty_fields = serde_json::Map::new();
         let fields = module_build_option
@@ -3782,37 +3868,49 @@ impl BuildCoordinator {
           .await?;
       }
 
-      if skip_profile_writes {
-        task_lifecycle
-          .up_to_date(
-            &module.name,
-            Some(&module_target_name),
-            "GeneratePkgSdkInfo",
-          )
-          .await?;
-      } else if task_lifecycle
-        .before(
+      // `GeneratePkgSdkInfo` is registered globally, but latest hvigor only
+      // schedules it through the HAP/HSP pack task graph. A normal HAR build
+      // therefore has no `intermediates/loader/.../pkgSdkInfo.json`; retain a
+      // directly selected native task root for plugin/task-runner parity.
+      let runs_pkg_sdk_info = module.module_type != OhosModuleType::Har
+        || task_lifecycle.has_root(
           &module.name,
           Some(&module_target_name),
           "GeneratePkgSdkInfo",
-        )
-        .await?
-      {
-        if !module_build_option.strict_mode.use_normalized_ohm_url {
-          arkdown_profile::PkgSdkInfoGenerator::new(
-            module_context.module.as_ref(),
-            module_context.deps.as_ref(),
-          )
-          .write(&module_layout.pkg_sdk_info_json())
-          .map_err(|error| anyhow::anyhow!("GeneratePkgSdkInfo failed: {error}"))?;
-        }
-        task_lifecycle
-          .after(
+        );
+      if runs_pkg_sdk_info {
+        if skip_profile_writes {
+          task_lifecycle
+            .up_to_date(
+              &module.name,
+              Some(&module_target_name),
+              "GeneratePkgSdkInfo",
+            )
+            .await?;
+        } else if task_lifecycle
+          .before(
             &module.name,
             Some(&module_target_name),
             "GeneratePkgSdkInfo",
           )
-          .await?;
+          .await?
+        {
+          if !module_build_option.strict_mode.use_normalized_ohm_url {
+            arkdown_profile::PkgSdkInfoGenerator::new(
+              module_context.module.as_ref(),
+              module_context.deps.as_ref(),
+            )
+            .write(&module_layout.pkg_sdk_info_json())
+            .map_err(|error| anyhow::anyhow!("GeneratePkgSdkInfo failed: {error}"))?;
+          }
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "GeneratePkgSdkInfo",
+            )
+            .await?;
+        }
       }
 
       let privacy_profile_path = {
@@ -3963,29 +4061,37 @@ impl BuildCoordinator {
           .map_err(|e| anyhow::anyhow!("apply sanitizer profile flags failed: {}", e))?;
       }
 
-      if skip_profile_writes {
-        task_lifecycle
-          .up_to_date(&module.name, Some(&module_target_name), "ProcessRouterMap")
-          .await?;
-      } else if task_lifecycle
-        .before(&module.name, Some(&module_target_name), "ProcessRouterMap")
-        .await?
-      {
-        let _timer = BuildTimingProbe::module(&module.name, "router_map_intermediates");
-        intermediate_writer.write_router_map_intermediates(
-          module,
-          &loader_json,
-          module_config.as_ref(),
-          &res_out,
-        )?;
-        intermediate_writer.apply_compile_resource_module_metadata(
-          &module_json_out,
-          !loader_json.router_map.is_empty(),
-          &res_layout.profile_dir().join("insight_intent.json"),
-        )?;
-        task_lifecycle
-          .after(&module.name, Some(&module_target_name), "ProcessRouterMap")
-          .await?;
+      // `ProcessRouterMap` feeds BasePackHapTask. Source/bytecode HARs carry
+      // their router profile through `ProcessHarArtifacts` instead, so normal
+      // HAR assembly must not create the two loader-router intermediates.
+      // Preserve explicit native task invocation for the plugin task graph.
+      let runs_router_map_task = module.module_type != OhosModuleType::Har
+        || task_lifecycle.has_root(&module.name, Some(&module_target_name), "ProcessRouterMap");
+      if runs_router_map_task {
+        if skip_profile_writes {
+          task_lifecycle
+            .up_to_date(&module.name, Some(&module_target_name), "ProcessRouterMap")
+            .await?;
+        } else if task_lifecycle
+          .before(&module.name, Some(&module_target_name), "ProcessRouterMap")
+          .await?
+        {
+          let _timer = BuildTimingProbe::module(&module.name, "router_map_intermediates");
+          intermediate_writer.write_router_map_intermediates(
+            module,
+            &loader_json,
+            module_config.as_ref(),
+            &res_out,
+          )?;
+          intermediate_writer.apply_compile_resource_module_metadata(
+            &module_json_out,
+            !loader_json.router_map.is_empty(),
+            &res_layout.profile_dir().join("insight_intent.json"),
+          )?;
+          task_lifecycle
+            .after(&module.name, Some(&module_target_name), "ProcessRouterMap")
+            .await?;
+        }
       }
 
       let process_share_config = if skip_profile_writes {
@@ -4060,10 +4166,24 @@ impl BuildCoordinator {
           .map_err(|e| anyhow::anyhow!("ProcessShareConfig failed: {}", e))?;
         if process_share_config {
           let share_config_out = module_layout.share_config_temp_json();
-          if module_requires_arkts_compilation || !share_out.entries.is_empty() {
+          // Latest `ProcessShareConfig.processHarShareConfig` only writes its
+          // declared output when a HAR actually has target share-config
+          // entries. HAP/HSP use `processHapOrHspShareConfig`, which writes an
+          // empty handoff as well. Remove a stale HAR handoff when a config is
+          // deleted so CompileResource cannot consume obsolete state.
+          let should_write_temp_share_config =
+            !matches!(module.module_type, OhosModuleType::Har) || !share_out.entries.is_empty();
+          if should_write_temp_share_config {
             share_config_processor
               .write_share_config(&share_out, &share_config_out)
               .map_err(|e| anyhow::anyhow!("write share config failed: {}", e))?;
+          } else if share_config_out.is_file() {
+            std::fs::remove_file(&share_config_out).map_err(|error| {
+              anyhow::anyhow!(
+                "remove stale HAR share-config handoff {} failed: {error}",
+                share_config_out.display()
+              )
+            })?;
           }
           task_lifecycle
             .after(
@@ -4529,6 +4649,76 @@ impl BuildCoordinator {
     }
     progress.done();
 
+    // Latest ets-loader registers `etsChecker` before `etsTransform` and runs
+    // it from `buildStart`.  Profiles/loader entries are now complete, while
+    // no Rolldown transform has run yet, which is the equivalent native
+    // boundary. The SDK checker remains an explicit stage so transform hooks
+    // never read SDK/configuration state.
+    if checker_selection.runs_sdk_semantic_checker() {
+      let semantic_checker_start = Instant::now();
+      let mut checker_plans = Vec::with_capacity(loader_jsons.len());
+      for (module, _manifest, loader_json, _resource_refs, module_target_name, module_config) in
+        &loader_jsons
+      {
+        if !BuildPolicy::new(module_config.as_ref()).module_requires_arkts_compilation(module)? {
+          continue;
+        }
+        let module_context = session.module_context(&module.name).ok_or_else(|| {
+          anyhow::anyhow!("missing build session module context for {}", module.name)
+        })?;
+        let module_layout = ModuleBuildLayout::new(&module.src_path);
+        let generated_profile_path = module_layout
+          .build_profile_for_module(&module.module_type, module_target_name)
+          .parent()
+          .map(Path::to_path_buf)
+          .ok_or_else(|| {
+            anyhow::anyhow!(
+              "SDK etsChecker cannot derive generated profile directory for module '{}'",
+              module.name
+            )
+          })?;
+        let paths = SdkEtsCheckerPaths::build(
+          module_layout.res_profile_dir(),
+          module_layout.res_ark_module_json(),
+          module_layout.resource_table_txt(),
+          module_layout.res_resources_dir().join("rawfile"),
+          module_layout.source().ets(),
+          module_layout.source().src_main().join("supervisual"),
+          module_layout.loader_json(),
+          PathBuf::from(&loader_json.cache_path),
+          PathBuf::from(&loader_json.ace_module_build),
+          generated_profile_path,
+          module_layout.generated_resource_table_typescript(),
+        );
+        let entries = SdkEtsCheckerEntryCollector::new(loader_json).collect();
+        checker_plans.push(
+          SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
+            config: module_config.as_ref(),
+            session: session.as_ref(),
+            module,
+            module_context: &module_context,
+            module_build_option: &module_config.product.build_option,
+            loader_json: Some(loader_json),
+            target_name: module_target_name,
+            node_executable: args.resolved_node_executable(),
+            paths,
+            entries,
+            coverage_enabled: coverage_mode,
+            debug_line: false,
+            byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
+          })
+          .build()?,
+        );
+      }
+      if !checker_plans.is_empty() {
+        SdkSemanticCheckStage::new(checker_plans).run()?;
+        tracing::info!(
+          elapsed_ms = semantic_checker_start.elapsed().as_millis(),
+          "SDK etsChecker semantic stage completed"
+        );
+      }
+    }
+
     // ── Step 3: Bundling ──────────────────────────────────────────────
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleStageOutput,)> = Vec::new();
@@ -4976,13 +5166,39 @@ impl BuildCoordinator {
         "bundle plugin factory completed"
       );
 
-      let bundle_out = BundleStage::run(BundleStageInput {
+      let mut bundle_out = BundleStage::run(BundleStageInput {
         config: config.clone(),
         plugins,
         ets_transform_plan: Some(Arc::clone(&ets_transform_plan)),
         plan: bundle_plan,
       })
       .await?;
+      // ets-loader's SourceMapGenerator runs during the Rollup pass, before
+      // CompileArkTS. Stage the map at the same boundary so its previous cache
+      // is still available for the current-pass-first merge.
+      if let Some(source_maps_path) = bundle_out.bundle_output.source_maps_path.clone() {
+        // Latest ProcessHarArtifacts does not materialize
+        // `intermediates/source_map` for a ByteCode HAR, unlike HAP/HSP and a
+        // source HAR. Keep that distinction in the Rust-owned handoff rather
+        // than making the packer infer it from an optional file.
+        let package_source_map_intermediate = module_layout.source_maps_intermediate();
+        let package_source_map_handoff = if module.module_type == OhosModuleType::Har
+          && module_build_option.har_artifact_type == HarArtifactType::Bytecode
+        {
+          SourceMapPackageHandoff::Suppress(&package_source_map_intermediate)
+        } else {
+          SourceMapPackageHandoff::Materialize(&package_source_map_intermediate)
+        };
+        let source_maps_path = intermediate_writer.stage_source_maps(
+          &source_maps_path,
+          &PathBuf::from(&loader_json.cache_path).join("sourceMaps.json"),
+          &PathBuf::from(&loader_json.cache_path).join("sourceMaps.map"),
+          package_source_map_handoff,
+          &config.build_mode,
+          &bundle_out.bundle_output.source_map_input_fingerprints,
+        )?;
+        bundle_out.bundle_output.source_maps_path = Some(source_maps_path);
+      }
       let widget_bundle_out = if let (Some(widget_compile_plan), Some(widget_bundle_plan)) =
         (widget_compile_plan, widget_bundle_plan)
       {
@@ -5396,7 +5612,6 @@ impl BuildCoordinator {
       .zip(all_bc_har_deps.iter())
       .enumerate()
     {
-      let module_layout = ModuleBuildLayout::new(&module.src_path);
       let module_package_plugins = package_plugins
         .iter()
         .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
@@ -5598,12 +5813,12 @@ impl BuildCoordinator {
         })?;
       }
 
-      if let Some(source_maps_path) = &bundle_out.bundle_output.source_maps_path {
-        intermediate_writer.stage_source_maps(
-          source_maps_path,
-          &PathBuf::from(&loader_json.cache_path).join("sourceMaps.json"),
-          &module_layout.source_maps_intermediate(),
-          &config.build_mode,
+      if bundle_out.bundle_output.source_maps_path.is_some() {
+        let compile_source_maps_cache =
+          PathBuf::from(&loader_json.cache_path).join("sourceMaps.json");
+        intermediate_writer.commit_source_map_input_fingerprints(
+          &compile_source_maps_cache,
+          &bundle_out.bundle_output.source_map_input_fingerprints,
         )?;
       }
 
@@ -6113,7 +6328,16 @@ impl BuildCoordinator {
               let artifact_type = module_build_option.har_artifact_type;
               let declarations_dir = module_layout.declarations_dir();
               if !matches!(artifact_type, HarArtifactType::Original) {
-                HarDeclarationGenerator::new_har(&module.src_path, &source_dir, &module.name)
+                let generated_module_info =
+                  module_layout.generated_module_info(&module_target_name);
+                let declaration_generator =
+                  HarDeclarationGenerator::new_har(&module.src_path, &source_dir, &module.name);
+                let declaration_generator = if matches!(artifact_type, HarArtifactType::Bytecode) {
+                  declaration_generator.with_generated_source(&generated_module_info)
+                } else {
+                  declaration_generator
+                };
+                declaration_generator
                   .generate()
                   .map_err(|error| anyhow::anyhow!("generate HAR declarations failed: {error}"))?;
               }
@@ -6303,7 +6527,8 @@ impl BuildCoordinator {
                 preload_system_so_json,
                 source_maps_path: source_maps,
                 build_profile_path: Some(
-                  module_layout.generated_build_profile(artifact_target_label),
+                  module_layout
+                    .build_profile_for_module(&module.module_type, artifact_target_label),
                 ),
                 declaration_entries,
                 package_parameters,
@@ -6367,49 +6592,6 @@ impl BuildCoordinator {
               let packed = packager
                 .pack_har_variant(har_pack_input, har_variant)
                 .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
-
-              if !matches!(artifact_type, HarArtifactType::Original) {
-                let har_info_out = module_layout.har_extend_info_json();
-                if let Some(parent) = har_info_out.parent() {
-                  std::fs::create_dir_all(parent).ok();
-                }
-                let exported_sources: Vec<String> = walkdir::WalkDir::new(&source_dir)
-                  .into_iter()
-                  .filter_map(|e| e.ok())
-                  .filter(|e| {
-                    e.file_type().is_file()
-                      && e
-                        .path()
-                        .extension()
-                        .and_then(|x| x.to_str())
-                        .is_some_and(|x| x == "ets")
-                  })
-                  .filter_map(|e| {
-                    e.path()
-                      .strip_prefix(&source_dir)
-                      .ok()
-                      .and_then(|r| ArtifactPathSerializer::path_to_slash_string(r).ok())
-                  })
-                  .collect();
-                let har_info = serde_json::json!({
-                    "moduleName": module.name,
-                    "moduleType": "har",
-                    "exportedSources": exported_sources,
-                    "abilities": manifest.abilities.iter().map(|a| serde_json::json!({
-                        "name": a.name,
-                        "srcEntry": a.src_entry,
-                    })).collect::<Vec<_>>(),
-                });
-                intermediate_writer
-                  .write_json_pretty(&har_info_out, &har_info)
-                  .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to write har-extend-info.json"
-                    );
-                  });
-              }
-
               Some(packed)
             }
             _ => {
@@ -6421,20 +6603,14 @@ impl BuildCoordinator {
                   std::fs::write(&resources_index, [])?;
                 }
                 {
-                  let raw_source_maps_path = {
-                    let candidate = module_layout.source_maps_intermediate();
-                    candidate.is_file().then_some(candidate)
-                  }
-                  .or_else(|| {
-                    package_out
-                      .source_maps_path
-                      .clone()
-                      .filter(|path| path.is_file())
-                  })
-                  .or_else(|| {
-                    let candidate = module_layout.loader_out_source_maps();
-                    candidate.is_file().then_some(candidate)
-                  });
+                  let raw_source_maps_path = package_out
+                    .source_maps_path
+                    .clone()
+                    .filter(|path| path.is_file())
+                    .or_else(|| {
+                      let candidate = module_layout.loader_out_source_maps();
+                      candidate.is_file().then_some(candidate)
+                    });
                   let source_maps_path = if matches!(config.build_mode, BuildMode::Release) {
                     None
                   } else {
@@ -6737,7 +6913,6 @@ impl BuildCoordinator {
             );
           }
           intermediate_writer.publish_package_source_maps(
-            &module_layout.source_maps_intermediate(),
             package_out.source_maps_path.as_deref(),
             &module_layout.output_mapping_source_maps(),
           )?;
@@ -6749,12 +6924,16 @@ impl BuildCoordinator {
             )
             .await?
           {
+            let source_map_primary = package_out
+              .source_maps_path
+              .clone()
+              .unwrap_or_else(|| module_layout.loader_out_source_maps());
             DebugSymbolCollector::new(
               module.src_path.clone(),
               module.name.clone(),
               config.build_mode.clone(),
-              module_layout.source_maps_intermediate(),
-              package_out.source_maps_path.clone(),
+              source_map_primary,
+              None,
               PathBuf::from(&loader_json.cache_path)
                 .join("obfuscation")
                 .join("nameCache.json"),

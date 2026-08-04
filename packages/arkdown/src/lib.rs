@@ -1850,8 +1850,8 @@ async fn run_build(
   use arkdown_session::BuildSessionBuilder;
 
   if let Some(checker) = package_args.checker.as_deref() {
-    if checker != "oxc" && checker != "off" {
-      anyhow::bail!("unsupported checker '{checker}'; expected 'oxc' or 'off'");
+    if checker != "sdk" && checker != "oxc" && checker != "off" {
+      anyhow::bail!("unsupported checker '{checker}'; expected 'sdk', 'oxc', or 'off'");
     }
   }
   let module_analyzer = match package_args.module_analyzer.as_deref().unwrap_or("oxc") {
@@ -1975,7 +1975,7 @@ async fn run_build(
     disable_abc_cache: package_args.disable_abc_cache || !package_args.cache,
     cache_file: package_args.cache_file.map(std::path::PathBuf::from),
     abc_backend: AbcBackendChoice::Sdk,
-    checker: package_args.checker.or_else(|| Some("oxc".to_string())),
+    checker: package_args.checker.or_else(|| Some("sdk".to_string())),
     module_analyzer,
     cache: package_args.cache,
     // Hot-rebuild flags are always false when invoked via the Node.js API

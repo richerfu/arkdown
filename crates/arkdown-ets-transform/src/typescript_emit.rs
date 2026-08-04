@@ -137,6 +137,7 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             .body
             .iter()
             .any(Statement::is_module_declaration);
+        let is_comment_only = parsed.program.body.is_empty();
 
         let rewriter = ImportedConstEnumRewriter::new(self.id, self.sources);
         let rewriter = match self.const_enum_exports {
@@ -181,14 +182,27 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             ..CodegenOptions::default()
         };
         let generated = Codegen::new().with_options(options).build(&parsed.program);
+        // Latest IDE ets-loader
+        // `rollup-plugin-ets-typescript.js::transform` sends a
+        // `//@ts-noCheck` input through TypeScript `Program.emit`. For a
+        // comment-only generated module such as ResourceTable.ts, that emit
+        // intentionally contains no source comments: it is just the emitted
+        // strict-mode prologue and source-map reference. OXC codegen preserves
+        // attached comments by default, so discard them through the parsed
+        // AST's body fact rather than matching generated-file paths or text.
+        let generated_code = if self.hvigor_emit_wrapper && is_comment_only {
+            String::new()
+        } else {
+            generated.code
+        };
         let generated_line_offset = u32::from(
             self.hvigor_emit_wrapper
-                && self.should_prepend_use_strict(&generated.code, is_external_module),
+                && self.should_prepend_use_strict(&generated_code, is_external_module),
         );
         let source_map = generated.map.as_ref().and_then(|source_map| {
             let source_map = source_map.to_json_string();
             TypeScriptJavaScriptSourceMapBuilder::new(
-                &generated.code,
+                &generated_code,
                 self.source,
                 self.id,
                 &source_map,
@@ -197,9 +211,9 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
             .build()
         });
         let code = if self.hvigor_emit_wrapper {
-            self.wrap_hvigor_emit(generated.code, is_external_module)
+            self.wrap_hvigor_emit(generated_code, is_external_module)
         } else {
-            generated.code
+            generated_code
         };
         Some(TypeScriptJavascriptEmitOutput { code, source_map })
     }

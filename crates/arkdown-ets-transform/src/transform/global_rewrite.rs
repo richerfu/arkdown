@@ -37,11 +37,28 @@ impl<'a> GlobalContextCallRewriter<'a> {
     }
 
     pub(crate) fn method_definition(&self, method: &MethodDefinition<'_>) -> ClassElement<'a> {
+        self.method_definition_with_decorators(method, false)
+    }
+
+    /// Rewrites global-context calls in a generated component method while
+    /// retaining its method decorators when the owning lowering pass needs
+    /// their runtime registration.
+    ///
+    /// `process_struct_componentV2.js` retains ComponentV2 lifecycle method
+    /// decorators on the generated `ViewV2` class. Other component lowering
+    /// paths still intentionally erase their source-only decorators.
+    pub(crate) fn method_definition_with_decorators(
+        &self,
+        method: &MethodDefinition<'_>,
+        retain_decorators: bool,
+    ) -> ClassElement<'a> {
         let ast = AstBuilder::new(self.allocator);
         let mut method = method.clone_in(self.allocator);
         let mut rewrite = GlobalContextCallMutator::new(self.allocator);
         rewrite.visit_function(&mut method.value, ScopeFlags::Function);
-        method.decorators.clear();
+        if !retain_decorators {
+            method.decorators.clear();
+        }
         ClassElement::MethodDefinition(ast.alloc(method))
     }
 

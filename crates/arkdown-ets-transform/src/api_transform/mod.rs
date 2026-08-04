@@ -16,7 +16,7 @@ use oxc_semantic::Scoping;
 use oxc_semantic::SemanticBuilder;
 #[cfg(test)]
 use oxc_span::SourceType;
-use oxc_span::SPAN;
+use oxc_span::{Span, SPAN};
 
 use crate::kit_map::KitEntry;
 #[cfg(test)]
@@ -97,6 +97,7 @@ impl KitImportRewriter {
 }
 
 struct KitImportDeclarationRewriter<'a> {
+    declaration_span: Span,
     source: &'a oxc_ast::ast::StringLiteral<'a>,
     specifiers: Option<&'a OxcVec<'a, ImportDeclarationSpecifier<'a>>>,
     import_kind: ImportOrExportKind,
@@ -107,6 +108,7 @@ struct KitImportDeclarationRewriter<'a> {
 impl<'a> KitImportDeclarationRewriter<'a> {
     fn from_import(import: &'a ImportDeclaration<'a>, scoping: &'a Scoping) -> Self {
         Self {
+            declaration_span: import.span,
             source: &import.source,
             specifiers: import.specifiers.as_ref(),
             import_kind: import.import_kind,
@@ -120,6 +122,7 @@ impl<'a> KitImportDeclarationRewriter<'a> {
         scoping: &'a Scoping,
     ) -> Self {
         Self {
+            declaration_span: import.span,
             source: &import.source,
             specifiers: import.specifiers.as_ref(),
             import_kind: ImportOrExportKind::Value,
@@ -162,6 +165,9 @@ impl<'a> KitImportDeclarationRewriter<'a> {
                 ImportOrExportKind::Value
             };
             imports.push(KitImportBinding {
+                declaration_span: self.declaration_span,
+                specifier_span: specifier.span,
+                local_span: specifier.local.span,
                 local_name: local_name.to_owned(),
                 module: HvigorEsmoduleModuleSpecifier::new(kit_entry.module()).to_import_request(),
                 import_kind,
@@ -198,6 +204,9 @@ impl<'a> HvigorEsmoduleModuleSpecifier<'a> {
 }
 
 struct KitImportBinding {
+    declaration_span: Span,
+    specifier_span: Span,
+    local_span: Span,
     local_name: String,
     module: String,
     import_kind: ImportOrExportKind,
@@ -232,7 +241,10 @@ impl KitImportEmitter {
         let module: &'a str = ast.allocator.alloc_str(&import.module);
         let specifier = match &import.binding {
             KitEntry::Default(_) => ImportDeclarationSpecifier::ImportDefaultSpecifier(
-                ast.alloc_import_default_specifier(SPAN, ast.binding_identifier(SPAN, local_name)),
+                ast.alloc_import_default_specifier(
+                    import.specifier_span,
+                    ast.binding_identifier(import.local_span, local_name),
+                ),
             ),
             KitEntry::Named(_, binding_name) => {
                 let binding_name: &'a str = ast.allocator.alloc_str(binding_name);
@@ -241,28 +253,31 @@ impl KitImportEmitter {
                 // because `imported` == `local`. When renamed we set `imported` to the
                 // binding name so codegen emits `{ binding_name as local_name }`.
                 let imported = if is_renamed {
-                    ast.module_export_name_identifier_name(SPAN, binding_name)
+                    ast.module_export_name_identifier_name(import.specifier_span, binding_name)
                 } else {
-                    ast.module_export_name_identifier_name(SPAN, local_name)
+                    ast.module_export_name_identifier_name(import.specifier_span, local_name)
                 };
                 ImportDeclarationSpecifier::ImportSpecifier(ast.alloc_import_specifier(
-                    SPAN,
+                    import.specifier_span,
                     imported,
-                    ast.binding_identifier(SPAN, local_name),
-                    ImportOrExportKind::Value,
+                    ast.binding_identifier(import.local_span, local_name),
+                    import.import_kind,
                 ))
             }
         };
         if import.lazy {
             Statement::from(ast.module_declaration_lazy_import_declaration(
-                SPAN,
+                import.declaration_span,
                 Some(ast.vec1(specifier)),
+                // `process_kit_import.js` creates a fresh module request.
+                // Keeping the kit declaration's literal span would make the
+                // source-shape printer reuse `@kit.*`'s raw text here.
                 ast.string_literal(SPAN, module, None),
                 NONE,
             ))
         } else {
             Statement::from(ast.module_declaration_import_declaration(
-                SPAN,
+                import.declaration_span,
                 Some(ast.vec1(specifier)),
                 ast.string_literal(SPAN, module, None),
                 None,
@@ -334,6 +349,24 @@ const value = new Want();"#;
             out.contains("import Want from \"@ohos.app.ability.Want\""),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn test_rewrite_component_v2_lifecycle_imports() {
+        // Current SDK @kit.ArkUI.d.ts re-exports these from StateManagement;
+        // latest ets-loader process_kit_import.js creates one import per
+        // binding, preserving source specifier order.
+        let src = r#"import { ComponentAppear, ComponentDisappear } from "@kit.ArkUI";
+ComponentAppear;
+ComponentDisappear;"#;
+        let out = rewrite_source(src);
+        assert!(
+            out.contains("import { ComponentAppear } from \"@ohos.arkui.StateManagement\"")
+                && out
+                    .contains("import { ComponentDisappear } from \"@ohos.arkui.StateManagement\""),
+            "ComponentV2 lifecycle imports must match ets-loader kit expansion: {out}"
+        );
+        assert!(!out.contains("@kit.ArkUI"), "got: {out}");
     }
 
     #[test]

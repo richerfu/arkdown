@@ -305,6 +305,43 @@ export default class ArkdownStartupConfig extends StartupConfigEntry {
             "OAAO,EAAE,eAAe,EAAE;AAE1B,MAAM,UAAU,KAAK,CAAC,IAAI,EAAE,MAAM,GAAG,MAAM;IACzC,OAAO,UAAU,IAAI,KAAK,eAAe,EAAE,CAAC;AAC9C,CAAC"
         );
     }
+
+    #[test]
+    fn standard_private_field_and_compound_assignment_match_latest_typescript_printer() {
+        let original = concat!(
+            "export function formatGreeting(name: string): string {\n",
+            "  return `Hello, ${name}!`;\n",
+            "}\n\n",
+            "export class Counter {\n",
+            "  private value: number = 0;\n\n",
+            "  increment(): number {\n",
+            "    this.value += 1;\n",
+            "    return this.value;\n",
+            "  }\n",
+            "}\n",
+        );
+        let generated = concat!(
+            "export function formatGreeting(name: string): string {\n",
+            "    return `Hello, ${name}!`;\n",
+            "}\n",
+            "export class Counter {\n",
+            "    private value: number = 0;\n",
+            "    increment(): number {\n",
+            "        this.value += 1;\n",
+            "        return this.value;\n",
+            "    }\n",
+            "}\n",
+        );
+        let source_map = HvigorStandardSourceMapBuilder::new(generated, original, "Index.ets")
+            .build()
+            .expect("standard source map");
+        let value: serde_json::Value = serde_json::from_str(&source_map).expect("source map JSON");
+
+        assert_eq!(
+            value["mappings"],
+            "AAAA,MAAM,UAAU,cAAc,CAAC,IAAI,EAAE,MAAM,GAAG,MAAM;IAClD,OAAO,UAAU,IAAI,GAAG,CAAC;AAC3B,CAAC;AAED,MAAM,OAAO,OAAO;IAClB,OAAO,CAAC,KAAK,EAAE,MAAM,GAAG,CAAC,CAAC;IAE1B,SAAS,IAAI,MAAM;QACjB,IAAI,CAAC,KAAK,IAAI,CAAC,CAAC;QAChB,OAAO,IAAI,CAAC,KAAK,CAAC;IACpB,CAAC;CACF"
+        );
+    }
 }
 
 use oxc_allocator::Allocator;
@@ -1042,6 +1079,9 @@ impl<'a> StandardTokenMappingDecision<'a> {
         if self.token.is_standard_start_suppressed() {
             return false;
         }
+        if self.token.is_compound_assignment() {
+            return false;
+        }
         if self.token.is_open_paren()
             && self.previous.is_some_and(SourceMapTokenInfo::is_if_keyword)
         {
@@ -1116,6 +1156,13 @@ impl<'a> StandardTokenMappingDecision<'a> {
         {
             return true;
         }
+        if self.token.is_identifier_name()
+            && self
+                .next
+                .is_some_and(SourceMapTokenInfo::is_compound_assignment)
+        {
+            return true;
+        }
         false
     }
 }
@@ -1156,6 +1203,7 @@ trait SourceMapTokenInfo {
     fn is_semicolon(&self) -> bool;
     fn is_comma(&self) -> bool;
     fn is_standard_start_suppressed(&self) -> bool;
+    fn is_compound_assignment(&self) -> bool;
     fn should_map_end_directly(&self) -> bool;
     fn starts_const_initializer(&self) -> bool;
     fn starts_type_name(&self) -> bool;
@@ -1224,10 +1272,31 @@ impl SourceMapTokenInfo for TokenInfo<'_> {
         matches!(self.kind, Kind::Class | Kind::Extends | Kind::Eq)
     }
 
+    fn is_compound_assignment(&self) -> bool {
+        matches!(
+            self.kind,
+            Kind::Amp2Eq
+                | Kind::AmpEq
+                | Kind::CaretEq
+                | Kind::MinusEq
+                | Kind::PercentEq
+                | Kind::Pipe2Eq
+                | Kind::PipeEq
+                | Kind::PlusEq
+                | Kind::Question2Eq
+                | Kind::ShiftLeftEq
+                | Kind::ShiftRight3Eq
+                | Kind::ShiftRightEq
+                | Kind::SlashEq
+                | Kind::Star2Eq
+                | Kind::StarEq
+        )
+    }
+
     fn should_map_end_directly(&self) -> bool {
         matches!(
             self.kind,
-            Kind::Export | Kind::Default | Kind::Async | Kind::Void | Kind::Arrow
+            Kind::Export | Kind::Default | Kind::Async | Kind::Private | Kind::Void | Kind::Arrow
         ) || self.kind.is_number()
     }
 
