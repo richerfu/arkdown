@@ -1011,6 +1011,33 @@ pub fn resolve_kit_import(kit: &str, sym: &str) -> Option<KitEntry> {
         ("@kit.ArkUI", "ComponentContent") => {
             Some(KitEntry::Named("@ohos:arkui.node", "ComponentContent"))
         }
+        // Latest SDK @kit.ArkUI.d.ts re-exports the ComponentV2 lifecycle
+        // decorators from StateManagement. Keep these as individual mappings:
+        // process_kit_import.js emits one declaration per kit binding.
+        ("@kit.ArkUI", "ComponentAppear") => Some(KitEntry::Named(
+            "@ohos:arkui.StateManagement",
+            "ComponentAppear",
+        )),
+        ("@kit.ArkUI", "ComponentBuilt") => Some(KitEntry::Named(
+            "@ohos:arkui.StateManagement",
+            "ComponentBuilt",
+        )),
+        ("@kit.ArkUI", "ComponentDisappear") => Some(KitEntry::Named(
+            "@ohos:arkui.StateManagement",
+            "ComponentDisappear",
+        )),
+        ("@kit.ArkUI", "ComponentInit") => Some(KitEntry::Named(
+            "@ohos:arkui.StateManagement",
+            "ComponentInit",
+        )),
+        ("@kit.ArkUI", "ComponentRecycle") => Some(KitEntry::Named(
+            "@ohos:arkui.StateManagement",
+            "ComponentRecycle",
+        )),
+        ("@kit.ArkUI", "ComponentReuse") => Some(KitEntry::Named(
+            "@ohos:arkui.StateManagement",
+            "ComponentReuse",
+        )),
         ("@kit.ArkUI", "ComponentUtils") => {
             Some(KitEntry::Named("@ohos:arkui.UIContext", "ComponentUtils"))
         }

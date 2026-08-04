@@ -41,6 +41,7 @@ pub(crate) struct EtsTransformModuleMetadataEntry {
     pub(crate) module_source_code: Option<Arc<str>>,
     pub(crate) emits_javascript: bool,
     pub(crate) has_source_map: bool,
+    pub(crate) is_comment_only_javascript: bool,
     pub(crate) is_shared_module: bool,
 }
 
@@ -56,6 +57,7 @@ impl EtsTransformModuleMetadata {
         module_source_code: Option<Arc<str>>,
         emits_javascript: bool,
         has_source_map: bool,
+        is_comment_only_javascript: bool,
         is_shared_module: bool,
     ) {
         self.entries.insert(
@@ -64,6 +66,7 @@ impl EtsTransformModuleMetadata {
                 module_source_code,
                 emits_javascript,
                 has_source_map,
+                is_comment_only_javascript,
                 is_shared_module,
             },
         );
@@ -132,6 +135,7 @@ impl EtsTransformPlugin {
                     output.module_source_code.clone(),
                     output.emits_javascript,
                     has_source_map,
+                    output.is_comment_only_javascript,
                     output.is_shared_module,
                 );
         }

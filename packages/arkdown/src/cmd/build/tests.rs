@@ -1,34 +1,46 @@
 use std::path::PathBuf;
 
+use arkdown::SourceMapInputFingerprint;
 use tempfile::TempDir;
 
-use super::intermediates::IntermediateArtifactWriter;
+use super::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
 use super::layout::RestoolLayout;
 
 #[test]
-fn release_source_maps_move_out_of_loader_output_like_hvigor() {
+fn bytecode_har_release_source_maps_move_to_compile_cache_like_hvigor() {
   let temp = TempDir::new().expect("create source-map fixture root");
   let origin = temp.path().join("loader_out/default/ets/sourceMaps.map");
   let compile_cache = temp.path().join("CompileArkTS/sourceMaps.json");
-  let intermediate = temp.path().join("source_map/default/sourceMaps.map");
+  let release_output = temp.path().join("CompileArkTS/sourceMaps.map");
+  let stale_package_intermediate = temp.path().join("source_map/default/sourceMaps.map");
   std::fs::create_dir_all(origin.parent().unwrap()).expect("create loader output");
   std::fs::write(&origin, b"source-map").expect("write source map");
+  std::fs::create_dir_all(stale_package_intermediate.parent().unwrap())
+    .expect("create stale source-map directory");
+  std::fs::write(&stale_package_intermediate, b"stale-source-map").expect("write stale source map");
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
-  writer
+  let staged = writer
     .stage_source_maps(
       &origin,
       &compile_cache,
-      &intermediate,
+      &release_output,
+      SourceMapPackageHandoff::Suppress(&stale_package_intermediate),
       &arkdown_core::BuildMode::Release,
+      &[],
     )
     .expect("stage release source map");
 
+  assert_eq!(staged, release_output);
   assert_eq!(
-    std::fs::read(&intermediate).expect("read staged source map"),
+    std::fs::read(&release_output).expect("read release source map"),
     b"source-map"
   );
   assert!(!origin.exists());
+  assert!(
+    !stale_package_intermediate.exists(),
+    "ByteCode HAR must remove the obsolete package source-map intermediate"
+  );
   assert_eq!(
     std::fs::read(&compile_cache).expect("read CompileArkTS source map"),
     b"source-map"
@@ -36,42 +48,170 @@ fn release_source_maps_move_out_of_loader_output_like_hvigor() {
 }
 
 #[test]
-fn debug_source_maps_remain_in_loader_output_after_staging() {
+fn debug_source_maps_keep_loader_and_package_intermediate_for_hap_like_hvigor() {
   let temp = TempDir::new().expect("create source-map fixture root");
   let origin = temp.path().join("loader_out/default/ets/sourceMaps.map");
   let compile_cache = temp.path().join("CompileArkTS/sourceMaps.json");
-  let intermediate = temp.path().join("source_map/default/sourceMaps.map");
+  let release_output = temp.path().join("CompileArkTS/sourceMaps.map");
+  let package_intermediate = temp.path().join("source_map/default/sourceMaps.map");
   std::fs::create_dir_all(origin.parent().unwrap()).expect("create loader output");
   std::fs::write(&origin, b"source-map").expect("write source map");
+  let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+  let staged = writer
+    .stage_source_maps(
+      &origin,
+      &compile_cache,
+      &release_output,
+      SourceMapPackageHandoff::Materialize(&package_intermediate),
+      &arkdown_core::BuildMode::Debug,
+      &[],
+    )
+    .expect("stage debug source map");
+
+  assert_eq!(staged, package_intermediate);
+  assert!(origin.is_file());
+  assert!(!release_output.exists());
+  assert!(compile_cache.is_file());
+  assert_eq!(
+    std::fs::read(&package_intermediate).expect("read package source map"),
+    b"source-map"
+  );
+}
+
+#[test]
+fn release_source_maps_keep_package_intermediate_for_hap_like_hvigor() {
+  let temp = TempDir::new().expect("create source-map fixture root");
+  let origin = temp.path().join("loader_out/default/ets/sourceMaps.map");
+  let compile_cache = temp.path().join("CompileArkTS/sourceMaps.json");
+  let release_output = temp.path().join("CompileArkTS/sourceMaps.map");
+  let package_intermediate = temp.path().join("source_map/default/sourceMaps.map");
+  std::fs::create_dir_all(origin.parent().unwrap()).expect("create loader output");
+  std::fs::write(&origin, b"source-map").expect("write source map");
+  let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+  let staged = writer
+    .stage_source_maps(
+      &origin,
+      &compile_cache,
+      &release_output,
+      SourceMapPackageHandoff::Materialize(&package_intermediate),
+      &arkdown_core::BuildMode::Release,
+      &[],
+    )
+    .expect("stage release source map");
+
+  assert_eq!(staged, package_intermediate);
+  assert!(!origin.exists());
+  for path in [&compile_cache, &release_output, &package_intermediate] {
+    assert_eq!(
+      std::fs::read(path).expect("read staged source map"),
+      b"source-map",
+      "{}",
+      path.display()
+    );
+  }
+}
+
+#[test]
+fn incremental_source_maps_prepend_regenerated_entries_like_latest_ets_loader() {
+  let temp = TempDir::new().expect("create incremental source-map fixture root");
+  let origin = temp.path().join("loader_out/default/ets/sourceMaps.map");
+  let compile_cache = temp.path().join("CompileArkTS/sourceMaps.json");
+  let release_output = temp.path().join("CompileArkTS/sourceMaps.map");
+  std::fs::create_dir_all(origin.parent().unwrap()).expect("create loader output");
+
+  // SDK 6.1.1 `SourceMapGenerator` first emits this pass's `Index` record,
+  // then appends cached ResourceTable and EntryAbility records in cache order.
+  // The source edit below deliberately leaves `mappings` unchanged so this
+  // regression protects the native source-fingerprint handoff, not a JSON
+  // source-map difference.
+  let map = r#"{
+  "ResourceTable.js": { "mappings": "resource" },
+  "EntryAbility.ts": { "mappings": "ability" },
+  "Index.ts": { "mappings": "stable-index" }
+}"#;
+  std::fs::write(&origin, map).expect("write cold source maps");
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
     .stage_source_maps(
       &origin,
       &compile_cache,
-      &intermediate,
+      &release_output,
+      SourceMapPackageHandoff::Materialize(&temp.path().join("source_map/default/sourceMaps.map")),
       &arkdown_core::BuildMode::Debug,
+      &[SourceMapInputFingerprint {
+        key: "Index.ts".to_string(),
+        content_hash: "cold-index-source".to_string(),
+      }],
     )
-    .expect("stage debug source map");
+    .expect("stage cold source maps");
+  writer
+    .commit_source_map_input_fingerprints(
+      &compile_cache,
+      &[SourceMapInputFingerprint {
+        key: "Index.ts".to_string(),
+        content_hash: "cold-index-source".to_string(),
+      }],
+    )
+    .expect("commit cold source-map input fingerprints");
+  std::fs::write(&origin, map).expect("write source maps with an unchanged serialized Index entry");
 
-  assert!(origin.is_file());
-  assert!(intermediate.is_file());
-  assert!(compile_cache.is_file());
+  writer
+    .stage_source_maps(
+      &origin,
+      &compile_cache,
+      &release_output,
+      SourceMapPackageHandoff::Materialize(&temp.path().join("source_map/default/sourceMaps.map")),
+      &arkdown_core::BuildMode::Debug,
+      &[SourceMapInputFingerprint {
+        key: "Index.ts".to_string(),
+        content_hash: "changed-index-source".to_string(),
+      }],
+    )
+    .expect("stage incrementally regenerated source maps");
+  writer
+    .commit_source_map_input_fingerprints(
+      &compile_cache,
+      &[SourceMapInputFingerprint {
+        key: "Index.ts".to_string(),
+        content_hash: "changed-index-source".to_string(),
+      }],
+    )
+    .expect("commit changed source-map input fingerprints");
+
+  let package_intermediate = temp.path().join("source_map/default/sourceMaps.map");
+  for path in [&origin, &compile_cache, &package_intermediate] {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).expect("read map"))
+      .expect("parse staged source map");
+    assert_eq!(
+      value
+        .as_object()
+        .expect("source map object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>(),
+      ["Index.ts", "ResourceTable.js", "EntryAbility.ts"],
+      "{} must preserve ets-loader's incremental map insertion order",
+      path.display()
+    );
+    assert_eq!(value["Index.ts"]["mappings"], "stable-index");
+  }
 }
 
 #[test]
 fn package_har_publishes_source_maps_to_outputs_mapping_like_latest_hvigor() {
   let temp = TempDir::new().expect("create PackageHar source-map fixture root");
   let module_layout = super::layout::ModuleBuildLayout::new(temp.path());
-  let intermediate = module_layout.source_maps_intermediate();
-  std::fs::create_dir_all(intermediate.parent().unwrap()).expect("create source-map directory");
-  std::fs::write(&intermediate, b"package-har-source-map").expect("write source map");
+  let source_maps = module_layout.source_maps_intermediate();
+  std::fs::create_dir_all(source_maps.parent().unwrap()).expect("create source-map directory");
+  std::fs::write(&source_maps, b"package-har-source-map").expect("write source map");
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
     .publish_package_source_maps(
-      &intermediate,
-      None,
+      Some(&source_maps),
       &module_layout.output_mapping_source_maps(),
     )
     .expect("publish PackageHar source map");

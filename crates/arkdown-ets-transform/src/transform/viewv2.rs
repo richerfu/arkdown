@@ -68,7 +68,10 @@ enum V2FieldKind {
 
 #[derive(Debug, Clone, Copy)]
 enum V2RegularMember<'a> {
-    Method(&'a MethodDefinition<'a>),
+    Method {
+        method: &'a MethodDefinition<'a>,
+        retain_decorators: bool,
+    },
     StaticBlock(&'a StaticBlock<'a>),
     TSIndexSignature(&'a TSIndexSignature<'a>),
     AccessorProperty(&'a AccessorProperty<'a>),
@@ -86,9 +89,11 @@ impl<'a> V2RegularMember<'a> {
     fn to_class_element<'b>(&self, allocator: &'b Allocator) -> ClassElement<'b> {
         let ast = AstBuilder::new(allocator);
         match self {
-            Self::Method(method) => {
-                GlobalContextCallRewriter::new(allocator).method_definition(method)
-            }
+            Self::Method {
+                method,
+                retain_decorators,
+            } => GlobalContextCallRewriter::new(allocator)
+                .method_definition_with_decorators(method, *retain_decorators),
             Self::StaticBlock(block) => {
                 ClassElement::StaticBlock(ast.alloc(block.clone_in(allocator)))
             }
@@ -328,7 +333,15 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     self.validate_lifecycle_method(name, method)?;
                     has_monitor_method |=
                         self.has_method_decorator(method, ArkuiDecoratorName::MONITOR);
-                    regular_members.push(V2RegularMember::Method(method));
+                    regular_members.push(V2RegularMember::Method {
+                        method,
+                        // Latest ets-loader's `process_struct_componentV2.js`
+                        // keeps lifecycle decorators on the ViewV2 method so
+                        // the ArkUI runtime can register the callback. Normal
+                        // component methods continue through the source-only
+                        // decorator stripping path.
+                        retain_decorators: self.has_lifecycle_method_decorator(method),
+                    });
                     source_members.push(V2SourceMember::Regular(regular_members.len() - 1));
                 }
                 StructElement::StaticBlock(block) => {
@@ -720,6 +733,12 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 | ArkuiDecoratorName::COMPONENT_RECYCLE
                 | ArkuiDecoratorName::COMPONENT_DISAPPEAR
         )
+    }
+
+    fn has_lifecycle_method_decorator(&self, method: &MethodDefinition<'_>) -> bool {
+        method.decorators.iter().any(|decorator| {
+            Self::component_lifecycle_member_decorator(ArkuiDecorator::new(decorator).name())
+        })
     }
 
     fn constructor_element(

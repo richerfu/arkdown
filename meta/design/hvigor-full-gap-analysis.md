@@ -1,8 +1,9 @@
 # hvigor Full Pipeline Gap Analysis
 
 Comprehensive mapping of every hvigor build step against the current arkdown implementation.
-Source data: live `@ohos/hvigor-arkts-compose@6.21.1` and `@ohos/hvigor-arkts-base@6.21.1`
-JS sources from `~/Downloads/command-line-tools/` (2026-05-29).
+Source data: the DevEco Studio-bundled hvigor and SDK under
+`/Applications/DevEco-Studio.app/Contents/tools/hvigor/` and
+`/Applications/DevEco-Studio.app/Contents/sdk/` (verified 2026-08-04).
 
 Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), ❌ not started.
 
@@ -49,7 +50,7 @@ from arkdown's ESMODULE-primary implementation.
 | B4 | Process `crossAppSharedConfig` from HSP dependencies | `ProcessShareConfig` → `process-share-config.js` | `arkdown-profile::merge_share_config()` wired in CLI; duplicate-URI is hard error | ✅ |
 | B5 | Merge startup config from all HAR/HSP deps; validate task deps | `ProcessStartupConfig` → `process-startup-config.js` | `arkdown-profile::merge_startup_config()` wired in CLI; duplicate task name is hard error | ✅ |
 | B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()`: `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate for HAP+HSP module fields and ability/extensionAbility objects. HSP type="shared" written via `OhosModuleType::Shared.to_string()`. Declaration file output is K4/K5-level and tracked separately. | ✅ |
-| B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | `har-extend-info.json` written to `intermediates/har/default/` after HAR packing: moduleName, moduleType, exportedSources list, abilities array | ✅ |
+| B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | Follows the current IDE task boundary: no synthetic `intermediates/har/default/har-extend-info.json` is left after packaging. ByteCode HAR generated metadata/declarations stay in `loader_out/etsFortgz` and only SDK-selected declarations enter the archive. | ✅ |
 | B8 | Process privacy data file | `ProcessModulePrivacyProfile` → `process-module-privacy-profile.js` | `privacy_profile_path` passed to `pack_hap()` from CLI; copies to `module.privacy.json` in HAP | ✅ |
 
 ### Stage C — Resource Compilation
@@ -65,7 +66,7 @@ from arkdown's ESMODULE-primary implementation.
 | # | hvigor Step | Field/Detail | arkdown | Status |
 |---|---|---|---|---|
 | D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden: `hspResourcesMap` now populated by scanning `oh_modules/` for HSP packages with `ResourceTable.txt`; `supportChunks` from `buildOption.arkOptions.supportChunks` | ✅ |
-| D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` now follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention and the declared `oh-package.json5` dependency graph (BFS over `dependencies` + `dynamicDependencies`, with legacy full-scan fallback only when no root deps exist), keys entries by `oh-package.json5#name`, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, writes `updateVersionInfo` from `metadata.dependencyPkgVersion` or installed dependency versions, copies dependency `metadata.declarationEntry` normalized OHM URLs into loader.json, and fills `otherCompileFiles` from ByteCode-HAR-blocked source HAR/npm deps plus `metadata.extraImportees`. Remaining: generation of a ByteCode HAR's own declarationEntry from ability/startup/insightIntent/runtimeOnly/workers, bundled-dependency subtleties, and E2E validation against hvigor DependencyManager fixtures. | ✅ |
+| D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention and the declared `oh-package.json5` dependency graph (BFS over `dependencies` + `dynamicDependencies`, with legacy full-scan fallback only when no root deps exist), keys entries by `oh-package.json5#name`, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, writes `updateVersionInfo`, copies dependency `metadata.declarationEntry` normalized OHM URLs, and fills `otherCompileFiles`. The producer golden also verifies SDK-style generated `ModuleInfo.d.ts` in `etsFortgz` without leaking it into the ByteCode HAR archive. | ✅ |
 | D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | `runtimeOnly.sources` (module+deps), `runtimeOnly.packages` with transitive BFS traversal, dependency `metadata.runtimeOnly.sources` and `metadata.runtimeOnly.packages` all collected; `dynamicImportLibInfo` from dynamicDependencies and product/dep packages. Post-bundle dynamic `import()` graph parity remaining. | ✅ |
 | D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries; explicit `buildOption.sourceOption.workers` entries merged in (deduplicated) | ✅ |
 | D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | `collect_hsp_har_ohm_maps()` now uses BFS over `oh-package.json5` dependency graph with visited set for cycle detection; collects direct AND transitive HSP/HAR dependencies with correct `@bundle:<bundleName>/<moduleName>/<entryRelPath>` OHM URLs | ✅ |
@@ -102,8 +103,8 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | F12 | `waitAsyncPlugin` — flush async plugin work after `buildEnd` | `buildEnd` | Tokio handles naturally | ✅ (N/A) |
 | F13 | `collectImportersPlugin` — reverse importer map for hot-reload delta | `moduleParsed` | Post-bundle step writes `intermediates/importer_map/default/importer_map.json`: `{chunkName → [importingChunkNames]}` reverse map from `ChunkGraph.cross_chunk_imports` | ✅ |
 | F14 | `hspCollectHarFilesPlugin` — collect HAR files used in HSP for dedup pass | `buildEnd` | Two-pass: first build uses `collect_pass()` to write `har_files.json`; second build detects the file and uses `real_build()` to exclude previously-collected HAR modules from the HSP bundle. Matches hvigor's hspCollectHarFilesPlugin two-pass dedup. | ✅ |
-| F15 | SDK `etsChecker` — TypeScript type checking for `.ets` files | `transform` (load from `ets_checker.js`) | Partial Rust checker: now consumes OXC `StructStatement` nodes and mirrors upstream `validateStructSpec/checkDecorators` for missing component decorators, V1/V2 decorator conflicts, missing `build()`, worker UI decorators, duplicate component names, and build return type. Added: at-most-one `@Entry` per file, `@Builder`/`@Styles` void return type. TypeScript semantic type checking (type inference, cross-module types) is architecturally not implementable in pure Rust without a TS compiler; structural validation covers all hvigor-specified checks. | ✅ |
-| F16 | SDK `etsTransform` — ArkTS decorator desugaring + ViewPU lowering | `load` + `transform` | Covers all ArkTS-only OXC AST nodes currently exposed by the pinned `ohos-rs/oxc` rev: `StructStatement`, `ArkUIComponentExpression`, `AnnotationDeclaration`, and `LazyImportDeclaration`. ViewPU lowering covers `@Component`/`@Entry`/`@CustomDialog`, state decorators, `@Builder`/`@LocalBuilder`, `@Styles`, `@Extend`/`@AnimatableExtend`, `@interface`, `import lazy`, `export default struct`, ArkUI `if`/callbacks, type-only re-export cleanup, and the SDK `finalizeConstruction` ViewPU compatibility shim for every transformed component file. It now follows upstream `process_component_build.js` for Button `createWithLabel/createWithChild`, builder parent-context calls, and `filterRegularAttrNode()` only under the upstream recycle/reuse-V2 immutable attribute condition, `process_component_member.js` for direct `@Prop` `updateStateVars().reset(params.x)`, and `process_component_class.js` for reusable-component `updateRecycleElmtId()`, `processBuildMember()` / `isNeedGetRawObject()` raw observed object call-argument wrapping, and child-`@Link` `createReference()` constructor backing-field params. Source-map encoding now uses Rolldown's Rust sourcemap stack (`rolldown_sourcemap` / `string_wizard`) instead of local VLQ/JSON writers. Standard generated ViewPU component creation closures and call statements are emitted through an OXC AST/codegen-backed `ViewpuAstEmitter`. `NavDestination.create` builder+metadata, `__Common__.create` call emission, `ifElseBranchUpdateFunction` wrapper, `forEachUpdateFunction` wrapper, Gesture `.pop()` calls, and `@CustomDialog` controller assignment are all implemented. @Event handled as regular field (direct assignment, no __ prefix); @Require documented as meta-decorator. `@Local`/`@Param`/`@Provider`/`@Consumer`/`@Env`/`@Trace`/`@Once` state decorators fully mapped via is_state_decorator + state_decorator_class_for. Builds minimal-hap and HmosWorld end-to-end. Remaining @ComponentV2 lifecycle edge cases and deeper golden-byte parity are optimization goals beyond buildability. | ✅ |
+| F15 | SDK `etsChecker` — TypeScript type checking for `.ets` files | `transform` (load from `ets_checker.js`) | Rust/OXC retains structural ArkTS diagnostics; the default `--arkts-checker sdk` path invokes the installed SDK's `etsStandaloneChecker` before Rolldown through a narrow Node bridge. `arkdown check` uses the same SDK diagnostic owner, so TypeScript inference and cross-module semantic errors are no longer silently accepted. | ✅ |
+| F16 | SDK `etsTransform` — ArkTS decorator desugaring + ViewPU lowering | `load` + `transform` | Covers all ArkTS-only OXC AST nodes currently exposed by the pinned `ohos-rs/oxc` rev: `StructStatement`, `ArkUIComponentExpression`, `AnnotationDeclaration`, and `LazyImportDeclaration`. ViewPU lowering covers `@Component`/`@Entry`/`@CustomDialog`, state decorators, `@Builder`/`@LocalBuilder`, `@Styles`, `@Extend`/`@AnimatableExtend`, `@interface`, `import lazy`, `export default struct`, ArkUI `if`/callbacks, type-only re-export cleanup, and the SDK `finalizeConstruction` ViewPU compatibility shim for every transformed component file. It follows upstream `process_component_build.js`, `process_component_member.js`, and `process_component_class.js` for the documented creation/update patterns. Source-map encoding uses Rolldown's Rust sourcemap stack (`rolldown_sourcemap` / `string_wizard`) and generated code uses an OXC AST/codegen-backed `ViewpuAstEmitter`. ComponentV2 lifecycle decorator lowering, SDK import mapping, invalid parameter diagnostics, debug/release output, and same-root incremental cache behavior are strict-golden covered. | ✅ |
 | F17 | SDK `apiTransform` — @kit.* → @ohos:* mapping + OHOS API shims | `transform` | `@kit.*` import expansion emits correct binding types (default vs named) per kit re-export shape; comprehensive kit map covering 120+ kits; `@Provide` fields generate `this.addProvidedVar(...)` calls; FA-model API `@ohos/*`→`@system.*` rewrite for API < 9; permission/system-capability decorators removed as metadata. Event-emitter call-pattern rewrites (deprecated API migration) not implemented but not required for standard OHOS ArkTS builds. | ✅ |
 | F18 | SDK `createProgramPlugin` — creates TypeScript compiler program | `buildStart` | N/A: this plugin bootstraps the TypeScript type checker (ets_checker.js); arkdown uses the pure Rust EtsTransformPlugin instead, which does not need a TS compiler program context | ✅ (N/A) |
 | F19 | SDK `genAbc` wrapper — only calls `cleanUp`; actual ABC comes from genAbc's hooks | `buildEnd` / `generateBundle` hooks | ABC compilation is post-bundle in `arkdown-abc`; equivalent but hookArchitecture differs | ✅ (equiv.) |
@@ -124,7 +125,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | G1 | Write rollup output chunks to `loader_out/` (JSBUNDLE) | `build.js::y.write(output)` | Rolldown writes chunks to configured output dir | ✅ |
 | G2 | `disableGenerateBundle: true` for ESMODULE — skip file write, ABC runs in memory | `build.js` / genAbc plugin hooks | arkdown writes intermediate JS to disk and reads back; ABC output is byte-identical since source content is the same; performance overhead only, not a correctness gap | ✅ (equiv.) |
 | G3 | `processImportees` — walk rollup module cache, write nonEntryImportees + compiledImportees + directImportee JSON caches | `process-importee.js` | `arkdown::process_importees()` — fully ported, Phase 4 complete | ✅ |
-| G4 | `removeRedundantDeclaredFiles` — clean stale `.d.ts`/`.d.ets` from cache | `rm-declared-files.js` | N/A until `.d.ts`/`.d.ets` declaration generation is implemented (TASK-OBFUS-01 / HAR publishing); no declaration files are emitted in the current ESMODULE compile path | ✅ (N/A) |
+| G4 | `removeRedundantDeclaredFiles` — clean stale `.d.ts`/`.d.ets` from cache | `rm-declared-files.js` | ByteCode HAR declarations are generated under `loader_out/etsFortgz`; the archive collector excludes build-helper `ModuleInfo.d.ts`, matching the current SDK package layout. Broader stale-declaration cache cleanup remains covered by the task cache success boundary. | ✅ |
 | G5 | `removeCompileFailedFilesFromCache` — remove cache entries for modules that errored | `rm-error-files-cache.js` | Covered by task-level cache semantics: `TaskInputs::save()` is only called on successful completion; errored builds never update the cache, so failed modules are not cached and will be recompiled on the next run | ✅ (equiv.) |
 | G6 | Write rollup msgpack cache to `cache/msgpack/` | `RollupCacheService::writeCache()` | `EtsTransformPlugin.save_transform_cache()` persists hash→code map to `build/default/cache/ets_transform/transform_cache.json` after each successful transform; provides equivalent incremental-build speedup for the ETS transform pipeline | ✅ |
 | G7 | `triggerBundleEnd` — flush async plugin work | `build.js` | Tokio handles naturally | ✅ (N/A) |
@@ -147,7 +148,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | H11 | Incremental ABC cache via `--cache-file` / `@modules.cache` ProgramCache | `aot/options.cpp::ParseCacheFileOption`, `compiler/core/compileQueue.cpp::RetrieveProgramFromCacheFiles`, `aot/emitFiles.cpp::ScheduleEmitCacheJobs` | Partially aligned. The false ARKD batch cache of final ABC bytes has been removed. `arkdown-abc` now carries upstream `protoPanda` protobuf types, reads/writes source `ProgramCache` and ABC-input `AbcProtoProgramsCache` protoBin envelopes with `prost`, parses `@modules.cache` as `sourceFile;protoBin`, and computes the upstream Murmur3 cache hash including the current Panda bytecode version string. `ts2abc --cache-file` maps cache files per input; source inputs restore/store per-source `Program`, and ABC inputs restore/store `abcPath|recordName -> Program` entries before normal ABC emission. Remaining gap: the Rust `pandasm_insns` model still needs broader opcode parity evidence against upstream abc2program for large bytecode-HAR fixtures. | 🔄 |
 | H12 | Widget compilation (separate pass, `widgetCompile: "true"`) | ArkCompile calls `initWidgetDefaultArkCompileConfig()` for form entries | `compile_widget_pass()` in CLI: scans extension abilities for form entries, transforms + rewrites OHM URLs, writes a widget CompileArkTS handoff (`filesInfo.txt`, `modules.cache`, `npmEntries.txt`), and compiles to `widgets.abc` through `Ts2abcCompiler` and the SDK `es2abc` driver. Output path matches hvigor's `ets/widgets.abc`. | ✅ |
 | H13 | ArkData compile (`arkDataCompile()`) | Separate compiler invocation for ArkData sources | `compile_arkdata_pass()`: scans `.ets` files for `@kit.ArkData`/`@ohos/cloudData` imports; transforms and compiles to `ets/data.abc` through `Ts2abcCompiler` and the SDK `es2abc` driver. ABC ProgramCache is not enabled on this path until an ArkData handoff manifest is produced. | ✅ |
-| H14 | CompileArkTS source maps and final `sourceMaps.map` | ets-loader writes `sourceMaps.json`; package includes `ets/sourceMaps.map` | Minimal-hap `sourceMaps.json` and final `ets/sourceMaps.map` match hvigor output; source-map generation uses `rolldown_sourcemap`/`string_wizard` stack for ETS transforms; hvigor-standard mapping format from `write_hvigor_source_maps()` | ✅ |
+| H14 | CompileArkTS source maps and final `sourceMaps.map` | ets-loader writes `sourceMaps.json`; package includes `ets/sourceMaps.map` | Source-map generation uses `rolldown_sourcemap`/`string_wizard` and the hvigor-standard mapping format. Strict real-project goldens cover ComponentV2 HAP debug/release/unchanged/changed passes, HSP debug/release, source HAR debug/release, and ByteCode HAR debug/release. The source-map handoff intentionally differs by current SDK task: HAP/HSP/source HAR retain `intermediates/source_map`, while ByteCode HAR bypasses it and uses loader output (debug) or CompileArkTS cache (release). | ✅ |
 
 ### Stage I — Obfuscation and Minification (Release)
 
@@ -157,7 +158,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | I2 | Compute obfuscation file hash; cache-invalidate ABC if rules change | `ArkCompile::computeObfuscationFileHash()` | `TaskInputs::compute_obfuscation_hash()` hashes the obfuscation config; hash change → `matches_cached()` → full rebuild | ✅ |
 | I3 | Generate consumer obfuscation config file for HAR publishing | `generateConsumerObConfigFile()` from SDK | For HAR+obfuscation builds, Rust parses `consumerFiles`/`consumerRules`, merges dependency `obfuscation.txt` configs for HAR output, and writes `intermediates/obfuscation/default/obfuscation.txt` for packaging | ✅ |
 | I4 | Terser JS minification (`@rollup/plugin-terser`) | JSBUNDLE release mode only | N/A — arkdown targets ESMODULE mode only; ESMODULE minification is through the obfuscator (I1) | ✅ (N/A) |
-| I5 | Move release source maps to separate directory | `ArkCompile::moveReleaseMap()` | In release mode `source_maps_path: None` is passed to `pack_hap()` so maps are NOT embedded in the HAP; maps are copied to `output_dir/mapping/sourceMaps.map` (existing code at pack stage) | ✅ |
+| I5 | Move release source maps to separate directory | `ArkCompile::moveReleaseMap()` | Release maps are not embedded in HAP/HSP. The compiler map is retained as `CompileArkTS/.../release/sourceMaps.map`; HAP/HSP/source HAR also keep the SDK package intermediate, while ByteCode HAR does not. All publish `outputs/*/mapping/sourceMaps.map`. | ✅ |
 
 ### Stage J — Incremental Cache
 
@@ -195,7 +196,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 | M2 | Hot-reload: importer graph delta computation | `collectImportersPlugin` + `cold-reload-ark-compile.js` | Importer map (F13) used in watch callback: changed files matched against chunk keys; if no chunk is affected the rebuild is skipped; full bundle still triggered for affected chunks (rolldown 1.0.3 does not support per-module invalidation) | ✅ |
 | M3 | Preview mode: resource watcher + live resource reload | `preview-resource-watcher-plugin.js` | `--preview` watches `src/main/resources/` with 100ms debounce; changed file list written to `build/default/outputs/preview_changes.json` for IDE file-watching integration; full build triggered on change; DevEco IDE WebSocket protocol not implemented (requires closed-source protocol spec) | ✅ |
 | M4 | HAR TGZ clean (strip rollup output for HAR publishing) | `clean-ets-for-tgz.js` | N/A: `pack_har()` reads directly from `src/main/ets/` source, never from rollup output intermediates; there is no bundled `.js` output to strip from the HAR | ✅ (N/A) |
-| M5 | ETS standalone checker (lint-only mode) | `etsStandaloneChecker` from SDK | `arkdown check` CLI command: runs `EtsTransformPlugin` struct-validation on all `.ets` files without building; reports errors and exits non-zero on failure | ✅ |
+| M5 | ETS standalone checker (lint-only mode) | `etsStandaloneChecker` from SDK | `arkdown check` invokes the installed SDK `etsStandaloneChecker` through the Rust-owned plan/diagnostic boundary, then augments it with OXC structural checks. The regression fixture injects `const x: number = "not-a-number"` and verifies a non-zero semantic diagnostic. | ✅ |
 
 ---
 
@@ -207,7 +208,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - hvigor: `emitter.cpp::GenInstructionDebugInfo()` attaches AST start positions to normal instructions and function/block end positions to return instructions; `BuildLineNumberProgram()` then emits line/column and local-variable events from the pandasm instruction stream
 - arkdown: minimal-hap now matches hvigor byte-for-byte on `ets/modules.abc`
 - HmosWorld (latest installed IDE SDK): the SDK `ark_disasm --quiet` comparison has the same 11,559 literal entries, 631 records, 7,759 normalized function instruction streams, and 7,906 strings. Raw `modules.abc` remains different (hvigor 4,163,104B; arkdown 4,165,100B), because offsets, generated function identities, input-module ordering, and remaining TypeScript-vs-OXC source-layout positions are serialized into the binary.
-- Remaining work: add same-root repeat-run golden coverage for explicit constructors, field initializers, more ArkUI DSL forms, imports/dependencies, release mode, HSP/HAR, and source-map/DebugInfo events. A raw byte comparison against one arbitrary hvigor run is not sufficient: its Rollup module map is populated after asynchronous native resolver completions.
+- ComponentV2 now has same-root cold/unchanged/changed debug coverage plus release coverage; HSP, source HAR, and ByteCode HAR have strict debug/release goldens. Remaining work is large-project DebugInfo/source-layout coverage for explicit constructors, field initializers, more ArkUI DSL forms, and dependency graphs. A raw byte comparison against one arbitrary hvigor run is not sufficient: its Rollup module map is populated after asynchronous native resolver completions.
 
 **H10 — Direct CompileArkTS cache-TS backend route**
 - hvigor: CompileArkTS writes transformed TS cache files, `filesInfo.txt`, `npmEntries.txt`, and invokes `es2abc @filesInfo`
@@ -216,20 +217,20 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - HmosWorld status: builds end-to-end without unresolved package externals. `filesInfo.txt`, `modules.cache`, and `npmEntries.txt` match hvigor by record set (572/572 module entries, 573/573 ProgramCache entries, and 57/57 package entries). 302/572 cache TS/JS files are byte-identical after preserving numeric/string/comment spelling and the pre-Rolldown etsTransform handoff; the remaining 270 are source-printer/layout goldens, not missing module records. The latest SDK `module_build_mode.js` passes `rollup.getModuleIds()` into `module_mode.js::collectModuleFileList()`. Its `Map` insertion order follows async resolver completion, so arkdown deliberately uses stable declared graph order plus sorted collector fallbacks rather than reproducing timing-dependent binary order.
 - Remaining work: turn the residual cache source-layout cases into focused etsTransform/source-map goldens, then validate DebugInfo with same-root builds. Do not replace the SDK compiler with a hand-rolled `arkdown-abc` cache/proto implementation: production currently delegates `--cache-file @modules.cache` and merge behavior to the installed SDK `es2abc`, as hvigor does.
 
-**F16 — Missing ViewPU lowering in etsTransform**
+**F16 — Large-project ViewPU source-layout goldens**
 - hvigor: `etsTransform` SDK plugin fully lowers ArkUI `struct`+`build()` blocks into `observeComponentCreation2()`, component-specific create methods, attribute method calls, and `.pop()` calls
 - arkdown: `EtsTransformPlugin` now lowers every ArkTS-only node emitted by the pinned OXC fork (`StructStatement`, `ArkUIComponentExpression`, `AnnotationDeclaration`, `LazyImportDeclaration`), and its checker consumes the same `StructStatement` nodes for upstream-aligned struct-decorator validation before rolldown's standard TS parser runs. It covers `@Component`/`@Entry`/`@CustomDialog` structs, top-level and method `@Builder`, `@Styles`, `@Extend`/`@AnimatableExtend`, `@interface`, `import lazy`, ArkUI `if`/callback bodies, Button `createWithLabel/createWithChild`, builder parent-context calls, upstream-scoped regular-attribute immutable grouping, reusable-component `updateRecycleElmtId()`, `processBuildMember()` raw observed object call-argument wrapping, child-`@Link` constructor backing-field params, direct `@Prop` update-state resets, and the upstream V1/V2 property-decorator classification set into TypeScript the rolldown/OXC path can parse.
-- Remaining execution gaps (2026-06-02, by file count in HmosWorld cache diff): `NavDestination.create` builder+metadata (12 files, fix in progress); `__Common__.create` call emission (11 files); `ifElseBranchUpdateFunction` wrapper (7 files); `forEachUpdateFunction` wrapper (4 files); Gesture `.pop()` calls (4 files); `@CustomDialog` controller assignment (3 files). `@Prop` default value fallback (`if (params.X === undefined) { this.__X.set(default) }`) is **fixed**.
-- Remaining impact: full `@ComponentV2` runtime semantics still need golden parity against upstream `arkui-plugins`; current coverage is syntax lowering plus conservative ViewPU-compatible state backing
+- The previously identified `NavDestination.create`, `__Common__.create`, `ifElseBranchUpdateFunction`, `forEachUpdateFunction`, Gesture `.pop()`, and `@CustomDialog` controller paths are implemented. Remaining work is to turn the HmosWorld printer/layout differences into focused goldens, not to add a JavaScript-side lowering fallback.
+- ComponentV2 lifecycle boundaries now have strict source/output/cache goldens and the SDK lifecycle parameter diagnostic; remaining large-project work is the HmosWorld source-layout/DebugInfo set described above.
 
-**F15 — No etsChecker (TypeScript type checking)**
-- hvigor: `etsChecker` runs `ets_checker.js` from the SDK for full TypeScript semantic analysis
-- arkdown: no type checking; compilation proceeds even with type errors
-- Impact: diagnostic parity zero; SDK API misuse not caught at build time
+**F15 — SDK semantic etsChecker** ✅ resolved
+- hvigor: `etsChecker` owns TypeScript semantic analysis in `ets_checker.js`
+- arkdown: default build checking and `arkdown check` invoke the installed SDK `etsStandaloneChecker`; Rust/OXC performs the complementary structural ArkTS checks
+- Evidence: `packages/arkdown/tests/check_semantic.rs` injects a TypeScript assignment error and requires the SDK semantic failure boundary
 
-**H14 — Source map breadth beyond minimal-hap**
-- minimal-hap: CompileArkTS `sourceMaps.json` and final `ets/sourceMaps.map` match the hvigor reference
-- remaining work: verify and extend source-map parity across broader ArkUI syntax, dependencies, release mode, and JSBUNDLE paths
+**H14 — Source-map/package/cache layout** ✅ resolved for the declared fixture matrix
+- Strict real-project comparisons cover ComponentV2 HAP debug/release/cold/unchanged/changed, HSP debug/release, source HAR debug/release, and ByteCode HAR debug/release.
+- The test matrix captures the current SDK's distinct source-map handoffs instead of forcing a single directory layout for every artifact kind.
 
 ### High-Impact Gaps (blocking release/production builds)
 
@@ -249,12 +250,11 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 **D2-D5 — Multi-module dependency maps partially incomplete**
 - `dynamicImportLibInfo` and transitive `harNameOhmMap`/`hspNameOhmMap` are implemented; `byteCodeHarInfo` now follows the declared dependency graph instead of scanning all installed packages
-- Remaining ByteCode HAR gaps: generated declaration entries for the current ByteCode HAR, bundled-dependency edge cases, and hvigor DependencyManager E2E fixture parity
+- The ByteCode HAR producer declaration/source-map/archive behavior is strict-golden covered. Remaining dependency work is bundled-dependency edge cases and larger hvigor DependencyManager graphs.
 
-**K3-K4 — HSP/HAR parity unverified**
-- HAP parity proven (11-entry zip matches hvigor golden)
-- HSP-specific content (declare files output, `ArkCompile.declareOutputFiles()` for HSP) unverified
-- HAR-specific content (obfuscation consumer file, processObfuscationFiles, cleanEtsForTgz) not implemented
+**K3-K4 — HSP/HAR package parity** ✅ resolved for the declared fixture matrix
+- Strict goldens cover minimal HSP and source HAR in debug/release, and ByteCode HAR in debug/release.
+- HSP declaration-output and exotic HAR obfuscation/dependency combinations remain separate feature matrices; they are not claimed by these fixtures.
 
 ### Medium-Impact Gaps (advanced features)
 
@@ -409,7 +409,7 @@ Use `tracing::debug!` for diagnostics; do not add a custom debug channel.
 **Upstream ref**: `byte-code-har-utils.js::collectByteCodeHarInfo()`, `GenerateLoaderJson.processDeclarationEntry()`, `ProcessHarArtifacts.processDeclarationEntry()`, `loader.json` schema in `hvigorw-analysis.md §9`
 **Complexity**: M
 **Depends on**: nothing
-**Status**: dependency graph scan, `updateVersionInfo`, and `otherCompileFiles` are implemented in `crates/arkdown-profile/src/bytecode_har.rs`: scan follows root package dependencies transitively, excludes undeclared installed packages, preserves the legacy no-root-manifest fixture fallback, keys loader entries by package `name`, emits version update metadata from `dependencyPkgVersion`/installed dependency versions, and resolves ByteCode HAR `extraImportees` plus directly blocked source HAR/npm entries. Remaining work is the generated declaration behavior and bundled-dependency edge cases listed in D2.
+**Status**: dependency graph scan, `updateVersionInfo`, and `otherCompileFiles` are implemented in `crates/arkdown-profile/src/bytecode_har.rs`: scan follows root package dependencies transitively, excludes undeclared installed packages, preserves the legacy no-root-manifest fixture fallback, keys loader entries by package `name`, emits version update metadata from `dependencyPkgVersion`/installed dependency versions, and resolves ByteCode HAR `extraImportees` plus directly blocked source HAR/npm entries. The producer declaration/source-map/archive contract is covered by `tests/fixtures/bytecode-har`; remaining work is bundled-dependency edge cases.
 
 ### TASK-LOADER-02: Dynamic import library info (M)
 
@@ -519,11 +519,11 @@ coverage.
 
 | Area | URL |
 |---|---|
-| ArkCompile task (full) | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/src/tasks/ark-compile.js` |
-| Rollup plugin setup | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-compose/dist/src/arkts-pack.js` |
-| Build orchestration | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build.js` |
-| SDK plugin loading | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-compose/dist/src/util/load-sdk-functions.js` |
-| Importee processing | `~/Downloads/command-line-tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build-steps/process-importee.js` |
+| ArkCompile task (full) | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/src/tasks/ark-compile.js` |
+| Rollup plugin setup | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-compose/dist/src/arkts-pack.js` |
+| Build orchestration | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build.js` |
+| SDK plugin loading | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-compose/dist/src/util/load-sdk-functions.js` |
+| Importee processing | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build-steps/process-importee.js` |
 | assembly-emitter.cpp | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/assembler/assembly-emitter.cpp` |
 | assembly-emitter.h | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/assembler/assembly-emitter.h` |
 | Panda bytecode ISA | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/isa/isa.yaml` |
@@ -533,23 +533,19 @@ coverage.
 
 ## 6. Summary Scorecard
 
-| Pipeline Area | Steps Total | ✅ | 🔄 | ❌ |
-|---|---|---|---|---|
-| Pre-Build (A) | 2 | 2 | 0 | 0 |
-| Profile Processing (B) | 8 | 8 | 0 | 0 |
-| Resource Compilation (C) | 3 | 3 | 0 | 0 |
-| loader.json (D) | 5 | 5 | 0 | 0 |
-| ArkCompile Setup (E) | 4 | 4 | 0 | 0 |
-| Rollup Plugins (F) | 28 | 28 | 0 | 0 |
-| Post-Bundle Processing (G) | 8 | 8 | 0 | 0 |
-| ABC Compilation (H) | 14 | 14 | 0 | 0 |
-| Obfuscation/Minification (I) | 5 | 5 | 0 | 0 |
-| Incremental Cache (J) | 4 | 4 | 0 | 0 |
-| Packaging (K) | 6 | 6 | 0 | 0 |
-| Signing (L) | 3 | 3 | 0 | 0 |
-| Advanced/Watch (M) | 5 | 5 | 0 | 0 |
-| **Total** | **95** | **95** | **0** | **0** |
+The declared parity matrix is now strict-golden covered against the current
+DevEco Studio Hvigor for:
 
-**Current overall pipeline coverage: 100% addressed (95/95 ✅).**
-All 95 pipeline steps are fully implemented or have verified-equivalent implementations. No step is unaddressed or completely unimplemented.
-Items marked ✅ include fully verified implementations, N/A steps (JSBUNDLE-mode features for ESMODULE-primary arkdown), and equivalent implementations that achieve the same correctness guarantee via a different mechanism.
+- SDK-owned TypeScript semantic diagnostics in both build and `arkdown check`;
+- ComponentV2 lifecycle HAP output in debug, release, and cold/unchanged/changed
+  same-root builds;
+- HSP, source HAR, and ByteCode HAR package output in debug and release;
+- source-map handoff, archive/mapping output, and cache invalidation for those
+  fixtures.
+
+This is not a claim that every arbitrary large application is already a
+drop-in Hvigor replacement. The explicitly retained global risks are the
+HmosWorld source-printer/DebugInfo goldens and larger dependency/ByteCode cache
+graphs documented in H9, H10, H11, and J3. Items marked ✅ mean the declared
+scope has an implementation and observed parity evidence; they do not erase
+those named large-project validation boundaries.

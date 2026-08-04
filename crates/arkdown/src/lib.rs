@@ -44,7 +44,9 @@ pub mod watch_config;
 pub use arkdown_core::source_maps;
 
 // bundler — primary API
-pub use bundler::{BundleOutput, Bundler, HvigorHarImportees, PreloadSystemSoTask};
+pub use bundler::{
+    BundleOutput, Bundler, HvigorHarImportees, PreloadSystemSoTask, SourceMapInputFingerprint,
+};
 
 // plan — typed bundle plan (SPEC-048 Phase 4 primary input)
 pub use plan::{

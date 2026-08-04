@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc_isolated_declarations::{IsolatedDeclarations, IsolatedDeclarationsOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -23,15 +23,20 @@ use super::layout::ModuleBuildLayout;
 pub(super) struct HarDeclarationGenerator<'a> {
   module_root: &'a Path,
   source_dir: &'a Path,
+  module_output_prefix: PathBuf,
   output_prefix: PathBuf,
+  generated_sources: Vec<&'a Path>,
 }
 
 impl<'a> HarDeclarationGenerator<'a> {
   pub(super) fn new_har(module_root: &'a Path, source_dir: &'a Path, module_name: &str) -> Self {
+    let module_output_prefix = PathBuf::from(module_name);
     Self {
       module_root,
       source_dir,
-      output_prefix: PathBuf::from(module_name).join("src/main/ets"),
+      output_prefix: module_output_prefix.join("src/main/ets"),
+      module_output_prefix,
+      generated_sources: Vec::new(),
     }
   }
 
@@ -39,11 +44,23 @@ impl<'a> HarDeclarationGenerator<'a> {
   /// declarations below `<module>/src/main/ets` before PackageSharedHar copies
   /// them to the interface HAR staging directory.
   pub(super) fn new_hsp(module_root: &'a Path, source_dir: &'a Path, module_name: &str) -> Self {
+    let module_output_prefix = PathBuf::from(module_name);
     Self {
       module_root,
       source_dir,
-      output_prefix: PathBuf::from(module_name).join("src/main/ets"),
+      output_prefix: module_output_prefix.join("src/main/ets"),
+      module_output_prefix,
+      generated_sources: Vec::new(),
     }
+  }
+
+  /// The latest `ets-loader` declaration pass also emits declarations for
+  /// generated TypeScript compile entries. ByteCode HAR's `ModuleInfo.ts` is
+  /// the concrete example: `generateSourceFilesInHar` preserves its path
+  /// relative to the consuming module below `etsFortgz`.
+  pub(super) fn with_generated_source(mut self, source: &'a Path) -> Self {
+    self.generated_sources.push(source);
+    self
   }
 
   pub(super) fn generate(&self) -> Result<()> {
@@ -80,19 +97,41 @@ impl<'a> HarDeclarationGenerator<'a> {
           self.source_dir.display()
         )
       })?;
-      let output_path = output_dir
-        .join(&self.output_prefix)
-        .join(Self::declaration_relative_path(relative));
-      if let Some(parent) = output_path.parent() {
-        fs_err::create_dir_all(parent)?;
-      }
-      if arkdown_path::SourceFileName::new(source_path).is_declaration() {
-        fs_err::copy(source_path, &output_path)?;
-        continue;
-      }
-      let declaration = HarSourceDeclaration::new(source_path).emit()?;
-      fs_err::write(&output_path, declaration)?;
+      self.emit_source(
+        source_path,
+        output_dir.join(&self.output_prefix).join(relative),
+      )?;
     }
+
+    for source_path in &self.generated_sources {
+      let relative = source_path
+        .strip_prefix(self.module_root)
+        .with_context(|| {
+          format!(
+            "generated declaration source {} is outside module root {}",
+            source_path.display(),
+            self.module_root.display()
+          )
+        })?;
+      self.emit_source(
+        source_path,
+        output_dir.join(&self.module_output_prefix).join(relative),
+      )?;
+    }
+    Ok(())
+  }
+
+  fn emit_source(&self, source_path: &Path, output_source_path: PathBuf) -> Result<()> {
+    let output_path = Self::declaration_relative_path(&output_source_path);
+    if let Some(parent) = output_path.parent() {
+      fs_err::create_dir_all(parent)?;
+    }
+    if arkdown_path::SourceFileName::new(source_path).is_declaration() {
+      fs_err::copy(source_path, &output_path)?;
+      return Ok(());
+    }
+    let declaration = HarSourceDeclaration::new(source_path).emit()?;
+    fs_err::write(&output_path, declaration)?;
     Ok(())
   }
 
@@ -162,6 +201,11 @@ impl<'a> HarSourceDeclaration<'a> {
     }
     let code = Codegen::new()
       .with_options(CodegenOptions {
+        // TypeScript's declaration printer used by the latest SDK emits four
+        // spaces, while OXC defaults to tab indentation. These bytes are
+        // packaged verbatim in ByteCode HAR's interface HAR.
+        indent_char: IndentChar::Space,
+        indent_width: 4,
         comments: CommentOptions {
           jsdoc: true,
           ..CommentOptions::disabled()

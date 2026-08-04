@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use arkdown_core::OhosModuleType;
+
 pub(super) struct ModuleSourceLayout<'a> {
   module_root: &'a Path,
 }
@@ -216,6 +218,24 @@ impl<'a> ModuleBuildLayout<'a> {
       .join("BuildProfile.ets")
   }
 
+  /// Returns the exact `BuildProfile.ets` task output path for a module.
+  ///
+  /// Latest hvigor keeps application profiles below `build/.../generated`,
+  /// while `ModulePathInfoIml.getHarGenerateBuildProfilePath` deliberately
+  /// writes a HAR profile at the module root so `ProcessHarArtifacts` can
+  /// include it in the package input tree.
+  pub(super) fn build_profile_for_module(
+    &self,
+    module_type: &OhosModuleType,
+    target_name: &str,
+  ) -> PathBuf {
+    if matches!(module_type, OhosModuleType::Har) {
+      self.module_root.join("BuildProfile.ets")
+    } else {
+      self.generated_build_profile(target_name)
+    }
+  }
+
   pub(super) fn generated_module_info(&self, target_name: &str) -> PathBuf {
     self
       .build_default()
@@ -268,14 +288,6 @@ impl<'a> ModuleBuildLayout<'a> {
 
   pub(super) fn syscap_dir(&self) -> PathBuf {
     self.default_intermediate_dir("syscap")
-  }
-
-  pub(super) fn har_dir(&self) -> PathBuf {
-    self.default_intermediate_dir("har")
-  }
-
-  pub(super) fn har_extend_info_json(&self) -> PathBuf {
-    self.default_intermediate_file("har", "har-extend-info.json")
   }
 
   pub(super) fn har_duplicate_dir(&self) -> PathBuf {

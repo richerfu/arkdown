@@ -1412,10 +1412,10 @@ export function animateNow(): void {
 }
 
 #[test]
-fn test_component_v2_lifecycle_methods_emitted_with_decorators_stripped() {
-    // @ComponentV2 methods decorated with @ComponentAppear, @ComponentDisappear etc.
-    // must be emitted into the ViewV2 class with their lifecycle decorators stripped.
-    // The ArkRuntime registers them at load time — no decorator syntax needed.
+fn test_component_v2_lifecycle_methods_preserve_runtime_decorators() {
+    // Latest ets-loader process_struct_componentV2.js retains lifecycle
+    // decorators on the generated ViewV2 methods. Kit import rewriting is
+    // covered at the API rewrite boundary below.
     let src = r#"@ComponentV2
 struct MyView {
   @Local count: number = 0;
@@ -1439,14 +1439,15 @@ struct MyView {
         result.contains("onDisappear"),
         "onDisappear missing: {result}"
     );
-    // Lifecycle decorators must be stripped
+    // Lifecycle decorators are runtime registrations and must survive on the
+    // generated ViewV2 methods.
     assert!(
-        !result.contains("@ComponentAppear"),
-        "@ComponentAppear must be stripped: {result}"
+        result.contains("@ComponentAppear"),
+        "@ComponentAppear must be retained: {result}"
     );
     assert!(
-        !result.contains("@ComponentDisappear"),
-        "@ComponentDisappear must be stripped: {result}"
+        result.contains("@ComponentDisappear"),
+        "@ComponentDisappear must be retained: {result}"
     );
 }
 
@@ -5134,4 +5135,50 @@ struct MemberForm {
     .unwrap();
 
     assert_eq!(names, vec!["Column"]);
+}
+
+#[test]
+fn test_kit_import_type_and_value_bindings_keep_source_specifier_order() {
+    // DevEco Studio 6.1.1 ets-loader `process_kit_import.js` emits one
+    // factory-created system import per original `@kit.*` specifier.  It does
+    // not group value imports before type imports, because that would shift
+    // CompileArkTS source-map positions.
+    let plan = crate::RolldownEtsTransformPlan::new(
+        "com.example",
+        "entry",
+        std::path::PathBuf::from("/tmp/project"),
+        std::path::PathBuf::from("/tmp/project/entry/src/main/ets"),
+        Vec::new(),
+        17,
+        rustc_hash::FxHashMap::default(),
+        ComponentMetadata::default(),
+        crate::TransformSourceSnapshot::default(),
+    );
+    let output = crate::RolldownEtsTransformer::new(std::sync::Arc::new(plan))
+        .compile_transform(
+            r#"import { AbilityConstant, UIAbility, Want } from "@kit.AbilityKit";
+export default class EntryAbility extends UIAbility {
+  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {}
+}"#,
+            "/tmp/project/entry/src/main/ets/entryability/EntryAbility.ets",
+        )
+        .expect("kit import transform")
+        .expect("ArkTS source must transform");
+    let code = output
+        .module_source_code
+        .expect("CompileArkTS source sidecar");
+    let ability_constant = code
+        .find("import type AbilityConstant from \"@ohos.app.ability.AbilityConstant\";")
+        .expect("type import for AbilityConstant");
+    let ui_ability = code
+        .find("import UIAbility from \"@ohos.app.ability.UIAbility\";")
+        .expect("value import for UIAbility");
+    let want = code
+        .find("import type Want from \"@ohos.app.ability.Want\";")
+        .expect("type import for Want");
+
+    assert!(
+        ability_constant < ui_ability && ui_ability < want,
+        "SDK kit import order must be retained:\n{code}"
+    );
 }

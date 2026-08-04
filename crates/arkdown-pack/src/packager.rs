@@ -2128,6 +2128,14 @@ impl<'a> HarArchiveEntries<'a> {
             let rel = path.strip_prefix(root).map_err(|error| {
                 PackError::MissingInput(format!("invalid HAR declaration path: {error}"))
             })?;
+            // Latest `ProcessHarArtifacts.copyDeclareFileToTempDir` keeps
+            // consumer source declarations but does not package declarations
+            // emitted for generated build helpers such as ByteCode HAR's
+            // `build/.../ModuleInfo.ts`. Those helpers still remain under
+            // `etsFortgz` for compiler bookkeeping.
+            if rel.starts_with("build") {
+                continue;
+            }
             self.files
                 .insert(ArtifactPathSerializer::rel_to_slash(rel), path);
         }
@@ -2812,6 +2820,20 @@ mod tests {
             )
             .unwrap(),
             r#"{"module":{"descriptionId":16777222,"pages":"$profile:main_pages","deviceTypes":["phone"],"appStartup":"$profile:startup_config","name":"entry","packageName":"entry"}}"#
+        );
+    }
+
+    #[test]
+    fn hap_module_json_matches_sdk_fastjson_order_for_component_v2_entry() {
+        // Observed from the current DevEco SDK app_packing_tool.jar (fastjson
+        // 2.0.57) while packaging component-v2-lifecycle-hap. The package
+        // intermediate remains schema ordered; only the archive entry passes
+        // through the tool's HashMap-backed JSON serializer.
+        let input = br#"{"app":{"bundleName":"com.example.arkdown.componentv2","vendor":"example","versionCode":1000000,"versionName":"1.0.0","icon":"$media:app_icon","label":"$string:app_name","apiReleaseType":"Release","compileSdkVersion":"6.1.1.125","targetAPIVersion":50005017,"minAPIVersion":50005017,"compileSdkType":"HarmonyOS","targetMinorAPIVersion":0,"targetPatchAPIVersion":0,"appEnvironments":[],"bundleType":"app","buildMode":"debug","debug":true,"iconId":16777217,"labelId":16777216},"module":{"name":"entry","type":"entry","mainElement":"EntryAbility","deviceTypes":["phone"],"deliveryWithInstall":true,"installationFree":false,"pages":"$profile:main_pages","abilities":[{"name":"EntryAbility","srcEntry":"./ets/entryability/EntryAbility.ets","exported":true,"startWindowIcon":"$media:start_icon","startWindowBackground":"$color:start_window_background","startWindowIconId":16777219,"startWindowBackgroundId":16777218}],"packageName":"entry","virtualMachine":"ark12.0.6.0","compileMode":"esmodule","dependencies":[]}}"#;
+
+        assert_eq!(
+            String::from_utf8(PackageToolJson::from_bytes(input.as_slice()).into_bytes()).unwrap(),
+            r#"{"app":{"iconId":16777217,"debug":true,"targetPatchAPIVersion":0,"minAPIVersion":50005017,"icon":"$media:app_icon","buildMode":"debug","label":"$string:app_name","bundleType":"app","versionName":"1.0.0","versionCode":1000000,"appEnvironments":[],"compileSdkType":"HarmonyOS","labelId":16777216,"compileSdkVersion":"6.1.1.125","targetAPIVersion":50005017,"vendor":"example","bundleName":"com.example.arkdown.componentv2","apiReleaseType":"Release","targetMinorAPIVersion":0},"module":{"abilities":[{"exported":true,"startWindowIconId":16777219,"srcEntry":"./ets/entryability/EntryAbility.ets","startWindowBackground":"$color:start_window_background","name":"EntryAbility","startWindowIcon":"$media:start_icon","startWindowBackgroundId":16777218}],"virtualMachine":"ark12.0.6.0","mainElement":"EntryAbility","deviceTypes":["phone"],"pages":"$profile:main_pages","installationFree":false,"name":"entry","deliveryWithInstall":true,"packageName":"entry","compileMode":"esmodule","type":"entry","dependencies":[]}}"#
         );
     }
 

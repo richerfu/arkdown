@@ -1907,6 +1907,14 @@ fn test_bytecode_har_uses_compiled_layout_and_does_not_mutate_source_manifest() 
         "export declare class Index {}",
     )
     .unwrap();
+    let generated_module_info =
+        declarations_dir.join("library/build/default/generated/profile/default/ModuleInfo.d.ts");
+    fs::create_dir_all(generated_module_info.parent().unwrap()).unwrap();
+    fs::write(
+        &generated_module_info,
+        "export declare const __MODULE_NAME__: string;\r\n",
+    )
+    .unwrap();
     let processed_module = module_root.join("processed-module.json");
     let resource_table = module_root.join("ResourceTable.txt");
     fs::write(&processed_module, r#"{"module":{"name":"library"}}"#).unwrap();
@@ -1994,6 +2002,10 @@ fn test_bytecode_har_uses_compiled_layout_and_does_not_mutate_source_manifest() 
     assert!(entries.contains_key("package/src/main/module.json"));
     assert!(entries.contains_key("package/ResourceTable.txt"));
     assert!(entries.contains_key("package/types/index.d.ts"));
+    assert!(
+        !entries.contains_key("package/build/default/generated/profile/default/ModuleInfo.d.ts"),
+        "ByteCode HAR must keep generated ModuleInfo declarations in etsFortgz only"
+    );
     assert!(!entries.contains_key("package/BuildProfile.ets"));
     assert_eq!(
         fs::read(package_cache.join("ets/modules.abc")).unwrap(),

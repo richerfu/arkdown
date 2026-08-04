@@ -1,0 +1,25 @@
+{
+  apiType: "stageMode",
+  buildOption: {
+    arkOptions: {
+      byteCodeHar: true
+    }
+  },
+  buildOptionSet: [
+    {
+      name: "release",
+      arkOptions: {
+        byteCodeHar: true,
+        obfuscation: {
+          ruleOptions: {
+            enable: false,
+            files: ["./obfuscation-rules.txt"]
+          }
+        }
+      }
+    }
+  ],
+  targets: [
+    { name: "default" }
+  ]
+}

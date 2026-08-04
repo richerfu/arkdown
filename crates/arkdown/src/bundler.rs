@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arcstr::ArcStr;
+use arkdown_cache::CacheKeyMaterial;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, ImportExpression, StringLiteral};
 use oxc_ast_visit::{walk, Visit};
@@ -105,6 +106,22 @@ pub struct BundleOutput {
     pub modules_abc_path: PathBuf,
     /// `sourceMaps.map` if a real source map was produced from bundler inputs.
     pub source_maps_path: Option<PathBuf>,
+    /// Content fingerprints for source-map entries whose original source was
+    /// already inventoried by the build session. The CLI cache handoff uses
+    /// these to retain latest ets-loader's per-module incremental map order
+    /// without re-reading source files after Rolldown finishes.
+    pub source_map_input_fingerprints: Vec<SourceMapInputFingerprint>,
+}
+
+/// One source-map entry's pre-transform source fingerprint.
+///
+/// This is internal incremental metadata, not an artifact serialized into the
+/// HAP/HSP/HAR. It mirrors the source identity Rollup uses to decide which
+/// `SourceMapGenerator.sourceMaps` entries belong to the current pass.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceMapInputFingerprint {
+    pub key: String,
+    pub content_hash: String,
 }
 
 /// Deterministic equivalent of the three importee arrays produced by latest
@@ -400,13 +417,13 @@ impl Bundler {
                 .source_map_local_dependency_roots(),
             javascript_source_paths: Self::source_map_javascript_paths(&module_source_files),
         };
-        let source_maps_path = if plan.source_map == SourceMapPolicy::External {
+        let source_map_output = if plan.source_map == SourceMapPolicy::External {
             let mut source_maps = raw_source_maps
                 .iter()
                 .map(|(module_id, source_map)| (module_id.as_str(), source_map.as_ref(), false))
                 .collect::<Vec<_>>();
             source_maps.sort_by(|left, right| left.0.cmp(right.0));
-            output::WrittenOutput::write_hvigor_source_maps_from_raw(
+            output::WrittenOutput::write_hvigor_source_maps_with_metadata_from_raw(
                 &output_dir,
                 source_maps,
                 &source_map_opts,
@@ -414,6 +431,16 @@ impl Bundler {
         } else {
             None
         };
+        let source_map_input_fingerprints = source_map_output
+            .as_ref()
+            .map(|output| {
+                self.source_map_input_fingerprints(
+                    &plan.input.project_root,
+                    output.entries.as_slice(),
+                )
+            })
+            .unwrap_or_default();
+        let source_maps_path = source_map_output.map(|output| output.path);
         tracing::info!(
             elapsed_ms = source_map_start.elapsed().as_millis(),
             source_map_policy = ?plan.source_map,
@@ -461,6 +488,7 @@ impl Bundler {
             npm_entries,
             modules_abc_path,
             source_maps_path,
+            source_map_input_fingerprints,
         })
     }
 
@@ -478,6 +506,37 @@ impl Bundler {
                     )
                 }
             })
+    }
+
+    fn source_map_input_fingerprints(
+        &self,
+        project_root: &Path,
+        entries: &[output::HvigorSourceMapOutputEntry],
+    ) -> Vec<SourceMapInputFingerprint> {
+        let Some(ets_transform_plan) = self.ets_transform_plan.as_ref() else {
+            return Vec::new();
+        };
+        let project_root = Self::canonical_project_root(project_root);
+        let mut fingerprints = entries
+            .iter()
+            .filter_map(|entry| {
+                let source_path = entry.source_path.as_ref()?;
+                let source_path = PathBuf::from(source_path);
+                let source_path = if source_path.is_absolute() {
+                    source_path
+                } else {
+                    project_root.join(source_path)
+                };
+                let source = ets_transform_plan.sources.source_text(&source_path)?;
+                Some(SourceMapInputFingerprint {
+                    key: entry.key.clone(),
+                    content_hash: CacheKeyMaterial::compute_content_hash(source.as_ref()),
+                })
+            })
+            .collect::<Vec<_>>();
+        fingerprints.sort_by(|left, right| left.key.cmp(&right.key));
+        fingerprints.dedup_by(|left, right| left.key == right.key);
+        fingerprints
     }
 
     fn module_source_scan_treeshake_enabled() -> bool {
@@ -1110,40 +1169,34 @@ impl HvigorModuleTransformCollector {
         Self { store }
     }
 
-    fn preserve_rollup_generated_lines(raw_map: String, generated_code: &str) -> String {
-        let expected_line_separators = generated_code
-            .encode_utf16()
-            .filter(|code_unit| *code_unit == u16::from(b'\n'))
-            .count();
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw_map) else {
-            return raw_map;
-        };
-        let Some(mappings) = value
-            .get_mut("mappings")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-        else {
-            return raw_map;
-        };
-        let present_line_separators = mappings.bytes().filter(|byte| *byte == b';').count();
-        if present_line_separators >= expected_line_separators {
-            return raw_map;
-        }
-
-        let mut mappings = mappings;
-        for _ in present_line_separators..expected_line_separators {
-            mappings.push(';');
-        }
-        value["mappings"] = serde_json::Value::String(mappings);
-        serde_json::to_string(&value).unwrap_or(raw_map)
-    }
-
     /// `transform.js::preserveSourceMap` ignores Rollup/CommonJS virtual
     /// modules. Only a materializable runtime JavaScript module can own a
     /// ModuleMode source-map entry.
     fn is_runtime_javascript_source(module_id: &str) -> bool {
         HvigorModuleSourceId::new(module_id).should_compile()
             && arkdown_ets_transform::SourceClassifier::classify(module_id).is_javascript_runtime()
+    }
+
+    fn restore_hvigor_javascript_mapping_lines(
+        raw_map: String,
+        is_comment_only_javascript: bool,
+    ) -> String {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw_map) else {
+            return raw_map;
+        };
+        let Some(mappings) = value.get("mappings").and_then(|value| value.as_str()) else {
+            return raw_map;
+        };
+        let mappings = if is_comment_only_javascript {
+            mappings.is_empty().then_some(";".to_string())
+        } else {
+            (!mappings.ends_with(';')).then(|| format!("{mappings};"))
+        };
+        if let Some(mappings) = mappings {
+            value["mappings"] = serde_json::Value::String(mappings);
+            return serde_json::to_string(&value).unwrap_or(raw_map);
+        }
+        raw_map
     }
 }
 
@@ -1169,9 +1222,19 @@ impl Plugin for HvigorModuleTransformCollector {
             .and_then(|metadata| metadata.take(&module_id));
         let is_runtime_javascript = Self::is_runtime_javascript_source(&module_id);
         let source_map = if let Some(metadata) = metadata.as_ref() {
+            // Latest IDE ets-loader `transform.js::preserveSourceMap` retains
+            // Rollup's combined mappings verbatim, then changes only source
+            // attribution/package metadata in its SourceMapGenerator. Rolldown
+            // drops the final unmapped line that TypeScript's source-map URL
+            // comment contributes to an emitted JavaScript module. Restore
+            // that boundary for SDK `Program.emit` output; comment-only input
+            // is its one-line `"mappings":";"` sentinel form.
             let raw_map = ctx.get_combined_sourcemap().to_json_string();
             let raw_map = if metadata.emits_javascript {
-                Self::preserve_rollup_generated_lines(raw_map, args.code.as_str())
+                Self::restore_hvigor_javascript_mapping_lines(
+                    raw_map,
+                    metadata.is_comment_only_javascript,
+                )
             } else {
                 raw_map
             };
@@ -1506,7 +1569,12 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                     stack.push(path);
                     continue;
                 }
-                if file_type.is_file() && !active_paths.contains(&path) {
+                let is_stale_module_source =
+                    file_type.is_file() && !active_paths.contains(&path) && {
+                        let source_kind = SourceClassifier::classify_path(&path);
+                        source_kind.is_ets_transform_input() || source_kind.is_javascript_runtime()
+                    };
+                if is_stale_module_source {
                     fs_err::remove_file(&path).map_err(|e| ArkdownError::Bundler(e.to_string()))?;
                 }
             }
@@ -3515,20 +3583,6 @@ mod tests {
     use arkdown_core::BuildMode;
 
     #[test]
-    fn transform_collector_preserves_rollup_trailing_mapping_lines() {
-        let raw_map =
-            r#"{"version":3,"sources":["ModuleInfo.ts"],"names":[],"mappings":"AAAA;AACA;AACA"}"#;
-        let normalized = HvigorModuleTransformCollector::preserve_rollup_generated_lines(
-            raw_map.to_string(),
-            "first\r\nsecond\r\nthird\r\n//# sourceMappingURL=ModuleInfo.js.map",
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(&normalized).expect("normalized source map JSON");
-
-        assert_eq!(value["mappings"], "AAAA;AACA;AACA;");
-    }
-
-    #[test]
     fn transform_collector_excludes_rollup_virtual_runtime_source_maps() {
         assert!(
             HvigorModuleTransformCollector::is_runtime_javascript_source(
@@ -3538,6 +3592,43 @@ mod tests {
         assert!(
             !HvigorModuleTransformCollector::is_runtime_javascript_source("\0rolldown/runtime.js")
         );
+    }
+
+    #[test]
+    fn transform_collector_restores_sdk_javascript_mapping_line_boundaries() {
+        let restored = HvigorModuleTransformCollector::restore_hvigor_javascript_mapping_lines(
+            r#"{"version":3,"sources":["ResourceTable.ts"],"names":[],"mappings":""}"#.to_string(),
+            true,
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&restored).expect("restored source map JSON");
+        assert_eq!(value["mappings"], ";");
+
+        let populated = HvigorModuleTransformCollector::restore_hvigor_javascript_mapping_lines(
+            r#"{"version":3,"sources":["Index.ts"],"names":[],"mappings":"AAAA"}"#.to_string(),
+            true,
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&populated).expect("populated source map JSON");
+        assert_eq!(value["mappings"], "AAAA");
+
+        let emitted = HvigorModuleTransformCollector::restore_hvigor_javascript_mapping_lines(
+            r#"{"version":3,"sources":["ModuleInfo.ts"],"names":[],"mappings":"AAAA"}"#.to_string(),
+            false,
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&emitted).expect("emitted source map JSON");
+        assert_eq!(value["mappings"], "AAAA;");
+
+        let emitted_with_boundary =
+            HvigorModuleTransformCollector::restore_hvigor_javascript_mapping_lines(
+                r#"{"version":3,"sources":["ModuleInfo.ts"],"names":[],"mappings":"AAAA;"}"#
+                    .to_string(),
+                false,
+            );
+        let value: serde_json::Value =
+            serde_json::from_str(&emitted_with_boundary).expect("source map JSON with boundary");
+        assert_eq!(value["mappings"], "AAAA;");
     }
 
     fn runtime_packages(
@@ -3929,6 +4020,10 @@ mod tests {
         let stale_file = out_dir.join("stale").join("Old.ts");
         fs_err::create_dir_all(stale_file.parent().unwrap()).unwrap();
         fs_err::write(&stale_file, "old").unwrap();
+        let source_maps_cache = out_dir.join("sourceMaps.json");
+        let program_cache = out_dir.join("modules.cache");
+        fs_err::write(&source_maps_cache, r#"{ "Index.ts": {} }"#).unwrap();
+        fs_err::write(&program_cache, "module-cache").unwrap();
 
         let mut next_state = HvigorModuleSourceState::default();
         next_state.sources.insert(
@@ -3961,6 +4056,16 @@ mod tests {
             .find(|file| file.module_id == entry_id)
             .expect("entry module source after second write");
         assert!(!stale_file.exists(), "stale module source must be removed");
+        assert_eq!(
+            fs_err::read_to_string(&source_maps_cache).unwrap(),
+            r#"{ "Index.ts": {} }"#,
+            "CompileArkTS source-map cache is not a stale module source"
+        );
+        assert_eq!(
+            fs_err::read_to_string(&program_cache).unwrap(),
+            "module-cache",
+            "CompileArkTS ProgramCache is not a stale module source"
+        );
         assert_eq!(
             std::fs::read_to_string(&next_entry_file.path).unwrap(),
             output

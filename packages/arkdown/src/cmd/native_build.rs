@@ -918,15 +918,16 @@ pub struct DebugSymbolOutput {
 ///
 /// Source selection and output names mirror
 /// `hvigor-ohos-plugin/src/tasks/collect-debug-symbol.ts`: prefer the
-/// intermediate source map, fall back to the compiler source map, copy the
-/// obfuscation name cache when it exists, and link ABI directories from the
-/// `ProcessLibs` output.
+/// compiler-owned source map (loader output in debug, CompileArkTS cache in
+/// release), fall back to an alternate package-owned map, copy the obfuscation
+/// name cache when it exists, and link ABI directories from the `ProcessLibs`
+/// output.
 pub struct DebugSymbolCollector {
   module_root: PathBuf,
   module_name: String,
   build_mode: BuildMode,
-  source_map_intermediate: PathBuf,
-  source_map_origin: Option<PathBuf>,
+  source_map_primary: PathBuf,
+  source_map_fallback: Option<PathBuf>,
   name_cache: PathBuf,
   should_collect: bool,
   product_name: String,
@@ -938,8 +939,8 @@ impl DebugSymbolCollector {
     module_root: PathBuf,
     module_name: String,
     build_mode: BuildMode,
-    source_map_intermediate: PathBuf,
-    source_map_origin: Option<PathBuf>,
+    source_map_primary: PathBuf,
+    source_map_fallback: Option<PathBuf>,
     name_cache: PathBuf,
   ) -> Self {
     let should_collect = matches!(build_mode, BuildMode::Release);
@@ -947,8 +948,8 @@ impl DebugSymbolCollector {
       module_root,
       module_name,
       build_mode,
-      source_map_intermediate,
-      source_map_origin,
+      source_map_primary,
+      source_map_fallback,
       name_cache,
       should_collect,
       product_name: "default".to_string(),
@@ -1023,11 +1024,11 @@ impl DebugSymbolCollector {
   }
 
   fn source_map_input(&self) -> Option<&Path> {
-    if self.source_map_intermediate.is_file() {
-      Some(&self.source_map_intermediate)
+    if self.source_map_primary.is_file() {
+      Some(&self.source_map_primary)
     } else {
       self
-        .source_map_origin
+        .source_map_fallback
         .as_deref()
         .filter(|path| path.is_file())
     }

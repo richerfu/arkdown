@@ -135,9 +135,11 @@ pub struct BuildArgs {
   /// ABC compiler backend. `auto` and `sdk` both use SDK es2abc for hvigor parity.
   #[arg(long = "abc-backend", value_enum, default_value = "sdk")]
   pub abc_backend: AbcBackendChoice,
-  /// ArkTS checker mode. `oxc` runs the OXC-backed checker; `off` disables
-  /// OXC checker diagnostics while keeping ETS transforms enabled.
-  #[arg(long, default_value = "oxc")]
+  /// ArkTS checker mode. `sdk` (the parity default) runs the installed
+  /// etsChecker semantic pass plus OXC structural checks; `oxc` keeps only
+  /// the Rust structural pass; `off` disables checker diagnostics while
+  /// preserving ETS transforms.
+  #[arg(long, default_value = "sdk")]
   pub checker: Option<String>,
   /// Module analyzer used for hvigor type/value split. `yuku` requires a build
   /// compiled with ARKDOWN_YUKU_ROOT and is opt-in for parity experiments.

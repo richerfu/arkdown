@@ -82,3 +82,71 @@ fn hsp_declarations_preserve_module_source_tree_for_package_shared_har() {
     .join("shared/src/main/ets/Index.d.ets")
     .is_file());
 }
+
+/// Latest IDE `ets-loader::generateSourceFilesInHar` sends both source and
+/// generated `ModuleInfo.ts` through TypeScript's declaration emitter for a
+/// ByteCode HAR. The declarations are archived as exact CRLF/four-space bytes.
+#[test]
+fn bytecode_har_declarations_match_sdk_generated_entries_and_printer() {
+  let temp = tempfile::tempdir().expect("create module root");
+  let source_dir = temp.path().join("src/main/ets");
+  let module_info = temp
+    .path()
+    .join("build/default/generated/profile/default/ModuleInfo.ts");
+  std::fs::create_dir_all(&source_dir).expect("create source tree");
+  std::fs::create_dir_all(module_info.parent().expect("generated profile parent"))
+    .expect("create generated profile tree");
+  std::fs::write(
+    source_dir.join("Index.ets"),
+    concat!(
+      "export function formatGreeting(name: string): string {\n",
+      "  return `Hello, ${name}!`;\n",
+      "}\n\n",
+      "export class Counter {\n",
+      "  private value: number = 0;\n\n",
+      "  increment(): number {\n",
+      "    this.value += 1;\n",
+      "    return this.value;\n",
+      "  }\n",
+      "}\n"
+    ),
+  )
+  .expect("write ByteCode HAR source");
+  std::fs::write(
+    &module_info,
+    concat!(
+      "\n//@ts-noCheck\n",
+      "export const __MODULE_NAME__: string = __getCurrentModuleName__()\n",
+      "export const __BUNDLE_NAME__: string = __getCurrentBundleName__()\n"
+    ),
+  )
+  .expect("write generated ModuleInfo");
+
+  HarDeclarationGenerator::new_har(temp.path(), &source_dir, "entry")
+    .with_generated_source(&module_info)
+    .generate()
+    .expect("generate ByteCode HAR declarations");
+
+  let declarations_dir = ModuleBuildLayout::new(temp.path()).declarations_dir();
+  assert_eq!(
+    std::fs::read_to_string(declarations_dir.join("entry/src/main/ets/Index.d.ets"))
+      .expect("read source declaration"),
+    concat!(
+      "export declare function formatGreeting(name: string): string;\r\n",
+      "export declare class Counter {\r\n",
+      "    private value;\r\n",
+      "    increment(): number;\r\n",
+      "}\r\n"
+    )
+  );
+  assert_eq!(
+    std::fs::read_to_string(
+      declarations_dir.join("entry/build/default/generated/profile/default/ModuleInfo.d.ts"),
+    )
+    .expect("read generated declaration"),
+    concat!(
+      "export declare const __MODULE_NAME__: string;\r\n",
+      "export declare const __BUNDLE_NAME__: string;\r\n"
+    )
+  );
+}
