@@ -7,3 +7,7 @@ tests/fixtures/minimal-hap/build
 .worktrees/
 .claude/
 .hvigor/
+tests/fixtures/multi-module-hap/entry/build
+tests/fixtures/multi-module-hap/library/build
+tests/fixtures/widget-hap/entry/build
+tests/fixtures/widget-hap/widget/build
