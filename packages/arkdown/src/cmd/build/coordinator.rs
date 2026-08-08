@@ -776,6 +776,9 @@ struct TransformSourceSnapshotBuilder<'a> {
   custom_type_declaration_inputs: &'a [PathBuf],
   source_set_overlays: &'a [(PathBuf, PathBuf)],
   package_roots: &'a [(String, PathBuf)],
+  /// Local unit-test source roots (`<module>/.test/testability`,
+  /// `<module>/src/test`) — compiler inputs of the `hvigorw test` chain.
+  test_source_roots: &'a [PathBuf],
 }
 
 impl<'a> TransformSourceSnapshotBuilder<'a> {
@@ -793,7 +796,13 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
       custom_type_declaration_inputs: &[],
       source_set_overlays,
       package_roots: &[],
+      test_source_roots: &[],
     }
+  }
+
+  fn with_test_source_roots(mut self, roots: &'a [PathBuf]) -> Self {
+    self.test_source_roots = roots;
+    self
   }
 
   fn with_package_roots(mut self, roots: &'a [(String, PathBuf)]) -> Self {
@@ -824,6 +833,14 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
       )?;
     }
     for root in self.dependency_source_roots {
+      self.collect_source_root(
+        root,
+        &mut files,
+        &mut runtime_source_paths,
+        &mut collected_roots,
+      )?;
+    }
+    for root in self.test_source_roots {
       self.collect_source_root(
         root,
         &mut files,
@@ -1042,6 +1059,7 @@ enum SourceRootMode {
 struct ModuleObfuscationContext {
   config: Option<ObfuscationConfig>,
   dependency_rule_files: Vec<PathBuf>,
+  output_target: OutputTarget,
 }
 
 struct ModuleArkguardPlanBuilder<'a> {
@@ -1323,10 +1341,16 @@ impl ModuleObfuscationContext {
     Ok(Self {
       config: effective,
       dependency_rule_files,
+      output_target: config.output_target.clone(),
     })
   }
 
   fn is_enabled(&self, build_mode: &BuildMode) -> bool {
+    // hvigor UnitTestArkCompile/OhosTestArkCompile delete obfuscationOptions;
+    // local unit-test builds never obfuscate.
+    if matches!(self.output_target, OutputTarget::Test) {
+      return false;
+    }
     self
       .config
       .as_ref()
@@ -2874,7 +2898,7 @@ fn build_cache_group_snapshots(
   project_root: &Path,
   byte_code_har_integrated_optimization: bool,
 ) -> Vec<CacheGroupSnapshot> {
-  let module_layout = ModuleBuildLayout::new(&module.src_path);
+  let module_layout = ModuleBuildLayout::for_output_target(&config.output_target, &module.src_path);
 
   // Helper: FNV-1a hash over file content; returns CacheGroupSnapshot.
   let file_hash = |path: &PathBuf, key: CacheGroupKey| -> CacheGroupSnapshot {
@@ -3410,7 +3434,12 @@ impl BuildCoordinator {
       .map(|batch| batch.changed_files.clone())
       .unwrap_or_default();
     let preview_mode = args.preview;
-    let coverage_mode = args.coverage;
+    // Local unit-test builds default to code-coverage instrumentation:
+    // hvigor `setTestDefaultParameters` injects `ohos-test-coverage=true`
+    // for the `test` task; the CLI flag can still override it.
+    let coverage_mode = args.coverage
+      || (matches!(config.output_target, OutputTarget::Test)
+        && args.ohos_test_coverage.unwrap_or(true));
     let disable_abc_cache = args.disable_abc_cache || !args.cache;
     let cli_cache_file = args.cache_file.clone();
     let abc_backend = args.abc_backend;
@@ -3591,7 +3620,13 @@ impl BuildCoordinator {
       let module_config = resolved_module.config;
       let module_build_option = &module_config.product.build_option;
       let processor = ProfileProcessor::new(module_config.clone());
-      let module_layout = ModuleBuildLayout::new(&module.src_path);
+      // Local unit-test builds (`--target test`) use the `.test` build root
+      // (hvigor `setTestDefaultParameters` injects `buildRoot=.test`).
+      let module_layout = if matches!(config.output_target, OutputTarget::Test) {
+        ModuleBuildLayout::for_test(&module.src_path)
+      } else {
+        ModuleBuildLayout::new(&module.src_path)
+      };
       let module_context = session.module_context(&module.name).ok_or_else(|| {
         anyhow::anyhow!("missing build session module context for {}", module.name)
       })?;
@@ -3615,6 +3650,38 @@ impl BuildCoordinator {
       task_lifecycle
         .marker(&module.name, Some(&module_target_name), "PreBuild")
         .await?;
+      // hvigor `GenerateUnitTestTemplate` writes the three local unit-test
+      // templates into `<module>/.test/testability/` (declared output). It
+      // runs for the `test` command entry (`hvigorw test`).
+      if matches!(config.output_target, OutputTarget::Test) {
+        let _timer = BuildTimingProbe::module(&module.name, "generate_unit_test_template");
+        let testability = module_layout.testability_dir();
+        if !testability.join("TestAbility.ets").is_file() {
+          let coverage = args.ohos_test_coverage.unwrap_or(true);
+          let scope = args.scope.as_deref().unwrap_or("");
+          // hvigor embeds the absolute module path (`pathInfo.getModulePath()`)
+          // into the template; canonicalize so `--project .` does not leak
+          // `./` segments into the generated file.
+          let module_path = std::fs::canonicalize(&module.src_path)
+            .unwrap_or_else(|_| config.project_root.join(&module.src_path));
+          super::unit_test::generate_unit_test_template(
+            &module_path,
+            &super::unit_test::UnitTestTemplateParams {
+              bundle_name: &config.product.bundle_name,
+              module_name: &module.name,
+              scope,
+              coverage,
+              module_path: &module_path,
+            },
+          )
+          .map_err(|error| {
+            anyhow::anyhow!("GenerateUnitTestTemplate failed for module '{}': {error}", module.name)
+          })?;
+        }
+        task_lifecycle
+          .after(&module.name, Some(&module_target_name), "GenerateUnitTestTemplate")
+          .await?;
+      }
       if !skip_profile_writes {
         // hvigor `pre-build.ts` validation: schema checks against the SDK
         // modulecheck schemas plus structural/path/API-version constraints.
@@ -4443,10 +4510,82 @@ impl BuildCoordinator {
           let form_widget_abilities = merge_form_widget_abilities(config, &module_json5)?;
           intermediate_writer.write_profile_intermediates(
             &module.src_path,
+            &config.output_target,
             &module_json_out,
             module_json5.module.extension_abilities.len(),
             &form_widget_abilities,
           )?;
+        }
+
+        // hvigor `UnitTestProcessProfile` (runs before CompileResource so
+        // restool annotates the injected TestAbility): when the generated
+        // testability template exists (`<module>/.test/testability/TestAbility.ets`),
+        // append the synthetic TestAbility to the processed profile and
+        // overwrite the ark module json / module.json with the same document.
+        if matches!(config.output_target, OutputTarget::Test)
+          && super::unit_test::has_test_ability_template(&module.src_path.join(".test"))
+        {
+          let process_profile_json = module_layout.process_profile_module_json();
+          let process_value = std::fs::read_to_string(&process_profile_json).map_err(|error| {
+            anyhow::anyhow!(
+              "UnitTestProcessProfile cannot read processed profile '{}': {error}",
+              process_profile_json.display()
+            )
+          })?;
+          let mut document: serde_json::Value = serde_json::from_str(&process_value).map_err(
+            |error| {
+              anyhow::anyhow!(
+                "UnitTestProcessProfile cannot parse processed profile '{}': {error}",
+                process_profile_json.display()
+              )
+            },
+          )?;
+          super::unit_test::inject_unit_test_ability(
+            &mut document,
+            module_json5.module.type_.as_str(),
+          )
+          .map_err(|error| {
+            anyhow::anyhow!(
+              "UnitTestProcessProfile failed for module '{}': {error}",
+              module.name
+            )
+          })?;
+          // hvigor `outputJSONSync(..., { spaces: "\t" })` for both files.
+          let serialized = {
+            let mut out = Vec::new();
+            let mut serializer = serde_json::Serializer::with_formatter(
+              &mut out,
+              serde_json::ser::PrettyFormatter::with_indent(b"\t"),
+            );
+            serde::Serialize::serialize(&document, &mut serializer)
+              .map_err(|error| anyhow::anyhow!("UnitTestProcessProfile serialize: {error}"))?;
+            out
+          };
+          std::fs::write(&process_profile_json, &serialized).map_err(|error| {
+            anyhow::anyhow!(
+              "UnitTestProcessProfile write '{}': {error}",
+              process_profile_json.display()
+            )
+          })?;
+          std::fs::write(&module_layout.res_ark_module_json(), &serialized).map_err(|error| {
+            anyhow::anyhow!(
+              "UnitTestProcessProfile write ark_module.json '{}': {error}",
+              module_layout.res_ark_module_json().display()
+            )
+          })?;
+          std::fs::write(&module_json_out, &serialized).map_err(|error| {
+            anyhow::anyhow!(
+              "UnitTestProcessProfile write module.json '{}': {error}",
+              module_json_out.display()
+            )
+          })?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "UnitTestProcessProfile",
+            )
+            .await?;
         }
 
         let _timer = BuildTimingProbe::module(&module.name, "resource_config_write_initial");
@@ -4793,6 +4932,30 @@ impl BuildCoordinator {
         }
       }
 
+      // hvigor `ReplaceUnitTestIndexFile` (after CompileResource): rewrite
+      // the res module.json pages and emit `main_pages.json` from the
+      // `unit.test.replace.page` default.
+      if matches!(config.output_target, OutputTarget::Test) {
+        let process_profile_json = module_layout.process_profile_module_json();
+        let process_value = std::fs::read_to_string(&process_profile_json)?;
+        let document: serde_json::Value = serde_json::from_str(&process_value)?;
+        super::unit_test::replace_unit_test_index_file(
+          &module_layout.res_module_json(),
+          &document,
+          &module_layout.res_profile_dir(),
+          module_json5.module.type_.as_str(),
+        )
+        .map_err(|error| {
+          anyhow::anyhow!(
+            "ReplaceUnitTestIndexFile failed for module '{}': {error}",
+            module.name
+          )
+        })?;
+        task_lifecycle
+          .after(&module.name, Some(&module_target_name), "ReplaceUnitTestIndexFile")
+          .await?;
+      }
+
       loader_jsons.push((
         module.clone(),
         manifest,
@@ -4823,7 +4986,7 @@ impl BuildCoordinator {
         let module_context = session.module_context(&module.name).ok_or_else(|| {
           anyhow::anyhow!("missing build session module context for {}", module.name)
         })?;
-        let module_layout = ModuleBuildLayout::new(&module.src_path);
+        let module_layout = ModuleBuildLayout::for_output_target(&config.output_target, &module.src_path);
         let generated_profile_path = module_layout
           .build_profile_for_module(&module.module_type, module_target_name)
           .parent()
@@ -4898,7 +5061,7 @@ impl BuildCoordinator {
     ) in loader_jsons.iter().zip(module_obfuscation_contexts.iter())
     {
       let module_build_option = &module_config.product.build_option;
-      let module_layout = ModuleBuildLayout::new(&module.src_path);
+      let module_layout = ModuleBuildLayout::for_output_target(&config.output_target, &module.src_path);
       let module_package_plugins = package_plugins
         .iter()
         .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
@@ -5253,12 +5416,22 @@ impl BuildCoordinator {
             .map(|root| (node.package_name.clone(), root))
         })
         .collect();
+      // Local unit-test builds additionally compile the generated
+      // testability templates and the `src/test` suite (hvigor
+      // `UnitTestArkTS` inputs; `GenerateUnitTestTemplate` output).
+      let test_source_roots: Vec<PathBuf> = if matches!(config.output_target, OutputTarget::Test)
+      {
+        vec![module_layout.testability_dir(), module_layout.test_sources_dir()]
+      } else {
+        Vec::new()
+      };
       let transform_sources = TransformSourceSnapshotBuilder::new(
         &all_module_roots,
         &dependency_source_roots,
         &native_declaration_roots,
         &source_set_overlays,
       )
+      .with_test_source_roots(&test_source_roots)
       .with_package_roots(&dependency_package_roots)
       .with_sdk_declaration_roots(&sdk_declaration_roots)
       .with_custom_type_declaration_inputs(&loader_json.compiler_type_declaration_inputs)
@@ -5578,7 +5751,7 @@ impl BuildCoordinator {
       if bundle_out.bypasses_compilation() {
         continue;
       }
-      let module_layout = ModuleBuildLayout::new(&module.src_path);
+      let module_layout = ModuleBuildLayout::for_output_target(&config.output_target, &module.src_path);
       let module_src_main = PathBuf::from(&loader_json.module_root_path);
       let importee_cfg = ProcessImporteeConfig {
         bundle_name: config.product.bundle_name.clone(),
@@ -6178,6 +6351,15 @@ impl BuildCoordinator {
 
     // ── Step 6: Packaging + Signing ───────────────────────────────────
     progress.step(6, 6, "Packaging");
+    // Local unit-test builds produce no HAP/HSP/HAR archive — the `test`
+    // task ends at the compiled assets (`intermediates/assets/<target>/ets/`)
+    // plus coverage data. hvigor `Test`/`UnitTestBuild` tasks never run the
+    // pack graph.
+    if matches!(config.output_target, OutputTarget::Test) {
+      return Ok(BuildOutput {
+        artifact_paths: Vec::new(),
+      });
+    }
     let mut output_paths = Vec::new();
 
     for (
@@ -6202,7 +6384,7 @@ impl BuildCoordinator {
           .filter(|_| module_config.sdk_config.sdk_component_api_version >= 12)
           .unwrap_or(1),
       );
-      let module_layout = ModuleBuildLayout::new(&module.src_path);
+      let module_layout = ModuleBuildLayout::for_output_target(&config.output_target, &module.src_path);
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
       if task_lifecycle
         .before(&module.name, Some(module_target_name), "MakePackInfo")

@@ -367,7 +367,13 @@ fn merge_profile_precedes_dependency_extension_ability_collection() {
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
-    .write_profile_intermediates(&module_root, &final_module_json, 2, &[])
+    .write_profile_intermediates(
+      &module_root,
+      &arkdown_core::OutputTarget::Hap,
+      &final_module_json,
+      2,
+      &[],
+    )
     .expect("write staged profiles");
 
   let layout = super::layout::ModuleBuildLayout::new(&module_root);
@@ -526,4 +532,191 @@ async fn unqualified_module_hook_root_matches_a_targetless_boundary() {
     .expect_err("the unqualified module hook boundary must stop the partial command");
 
   assert!(cutoff.is::<NativeTaskCutoffReached>());
+}
+
+// ── Local unit-test chain oracle tests ──────────────────────────────────────
+// Golden files captured from a real hvigor 6.24.3 `hvigorw test` run over the
+// minimal-hap fixture (see meta/design/hvigor-remaining-diff-audit.md E).
+// The templates must match `@ohos/coverage` testTemplate.js byte for byte.
+
+// Golden files captured from a real hvigor 6.24.3 `hvigorw test
+// -p ohos-test-coverage=false` run over the minimal-hap fixture; they are
+// committed under tests/fixtures/golden/unit-test/ so the oracle does not
+// depend on a live `.test` build root.
+const GOLDEN_UNIT_TEST_DIR: &str = concat!(
+  env!("CARGO_MANIFEST_DIR"),
+  "/../../tests/fixtures/golden/unit-test"
+);
+
+#[test]
+fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
+  let index_golden = std::fs::read(format!("{GOLDEN_UNIT_TEST_DIR}/Index.ets.golden"))
+    .expect("hvigor-generated Index.ets golden must exist");
+  let ability_golden = std::fs::read(format!("{GOLDEN_UNIT_TEST_DIR}/TestAbility.ets.golden"))
+    .expect("hvigor-generated TestAbility.ets golden must exist");
+  let phone_golden =
+    std::fs::read(format!("{GOLDEN_UNIT_TEST_DIR}/phoneSettingConfig_Phone.json.golden"))
+      .expect("hvigor-generated phoneSettingConfig golden must exist");
+
+  let params = super::unit_test::UnitTestTemplateParams {
+    bundle_name: "com.example.arkdown.test",
+    module_name: "entry",
+    scope: "",
+    // Golden files captured from a `hvigorw test -p ohos-test-coverage=false` run.
+    coverage: false,
+    module_path: std::path::Path::new(
+      "/Volumes/PSSD/code/arkdown/tests/fixtures/minimal-hap/entry",
+    ),
+  };
+  let rendered = super::unit_test::render_page_index_template(&params);
+  assert_eq!(
+    rendered.as_bytes(),
+    index_golden.as_slice(),
+    "rendered Index.ets must equal the hvigor-generated file"
+  );
+
+  let dir = tempfile::tempdir().expect("tempdir");
+  super::unit_test::generate_unit_test_template(dir.path(), &params)
+    .expect("template generation");
+  assert_eq!(
+    std::fs::read(dir.path().join(".test/testability/TestAbility.ets")).unwrap(),
+    ability_golden,
+    "TestAbility.ets must equal the hvigor-generated file"
+  );
+  assert_eq!(
+    std::fs::read(dir.path().join(".test/testability/phoneSettingConfig_Phone.json")).unwrap(),
+    phone_golden,
+    "phoneSettingConfig must equal the hvigor-generated file"
+  );
+}
+
+#[test]
+fn unit_test_template_coverage_false_and_scope_are_substituted() {
+  let params = super::unit_test::UnitTestTemplateParams {
+    bundle_name: "com.example.arkdown.test",
+    module_name: "entry",
+    scope: "ActsAbilityTest",
+    coverage: false,
+    module_path: std::path::Path::new("/tmp/example/entry"),
+  };
+  let rendered = super::unit_test::render_page_index_template(&params);
+  assert!(
+    rendered.contains("\"-s coverage\": \"false\""),
+    "coverage=false must render false"
+  );
+  assert!(
+    rendered.contains("\"-s class\": \"ActsAbilityTest\""),
+    "scope must be injected into -s class"
+  );
+  assert!(
+    rendered.contains("abilityDelegatorArguments.testCaseNames = \"ActsAbilityTest\""),
+    "scope must be injected into testCaseNames"
+  );
+  assert!(
+    rendered.contains("global[savePath] = \"/tmp/example/entry/.test/default/intermediates/test/coverage_data/js_coverage.json\""),
+    "module path must be embedded verbatim"
+  );
+}
+
+#[test]
+fn unit_test_process_profile_injects_test_ability_like_hvigor() {
+  let process_profile: serde_json::Value = serde_json::from_str(
+    r#"{
+      "app": {"bundleName": "com.example.arkdown.test", "icon": "$media:layered_image"},
+      "module": {
+        "name": "entry",
+        "type": "entry",
+        "mainElement": "EntryAbility",
+        "abilities": [
+          {
+            "name": "EntryAbility",
+            "srcEntry": "./ets/entryability/EntryAbility.ets",
+            "startWindowIcon": "$media:startIcon",
+            "startWindowBackground": "$color:start_window_background"
+          }
+        ]
+      }
+    }"#,
+  )
+  .unwrap();
+  let mut document = process_profile.clone();
+  super::unit_test::inject_unit_test_ability(&mut document, "entry").expect("injection");
+  let abilities = document["module"]["abilities"].as_array().unwrap();
+  assert_eq!(abilities.len(), 2, "one TestAbility appended");
+  assert_eq!(abilities[1]["name"], "TestAbility");
+  assert_eq!(abilities[1]["srcEntrance"], "../../.test/testability/TestAbility.ets");
+  assert_eq!(abilities[1]["startWindowIcon"], "$media:startIcon");
+  assert_eq!(
+    abilities[1]["startWindowBackground"],
+    "$color:start_window_background"
+  );
+  assert_eq!(document["module"]["deliveryWithInstall"], serde_json::Value::Null);
+  // entry module keeps deliveryWithInstall untouched
+}
+
+#[test]
+fn unit_test_process_profile_har_rewrite_matches_hvigor() {
+  let mut document = serde_json::json!({
+    "app": {"icon": "$media:layered_image", "label": "$string:app_name"},
+    "module": {"name": "library", "type": "har", "abilities": []}
+  });
+  super::unit_test::inject_unit_test_ability(&mut document, "har").expect("injection");
+  assert_eq!(document["module"]["type"], "entry");
+  // hvigor: `s.module.deliveryWithInstall = n.isHarModule()` — HAR is true.
+  assert_eq!(document["module"]["deliveryWithInstall"], true);
+  assert_eq!(document["app"]["icon"], "icon");
+  assert_eq!(document["app"]["label"], "label");
+  let ability = &document["module"]["abilities"][0];
+  assert_eq!(ability["startWindowIcon"], "startIcon");
+  assert_eq!(ability["startWindowBackground"], "#FFFFFF");
+}
+
+#[test]
+fn replace_unit_test_index_file_writes_pages_and_main_pages() {
+  let dir = tempfile::tempdir().unwrap();
+  let res = dir.path().join("res");
+  std::fs::create_dir_all(&res).unwrap();
+  let res_module_json = res.join("module.json");
+  let profile_dir = res.join("resources/base/profile");
+  let process_profile = serde_json::json!({
+    "module": {"pages": "$profile:main_pages"}
+  });
+  // HAP without pages -> rewrite.
+  super::unit_test::replace_unit_test_index_file(
+    &res_module_json,
+    &process_profile,
+    &profile_dir,
+    "entry",
+  )
+  .expect("replace");
+  let module_doc: serde_json::Value =
+    serde_json::from_str(&std::fs::read_to_string(&res_module_json).unwrap()).unwrap();
+  assert_eq!(module_doc["module"]["pages"], "$profile:main_pages");
+  let main_pages: serde_json::Value = serde_json::from_str(
+    &std::fs::read_to_string(profile_dir.join("main_pages.json")).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(
+    main_pages["src"][0],
+    super::unit_test::UNIT_TEST_REPLACE_PAGE
+  );
+
+  // HAP with existing pages -> keep, but still write main_pages.json.
+  let res_module_json2 = res.join("module2.json");
+  std::fs::write(
+    &res_module_json2,
+    r#"{"module": {"pages": "$profile:existing"}}"#,
+  )
+  .unwrap();
+  super::unit_test::replace_unit_test_index_file(
+    &res_module_json2,
+    &process_profile,
+    &profile_dir,
+    "entry",
+  )
+  .expect("replace keeps pages");
+  let kept: serde_json::Value =
+    serde_json::from_str(&std::fs::read_to_string(&res_module_json2).unwrap()).unwrap();
+  assert_eq!(kept["module"]["pages"], "$profile:existing");
+  assert!(profile_dir.join("main_pages.json").is_file());
 }

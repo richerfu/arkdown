@@ -27,8 +27,10 @@ mod layout;
 mod module_plan;
 mod preload_system_so;
 mod syscap;
+mod unit_test;
 #[cfg(test)]
 mod tests;
 mod watch_stage;
 
 pub use args::{BuildArgs, BuildCommand};
+

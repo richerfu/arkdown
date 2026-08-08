@@ -26,7 +26,8 @@
 | 项 | 说明 |
 |---|---|
 | FA 模型 / JSBUNDLE 全套（legacy-tasks、format cjs、babel、terser-release-JSBUNDLE、sourcemapPathTransform-JSBUNDLE） | CLAUDE.md 明确范围外 |
-| unitTest 全套（11 任务）/ ohosTest 全套（6 任务） | session 有 Inventory 模型，CLI 无 test 目标 |
+| unitTest 全套（11 任务） | ✅ 已实现（`--target test`，E2 节；GenerateUnitTestResult 执行面待接 @ohos/coverage） |
+| ohosTest 全套（6 任务，`-p module=entry@ohosTest`） | 未实现（src/ohosTest 编译输入已预留 collector 门） |
 | 设备覆盖率报告链（generate-device-coverage 等） | **插桩已实现**（coverage_instrument.rs，F20）；报告生成未实现 |
 | 设备测试链（device-test-hook / onDeviceTest） | 未实现 |
 | 预览器管线（previewer-ark-compile / preview-compile-resource 等 10 任务） | `--preview` 已实现资源重编译 + preview_changes.json（M3） |
@@ -58,6 +59,40 @@
 | pkgSdkInfo.json 手动 oh_modules 链接场景 | arkdown 依赖图解析 file: 依赖更完整；真实 ohpm 安装应一致 |
 | expandImportPath 本地包范围 | ✅ 已对齐（2026-08-08）：快照 `with_package_roots` 显式传入依赖包根（file: 依赖 canonical 路径不再漏判）、package_root 推断修复（多余 parent 致双重前缀）、decl 在入口的 symbol 展开到入口、远程 HSP/HAR 包（OHM 映射）不展开。multi-module-hap + expandImportPath 的 modules.abc md5 与 hvigor 一致 |
 | HmosWorld 大工程 source-layout/DebugInfo goldens | fixture 软链断裂不可用；验证类工作 |
+
+## E2. unitTest 构建链（2026-08-08 完成）
+
+`--target test`（`hvigorw test` 对齐）已实现并通过真实 hvigor parity
+（`minimal_hap_test_hvigor_parity_report`，strict 套件 28/28）：
+
+| 项 | 状态 |
+|---|---|
+| CLI `--target test` + `--scope`/`--ohos-test-coverage`（hvigor `setTestDefaultParameters` 注入 buildRoot=.test/isLocalTest/coverage 的等价物） | ✅ |
+| 构建根 `.test`（`ModuleBuildLayout::for_test`/`ProfileModuleLayout::for_test`） | ✅ |
+| GenerateUnitTestTemplate（`.test/testability/` 3 文件，与 @ohos/coverage 逐字节一致—— 含 bundleName/moduleName/scope/coverage/modulePath 参数替换，golden 固化于 `tests/fixtures/golden/unit-test/`） | ✅ |
+| UnitTestProcessProfile（TestAbility 注入 process_profile/module.json + ark_module.json + res/module.json，HAR deliveryWithInstall/type/icon/label 改写，`\t` 缩进—— 与 hvigor 逐字节一致） | ✅ |
+| ReplaceUnitTestIndexFile（res/module.json pages=$profile:main_pages + main_pages.json `{src:[unit.test.replace.page]}`） | ✅ |
+| 编译输入（testability + src/test + mock；main_pages 主页面排除；serialized compileEntry 收窄为 ResourceTable+mock—— 与 hvigor loader.json 逐字段一致） | ✅ |
+| cache 任务名 `default@UnitTestArkTS`（参与 es2abc 模块标识）、ResourceTable recordName 固定 `build/generated/r/ResourceTable`、anBuildMode/anBuildOutPut、buildConfigPath `.test/config/buildConfig.json` | ✅ |
+| 无混淆（obfuscationOptions 删除）、coverage 默认 true（可关）、不产 HAP | ✅ |
+| sourceMaps.map 47 模块逐字段一致（含 hypium 全部 .js） | ✅ |
+| modules.abc | 🔄 指令级一致（normalized dump 去行号 100% 一致、record 顺序一致）；md5 差异源于**空函数体格式**（见 D 类新增项） |
+
+### D 类新增记录项：源码空函数体格式
+
+hvigor 的 ets-loader（TS emit）对**源码空箭头函数体**输出多行
+`() => {\n<indent>}`；arkdown 的 OXC codegen 压缩为 `{ }`（单行）。
+而 **transform 生成的空回调**（组件构造 paramsLambda 等）hvigor 为单行
+`{ }`（生成器在 TS emit 后注入）。两者无法在 codegen 层统一区分，
+故源码空箭头保留 `{ }`—— 影响：
+
+- 含源码空箭头的文件（模板 Index.ets 的 `onClick(() => {})`）在
+  `modules.abc` debug-info 中行号偏移 1（指令/record 完全一致）
+- 该文件的 sourceMaps.map mappings 相应差一段
+
+parity 中通过 allowlist（`tests/parity_allowlist.json`，
+sourceMaps/abc debug-info 行号项）记录；修复需 transform 层区分
+源码/生成空箭头（生成器直写 `{ }`）。
 
 ## E. widget 端到端验证（2026-08-08 完成）
 

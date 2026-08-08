@@ -213,6 +213,10 @@ impl<'a> PreBuildValidator<'a> {
 
     /// `appJson5Validate`: validate `AppScope/app.json5` against the SDK
     /// `app.json` schema when present.
+    ///
+    /// hvigor passes `changeAppSchema = (moduleType === Har)`, which narrows
+    /// the required fields to `bundleName`/`versionCode`/`versionName` — HAR
+    /// modules have no app icon/label of their own.
     fn validate_app_schema(&self) -> Result<()> {
         let Some(schema_path) = self.sdk_schema("app.json") else {
             return Ok(());
@@ -225,7 +229,20 @@ impl<'a> PreBuildValidator<'a> {
         if !app_path.is_file() {
             return Ok(());
         }
-        let schema = Self::read_schema(&schema_path)?;
+        let is_har = matches!(self.module.module_type, OhosModuleType::Har);
+        let mut schema = Self::read_schema(&schema_path)?;
+        if is_har {
+            if let Some(app) = schema
+                .get_mut("properties")
+                .and_then(|p| p.get_mut("app"))
+                .and_then(|a| a.as_object_mut())
+            {
+                app.insert(
+                    "required".into(),
+                    serde_json::json!(["bundleName", "versionCode", "versionName"]),
+                );
+            }
+        }
         let instance = Self::parse_json5_file(&app_path)?;
         validate_schema(&app_path, &instance, &schema, "AppScope/app.json5", false)
     }

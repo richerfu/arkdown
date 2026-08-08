@@ -405,13 +405,14 @@ impl IntermediateArtifactWriter {
   pub(super) fn write_profile_intermediates(
     &self,
     module_root: &Path,
+    output_target: &OutputTarget,
     final_module_json: &Path,
     current_extension_ability_count: usize,
     form_widget_abilities: &[serde_json::Value],
   ) -> Result<()> {
     let content = fs_err::read_to_string(final_module_json)?;
     let final_value: serde_json::Value = serde_json::from_str(&content)?;
-    let module_layout = ModuleBuildLayout::new(module_root);
+    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root);
 
     let process_value = self.profile_without_resource_ids(final_value.clone());
     self.write_profile_json(&module_layout.process_profile_module_json(), &process_value)?;
@@ -552,7 +553,8 @@ impl IntermediateArtifactWriter {
     let project_root = canonical_or_owned(project_root);
     let module_root = canonical_or_owned(&module.src_path);
     let res_out = canonical_or_owned(res_out);
-    let module_layout = ModuleBuildLayout::new(&module_root);
+    let module_layout =
+        ModuleBuildLayout::for_output_target(&config.output_target, &module_root);
     let resource_layout = ResourceOutputLayout::new(&res_out);
     let project_layout = ProjectBuildLayout::new(&project_root);
     let extension_path = self
@@ -1076,7 +1078,7 @@ impl IntermediateArtifactWriter {
     device_types: &[String],
     is_signed: bool,
   ) -> Result<()> {
-    let module_layout = ModuleBuildLayout::new(module_root);
+    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root);
     let (metadata_path, name_key) = match output_target {
       OutputTarget::Hsp => (module_layout.hsp_metadata_output_json(), "hspName"),
       OutputTarget::Hap | OutputTarget::Preview | OutputTarget::Test => {

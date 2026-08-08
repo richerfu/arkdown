@@ -1969,6 +1969,8 @@ async fn run_build(
     build_version: package_args.build_version,
     watch: package_args.watch,
     coverage: package_args.coverage,
+    scope: None,
+    ohos_test_coverage: None,
     ohos_debug_asan: package_args.ohos_debug_asan,
     ohos_enable_hwasan: package_args.ohos_enable_hwasan,
     preview: package_args.preview,
