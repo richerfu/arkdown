@@ -65,6 +65,12 @@
       "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments (incremental variant)",
       "owner": "arkdown",
       "expires": "2026-09-30"
+    },
+    {
+      "fixture": "minimal-hap-ohos-test",
+      "reason": "modules.abc debug-info line numbers differ by template formatting (hvigor TS emit vs OXC codegen for the ohosTest templates); res module.json resource ID segments differ (hvigor AppScope segment 0x2000000 vs module segment)",
+      "owner": "arkdown",
+      "expires": "2026-09-30"
     }
   ]
 }

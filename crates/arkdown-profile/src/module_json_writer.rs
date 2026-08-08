@@ -875,10 +875,15 @@ impl ModuleJsonWriter {
     /// Returns `None` when the module is not in `config.modules`, the file is
     /// absent, or parsing fails; callers fall back to `manifest.module_name`.
     fn read_oh_package_name(manifest: &HapManifest, config: &ArkdownConfig) -> Option<String> {
+        // The `ohosTest` target builds under the test module name (e.g.
+        // `entry_test`) which is not a configured module; its package name
+        // still comes from the owning module's oh-package.json5 (hvigor
+        // `packageJsonObj.name`).
         let src_path = config
             .modules
             .iter()
             .find(|m| m.name == manifest.module_name)
+            .or_else(|| config.modules.first())
             .map(|m| m.src_path.as_path())?;
         let path = src_path.join("oh-package.json5");
         let content = fs_err::read_to_string(&path).ok()?;

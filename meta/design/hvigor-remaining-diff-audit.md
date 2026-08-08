@@ -27,7 +27,7 @@
 |---|---|
 | FA 模型 / JSBUNDLE 全套（legacy-tasks、format cjs、babel、terser-release-JSBUNDLE、sourcemapPathTransform-JSBUNDLE） | CLAUDE.md 明确范围外 |
 | unitTest 全套（11 任务） | ✅ 已实现（`--target test`，E2 节；GenerateUnitTestResult 执行面待接 @ohos/coverage） |
-| ohosTest 全套（6 任务，`-p module=entry@ohosTest`） | 未实现（src/ohosTest 编译输入已预留 collector 门） |
+| ohosTest 全套（6 任务，`-p module=entry@ohosTest`） | ✅ 已实现（E3 节；执行面走设备测试链 @ohos/coverage） |
 | 设备覆盖率报告链（generate-device-coverage 等） | **插桩已实现**（coverage_instrument.rs，F20）；报告生成未实现 |
 | 设备测试链（device-test-hook / onDeviceTest） | 未实现 |
 | 预览器管线（previewer-ark-compile / preview-compile-resource 等 10 任务） | `--preview` 已实现资源重编译 + preview_changes.json（M3） |
@@ -93,6 +93,32 @@ hvigor 的 ets-loader（TS emit）对**源码空箭头函数体**输出多行
 parity 中通过 allowlist（`tests/parity_allowlist.json`，
 sourceMaps/abc debug-info 行号项）记录；修复需 transform 层区分
 源码/生成空箭头（生成器直写 `{ }`）。
+
+## E3. ohosTest target（2026-08-08 完成）
+
+`--build-target-name ohosTest`（`hvigorw assembleHap -p module=entry@ohosTest` 对齐）
+已实现并通过真实 hvigor parity（`minimal_hap_ohos_test_hvigor_parity_report`，
+strict 套件 29/29）：
+
+| 项 | 状态 |
+|---|---|
+| ohosTest target 动态路由（`ModuleTargetSelection`—— build-profile 无需声明，src/ohosTest/module.json5 存在即可） | ✅ |
+| GenerateOhosTestTemplate（`.test/<product>/intermediates/src/ohosTest/` 8 文件，API>=11 用 @kit 模板变体） | ✅ |
+| src/ohosTest/module.json5 处理（module 名 entry_test、MergeProfile 的 getOhosTestAbilityConfig 合并—— description/mainElement/pages/TestAbility） | ✅ |
+| 编译输入（模板 ets + src/ohosTest/ets + 模板 resources）、compileEntry、record 名（ets/ 前缀 + modulePathMap 归属）、pkgName（entry_test）、ResourceTable record 固定 entry | ✅ |
+| restool 模块名（entry_test）+ 模板资源输入 | ✅ |
+| 产物：process_profile/loader/merge_profile 逐字段一致、HAP 内容一致、abc 去行号 0 差异 | ✅ |
+| 输出 `outputs/ohosTest/entry-ohosTest-unsigned.hap` | ✅ |
+| modules.abc | 🔄 指令级一致；行号差（模板格式—— 与 E2 空函数体同源 D 类） |
+| res module.json 资源 ID 段 | 🔄 hv 用 AppScope 段（0x2000000）、arkdown 用模块段（0x1000000）—— restool 分配差异，allowlist 记录 |
+
+过程中修复的通用问题：
+- kit import 生成：语句级 `import type` 时 specifier 不得携带 `type` 修饰符
+  （`import type { type X }` 是 TS 错误—— 模板的 type-only named import 场景）
+- `HvigorModuleRelativeSourceFile::after_src_main` 增加 `src/ohosTest` 匹配
+  （hvigor `getOhmUrlByFilepath` 的 `/src/(main|ohosTest)/(ets|js|mock)/` 规则）
+- record 名/pkgeName 的当前模块归属（模板树在模块根下）
+- ResourceTable 的固定 record 名与 packageName（ohosTest 模块名下仍用宿主模块名）
 
 ## E. widget 端到端验证（2026-08-08 完成）
 

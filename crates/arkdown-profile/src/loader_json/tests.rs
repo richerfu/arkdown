@@ -177,7 +177,7 @@ fn test_loader_json_main_pages_are_runtime_entries() {
     let mut manifest = make_manifest();
     manifest.pages = Some("$profile:main_pages".to_string());
 
-    let loader = LoaderJson::try_generate(&config, &module_cfg, &manifest).unwrap();
+    let loader = LoaderJson::try_generate(&config, &module_cfg, &manifest, "default").unwrap();
 
     assert!(loader
         .runtime_entry_sources
@@ -206,7 +206,7 @@ fn test_loader_json_missing_main_pages_profile_is_error() {
     let mut manifest = make_manifest();
     manifest.pages = Some("$profile:main_pages".to_string());
 
-    let error = LoaderJson::try_generate(&config, &module_cfg, &manifest).unwrap_err();
+    let error = LoaderJson::try_generate(&config, &module_cfg, &manifest, "default").unwrap_err();
     assert!(
         matches!(error, ArkdownError::Io(_)),
         "missing main_pages profile must fail instead of silently dropping entries: {error}"
@@ -230,7 +230,7 @@ fn test_loader_json_does_not_scan_unreferenced_form_profiles() {
     config.project_root = tmp.path().to_path_buf();
     let mut module_cfg = make_module_cfg();
     module_cfg.src_path = module_root;
-    let loader = LoaderJson::try_generate(&config, &module_cfg, &make_manifest()).unwrap();
+    let loader = LoaderJson::try_generate(&config, &module_cfg, &make_manifest(), "default").unwrap();
 
     assert!(
         !loader
@@ -265,7 +265,7 @@ fn test_loader_json_form_profile_sources_feed_internal_compile_entries() {
     module_cfg.src_path = module_root;
     let mut manifest = make_manifest();
     manifest.extension_abilities = vec![form_extension_ability("form_config")];
-    let loader = LoaderJson::try_generate(&config, &module_cfg, &manifest).unwrap();
+    let loader = LoaderJson::try_generate(&config, &module_cfg, &manifest, "default").unwrap();
 
     // 6.24.3: form card sources never enter the module compile entries —
     // hvigor compiles them in the dedicated widget pass (`widgets.abc`) and
@@ -307,7 +307,7 @@ fn test_loader_json_rejects_missing_form_profile_reference() {
     let mut manifest = make_manifest();
     manifest.extension_abilities = vec![form_extension_ability("missing_form")];
 
-    let error = LoaderJson::try_generate(&config, &module_cfg, &manifest).unwrap_err();
+    let error = LoaderJson::try_generate(&config, &module_cfg, &manifest, "default").unwrap_err();
     assert!(error.to_string().contains("CAN_NOT_RESOLVE_SYMBOL"));
 }
 

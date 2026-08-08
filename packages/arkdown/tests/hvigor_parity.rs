@@ -48,6 +48,10 @@ enum ArtifactType {
   /// testability templates, TestAbility-injected profiles and compiled
   /// assets.
   Test,
+  /// `ohosTest` target build (`hvigorw assembleHap -p module=entry@ohosTest`
+  /// / `--target hap --build-target-name ohosTest`): compiles the
+  /// `src/ohosTest` module and produces the test HAP under `outputs/ohosTest`.
+  OhosTest,
 }
 
 impl ArtifactType {
@@ -57,6 +61,7 @@ impl ArtifactType {
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
       ArtifactType::Test => "test",
+      ArtifactType::OhosTest => "hap",
     }
   }
 
@@ -68,6 +73,7 @@ impl ArtifactType {
       // `hvigorw test`; `setTestDefaultParameters` injects
       // `ohos-test-coverage=true` unless overridden.
       ArtifactType::Test => "test",
+      ArtifactType::OhosTest => "assembleHap",
     }
   }
 
@@ -77,6 +83,7 @@ impl ArtifactType {
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
       ArtifactType::Test => "test",
+      ArtifactType::OhosTest => "hap",
     }
   }
 }
@@ -121,6 +128,18 @@ fn minimal_hap_test_hvigor_parity_report() {
     "tests/fixtures/minimal-hap",
     "minimal-hap-test",
     ArtifactType::Test,
+    ParityBuildMode::Debug,
+  );
+}
+
+/// ohosTest target build parity (`hvigorw assembleHap -p module=entry@ohosTest`):
+/// src/ohosTest module processing, template generation, test HAP packaging.
+#[test]
+fn minimal_hap_ohos_test_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/minimal-hap",
+    "minimal-hap-ohos-test",
+    ArtifactType::OhosTest,
     ParityBuildMode::Debug,
   );
 }
@@ -939,6 +958,10 @@ fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<
     args.push("-p");
     args.push("ohos-test-coverage=false");
   }
+  if artifact_type == ArtifactType::OhosTest {
+    args.push("-p");
+    args.push("module=entry@ohosTest");
+  }
   args
 }
 
@@ -953,6 +976,10 @@ fn arkdown_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec
   if artifact_type == ArtifactType::Test {
     args.push("--ohos-test-coverage");
     args.push("false");
+  }
+  if artifact_type == ArtifactType::OhosTest {
+    args.push("--build-target-name");
+    args.push("ohosTest");
   }
   args
 }
@@ -1415,6 +1442,40 @@ fn collect_build(
       // Include its full compiler handoff root in the strict golden.
       collect_all_cache_root_files(&mut artifacts, root)?;
     }
+    ArtifactType::OhosTest => {
+      // ohosTest target HAP: compare the packaged artifacts plus profiles
+      // under the `ohosTest` target directories. `modules.abc` debug-info
+      // line numbers differ by template formatting (same D-class item as
+      // unit-test empty function bodies); the resource ID segments differ
+      // (hvigor AppScope segment) — allowlisted.
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "module.json",
+        Some("module.json"),
+        &["intermediates/process_profile/ohosTest", "intermediates/res/ohosTest"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "loader.json",
+        Some("loader.json"),
+        &["intermediates/loader/ohosTest"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "merge_profile.json",
+        Some("merge_profile.json"),
+        &["intermediates/merge_profile/ohosTest"],
+        false,
+      )?;
+    }
     ArtifactType::Test => {
       // Local unit-test build root: generated templates, TestAbility-injected
       // profiles, loader, page override and compiled assets. `modules.abc`
@@ -1494,13 +1555,20 @@ fn collect_build(
   // Local unit-test cache trees contain `filesInfo.txt` whose module order
   // is nondeterministic in hvigor (async Rollup resolver timing), and the
   // `modules.abc` debug-info line numbers differ by the empty-function-body
-  // formatting. Compare only the deterministic artifacts for `test`.
-  let build_files = if artifact_type == ArtifactType::Test {
+  // formatting. Compare only the deterministic artifacts for `test` and
+  // `ohosTest`.
+  let build_files = if matches!(
+    artifact_type,
+    ArtifactType::Test | ArtifactType::OhosTest
+  ) {
     BTreeMap::new()
   } else {
     collect_build_default_files(root)?
   };
-  let loader_out_js = if artifact_type == ArtifactType::Test {
+  let loader_out_js = if matches!(
+    artifact_type,
+    ArtifactType::Test | ArtifactType::OhosTest
+  ) {
     BTreeMap::new()
   } else {
     collect_loader_out_js(root)?
