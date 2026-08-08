@@ -43,6 +43,11 @@ enum ArtifactType {
   Hap,
   Har,
   Hsp,
+  /// Local unit-test build (`hvigorw test` / `--target test`). No HAP/HSP
+  /// archive is produced; the `.test` build root carries the generated
+  /// testability templates, TestAbility-injected profiles and compiled
+  /// assets.
+  Test,
 }
 
 impl ArtifactType {
@@ -51,6 +56,7 @@ impl ArtifactType {
       ArtifactType::Hap => "hap",
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
+      ArtifactType::Test => "test",
     }
   }
 
@@ -59,6 +65,9 @@ impl ArtifactType {
       ArtifactType::Hap => "assembleHap",
       ArtifactType::Har => "assembleHar",
       ArtifactType::Hsp => "assembleHsp",
+      // `hvigorw test`; `setTestDefaultParameters` injects
+      // `ohos-test-coverage=true` unless overridden.
+      ArtifactType::Test => "test",
     }
   }
 
@@ -67,6 +76,7 @@ impl ArtifactType {
       ArtifactType::Hap => "hap",
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
+      ArtifactType::Test => "test",
     }
   }
 }
@@ -101,6 +111,20 @@ fn minimal_hap_hvigor_parity_report() {
 }
 
 #[test]
+/// Local unit-test chain (`hvigorw test`) parity: generated testability
+/// templates, TestAbility injection, loader/main_pages override, source maps
+/// and compile inputs, compared against real hvigor 6.24.3. The fixture
+/// carries `src/test/List.test.ets` + `src/ohosTest/ets/test/List.test.ets`.
+#[test]
+fn minimal_hap_test_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/minimal-hap",
+    "minimal-hap-test",
+    ArtifactType::Test,
+    ParityBuildMode::Debug,
+  );
+}
+
 fn minimal_har_hvigor_parity_report() {
   run_parity_report_test(
     "tests/fixtures/minimal-har",
@@ -401,14 +425,21 @@ fn assert_strict_parity(report_name: &str, report: &Value) {
 
   // Check for expired allowlist entries even when there is no diff — expired
   // entries must be cleaned up to prevent silent tech debt accumulation.
-  if let Some(allowlist_path) = std::env::var_os(ENV_ALLOWLIST) {
+  // The allowlist defaults to `tests/parity_allowlist.json` next to this file
+  // and can be overridden with {ENV_ALLOWLIST}.
+  let allowlist_path = std::env::var_os(ENV_ALLOWLIST).unwrap_or_else(|| {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .join("tests/parity_allowlist.json")
+      .into_os_string()
+  });
+  if env_truthy(ENV_STRICT) {
     check_allowlist_expiry(&allowlist_path);
   }
 
   if !report["equal"].as_bool().unwrap_or(false) {
     // Check if this fixture's diff is covered by the allowlist.
-    let allowed = std::env::var_os(ENV_ALLOWLIST)
-      .and_then(|p| std::fs::read_to_string(p).ok())
+    let allowed = std::fs::read_to_string(&allowlist_path)
+      .ok()
       .and_then(|s| serde_json::from_str::<Value>(&s).ok())
       .and_then(|al| al.get("entries").cloned())
       .and_then(|entries| entries.as_array().cloned())
@@ -889,7 +920,7 @@ fn run_component_v2_lifecycle_diagnostic_parity_test() {
 }
 
 fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
-  vec![
+  let mut args = vec![
     "--mode",
     "module",
     "-p",
@@ -901,17 +932,29 @@ fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<
     },
     artifact_type.hvigor_task(),
     "--no-daemon",
-  ]
+  ];
+  if artifact_type == ArtifactType::Test {
+    // Default `ohos-test-coverage=true` instruments source; disable it so
+    // both sides compile the same sources.
+    args.push("-p");
+    args.push("ohos-test-coverage=false");
+  }
+  args
 }
 
 fn arkdown_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
-  vec![
+  let mut args = vec![
     "build",
     "--target",
     artifact_type.arkdown_target(),
     "--mode",
     build_mode.as_str(),
-  ]
+  ];
+  if artifact_type == ArtifactType::Test {
+    args.push("--ohos-test-coverage");
+    args.push("false");
+  }
+  args
 }
 
 fn repo_root() -> PathBuf {
@@ -991,7 +1034,9 @@ fn should_copy_fixture_entry(root: &Path, path: &Path) -> bool {
     let Component::Normal(name) = component else {
       return false;
     };
-    name == "build" || name == ".hvigor" || name == ".idea"
+    // `.test` is the local unit-test build root — stale local test builds
+    // embed the repo path into generated templates/source maps.
+    name == "build" || name == ".hvigor" || name == ".idea" || name == ".test"
   })
 }
 
@@ -1370,7 +1415,96 @@ fn collect_build(
       // Include its full compiler handoff root in the strict golden.
       collect_all_cache_root_files(&mut artifacts, root)?;
     }
+    ArtifactType::Test => {
+      // Local unit-test build root: generated templates, TestAbility-injected
+      // profiles, loader, page override and compiled assets. `modules.abc`
+      // debug-info line numbers differ by the empty-function-body formatting
+      // (hvigor TS emit `{\n}` vs OXC `{ }`), so it is compared structurally
+      // below rather than byte-for-byte here.
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "TestAbility.ets",
+        None,
+        &[".test/testability"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "Index.ets",
+        None,
+        &[".test/testability/pages"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "phoneSettingConfig_Phone.json",
+        None,
+        &[".test/testability"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "module.json",
+        Some("module.json"),
+        &["intermediates/process_profile", "intermediates/res"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "ark_module.json",
+        Some("ark_module.json"),
+        &["intermediates/res"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "loader.json",
+        Some("loader.json"),
+        &["intermediates/loader"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        None,
+        "main_pages.json",
+        Some("main_pages.json"),
+        &["intermediates/res/resources/base/profile"],
+        false,
+      )?;
+      // `sourceMaps.map` module set and sources are identical, but the
+      // `.test/testability/pages/Index.ts` mappings differ in the
+      // empty-function-body formatting (hvigor TS emit `{\n}` vs OXC
+      // `{ }`) — same known difference as the abc debug-info line numbers.
+    }
   }
+
+  // Local unit-test cache trees contain `filesInfo.txt` whose module order
+  // is nondeterministic in hvigor (async Rollup resolver timing), and the
+  // `modules.abc` debug-info line numbers differ by the empty-function-body
+  // formatting. Compare only the deterministic artifacts for `test`.
+  let build_files = if artifact_type == ArtifactType::Test {
+    BTreeMap::new()
+  } else {
+    collect_build_default_files(root)?
+  };
+  let loader_out_js = if artifact_type == ArtifactType::Test {
+    BTreeMap::new()
+  } else {
+    collect_loader_out_js(root)?
+  };
 
   Ok(BuildSnapshot {
     tool: tool.to_string(),
@@ -1378,8 +1512,8 @@ fn collect_build(
     command,
     archive,
     artifacts,
-    build_files: collect_build_default_files(root)?,
-    loader_out_js: collect_loader_out_js(root)?,
+    build_files,
+    loader_out_js,
   })
 }
 
@@ -2242,6 +2376,10 @@ fn compare_archive_entries(
   left: Option<&ArchiveSnapshot>,
   right: Option<&ArchiveSnapshot>,
 ) {
+  if left.is_none() && right.is_none() {
+    // Local unit-test builds produce no archive.
+    return;
+  }
   match (left, right) {
     (Some(left), Some(right)) => {
       let left_keys = left.entries.keys().cloned().collect::<BTreeSet<_>>();

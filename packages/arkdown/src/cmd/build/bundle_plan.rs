@@ -194,8 +194,12 @@ impl<'a> BundleModuleMetaInfoFileCollector<'a> {
     else {
       return false;
     };
+    // Local unit-test builds root at `<module>/.test`; the generated
+    // ResourceTable still carries the fixed `build/generated/r/ResourceTable`
+    // Ohm URL (hvigor `getOhmUrlByFilepath` + ModuleInfo attribution keep
+    // the standard record name regardless of `buildRoot`).
     path.strip_prefix(module_root).is_ok_and(|relative| {
-      relative.starts_with("build")
+      (relative.starts_with("build") || relative.starts_with(".test"))
         && relative
           .components()
           .any(|part| part.as_os_str() == "generated")

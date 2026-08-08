@@ -42,11 +42,45 @@ impl<'a> ModuleSourceLayout<'a> {
 
 pub(super) struct ModuleBuildLayout<'a> {
   module_root: &'a Path,
+  /// Build root directory name under the module root.
+  ///
+  /// `"build"` for normal HAP/HSP/HAR builds. Local unit-test builds
+  /// (`--target test`, mirroring `hvigorw test`) use `".test"` — hvigor
+  /// injects `buildRoot=.test` via `setTestDefaultParameters`.
+  build_root: &'a str,
 }
 
 impl<'a> ModuleBuildLayout<'a> {
   pub(super) fn new(module_root: &'a Path) -> Self {
-    Self { module_root }
+    Self {
+      module_root,
+      build_root: "build",
+    }
+  }
+
+  /// Unit-test build layout rooted at `<module>/.test` (hvigor `buildRoot=.test`).
+  pub(super) fn for_test(module_root: &'a Path) -> Self {
+    Self {
+      module_root,
+      build_root: ".test",
+    }
+  }
+
+  /// Layout for the active output target: local unit-test builds root at
+  /// `<module>/.test`; everything else uses `build`.
+  pub(super) fn for_output_target(
+    output_target: &arkdown_core::OutputTarget,
+    module_root: &'a Path,
+  ) -> Self {
+    if matches!(output_target, arkdown_core::OutputTarget::Test) {
+      Self::for_test(module_root)
+    } else {
+      Self::new(module_root)
+    }
+  }
+
+  pub(super) fn is_test(&self) -> bool {
+    self.build_root == ".test"
   }
 
   pub(super) fn source(&self) -> ModuleSourceLayout<'a> {
@@ -58,7 +92,42 @@ impl<'a> ModuleBuildLayout<'a> {
   }
 
   pub(super) fn build_default(&self) -> PathBuf {
-    self.module_root.join("build").join("default")
+    self.module_root.join(self.build_root).join("default")
+  }
+
+  /// `.test/testability/` — generated local unit-test template directory
+  /// (hvigor `getUnitTestTemplatePath`). Note this sits directly under
+  /// `.test/`, not under `.test/<product>/`.
+  pub(super) fn testability_dir(&self) -> PathBuf {
+    self.module_root.join(".test").join("testability")
+  }
+
+  /// `.test/<product>/intermediates/test/` — coverage data and init files.
+  pub(super) fn test_intermediates_dir(&self) -> PathBuf {
+    self
+      .module_root
+      .join(self.build_root)
+      .join("default")
+      .join("intermediates")
+      .join("test")
+  }
+
+  /// `.test/<product>/intermediates/test/init_coverage.json` — hvigor writes
+  /// the instrumented-file inventory here for unit-test coverage collection.
+  pub(super) fn test_init_coverage_json(&self) -> PathBuf {
+    self.test_intermediates_dir().join("init_coverage.json")
+  }
+
+  /// `.test/config/buildConfig.json` — unit-test build config handoff
+  /// (hvigor `getTestBuildConfigPath`), referenced by loader.json
+  /// `buildConfigPath` in local-test mode.
+  pub(super) fn test_build_config_json(&self) -> PathBuf {
+    self.module_root.join(".test").join("config").join("buildConfig.json")
+  }
+
+  /// `src/test/` — local unit-test source directory (`List.test.ets` etc.).
+  pub(super) fn test_sources_dir(&self) -> PathBuf {
+    self.module_root.join("src").join("test")
   }
 
   pub(super) fn default_cache_dir(&self, cache_name: &str) -> PathBuf {
@@ -133,6 +202,12 @@ impl<'a> ModuleBuildLayout<'a> {
 
   pub(super) fn res_profile_dir(&self) -> PathBuf {
     self.default_intermediate_nested_file("res", ["resources", "base", "profile"])
+  }
+
+  /// `res/profile/main_pages.json` — unit-test page override written by
+  /// ReplaceUnitTestIndexFile (`{ "src": ["<unit.test.replace.page>"] }`).
+  pub(super) fn res_main_pages_json(&self) -> PathBuf {
+    self.res_profile_dir().join("main_pages.json")
   }
 
   pub(super) fn preload_so_dir(&self) -> PathBuf {

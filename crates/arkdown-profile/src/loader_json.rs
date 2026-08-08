@@ -296,12 +296,10 @@ impl AotLoaderFields {
             return Self::empty(fallback_an_build);
         }
 
-        // Preview and Test builds do not run AOT compilation.
-        // hvigor skips `anBuildMode`/`anBuildOutPut` for these targets.
-        if matches!(
-            config.output_target,
-            arkdown_core::OutputTarget::Preview | arkdown_core::OutputTarget::Test
-        ) {
+        // Preview builds do not run AOT compilation. hvigor skips
+        // `anBuildMode`/`anBuildOutPut` for preview targets. Local unit-test
+        // builds keep them (hvigor `handleAotFields` is target-agnostic).
+        if matches!(config.output_target, arkdown_core::OutputTarget::Preview) {
             return Self::empty(false);
         }
 
@@ -337,8 +335,13 @@ impl AotLoaderFields {
         }
 
         let module_root = PathBuf::from(to_absolute_path_string(&module_cfg.src_path));
+        let aot_layout = if matches!(config.output_target, OutputTarget::Test) {
+            ProfileModuleLayout::for_test(&module_root)
+        } else {
+            ProfileModuleLayout::new(&module_root)
+        };
         let an_build_out_put =
-            normalize_path_string(&ProfileModuleLayout::new(&module_root).aot_loader_output_dir());
+            normalize_path_string(&aot_layout.aot_loader_output_dir());
 
         let should_write_ap_path =
             ((api_version == 9 && an_build_mode == "partial") || api_version >= 10) && ap_exists;
@@ -742,6 +745,7 @@ impl LoaderJson {
     }
 
     fn collect_runtime_entry_sources(
+        config: &ArkdownConfig,
         manifest: &HapManifest,
         module_layout: &ProfileModuleLayout<'_>,
     ) -> Result<Vec<String>, ArkdownError> {
@@ -758,8 +762,15 @@ impl LoaderJson {
             .chain(manifest.src_entry.iter().cloned())
             .collect();
 
+        // Local unit-test builds replace the module pages with the generated
+        // `.test/testability/pages/Index` entry; the real main pages do not
+        // participate in the `test` compilation (hvigor `UnitTestArkTS`
+        // inputs). Preview keeps the normal page collection.
         if let Some(pages_ref) = &manifest.pages {
-            runtime_entry_sources.extend(Self::read_main_page_entries(module_layout, pages_ref)?);
+            if !matches!(config.output_target, OutputTarget::Test) {
+                runtime_entry_sources
+                    .extend(Self::read_main_page_entries(module_layout, pages_ref)?);
+            }
         }
 
         Ok(runtime_entry_sources)
@@ -845,14 +856,36 @@ impl LoaderJson {
         manifest: &HapManifest,
         dep_graph: &crate::dependency_graph::LocalDependencyGraph,
     ) -> Result<Self, ArkdownError> {
-        let module_layout = ProfileModuleLayout::new(&module_cfg.src_path);
+        // Local unit-test builds root at `<module>/.test` (hvigor
+        // `buildRoot=.test`), which moves cache/assets/loader paths below it.
+        let module_layout = if matches!(config.output_target, OutputTarget::Test) {
+            ProfileModuleLayout::for_test(&module_cfg.src_path)
+        } else {
+            ProfileModuleLayout::new(&module_cfg.src_path)
+        };
         let runtime_entry_sources = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "runtime_entry_sources");
-            Self::collect_runtime_entry_sources(manifest, &module_layout)?
+            Self::collect_runtime_entry_sources(config, manifest, &module_layout)?
         };
 
         // Collect compile_entry from runtime srcEntry values.
-        let mut compile_entry = runtime_entry_sources.clone();
+        let mut compile_entry = Vec::new();
+        if matches!(config.output_target, OutputTarget::Test) {
+            // hvigor UnitTestArkTS input order puts the generated testability
+            // templates before the module abilities (filesInfo.txt:
+            // ResourceTable, TestAbility, Index, EntryAbility, List.test).
+            // es2abc compiles in input order, so the entry order must match.
+            let testability_dir = module_cfg.src_path.join(".test/testability");
+            for entry in [
+                testability_dir.join("TestAbility.ets"),
+                testability_dir.join("pages/Index.ets"),
+            ] {
+                if entry.is_file() {
+                    compile_entry.push(to_absolute_path_string(&entry));
+                }
+            }
+        }
+        compile_entry.extend(runtime_entry_sources.iter().cloned());
         let runtime_only_collector = RuntimeOnlyCollector::new(config, module_cfg);
         let module_json_path = module_layout.module_json5();
         let form_sources = {
@@ -1087,11 +1120,34 @@ impl LoaderJson {
             .iter()
             .map(|path| to_absolute_path_string(path))
             .collect();
+        if matches!(config.output_target, OutputTarget::Test) {
+            // Local unit-test builds compile in non-full-compilation mode:
+            // hvigor's serialized compileEntry carries only ResourceTable.ts
+            // (plus mock sources — `collectMockFileEntry` runs before
+            // `addResourceTable2CompileEntry` for local-test mode). The
+            // testability templates and src/test sources reach the compiler
+            // through moduleJson abilities / the replaced main_pages entry.
+            hvigor_compile_entry.retain(|entry| {
+                entry.ends_with("ResourceTable.ts")
+                    || entry.contains("/src/mock/")
+                    || entry.contains("/src/main/mock/")
+            });
+        }
         for path in &serialized_compile_entry {
             if let Ok(rel) = path.strip_prefix(&src_main_root) {
                 compile_entry.push(Self::compile_entry_from_src_main_rel(rel));
             } else {
                 compile_entry.push(to_absolute_path_string(path));
+            }
+        }
+        if matches!(config.output_target, OutputTarget::Test) {
+            // The `src/test` suite participates in the local-test compiler
+            // input surface (testability templates were added up front).
+            let test_sources = module_cfg.src_path.join("src/test");
+            if test_sources.is_dir() {
+                for file in Self::collect_code_files(&test_sources) {
+                    compile_entry.push(to_absolute_path_string(&file));
+                }
             }
         }
 
@@ -1258,17 +1314,29 @@ impl LoaderJson {
                     .and_then(|config| config.get("patchConfig").cloned())
             })
             .flatten();
-        let serialized_build_config_path = matches!(config.output_target, OutputTarget::Preview)
-            .then(|| {
-                build_config_path
-                    .strip_prefix(&module_cfg.src_path)
-                    .map(ArtifactPathSerializer::rel_to_slash)
-                    .unwrap_or_else(|_| to_absolute_path_string(&build_config_path))
-            });
+        let serialized_build_config_path = match config.output_target {
+            // hvigor GenerateLoaderJson:
+            // `(isPreview || isLocalTest()) && (c.buildConfigPath =
+            // relative(modulePath, buildConfigPath))`.
+            // Preview: `build/default/config/buildConfig.json`; local test:
+            // `getTestBuildConfigPath()` = `<module>/.test/config/buildConfig.json`.
+            OutputTarget::Test => Some(".test/config/buildConfig.json".to_string()),
+            OutputTarget::Preview => build_config_path
+                .strip_prefix(&module_cfg.src_path)
+                .map(ArtifactPathSerializer::rel_to_slash)
+                .ok()
+                .or_else(|| Some(to_absolute_path_string(&build_config_path))),
+            _ => None,
+        };
 
         let loader_out_root = module_layout.loader_out_default_dir();
         let node_modules_path = to_absolute_path_string(&loader_out_root.join("node_modules"));
-        let compile_task_name = if matches!(config.output_target, OutputTarget::Har) {
+        // Local unit-test builds run the `UnitTestArkTS` task; its cache
+        // directory (`default@UnitTestArkTS`) participates in es2abc module
+        // identities, so the task name must match hvigor exactly.
+        let compile_task_name = if matches!(config.output_target, OutputTarget::Test) {
+            "UnitTestArkTS"
+        } else if matches!(config.output_target, OutputTarget::Har) {
             "HarCompileArkTS"
         } else {
             "CompileArkTS"
@@ -2091,12 +2159,15 @@ impl LoaderJson {
             .collect()
     }
 
-    /// Collect `src/ohosTest/ets/` source files for `OutputTarget::Test` builds.
+    /// Collect `src/ohosTest/ets/` source files for ohosTest-target builds.
     ///
-    /// hvigor's `collectOhosTestEntry()` scans `src/ohosTest/ets/` and adds all
-    /// `.ets`/`.ts` source files to `compileEntry` when building in test mode.
-    /// This is the "local-test injection state" — test harness sources that only
-    /// participate in the `ohosTest` build, not in regular debug/release builds.
+    /// NOTE: the local unit-test build (`--target test`, `hvigorw test`) does
+    /// NOT include `src/ohosTest` sources — its compiler inputs are the
+    /// generated `.test/testability` templates plus `src/test` (see the
+    /// local-test entry extension above). `src/ohosTest` participates in the
+    /// separate `ohosTest` target build (`-p module=entry@ohosTest`), which is
+    /// not yet wired through `OutputTarget`. This collector is retained for
+    /// that future target routing and currently returns nothing.
     fn collect_ohos_test_compile_entries(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
@@ -2110,7 +2181,11 @@ impl LoaderJson {
             return vec![];
         }
 
-        Self::collect_code_files(&test_ets_root)
+        // Local unit-test builds exclude `src/ohosTest` (hvigor `test` task
+        // compiler inputs; see the doc comment above). The ohosTest target
+        // build will collect this tree once routed through its own target.
+        let _ = test_ets_root;
+        Vec::new()
     }
 
     fn collect_code_files(root: &Path) -> Vec<PathBuf> {

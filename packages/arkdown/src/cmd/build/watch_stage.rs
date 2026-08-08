@@ -239,6 +239,8 @@ impl WatchStage {
           build_version: build_version.clone(),
           watch: false,
           coverage,
+          scope: None,
+          ohos_test_coverage: None,
           ohos_debug_asan,
           ohos_enable_hwasan,
           preview: false,

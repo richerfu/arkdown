@@ -29,11 +29,29 @@ impl<'a> ProfileProjectLayout<'a> {
 
 pub(crate) struct ProfileModuleLayout<'a> {
     module_root: &'a Path,
+    /// Build root directory name (`build` or `.test` for local unit tests).
+    build_root: &'a str,
 }
 
 impl<'a> ProfileModuleLayout<'a> {
     pub(crate) fn new(module_root: &'a Path) -> Self {
-        Self { module_root }
+        Self {
+            module_root,
+            build_root: "build",
+        }
+    }
+
+    /// Local unit-test layout rooted at `<module>/.test` (hvigor
+    /// `buildRoot=.test` injected for the `test` task).
+    pub(crate) fn for_test(module_root: &'a Path) -> Self {
+        Self {
+            module_root,
+            build_root: ".test",
+        }
+    }
+
+    pub(crate) fn build_root(&self) -> &str {
+        self.build_root
     }
 
     pub(crate) fn src_main(&self) -> PathBuf {
@@ -150,7 +168,7 @@ impl<'a> ProfileModuleLayout<'a> {
     }
 
     pub(crate) fn build_default(&self) -> PathBuf {
-        self.module_root.join("build").join("default")
+        self.module_root.join(self.build_root).join("default")
     }
 
     pub(crate) fn default_intermediates(&self) -> PathBuf {

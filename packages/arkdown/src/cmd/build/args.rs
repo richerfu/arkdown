@@ -57,9 +57,26 @@ pub struct NativeTaskRoot {
 
 #[derive(Args, Clone, Default)]
 pub struct BuildArgs {
-  /// Build target: hap, hsp, har
+  /// Build target: hap, hsp, har, app, test
+  ///
+  /// `test` mirrors hvigor's `hvigorw test` task: local unit-test build root
+  /// (`.test/`), GenerateUnitTestTemplate, TestAbility injection, and test
+  /// compilation (no HAP packaging). Hvigor injects `buildRoot=.test`,
+  /// `isLocalTest=true`, `unitTestMode=true`, `ohos-test-coverage=true` and
+  /// `unit.test.replace.page` defaults for the `test` task; arkdown derives
+  /// the same behavior from the target alone.
   #[arg(long, default_value = "hap")]
   pub target: String,
+  /// Scope filter for local unit tests (`-s class` parameter in the generated
+  /// `Index.ets`; hvigor extra config `scope`). Optional — hvigor leaves the
+  /// template parameter empty when unset.
+  #[arg(long, default_value = None)]
+  pub scope: Option<String>,
+  /// Code-coverage instrumentation for local unit tests (hvigor extra config
+  /// `ohos-test-coverage`). Defaults to `true` for `--target test`, matching
+  /// hvigor's `setTestDefaultParameters` injection.
+  #[arg(long, default_value = None)]
+  pub ohos_test_coverage: Option<bool>,
   /// Build mode: debug, release
   #[arg(long, default_value = "debug")]
   pub mode: String,
@@ -391,8 +408,13 @@ impl BuildArgs {
       // APP is a project-level aggregate (`assembleApp`); the module-level
       // output target is neutral.
       "app" => Ok(arkdown_core::OutputTarget::Hap),
+      // Local unit test build (`hvigorw test`): `.test` build root, test
+      // template generation, TestAbility injection, no HAP packaging.
+      "test" => Ok(arkdown_core::OutputTarget::Test),
       target => {
-        anyhow::bail!("unsupported build target '{target}'; expected 'hap', 'hsp', 'har', or 'app'")
+        anyhow::bail!(
+          "unsupported build target '{target}'; expected 'hap', 'hsp', 'har', 'app', or 'test'"
+        )
       }
     }
   }

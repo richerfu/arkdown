@@ -1285,23 +1285,36 @@ fn test_loader_json_preview_and_test_compile_entry_uses_mock_config_sources() {
     for output_target in [OutputTarget::Preview, OutputTarget::Test] {
         let mut config = make_config(false);
         config.project_root = project_root.clone();
-        config.output_target = output_target;
+        config.output_target = output_target.clone();
         let mut module_cfg = make_module_cfg();
         module_cfg.src_path = module_root.clone();
 
         let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
 
-        assert_eq!(
-            loader.hvigor_compile_entry,
-            vec![
-                to_absolute_path_string(&insight),
-                to_absolute_path_string(&mock_service),
-                to_absolute_path_string(&mock_page),
-            ]
-        );
-        assert!(loader
-            .compile_entry
-            .contains(&"./ets/Insight.ets".to_string()));
+        if output_target == OutputTarget::Preview {
+            assert_eq!(
+                loader.hvigor_compile_entry,
+                vec![
+                    to_absolute_path_string(&insight),
+                    to_absolute_path_string(&mock_service),
+                    to_absolute_path_string(&mock_page),
+                ]
+            );
+            assert!(loader
+                .compile_entry
+                .contains(&"./ets/Insight.ets".to_string()));
+        } else {
+            // Local unit-test builds serialize a narrowed compileEntry
+            // (hvigor `test` task: ResourceTable.ts plus mock sources);
+            // the module srcEntry and pages stay internal.
+            assert_eq!(
+                loader.hvigor_compile_entry,
+                vec![
+                    to_absolute_path_string(&mock_service),
+                    to_absolute_path_string(&mock_page),
+                ]
+            );
+        }
         assert!(loader
             .compile_entry
             .contains(&to_absolute_path_string(&mock_service)));
@@ -3249,11 +3262,12 @@ fn test_loader_json_target_ets_src_added_to_source_roots() {
     );
 }
 
-/// Verify that `src/ohosTest/ets/` sources are added to compileEntry when
-/// building in Test (ohosTest) mode, and excluded in debug/release mode.
-///
-/// Addresses section 3.4/3.1: 'local-test 注入態'
-/// hvigor's collectOhosTestEntry() scans src/ohosTest/ets/ for test sources.
+/// Verify that `src/ohosTest/ets/` sources are NOT added to the local
+/// unit-test compileEntry (`OutputTarget::Test` = `hvigorw test`). The
+/// `test` task compiles the generated `.test/testability` templates plus
+/// `src/test`; `src/ohosTest` participates in the separate `ohosTest`
+/// target build (`-p module=entry@ohosTest`), which is not yet routed
+/// through `OutputTarget` (see `collect_ohos_test_compile_entries`).
 #[test]
 fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
     let tmp = tempfile::tempdir().expect("create temp dir");
@@ -3277,7 +3291,9 @@ fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
     // A .d.ts file should NOT be included
     fs::write(test_ets.join("TestTypes.d.ts"), "export type T = {}").expect("write types");
 
-    // Test mode should include ohosTest sources
+    // Local unit-test mode must NOT include src/ohosTest sources (hvigor
+    // `test` task compiler inputs; the generated `.test/testability`
+    // templates and `src/test` suite replace them).
     let mut test_config = make_config(false);
     test_config.project_root = project_root.clone();
     test_config.output_target = arkdown_core::OutputTarget::Test;
@@ -3291,26 +3307,8 @@ fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
         .iter()
         .any(|e| e.contains("TestRunner"));
     assert!(
-        has_test_runner,
-        "TestRunner.ets must be in compileEntry for ohosTest mode; entries: {:?}",
-        loader.hvigor_compile_entry
-    );
-    let has_test_index = loader
-        .hvigor_compile_entry
-        .iter()
-        .any(|e| e.contains("ohosTest") && e.contains("index"));
-    assert!(
-        has_test_index,
-        "index.ets must be in compileEntry for ohosTest mode; entries: {:?}",
-        loader.hvigor_compile_entry
-    );
-    let has_types = loader
-        .hvigor_compile_entry
-        .iter()
-        .any(|e| e.ends_with(".d.ts"));
-    assert!(
-        !has_types,
-        "declaration files must not be included in ohosTest compileEntry; entries: {:?}",
+        !has_test_runner,
+        "src/ohosTest sources must NOT be in the local-test compileEntry; entries: {:?}",
         loader.hvigor_compile_entry
     );
 
