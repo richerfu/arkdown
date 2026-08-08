@@ -10,9 +10,10 @@ use std::collections::{HashMap, VecDeque};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, BindingIdentifier, Comment,
-    BinaryExpression, IdentifierName, IdentifierReference, IfStatement, ImportDeclaration,
-    MethodDefinition, MethodDefinitionKind, NumericLiteral, ObjectExpression, ObjectPropertyKind,
-    Program, PropertyDefinition, PropertyKey, StringLiteral, TSType, ThisExpression,
+    ArkUIComponentExpression, BinaryExpression, Expression, ExpressionStatement, IdentifierName,
+    IdentifierReference, IfStatement, ImportDeclaration, MethodDefinition,
+    MethodDefinitionKind, NumericLiteral, ObjectExpression, ObjectPropertyKind, Program,
+    PropertyDefinition, PropertyKey, StringLiteral, TSType, ThisExpression,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
@@ -175,6 +176,9 @@ enum TypeScriptSourceBoundaryKind {
     Method { name: String, constructor: bool },
     Property(String),
     Operator(String),
+    /// ArkUI component block closure: source components (`Column() { ... }`)
+    /// map to their generated `Column.pop()` calls (pop order is LIFO).
+    ComponentClosure(String),
 }
 
 #[derive(Clone)]
@@ -279,6 +283,52 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
         walk::walk_property_definition(self, property);
     }
 
+    fn visit_ark_ui_component_expression(&mut self, component: &ArkUIComponentExpression<'a>) {
+        let callee_name = match &component.callee {
+            Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+            _ => None,
+        };
+        if let Some(name) = callee_name {
+            self.push(
+                TypeScriptSourceBoundaryKind::ComponentClosure(name.to_string()),
+                component.span,
+            );
+        }
+        walk::walk_ark_ui_component_expression(self, component);
+    }
+
+    /// Generated `Column.pop()` calls close the corresponding source
+    /// component block; they are collected as component closures (matched
+    /// LIFO because pop order mirrors the reverse of the source nesting).
+    fn visit_expression_statement(&mut self, stmt: &ExpressionStatement<'a>) {
+        if let Expression::CallExpression(call) = &stmt.expression {
+            if let Expression::StaticMemberExpression(member) = call.callee.without_parentheses() {
+
+            }
+        }
+        if let Expression::CallExpression(call) = &stmt.expression {
+            if let Expression::StaticMemberExpression(member) = call.callee.without_parentheses() {
+                if member.property.name.as_str() == "pop" {
+                    let name = match &member.object {
+                        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        self.push(
+                            TypeScriptSourceBoundaryKind::ComponentClosure(name.to_string()),
+                            stmt.span,
+                        );
+                    }
+                    // The component name inside a pop call maps to the block
+                    // closure, not to the source component identifier — do
+                    // not walk the callee.
+                    return;
+                }
+            }
+        }
+        walk::walk_expression_statement(self, stmt);
+    }
+
     fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
         let left_end = expr.left.span().end as usize;
         let right_start = expr.right.span().start as usize;
@@ -336,20 +386,31 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
 
         let mut entries = Vec::new();
         for original in self.original {
-            let Some(generated_span) = generated_by_kind
-                .get_mut(&original.kind)
-                .and_then(VecDeque::pop_front)
-            else {
+            let generated_span = match &original.kind {
+                // Component closures close in pop order (LIFO).
+                TypeScriptSourceBoundaryKind::ComponentClosure(_) => generated_by_kind
+                    .get_mut(&original.kind)
+                    .and_then(VecDeque::pop_back),
+                _ => generated_by_kind
+                    .get_mut(&original.kind)
+                    .and_then(VecDeque::pop_front),
+            };
+            let Some(generated_span) = generated_span else {
                 continue;
             };
             if original.span.is_empty() {
                 continue;
             }
+            // Component closures map to the source block's closing brace.
+            let source_offset = match &original.kind {
+                TypeScriptSourceBoundaryKind::ComponentClosure(_) => original.span.end,
+                _ => original.span.start,
+            };
             entries.push(TypeScriptSourceMapEntry::from_offsets(
                 self.generated,
                 generated_span.start,
                 self.source,
-                original.span.start,
+                source_offset,
             ));
             let source_end = match &original.kind {
                 TypeScriptSourceBoundaryKind::Method {
@@ -364,6 +425,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 source_end,
             ));
         }
+
         entries
     }
 }
