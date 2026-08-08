@@ -75,7 +75,7 @@
 | `component_collection.json` | ✅ 一致 |
 | `etsFortgz/*.d.ets` 声明内容 | ✅ md5 一致（自研 `declare struct` 生成：装饰器分行、成员签名、方法默认 `: void`、CRLF；OXC IsolatedDeclarations 不处理 ArkUI struct，走自研路径） |
 | `intermediates/res/ark_module.json` | ✅ 一致（`merge_form_widget_abilities`：form widget 模块合并 formExtensionModule 的 form abilities，name/type/metadata 精简字段） |
-| sourceMaps.map 行映射 | 🔄 大幅收敛（2026-08-08）：src 位置/行归属全对齐（AST 级展开 map 同步 + Method 打点锚定 key——OXC fork 3 行修改）；剩余 3 类 token 级细节：合成调用（finalizeConstruction/组件 pop——TS lastSourcePosition 机制，hvigor 映射 src 0:0/组件闭合）、语句分号（mapper 缺 Semicolon 边界）、BinaryExpression 操作符（mapper 缺 Operator 边界）。普通 class 文件（EntryAbility 等）已逐字节对齐 |
+| sourceMaps.map 行映射 | 🔄 收敛至最后 1 类（2026-08-08）：操作符（BinaryExpression `+` 等）与分号已对齐（mapper 的 Operator 边界 + Property end 映射）；src 位置/行归属全对齐。剩余：合成调用（组件 pop 的闭合映射——hvigor 映射到源组件块 `}`；块闭合 `}`——TS lastSourcePosition 内部机制；constructor `}` → src 0:45 fallback）。需 mapper 的组件闭合边界扩展（源组件 AST 访问 + pop LIFO 匹配）。普通 class 文件逐字节对齐 |
 
 修复项：`WidgetCompileArktsPass::plan()` 不再跳过 Shared 模块、form sources 不入
 compileEntry（loader_json.rs）、widget 模块主编译 es2abc 输入含 form sources
