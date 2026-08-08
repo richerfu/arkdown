@@ -286,6 +286,23 @@ impl Bundler {
             "rolldown scan completed"
         );
 
+        // ── 4b. Surface rolldown scan warnings ────────────────────────────────
+        // hvigor `arkts-pack.js::generateConfig()` routes every non-fatal
+        // bundler warning through `onRollupWarn(message, code, isFaMode)`:
+        // `SHIMMED_EXPORT` is always suppressed, `SOURCEMAP_BROKEN` only in FA
+        // mode (out of scope), and everything else is `console.warn` to the
+        // build log. The scan warnings must not be silently dropped.
+        for warning in &module_source_scan.warnings {
+            if warning.kind().to_string() == "SHIMMED_EXPORT" {
+                continue;
+            }
+            let message = format!("{}: {}", warning.kind(), warning);
+            match warning.id() {
+                Some(module_id) => tracing::warn!("{module_id}: {message}"),
+                None => tracing::warn!("{message}"),
+            }
+        }
+
         // ── 5. Materialize the hvigor CompileArkTS module-source handoff ─────
         let module_source_start = Instant::now();
         let mut module_source_state = HvigorModuleSourceState::from_rolldown_scan(
@@ -7178,9 +7195,16 @@ export class APDIDNetworkUtil {
                 .join("hmcore")
                 .join("index.ts")
         );
+        // `ModuleMode.processModuleInfos` computes packageName via
+        // `getPkgModulesFilePkgName()`: the physical OHPM record root
+        // (path.join("pkg_modules", pkgPath - projectRoot/packageDir)
+        // with packageDir replaced by the constant "pkg_modules"),
+        // not the logical package name. The logical name only appears in
+        // the `phone|<pkg>|<version>|<entry>` source_file shape.
+        // Evidence: SDK ets-loader `module/module_mode.js::getPkgModulesFilePkgName`.
         assert_eq!(
             hmcore_file.package_name.as_deref(),
-            Some("@hw-agconnect/hmcore")
+            Some("pkg_modules/.ohpm/@hw-agconnect+hmcore@1.0.6/pkg_modules/@hw-agconnect/hmcore")
         );
         assert_eq!(
             logger_file.record_name,

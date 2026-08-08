@@ -1,3 +1,5 @@
+mod auto_lazy_import;
+pub(crate) use auto_lazy_import::apply as apply_auto_lazy_import;
 mod build_fn;
 mod component;
 mod component_analysis;
@@ -6,6 +8,8 @@ pub mod component_meta;
 mod declaration_emit;
 pub(crate) mod decorator;
 mod entry;
+mod expand_import_path;
+pub(crate) use expand_import_path::{apply as apply_expand_import_path, apply_to_program as apply_expand_import_path_to_program};
 mod global_rewrite;
 mod navigation;
 pub(crate) mod source_emit;
@@ -21,7 +25,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 
-use arkdown_core::ModuleSource;
+use arkdown_core::{AutoLazyFilter, ExpandImportPath, ModuleSource};
 use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, HvigorModulePath};
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
@@ -103,6 +107,23 @@ pub struct TransformOptions {
     /// which `validate_compile_mode()` in `arkdown-profile` rejects anyway.
     pub partial_update: bool,
     pub checker_mode: CheckerMode,
+    /// `arkOptions.autoLazyImport`: rewrite value imports into
+    /// `import lazy` declarations (SDK `process_lazy_import.js::transformLazyImport`).
+    pub auto_lazy_import: bool,
+    /// `arkOptions.autoLazyFilter` include/exclude lists keyed on the current
+    /// module's package name (`isNotAutoLazyImport`).
+    pub auto_lazy_filter: Option<AutoLazyFilter>,
+    /// Package name of the module owning the transformed file (SDK
+    /// `meta.pkgName` used by `isNotAutoLazyImport`).
+    pub pkg_name: Option<String>,
+    /// `arkOptions.expandImportPath` — package-level import expansion
+    /// (SDK `import_path_expand.js`). Only effective for non-HAR modules.
+    pub expand_import_path: Option<ExpandImportPath>,
+    /// Package names present in `hspNameOhmMap`/`harNameOhmMap` — hvigor's
+    /// `import_path_expand.js` never expands remote HSP/HAR packages
+    /// (`a2[i]` guard); local `file:` dependencies are not in the maps and
+    /// do expand.
+    pub hsp_har_package_names: FxHashSet<String>,
 }
 
 impl Default for TransformOptions {
@@ -120,6 +141,11 @@ impl Default for TransformOptions {
             form_entry: false,
             partial_update: true,
             checker_mode: CheckerMode::Oxc,
+            auto_lazy_import: false,
+            auto_lazy_filter: None,
+            pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
         }
     }
 }
@@ -441,6 +467,15 @@ impl<'a> ArktsTransformer<'a> {
             );
             parsed.program.body = body;
             ViewpuProgramFinalizer::new(&allocator, &mut parsed.program).finalize();
+            // hvigor runs `expandAllImportPaths` inside the TS emit
+            // transformer chain; expanding before codegen keeps the emitted
+            // source map in sync with the expanded imports.
+            crate::transform::expand_import_path::apply_to_program(
+                &mut parsed.program,
+                &allocator,
+                &source.id.id,
+                options,
+            );
 
             let generated = HvigorTypescriptPrinter::print_with_source_map(
                 &parsed.program,

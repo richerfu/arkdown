@@ -407,6 +407,7 @@ impl IntermediateArtifactWriter {
     module_root: &Path,
     final_module_json: &Path,
     current_extension_ability_count: usize,
+    form_widget_abilities: &[serde_json::Value],
   ) -> Result<()> {
     let content = fs_err::read_to_string(final_module_json)?;
     let final_value: serde_json::Value = serde_json::from_str(&content)?;
@@ -418,10 +419,25 @@ impl IntermediateArtifactWriter {
     // Restool's ark_module.json describes the current resource module. Hvigor
     // appends dependency HAR extension abilities in ProcessProfile, after the
     // resource compiler has produced ark_module.json, so those dependency
-    // entries must not leak back into the resource-stage artifact.
+    // entries must not leak back into the resource-stage artifact. Form
+    // widget modules additionally carry the form extension module's merged
+    // `type: "form"` abilities (`getTargetModuleOptObj`).
     let mut resource_ark_value = process_value.clone();
     self
       .retain_current_extension_abilities(&mut resource_ark_value, current_extension_ability_count);
+    if !form_widget_abilities.is_empty() {
+      let abilities = resource_ark_value
+        .get_mut("module")
+        .and_then(|module| module.as_object_mut())
+        .map(|module| {
+          module
+            .entry("extensionAbilities")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        });
+      if let Some(serde_json::Value::Array(abilities)) = abilities {
+        abilities.extend(form_widget_abilities.iter().cloned());
+      }
+    }
     self.write_json_minified(&module_layout.res_ark_module_json(), &resource_ark_value)?;
 
     let mut merge_value = process_value;

@@ -55,8 +55,9 @@ pub use config::{
     AppOptionOverride, ArkOptions, ArkTscConfig, ArkTscTarget, ArkdownConfig, BuildMode,
     BuildOption, CompileMode, CopyCodeResource, ExternalNativeOptions, HarArtifactType,
     ModuleConfig, NativeDebugSymbolOption, NativeLibFilterOption, NativeLibOption,
-    NativeLibPackageSelection, ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig,
-    ResOptions, RuntimeOnlyConfig, SdkConfig, SigningConfig, SourceOption, StrictModeConfig,
+    AutoLazyFilter, ExpandImportPath, NativeLibPackageSelection, ObfuscationConfig,
+    OhosModuleType, OutputTarget, ProductConfig, ResOptions, RuntimeOnlyConfig, SdkConfig,
+    SigningConfig, SourceOption, StrictModeConfig, WidgetArkOptions,
 };
 
 // diagnostic

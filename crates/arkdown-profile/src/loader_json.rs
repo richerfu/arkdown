@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{
-    ArkdownConfig, ArkdownError, BuildMode, HapManifest, ModuleConfig, OhosModuleType,
+    ArkdownConfig, ArkdownError, BuildMode, HapManifest, ModuleConfig, ModuleJson5, OhosModuleType,
     OutputTarget, PkgBriefInfo,
 };
 use arkdown_path::{
@@ -84,6 +84,19 @@ pub struct LoaderJson {
     /// common loader object; source HAR/HAP/HSP loader files omit it.
     #[serde(rename = "byteCodeHar", skip_serializing_if = "Option::is_none")]
     pub byte_code_har: Option<bool>,
+    /// 6.24.3 widget-loader field: transitively blocked dependency compile
+    /// files grouped by the topmost blocking ByteCode HAR package.
+    ///
+    /// `GenerateLoaderJson.doTaskAction()` writes `pkgName2OtherCompileFiles`
+    /// only on the widget loader JSON (`{...common, pkgName2OtherCompileFiles}`);
+    /// the main `loader.json` never carries the key. The field is therefore
+    /// `None` for the common loader and `Some(_)` (possibly empty) for the
+    /// widget loader when `needSubmitArkTsWidget` is set.
+    #[serde(
+        rename = "pkgName2OtherCompileFiles",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pkg_name2_other_compile_files: Option<IndexMap<String, Vec<String>>>,
     /// Ark Native output path emitted by hvigor when AOT is enabled for this module.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub an_build_out_put: Option<String>,
@@ -856,6 +869,12 @@ impl LoaderJson {
             })?
         };
         let src_main_root = module_layout.src_main();
+        // Widget (form card) sources never enter the module compile entries:
+        // hvigor compiles them in the dedicated widget pass (`widgets.abc`)
+        // under `needSubmitArkTsWidget`, while the non-full-compilation
+        // `compileEntry` only carries ResourceTable.ts and the configured
+        // entries. The form collection above still runs for its profile
+        // validations (`FORM_WIDGET_MODULE_INVALID_*`).
         let form_entry_sources = form_sources
             .iter()
             .map(|form_source| {
@@ -866,7 +885,6 @@ impl LoaderJson {
                 }
             })
             .collect::<Vec<_>>();
-        compile_entry.extend(form_entry_sources.iter().cloned());
 
         // Module-level srcEntry (used by HSP shared packages that export a single file
         // without declaring abilities).
@@ -982,8 +1000,18 @@ impl LoaderJson {
         // `src/main/ets`. This mirrors GenerateLoaderJson's
         // allowToCollectEtsFolder()/collectCompileFiles contract and ensures
         // exported shared-library files participate even without abilities.
+        // Form widget modules compile in non-full-compilation mode
+        // (`isFullCompilationEnabled` is false without `OHOS_COMPILE_LIB_ENTRY`):
+        // hvigor's compileEntry only carries ResourceTable.ts and the
+        // configured entries, never the ets tree (widget pages go to
+        // `widgets.abc` via `needSubmitArkTsWidget`).
+        let is_form_widget_module = std::fs::read_to_string(&module_json_path)
+            .ok()
+            .and_then(|content| json5::from_str::<ModuleJson5>(&content).ok())
+            .is_some_and(|json| json.module.form_extension_module.is_some());
         let mut serialized_compile_entry = if matches!(config.output_target, OutputTarget::Hsp)
             && matches!(module_cfg.module_type, OhosModuleType::Shared)
+            && !is_form_widget_module
         {
             Self::collect_code_files(&ets_root)
         } else {
@@ -1287,6 +1315,8 @@ impl LoaderJson {
                 .customized_har_base_package
                 .is_some(),
             byte_code_har: module_is_bytecode_har.then_some(true),
+            // The common loader.json never carries the widget-only field.
+            pkg_name2_other_compile_files: None,
             an_build_out_put: aot_fields.an_build_out_put,
             an_build_mode: aot_fields.an_build_mode,
             ap_path: aot_fields.ap_path,

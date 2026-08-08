@@ -2040,6 +2040,11 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
         partial_update: true,
+        auto_lazy_import: false,
+        auto_lazy_filter: None,
+        pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
         checker_mode: crate::CheckerMode::Oxc,
     };
     let result = TransformHarness::transform_with_options(
@@ -2117,6 +2122,11 @@ export struct SecureModePage {
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
         partial_update: true,
+        auto_lazy_import: false,
+        auto_lazy_filter: None,
+        pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
         checker_mode: crate::CheckerMode::Oxc,
     };
     let result = TransformHarness::transform_with_options(
@@ -2229,6 +2239,11 @@ export struct SecureModePage {
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
         partial_update: true,
+        auto_lazy_import: false,
+        auto_lazy_filter: None,
+        pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
         checker_mode: crate::CheckerMode::Oxc,
     };
     let result = TransformHarness::transform_with_options(
@@ -4269,7 +4284,12 @@ struct WidgetCard {
             navigation_routes: NavigationRouteMap::default(),
             form_entry: true,
             partial_update: true,
-            checker_mode: crate::CheckerMode::Oxc,
+            auto_lazy_import: false,
+        auto_lazy_filter: None,
+        pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
+        checker_mode: crate::CheckerMode::Oxc,
         },
     )
     .unwrap();
@@ -4409,7 +4429,12 @@ struct ModalPage {
             navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
             partial_update: true,
-            checker_mode: crate::CheckerMode::Oxc,
+            auto_lazy_import: false,
+        auto_lazy_filter: None,
+        pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
+        checker_mode: crate::CheckerMode::Oxc,
         },
     )
     .unwrap();

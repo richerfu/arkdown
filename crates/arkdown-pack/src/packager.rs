@@ -89,6 +89,9 @@ fn order_module(module: &serde_json::Value) -> serde_json::Value {
         "packageName",
         "virtualMachine",
         "compileMode",
+        // `formExtensionModule` sits between `type` and `dependencies` in the
+        // SDK packaging order (observed on a form widget HSP archive).
+        "formExtensionModule",
         "dependencies",
         "descriptionId",
     ] {

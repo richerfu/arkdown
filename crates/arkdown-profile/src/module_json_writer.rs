@@ -359,23 +359,39 @@ impl ModuleJsonWriter {
             .zip(label_ref.as_deref())
             .and_then(|(ids, r)| Self::resolve_res_ref(r, ids));
 
-        let mut obj = serde_json::Map::new();
-        if let Some(id) = icon_id {
-            obj.insert("iconId".into(), (id as u64).into());
-        }
-        obj.insert("debug".into(), is_debug.into());
-        obj.insert("targetPatchAPIVersion".into(), 0u64.into());
+        // hvigor (`merge-profile.ts::computeAppJsonOpt`/`mergeDslConfig`/
+        // `resolveApi`/`mergeAppEnvironmentConfig`) clones `app.json5` and
+        // mutates in place, so the emitted field order is the app.json5 order
+        // followed by the computed fields in mutation order. Start from the
+        // source object to preserve that order; `insert` keeps an existing
+        // key at its original position and appends new keys.
+        // hvigor (`merge-profile.ts`) clones `app.json5` and mutates in
+        // place, so the emitted order is the app.json5 order followed by the
+        // computed fields in mutation order: `mergeDslConfig` appends
+        // `apiReleaseType`, `resolveApi` appends the API versions,
+        // `mergeAppEnvironmentConfig` appends `appEnvironments`, and the
+        // build-mode pass appends `bundleType`/`buildMode`/`debug`.
+        // `insert` keeps an existing key at its original position and appends
+        // new keys, preserving that contract for app.json5 fields that are
+        // also computed.
+        let mut obj = src.clone();
+        // hvigor `merge-profile.ts::computeAppJsonOpt` deletes an
+        // AppScope/app.json5 `multiProjects` (it only accepts the
+        // build-profile top-level `app.multiProjects`).
+        obj.remove("multiProjects");
+        obj.insert("apiReleaseType".into(), "Release".into());
+        obj.insert("compileSdkVersion".into(), compile_sdk_version.into());
+        obj.insert("targetAPIVersion".into(), target_numeric_api.into());
         obj.insert("minAPIVersion".into(), min_numeric_api.into());
-        if let Some(v) = icon_ref.as_ref() {
-            obj.insert("icon".into(), v.clone().into());
-        }
+        obj.insert("compileSdkType".into(), "HarmonyOS".into());
+        obj.insert("targetMinorAPIVersion".into(), 0u64.into());
+        obj.insert("targetPatchAPIVersion".into(), 0u64.into());
         obj.insert(
-            "buildMode".into(),
-            if is_debug { "debug" } else { "release" }.into(),
+            "appEnvironments".into(),
+            src.get("appEnvironments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(vec![])),
         );
-        if let Some(v) = label_ref.as_ref() {
-            obj.insert("label".into(), v.clone().into());
-        }
         obj.insert(
             "bundleType".into(),
             app_options
@@ -385,6 +401,17 @@ impl ModuleJsonWriter {
                 .or_else(|| src.get("bundleType").cloned())
                 .unwrap_or_else(|| "app".into()),
         );
+        obj.insert(
+            "buildMode".into(),
+            if is_debug { "debug" } else { "release" }.into(),
+        );
+        obj.insert("debug".into(), is_debug.into());
+        if let Some(v) = icon_ref.as_ref() {
+            obj.insert("icon".into(), v.clone().into());
+        }
+        if let Some(v) = label_ref.as_ref() {
+            obj.insert("label".into(), v.clone().into());
+        }
         // versionName: product override takes priority over app.json5.
         if let Some(name) = version_name_override {
             obj.insert("versionName".into(), name.into());
@@ -397,18 +424,6 @@ impl ModuleJsonWriter {
         } else if let Some(v) = src.get("versionCode") {
             obj.insert("versionCode".into(), v.clone());
         }
-        obj.insert(
-            "appEnvironments".into(),
-            src.get("appEnvironments")
-                .cloned()
-                .unwrap_or_else(|| serde_json::Value::Array(vec![])),
-        );
-        obj.insert("compileSdkType".into(), "HarmonyOS".into());
-        if let Some(id) = label_id {
-            obj.insert("labelId".into(), (id as u64).into());
-        }
-        obj.insert("compileSdkVersion".into(), compile_sdk_version.into());
-        obj.insert("targetAPIVersion".into(), target_numeric_api.into());
         if let Some(v) = app_options
             .vendor
             .clone()
@@ -425,8 +440,16 @@ impl ModuleJsonWriter {
                 bundle_name_fallback.into()
             },
         );
-        obj.insert("apiReleaseType".into(), "Release".into());
-        obj.insert("targetMinorAPIVersion".into(), 0u64.into());
+        if let Some(id) = icon_id {
+            obj.insert("iconId".into(), (id as u64).into());
+        }
+        if let Some(id) = label_id {
+            obj.insert("labelId".into(), (id as u64).into());
+        }
+        if project_multi_projects {
+            obj.insert("multiProjects".into(), true.into());
+        }
+
         if project_multi_projects {
             obj.insert("multiProjects".into(), true.into());
         }
@@ -439,6 +462,8 @@ impl ModuleJsonWriter {
         //
         // `multiProjects` is special: hvigor ignores it from AppScope/app.json5
         // and only writes the build-profile top-level `app.multiProjects`.
+        // `buildVersion` is kept at its app.json5 position (cloneDeep); a
+        // newly supplied override is appended after the source object.
         for (key, value) in src {
             if key == "multiProjects" || key == "buildVersion" {
                 continue;
@@ -453,12 +478,12 @@ impl ModuleJsonWriter {
                 obj.insert(key.clone(), value.clone());
             }
         }
-        if let Some(build_version) = build_version_override
-            .or_else(|| src.get("buildVersion").and_then(serde_json::Value::as_str))
-        {
+        if let Some(build_version) = build_version_override {
             // MergeProfile.getMergedAppOptObj assigns buildVersion after the
             // source app object has been cloned, so a newly supplied product
             // or invocation value is appended to the generated app object.
+            // `insert` keeps the key at its app.json5 position when present
+            // and appends it when absent.
             obj.insert("buildVersion".into(), build_version.into());
         }
 
@@ -655,7 +680,19 @@ impl ModuleJsonWriter {
             })
             .collect();
 
-        let mut obj = serde_json::Map::new();
+        // hvigor (`merge-profile.ts`) clones `module.json5` and mutates in
+        // place: the emitted order is the module.json5 order followed by the
+        // computed fields in mutation order (`packageName` via Object.assign,
+        // then `virtualMachine`/`compileMode` from profile processing, then
+        // `dependencies`). Start from the raw module object so unknown fields
+        // keep their positions; `insert` keeps existing keys in place.
+        let mut obj = raw_module5
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        // packageName from oh-package.json5#name (hvigor: Object.assign using
+        // packageJsonObj.name); falls back to module_name when file is absent.
+        obj.insert("packageName".into(), package_name.into());
         obj.insert(
             "virtualMachine".into(),
             manifest.virtual_machine.clone().into(),
@@ -793,9 +830,6 @@ impl ModuleJsonWriter {
             obj.insert("appStartup".into(), app_startup.clone());
         }
         obj.insert("name".into(), manifest.module_name.clone().into());
-        // packageName from oh-package.json5#name (hvigor: Object.assign using
-        // packageJsonObj.name); falls back to module_name when file is absent.
-        obj.insert("packageName".into(), package_name.into());
 
         if has_insight_intent {
             obj.insert("hasInsightIntent".into(), true.into());
@@ -2025,10 +2059,40 @@ mod tests {
 
         assert_eq!(from_app["buildVersion"], "app-build");
         assert_eq!(from_product["buildVersion"], "product-build");
+        // An app.json5 buildVersion keeps its position (`cloneDeep` +
+        // targeted mutation); a newly supplied override for a source object
+        // without buildVersion is appended.
+        let position = from_product
+            .keys()
+            .position(|key| key == "buildVersion")
+            .expect("buildVersion present");
+        let source_position = src.keys().position(|key| key == "buildVersion").unwrap();
         assert_eq!(
-            from_product.keys().last().map(String::as_str),
-            Some("buildVersion"),
-            "MergeProfile appends a newly assigned buildVersion"
+            position, source_position,
+            "an existing app.json5 buildVersion keeps its original position"
         );
+
+        let mut without = make_app_json5_src(1_000_000, "1.0.0");
+        let from_override = ModuleJsonWriter::build_app_section(
+            &without,
+            12,
+            20,
+            true,
+            "5.0.0",
+            "com.example.app",
+            &arkdown_core::AppOptionOverride::default(),
+            false,
+            None,
+            None,
+            None,
+            Some("cli-build"),
+        );
+        assert_eq!(from_override["buildVersion"], "cli-build");
+        assert_eq!(
+            from_override.keys().last().map(String::as_str),
+            Some("buildVersion"),
+            "a newly supplied buildVersion is appended after the source object"
+        );
+        let _ = &mut without;
     }
 }
