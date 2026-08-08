@@ -163,7 +163,7 @@ struct HvigorSourceMapToken {
     supplemental: bool,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TypeScriptSourceBoundaryKind {
     Identifier(String),
     StringLiteral(String),
@@ -249,7 +249,9 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory {
                 name: Self::property_name(&method.key),
                 constructor: method.kind == MethodDefinitionKind::Constructor,
             },
-            method.span,
+            // TypeScript anchors method mappings at the property key, skipping
+            // `get`/`set`/`static`/accessibility keywords.
+            method.key.span(),
         );
         walk::walk_method_definition(self, method);
     }
@@ -257,6 +259,8 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory {
     fn visit_property_definition(&mut self, property: &PropertyDefinition<'a>) {
         self.push(
             TypeScriptSourceBoundaryKind::Property(Self::property_name(&property.key)),
+            // TypeScript maps the whole property declaration (including the
+            // `private`/`readonly` keywords) from the source property start.
             property.span,
         );
         walk::walk_property_definition(self, property);

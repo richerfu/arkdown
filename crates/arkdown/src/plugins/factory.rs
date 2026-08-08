@@ -153,6 +153,15 @@ pub struct PluginFactoryInput {
     ///
     /// Populated from `arkdown.config.json` `plugins.disabled` via the coordinator.
     pub disabled_plugins: Vec<String>,
+    /// `arkOptions.autoLazyImport` + `autoLazyFilter` + owning module package
+    /// name, forwarded to the SDK `process_lazy_import.js` rewrite.
+    pub auto_lazy_import: bool,
+    pub auto_lazy_filter: Option<arkdown_core::AutoLazyFilter>,
+    pub module_pkg_name: Option<String>,
+    /// `arkOptions.expandImportPath` (SDK `import_path_expand.js`).
+    pub expand_import_path: Option<arkdown_core::ExpandImportPath>,
+    /// Remote HSP/HAR package names (OHM maps) that never expand.
+    pub hsp_har_package_names: FxHashSet<String>,
     /// Package-supplied Rolldown-compatible plugins from the Node.js public API.
     ///
     /// These are inserted using hvigor's `getPlugins()` order convention:
@@ -190,6 +199,11 @@ impl PluginFactoryInput {
             har_dedup: HarDedupFactoryMode::Disabled,
             disabled_plugins: vec![],
             package_plugins: vec![],
+            auto_lazy_import: false,
+            auto_lazy_filter: None,
+            module_pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
         }
     }
 }
@@ -715,7 +729,14 @@ impl<'a> PluginFactory<'a> {
         .with_checker_mode(self.input.checker_mode)
         .with_should_emit_js(self.plan.should_emit_js)
         .with_tsc_target(self.input.tsc_target)
-        .with_module_analyzer(self.plan.module_analyzer);
+        .with_module_analyzer(self.plan.module_analyzer)
+        .with_auto_lazy_import(
+            self.input.auto_lazy_import,
+            self.input.auto_lazy_filter.clone(),
+            self.input.module_pkg_name.clone(),
+        )
+        .with_expand_import_path(self.input.expand_import_path.clone())
+        .with_hsp_har_package_names(self.input.hsp_har_package_names.clone());
         let ets_transform_plan = Arc::new(ets_transform_plan);
         let ets_transform_plugin: SharedPluginable = Arc::new(EtsTransformPlugin::from_plan(
             Arc::clone(&ets_transform_plan),

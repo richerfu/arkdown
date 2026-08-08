@@ -15,7 +15,7 @@ use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc_isolated_declarations::{IsolatedDeclarations, IsolatedDeclarationsOptions};
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
 use walkdir::WalkDir;
 
 use super::layout::ModuleBuildLayout;
@@ -64,6 +64,7 @@ impl<'a> HarDeclarationGenerator<'a> {
   }
 
   pub(super) fn generate(&self) -> Result<()> {
+    tracing::debug!(source_dir = %self.source_dir.display(), "HSP declaration generation started");
     if !self.source_dir.is_dir() {
       anyhow::bail!(
         "Source HAR declaration root does not exist: {}",
@@ -180,6 +181,24 @@ impl<'a> HarSourceDeclaration<'a> {
           .join("\n")
       );
     }
+    // OXC's IsolatedDeclarations does not lower ArkUI `struct` statements;
+    // the SDK TypeScript compiler emits `declare struct` with decorators and
+    // member signatures. Emit that shape directly for struct-only sources
+    // (widget form pages), falling back to IsolatedDeclarations otherwise.
+    let structs = parsed
+      .program
+      .body
+      .iter()
+      .filter_map(|statement| match statement {
+        oxc_ast::ast::Statement::StructStatement(struct_statement) => {
+          Some(struct_statement.as_ref())
+        }
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    if !structs.is_empty() {
+      return Self::emit_struct_declarations(&source, &structs);
+    }
     let declarations = IsolatedDeclarations::new(
       &allocator,
       IsolatedDeclarationsOptions {
@@ -219,3 +238,82 @@ impl<'a> HarSourceDeclaration<'a> {
     Ok(code.replace('\n', "\r\n"))
   }
 }
+
+impl<'a> HarSourceDeclaration<'a> {
+  /// SDK `declare struct` emission for ArkUI struct sources: decorators on
+  /// their own lines, `declare struct <name>`, members with signatures and
+  /// no initializers, methods as `name(params): returnType;`.
+  fn emit_struct_declarations(
+    source: &str,
+    structs: &[&oxc_ast::ast::StructStatement<'_>],
+  ) -> Result<String> {
+    let mut out = String::new();
+    for struct_statement in structs {
+      for decorator in &struct_statement.decorators {
+        let expression = &decorator.expression;
+        out.push_str(&format!("@{}\r\n", source[expression.span()].trim()));
+      }
+      out.push_str(&format!("declare struct {} {{\r\n", struct_statement.id.name));
+      for element in &struct_statement.body.body {
+        match element {
+          oxc_ast::ast::StructElement::PropertyDefinition(property) => {
+            for decorator in &property.decorators {
+              let expression = &decorator.expression;
+              out.push_str(&format!("    @{}\r\n", source[expression.span()].trim()));
+            }
+            out.push_str("    ");
+            if property.readonly {
+              out.push_str("readonly ");
+            }
+            let key = match &property.key {
+              oxc_ast::ast::PropertyKey::StaticIdentifier(identifier) => {
+                identifier.name.as_str().to_string()
+              }
+              oxc_ast::ast::PropertyKey::StringLiteral(literal) => {
+                literal.value.as_str().to_string()
+              }
+              other => source[other.span()].trim().to_string(),
+            };
+            out.push_str(&key);
+            if let Some(type_annotation) = &property.type_annotation {
+              out.push_str(": ");
+              out.push_str(source[type_annotation.type_annotation.span()].trim());
+            }
+            out.push_str(";\r\n");
+          }
+          oxc_ast::ast::StructElement::MethodDefinition(method) => {
+            let key = match &method.key {
+              oxc_ast::ast::PropertyKey::StaticIdentifier(identifier) => {
+                identifier.name.as_str().to_string()
+              }
+              other => source[other.span()].trim().to_string(),
+            };
+            out.push_str(&format!("    {key}"));
+            out.push('(');
+            let params = &method.value.params.items;
+            if let Some(first) = params.first() {
+              out.push_str(&source[first.pattern.span()].trim());
+              for parameter in params.iter().skip(1) {
+                out.push_str(", ");
+                out.push_str(&source[parameter.pattern.span()].trim());
+              }
+            }
+            out.push(')');
+            if let Some(return_type) = &method.value.return_type {
+              out.push_str(": ");
+              out.push_str(source[return_type.type_annotation.span()].trim());
+            } else {
+              // SDK declaration output defaults unannotated methods to void.
+              out.push_str(": void");
+            }
+            out.push_str(";\r\n");
+          }
+          _ => {}
+        }
+      }
+      out.push_str("}\r\n");
+    }
+    Ok(out)
+  }
+}
+

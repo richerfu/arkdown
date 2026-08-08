@@ -156,6 +156,21 @@ impl TransformSourceSnapshot {
         self
     }
 
+    /// Override/complete the package root index with the dependency graph's
+    /// authoritative `package_name → package_root` mapping. Path inference
+    /// only recognizes `oh_modules/` layouts; local `file:` dependencies are
+    /// canonicalized to their real paths and must be supplied explicitly
+    /// (hvigor's TS program resolves them through the installed
+    /// `oh_modules/` links).
+    pub fn with_package_roots(mut self, roots: FxHashMap<String, PathBuf>) -> Self {
+        let mut package_roots = (*self.package_roots).clone();
+        for (name, root) in roots {
+            package_roots.insert(name, lexical_normalize(&root));
+        }
+        self.package_roots = Arc::new(package_roots);
+        self
+    }
+
     pub(crate) fn resolve_relative_with_declarations(
         &self,
         importer: &Path,

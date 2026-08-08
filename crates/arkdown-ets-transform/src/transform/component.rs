@@ -1438,7 +1438,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                 allocator.alloc_str(&field.name),
                 getter_stmts,
                 None,
-                SPAN,
+                field.name_span,
                 field.name_span,
             ),
         );
@@ -1474,7 +1474,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                 param,
                 setter_stmts,
                 None,
-                SPAN,
+                field.source_span,
                 field.name_span,
             ),
         );

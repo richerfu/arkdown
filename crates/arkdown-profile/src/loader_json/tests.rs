@@ -35,7 +35,8 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 preload_system_so: false,
                 preload_so: vec![],
                 deduplicate_har: false,
-                app_with_signed_pkg: false,
+                enable_source_code_check: true,
+            app_with_signed_pkg: false,
                 generate_shared_tgz: None,
                 customized_har_base_package: None,
                 remove_permissions: vec![],
@@ -266,11 +267,18 @@ fn test_loader_json_form_profile_sources_feed_internal_compile_entries() {
     manifest.extension_abilities = vec![form_extension_ability("form_config")];
     let loader = LoaderJson::try_generate(&config, &module_cfg, &manifest).unwrap();
 
+    // 6.24.3: form card sources never enter the module compile entries —
+    // hvigor compiles them in the dedicated widget pass (`widgets.abc`) and
+    // the serialized `compileEntry` only carries ResourceTable.ts and the
+    // configured entries (`isFullCompilationEnabled` is false for the form
+    // widget module). The internal `form_entry_sources` still feed the widget
+    // pass and the form widget module's main es2abc input.
     assert!(
-        loader
+        !loader
             .compile_entry
-            .contains(&"./ets/forms/Card.ets".to_string()),
-        "referenced form sources must feed arkdown's Rolldown input: {:?}",
+            .iter()
+            .any(|entry| entry.contains("forms/Card.ets")),
+        "form widget sources must not enter compile_entry: {:?}",
         loader.compile_entry
     );
     assert_eq!(
@@ -2713,6 +2721,14 @@ fn test_loader_json_dynamic_import_lib_info_uses_runtime_only_packages() {
         byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
+        widget: None,
+        branch_elimination: None,
+        transform_lib: None,
+        skip_oh_modules_lint: None,
+        re_export_check_mode: None,
+        auto_lazy_import: None,
+        auto_lazy_filter: None,
+        expand_import_path: None,
         tsc_config: Default::default(),
     });
     let module_cfg = ModuleConfig {
@@ -2770,6 +2786,14 @@ fn test_loader_json_compile_entry_uses_runtime_only_sources() {
         byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
+        widget: None,
+        branch_elimination: None,
+        transform_lib: None,
+        skip_oh_modules_lint: None,
+        re_export_check_mode: None,
+        auto_lazy_import: None,
+        auto_lazy_filter: None,
+        expand_import_path: None,
         tsc_config: Default::default(),
     });
     let module_cfg = ModuleConfig {
@@ -2930,6 +2954,14 @@ fn runtime_only_exclude_packages_skips_only_remote_source_har_code() {
         byte_code_har: Some(false),
         bundled_dependencies: false,
         integrated_hsp: None,
+        widget: None,
+        branch_elimination: None,
+        transform_lib: None,
+        skip_oh_modules_lint: None,
+        re_export_check_mode: None,
+        auto_lazy_import: None,
+        auto_lazy_filter: None,
+        expand_import_path: None,
         tsc_config: Default::default(),
     });
     let module_cfg = ModuleConfig {
@@ -3106,7 +3138,11 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
     )
     .expect("write oh-package.json5");
 
-    let mut config = make_config(false);
+    // `GenerateLoaderJson.setByteCodeHarInfoAndOtherCompileFiles()` gates the
+    // whole ByteCode HAR collection on `useNormalizedOHMUrl` (and HAP/HSP
+    // targets); `byte-code-har-utils.checkByteCodeHar` hard-errors when it is
+    // off. This test therefore uses `make_config(true)`.
+    let mut config = make_config(true);
     config.project_root = project_root.clone();
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
@@ -3131,7 +3167,6 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
     assert!(entry.abc_path.ends_with("index.abc"));
     assert!(entry.source_maps_path.is_none());
 }
-
 /// Verify that a non-default effective target's `src/<target>/ets/` directory
 /// appears in `pkgNameToPkgBriefInfo.sourceRoots` when the directory exists.
 ///
@@ -3293,5 +3328,54 @@ fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
         !has_ohos_test,
         "ohosTest sources must not be included in debug compileEntry; entries: {:?}",
         debug_loader.hvigor_compile_entry
+    );
+}
+
+/// 6.24.3 `pkgName2OtherCompileFiles` is a widget-loader-only field: the
+/// common `loader.json` never carries it, the widget loader always does
+/// (`Some(empty)` object when `widget.transitiveDeps` is off).
+#[test]
+fn test_loader_json_pkg_name2_other_compile_files_widget_only() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    std::fs::create_dir_all(module_root.join("src/main/ets")).expect("create src/main/ets");
+
+    let mut config = make_config(true);
+    config.project_root = project_root.clone();
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Entry,
+    };
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+    let value = serde_json::to_value(&loader).expect("serialize common loader");
+    assert!(
+        value.get("pkgName2OtherCompileFiles").is_none(),
+        "the common loader.json must not carry pkgName2OtherCompileFiles"
+    );
+
+    // Widget loader with transitiveDeps off: field present and empty.
+    let mut widget_loader = loader.clone();
+    widget_loader.pkg_name2_other_compile_files = Some(IndexMap::new());
+    let value = serde_json::to_value(&widget_loader).expect("serialize widget loader");
+    assert_eq!(
+        value.get("pkgName2OtherCompileFiles"),
+        Some(&serde_json::json!({})),
+        "widget loader without transitiveDeps carries an empty object"
+    );
+
+    // Widget loader with grouped blocked files.
+    let mut widget_loader = loader.clone();
+    widget_loader.pkg_name2_other_compile_files = Some(IndexMap::from([(
+        "bc-har-a".to_string(),
+        vec!["/abs/path/blocked.ets".to_string()],
+    )]));
+    let value = serde_json::to_value(&widget_loader).expect("serialize widget loader");
+    assert_eq!(
+        value.get("pkgName2OtherCompileFiles"),
+        Some(&serde_json::json!({ "bc-har-a": ["/abs/path/blocked.ets"] })),
+        "widget loader groups blocked files per topmost BC HAR"
     );
 }

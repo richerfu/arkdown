@@ -508,7 +508,9 @@ impl ProfileProcessor {
         }
         let json = serde_json::to_string_pretty(loader)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
-        fs_err::write(path, json)?;
+        // `fse.outputJSONSync` (hvigor `GenerateLoaderJson.doTaskAction`)
+        // terminates the file with a newline; mirror that byte-for-byte.
+        fs_err::write(path, format!("{json}\n"))?;
 
         Ok(())
     }
@@ -604,7 +606,8 @@ mod tests {
                     preload_system_so: false,
                     preload_so: vec![],
                     deduplicate_har: false,
-                    app_with_signed_pkg: false,
+                    enable_source_code_check: true,
+            app_with_signed_pkg: false,
                     generate_shared_tgz: None,
                     customized_har_base_package: None,
                     remove_permissions: vec![],

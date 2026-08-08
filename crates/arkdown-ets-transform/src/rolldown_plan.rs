@@ -59,6 +59,16 @@ pub struct RolldownEtsTransformPlan {
     /// checker before `etsTransform` emits JavaScript for suppression-pragmas.
     pub tsc_target: ArkTscTarget,
     pub module_analyzer: ModuleAnalyzerKind,
+    /// `arkOptions.autoLazyImport` + `autoLazyFilter` + module package name,
+    /// forwarded to `TransformOptions` for the SDK `process_lazy_import.js`
+    /// rewrite.
+    pub auto_lazy_import: bool,
+    pub auto_lazy_filter: Option<arkdown_core::AutoLazyFilter>,
+    pub pkg_name: Option<String>,
+    /// `arkOptions.expandImportPath` (SDK `import_path_expand.js`).
+    pub expand_import_path: Option<arkdown_core::ExpandImportPath>,
+    /// Remote HSP/HAR package names (OHM maps) that never expand.
+    pub hsp_har_package_names: FxHashSet<String>,
 }
 
 impl RolldownEtsTransformPlan {
@@ -93,7 +103,37 @@ impl RolldownEtsTransformPlan {
             should_emit_js: true,
             tsc_target: ArkTscTarget::default(),
             module_analyzer: ModuleAnalyzerKind::default(),
+            auto_lazy_import: false,
+            auto_lazy_filter: None,
+            pkg_name: None,
+            expand_import_path: None,
+            hsp_har_package_names: FxHashSet::default(),
         }
+    }
+
+    /// Set `arkOptions.expandImportPath` (SDK `import_path_expand.js`).
+    pub fn with_expand_import_path(mut self, expand: Option<arkdown_core::ExpandImportPath>) -> Self {
+        self.expand_import_path = expand;
+        self
+    }
+
+    pub fn with_hsp_har_package_names(mut self, names: FxHashSet<String>) -> Self {
+        self.hsp_har_package_names = names;
+        self
+    }
+
+    /// Enable `arkOptions.autoLazyImport` with its include/exclude filter and
+    /// the owning module's package name (SDK `meta.pkgName`).
+    pub fn with_auto_lazy_import(
+        mut self,
+        enabled: bool,
+        filter: Option<arkdown_core::AutoLazyFilter>,
+        pkg_name: Option<String>,
+    ) -> Self {
+        self.auto_lazy_import = enabled;
+        self.auto_lazy_filter = filter;
+        self.pkg_name = pkg_name;
+        self
     }
 
     pub fn with_checker_mode(mut self, checker_mode: CheckerMode) -> Self {
@@ -144,6 +184,11 @@ impl RolldownEtsTransformPlan {
             form_entry: self.is_form_entry(id),
             partial_update: true,
             checker_mode: self.checker_mode,
+            auto_lazy_import: self.auto_lazy_import,
+            auto_lazy_filter: self.auto_lazy_filter.clone(),
+            pkg_name: self.pkg_name.clone(),
+            expand_import_path: self.expand_import_path.clone(),
+            hsp_har_package_names: self.hsp_har_package_names.clone(),
         }
     }
 
@@ -222,6 +267,13 @@ impl RolldownEtsTransformer {
 
         if !is_ets {
             let final_code = pipeline.finalize_source(code.as_ref());
+            // SDK genAbc lazy transform runs on every compile input after the
+            // regular transform; TS/JS files are covered too.
+            let final_code = crate::transform::apply_auto_lazy_import(
+                final_code.as_ref(),
+                id,
+                &self.plan.transform_options_for(id),
+            );
             let emitted =
                 self.emit_javascript_if_required(final_code.as_ref(), id, directive_flags)?;
             let source_map = if is_comment_only_javascript {
@@ -269,8 +321,25 @@ impl RolldownEtsTransformer {
         // Keep its map as a separate edge in the map chain. Passing the
         // pre-finalization map through unchanged makes every following line
         // point at the wrong generated location in the aggregated hvigor map.
+        // SDK ordering: `expandAllImportPaths` runs inside the TS emit
+        // transformer chain before `processKitImport` (the expander skips
+        // `@kit.*` sources), then `process_lazy_import` rewrites value
+        // imports into `import lazy` in genAbc. The expander now runs inside
+        // the transform pipeline (before codegen) so the source map covers
+        // the expanded imports.
         let finalization = pipeline.finalize_source_with_source_map(&transformed.code);
-        let final_source = finalization.code.as_ref();
+        let final_source = match crate::transform::apply_auto_lazy_import(
+            finalization.code.as_ref(),
+            id,
+            &self.plan.transform_options_for(id),
+        ) {
+            Cow::Owned(lowered) => {
+                let _ = finalization;
+                Cow::Owned(lowered)
+            }
+            Cow::Borrowed(_) => finalization.code,
+        };
+        let final_source = final_source.as_ref();
 
         if transformed.code == code.as_ref() {
             // The SDK etsTransform printer still formats a plain `.ets` file
