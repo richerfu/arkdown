@@ -28,6 +28,7 @@ use rayon::prelude::*;
 use crate::cmd::native_build::ProjectDebugSymbolCollector;
 
 use super::args::BuildArgs;
+use super::remote_hsp_sign::RemoteHspSigner;
 use super::coordinator::{
   BuildCoordinator, BuildOutput, BuildTaskLifecycle, BuildTaskObserver, NativeTaskCutoffReached,
 };
@@ -175,6 +176,24 @@ impl AppBuildCoordinator {
     } else {
       None
     };
+
+    // hvigor `SignProjectRemoteHsp`/`SignModuleRemoteHsp` (per-target common
+    // tasks): signed remote HSP copies under
+    // `build/cache/<product>/remote_hsp/` plus `remoteHspCache.json`, before
+    // the app packaging.
+    if lifecycle.before(&project_name, None, "SignRemoteHsp").await? {
+      let signer = RemoteHspSigner::new(self.config.clone(), self.session.clone());
+      let cache_file = tokio::task::spawn_blocking(move || signer.run())
+        .await
+        .context("SignRemoteHsp worker failed")??;
+      if let Some(cache_file) = cache_file {
+        tracing::info!(
+          cache = %cache_file.display(),
+          "remote HSP cache written"
+        );
+      }
+      lifecycle.after(&project_name, None, "SignRemoteHsp").await?;
+    }
 
     let package_runner = self.package_runner()?;
     let pack_res_path = if lifecycle

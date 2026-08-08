@@ -8,7 +8,7 @@ pub mod zip_writer;
 pub use app::{
     AppArchiveUnpacker, AppArtifactInput, AppArtifactRole, AppArtifactStager, AppNormalizePlan,
     AppPackagePlan, AppPackageRunner, AppPackingCommand, ProjectPackInfoBuilder,
-    ProjectPackInfoOutput, RemoteHspCollector, RemoteHspDependencyScope, StagedAppArtifacts,
+    ProjectPackInfoOutput, RemoteHspCandidate, RemoteHspCollector, RemoteHspDependencyScope, StagedAppArtifacts,
     UnpackedAppArtifacts,
 };
 pub use error::PackError;
@@ -55,7 +55,8 @@ mod tests {
                     preload_system_so: false,
                     preload_so: vec![],
                     deduplicate_har: false,
-                    app_with_signed_pkg: false,
+                    enable_source_code_check: true,
+            app_with_signed_pkg: false,
                     generate_shared_tgz: None,
                     customized_har_base_package: None,
                     remove_permissions: vec![],
