@@ -419,6 +419,23 @@ impl ProfileProcessor {
         module_json5: &ModuleJson5,
         dependency_context: &ProfileDependencyContext,
     ) -> Result<(HapManifest, LoaderJson), ArkdownError> {
+        self.process_module_with_dependency_context_and_target(
+            module_cfg,
+            module_json5,
+            dependency_context,
+            "default",
+        )
+    }
+
+    /// Variant with an explicit module target name (e.g. `ohosTest` keys the
+    /// generated resource table and loader paths like hvigor).
+    pub fn process_module_with_dependency_context_and_target(
+        &self,
+        module_cfg: &ModuleConfig,
+        module_json5: &ModuleJson5,
+        dependency_context: &ProfileDependencyContext,
+        target_name: &str,
+    ) -> Result<(HapManifest, LoaderJson), ArkdownError> {
         let discovered_ark_vm_version = {
             let _timer = ProfileTimingProbe::new(&module_cfg.name, "discover_ark_vm_version");
             let profile_api_version =
@@ -494,6 +511,7 @@ impl ProfileProcessor {
                 module_cfg,
                 &manifest,
                 dependency_context.graph(),
+                target_name,
             )?
         };
         Ok((manifest, loader))

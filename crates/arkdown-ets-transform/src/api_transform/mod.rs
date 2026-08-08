@@ -257,11 +257,21 @@ impl KitImportEmitter {
                 } else {
                     ast.module_export_name_identifier_name(import.specifier_span, local_name)
                 };
+                // When the statement is emitted as `import type { ... }`, the
+                // specifier must not carry a redundant `type` modifier
+                // (`import type { type X }` is a TS error). Named type-only
+                // kit imports therefore use a plain named specifier inside
+                // the type-only statement.
+                let specifier_import_kind = if import.import_kind.is_type() {
+                    ImportOrExportKind::Value
+                } else {
+                    import.import_kind
+                };
                 ImportDeclarationSpecifier::ImportSpecifier(ast.alloc_import_specifier(
                     import.specifier_span,
                     imported,
                     ast.binding_identifier(import.local_span, local_name),
-                    import.import_kind,
+                    specifier_import_kind,
                 ))
             }
         };

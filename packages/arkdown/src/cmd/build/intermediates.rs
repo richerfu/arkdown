@@ -406,13 +406,14 @@ impl IntermediateArtifactWriter {
     &self,
     module_root: &Path,
     output_target: &OutputTarget,
+    target_name: &str,
     final_module_json: &Path,
     current_extension_ability_count: usize,
     form_widget_abilities: &[serde_json::Value],
   ) -> Result<()> {
     let content = fs_err::read_to_string(final_module_json)?;
     let final_value: serde_json::Value = serde_json::from_str(&content)?;
-    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root);
+    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root, target_name);
 
     let process_value = self.profile_without_resource_ids(final_value.clone());
     self.write_profile_json(&module_layout.process_profile_module_json(), &process_value)?;
@@ -550,11 +551,37 @@ impl IntermediateArtifactWriter {
     module_res_dirs: &[PathBuf],
     dependency_res_dirs: &[PathBuf],
   ) -> Result<()> {
+    self.write_resource_config_files_with_dirs_and_names(
+      project_root,
+      module,
+      config,
+      res_out,
+      module_res_dirs,
+      dependency_res_dirs,
+      &[],
+      "default",
+    )
+  }
+
+  /// Variant with an explicit restool module-name list (`moduleNames` in
+  /// `resConfig.json`); the `ohosTest` target packs under its own module
+  /// name (`entry_test`) instead of the configured module list.
+  pub(super) fn write_resource_config_files_with_dirs_and_names(
+    &self,
+    project_root: &Path,
+    module: &ModuleConfig,
+    config: &ArkdownConfig,
+    res_out: &Path,
+    module_res_dirs: &[PathBuf],
+    dependency_res_dirs: &[PathBuf],
+    explicit_module_names: &[String],
+    target_name: &str,
+  ) -> Result<()> {
     let project_root = canonical_or_owned(project_root);
     let module_root = canonical_or_owned(&module.src_path);
     let res_out = canonical_or_owned(res_out);
     let module_layout =
-        ModuleBuildLayout::for_output_target(&config.output_target, &module_root);
+        ModuleBuildLayout::for_output_target(&config.output_target, &module_root, target_name);
     let resource_layout = ResourceOutputLayout::new(&res_out);
     let project_layout = ProjectBuildLayout::new(&project_root);
     let extension_path = self
@@ -567,7 +594,9 @@ impl IntermediateArtifactWriter {
       .iter()
       .map(|dir| IntermediateArtifactWriter::path_string(&canonical_or_owned(dir)))
       .collect();
-    let module_names = if config.modules.is_empty() {
+    let module_names = if !explicit_module_names.is_empty() {
+      explicit_module_names.join(",")
+    } else if config.modules.is_empty() {
       module.name.clone()
     } else {
       config
@@ -1078,7 +1107,7 @@ impl IntermediateArtifactWriter {
     device_types: &[String],
     is_signed: bool,
   ) -> Result<()> {
-    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root);
+    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root, "default");
     let (metadata_path, name_key) = match output_target {
       OutputTarget::Hsp => (module_layout.hsp_metadata_output_json(), "hspName"),
       OutputTarget::Hap | OutputTarget::Preview | OutputTarget::Test => {

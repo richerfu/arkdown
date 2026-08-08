@@ -31,6 +31,8 @@ pub(crate) struct ProfileModuleLayout<'a> {
     module_root: &'a Path,
     /// Build root directory name (`build` or `.test` for local unit tests).
     build_root: &'a str,
+    /// Target name segment (`generated/r/<target>/ResourceTable.ts`).
+    target_name: &'a str,
 }
 
 impl<'a> ProfileModuleLayout<'a> {
@@ -38,6 +40,17 @@ impl<'a> ProfileModuleLayout<'a> {
         Self {
             module_root,
             build_root: "build",
+            target_name: "default",
+        }
+    }
+
+    /// Layout for a named target (e.g. `ohosTest`), keying the generated
+    /// resource table path like hvigor (`generated/r/ohosTest/...`).
+    pub(crate) fn for_target(module_root: &'a Path, target_name: &'a str) -> Self {
+        Self {
+            module_root,
+            build_root: "build",
+            target_name,
         }
     }
 
@@ -47,6 +60,7 @@ impl<'a> ProfileModuleLayout<'a> {
         Self {
             module_root,
             build_root: ".test",
+            target_name: "default",
         }
     }
 
@@ -176,7 +190,7 @@ impl<'a> ProfileModuleLayout<'a> {
     }
 
     pub(crate) fn default_intermediate_dir(&self, stage: &str) -> PathBuf {
-        self.default_intermediates().join(stage).join("default")
+        self.default_intermediates().join(stage).join(self.target_name)
     }
 
     pub(crate) fn default_intermediate_file(&self, stage: &str, file_name: &str) -> PathBuf {
@@ -214,7 +228,7 @@ impl<'a> ProfileModuleLayout<'a> {
         self.build_default()
             .join("generated")
             .join("r")
-            .join("default")
+            .join(self.target_name)
             .join("ResourceTable.ts")
     }
 

@@ -370,6 +370,7 @@ fn merge_profile_precedes_dependency_extension_ability_collection() {
     .write_profile_intermediates(
       &module_root,
       &arkdown_core::OutputTarget::Hap,
+      "default",
       &final_module_json,
       2,
       &[],

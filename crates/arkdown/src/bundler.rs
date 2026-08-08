@@ -1680,6 +1680,16 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         module_id: &str,
         ownership: &HvigorChunkSource,
     ) -> Result<String, ArkdownError> {
+        // The generated ResourceTable carries the owning module name in its
+        // fixed Ohm URL (e.g. `com.example.arkdown.test/entry/build/
+        // generated/r/ResourceTable`) even for the ohosTest module.
+        if let Some(ohm_url) = self.module_path_map.module_meta_info_ohm_url(module_id) {
+            if let Some((_, module)) = ohm_url.split_once('/') {
+                if let Some(module) = module.split('/').next() {
+                    return Ok(module.to_string());
+                }
+            }
+        }
         match &ownership.kind {
             // `ModuleMode.processModuleInfos` uses `getPkgModulesFilePkgName`
             // for ordinary OHPM packages. The value is the physical OHPM
@@ -1699,7 +1709,19 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                     ))
                 }),
             HvigorChunkSourceKind::SourceModule
-            | HvigorChunkSourceKind::LocalDependencyModule(_) => Ok(ownership.module_name.clone()),
+            | HvigorChunkSourceKind::LocalDependencyModule(_) => {
+                // Files under the current module root carry the entry module
+                // name (hvigor `pkgName@<module>` for the `ohosTest` template
+                // tree uses the test module name `entry_test`).
+                if arkdown_path::AbsPath::canonicalize(Path::new(module_id))
+                    .map(|path| path.starts_with(self.module_path_map.current_module_root()))
+                    .unwrap_or(false)
+                {
+                    Ok(self.module_name.to_string())
+                } else {
+                    Ok(ownership.module_name.clone())
+                }
+            }
         }
     }
 
@@ -2486,6 +2508,10 @@ struct HvigorModulePathMap {
 }
 
 impl HvigorModulePathMap {
+    fn current_module_root(&self) -> &Path {
+        &self.current_module_root
+    }
+
     fn new(
         current_module_name: &str,
         module_root: &Path,
@@ -2747,7 +2773,17 @@ impl HvigorModulePathMap {
                 let source_file = ArtifactPathSerializer::rel_to_slash(
                     &Path::new(&source_file).with_extension(""),
                 );
-                let module_segment = if source.module_name == entry_module_name {
+                // Files under the current module root belong to the entry
+                // module even when the source ownership resolved them to a
+                // configured module name (the `ohosTest` template tree lives
+                // under `<module>/.test/...` but carries the test module name
+                // `entry_test`; hvigor `getBelongModuleInfo` keys by the
+                // modulePathMap entry).
+                let belongs_to_current = source.module_name == entry_module_name
+                    || Self::canonical_root(Path::new(module_id)).starts_with(
+                        &self.current_module_root,
+                    );
+                let module_segment = if belongs_to_current {
                     entry_module_name.to_string()
                 } else {
                     format!("{entry_module_name}@{}", source.module_name)
@@ -3559,10 +3595,19 @@ impl<'a> HvigorModuleRelativeSourceFile<'a> {
     }
 
     fn after_src_main(&self) -> Option<PathBuf> {
+        // hvigor `ark_utils.getOhmUrlByFilepath` matches
+        // `/src/(?:main|ohosTest)/(ets|js|mock)/` and maps the remainder to
+        // `ets/...` — the `ohosTest` template tree
+        // (`.test/<product>/intermediates/src/ohosTest/ets/...`) hits the
+        // `src/ohosTest` arm.
         let components = self.relative.components().collect::<Vec<_>>();
         let src_main_index = components.windows(2).position(|window| {
             matches!(window[0], std::path::Component::Normal(component) if component == "src")
-                && matches!(window[1], std::path::Component::Normal(component) if component == "main")
+                && matches!(
+                    window[1],
+                    std::path::Component::Normal(component)
+                        if component == "main" || component == "ohosTest"
+                )
         })?;
         let mut path = PathBuf::new();
         for component in components.into_iter().skip(src_main_index + 2) {

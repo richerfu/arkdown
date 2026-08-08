@@ -48,6 +48,9 @@ pub(super) struct ModuleBuildLayout<'a> {
   /// (`--target test`, mirroring `hvigorw test`) use `".test"` — hvigor
   /// injects `buildRoot=.test` via `setTestDefaultParameters`.
   build_root: &'a str,
+  /// Target name segment in intermediate/loader/cache paths (hvigor
+  /// `getIntermediatesProcessProfile()` etc. key by target).
+  target_name: &'a str,
 }
 
 impl<'a> ModuleBuildLayout<'a> {
@@ -55,6 +58,18 @@ impl<'a> ModuleBuildLayout<'a> {
     Self {
       module_root,
       build_root: "build",
+      target_name: "default",
+    }
+  }
+
+  /// Layout for a named target configuration (e.g. `ohosTest`), which keys
+  /// the intermediate/loader/cache directories like hvigor.
+  pub(super) fn for_target(module_root: &'a Path, target_name: &'a str) -> Self {
+    let _ = target_name;
+    Self {
+      module_root,
+      build_root: "build",
+      target_name,
     }
   }
 
@@ -63,17 +78,22 @@ impl<'a> ModuleBuildLayout<'a> {
     Self {
       module_root,
       build_root: ".test",
+      target_name: "default",
     }
   }
 
-  /// Layout for the active output target: local unit-test builds root at
-  /// `<module>/.test`; everything else uses `build`.
+  /// Layout for the active output target and module target name: local
+  /// unit-test builds root at `<module>/.test`; named targets (e.g.
+  /// `ohosTest`) key intermediate/loader/cache directories like hvigor.
   pub(super) fn for_output_target(
     output_target: &arkdown_core::OutputTarget,
     module_root: &'a Path,
+    target_name: &'a str,
   ) -> Self {
     if matches!(output_target, arkdown_core::OutputTarget::Test) {
       Self::for_test(module_root)
+    } else if target_name != "default" {
+      Self::for_target(module_root, target_name)
     } else {
       Self::new(module_root)
     }
@@ -153,7 +173,7 @@ impl<'a> ModuleBuildLayout<'a> {
   }
 
   pub(super) fn default_intermediate_dir(&self, stage: &str) -> PathBuf {
-    self.intermediates().join(stage).join("default")
+    self.intermediates().join(stage).join(self.target_name)
   }
 
   pub(super) fn intermediate_dir(&self, stage: &str) -> PathBuf {
@@ -278,7 +298,7 @@ impl<'a> ModuleBuildLayout<'a> {
       .build_default()
       .join("generated")
       .join("r")
-      .join("default")
+      .join(self.target_name)
       .join("ResourceTable.h")
   }
 
@@ -287,7 +307,7 @@ impl<'a> ModuleBuildLayout<'a> {
       .build_default()
       .join("generated")
       .join("r")
-      .join("default")
+      .join(self.target_name)
       .join("ResourceTable.ts")
   }
 

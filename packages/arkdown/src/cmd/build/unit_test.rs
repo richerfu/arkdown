@@ -89,6 +89,64 @@ pub(crate) fn generate_unit_test_template(
   Ok(())
 }
 
+/// Write the `ohosTest` template tree into
+/// `<module>/.test/<product>/intermediates/src/ohosTest/` (hvigor
+/// `GenerateOhosTestTemplate` calling `@ohos/coverage`
+/// `generateOhosTestTemplateFile`). API >= 11 uses the `@kit.*` template
+/// variants (`TestAbility_withKit.ets`, `OpenHarmonyTestRunner_mock.ets`);
+/// older SDKs use the plain templates.
+pub(crate) fn generate_ohos_test_template(module_root: &Path, api_version: u32) -> Result<()> {
+  let source_root = module_root
+    .join(".test")
+    .join("default")
+    .join("intermediates")
+    .join("src")
+    .join("ohosTest");
+  let runner_dir = source_root.join("ets/testrunner");
+  let ability_dir = source_root.join("ets/testability");
+  let pages_dir = source_root.join("ets/testability/pages");
+  let resources = source_root.join("resources/base");
+  for dir in [
+    &runner_dir,
+    &ability_dir,
+    &pages_dir,
+    &resources.join("element"),
+    &resources.join("profile"),
+  ] {
+    std::fs::create_dir_all(dir)?;
+  }
+  let (runner_src, ability_src) = if api_version >= 11 {
+    (
+      OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE,
+      TEST_ABILITY_WITH_KIT_TEMPLATE,
+    )
+  } else {
+    (OPEN_HARMONY_TEST_RUNNER_TEMPLATE, TEST_ABILITY_TEMPLATE_OHOS)
+  };
+  std::fs::write(runner_dir.join("OpenHarmonyTestRunner.ets"), runner_src)?;
+  std::fs::write(ability_dir.join("TestAbility.ets"), ability_src)?;
+  std::fs::write(pages_dir.join("Index.ets"), OHOS_TEST_INDEX_TEMPLATE)?;
+  std::fs::write(resources.join("element/color.json"), OHOS_TEST_COLOR_TEMPLATE)?;
+  std::fs::write(resources.join("element/string.json"), OHOS_TEST_STRING_TEMPLATE)?;
+  std::fs::write(resources.join("profile/test_pages.json"), OHOS_TEST_PAGES_TEMPLATE)?;
+  Ok(())
+}
+
+/// Whether the generated `ohosTest` template exists — used to gate the
+/// ohosTest compile inputs.
+pub(crate) fn has_ohos_test_template(module_root: &Path) -> bool {
+  module_root
+    .join(".test/default/intermediates/src/ohosTest/ets/testability/TestAbility.ets")
+    .is_file()
+}
+
+/// Whether the generated `ohosTest` template exists — used to gate the
+/// ohosTest compile inputs.
+pub(crate) fn ohos_test_template_root(module_root: &Path) -> std::path::PathBuf {
+  module_root
+    .join(".test/default/intermediates/src/ohosTest/ets")
+}
+
 /// Whether the generated testability template exists under the module build
 /// root — `UnitTestProcessProfile` returns early (no TestAbility injection)
 /// when `<buildRoot>/testability/TestAbility.ets` is missing.
@@ -260,3 +318,367 @@ const TEST_ABILITY_TEMPLATE: &str = "\n    import AbilityConstant from '@ohos.ap
 
 /// `@ohos/coverage` `phoneSettingConfigTemplate` — fixed phone settings.
 const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n        \"1.0.1\": {\n          \"Language\": {\n            \"args\": {\n              \"Language\": \"zh_CN\"\n            }\n          }\n        }\n      },\n      \"frontend\": {\n        \"1.0.0\": {\n          \"Resolution\": {\n            \"args\": {\n              \"Resolution\": \"360*780\"\n            }\n          },\n          \"DeviceType\": {\n            \"args\": {\n              \"DeviceType\": \"phone\"\n            }\n          }\n        }\n      }\n    }\n  ";
+
+  const OPEN_HARMONY_TEST_RUNNER_TEMPLATE: &str = "
+    import hilog from '@ohos.hilog';\n
+    import TestRunner from '@ohos.application.testRunner';\n
+    import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';\n
+    import Want from '@ohos.app.ability.Want';\n
+    \n
+    let abilityDelegator: AbilityDelegatorRegistry.AbilityDelegator\n
+    let abilityDelegatorArguments: AbilityDelegatorRegistry.AbilityDelegatorArgs | undefined = undefined\n
+    let tag: string = 'testTag';\n
+    const UNLOCK_ERROR = -3;\n
+    \n
+    async function onAbilityCreateCallback() {\n
+      hilog.info(0x0000, 'testTag', '%{public}s', 'onAbilityCreateCallback');\n
+    }\n
+    \n
+    async function addAbilityMonitorCallback(err : Error) {\n
+      hilog.info(0x0000, 'testTag', 'addAbilityMonitorCallback : %{public}s', JSON.stringify(err) ?? '');\n
+    }\n
+    \n
+    export default class OpenHarmonyTestRunner implements TestRunner {\n
+      constructor() {\n
+      }\n
+    \n
+      onPrepare() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'OpenHarmonyTestRunner OnPrepare ');\n
+      }\n
+    \n
+      async onRun() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'OpenHarmonyTestRunner onRun run');\n
+        abilityDelegatorArguments = AbilityDelegatorRegistry.getArguments()\n
+        abilityDelegator = AbilityDelegatorRegistry.getAbilityDelegator()\n
+        const bundleName = abilityDelegatorArguments.bundleName;\n
+        const testAbilityName = 'TestAbility';\n
+        const parameters = abilityDelegatorArguments.parameters;\n
+        const moduleName = parameters['-m'];\n
+        const isDebug = parameters['-D'] == 'true';\n
+        let lMonitor: AbilityDelegatorRegistry.AbilityMonitor = {\n
+          abilityName: testAbilityName,\n
+          onAbilityCreate: onAbilityCreateCallback,\n
+          moduleName: moduleName\n
+        };\n
+        abilityDelegator.addAbilityMonitor(lMonitor, addAbilityMonitorCallback)\n
+        await startAbility(bundleName, testAbilityName, moduleName, isDebug);\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'OpenHarmonyTestRunner onRun end');\n
+      }\n
+    }\n
+    \n
+    async function startAbility(bundleName: string, abilityName: string, moduleName: string, isDebug: boolean) {\n
+      let command = `aa start -b ${bundleName} -a ${abilityName} -m ${moduleName}`;\n
+      if (isDebug) {\n
+        command += ' -D';\n
+      }\n
+      await abilityDelegator.executeShellCommand(command).then(result => {\n
+        if (result.stdResult.includes(\"error: unlock screen failed in developer mode\")\n
+        || result.stdResult.includes(\"10106102\")) {\n
+          hilog.info(0x0000, tag, '%{public}s', `startAbility failed ${result.stdResult}`);\n
+          abilityDelegator.finishTest(\"\", UNLOCK_ERROR, () => {});\n
+          return;\n
+        }\n
+      }).catch((err: string) => {\n
+        hilog.info(0x0000, tag, '%{public}s', `startAbility error: ${err}`);\n
+      })\n
+    }
+  ";
+
+  const OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE: &str = "
+    import { abilityDelegatorRegistry, TestRunner } from '@kit.TestKit';\n
+    import { UIAbility, common, application } from '@kit.AbilityKit';\n
+    import { BusinessError } from '@kit.BasicServicesKit';\n
+    import { hilog } from '@kit.PerformanceAnalysisKit';\n
+    import { resourceManager } from '@kit.LocalizationKit';\n
+    import { util } from '@kit.ArkTS';\n
+    \n
+    let abilityDelegator: abilityDelegatorRegistry.AbilityDelegator;\n
+    let abilityDelegatorArguments: abilityDelegatorRegistry.AbilityDelegatorArgs;\n
+    let jsonPath: string = 'mock/mock-config.json';\n
+    let tag: string = 'testTag';\n
+    const UNLOCK_ERROR = -3;\n
+    const global: object = new Function(\"return this\")();\n
+    \n
+    async function onAbilityCreateCallback(data: UIAbility) {\n
+      hilog.info(0x0000, tag, 'onAbilityCreateCallback, data: ${}', JSON.stringify(data));\n
+    }\n
+    \n
+    async function addAbilityMonitorCallback(err: BusinessError) {\n
+      hilog.info(0x0000, tag, 'addAbilityMonitorCallback : %{public}s', JSON.stringify(err) ?? '');\n
+    }\n
+    \n
+    export default class OpenHarmonyTestRunner implements TestRunner {\n
+      constructor() {\n
+      }\n
+    \n
+      onPrepare() {\n
+        hilog.info(0x0000, tag, '%{public}s', 'OpenHarmonyTestRunner OnPrepare');\n
+      }\n
+    \n
+      async onRun() {\n
+        hilog.info(0x0000, tag, '%{public}s', 'OpenHarmonyTestRunner onRun run');\n
+        abilityDelegatorArguments = abilityDelegatorRegistry.getArguments()\n
+        abilityDelegator = abilityDelegatorRegistry.getAbilityDelegator()\n
+        let moduleName = abilityDelegatorArguments.parameters['-m'];\n
+    \n
+        const savePath: string = '__savePath__';\n
+        const readPath: string = '__readPath__';\n
+        const testMode: string = '__testMode__';\n
+        let uid: number = Math.floor(abilityDelegator.getAppContext().applicationInfo.uid / 200000);\n
+        const bundleName: string = abilityDelegatorArguments.bundleName;\n
+        global[savePath] = '/data/storage/el2/base/js_coverage.json';\n
+        global[readPath] = '/data/app/el2/' + uid + '/base/' + bundleName + '/js_coverage.json';\n
+        global[testMode] = 'ohostest';\n
+    \n
+        try {\n
+          application.createModuleContext(abilityDelegator.getAppContext().getApplicationContext(), moduleName)\n
+            .then((data: Context)=> {\n
+              doOnRun(data, moduleName);\n
+          }).catch((error : BusinessError)=>{\n
+            console.error(`test runner createModuleContext failed, error.code: ${(error as BusinessError).code}, error.message: ${(error as BusinessError).message}`);\n
+            return;\n
+          })\n
+        } catch (error) {\n
+          console.error(`test runner createModuleContext failed, error.code: ${(error as BusinessError).code}, error.message: ${(error as BusinessError).message}`);\n
+          return;\n
+        }\n
+      }\n
+    }\n
+    \n
+    async function doOnRun(context: common.Context, moduleName: string) {\n
+      let mResourceManager = context.resourceManager;\n
+      await checkMock(abilityDelegator, mResourceManager);\n
+      const bundleName = abilityDelegatorArguments.bundleName;\n
+      const testAbilityName: string = 'TestAbility';\n
+      const parameters = abilityDelegatorArguments.parameters;\n
+      const isDebug = parameters['-D'] == 'true';\n
+      let lMonitor: abilityDelegatorRegistry.AbilityMonitor = {\n
+        abilityName: testAbilityName,\n
+        onAbilityCreate: onAbilityCreateCallback,\n
+        moduleName: moduleName\n
+      };\n
+      abilityDelegator.addAbilityMonitor(lMonitor, addAbilityMonitorCallback)\n
+      await startAbility(bundleName, testAbilityName, moduleName, isDebug);\n
+      hilog.info(0x0000, tag, '%{public}s', 'OpenHarmonyTestRunner onRun end');\n
+    }\n
+    \n
+    async function startAbility(bundleName: string, abilityName: string, moduleName: string, isDebug: boolean) {\n
+      let command = `aa start -b ${bundleName} -a ${abilityName} -m ${moduleName}`;\n
+      if (isDebug) {\n
+        command += ' -D';\n
+      }\n
+      await abilityDelegator.executeShellCommand(command).then(result => {\n
+        if (result.stdResult.includes(\"error: unlock screen failed in developer mode\")\n
+        || result.stdResult.includes(\"10106102\")) {\n
+          hilog.info(0x0000, tag, '%{public}s', `startAbility failed ${result.stdResult}`);\n
+          abilityDelegator.finishTest(\"\", UNLOCK_ERROR, () => {});\n
+          return;\n
+        }\n
+      }).catch((err: string) => {\n
+        hilog.info(0x0000, tag, '%{public}s', `startAbility error: ${err}`);\n
+      })\n
+    }\n
+    \n
+    async function checkMock(abilityDelegator: abilityDelegatorRegistry.AbilityDelegator, resourceManager: resourceManager.ResourceManager) {\n
+      let rawFile: Uint8Array;\n
+      try {\n
+        rawFile = resourceManager.getRawFileContentSync(jsonPath);\n
+        hilog.info(0x0000, tag, 'MockList file exists');\n
+        let mockStr: string = util.TextDecoder.create('utf-8', { ignoreBOM: true }).decodeToString(rawFile);\n
+        let mockMap: Record<string, string> = getMockList(mockStr);\n
+        try {\n
+          abilityDelegator.setMockList(mockMap)\n
+        } catch (error) {\n
+          let code = (error as BusinessError).code;\n
+          let message = (error as BusinessError).message;\n
+          hilog.error(0x0000, tag, `abilityDelegator.setMockList failed, error code: ${code}, message: ${message}.`);\n
+        }\n
+      } catch (error) {\n
+        let code = (error as BusinessError).code;\n
+        let message = (error as BusinessError).message;\n
+        hilog.error(0x0000, tag, `ResourceManager:callback getRawFileContent failed, error code: ${code}, message: ${message}.`);\n
+      }\n
+    }\n
+    \n
+    function getMockList(jsonStr: string) {\n
+      let jsonObj: Record<string, Object> = JSON.parse(jsonStr);\n
+      let map: Map<string, object> = new Map<string, object>(Object.entries(jsonObj));\n
+      let mockList: Record<string, string> = {};\n
+      map.forEach((value: object, key: string) => {\n
+        let realValue: string = value['source'].toString();\n
+        mockList[key] = realValue;\n
+      });\n
+      hilog.info(0x0000, tag, '%{public}s', 'mock-json value:' + JSON.stringify(mockList) ?? '');\n
+      return mockList;\n
+    }
+  ";
+
+  const TEST_ABILITY_TEMPLATE_OHOS: &str = "
+    import UIAbility from '@ohos.app.ability.UIAbility';\n
+    import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';\n
+    import hilog from '@ohos.hilog';\n
+    import { Hypium } from '@ohos/hypium';\n
+    import testsuite from '../../../../../../../src/ohosTest/ets/test/List.test';\n
+    import window from '@ohos.window';\n
+    import Want from '@ohos.app.ability.Want';\n
+    import AbilityConstant from '@ohos.app.ability.AbilityConstant';\n
+    \n
+    export default class TestAbility extends UIAbility {\n
+        onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onCreate');\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'want param:' + JSON.stringify(want) ?? '');\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'launchParam:'+ JSON.stringify(launchParam) ?? '');\n
+            var abilityDelegator: any\n
+            abilityDelegator = AbilityDelegatorRegistry.getAbilityDelegator()\n
+            var abilityDelegatorArguments: any\n
+            abilityDelegatorArguments = AbilityDelegatorRegistry.getArguments()\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'start run testcase!!!');\n
+            Hypium.hypiumTest(abilityDelegator, abilityDelegatorArguments, testsuite)\n
+        }\n
+    \n
+        onDestroy() {\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onDestroy');\n
+        }\n
+    \n
+        onWindowStageCreate(windowStage: window.WindowStage) {\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onWindowStageCreate');\n
+            windowStage.loadContent('testability/pages/Index', (err, data) => {\n
+                if (err.code) {\n
+                    hilog.error(0x0000, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err) ?? '');\n
+                    return;\n
+                }\n
+                hilog.info(0x0000, 'testTag', 'Succeeded in loading the content. Data: %{public}s',\n
+                    JSON.stringify(data) ?? '');\n
+            });\n
+        }\n
+    \n
+        onWindowStageDestroy() {\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onWindowStageDestroy');\n
+        }\n
+    \n
+        onForeground() {\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onForeground');\n
+        }\n
+    \n
+        onBackground() {\n
+            hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onBackground');\n
+        }\n
+    }
+  ";
+
+  const TEST_ABILITY_WITH_KIT_TEMPLATE: &str = "
+    import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';\n
+    import { abilityDelegatorRegistry } from '@kit.TestKit';\n
+    import { hilog } from '@kit.PerformanceAnalysisKit';\n
+    import { window } from '@kit.ArkUI';\n
+    import { Hypium } from '@ohos/hypium';\n
+    import testsuite from '../../../../../../../src/ohosTest/ets/test/List.test';\n
+    \n
+    const ON_DESTROY_ERROR = -2;\n
+    \n
+    export default class TestAbility extends UIAbility {\n
+      abilityDelegator: abilityDelegatorRegistry.AbilityDelegator;\n
+    \n
+      constructor() {\n
+        super();\n
+        this.abilityDelegator = abilityDelegatorRegistry.getAbilityDelegator();\n
+      }\n
+    \n
+      onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onCreate');\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'want param:' + JSON.stringify(want) ?? '');\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'launchParam:' + JSON.stringify(launchParam) ?? '');\n
+        let abilityDelegatorArguments: abilityDelegatorRegistry.AbilityDelegatorArgs;\n
+        abilityDelegatorArguments = abilityDelegatorRegistry.getArguments();\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'start run testcase!!!');\n
+        Hypium.hypiumTest(this.abilityDelegator, abilityDelegatorArguments, testsuite);\n
+      }\n
+    \n
+      onDestroy() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onDestroy');\n
+        this.abilityDelegator.finishTest('TestAbility onDestroy unexpectedly!', ON_DESTROY_ERROR, () => {});\n
+      }\n
+    \n
+      onWindowStageCreate(windowStage: window.WindowStage) {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onWindowStageCreate');\n
+        windowStage.loadContent('testability/pages/Index', (err) => {\n
+          if (err.code) {\n
+            hilog.error(0x0000, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err) ?? '');\n
+            return;\n
+          }\n
+          hilog.info(0x0000, 'testTag', 'Succeeded in loading the content.');\n
+        });\n
+      }\n
+    \n
+      onWindowStageDestroy() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onWindowStageDestroy');\n
+      }\n
+    \n
+      onForeground() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onForeground');\n
+      }\n
+    \n
+      onBackground() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'TestAbility onBackground');\n
+      }\n
+    }
+  ";
+
+  const OHOS_TEST_INDEX_TEMPLATE: &str = "
+    @Entry\n
+    @Component\n
+    struct Index {\n
+      @State message: string = 'Hello World';\n
+    \n
+      build() {\n
+        Row() {\n
+          Column() {\n
+            Text(this.message)\n
+              .fontSize(50)\n
+              .fontWeight(FontWeight.Bold)\n
+          }\n
+          .width('100%')\n
+        }\n
+        .height('100%')\n
+      }\n
+    }
+  ";
+
+  const OHOS_TEST_COLOR_TEMPLATE: &str = "
+    {\n
+      \"color\": [\n
+        {\n
+          \"name\": \"start_window_background\",\n
+          \"value\": \"#FFFFFF\"\n
+        }\n
+      ]\n
+    }
+  ";
+
+  const OHOS_TEST_STRING_TEMPLATE: &str = "
+    {\n
+      \"string\": [\n
+        {\n
+          \"name\": \"module_test_desc\",\n
+          \"value\": \"test ability description\"\n
+        },\n
+        {\n
+          \"name\": \"TestAbility_desc\",\n
+          \"value\": \"the test ability\"\n
+        },\n
+        {\n
+          \"name\": \"TestAbility_label\",\n
+          \"value\": \"test label\"\n
+        }\n
+      ]\n
+    }
+  ";
+
+  const OHOS_TEST_PAGES_TEMPLATE: &str = "
+    {\n
+      \"src\": [\n
+        \"testability/pages/Index\"\n
+      ]\n
+    }\n
+    
+  ";

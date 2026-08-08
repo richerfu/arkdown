@@ -290,6 +290,7 @@ impl AotLoaderFields {
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
         manifest: &HapManifest,
+        target_name: &str,
     ) -> Self {
         let fallback_an_build = matches!(manifest.module_type, OhosModuleType::Har);
         if fallback_an_build {
@@ -337,6 +338,8 @@ impl AotLoaderFields {
         let module_root = PathBuf::from(to_absolute_path_string(&module_cfg.src_path));
         let aot_layout = if matches!(config.output_target, OutputTarget::Test) {
             ProfileModuleLayout::for_test(&module_root)
+        } else if target_name != "default" {
+            ProfileModuleLayout::for_target(&module_root, target_name)
         } else {
             ProfileModuleLayout::new(&module_root)
         };
@@ -748,6 +751,7 @@ impl LoaderJson {
         config: &ArkdownConfig,
         manifest: &HapManifest,
         module_layout: &ProfileModuleLayout<'_>,
+        target_name: &str,
     ) -> Result<Vec<String>, ArkdownError> {
         let mut runtime_entry_sources: Vec<String> = manifest
             .abilities
@@ -765,9 +769,13 @@ impl LoaderJson {
         // Local unit-test builds replace the module pages with the generated
         // `.test/testability/pages/Index` entry; the real main pages do not
         // participate in the `test` compilation (hvigor `UnitTestArkTS`
-        // inputs). Preview keeps the normal page collection.
+        // inputs). The `ohosTest` target similarly compiles the generated
+        // `src/ohosTest` pages (`$profile:test_pages` lives in the template
+        // tree, not `src/main/resources`). Preview keeps the normal pages.
         if let Some(pages_ref) = &manifest.pages {
-            if !matches!(config.output_target, OutputTarget::Test) {
+            if !matches!(config.output_target, OutputTarget::Test)
+                && target_name != "ohosTest"
+            {
                 runtime_entry_sources
                     .extend(Self::read_main_page_entries(module_layout, pages_ref)?);
             }
@@ -828,15 +836,17 @@ impl LoaderJson {
         module_cfg: &ModuleConfig,
         manifest: &HapManifest,
     ) -> Self {
-        Self::try_generate(config, module_cfg, manifest)
+        Self::try_generate(config, module_cfg, manifest, "default")
             .unwrap_or_else(|err| panic!("failed to generate loader.json: {err}"))
     }
 
-    /// Fallible form of [`LoaderJson::generate`].
+    /// Fallible form of [`LoaderJson::generate`] with an explicit module
+    /// target name (e.g. `ohosTest` keys `generated/r/<target>/`).
     pub fn try_generate(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
         manifest: &HapManifest,
+        target_name: &str,
     ) -> Result<Self, ArkdownError> {
         // Build the dependency graph ONCE per try_generate() invocation.
         // Per SPEC-048: the same snapshot feeds all downstream helpers.
@@ -847,7 +857,7 @@ impl LoaderJson {
                 &config.project_root,
             )
         };
-        Self::try_generate_with_dependency_graph(config, module_cfg, manifest, &dep_graph)
+        Self::try_generate_with_dependency_graph(config, module_cfg, manifest, &dep_graph, target_name)
     }
 
     pub(crate) fn try_generate_with_dependency_graph(
@@ -855,17 +865,20 @@ impl LoaderJson {
         module_cfg: &ModuleConfig,
         manifest: &HapManifest,
         dep_graph: &crate::dependency_graph::LocalDependencyGraph,
+        target_name: &str,
     ) -> Result<Self, ArkdownError> {
         // Local unit-test builds root at `<module>/.test` (hvigor
         // `buildRoot=.test`), which moves cache/assets/loader paths below it.
         let module_layout = if matches!(config.output_target, OutputTarget::Test) {
             ProfileModuleLayout::for_test(&module_cfg.src_path)
+        } else if target_name != "default" {
+            ProfileModuleLayout::for_target(&module_cfg.src_path, target_name)
         } else {
             ProfileModuleLayout::new(&module_cfg.src_path)
         };
         let runtime_entry_sources = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "runtime_entry_sources");
-            Self::collect_runtime_entry_sources(config, manifest, &module_layout)?
+            Self::collect_runtime_entry_sources(config, manifest, &module_layout, target_name)?
         };
 
         // Collect compile_entry from runtime srcEntry values.
@@ -884,8 +897,34 @@ impl LoaderJson {
                     compile_entry.push(to_absolute_path_string(&entry));
                 }
             }
+        } else if target_name == "ohosTest" {
+            // The `ohosTest` target compiles the generated template tree
+            // (`.test/<product>/intermediates/src/ohosTest/ets/`) — the
+            // TestAbility srcEntry points there and the test pages live in
+            // the template `resources`. Relative `./ets/...` srcEntry values
+            // resolve against the module ets root, which does not exist for
+            // the ohosTest module; the absolute template paths below are the
+            // compiler inputs.
+            let template_ets = module_cfg
+                .src_path
+                .join(".test/default/intermediates/src/ohosTest/ets");
+            for entry in [
+                template_ets.join("testability/TestAbility.ets"),
+                template_ets.join("testability/pages/Index.ets"),
+                template_ets.join("testrunner/OpenHarmonyTestRunner.ets"),
+            ] {
+                if entry.is_file() {
+                    compile_entry.push(to_absolute_path_string(&entry));
+                }
+            }
+            for source in runtime_entry_sources.iter().filter(|source| {
+                !Path::new(source).has_root() && !source.starts_with("./ets/")
+            }) {
+                compile_entry.push(source.clone());
+            }
+        } else {
+            compile_entry.extend(runtime_entry_sources.iter().cloned());
         }
-        compile_entry.extend(runtime_entry_sources.iter().cloned());
         let runtime_only_collector = RuntimeOnlyCollector::new(config, module_cfg);
         let module_json_path = module_layout.module_json5();
         let form_sources = {
@@ -1297,7 +1336,7 @@ impl LoaderJson {
 
         let aot_fields = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "aot_loader_fields");
-            AotLoaderFields::from_config(config, module_cfg, manifest)
+            AotLoaderFields::from_config(config, module_cfg, manifest, target_name)
         };
         let build_config_path = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "loader_build_config_path");

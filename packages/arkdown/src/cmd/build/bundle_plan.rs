@@ -207,16 +207,21 @@ impl<'a> BundleModuleMetaInfoFileCollector<'a> {
   }
 
   fn resource_table_ohm_url(&self) -> String {
+    // The ResourceTable record keeps the owning module name even when the
+    // loader names a test module (`ohosTest` target builds under
+    // `entry_test`; hvigor `getOhmUrlByFilepath` resolves the generated
+    // table through the modulePathMap entry).
+    let module_name = self
+      .loader_json
+      .module_path_map
+      .keys()
+      .find(|name| **name != self.loader_json.module_name)
+      .cloned()
+      .unwrap_or_else(|| self.loader_json.module_name.clone());
     if self.loader_json.use_normalized_ohm_url {
-      return format!(
-        "&{}/build/generated/r/ResourceTable&",
-        self.loader_json.module_name
-      );
+      return format!("&{module_name}/build/generated/r/ResourceTable&");
     }
-    format!(
-      "{}/{}/build/generated/r/ResourceTable",
-      self.bundle_name, self.loader_json.module_name
-    )
+    format!("{}/{module_name}/build/generated/r/ResourceTable", self.bundle_name)
   }
 }
 
