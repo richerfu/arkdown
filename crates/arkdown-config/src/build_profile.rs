@@ -412,6 +412,10 @@ pub struct RawPackOptions {
     pub deduplicate_har: bool,
     #[serde(default)]
     pub app_with_signed_pkg: bool,
+    /// `packOptions.enableSourceCodeCheck` (default true): warn when the
+    /// packaged outputs contain stray source code files.
+    #[serde(rename = "enableSourceCodeCheck", default)]
+    pub enable_source_code_check: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -568,6 +572,11 @@ pub struct RawResOptions {
     /// Resource qualifier restrictions; not supported for HAR by hvigor.
     #[serde(default)]
     pub qualifiers_config: Option<serde_json::Value>,
+    /// Remote HAR dependency names whose resources are excluded from the
+    /// bundled-resource map (`har-target-util.js::getHarPathToResourcesDirMap`
+    /// `isNeedExclude`: excluded && !local && host is not a HAR module).
+    #[serde(rename = "excludeHarRes", default)]
+    pub exclude_har_res: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -651,6 +660,22 @@ pub struct RawArkOptions {
     pub bundled_dependencies: Option<bool>,
     #[serde(default)]
     pub integrated_hsp: Option<bool>,
+    #[serde(default)]
+    pub widget: Option<RawWidgetArkOptions>,
+    #[serde(default)]
+    pub branch_elimination: Option<bool>,
+    #[serde(rename = "transformLib", default)]
+    pub transform_lib: Option<std::path::PathBuf>,
+    #[serde(rename = "skipOhModulesLint", default)]
+    pub skip_oh_modules_lint: Option<bool>,
+    #[serde(rename = "reExportCheckMode", default)]
+    pub re_export_check_mode: Option<String>,
+    #[serde(rename = "autoLazyImport", default)]
+    pub auto_lazy_import: Option<bool>,
+    #[serde(rename = "autoLazyFilter", default)]
+    pub auto_lazy_filter: Option<RawAutoLazyFilter>,
+    #[serde(rename = "expandImportPath", default)]
+    pub expand_import_path: Option<RawExpandImportPath>,
     #[serde(rename = "aotCompileMode", default)]
     pub aot_compile_mode: Option<String>,
     #[serde(rename = "apPath", default)]
@@ -659,6 +684,31 @@ pub struct RawArkOptions {
     pub host_pgo: Option<bool>,
     #[serde(rename = "tscConfig", default)]
     pub tsc_config: Option<RawArkTscConfig>,
+}
+
+/// Raw `arkOptions.widget` values accepted by hvigor 6.24.3.
+#[derive(Debug, Deserialize, Default)]
+pub struct RawWidgetArkOptions {
+    #[serde(rename = "transitiveDeps", default)]
+    pub transitive_deps: Option<bool>,
+}
+
+/// Raw `arkOptions.autoLazyFilter` values.
+#[derive(Debug, Deserialize, Default)]
+pub struct RawAutoLazyFilter {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// Raw `arkOptions.expandImportPath` values.
+#[derive(Debug, Deserialize, Default)]
+pub struct RawExpandImportPath {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Raw `arkOptions.tscConfig` values accepted by the latest ets checker.
@@ -720,6 +770,28 @@ impl<'a> BuildOptionDecoder<'a> {
             byte_code_har: options.byte_code_har,
             bundled_dependencies: options.bundled_dependencies.unwrap_or(false),
             integrated_hsp: options.integrated_hsp,
+            widget: options.widget.as_ref().map(|widget| {
+                arkdown_core::WidgetArkOptions {
+                    transitive_deps: widget.transitive_deps.unwrap_or(false),
+                }
+            }),
+            branch_elimination: options.branch_elimination,
+            transform_lib: options.transform_lib.clone(),
+            skip_oh_modules_lint: options.skip_oh_modules_lint,
+            re_export_check_mode: options.re_export_check_mode.clone(),
+            auto_lazy_import: options.auto_lazy_import,
+            auto_lazy_filter: options.auto_lazy_filter.as_ref().map(|filter| {
+                arkdown_core::AutoLazyFilter {
+                    include: filter.include.clone(),
+                    exclude: filter.exclude.clone(),
+                }
+            }),
+            expand_import_path: options.expand_import_path.as_ref().map(|expand| {
+                arkdown_core::ExpandImportPath {
+                    enable: expand.enable,
+                    exclude: expand.exclude.clone(),
+                }
+            }),
             tsc_config: arkdown_core::ArkTscConfig {
                 target_es_version: arkdown_core::ArkTscTarget::from_hvigor_option(
                     options
@@ -781,6 +853,7 @@ impl<'a> BuildOptionDecoder<'a> {
                     res_compile_threads: resources.res_compile_threads,
                     ignore_resource_pattern: resources.ignore_resource_pattern.clone(),
                     qualifiers_config: resources.qualifiers_config.clone(),
+                    exclude_har_res: resources.exclude_har_res.clone(),
                 });
         let preload_so = self
             .raw
@@ -819,6 +892,11 @@ impl<'a> BuildOptionDecoder<'a> {
                 .raw
                 .and_then(|option| option.pack_options.as_ref())
                 .is_some_and(|options| options.app_with_signed_pkg),
+            enable_source_code_check: self
+                .raw
+                .and_then(|option| option.pack_options.as_ref())
+                .map(|options| options.enable_source_code_check)
+                .unwrap_or(true),
             generate_shared_tgz: self.raw.and_then(|option| option.generate_shared_tgz),
             customized_har_base_package,
             remove_permissions: self
@@ -1374,6 +1452,87 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
         }
         Ok(effective.value)
     }
+
+    /// hvigor `build-info.ts` display resolution (`-p buildOption=`).
+    ///
+    /// Like [`resolve_value`](Self::resolve_value) but keeps what hvigor's
+    /// `BuildInfo` task shows: path-bearing values stay in their raw declared
+    /// form (hvigor does not normalize them in the resolved map), and the
+    /// buildOptionSet identity (`name`) plus the default module/build-mode
+    /// presets (`debuggable`, `copyFrom`) are preserved instead of stripped.
+    /// The presets are merged last with hvigor's fill-only semantics
+    /// (`mergeBuildOption(preset, resolved)` keeps the resolved value for
+    /// overlapping keys).
+    pub fn resolve_display_value(&self) -> Result<serde_json::Value, ConfigError> {
+        let module_snapshot = self.inventory.module(self.module_name)?;
+        let project = &self.inventory.project;
+        let module = module_snapshot.profile.as_ref();
+        let mut effective = BuildOptionValue::default();
+
+        effective.merge_display_layer(project.project_build_mode_option(self.build_mode_name));
+        effective.merge_display_layer(project.product_build_option(self.product_name));
+        if let Some(module) = module {
+            effective.merge_display_layer(module.module_build_option());
+            if let Some(option_set) = module.selected_build_option(
+                self.build_mode_name,
+                self.target_name,
+                &module_snapshot.path,
+            )? {
+                effective.merge_display_layer(Some(&option_set));
+            }
+            effective.merge_display_layer(module.target_build_option(self.target_name));
+        }
+        effective.merge_display_layer(self.build_script_override.as_ref());
+
+        // hvigor `validateBuildOptionSet` synthesizes `{name}` placeholders
+        // for the DEFAULT/DEBUG/RELEASE option names, and the build-mode
+        // binder fallback resolves to one of them, so the displayed entry
+        // always carries the option name when the module did not declare it.
+        let option_name = module
+            .map(|module| module.build_option_name(self.build_mode_name, self.target_name))
+            .unwrap_or_else(|| self.build_mode_name.to_string());
+        let name_in_presets = matches!(option_name.as_str(), "default" | "debug" | "release");
+        if name_in_presets {
+            effective.value =
+                BuildOptionValue::merge_values(
+                    &serde_json::json!({ "name": option_name }),
+                    &effective.value,
+                    "",
+                );
+        }
+        // `getDefaultModuleBuildOpt` then `getDefaultBuildModeBuildOpt` are
+        // merged last in `initModuleBuildOptionMap` and only fill keys the
+        // resolved option did not already set.
+        let module_preset = match option_name.as_str() {
+            "debug" => serde_json::json!({ "debuggable": true, "copyFrom": "default" }),
+            "release" => serde_json::json!({ "debuggable": false, "copyFrom": "default" }),
+            "default" => serde_json::json!({ "debuggable": true }),
+            _ => serde_json::Value::Null,
+        };
+        if !module_preset.is_null() {
+            effective.value = BuildOptionValue::merge_values(&module_preset, &effective.value, "");
+        }
+        let mode_preset = match self.build_mode_name {
+            "debug" | "test" => serde_json::json!({ "debuggable": true }),
+            "release" => serde_json::json!({ "debuggable": false }),
+            _ => serde_json::Value::Null,
+        };
+        if !mode_preset.is_null() {
+            effective.value = BuildOptionValue::merge_values(&mode_preset, &effective.value, "");
+        }
+        Ok(effective.value)
+    }
+}
+
+impl BuildOptionValue {
+    /// Merge a layer without hvigor's path normalization — the raw declared
+    /// values hvigor's `BuildInfo` task displays.
+    fn merge_display_layer(&mut self, layer: Option<&serde_json::Value>) {
+        let Some(layer) = layer else {
+            return;
+        };
+        self.value = Self::merge_values(&self.value, layer, "");
+    }
 }
 
 #[derive(Debug)]
@@ -1485,7 +1644,12 @@ impl BuildProfileValue {
                 }
             }
         }
+        // `getBuildOptNameFromMapping` fallback plus the default binder
+        // synthesized by `getOrDefaultBuildModeBinderSet`: the `ohosTest`
+        // target always binds to the `default` option set.
         match build_mode_name {
+            "debug" | "test" if target_name == "ohosTest" => "default",
+            "release" if target_name == "ohosTest" => "default",
             "debug" | "test" => "debug",
             "release" => "release",
             _ => "default",
@@ -2687,6 +2851,159 @@ mod tests {
                 .and_then(|config| config.target_es_version.as_deref()),
             Some("ES2017")
         );
+    }
+
+    /// 6.24.3 `arkOptions.widget.transitiveDeps` (default `false`).
+    #[test]
+    fn test_parse_widget_transitive_deps_under_ark_options() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        arkOptions: {
+                            widget: { transitiveDeps: true }
+                        }
+                    }
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let decoded = BuildOptionDecoder::new(
+            profile.app.products[0].build_option.as_ref(),
+            std::path::Path::new("/project"),
+            std::path::Path::new("build-profile.json5"),
+        )
+        .decode()
+        .unwrap();
+        let widget = decoded
+            .ark_options
+            .as_ref()
+            .and_then(|options| options.widget.as_ref())
+            .expect("widget config parsed");
+        assert!(widget.transitive_deps);
+
+        // Absent widget block stays absent (presence is observable).
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: { arkOptions: {} }
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let decoded = BuildOptionDecoder::new(
+            profile.app.products[0].build_option.as_ref(),
+            std::path::Path::new("/project"),
+            std::path::Path::new("build-profile.json5"),
+        )
+        .decode()
+        .unwrap();
+        assert!(decoded.ark_options.as_ref().unwrap().widget.is_none());
+    }
+
+    /// 6.24.3 schema arkOptions fields: branchElimination, transformLib,
+    /// skipOhModulesLint, reExportCheckMode, autoLazyImport/autoLazyFilter,
+    /// expandImportPath.
+    #[test]
+    fn test_parse_remaining_ark_options_fields() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        arkOptions: {
+                            branchElimination: true,
+                            transformLib: "./aop-lib.js",
+                            skipOhModulesLint: true,
+                            reExportCheckMode: "strict",
+                            autoLazyImport: true,
+                            autoLazyFilter: {
+                                include: ["@ohos/foo"],
+                                exclude: ["@ohos/bar", "@ohos/baz"]
+                            },
+                            expandImportPath: {
+                                enable: true,
+                                exclude: ["@ohos/keep"]
+                            }
+                        }
+                    }
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let decoded = BuildOptionDecoder::new(
+            profile.app.products[0].build_option.as_ref(),
+            std::path::Path::new("/project"),
+            std::path::Path::new("build-profile.json5"),
+        )
+        .decode()
+        .unwrap();
+        let ark_options = decoded.ark_options.as_ref().unwrap();
+        assert_eq!(ark_options.branch_elimination, Some(true));
+        assert_eq!(
+            ark_options.transform_lib.as_deref(),
+            Some(std::path::Path::new("./aop-lib.js"))
+        );
+        assert_eq!(ark_options.skip_oh_modules_lint, Some(true));
+        assert_eq!(
+            ark_options.re_export_check_mode.as_deref(),
+            Some("strict")
+        );
+        assert_eq!(ark_options.auto_lazy_import, Some(true));
+        let filter = ark_options.auto_lazy_filter.as_ref().unwrap();
+        assert_eq!(filter.include, vec!["@ohos/foo"]);
+        assert_eq!(filter.exclude, vec!["@ohos/bar", "@ohos/baz"]);
+        let expand = ark_options.expand_import_path.as_ref().unwrap();
+        assert!(expand.enable);
+        assert_eq!(expand.exclude, vec!["@ohos/keep"]);
+
+        // Absent fields stay absent (presence is observable).
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: { arkOptions: {} }
+                }],
+            },
+            modules: [{ name: "entry", srcPath: "./entry" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let decoded = BuildOptionDecoder::new(
+            profile.app.products[0].build_option.as_ref(),
+            std::path::Path::new("/project"),
+            std::path::Path::new("build-profile.json5"),
+        )
+        .decode()
+        .unwrap();
+        let ark_options = decoded.ark_options.as_ref().unwrap();
+        assert!(ark_options.branch_elimination.is_none());
+        assert!(ark_options.transform_lib.is_none());
+        assert!(ark_options.skip_oh_modules_lint.is_none());
+        assert!(ark_options.re_export_check_mode.is_none());
+        assert!(ark_options.auto_lazy_import.is_none());
+        assert!(ark_options.auto_lazy_filter.is_none());
+        assert!(ark_options.expand_import_path.is_none());
     }
 
     #[test]
