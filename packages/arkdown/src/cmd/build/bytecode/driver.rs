@@ -47,6 +47,11 @@ pub struct Ts2abcOptions {
   pub dump_deps_info: bool,
   pub remove_redundant_file: bool,
   pub npm_module_entry_list: Option<PathBuf>,
+  /// es2abc `--branch-elimination` (release, non-debuggable, no bytecode
+  /// obfuscation — mirrors `module_mode.js` command construction).
+  pub branch_elimination: bool,
+  /// es2abc `--transform-lib` AOP transform library path when configured.
+  pub transform_lib: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +271,15 @@ impl SdkEs2abcBackend {
     if !options.optimize_try_catch_func {
       command.arg("--opt-try-catch-func=false");
     }
+    // `abstract-compile-node.js::declareInputs` only sets projectConfig
+    // branchElimination for non-debuggable builds; mirror that here so a
+    // debug build never passes the flag even if a caller misconfigures it.
+    if options.branch_elimination && !options.debug_info {
+      command.arg("--branch-elimination");
+    }
+    if let Some(transform_lib) = &options.transform_lib {
+      command.arg("--transform-lib").arg(transform_lib);
+    }
     if options.enable_annotations {
       command.arg("--enable-annotations");
     }
@@ -388,4 +402,112 @@ fn needs_file_info(input: &Ts2abcInput, options: &Ts2abcOptions) -> bool {
 
 fn non_empty_str(value: Option<&str>) -> Option<&str> {
   value.filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn module_mode_options() -> Ts2abcOptions {
+    Ts2abcOptions {
+      inputs: vec![Ts2abcInput {
+        path: PathBuf::from("/tmp/entry.js"),
+        output: None,
+        cache_file: None,
+        record_name: "entry".to_string(),
+        source_file: Some("entry.js".to_string()),
+        package_name: Some("entry".to_string()),
+        is_commonjs: false,
+        is_shared_module: false,
+        origin_source_lang: "js".to_string(),
+        source_map: None,
+      }],
+      output: PathBuf::from("/tmp/modules.abc"),
+      target_api_version: 23,
+      target_api_sub_version: None,
+      enable_annotations: false,
+      use_define_semantic: false,
+      debug_info: false,
+      opt_level: 2,
+      optimize_try_catch_func: true,
+      merge_abc: true,
+      module: true,
+      commonjs: false,
+      input_extension: "js".to_string(),
+      module_record_field_name: None,
+      cache_file: None,
+      output_proto: None,
+      compile_context_info: CompileContextInfo::default(),
+      enable_abc_input: false,
+      dump_deps_info: false,
+      remove_redundant_file: false,
+      npm_module_entry_list: None,
+      branch_elimination: false,
+      transform_lib: None,
+    }
+  }
+
+  fn args_for(options: &Ts2abcOptions) -> Vec<String> {
+    let backend = SdkEs2abcBackend::new(PathBuf::from("/fake/es2abc"))
+      .with_input_file_list(Some(PathBuf::from("/tmp/filesInfo.txt")));
+    let command = backend.build_command(options).expect("build command");
+    command
+      .get_args()
+      .map(|arg| arg.to_string_lossy().into_owned())
+      .collect()
+  }
+
+  /// `--branch-elimination` is emitted only for release builds without
+  /// bytecode obfuscation (mirrors `module_mode.js` es2abc construction).
+  #[test]
+  fn branch_elimination_flag_is_conditional() {
+    let base = module_mode_options();
+    let args = args_for(&base);
+    assert!(
+      !args.iter().any(|arg| arg == "--branch-elimination"),
+      "branch-elimination must be absent by default; args: {args:?}"
+    );
+
+    let mut enabled = module_mode_options();
+    enabled.branch_elimination = true;
+    let args = args_for(&enabled);
+    assert!(
+      args.iter().any(|arg| arg == "--branch-elimination"),
+      "branch-elimination must be passed when enabled; args: {args:?}"
+    );
+
+    // Debug builds never pass the flag even when configured.
+    let mut debug = module_mode_options();
+    debug.branch_elimination = true;
+    debug.debug_info = true;
+    let args = args_for(&debug);
+    assert!(
+      !args.iter().any(|arg| arg == "--branch-elimination"),
+      "debug builds must not pass branch-elimination; args: {args:?}"
+    );
+  }
+
+  /// `--transform-lib <path>` is emitted when `arkOptions.transformLib` is set.
+  #[test]
+  fn transform_lib_flag_is_conditional() {
+    let base = module_mode_options();
+    let args = args_for(&base);
+    assert!(
+      !args.iter().any(|arg| arg == "--transform-lib"),
+      "transform-lib must be absent by default; args: {args:?}"
+    );
+
+    let mut configured = module_mode_options();
+    configured.transform_lib = Some(PathBuf::from("/tmp/aop-lib.js"));
+    let args = args_for(&configured);
+    let index = args
+      .iter()
+      .position(|arg| arg == "--transform-lib")
+      .expect("transform-lib flag present");
+    assert_eq!(
+      args.get(index + 1).map(String::as_str),
+      Some("/tmp/aop-lib.js"),
+      "transform-lib must carry the configured path; args: {args:?}"
+    );
+  }
 }

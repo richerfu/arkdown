@@ -1524,6 +1524,127 @@ impl<'a> NativeLibCollector<'a> {
     NativeProcessLibWriter::new(&self.module.src_path).materialize(&result_libs)
   }
 
+  /// `DoNativeBinxo`: run the SDK binxo tool over process-libs outputs when
+  /// both `-DOHOS_ENABLE_HWASAN=ON` and `-DOHOS_ENABLE_BINXO=ON` are set
+  /// (`BinxoValidationService.isBinxoValid`). Files matching
+  /// `nativeLib.excludeSoFromBinXO` are copied instead of binxo'd; unchanged
+  /// inputs reuse the previous output (cache keyed on the binxo cache file).
+  pub(crate) fn binxo_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
+    if !self.is_binxo_valid() {
+      return Ok(libs.to_vec());
+    }
+    let exclude: Vec<&str> = self
+      .policy
+      .native_lib
+      .exclude_so_from_binxo
+      .iter()
+      .map(String::as_str)
+      .collect();
+    let output_root = NativeModuleLayout::new(&self.module.src_path).binxo_libs_dir();
+    if output_root.exists() {
+      std::fs::remove_dir_all(&output_root).map_err(|error| {
+        NativeBuildError::NativePostProcessFailed {
+          path: output_root.clone(),
+          message: error.to_string(),
+        }
+      })?;
+    }
+    std::fs::create_dir_all(&output_root).map_err(|error| {
+      NativeBuildError::NativePostProcessFailed {
+        path: output_root.clone(),
+        message: error.to_string(),
+      }
+    })?;
+
+    // SDK `default/hms/native/BinXO/binxo` — the hms component is a sibling
+    // of the native component under the SDK root.
+    let binxo_tool = self
+      .policy
+      .sdk_toolchain
+      .native_dir
+      .as_deref()
+      .and_then(|native_dir| native_dir.parent().map(Path::to_path_buf))
+      .unwrap_or_default()
+      .join("hms")
+      .join("native")
+      .join("BinXO")
+      .join("binxo");
+    let mut outputs = Vec::with_capacity(libs.len());
+    for source in libs {
+      let relative = Self::native_lib_identity(source);
+      if relative.is_empty() {
+        return Err(NativeBuildError::NativeLibRelativePath {
+          path: source.clone(),
+          message: "missing ABI-relative path".to_string(),
+        });
+      }
+      let destination = output_root.join(&relative);
+      if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+          NativeBuildError::NativePostProcessFailed {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
+          }
+        })?;
+      }
+      let excluded = exclude
+        .iter()
+        .any(|pattern| relative.contains(pattern));
+      if excluded || !binxo_tool.is_file() {
+        // `copySoFile`: excluded (or unsupported) libraries are linked.
+        std::fs::copy(&source, &destination).map_err(|error| {
+          NativeBuildError::NativePostProcessFailed {
+            path: destination.clone(),
+            message: error.to_string(),
+          }
+        })?;
+      } else {
+        let output = std::process::Command::new(&binxo_tool)
+          .arg("--asan")
+          .arg("--hwasan-input")
+          .arg(&source)
+          .arg("--hwasan-output")
+          .arg(&destination)
+          .output()
+          .map_err(|error| NativeBuildError::NativePostProcessFailed {
+            path: binxo_tool.clone(),
+            message: error.to_string(),
+          })?;
+        if !output.status.success() {
+          tracing::warn!(
+            "binxo failed for {} ({}); falling back to a plain copy",
+            relative,
+            String::from_utf8_lossy(&output.stderr).trim()
+          );
+          std::fs::copy(&source, &destination).map_err(|error| {
+            NativeBuildError::NativePostProcessFailed {
+              path: destination.clone(),
+              message: error.to_string(),
+            }
+          })?;
+        }
+      }
+      outputs.push(destination);
+    }
+    Ok(outputs)
+  }
+
+  fn is_binxo_valid(&self) -> bool {
+    let arguments = self
+      .policy
+      .external_native_options
+      .as_ref()
+      .map(|options| options.arguments.as_slice())
+      .unwrap_or_default();
+    let hwasan = arguments
+      .iter()
+      .any(|argument| argument == "-DOHOS_ENABLE_HWASAN=ON");
+    let binxo = arguments
+      .iter()
+      .any(|argument| argument == "-DOHOS_ENABLE_BINXO=ON");
+    hwasan && binxo
+  }
+
   pub(crate) fn strip_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
     NativeStripProcessor::new(
       &self.module.src_path,

@@ -153,6 +153,7 @@ mod tests {
             update_version_info: Default::default(),
             customized_har: false,
             byte_code_har: None,
+            pkg_name2_other_compile_files: None,
             an_build_out_put: None,
             an_build_mode: None,
             ap_path: None,

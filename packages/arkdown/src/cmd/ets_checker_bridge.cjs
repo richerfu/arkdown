@@ -55,7 +55,19 @@ function main() {
   if (typeof sdk.etsStandaloneChecker !== "function") {
     throw new Error(`SDK etsStandaloneChecker is unavailable: ${request.etsLoaderPath}`);
   }
-  sdk.etsStandaloneChecker(request.entries, logger, request.projectConfig);
+  // The SDK checker expects `depName2OhExports`/`depName2DepInfo` to be Maps
+  // (`isOhExport` calls `?.has(pkgName)`); JSON transport delivers plain
+  // objects, so rebuild the Map-shaped fields before the checker runs.
+  const projectConfig = { ...request.projectConfig };
+  for (const key of ["depName2OhExports", "depName2DepInfo"]) {
+    const value = projectConfig[key];
+    if (value && typeof value === "object" && !(value instanceof Map)) {
+      projectConfig[key] = new Map(
+        Object.entries(value).map(([name, info]) => [name, info]),
+      );
+    }
+  }
+  sdk.etsStandaloneChecker(request.entries, logger, projectConfig);
   const checkerExitCode = process.exitCode || 0;
   // Diagnostic severity is returned to Rust. Avoid a process-level exit that
   // would discard the complete deterministic diagnostic list.

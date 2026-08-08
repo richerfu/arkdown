@@ -100,6 +100,11 @@ pub struct RolldownBytecodeCompiler {
   target_api_version: u32,
   target_api_sub_version: Option<String>,
   is_debug: bool,
+  /// es2abc `--branch-elimination` (release, non-debuggable, no bytecode
+  /// obfuscation — mirrors `module_mode.js` command construction).
+  branch_elimination: bool,
+  /// es2abc `--transform-lib` AOP transform library path when configured.
+  transform_lib: Option<PathBuf>,
 }
 
 impl RolldownBytecodeCompiler {
@@ -115,6 +120,8 @@ impl RolldownBytecodeCompiler {
       target_api_version,
       target_api_sub_version: None,
       is_debug,
+      branch_elimination: false,
+      transform_lib: None,
     }
   }
 
@@ -122,6 +129,19 @@ impl RolldownBytecodeCompiler {
   /// `es2abc` command.
   pub fn with_target_api_sub_version(mut self, target_api_sub_version: Option<String>) -> Self {
     self.target_api_sub_version = target_api_sub_version;
+    self
+  }
+
+  /// Enable es2abc `--branch-elimination` when `arkOptions.branchElimination`
+  /// is configured for a non-debuggable build without bytecode obfuscation.
+  pub fn with_branch_elimination(mut self, enabled: bool) -> Self {
+    self.branch_elimination = enabled;
+    self
+  }
+
+  /// Pass `arkOptions.transformLib` to es2abc as `--transform-lib`.
+  pub fn with_transform_lib(mut self, path: Option<PathBuf>) -> Self {
+    self.transform_lib = path;
     self
   }
 
@@ -146,6 +166,12 @@ impl RolldownBytecodeCompiler {
       .with_target_api_sub_version(self.target_api_sub_version.clone())
       .with_annotations()
       .with_opt_level(if self.is_debug { 0 } else { 2 });
+    if self.branch_elimination {
+      builder = builder.with_branch_elimination();
+    }
+    if let Some(transform_lib) = &self.transform_lib {
+      builder = builder.with_transform_lib(transform_lib.clone());
+    }
 
     let npm_entries_path = input.cache_dir.join("npmEntries.txt");
     builder = builder.with_npm_module_cache_entry(npm_entries_path.clone());
@@ -393,6 +419,8 @@ impl Ts2abcCompiler {
       dump_deps_info: plan.dump_deps_info,
       remove_redundant_file: plan.remove_redundant_file,
       npm_module_entry_list: plan.npm_module_entry_list.clone(),
+      branch_elimination: plan.branch_elimination,
+      transform_lib: plan.transform_lib.clone(),
     })
   }
 
@@ -490,6 +518,8 @@ mod tests {
       npm_module_entry_list: None,
       npm_module_cache_entry: None,
       enable_abc_input: false,
+      branch_elimination: false,
+      transform_lib: None,
     }
   }
 

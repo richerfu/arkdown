@@ -367,7 +367,7 @@ fn merge_profile_precedes_dependency_extension_ability_collection() {
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
-    .write_profile_intermediates(&module_root, &final_module_json, 2)
+    .write_profile_intermediates(&module_root, &final_module_json, 2, &[])
     .expect("write staged profiles");
 
   let layout = super::layout::ModuleBuildLayout::new(&module_root);
