@@ -10,9 +10,9 @@ use std::collections::{HashMap, VecDeque};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, BindingIdentifier, Comment,
-    IdentifierName, IdentifierReference, IfStatement, ImportDeclaration, MethodDefinition,
-    MethodDefinitionKind, NumericLiteral, ObjectExpression, ObjectPropertyKind, Program,
-    PropertyDefinition, PropertyKey, StringLiteral, TSType, ThisExpression,
+    BinaryExpression, IdentifierName, IdentifierReference, IfStatement, ImportDeclaration,
+    MethodDefinition, MethodDefinitionKind, NumericLiteral, ObjectExpression, ObjectPropertyKind,
+    Program, PropertyDefinition, PropertyKey, StringLiteral, TSType, ThisExpression,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
@@ -45,7 +45,9 @@ impl HvigorTypescriptPrinter {
         numeric_literals.visit_program(program);
         let mut string_literals = StringLiteralInventory::new(program.source_text);
         string_literals.visit_program(program);
-        let mut original_boundaries = TypeScriptSourceBoundaryInventory::default();
+        let mut original_boundaries = TypeScriptSourceBoundaryInventory::with_source_text(
+            program.source_text,
+        );
         original_boundaries.visit_program(program);
         let source_comments = if options.comments == CommentOptions::disabled() {
             TypeScriptSourceCommentSnapshot::default()
@@ -172,6 +174,7 @@ enum TypeScriptSourceBoundaryKind {
     Type,
     Method { name: String, constructor: bool },
     Property(String),
+    Operator(String),
 }
 
 #[derive(Clone)]
@@ -180,12 +183,21 @@ struct TypeScriptSourceBoundary {
     span: Span,
 }
 
-#[derive(Default)]
-struct TypeScriptSourceBoundaryInventory {
+struct TypeScriptSourceBoundaryInventory<'a> {
     boundaries: Vec<TypeScriptSourceBoundary>,
+    source_text: Option<&'a str>,
 }
 
-impl TypeScriptSourceBoundaryInventory {
+impl<'a> TypeScriptSourceBoundaryInventory<'a> {
+    fn with_source_text(source: &'a str) -> Self {
+        Self {
+            boundaries: Vec::new(),
+            source_text: Some(source),
+        }
+    }
+}
+
+impl<'a> TypeScriptSourceBoundaryInventory<'a> {
     fn push(&mut self, kind: TypeScriptSourceBoundaryKind, span: Span) {
         self.boundaries
             .push(TypeScriptSourceBoundary { kind, span });
@@ -198,7 +210,7 @@ impl TypeScriptSourceBoundaryInventory {
     }
 }
 
-impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory {
+impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
         self.push(
             TypeScriptSourceBoundaryKind::Identifier(identifier.name.to_string()),
@@ -260,10 +272,33 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory {
         self.push(
             TypeScriptSourceBoundaryKind::Property(Self::property_name(&property.key)),
             // TypeScript maps the whole property declaration (including the
-            // `private`/`readonly` keywords) from the source property start.
-            property.span,
+            // `private`/`readonly` keywords) from the source property start;
+            // the trailing `;` maps to the source semicolon (span end).
+            Span::new(property.span.start, property.span.end),
         );
         walk::walk_property_definition(self, property);
+    }
+
+    fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
+        let left_end = expr.left.span().end as usize;
+        let right_start = expr.right.span().start as usize;
+        if let Some(source) = self.source_text {
+            if left_end < right_start {
+                let between = &source[left_end..right_start];
+                let operator = between.trim();
+                if !operator.is_empty()
+                    && operator
+                        .chars()
+                        .all(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+                {
+                    self.push(
+                        TypeScriptSourceBoundaryKind::Operator(operator.to_string()),
+                        Span::new(left_end as u32, right_start as u32),
+                    );
+                }
+            }
+        }
+        walk::walk_binary_expression(self, expr);
     }
 }
 
@@ -288,7 +323,8 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             return Vec::new();
         }
-        let mut generated = TypeScriptSourceBoundaryInventory::default();
+        let mut generated =
+            TypeScriptSourceBoundaryInventory::with_source_text(&parsed.program.source_text);
         generated.visit_program(&parsed.program);
         let mut generated_by_kind = HashMap::<TypeScriptSourceBoundaryKind, VecDeque<Span>>::new();
         for boundary in generated.boundaries {
