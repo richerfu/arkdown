@@ -1,0 +1,50 @@
+{
+  module: {
+    name: "entry",
+    type: "entry",
+    description: "$string:module_desc",
+    mainElement: "EntryAbility",
+    deviceTypes: [
+      "phone"
+    ],
+    deliveryWithInstall: true,
+    formWidgetModule: "widget",
+    installationFree: false,
+    pages: "$profile:main_pages",
+    extensionAbilities: [
+      {
+        name: "EntryFormAbility",
+        srcEntry: "./ets/form/EntryFormAbility.ets",
+        type: "form",
+        metadata: [
+          {
+            name: "ohos.extension.form",
+            resource: "$profile:form_config"
+          }
+        ]
+      }
+    ],
+    abilities: [
+      {
+        name: "EntryAbility",
+        srcEntry: "./ets/entryability/EntryAbility.ets",
+        description: "$string:EntryAbility_desc",
+        icon: "$media:layered_image",
+        label: "$string:EntryAbility_label",
+        exported: true,
+        startWindowIcon: "$media:startIcon",
+        startWindowBackground: "$color:start_window_background",
+        skills: [
+          {
+            entities: [
+              "entity.system.home"
+            ],
+            actions: [
+              "ohos.want.action.home"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

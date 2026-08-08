@@ -1,0 +1,11 @@
+{
+  module: {
+    name: "widget",
+    type: "shared",
+    deliveryWithInstall: true,
+    deviceTypes: [
+      "phone"
+    ],
+    formExtensionModule: "entry"
+  }
+}
