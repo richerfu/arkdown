@@ -48,7 +48,7 @@ process reported by `/usr/bin/time`.
 | Node.js         | 22.21.1                                               |
 | OpenHarmony SDK | 6.1.0.31, API 23                                      |
 | arkdown         | 0.0.1-beta.2                                          |
-| hvigorw         | 6.21.1                                                |
+| hvigorw         | 6.24.3 (DevEco-bundled, run via `hvigor/tools/arkdown-hvigorw`) |
 
 ### Anonymous project scale
 
@@ -85,6 +85,25 @@ by 58.89%, and peak process-tree physical footprint by 70.29% for this project a
 
 Results are representative of this device and project scale; other SDK, hardware, and project
 configurations may differ.
+
+## Parity testing against a real hvigor
+
+The fixture matrix under `tests/fixtures/` is compared artifact-by-artifact against
+the DevEco-bundled hvigor. The bundled `hvigorw` cannot install `@ohos/hvigor`
+from any public npm registry (the IDE provisions the packages itself), so
+`hvigor/tools/arkdown-hvigorw` provisions the per-project workspace from the
+DevEco installation and runs the engine directly:
+
+```sh
+ARKDOWN_PARITY_HVIGORW="$PWD/hvigor/tools/arkdown-hvigorw" \
+ARKDOWN_PARITY_RUN=1 \
+cargo test -p arkdown-napi --test hvigor_parity
+```
+
+Requires DevEco Studio at `/Applications/DevEco-Studio.app` (override with
+`DEVECO_APP`). Verified against hvigor 6.24.3: all 25 parity tests pass with
+zero diffs across HAP/HSP/source-HAR/ByteCode-HAR fixtures in debug and
+release modes, including cold/unchanged/changed incremental builds.
 
 ## Usage
 

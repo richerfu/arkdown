@@ -68,6 +68,7 @@ rayon = { workspace = true }
 sha2 = { workspace = true }
 dhat = { workspace = true, optional = true }
 dunce = { workspace = true }
+jsonschema = "0.49.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mimalloc-safe = { workspace = true, optional = true, features = ["skip_collect_on_exit"] }

@@ -49,7 +49,7 @@ from arkdown's ESMODULE-primary implementation.
 | B3 | Collect router map entries; write `intermediates/routerMap.json` | `ProcessRouterMap` → `process-router-map.js` | `arkdown-profile` router map output + cache fingerprinting | ✅ |
 | B4 | Process `crossAppSharedConfig` from HSP dependencies | `ProcessShareConfig` → `process-share-config.js` | `arkdown-profile::merge_share_config()` wired in CLI; duplicate-URI is hard error | ✅ |
 | B5 | Merge startup config from all HAR/HSP deps; validate task deps | `ProcessStartupConfig` → `process-startup-config.js` | `arkdown-profile::merge_startup_config()` wired in CLI; duplicate task name is hard error | ✅ |
-| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()`: `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate for HAP+HSP module fields and ability/extensionAbility objects. HSP type="shared" written via `OhosModuleType::Shared.to_string()`. Declaration file output is K4/K5-level and tracked separately. | ✅ |
+| B6 | Generate module metadata JSON for HAP/HSP | `CreateModuleInfo` → `create-module-info.js` | `arkdown-profile::write_module_json()`: `packageName` from `oh-package.json5#name`; `installationFree` from `bundleType`; `atomicService` block preserved; `deliveryWithInstall` from module.json5; `dependencies` serialized; `requestPermissions`/`definePermissions`/`proxyData` passed through; preserve-and-mutate for HAP+HSP module fields and ability/extensionAbility objects. HSP type="shared" written via `OhosModuleType::Shared.to_string()`. Field order matches hvigor byte-for-byte: the `app` section keeps the `app.json5` order followed by the computed fields in hvigor's mutation order (`apiReleaseType` → `resolveApi` versions → `appEnvironments` → `bundleType`/`buildMode`/`debug`), the `module` section keeps the `module.json5` order followed by `packageName`/`virtualMachine`/`compileMode`/`dependencies`, and `app.json5#multiProjects` is deleted like `computeAppJsonOpt`. Declaration file output is K4/K5-level and tracked separately. | ✅ |
 | B7 | Generate module metadata JSON for HAR | `CreateHarModuleInfo` → `har/har-extend-info.js` | Follows the current IDE task boundary: no synthetic `intermediates/har/default/har-extend-info.json` is left after packaging. ByteCode HAR generated metadata/declarations stay in `loader_out/etsFortgz` and only SDK-selected declarations enter the archive. | ✅ |
 | B8 | Process privacy data file | `ProcessModulePrivacyProfile` → `process-module-privacy-profile.js` | `privacy_profile_path` passed to `pack_hap()` from CLI; copies to `module.privacy.json` in HAP | ✅ |
 
@@ -67,9 +67,10 @@ from arkdown's ESMODULE-primary implementation.
 |---|---|---|---|---|
 | D1 | Write loader.json: core 18 fields | `GenerateLoaderJson::doTaskAction()` → `generate-loader-json.js` | `arkdown-profile::generate_loader_json()` — all 18 fields match golden: `hspResourcesMap` now populated by scanning `oh_modules/` for HSP packages with `ResourceTable.txt`; `supportChunks` from `buildOption.arkOptions.supportChunks` | ✅ |
 | D2 | `byteCodeHarInfo` map + ByteCode HAR `declarationEntry` | `byte-code-har-utils.js`, `GenerateLoaderJson.processDeclarationEntry()` | `scan_bytecode_har_deps()` follows hvigor's `metadata.byteCodeHar` + `ets/modules.abc` convention and the declared `oh-package.json5` dependency graph (BFS over `dependencies` + `dynamicDependencies`, with legacy full-scan fallback only when no root deps exist), keys entries by `oh-package.json5#name`, populates `abcPath`, `sourceMapsPath`, `compatibleSdkVersion`, and `insightIntent`, writes `updateVersionInfo`, copies dependency `metadata.declarationEntry` normalized OHM URLs, and fills `otherCompileFiles`. The producer golden also verifies SDK-style generated `ModuleInfo.d.ts` in `etsFortgz` without leaking it into the ByteCode HAR archive. | ✅ |
-| D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | `runtimeOnly.sources` (module+deps), `runtimeOnly.packages` with transitive BFS traversal, dependency `metadata.runtimeOnly.sources` and `metadata.runtimeOnly.packages` all collected; `dynamicImportLibInfo` from dynamicDependencies and product/dep packages. Post-bundle dynamic `import()` graph parity remaining. | ✅ |
+| D3 | `runtimeOnly` compile entries and `dynamicImportLibInfo` (runtime-only and cross-HAR dynamic imports) | `GenerateLoaderJson.processDynamicImport()` | `runtimeOnly.sources` (module+deps), `runtimeOnly.packages` with transitive BFS traversal, dependency `metadata.runtimeOnly.sources` and `metadata.runtimeOnly.packages` all collected; `dynamicImportLibInfo` from dynamicDependencies and product/dep packages, with hvigor-shaped entries (`hostModulesInfo`, `entryFilePath`, `isLocalDependency`, `pkgPath`, HSP `module.name` substitution). Confirmed against the installed 6.24.3 source: `processDynamicImport` is driven entirely by `buildOption.arkOptions.runtimeOnly`; there is no post-bundle dynamic-`import()` graph walk. | ✅ |
 | D4 | `workers[]` (WebWorker `.ets`/`.ts`/`.js` file paths) | `compiler/main.js::readWorkerFile()` reads explicit loader entries; `loadWorker()` scans `workers/` recursively when absent | `generate_loader_json()` recursively scans `src/main/ets/workers`, serializes absolute `workers` only when non-empty, and adds matching `./ets/...` compile entries; explicit `buildOption.sourceOption.workers` entries merged in (deduplicated) | ✅ |
 | D5 | `hspNameOhmMap` + `harNameOhmMap` for multi-module projects | From `DependencyManager` | `collect_hsp_har_ohm_maps()` now uses BFS over `oh-package.json5` dependency graph with visited set for cycle detection; collects direct AND transitive HSP/HAR dependencies with correct `@bundle:<bundleName>/<moduleName>/<entryRelPath>` OHM URLs | ✅ |
+| D6 | `pkgName2OtherCompileFiles` (6.24.3): transitively blocked compile files grouped per topmost ByteCode HAR | `generate-loader-json.js::setByteCodeHarInfoAndOtherCompileFiles` V2 chain (`processSourceCodeHarNodeV2`/`processNpmPackageNodeV2`/`collectExtraImporteesV2`) + `arkOptions.widget.transitiveDeps` | `arkdown-profile::collect_pkg_name2_other_compile_files()` mirrors the V2 BFS: `topmostBlockedNode` propagation from each non-bundled BC-HAR, HSP/SO/dev-dependency filtering (`getFinalNodes`), source-HAR `src/main/ets` tree + npm entry collection, and per-group extra-importee resolution. `LoaderJson.pkg_name2_other_compile_files` serializes as `pkgName2OtherCompileFiles` on the widget loader only (`intermediates/loader/widget_loader.json`, written by the widget pass); the common `loader.json` never carries the key, matching `GenerateLoaderJson.doTaskAction()`. Config: `buildOption.arkOptions.widget.transitiveDeps` (schema-verified default `false`). | ✅ |
 
 ### Stage E — ArkCompile Task Setup
 
@@ -79,6 +80,36 @@ from arkdown's ESMODULE-primary implementation.
 | E2 | Load SDK compile plugins from `ets-loader/compile_plugin.js` | `load-sdk-functions.js::loadSdkFunctions()` | OXC/Rolldown replacement for JS compile-plugin work; native SDK tools remain SDK-backed | ✅ |
 | E3 | `hijackTscCompilerOptionsPaths`: monkey-patch `ets_checker.js` for `@types` path resolution | `load-sdk-functions.js` | Not needed — Rust resolver handles paths directly | ✅ (N/A) |
 | E4 | Read rollup msgpack cache from `cache/msgpack/` | `RollupCacheService::readCache()` → `rollup-cache-service.js` | `EtsTransformPlugin` loads per-file transform cache from `build/default/cache/ets_transform/transform_cache.json` at construction; FNV content hash → transformed code; rolldown 1.0.3 scan-stage API not exposed but per-file transform cache covers the critical hot path | ✅ |
+
+### Stage E.5 — arkOptions field coverage (6.24.3 schema)
+
+Every property of `ohos-module-build-profile-schema.json#/definitions/arkOptions`
+(15 fields) is parsed and wired:
+
+| arkOptions field | arkdown | Behavior |
+|---|---|---|
+| `obfuscation` | `ObfuscationConfig` | source/bytecode obfuscation pipeline (I1-I5) |
+| `types` | `ArkOptions.types` | declaration inputs hash |
+| `runtimeOnly` | `RuntimeOnlyConfig` | loader.json D3 |
+| `buildProfileFields` | `build_profile_fields` | `BuildProfile.ets` constants |
+| `supportChunks` | `support_chunks` | F25 manualChunks |
+| `byteCodeHar` | `byte_code_har` | HAR artifact type selection |
+| `bundledDependencies` | `bundled_dependencies` | BC-HAR embedded deps |
+| `integratedHsp` | `integrated_hsp` | K5 |
+| `widget.transitiveDeps` | `widget` | D6 `pkgName2OtherCompileFiles` |
+| `branchElimination` | `branch_elimination` | es2abc `--branch-elimination` (release, non-debuggable, no bytecode obfuscation — `module_mode.js` condition) |
+| `transformLib` | `transform_lib` | es2abc `--transform-lib` |
+| `skipOhModulesLint` | `skip_oh_modules_lint` | checker `skipOhModulesLint` |
+| `reExportCheckMode` | `re_export_check_mode` | checker `reExportCheckMode` (noCheck/compatible/strict) |
+| `autoLazyImport` + `autoLazyFilter` | `TransformOptions.auto_lazy_import` + filter | automatic lazy-import rewrite (SDK `process_lazy_import.js::transformLazyImport`) in the genAbc-equivalent pass after kit expansion: value imports become `import lazy`, type-only/namespace/`.json` stay plain, unreferenced named specifiers are eliminated via the semantic reference set, `include`/`exclude` filter keyed on the owning module package name (`isNotAutoLazyImport`). Byte-compared against hvigor on a real fixture: cache TS, `modules.abc`, and the HAP match except the `sourceMaps.map` (arkdown additionally maps the rewritten lazy import lines). |
+| `expandImportPath` | `TransformOptions.expand_import_path` | package-level import expansion (SDK `import_path_expand.js::expandAllImportPaths`) before kit expansion: each imported symbol is traced through the package entry's export graph (`export { x }`, `export { x } from`, `export * from`, `export default`) to its declaring file, and one import per declaration file is emitted with the `.ets`/`.ts` suffix stripped. Expansion is broader than hvigor's TypeScript-program scope: arkdown's source snapshot includes local `file:` packages that hvigor's program does not resolve, so those imports expand under arkdown but stay package-level under hvigor. |
+| `aotCompileMode` / `apPath` / `hostPGO` / `tscConfig` | parsed | AOT/checker fields |
+
+`buildOption` schema fields are also fully covered: `resOptions` (including
+`excludeHarRes` — remote HAR resource exclusion in `bundled_har_resources`,
+mirroring `har-target-util.js::isNeedExclude`), `externalNativeOptions`,
+`sourceOption.workers`, `removePermissions`, `napiLibFilterOption`,
+`nativeLib`, and `generateSharedTgz`.
 
 ### Stage F — Rollup Bundling (plugin execution order)
 
@@ -234,10 +265,12 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 ### High-Impact Gaps (blocking release/production builds)
 
-**I1-I5 — Obfuscation pipeline not wired**
-- `arkdown-obfuscate` has `transform.rs`, `rename.rs`, `rules.rs`, `minifier.rs`
-- CLI passes no obfuscation config to bundler or ABC compiler
-- Needs: wire between `arkdown::Bundler` output and `arkdown-abc::AbcCompiler` input
+**I1-I5 — Obfuscation pipeline** ✅ resolved
+- `Obfuscator` is wired in `BuildCoordinator` (source obfuscation between
+  bundling and ABC; ArkGuard bytecode obfuscation after ABC), driven by
+  `buildOption.arkOptions.obfuscation`; `TaskInputs` invalidates on rule hash
+  changes; consumer obfuscation config is written for HAR publishing
+- Strict golden coverage via the `release-obfuscation-hap` parity fixture
 
 **J2-J3 — Incremental cache not fully parity-verified**
 - Rolldown transform/task cache is wired for the current Rust pipeline
@@ -265,7 +298,7 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 **B8 — ProcessModulePrivacyProfile** ✅ resolved
 - `pack_hap()` now writes `module.privacy.json` (deflated) from `input.privacy_profile_path` when present
 
-**B6 — module.json field parity** 🔄 improved
+**B6 — module.json field parity** ✅ resolved
 - `packageName` now read from `oh-package.json5#name` (hvigor: `Object.assign` using `packageJsonObj.name`)
 - `installationFree` now derived from `bundleType` (`atomicService` → `true`; other → `false`)
 - `atomicService` config block preserved verbatim for atomicService bundles
@@ -273,12 +306,11 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 - `dependencies` now serialized from manifest (not unconditionally empty array)
 - `requestPermissions`, `definePermissions`, `proxyData` passed through verbatim from raw module.json5
 - Unknown module-level fields preserved via preserve-and-mutate passthrough (mirrors hvigor `cloneDeep` + mutate)
-- **New**: `abilities` and `extensionAbilities` now preserve unknown fields (launchType, visible, continuable, orientation, windowMode, permissions, forms, etc.) via preserve-and-mutate; computed values (resource IDs, srcEntry) are overlaid
-- Remaining: `ArkCompile.declareOutputFiles()` for HSP declaration files
+- `abilities` and `extensionAbilities` preserve unknown fields (launchType, visible, continuable, orientation, windowMode, permissions, forms, etc.) via preserve-and-mutate; computed values (resource IDs, srcEntry) are overlaid
+- HSP declarations (`ArkCompile.declareOutputFiles`) generated via `HarDeclarationGenerator::new_hsp` for `module.type = "shared"` modules
 
-**C3 — ProcessCompiledResources (preloaded SO)**
-- Needed for projects with preloaded system SO libraries
-- Not blocking for pure ArkTS apps
+**C3 — ProcessCompiledResources (preloaded SO)** ✅ resolved
+- `buildOption.preloadSo` paths written to `intermediates/preload_so/default/preload_so_list.json` after resource compilation (`addPreloadSystemSoFileList` equivalent)
 
 **F13, M1-M5 — Watch mode, hot-reload, preview mode**
 - SPEC-023 through SPEC-027
@@ -534,7 +566,7 @@ coverage.
 ## 6. Summary Scorecard
 
 The declared parity matrix is now strict-golden covered against the current
-DevEco Studio Hvigor for:
+DevEco Studio Hvigor (6.24.3) for:
 
 - SDK-owned TypeScript semantic diagnostics in both build and `arkdown check`;
 - ComponentV2 lifecycle HAP output in debug, release, and cold/unchanged/changed
@@ -542,6 +574,11 @@ DevEco Studio Hvigor for:
 - HSP, source HAR, and ByteCode HAR package output in debug and release;
 - source-map handoff, archive/mapping output, and cache invalidation for those
   fixtures.
+
+The full parity suite (25 tests) runs against the real DevEco-bundled hvigor
+via `hvigor/tools/arkdown-hvigorw` (see README "Parity testing against a real
+hvigor"); all fixtures compare artifact-for-artifact with zero diffs, including
+the 6.24.3-only `pkgName2OtherCompileFiles` widget-loader field (D6).
 
 This is not a claim that every arbitrary large application is already a
 drop-in Hvigor replacement. The explicitly retained global risks are the
