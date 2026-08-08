@@ -334,6 +334,21 @@ impl BuildCommand {
         .build()
         .map_err(|e| anyhow::anyhow!("{}", e))?,
     );
+    // `assembleApp` routes to the project-level coordinator; every other
+    // target runs the module coordinator.
+    if args.target == "app" {
+      let mut coordinator = super::app_coordinator::AppBuildCoordinator::new(
+        session,
+        config,
+        args,
+      )
+      .with_package_plugins(package_plugins);
+      if let Some(task_observer) = task_observer {
+        coordinator = coordinator.with_task_observer(task_observer);
+      }
+      coordinator.execute().await?;
+      return Ok(());
+    }
     let mut coordinator = super::coordinator::BuildCoordinator::new(session, config, args)
       .with_package_plugins(package_plugins);
     if let Some(task_observer) = task_observer {
@@ -373,8 +388,11 @@ impl BuildArgs {
       "hap" => Ok(arkdown_core::OutputTarget::Hap),
       "hsp" => Ok(arkdown_core::OutputTarget::Hsp),
       "har" => Ok(arkdown_core::OutputTarget::Har),
+      // APP is a project-level aggregate (`assembleApp`); the module-level
+      // output target is neutral.
+      "app" => Ok(arkdown_core::OutputTarget::Hap),
       target => {
-        anyhow::bail!("unsupported build target '{target}'; expected 'hap', 'hsp', or 'har'")
+        anyhow::bail!("unsupported build target '{target}'; expected 'hap', 'hsp', 'har', or 'app'")
       }
     }
   }

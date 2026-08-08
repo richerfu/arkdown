@@ -96,6 +96,10 @@ impl<'a> RemoteHspCollector<'a> {
         }
     }
 
+    pub fn collect_candidates(&self) -> Result<BTreeMap<String, RemoteHspCandidate>, PackError> {
+        self.collect_candidates_impl()
+    }
+
     pub fn collect_for_app(
         &self,
         bundle_name: &str,
@@ -138,7 +142,7 @@ impl<'a> RemoteHspCollector<'a> {
             .collect())
     }
 
-    fn collect_candidates(&self) -> Result<BTreeMap<String, RemoteHspCandidate>, PackError> {
+    fn collect_candidates_impl(&self) -> Result<BTreeMap<String, RemoteHspCandidate>, PackError> {
         let mut candidates = BTreeMap::new();
         for scope in self.scopes {
             self.scan_repository(
@@ -190,13 +194,13 @@ impl<'a> RemoteHspCollector<'a> {
     }
 }
 
-struct RemoteHspCandidate {
-    package_name: String,
-    version: semver::Version,
-    path: PathBuf,
-    directory_name: String,
-    file_name: String,
-    integrated: bool,
+pub struct RemoteHspCandidate {
+    pub package_name: String,
+    pub version: semver::Version,
+    pub path: PathBuf,
+    pub directory_name: String,
+    pub file_name: String,
+    pub integrated: bool,
 }
 
 impl RemoteHspCandidate {
