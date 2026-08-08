@@ -211,6 +211,10 @@ pub struct BuildOption {
     /// archives are signed before the outer APP is signed.
     #[serde(default)]
     pub app_with_signed_pkg: bool,
+    /// `buildOption.packOptions.enableSourceCodeCheck` (default true): warn
+    /// when the packaged outputs contain stray source code files.
+    #[serde(default = "default_true_enable_source_code_check")]
+    pub enable_source_code_check: bool,
     /// `buildOption.generateSharedTgz` for HSP outputs.
     ///
     /// `None` preserves hvigor's mode-dependent default: enabled for release
@@ -436,6 +440,44 @@ pub struct ArkOptions {
     /// hvigor switch is explicitly enabled.
     #[serde(default)]
     pub integrated_hsp: Option<bool>,
+    /// Widget card configuration from `buildOption.arkOptions.widget`
+    /// (hvigor 6.24.3). `transitiveDeps` switches on the per-ByteCode-HAR
+    /// grouping of transitively blocked compile files written to the widget
+    /// loader.json `pkgName2OtherCompileFiles` field.
+    #[serde(default)]
+    pub widget: Option<WidgetArkOptions>,
+    /// `buildOption.arkOptions.branchElimination` — es2abc `--branch-elimination`
+    /// optimization for non-debuggable (release) builds without bytecode
+    /// obfuscation (`abstract-compile-node.js::declareInputs`,
+    /// `module_mode.js` es2abc command construction).
+    #[serde(default)]
+    pub branch_elimination: Option<bool>,
+    /// `buildOption.arkOptions.transformLib` — AOP transform lib path passed
+    /// to es2abc as `--transform-lib` when non-empty.
+    #[serde(default)]
+    pub transform_lib: Option<std::path::PathBuf>,
+    /// `buildOption.arkOptions.skipOhModulesLint` — passed to the checker as
+    /// `skipOhModulesLint` (skip ArkTS lint for `oh_modules`).
+    #[serde(default)]
+    pub skip_oh_modules_lint: Option<bool>,
+    /// `buildOption.arkOptions.reExportCheckMode` — `noCheck` | `compatible`
+    /// | `strict` re-export checking mode for the checker.
+    #[serde(default)]
+    pub re_export_check_mode: Option<String>,
+    /// `buildOption.arkOptions.autoLazyImport` — automatic lazy-import
+    /// transform (SDK `process_lazy_import.js::transformLazyImport`). Defaults
+    /// to the `ohos.defaults.autoLazyImport` property when absent.
+    #[serde(default)]
+    pub auto_lazy_import: Option<bool>,
+    /// `buildOption.arkOptions.autoLazyFilter` — include/exclude package
+    /// filters for the automatic lazy-import transform.
+    #[serde(default)]
+    pub auto_lazy_filter: Option<AutoLazyFilter>,
+    /// `buildOption.arkOptions.expandImportPath` — expand package-level
+    /// imports into direct source-file imports (SDK `import_path_expand.js`).
+    /// Only effective for non-HAR modules.
+    #[serde(default)]
+    pub expand_import_path: Option<ExpandImportPath>,
     /// TypeScript emission settings from `arkOptions.tscConfig`.
     ///
     /// The installed ets-loader accepts only `ES2017` and `ES2021`; absent or
@@ -443,6 +485,40 @@ pub struct ArkOptions {
     /// `ets_checker.js::getTargetESVersion`.
     #[serde(default)]
     pub tsc_config: ArkTscConfig,
+}
+
+/// Widget card configuration from `buildOption.arkOptions.widget`.
+///
+/// Mirrors the installed hvigor 6.24.3 schema
+/// `ohos-module-build-profile-schema.json#/properties/arkOptions/properties/widget`:
+/// only `transitiveDeps` exists (default `false`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WidgetArkOptions {
+    /// Collect transitively blocked dependency compile files for widget
+    /// compilation, grouped per topmost ByteCode HAR package.
+    #[serde(default)]
+    pub transitive_deps: bool,
+}
+
+/// `buildOption.arkOptions.autoLazyFilter` — include/exclude lists for the
+/// automatic lazy-import transform. Hvigor joins each list with `,` when
+/// passing them to the loader.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutoLazyFilter {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// `buildOption.arkOptions.expandImportPath` — `enable` + `exclude` for the
+/// import path expansion transform (SDK `import_path_expand.js`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExpandImportPath {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// TypeScript emission configuration owned by `arkOptions.tscConfig`.
@@ -549,6 +625,10 @@ pub struct ResOptions {
     pub ignore_resource_pattern: Vec<String>,
     #[serde(default)]
     pub qualifiers_config: Option<serde_json::Value>,
+    /// Remote HAR dependency names whose resources are excluded from the
+    /// bundled-resource map (`har-target-util.js::isNeedExclude`).
+    #[serde(default)]
+    pub exclude_har_res: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -572,6 +652,10 @@ impl Default for CopyCodeResource {
 }
 
 fn default_true() -> bool {
+    true
+}
+
+fn default_true_enable_source_code_check() -> bool {
     true
 }
 

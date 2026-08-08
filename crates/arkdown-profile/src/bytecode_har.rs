@@ -34,8 +34,23 @@ struct OhPkgMinimal {
     dependencies: IndexMap<String, String>,
     #[serde(default)]
     dynamic_dependencies: IndexMap<String, String>,
+    /// `devDependencies` — excluded from the dependency walk unless the
+    /// `ohos.byteCodeHar.integratedOptimization` inject is enabled (hvigor
+    /// `getFinalNodes` default filters `DEV_DEPENDENCIES`).
+    #[serde(default)]
+    dev_dependencies: IndexMap<String, String>,
     #[serde(default)]
     metadata: Option<OhPkgMetadata>,
+}
+
+impl OhPkgMinimal {
+    /// `metadata.byteCodeHar` — the SDK marker used by
+    /// `DefaultNpmDependency.isByteCodeHarDependency()`.
+    fn is_byte_code_har(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.byte_code_har)
+    }
 }
 
 impl OhPkgMinimal {
@@ -797,6 +812,268 @@ impl LoaderByteCodeHarFields {
 
         Self::dedupe_pathbufs(&mut files);
         files
+    }
+
+    /// 6.24.3 `pkgName2OtherCompileFiles`: transitively blocked dependency
+    /// compile files grouped by the topmost blocking ByteCode HAR package.
+    ///
+    /// Mirrors the V2 chain of hvigor's `collectByteCodeInfoAndOtherCompileEntrances`
+    /// (`processSourceCodeHarNodeV2` / `processNpmPackageNodeV2` /
+    /// `collectExtraImporteesV2`): a BFS over the declared dependency graph
+    /// tracks `topmostBlockedNode` — the nearest ByteCode HAR ancestor —
+    /// and every source HAR / npm package reached below one contributes its
+    /// entry and `src/main/ets` sources to that package's group.
+    ///
+    /// HSP dependencies, SO dependencies, and (by default) devDependencies
+    /// are dropped from the walk entirely (`getFinalNodes`).
+    pub fn collect_pkg_name2_other_compile_files(
+        module_root: &Path,
+        project_root: &Path,
+    ) -> IndexMap<String, Vec<PathBuf>> {
+        let mut grouped: IndexMap<String, Vec<PathBuf>> = IndexMap::new();
+        let mut extra_importees: IndexMap<String, Vec<String>> = IndexMap::new();
+        let mut queue =
+            std::collections::VecDeque::<(String, PathBuf, Option<String>)>::new();
+        let mut seen = FxHashSet::default();
+
+        Self::enqueue_root_dependencies(module_root, &mut queue);
+        if project_root != module_root {
+            Self::enqueue_root_dependencies(project_root, &mut queue);
+        }
+        if queue.is_empty() {
+            // hvigor starts from `getDirectPkgNodes()`; without declared
+            // dependencies there is nothing to walk (no oh_modules fallback).
+            return grouped;
+        }
+
+        while let Some((dep_name, issuer_root, topmost)) = queue.pop_front() {
+            for pkg_dir in Self::candidate_dep_dirs(&dep_name, &issuer_root, module_root, project_root)
+            {
+                let root_key = ByteCodeHarScanEntry::path_key(&pkg_dir);
+                if !seen.insert(root_key) {
+                    continue;
+                }
+
+                let Some(pkg) = OhPkgMinimal::load(&pkg_dir) else {
+                    continue;
+                };
+                let package_name = pkg.package_name(&dep_name).to_string();
+
+                // `getFinalNodes`: HSP and SO dependencies are dropped from
+                // the walk; devDependencies declared by the issuer are
+                // dropped unless the `ohos.byteCodeHar.integratedOptimization`
+                // inject is on.
+                if Self::is_hsp_dependency(&pkg_dir) || Self::is_so_dependency(&dep_name) {
+                    continue;
+                }
+                if OhPkgMinimal::load(&issuer_root).is_some_and(|issuer| {
+                    issuer.dev_dependencies.contains_key(&dep_name)
+                }) {
+                    continue;
+                }
+
+                let is_har = ByteCodeHarDependencyProfile::is_har_dependency(&pkg_dir);
+                if pkg.is_byte_code_har() {
+                    // `processByteCodeHarNode`:
+                    //   topmostBlockedNode ||= node
+                    // then children inherit it. `isBundledDependency` nodes
+                    // are handled by `processBundledNodeDependencies` with no
+                    // topmost propagation; arkdown resolves bundled BC-HAR
+                    // children through the same walk without a topmost.
+                    let node_topmost = topmost.clone().or_else(|| Some(package_name.clone()));
+                    Self::collect_extra_importees_v2(
+                        &pkg,
+                        node_topmost.as_deref(),
+                        &mut extra_importees,
+                    );
+                    for child in pkg.dependency_names() {
+                        queue.push_back((child, pkg_dir.clone(), node_topmost.clone()));
+                    }
+                } else {
+                    // Source HAR or npm package reached below a BC-HAR
+                    // ancestor: contribute to the topmost blocker's group.
+                    if let Some(blocker) = topmost.as_deref() {
+                        if is_har {
+                            // `collectSourceCodeHarInfo`: entry file + the
+                            // whole `src/main/ets` source tree.
+                            if let Some(entry) =
+                                Self::resolve_package_entry_path(&pkg_dir, &pkg)
+                            {
+                                grouped.entry(blocker.to_string()).or_default().push(entry);
+                            }
+                            let ets_root =
+                                ProfileModuleLayout::new(&pkg_dir).ets_source_root();
+                            if ets_root.is_dir() {
+                                grouped
+                                    .entry(blocker.to_string())
+                                    .or_default()
+                                    .extend(Self::collect_code_files(&ets_root));
+                            }
+                        } else if let Some(entry) =
+                            Self::resolve_package_entry_path(&pkg_dir, &pkg)
+                        {
+                            // `collectEntryPath` for ordinary npm packages.
+                            grouped.entry(blocker.to_string()).or_default().push(entry);
+                        }
+                    }
+                    // `processNpmPackageNode` does not enqueue children; only
+                    // source HARs keep walking the graph.
+                    if is_har {
+                        for child in pkg.dependency_names() {
+                            queue.push_back((child, pkg_dir.clone(), topmost.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // `processExtraImporteesV2`: resolve each importee string through the
+        // package dependency map into an entry or source file.
+        for (blocker, importees) in extra_importees {
+            let files = grouped.entry(blocker).or_default();
+            for importee in importees {
+                Self::collect_extra_importee_paths(&importee, module_root, project_root, files);
+            }
+        }
+
+        for files in grouped.values_mut() {
+            Self::dedupe_pathbufs(files);
+        }
+        grouped
+    }
+
+    fn enqueue_root_dependencies(
+        root: &Path,
+        queue: &mut std::collections::VecDeque<(String, PathBuf, Option<String>)>,
+    ) {
+        let Some(pkg) = OhPkgMinimal::load(root) else {
+            return;
+        };
+        for dep_name in pkg.dependency_names() {
+            queue.push_back((dep_name, root.to_path_buf(), None));
+        }
+    }
+
+    fn candidate_dep_dirs(
+        dep_name: &str,
+        issuer_root: &Path,
+        module_root: &Path,
+        project_root: &Path,
+    ) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        let mut candidates = vec![issuer_root.join("oh_modules").join(dep_name)];
+        if let Some(store_root) = Self::issuer_store_oh_modules_root(issuer_root) {
+            candidates.push(store_root.join("oh_modules").join(dep_name));
+        }
+        candidates.extend([
+            module_root.join("oh_modules").join(dep_name),
+            project_root.join("oh_modules").join(dep_name),
+        ]);
+
+        let mut seen = FxHashSet::default();
+        for dir in candidates {
+            if dir.is_dir() && seen.insert(ByteCodeHarScanEntry::path_key(&dir)) {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    }
+
+    /// `getFinalNodes` drops HSP dependencies (`isHspDependency`).
+    fn is_hsp_dependency(package_root: &Path) -> bool {
+        let layout = ProfileModuleLayout::new(package_root);
+        for path in [layout.module_json5(), layout.module_json()] {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(profile) = json5::from_str::<ByteCodeHarDependencyProfile>(&content) else {
+                continue;
+            };
+            if profile
+                .module
+                .module_type
+                .as_deref()
+                .is_some_and(|module_type| module_type == "shared")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `ValidateRegExp.SO_DEPENDENCY_REG_EXP = /lib(.+)\.so/`.
+    fn is_so_dependency(dep_name: &str) -> bool {
+        let Some(rest) = dep_name.strip_prefix("lib") else {
+            return false;
+        };
+        !rest.is_empty() && rest.ends_with(".so")
+    }
+
+    /// `collectExtraImporteesV2`: a ByteCode HAR's `metadata.extraImportees`
+    /// grouped under its topmost blocker's package name.
+    ///
+    /// Like hvigor's `getOrSetMapValue(extraImporteesV2, ...)`, an empty
+    /// importee list still registers the group: `processExtraImporteesV2`
+    /// then materializes the group in the compile-file map (hvigor writes it
+    /// as an empty array into `pkgName2OtherCompileFiles`).
+    fn collect_extra_importees_v2(
+        pkg: &OhPkgMinimal,
+        blocker: Option<&str>,
+        out: &mut IndexMap<String, Vec<String>>,
+    ) {
+        let Some(blocker) = blocker else {
+            return;
+        };
+        let Some(importees) = pkg
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.extra_importees.clone())
+        else {
+            return;
+        };
+        let group = out.entry(blocker.to_string()).or_default();
+        for importee in importees {
+            if !group.contains(&importee) {
+                group.push(importee);
+            }
+        }
+    }
+
+    /// `addExtraImporteesToOtherCompileFiles`: resolve one importee string
+    /// (`@scope/pkg` or `@scope/pkg/path`) into an entry or source file.
+    fn collect_extra_importee_paths(
+        importee: &str,
+        module_root: &Path,
+        project_root: &Path,
+        files: &mut Vec<PathBuf>,
+    ) {
+        let Some(specifier) = ExtraImporteeSpecifier::new(importee) else {
+            return;
+        };
+        let package_name = specifier.package_name();
+        let Some(pkg_root) = Self::resolve_dependency_root(
+            package_name,
+            module_root,
+            module_root,
+            project_root,
+        ) else {
+            return;
+        };
+        let Some(pkg) = OhPkgMinimal::load(&pkg_root) else {
+            return;
+        };
+
+        let subpath = specifier.subpath();
+        if subpath.as_os_str().is_empty() {
+            if let Some(entry) = Self::resolve_package_entry_path(&pkg_root, &pkg) {
+                files.push(entry);
+            }
+            return;
+        }
+
+        if let Some(path) = Self::find_supported_source_file(&pkg_root.join(subpath)) {
+            files.push(path);
+        }
     }
 
     /// Build hvigor's `loader.json#dynamicImportLibInfo` entries.
@@ -2292,6 +2569,221 @@ mod tests {
             names.contains(&"runtime-bc-har"),
             "BC HAR in metadata.runtimeOnly.packages must be detected; got: {:?}",
             names
+        );
+    }
+
+    /// 6.24.3 `pkgName2OtherCompileFiles`: transitively blocked source HAR /
+    /// npm packages group under the topmost ByteCode HAR package.
+    #[test]
+    fn test_collect_pkg_name2_other_compile_files_groups_by_topmost_blocker() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+
+        // bc-har-a (BC HAR) -> source-har-b (source HAR) -> source-har-c
+        //                          \-> npm-pkg-d (npm package)
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "bc-har-a": "1.0.0" } }"#,
+        );
+        let bc_har_a = oh_modules.join("bc-har-a");
+        write_abc(&bc_har_a.join("ets").join("modules.abc"));
+        write_file(
+            &bc_har_a.join("oh-package.json5"),
+            r#"{
+              name: "bc-har-a",
+              metadata: { byteCodeHar: true },
+              dependencies: {
+                "source-har-b": "1.0.0",
+                "npm-pkg-d": "1.0.0"
+              }
+            }"#,
+        );
+        write_file(
+            &bc_har_a.join("src/main/module.json5"),
+            r#"{ module: { name: "bc-har-a", type: "har" } }"#,
+        );
+
+        let source_har_b = oh_modules.join("source-har-b");
+        write_file(
+            &source_har_b.join("oh-package.json5"),
+            r#"{
+              name: "source-har-b",
+              main: "src/main/ets/index.ets",
+              dependencies: {
+                "source-har-c": "1.0.0",
+                "npm-pkg-d": "1.0.0"
+              }
+            }"#,
+        );
+        write_file(
+            &source_har_b.join("src/main/module.json5"),
+            r#"{ module: { name: "source-har-b", type: "har" } }"#,
+        );
+        write_file(
+            &source_har_b.join("src/main/ets/index.ets"),
+            "export default 1;",
+        );
+        write_file(
+            &source_har_b.join("src/main/ets/other.ets"),
+            "export default 2;",
+        );
+
+        let source_har_c = oh_modules.join("source-har-c");
+        write_file(
+            &source_har_c.join("oh-package.json5"),
+            r#"{ name: "source-har-c", main: "src/main/ets/index.ets" }"#,
+        );
+        write_file(
+            &source_har_c.join("src/main/module.json5"),
+            r#"{ module: { name: "source-har-c", type: "har" } }"#,
+        );
+        write_file(
+            &source_har_c.join("src/main/ets/index.ets"),
+            "export default 3;",
+        );
+
+        let npm_pkg_d = oh_modules.join("npm-pkg-d");
+        write_file(
+            &npm_pkg_d.join("oh-package.json5"),
+            r#"{ name: "npm-pkg-d", main: "index.js" }"#,
+        );
+        write_file(&npm_pkg_d.join("index.js"), "export default 4;");
+
+        let grouped = LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
+            tmp.path(),
+            tmp.path(),
+        );
+
+        let files = grouped
+            .get("bc-har-a")
+            .expect("blocked files group under the topmost BC HAR");
+        let rel: Vec<String> = files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(tmp.path())
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            rel.iter().any(|p| p.ends_with("source-har-b/src/main/ets/index.ets")),
+            "source HAR entry must be collected; got: {rel:?}"
+        );
+        assert!(
+            rel.iter().any(|p| p.ends_with("source-har-b/src/main/ets/other.ets")),
+            "source HAR ets tree must be collected; got: {rel:?}"
+        );
+        assert!(
+            rel.iter().any(|p| p.ends_with("source-har-c/src/main/ets/index.ets")),
+            "transitive source HAR (two levels below the BC HAR) must be collected; got: {rel:?}"
+        );
+        assert!(
+            rel.iter().any(|p| p.ends_with("npm-pkg-d/index.js")),
+            "npm package entry below the BC HAR must be collected; got: {rel:?}"
+        );
+        assert!(
+            !rel.iter().any(|p| p.contains("bc-har-a/ets")),
+            "the BC HAR's own abc must not be collected; got: {rel:?}"
+        );
+        assert_eq!(
+            grouped.len(),
+            1,
+            "only the topmost BC HAR receives a group; got: {:?}",
+            grouped.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// `getFinalNodes` drops HSP and SO dependencies from the walk.
+    #[test]
+    fn test_collect_pkg_name2_other_compile_files_skips_hsp_and_so_deps() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{ dependencies: { "bc-har-a": "1.0.0" } }"#,
+        );
+        let bc_har_a = oh_modules.join("bc-har-a");
+        write_abc(&bc_har_a.join("ets").join("modules.abc"));
+        write_file(
+            &bc_har_a.join("oh-package.json5"),
+            r#"{
+              name: "bc-har-a",
+              metadata: { byteCodeHar: true },
+              dependencies: {
+                "shared-hsp": "1.0.0",
+                "libnative.so": "1.0.0"
+              }
+            }"#,
+        );
+
+        let shared_hsp = oh_modules.join("shared-hsp");
+        write_file(
+            &shared_hsp.join("oh-package.json5"),
+            r#"{ name: "shared-hsp", main: "src/main/ets/index.ets" }"#,
+        );
+        write_file(
+            &shared_hsp.join("src/main/module.json5"),
+            r#"{ module: { name: "shared-hsp", type: "shared" } }"#,
+        );
+        write_file(
+            &shared_hsp.join("src/main/ets/index.ets"),
+            "export default 5;",
+        );
+
+        let grouped = LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
+            tmp.path(),
+            tmp.path(),
+        );
+        let files = grouped.get("bc-har-a").expect("group exists");
+        assert!(
+            !files
+                .iter()
+                .any(|path| path.to_string_lossy().contains("shared-hsp")),
+            "HSP dependencies are dropped by getFinalNodes; got: {files:?}"
+        );
+    }
+
+    /// devDependencies declared by the issuer are dropped from the walk.
+    #[test]
+    fn test_collect_pkg_name2_other_compile_files_skips_dev_dependencies() {
+        let tmp = make_temp_dir();
+        let oh_modules = tmp.path().join("oh_modules");
+
+        write_file(
+            &tmp.path().join("oh-package.json5"),
+            r#"{
+              dependencies: { "bc-har-a": "1.0.0" },
+              devDependencies: { "dev-only": "1.0.0" }
+            }"#,
+        );
+        let bc_har_a = oh_modules.join("bc-har-a");
+        write_abc(&bc_har_a.join("ets").join("modules.abc"));
+        write_file(
+            &bc_har_a.join("oh-package.json5"),
+            r#"{
+              name: "bc-har-a",
+              metadata: { byteCodeHar: true }
+            }"#,
+        );
+
+        let dev_only = oh_modules.join("dev-only");
+        write_file(
+            &dev_only.join("oh-package.json5"),
+            r#"{ name: "dev-only", main: "index.js" }"#,
+        );
+        write_file(&dev_only.join("index.js"), "export default 6;");
+
+        let grouped = LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
+            tmp.path(),
+            tmp.path(),
+        );
+        assert!(
+            grouped.values().flatten().all(|path| !path
+                .to_string_lossy()
+                .contains("dev-only")),
+            "devDependencies are dropped from the walk"
         );
     }
 }

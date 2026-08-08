@@ -159,6 +159,13 @@ impl<'a> ModuleBuildLayout<'a> {
     self.default_intermediate_file("loader", "loader.json")
   }
 
+  /// hvigor `BuildArtifactConst.WIDGET_LOADER_JSON` — the widget compile
+  /// handoff loader (`GenerateLoaderJson.aceWidgetLoaderJson`). Only written
+  /// when the module submits ArkTS widgets (`needSubmitArkTsWidget`).
+  pub(super) fn widget_loader_json(&self) -> PathBuf {
+    self.default_intermediate_file("loader", "widget_loader.json")
+  }
+
   pub(super) fn pkg_context_info_json(&self) -> PathBuf {
     self.default_intermediate_file("loader", "pkgContextInfo.json")
   }

@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use indexmap::IndexMap;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -45,6 +46,8 @@ use arkdown_session::{BuildSession, ModuleCompileContext, PackageSnapshot, SdkTo
 use arkdown_sign::SignBackendRunner;
 
 use super::args::{AbcBackendChoice, BuildArgs, NativeTaskRoot};
+use super::packing_check::PackingCheck;
+use super::pre_build::PreBuildValidator;
 use super::bundle_plan::{
   make_bundle_plan, BundlePackageOutput, BundlePlanPackageInfo, BundleRuntimePackageInfoBuilder,
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
@@ -111,9 +114,10 @@ use arkdown_pack::{
 use arkdown_profile::{
   BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarDependencyRoot,
   ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, FormProfileProcessor,
-  LoaderJson, ModuleFormProfileInput, OhExportsProcessor, PkgContextCurrentInput,
-  PkgContextDependencyInput, PkgContextDependencyKind, PkgContextInfoGenerator,
-  PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind, ProfileProcessor,
+  LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput, OhExportsProcessor,
+  PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
+  PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
+  ProfileProcessor,
 };
 use arkdown_resolver::{OhPackage, PkgBriefInfo};
 use arkdown_resource::{ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput};
@@ -541,9 +545,10 @@ impl<'a> WidgetCompileArktsPass<'a> {
   }
 
   fn plan(&self) -> Result<Option<WidgetCompileArktsPlan>> {
-    if self.module.module_type == OhosModuleType::Shared {
-      return Ok(None);
-    }
+    // hvigor's widget compile pass (`needSubmitArkTsWidget`) runs on the
+    // form widget module itself — an HSP whose `module.json5` declares
+    // `formExtensionModule` (`isFormWidgetModule`), in addition to the HAP
+    // form extension module's own form-ability sources.
     let module_layout = ModuleBuildLayout::new(&self.module.src_path);
     let form_sources = FormProfileProcessor::new()
       .collect_module_form_sources(ModuleFormProfileInput {
@@ -600,8 +605,10 @@ impl<'a> WidgetCompileArktsPass<'a> {
 
   fn compile_context_loader_json(&self, plan: &WidgetCompileArktsPlan) -> Result<LoaderJson> {
     let mut loader_json = self.loader_json.clone();
-    loader_json.hvigor_compile_entry.clear();
-    loader_json.compile_entry = plan.entries.clone();
+    // 6.24.3: the widget loader JSON is the same loader object written to a
+    // second path (`needSubmitArkTsWidget && outputJSONSync(aceWidgetLoaderJson,
+    // c)`); its `compileEntry` matches the main loader (ResourceTable.ts etc.)
+    // and never carries the widget form sources — those go to `widgets.abc`.
     loader_json.form_entry_sources = plan.entries.clone();
     loader_json.runtime_entry_sources.clear();
     loader_json.cache_path = ArtifactPathSerializer::path_to_slash_string(&plan.cache_dir)
@@ -611,6 +618,42 @@ impl<'a> WidgetCompileArktsPass<'a> {
           plan.cache_dir.display()
         )
       })?;
+    // 6.24.3 `GenerateLoaderJson`: the widget loader JSON always carries
+    // `pkgName2OtherCompileFiles`; the main loader.json never does. The
+    // per-ByteCode-HAR grouping is populated when
+    // `arkOptions.widget.transitiveDeps` is enabled
+    // (`isWidgetTransitiveDeps`), otherwise it stays an empty object.
+    let transitive_deps = self
+      .config
+      .product
+      .build_option
+      .ark_options
+      .as_ref()
+      .and_then(|options| options.widget.as_ref())
+      .is_some_and(|widget| widget.transitive_deps);
+    loader_json.pkg_name2_other_compile_files = Some(
+      if transitive_deps {
+        LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
+          &self.module.src_path,
+          &self.config.project_root,
+        )
+        .into_iter()
+        .map(|(package_name, files)| {
+          (
+            package_name,
+            files
+              .into_iter()
+              .map(|path| {
+                ArtifactPathSerializer::path_to_slash_string(&path).unwrap_or_default()
+              })
+              .collect(),
+          )
+        })
+        .collect()
+      } else {
+        IndexMap::new()
+      },
+    );
     Ok(loader_json)
   }
 
@@ -681,6 +724,50 @@ impl<'a> WidgetCompileArktsPass<'a> {
   }
 }
 
+/// `FormUtil.getTargetModuleOptObj`: the form widget module (HSP declaring
+/// `formExtensionModule`) merges the form extension module's `type: "form"`
+/// abilities — reduced to `name`/`type`/`metadata` — into its ark module.
+fn merge_form_widget_abilities(
+  config: &arkdown_core::ArkdownConfig,
+  module_json5: &arkdown_core::ModuleJson5,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+  let Some(extension_module_name) = module_json5.module.form_extension_module.as_deref() else {
+    return Ok(Vec::new());
+  };
+  let Some(extension_module) = config
+    .modules
+    .iter()
+    .find(|module| module.name == extension_module_name)
+  else {
+    return Ok(Vec::new());
+  };
+  let path = extension_module.src_path.join("src/main/module.json5");
+  let content = std::fs::read_to_string(&path)
+    .map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
+  let extension_json: arkdown_core::ModuleJson5 =
+    json5::from_str(&content).map_err(|error| anyhow::anyhow!("parse {}: {error}", path.display()))?;
+  Ok(extension_json
+    .module
+    .extension_abilities
+    .iter()
+    .filter(|ability| ability.extension_type == "form")
+    .map(|ability| {
+      serde_json::json!({
+        "name": ability.name,
+        "type": "form",
+        "metadata": ability.metadata.iter().map(|entry| {
+          let mut value = serde_json::Map::new();
+          value.insert("name".into(), entry.name.clone().into());
+          if let Some(resource) = entry.resource.as_ref() {
+            value.insert("resource".into(), resource.clone().into());
+          }
+          serde_json::Value::Object(value)
+        }).collect::<Vec<_>>(),
+      })
+    })
+    .collect())
+}
+
 struct TransformSourceSnapshotBuilder<'a> {
   module_roots: &'a [(String, PathBuf)],
   dependency_source_roots: &'a [PathBuf],
@@ -688,6 +775,7 @@ struct TransformSourceSnapshotBuilder<'a> {
   sdk_declaration_roots: &'a [PathBuf],
   custom_type_declaration_inputs: &'a [PathBuf],
   source_set_overlays: &'a [(PathBuf, PathBuf)],
+  package_roots: &'a [(String, PathBuf)],
 }
 
 impl<'a> TransformSourceSnapshotBuilder<'a> {
@@ -704,7 +792,13 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
       sdk_declaration_roots: &[],
       custom_type_declaration_inputs: &[],
       source_set_overlays,
+      package_roots: &[],
     }
+  }
+
+  fn with_package_roots(mut self, roots: &'a [(String, PathBuf)]) -> Self {
+    self.package_roots = roots;
+    self
   }
 
   fn with_custom_type_declaration_inputs(mut self, inputs: &'a [PathBuf]) -> Self {
@@ -782,7 +876,14 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
         resolved_static_modules,
         runtime_source_paths,
       )
-      .with_sdk_declaration_roots(self.sdk_declaration_roots.to_vec()),
+      .with_sdk_declaration_roots(self.sdk_declaration_roots.to_vec())
+      .with_package_roots(
+        self
+          .package_roots
+          .iter()
+          .map(|(name, root)| (name.clone(), root.clone()))
+          .collect(),
+      ),
     )
   }
 
@@ -2015,6 +2116,9 @@ struct CompileContextInfoWriter<'a> {
   module_source_files: &'a [arkdown_core::HvigorModuleSourceFile],
   bundle_type: &'a str,
   bundle_name: &'a str,
+  /// `isFormWidgetModule`: the widget pass joins form card sources into the
+  /// main es2abc input only on the form widget module itself.
+  form_widget_module: bool,
 }
 
 impl<'a> CompileContextInfoWriter<'a> {
@@ -2024,12 +2128,14 @@ impl<'a> CompileContextInfoWriter<'a> {
     _pkg_context_info: &'a BTreeMap<String, PkgContextInfoOpt>,
     bundle_type: &'a str,
     bundle_name: &'a str,
+    form_widget_module: bool,
   ) -> Self {
     Self {
       loader_json,
       module_source_files,
       bundle_type,
       bundle_name,
+      form_widget_module,
     }
   }
 
@@ -2108,6 +2214,20 @@ impl<'a> CompileContextInfoWriter<'a> {
       if let Some(record_name) = self.record_name_for_source_entry(runtime_entry, &source_records) {
         if seen_entries.insert(record_name.clone()) {
           entries.push(record_name);
+        }
+      }
+    }
+    // hvigor's widget pass (`needSubmitArkTsWidget`) compiles the form card
+    // sources into the main es2abc input (`filesInfo.txt`) in addition to the
+    // dedicated `widgets.abc` — but only on the form widget module itself.
+    // The form extension module (HAP) keeps them out (`getFormJsonArr`
+    // returns [] for `isFormExtensionModule`).
+    if self.form_widget_module {
+      for form_entry in &self.loader_json.form_entry_sources {
+        if let Some(record_name) = self.record_name_for_source_entry(form_entry, &source_records) {
+          if seen_entries.insert(record_name.clone()) {
+            entries.push(record_name);
+          }
         }
       }
     }
@@ -2273,6 +2393,7 @@ mod compile_context_info_tests {
       &pkg_context_info,
       "app",
       "com.example.entry",
+      false,
     );
 
     assert_eq!(
@@ -2366,6 +2487,7 @@ mod compile_context_info_tests {
       &pkg_context_info,
       "app",
       "com.sankuai.hmeituan",
+      false,
     );
 
     assert_eq!(
@@ -2459,6 +2581,7 @@ mod compile_context_info_tests {
       &pkg_context_info,
       "app",
       "com.sankuai.hmeituan",
+      false,
     );
 
     assert_eq!(
@@ -2536,6 +2659,7 @@ mod compile_context_info_tests {
       &pkg_context_info,
       "app",
       "com.sankuai.hmeituan",
+      false,
     );
 
     assert_eq!(
@@ -2574,6 +2698,7 @@ mod compile_context_info_tests {
       &pkg_context_info,
       "app",
       "com.sankuai.hmeituan",
+      false,
     );
 
     assert_eq!(writer.compile_entries(&[]), Vec::<String>::new());
@@ -2610,6 +2735,7 @@ mod compile_context_info_tests {
       &pkg_context_info,
       "app",
       "com.sankuai.hmeituan",
+      false,
     );
 
     assert_eq!(writer.compile_entries(&[]), Vec::<String>::new());
@@ -2636,6 +2762,7 @@ mod compile_context_info_tests {
       &pkg_context_info,
       "app",
       "com.sankuai.hmeituan",
+      false,
     )
     .write(&output_path)
     .expect("write compileContextInfo");
@@ -2674,6 +2801,7 @@ mod compile_context_info_tests {
       update_version_info: IndexMap::new(),
       customized_har: false,
       byte_code_har: None,
+      pkg_name2_other_compile_files: None,
       an_build_out_put: None,
       an_build_mode: None,
       ap_path: None,
@@ -3160,6 +3288,16 @@ impl Drop for BuildTimingProbe<'_> {
 }
 
 impl BuildCoordinator {
+  /// `isFormWidgetModule`: an HSP whose `module.json5` declares
+  /// `formExtensionModule` (hvigor `module-model-impl.ts`).
+  fn module_json5_has_form_extension_module(module_root: &Path) -> bool {
+    let module_json_path = module_root.join("src/main/module.json5");
+    std::fs::read_to_string(&module_json_path)
+      .ok()
+      .and_then(|content| json5::from_str::<arkdown_core::ModuleJson5>(&content).ok())
+      .is_some_and(|json| json.module.form_extension_module.is_some())
+  }
+
   /// Construct a new coordinator from a completed build session and CLI args.
   pub fn new(session: Arc<BuildSession>, config: Arc<ArkdownConfig>, args: BuildArgs) -> Self {
     Self {
@@ -3477,6 +3615,20 @@ impl BuildCoordinator {
       task_lifecycle
         .marker(&module.name, Some(&module_target_name), "PreBuild")
         .await?;
+      if !skip_profile_writes {
+        // hvigor `pre-build.ts` validation: schema checks against the SDK
+        // modulecheck schemas plus structural/path/API-version constraints.
+        let pre_build_validator = PreBuildValidator::new(
+          config,
+          session,
+          &module,
+          &module_context,
+          module_build_option,
+        );
+        pre_build_validator
+          .validate()
+          .map_err(|error| anyhow::anyhow!("pre-build validation failed: {error}"))?;
+      }
       let module_info_task_name = if module.module_type == OhosModuleType::Har {
         "CreateHarModuleInfo"
       } else {
@@ -4285,10 +4437,15 @@ impl BuildCoordinator {
         }
         {
           let _timer = BuildTimingProbe::module(&module.name, "profile_intermediates_initial");
+          // hvigor `getTargetModuleOptObj` merges the form extension module's
+          // form abilities (name/type/metadata) into the form widget module's
+          // ark_module.json consumed by restool.
+          let form_widget_abilities = merge_form_widget_abilities(config, &module_json5)?;
           intermediate_writer.write_profile_intermediates(
             &module.src_path,
             &module_json_out,
             module_json5.module.extension_abilities.len(),
+            &form_widget_abilities,
           )?;
         }
 
@@ -4982,6 +5139,18 @@ impl BuildCoordinator {
         },
       );
       bundle_plan.input.module_record_roots = module_record_roots;
+      // hvigor's widget pass compiles the form card sources into the main
+      // es2abc input (`filesInfo.txt`) in addition to `widgets.abc`, but only
+      // on the form widget module itself (`needSubmitArkTsWidget`).
+      if matches!(module.module_type, OhosModuleType::Shared)
+        && Self::module_json5_has_form_extension_module(&module.src_path)
+      {
+        for form_entry in &loader_json.form_entry_sources {
+          if !bundle_plan.input.entries.contains(form_entry) {
+            bundle_plan.input.entries.push(form_entry.clone());
+          }
+        }
+      }
       let preload_system_so_enabled = module_build_option.preload_system_so
         && module.module_type != OhosModuleType::Shared
         && match config.output_target {
@@ -5073,12 +5242,24 @@ impl BuildCoordinator {
         .filter_map(|node| node.package_root.clone())
         .collect();
       let transform_snapshot_start = Instant::now();
+      let dependency_package_roots: Vec<(String, PathBuf)> = module_context
+        .deps
+        .nodes
+        .values()
+        .filter_map(|node| {
+          node
+            .package_root
+            .clone()
+            .map(|root| (node.package_name.clone(), root))
+        })
+        .collect();
       let transform_sources = TransformSourceSnapshotBuilder::new(
         &all_module_roots,
         &dependency_source_roots,
         &native_declaration_roots,
         &source_set_overlays,
       )
+      .with_package_roots(&dependency_package_roots)
       .with_sdk_declaration_roots(&sdk_declaration_roots)
       .with_custom_type_declaration_inputs(&loader_json.compiler_type_declaration_inputs)
       .build()?;
@@ -5112,6 +5293,35 @@ impl BuildCoordinator {
         har_dedup: HarDedupFactoryMode::Disabled,
         disabled_plugins: custom_cfg.plugins.disabled.clone(),
         package_plugins: module_package_plugins.clone(),
+        auto_lazy_import: module_build_option
+          .ark_options
+          .as_ref()
+          .and_then(|options| options.auto_lazy_import)
+          .unwrap_or(false),
+        auto_lazy_filter: module_build_option
+          .ark_options
+          .as_ref()
+          .and_then(|options| options.auto_lazy_filter.clone()),
+        expand_import_path: module_build_option
+          .ark_options
+          .as_ref()
+          .and_then(|options| options.expand_import_path.clone()),
+        hsp_har_package_names: loader_json
+          .hsp_name_ohm_map
+          .keys()
+          .chain(loader_json.har_name_ohm_map.keys())
+          .cloned()
+          .collect(),
+        // `meta.pkgName` for `isNotAutoLazyImport`: the owning module's
+        // `oh-package.json5#name`.
+        module_pkg_name: std::fs::read_to_string(module.src_path.join("oh-package.json5"))
+          .ok()
+          .and_then(|content| json5::from_str::<serde_json::Value>(&content).ok())
+          .and_then(|raw| {
+            raw.get("name")
+              .and_then(|name| name.as_str())
+              .map(str::to_string)
+          }),
       };
       let collect_factory_output = if module_har_dedup_plan.is_empty() {
         None
@@ -5666,6 +5876,8 @@ impl BuildCoordinator {
           &pkg_context_info,
           &session.project.bundle_type,
           &config.product.bundle_name,
+          matches!(module.module_type, OhosModuleType::Shared)
+            && Self::module_json5_has_form_extension_module(&module.src_path),
         )
         .write(&path)
         .map_err(|e| anyhow::anyhow!("GenerateCompileContextInfo failed: {}", e))?;
@@ -5685,6 +5897,19 @@ impl BuildCoordinator {
           bundle_out.bundle_output.npm_entries.len()
         ),
       );
+      // `module_mode.js` es2abc command construction: `--branch-elimination`
+      // only for non-debuggable builds without bytecode obfuscation, and
+      // `--transform-lib` when `arkOptions.transformLib` is configured.
+      let ark_options = &module_config.product.build_option.ark_options;
+      let branch_elimination = !matches!(config.build_mode, BuildMode::Debug)
+        && pending_bytecode_obfuscations[bundle_index].is_none()
+        && ark_options
+          .as_ref()
+          .and_then(|options| options.branch_elimination)
+          .unwrap_or(false);
+      let transform_lib = ark_options
+        .as_ref()
+        .and_then(|options| options.transform_lib.clone());
       let bytecode_result = BytecodeStage::run(BytecodeStageInput {
         compiler: RolldownBytecodeCompiler::new(
           abc_ts2abc_backend_inner,
@@ -5692,7 +5917,9 @@ impl BuildCoordinator {
           compile_target.api_version(),
           matches!(config.build_mode, BuildMode::Debug),
         )
-        .with_target_api_sub_version(compile_target.api_sub_version()),
+        .with_target_api_sub_version(compile_target.api_sub_version())
+        .with_branch_elimination(branch_elimination)
+        .with_transform_lib(transform_lib.clone()),
         module_source_files: bundle_out.bundle_output.module_source_files.clone(),
         external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
         npm_entries: bundle_out.bundle_output.npm_entries.clone(),
@@ -5756,6 +5983,15 @@ impl BuildCoordinator {
         let widget_loader_json =
           WidgetCompileArktsPass::new(module_config.as_ref(), module, manifest, loader_json)
             .compile_context_loader_json(&widget_out.plan)?;
+        // 6.24.3 `GenerateLoaderJson.doTaskAction()` writes the widget loader
+        // JSON alongside the common one (`aceWidgetLoaderJson`) whenever the
+        // module submits ArkTS widgets.
+        let widget_loader_path = ModuleBuildLayout::new(&module.src_path).widget_loader_json();
+        let widget_loader_value = serde_json::to_value(&widget_loader_json)
+            .map_err(|error| anyhow::anyhow!("serialize widget_loader.json failed: {}", error))?;
+        intermediate_writer
+          .write_json_pretty(&widget_loader_path, &widget_loader_value)
+          .map_err(|error| anyhow::anyhow!("write widget_loader.json failed: {}", error))?;
         let widget_compile_context_info_path = if loader_json.use_normalized_ohm_url {
           let module_context = session
             .module_context(&module.name)
@@ -5778,6 +6014,7 @@ impl BuildCoordinator {
             &pkg_context_info,
             &session.project.bundle_type,
             &config.product.bundle_name,
+            true,
           )
           .write(&path)
           .map_err(|e| anyhow::anyhow!("GenerateWidgetCompileContextInfo failed: {}", e))?;
@@ -5792,7 +6029,9 @@ impl BuildCoordinator {
             compile_target.api_version(),
             matches!(config.build_mode, BuildMode::Debug),
           )
-          .with_target_api_sub_version(compile_target.api_sub_version()),
+          .with_target_api_sub_version(compile_target.api_sub_version())
+          .with_branch_elimination(branch_elimination)
+          .with_transform_lib(transform_lib.clone()),
           module_source_files: widget_out
             .bundle_out
             .bundle_output
@@ -6202,12 +6441,17 @@ impl BuildCoordinator {
         } else {
           Vec::new()
         };
+        // DoNativeBinxo: when OHOS_ENABLE_HWASAN + OHOS_ENABLE_BINXO are
+        // configured, binxo outputs replace the process-libs inputs for strip.
+        let binxo_libs = native_collector
+          .binxo_libs(&processed_native_libs)
+          .map_err(|error| anyhow::anyhow!("DoNativeBinxo failed: {error}"))?;
         let native_libs = if task_lifecycle
           .before(&module.name, Some(artifact_target_label), "DoNativeStrip")
           .await?
         {
           let stripped = native_collector
-            .strip_libs(&processed_native_libs)
+            .strip_libs(&binxo_libs)
             .map_err(|error| anyhow::anyhow!("DoNativeStrip failed: {error}"))?;
           task_lifecycle
             .after(&module.name, Some(artifact_target_label), "DoNativeStrip")
@@ -6445,9 +6689,32 @@ impl BuildCoordinator {
               } else {
                 None
               };
-              let bundled_resource_snapshots = bundled_dependencies
-                .then(|| module_context.deps.bundled_har_resources())
+              // `har-target-util.js::isNeedExclude`: `resOptions.excludeHarRes`
+              // drops remote HAR resources (local `file:` dependencies and
+              // HAR-host modules are never excluded).
+              let exclude_har_res = module_build_option
+                .res_options
+                .as_ref()
+                .map(|options| options.exclude_har_res.as_slice())
                 .unwrap_or_default();
+              let bundled_resource_snapshots = if bundled_dependencies {
+                module_context
+                  .deps
+                  .bundled_har_resources()
+                  .into_iter()
+                  .filter(|resource| {
+                    let is_local = module_context
+                      .deps
+                      .nodes
+                      .get(&resource.package_name)
+                      .and_then(|node| node.version_spec.as_deref())
+                      .is_some_and(|spec| spec.starts_with("file:"));
+                    !(exclude_har_res.contains(&resource.package_name) && !is_local)
+                  })
+                  .collect::<Vec<_>>()
+              } else {
+                Vec::new()
+              };
               let bundled_resources = bundled_resource_snapshots
                 .iter()
                 .map(|resource| BundledHarResourceInput {
@@ -6825,8 +7092,17 @@ impl BuildCoordinator {
             )
             .await?
           {
-            // Packager validation is part of the typed pack operation above;
-            // this boundary owns hvigor's separate PackingCheck lifecycle.
+            // hvigor `packing-check.js`: `.so` extension-ability srcEntry
+            // existence per ABI + stray-source-file packaging warning.
+            let packing_check = PackingCheck::new(
+              config,
+              module,
+              loader_json,
+              module_layout.intermediates().join("stripped_native_libs"),
+            );
+            packing_check
+              .validate()
+              .map_err(|error| anyhow::anyhow!("packing-check failed: {error}"))?;
             task_lifecycle
               .after(
                 &module.name,

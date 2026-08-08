@@ -283,11 +283,24 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     extras.insert("allowEtsAnnotations".to_string(), Value::Bool(true));
     extras.insert("projectArkOption".to_string(), Value::Object(Map::new()));
     extras.insert("sourceMapDir".to_string(), Value::String(String::new()));
-    extras.insert("branchElimination".to_string(), Value::Bool(false));
+    extras.insert(
+      "branchElimination".to_string(),
+      Value::Bool(
+        !matches!(self.input.config.build_mode, BuildMode::Debug)
+          && ark_options
+            .and_then(|options| options.branch_elimination)
+            .unwrap_or(false),
+      ),
+    );
     extras.insert("tsImportSendable".to_string(), Value::Bool(false));
     extras.insert("resolveConflictMode".to_string(), Value::Bool(true));
     extras.insert("depName2RootPath".to_string(), self.dependency_root_map()?);
-    extras.insert("depName2DepInfo".to_string(), Value::Object(Map::new()));
+    // SDK `import_path_expand.js` calls `depName2DepInfo.has(pkgName)` and
+    // reads `entry.pkgRootPath`; an empty object makes `{}.has` throw.
+    extras.insert(
+        "depName2DepInfo".to_string(),
+        self.dependency_name2_dep_info(),
+    );
     extras.insert("depName2OhExports".to_string(), Value::Object(Map::new()));
     extras.insert(
       "rootPathSet".to_string(),
@@ -321,29 +334,68 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       "isHarDeduplicateEnabled".to_string(),
       Value::Bool(self.input.module_build_option.deduplicate_har),
     );
-    extras.insert("autoLazyImport".to_string(), Value::Bool(false));
+    extras.insert(
+      "autoLazyImport".to_string(),
+      Value::Bool(
+        ark_options
+          .and_then(|options| options.auto_lazy_import)
+          .unwrap_or(false),
+      ),
+    );
     extras.insert("allowEmptyBundleName".to_string(), Value::Bool(false));
     extras.insert(
       "reExportCheckMode".to_string(),
-      Value::String("noCheck".to_string()),
+      Value::String(
+        ark_options
+          .and_then(|options| options.re_export_check_mode.clone())
+          .unwrap_or_else(|| "noCheck".to_string()),
+      ),
     );
     extras.insert("usePathPlaceholder".to_string(), Value::Bool(false));
     extras.insert("writeRollupCache".to_string(), Value::Bool(true));
-    extras.insert("isExpandImportEnabled".to_string(), Value::Bool(false));
+    let expand_import_path = ark_options.and_then(|options| options.expand_import_path.as_ref());
     extras.insert(
-      "expandImportExclude".to_string(),
-      Value::String(String::new()),
+      "isExpandImportEnabled".to_string(),
+      Value::Bool(
+        expand_import_path
+          .map(|expand| expand.enable)
+          .unwrap_or(false),
+      ),
     );
     extras.insert(
+      "expandImportExclude".to_string(),
+      Value::String(
+        expand_import_path
+          .map(|expand| expand.exclude.join(","))
+          .unwrap_or_default(),
+      ),
+    );
+    let auto_lazy_filter = ark_options.and_then(|options| options.auto_lazy_filter.as_ref());
+    extras.insert(
       "lazyImportExclude".to_string(),
-      Value::String(String::new()),
+      Value::String(
+        auto_lazy_filter
+          .map(|filter| filter.exclude.join(","))
+          .unwrap_or_default(),
+      ),
     );
     extras.insert(
       "lazyImportInclude".to_string(),
-      Value::String(String::new()),
+      Value::String(
+        auto_lazy_filter
+          .map(|filter| filter.include.join(","))
+          .unwrap_or_default(),
+      ),
     );
     extras.insert("ignoreCrossplatformCheck".to_string(), Value::Bool(false));
-    extras.insert("skipOhModulesLint".to_string(), Value::Bool(false));
+    extras.insert(
+      "skipOhModulesLint".to_string(),
+      Value::Bool(
+        ark_options
+          .and_then(|options| options.skip_oh_modules_lint)
+          .unwrap_or(false),
+      ),
+    );
     extras.insert("enableStrictCheckOHModule".to_string(), Value::Bool(false));
     extras.insert(
       "disableSendableCheckRules".to_string(),
@@ -700,20 +752,32 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
 
   fn user_project_config(&self) -> Value {
     let ark_options = self.input.module_build_option.ark_options.as_ref();
+    let expand_import_path = ark_options.and_then(|options| options.expand_import_path.as_ref());
+    let auto_lazy_filter = ark_options.and_then(|options| options.auto_lazy_filter.as_ref());
     json!({
-      "autoLazyImport": false,
+      "autoLazyImport": ark_options.and_then(|options| options.auto_lazy_import).unwrap_or(false),
       "allowEmptyBundleName": false,
-      "reExportCheckMode": "noCheck",
+      "reExportCheckMode": ark_options
+        .and_then(|options| options.re_export_check_mode.clone())
+        .unwrap_or_else(|| "noCheck".to_string()),
       "executionMode": "memory",
       "usePathPlaceholder": false,
       "writeRollupCache": true,
-      "isExpandImportEnabled": false,
-      "expandImportExclude": "",
-      "lazyImportExclude": "",
-      "lazyImportInclude": "",
+      "isExpandImportEnabled": expand_import_path.map(|expand| expand.enable).unwrap_or(false),
+      "expandImportExclude": expand_import_path
+        .map(|expand| expand.exclude.join(","))
+        .unwrap_or_default(),
+      "lazyImportExclude": auto_lazy_filter
+        .map(|filter| filter.exclude.join(","))
+        .unwrap_or_default(),
+      "lazyImportInclude": auto_lazy_filter
+        .map(|filter| filter.include.join(","))
+        .unwrap_or_default(),
       "ignoreCrossplatformCheck": false,
       "isHarDeduplicateEnabled": self.input.module_build_option.deduplicate_har,
-      "skipOhModulesLint": false,
+      "skipOhModulesLint": ark_options
+        .and_then(|options| options.skip_oh_modules_lint)
+        .unwrap_or(false),
       "enableStrictCheckOHModule": false,
       "disableSendableCheckRules": [],
       "useDeclarationFileSignature": false,
@@ -741,6 +805,35 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       }
     }
     Ok(Value::Object(output))
+  }
+
+  /// `depName2DepInfo`: `{ [pkgName]: { pkgRootPath } }` consumed by the SDK
+  /// `import_path_expand.js` (`.has(pkgName)` + `entry.pkgRootPath`).
+  fn dependency_name2_dep_info(&self) -> Value {
+    let mut output = Map::new();
+    for node in self.input.module_context.deps.nodes.values() {
+      let Some(root) = node.package_root.as_ref() else {
+        continue;
+      };
+      let path = self.path(root).unwrap_or_default();
+      output.insert(
+        node.package_name.clone(),
+        Value::Object(Map::from_iter([(
+          "pkgRootPath".to_string(),
+          Value::String(path),
+        )])),
+      );
+      if node.alias != node.package_name {
+        output.insert(
+          node.alias.clone(),
+          Value::Object(Map::from_iter([(
+            "pkgRootPath".to_string(),
+            Value::String(self.path(root).unwrap_or_default()),
+          )])),
+        );
+      }
+    }
+    Value::Object(output)
   }
 
   fn dependency_alias_map(&self) -> Value {
@@ -1334,3 +1427,4 @@ struct SdkEtsCheckerResponse {
   #[serde(default)]
   diagnostics: Vec<SdkEtsCheckerDiagnostic>,
 }
+

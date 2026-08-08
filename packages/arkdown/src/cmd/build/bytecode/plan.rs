@@ -193,6 +193,11 @@ pub struct Ts2abcPlan {
   pub npm_module_cache_entry: Option<PathBuf>,
   /// Whether ABC input mode is enabled (merge existing `.abc` files).
   pub enable_abc_input: bool,
+  /// es2abc `--branch-elimination` (release, non-debuggable, no bytecode
+  /// obfuscation — mirrors `module_mode.js` command construction).
+  pub branch_elimination: bool,
+  /// es2abc `--transform-lib` AOP transform library path when configured.
+  pub transform_lib: Option<PathBuf>,
 }
 
 impl Ts2abcPlan {
@@ -260,6 +265,8 @@ pub struct Ts2abcPlanBuilder {
   npm_module_entry_list: Option<PathBuf>,
   npm_module_cache_entry: Option<PathBuf>,
   enable_abc_input: bool,
+  branch_elimination: bool,
+  transform_lib: Option<PathBuf>,
 }
 
 impl Ts2abcPlanBuilder {
@@ -283,6 +290,8 @@ impl Ts2abcPlanBuilder {
       npm_module_entry_list: None,
       npm_module_cache_entry: None,
       enable_abc_input: false,
+      branch_elimination: false,
+      transform_lib: None,
     }
   }
 
@@ -340,6 +349,19 @@ impl Ts2abcPlanBuilder {
   /// Set the upstream compile context file passed as `--compile-context-info`.
   pub fn with_compile_context_info(mut self, path: PathBuf) -> Self {
     self.compile_context_info_path = Some(path);
+    self
+  }
+
+  /// Enable es2abc `--branch-elimination` (release, non-debuggable, no
+  /// bytecode obfuscation — mirrors `module_mode.js` command construction).
+  pub fn with_branch_elimination(mut self) -> Self {
+    self.branch_elimination = true;
+    self
+  }
+
+  /// Pass an AOP transform library to es2abc as `--transform-lib`.
+  pub fn with_transform_lib(mut self, path: PathBuf) -> Self {
+    self.transform_lib = Some(path);
     self
   }
 
@@ -403,6 +425,8 @@ impl Ts2abcPlanBuilder {
       npm_module_entry_list: self.npm_module_entry_list,
       npm_module_cache_entry: self.npm_module_cache_entry,
       enable_abc_input: self.enable_abc_input,
+      branch_elimination: self.branch_elimination,
+      transform_lib: self.transform_lib,
     };
     plan.validate()?;
     Ok(plan)

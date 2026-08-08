@@ -1,5 +1,8 @@
 pub mod app_coordinator;
 pub mod args;
+mod packing_check;
+mod pre_build;
+mod remote_hsp_sign;
 mod bundle_plan;
 pub(crate) mod bytecode;
 mod bytecode_har_declaration;
