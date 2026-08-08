@@ -46,6 +46,10 @@ enum Commands {
   /// a full build.
   #[command(name = "dump-config")]
   DumpConfig(cmd::dump_config::DumpConfigArgs),
+  /// Print build-profile information like hvigor's `build-info` task
+  /// (`hvigorw build-info [-p json=] [-p buildOption=] [-p module=<name>]`)
+  #[command(name = "build-info")]
+  BuildInfo(cmd::build_info::BuildInfoArgs),
 }
 
 #[tokio::main]
@@ -62,6 +66,7 @@ async fn main() {
     Commands::Clean(args) => cmd::clean::run(args),
     Commands::Check(args) => cmd::check::run(args),
     Commands::DumpConfig(args) => cmd::dump_config::run(args),
+    Commands::BuildInfo(args) => cmd::build_info::run(args),
   };
   if let Err(e) = result {
     tracing::error!("error: {}", e);
