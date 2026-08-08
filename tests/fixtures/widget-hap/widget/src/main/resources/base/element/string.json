@@ -1,0 +1,6 @@
+{
+  "string": [
+    { "name": "widget_card_name", "value": "WidgetCard" },
+    { "name": "widget_card_desc", "value": "Widget card description" }
+  ]
+}

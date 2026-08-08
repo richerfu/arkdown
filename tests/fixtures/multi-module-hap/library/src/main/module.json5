@@ -1,0 +1,8 @@
+{
+  "module": {
+    "name": "library",
+    "type": "har",
+    "deviceTypes": ["phone"],
+
+  }
+}

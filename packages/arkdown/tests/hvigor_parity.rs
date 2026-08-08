@@ -149,6 +149,34 @@ fn bc_har_dep_hap_hvigor_parity_report() {
   );
 }
 
+/// Multi-module parity: an entry HAP depending on a source HAR module.
+/// Validates module.json app/module field order, loader.json module maps,
+/// cross-module cache TS, and the merged ABC against hvigor.
+#[test]
+fn multi_module_hap_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/multi-module-hap",
+    "multi-module-hap",
+    ArtifactType::Hap,
+    ParityBuildMode::Debug,
+  );
+}
+
+/// Widget parity: a form widget HSP (`formExtensionModule: "entry"`) paired
+/// with an entry HAP carrying the `formWidgetModule` mapping and the form
+/// extension ability. Validates `widgets.abc`, `widget_loader.json`
+/// (`pkgName2OtherCompileFiles`), the widget component collection, and the
+/// packaged HSP against hvigor.
+#[test]
+fn widget_hap_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/widget-hap",
+    "widget-hap",
+    ArtifactType::Hsp,
+    ParityBuildMode::Debug,
+  );
+}
+
 /// Parity test for share config — validates that crossAppSharedConfig entries
 /// exported by a HAR dependency survive profile processing and are written to
 /// the correct resource profile. Hvigor's ProcessShareConfig consumes
@@ -564,6 +592,8 @@ fn parity_referenced_fixtures_exist() {
     "tests/fixtures/share-config-hap",
     "tests/fixtures/startup-config-hap",
     "tests/fixtures/release-obfuscation-hap",
+    "tests/fixtures/multi-module-hap",
+    "tests/fixtures/widget-hap",
   ] {
     let path = repo_root.join(fixture);
     assert!(path.is_dir(), "parity fixture must exist: {fixture}");
@@ -1227,6 +1257,36 @@ fn collect_build(
         "importee.json",
         None,
         &["intermediates/importee"],
+        false,
+      )?;
+      // Widget (form card) artifacts: the widget compile pass emits
+      // `widgets.abc`, the widget loader JSON with `pkgName2OtherCompileFiles`,
+      // and the widget component collection consumed by the IDE.
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "widgets.abc",
+        Some("ets/widgets.abc"),
+        &["intermediates/loader_out"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "widget_loader.json",
+        None,
+        &["intermediates/loader"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "component_collection.json",
+        None,
+        &["intermediates/loader_out"],
         false,
       )?;
       // Section 3.5 "扩展 oracle 收集 cache root 所有文件":
