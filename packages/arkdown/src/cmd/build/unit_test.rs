@@ -158,7 +158,6 @@ pub(crate) fn ohos_test_template_root(module_root: &Path) -> std::path::PathBuf 
 pub(crate) fn execute_unit_test(
   module_root: &Path,
   previewer_dir: &Path,
-  compile_api_version: u32,
   coverage: bool,
 ) -> Result<()> {
   let module_root_str = arkdown_path::ArtifactPathSerializer::path_to_slash_string(module_root)
