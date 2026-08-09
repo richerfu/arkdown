@@ -32,7 +32,9 @@
 | 设备测试链（device-test-hook / onDeviceTest） | 未实现 |
 | 预览器管线（previewer-ark-compile / preview-compile-resource 等 10 任务） | `--preview` 已实现资源重编译 + preview_changes.json（M3） |
 | Quickfix 链（prepare-quickfix / package-hqf / sign-hqf） | 未实现（assembleDevHqf） |
-| fast-package / fast-package-hsp | 未实现（增量快速重打） |
+| fast-package / fast-package-hsp | ✅ fast-package 已实现（E4 节，`--fast-build-app`）；fast-package-hsp 未做 |
+| quickfix 链（prepare-quickfix / package-hqf / sign-hqf） | 未实现（依赖 ColdReloadArkTS 冷重载链） |
+| 设备测试链（device-test-hook / onDeviceTest） | 构建侧已完成（ohosTest target E3 节）；设备执行（签名 HAP + 设备 + Previewer 覆盖率）待设备环境 |
 | 远程 HSP 签名（sign-module-remote-hsp / sign-project-remote-hsp） | ✅ 已实现（`remote_hsp_sign.rs`）：有签名配置时签名 `oh_modules/.hsp` 依赖到 `build/cache/<product>/remote_hsp/` + `remoteHspCache.json` |
 | validate-sign（ValidateSigning） | keystore 校验在 sign crate 内部，任务边界无 |
 | ark-linter（LintArkTS，HAR lint） | 未实现（SDK etsChecker 是另一条线） |
@@ -119,6 +121,22 @@ strict 套件 29/29）：
   （hvigor `getOhmUrlByFilepath` 的 `/src/(main|ohosTest)/(ets|js|mock)/` 规则）
 - record 名/pkgeName 的当前模块归属（模板树在模块根下）
 - ResourceTable 的固定 record 名与 packageName（ohosTest 模块名下仍用宿主模块名）
+
+## E4. 测试执行链 + fast-package（2026-08-09 完成）
+
+**unitTest 执行**（GenerateUnitTestResult 等价）：`--target test` 现在通过
+SDK Previewer 执行本地测试—— spawn Previewer（对齐 `executeCoverageTest`
+OpenHarmony 参数）、流式写 coverage.log、完成标记（taskconsuming）检测、
+解析出 `test_result.txt`（class/test/result/Tests run—— 与 hvigor 格式一致）。
+覆盖率数据（js_coverage.json）依赖插桩代码上报—— arkdown 的
+CoverageInstrumenter 与 hvigor 的 istanbul 插桩不同（已知 D 类差异），
+js_coverage/报告生成待插桩对齐。
+
+**fast-package**（FastPackageHap 等价）：`--fast-build-app`（=
+`packOptions.fastBuildApp`）—— 跳过 HAP 打包，把编译 intermediates 复制到
+`intermediates/fastApp/<target>/`（ets/ + resources + resources.index +
+pkgContextInfo/pkgSdkInfo + module.json/pack.info（bundleName 改写）——
+对齐 copyIntermediates）。
 
 ## E. widget 端到端验证（2026-08-08 完成）
 
