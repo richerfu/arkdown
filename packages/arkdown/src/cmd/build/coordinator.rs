@@ -6679,6 +6679,26 @@ impl BuildCoordinator {
     // plus coverage data. hvigor `Test`/`UnitTestBuild` tasks never run the
     // pack graph.
     if matches!(config.output_target, OutputTarget::Test) {
+      // hvigor `GenerateUnitTestResult`: execute the local unit-test suite
+      // through the SDK Previewer (coverage.log + test_result.txt), then end.
+      let previewer_dir = config
+        .sdk_config
+        .ets_loader_path
+        .join("../../../previewer/common/bin");
+      let coverage = args.ohos_test_coverage.unwrap_or(true);
+      for (module, _manifest, _loader_json, _resource_refs, _module_target_name, _module_config) in
+        loader_jsons.iter()
+      {
+        super::unit_test::execute_unit_test(
+          &module.src_path,
+          &previewer_dir,
+          config.sdk_config.compile_api_version,
+          coverage,
+        )
+        .map_err(|error| {
+          anyhow::anyhow!("GenerateUnitTestResult failed for module '{}': {error}", module.name)
+        })?;
+      }
       return Ok(BuildOutput {
         artifact_paths: Vec::new(),
       });

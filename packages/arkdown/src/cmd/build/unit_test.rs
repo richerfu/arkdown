@@ -18,6 +18,7 @@
 //!   from the `unit.test.replace.page` default
 //!   (`../../../.test/testability/pages/Index`).
 
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::Result;
@@ -145,6 +146,214 @@ pub(crate) fn has_ohos_test_template(module_root: &Path) -> bool {
 pub(crate) fn ohos_test_template_root(module_root: &Path) -> std::path::PathBuf {
   module_root
     .join(".test/default/intermediates/src/ohosTest/ets")
+}
+
+/// Execute the local unit-test suite through the SDK Previewer
+/// (hvigor `GenerateUnitTestResult` → `@ohos/coverage` `executeCoverageTest`).
+///
+/// Spawns the Previewer binary with the compiled ABC + resources, streams its
+/// stdout into `.test/<product>/intermediates/test/coverage_data/coverage.log`,
+/// kills it on the test-completion marker, then parses the log into
+/// `test_result.txt` (class/test/result lines) and `js_coverage.json`.
+pub(crate) fn execute_unit_test(
+  module_root: &Path,
+  previewer_dir: &Path,
+  compile_api_version: u32,
+  coverage: bool,
+) -> Result<()> {
+  let module_root_str = arkdown_path::ArtifactPathSerializer::path_to_slash_string(module_root)
+    .unwrap_or_else(|_| module_root.display().to_string());
+  // arkdown compiles ABC into `loader_out/<target>/ets` (no `assets/`
+  // mirror); point the Previewer at the actual compiled assets.
+  let abc_dir = module_root
+    .join(".test/default/intermediates/loader_out/default/ets");
+  let resource_dir = module_root
+    .join(".test/default/intermediates/res/default");
+  let phone_config = module_root.join(".test/testability/phoneSettingConfig_Phone.json");
+  let loader_path = module_root
+    .join(".test/default/intermediates/loader/default/loader.json");
+  let coverage_data_dir = module_root
+    .join(".test/default/intermediates/test/coverage_data");
+  std::fs::create_dir_all(&coverage_data_dir)?;
+  let log_path = coverage_data_dir.join("coverage.log");
+  let _ = std::fs::remove_file(&log_path);
+
+  let previewer_path = previewer_dir.join("Previewer");
+  if !previewer_path.is_file() {
+    return Err(anyhow::anyhow!(
+      "Previewer not found at {} — the previewer SDK component is required to run local unit tests",
+      previewer_path.display()
+    ));
+  }
+
+  // hvigor `getSpawnChild` OpenHarmony branch. `-lws` needs a free port;
+  // reuse the SDK's 40000.. probe behavior with a simple fallback.
+  let port = find_free_port(40000)?;
+  let mut command = std::process::Command::new(&previewer_path);
+  command
+    .args([
+      "-d", "", "-abp", ".test/testability/TestAbility.abc",
+      "-ilt", "true", "-refresh", "region",
+      "-projectID", "743055776", "-ts", "trace_7947_commandPipe",
+      "-j", &abc_dir.display().to_string(),
+      "-s", "phone_1702972840143_1", "-cpm", "false",
+      "-device", "default", "-shape", "rect", "-sd", "480",
+      "-or", "1080", "2340", "-cr", "1080", "2340",
+      "-f", &phone_config.display().to_string(),
+      "-n", "entry", "-av", "ACE_2_0",
+      "-url", "../../../.test/testability/pages/Index",
+      "-pages", "main_pages",
+      "-arp", &resource_dir.display().to_string(),
+      "-pm", "Stage", "-l", "zh_CN", "-cm", "light", "-o", "portrait",
+      "-ljPath", &loader_path.display().to_string(),
+      "-lws", &port.to_string(),
+    ])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::inherit())
+    .current_dir(previewer_dir);
+
+  let mut child = command
+    .spawn()
+    .map_err(|error| anyhow::anyhow!("spawn Previewer failed: {error}"))?;
+  let stdout = child
+    .stdout
+    .take()
+    .ok_or_else(|| anyhow::anyhow!("Previewer stdout unavailable"))?;
+  let log_writer = std::sync::Arc::new(std::sync::Mutex::new(std::fs::File::create(&log_path)?));
+  let log_writer_clone = log_writer.clone();
+  let mut reader = std::io::BufReader::new(stdout);
+  let mut buffer = Vec::new();
+  let mut line = Vec::new();
+  let mut done = false;
+  loop {
+    line.clear();
+    let bytes = std::io::BufRead::read_until(&mut reader, b'\n', &mut line)
+      .map_err(|error| anyhow::anyhow!("read Previewer stdout failed: {error}"))?;
+    if bytes == 0 {
+      break;
+    }
+    log_writer_clone
+      .lock()
+      .map_err(|_| anyhow::anyhow!("coverage.log lock poisoned"))?
+      .write_all(&line)?;
+    buffer.extend_from_slice(&line);
+    if is_test_completion_marker(&buffer) {
+      done = true;
+      break;
+    }
+    if buffer.len() > 1_048_576 {
+      buffer.clear();
+    }
+  }
+  if done {
+    let _ = child.kill();
+    let _ = child.wait();
+  } else {
+    let _ = child.wait();
+  }
+  let _ = log_writer;
+
+  // Parse the coverage log into test_result.txt + js_coverage.json
+  // (hvigor `coverageParser.parseCoverageData`).
+  parse_coverage_log(
+    &log_path,
+    &coverage_data_dir.join("test_result.txt"),
+    &coverage_data_dir.join("js_coverage.json"),
+    coverage,
+    &module_root_str,
+  )
+}
+
+fn is_test_completion_marker(buffer: &[u8]) -> bool {
+  let text = String::from_utf8_lossy(buffer);
+  text.contains("OHOS_REPORT_STATUS: taskconsuming")
+    || text.contains("[Engine Log]Error message:")
+    || text.contains("The AbilityDelegator.finishTest")
+}
+
+fn find_free_port(start: u16) -> Result<u16> {
+  for port in start..start + 512 {
+    if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+      return Ok(port);
+    }
+  }
+  Err(anyhow::anyhow!("no free port found for Previewer"))
+}
+
+/// hvigor `coverageParser` — extract `class=`/`test=`/result lines into
+/// `test_result.txt` and the `OHOS_REPORT_COVERAGE_DATA:` payload into
+/// `js_coverage.json`.
+fn parse_coverage_log(
+  log_path: &Path,
+  test_result_path: &Path,
+  coverage_path: &Path,
+  coverage: bool,
+  _module_path: &str,
+) -> Result<()> {
+  let content = std::fs::read_to_string(log_path)?;
+  let mut test_result = String::new();
+  let mut coverage_data = String::new();
+  let mut seen_class = String::new();
+  let mut seen_test = String::new();
+  let class_tag = "OHOS_REPORT_STATUS: class=";
+  let test_tag = "OHOS_REPORT_STATUS: test=";
+  let result_tag = "OHOS_REPORT_RESULT: stream=";
+  let status_code_tag = "OHOS_REPORT_STATUS_CODE: ";
+  let coverage_tag = "OHOS_REPORT_COVERAGE_DATA: ";
+  for line in content.lines() {
+    if let Some(index) = line.find(class_tag) {
+      let class_name = &line[index + class_tag.len()..];
+      if class_name != seen_class {
+        seen_class = class_name.to_string();
+        test_result.push_str(&format!("class={class_name}\n"));
+      }
+      continue;
+    }
+    if let Some(index) = line.find(test_tag) {
+      let test_name = &line[index + test_tag.len()..];
+      if test_name != seen_test {
+        seen_test = test_name.to_string();
+        test_result.push_str(&format!("test={test_name}\n"));
+      }
+      continue;
+    }
+    if let Some(index) = line.find(result_tag) {
+      test_result.push_str(&line[index + result_tag.len()..]);
+      test_result.push('\n');
+      continue;
+    }
+    if let Some(index) = line.find(status_code_tag) {
+      let code = line[index + status_code_tag.len()..]
+        .trim()
+        .parse::<i32>()
+        .unwrap_or(-99);
+      let result = match code {
+        0 => "Success",
+        -1 => "Error",
+        -2 => "Failure",
+        -3 => "Ignore",
+        _ => continue,
+      };
+      test_result.push_str(&format!("result={result}\n"));
+      continue;
+    }
+    if coverage && line.contains("OHOS_REPORT_COVERAGE_DATA") {
+      if let Some(index) = line.find(coverage_tag) {
+        coverage_data.push_str(&line[index + coverage_tag.len()..]);
+        coverage_data.push('\n');
+      }
+    }
+  }
+  if !test_result.is_empty() {
+    std::fs::write(test_result_path, test_result)?;
+  }
+  if !coverage_data.is_empty() {
+    // `OHOS_REPORT_COVERAGE_DATA:` payloads may be chunked JSON across lines;
+    // join them into the coverage document.
+    let joined = coverage_data.replace('\n', "");
+    std::fs::write(coverage_path, joined)?;
+  }
+  Ok(())
 }
 
 /// Whether the generated testability template exists under the module build
