@@ -3288,6 +3288,26 @@ impl ModuleBuildConfiguration {
   }
 }
 
+/// Recursively copy a directory tree (hvigor `fs-extra.copy` semantics).
+fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+  for entry in walkdir::WalkDir::new(source) {
+    let entry = entry.map_err(|error| anyhow::anyhow!("copy tree walk: {error}"))?;
+    let relative = entry.path().strip_prefix(source).map_err(|error| {
+      anyhow::anyhow!("copy tree strip prefix: {error}")
+    })?;
+    let target = destination.join(relative);
+    if entry.file_type().is_dir() {
+      std::fs::create_dir_all(&target)?;
+    } else if entry.file_type().is_file() {
+      if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+      }
+      std::fs::copy(entry.path(), &target)?;
+    }
+  }
+  Ok(())
+}
+
 struct BuildTimingProbe<'a> {
   stage: &'static str,
   module: Option<&'a str>,
@@ -3329,6 +3349,99 @@ impl Drop for BuildTimingProbe<'_> {
 }
 
 impl BuildCoordinator {
+  /// hvigor `FastPackageHap` (`packOptions.fastBuildApp`): copy the compiled
+  /// intermediates into `intermediates/fastApp/<target>/` — `ets/` assets,
+  /// compiled resources + `resources.index`, package context, module.json and
+  /// pack.info with the owning bundle name / aligned device types.
+  fn run_fast_package(
+    loader_jsons: &[(
+      ModuleConfig,
+      HapManifest,
+      LoaderJson,
+      FxHashMap<String, ResourceReference>,
+      String,
+      Arc<ArkdownConfig>,
+    )],
+  ) -> Result<Vec<PathBuf>> {
+    let mut artifact_paths = Vec::new();
+    for (module, _manifest, _loader_json, _resource_refs, module_target_name, module_config) in
+      loader_jsons
+    {
+      let module_layout = ModuleBuildLayout::for_output_target(
+        &module_config.output_target,
+        &module.src_path,
+        module_target_name,
+      );
+      let fast_app = module_layout
+        .intermediates()
+        .join("fastApp")
+        .join(module_target_name);
+      std::fs::create_dir_all(&fast_app)?;
+
+      // ets assets (compiled ABC) → fastApp/ets
+      let ets_assets = module_layout.loader_out_dir().join("ets");
+      if ets_assets.is_dir() {
+        copy_tree(&ets_assets, &fast_app.join("ets"))?;
+      }
+      // compiled resources → fastApp/resources
+      let resource_dir = module_layout.res_resources_dir();
+      if resource_dir.is_dir() {
+        copy_tree(&resource_dir, &fast_app.join("resources"))?;
+      }
+      // resources.index → fastApp/resources.index
+      let resources_index = module_layout.res_resources_index();
+      if resources_index.is_file() {
+        std::fs::copy(&resources_index, fast_app.join("resources.index"))?;
+      }
+      // package context / sdk info (conditional on normalized OHM url)
+      let use_normalized = module_config
+        .product
+        .build_option
+        .strict_mode
+        .use_normalized_ohm_url;
+      let pkg_context = module_layout.pkg_context_info_json();
+      if use_normalized && pkg_context.is_file() {
+        std::fs::copy(&pkg_context, fast_app.join("pkgContextInfo.json"))?;
+      }
+      let pkg_sdk_info = module_layout.pkg_sdk_info_json();
+      if !use_normalized && pkg_sdk_info.is_file() {
+        std::fs::copy(&pkg_sdk_info, fast_app.join("pkgSdkInfo.json"))?;
+      }
+      // module.json with the owning bundle name
+      let package_module_json = module_layout.default_intermediate_dir("package").join("module.json");
+      if package_module_json.is_file() {
+        let mut document: serde_json::Value =
+          serde_json::from_slice(&std::fs::read(&package_module_json)?)?;
+        if let Some(app) = document.get_mut("app").and_then(serde_json::Value::as_object_mut) {
+          app.insert(
+            "bundleName".into(),
+            module_config.product.bundle_name.clone().into(),
+          );
+        }
+        std::fs::write(fast_app.join("module.json"), serde_json::to_vec(&document)?)?;
+      }
+      // pack.info with the owning bundle name
+      let pack_info = module_layout
+        .outputs_root()
+        .join(module_target_name)
+        .join("pack.info");
+      if pack_info.is_file() {
+        let mut document: serde_json::Value =
+          serde_json::from_slice(&std::fs::read(&pack_info)?)?;
+        if let Some(summary) = document.get_mut("summary").and_then(serde_json::Value::as_object_mut) {
+          if let Some(app) = summary.get_mut("app").and_then(serde_json::Value::as_object_mut) {
+            app.insert(
+              "bundleName".into(),
+              module_config.product.bundle_name.clone().into(),
+            );
+          }
+        }
+        std::fs::write(fast_app.join("pack.info"), serde_json::to_vec(&document)?)?;
+      }
+      artifact_paths.push(fast_app);
+    }
+    Ok(artifact_paths)
+  }
   /// `isFormWidgetModule`: an HSP whose `module.json5` declares
   /// `formExtensionModule` (hvigor `module-model-impl.ts`).
   fn module_json5_has_form_extension_module(module_root: &Path) -> bool {
@@ -6568,6 +6681,14 @@ impl BuildCoordinator {
     if matches!(config.output_target, OutputTarget::Test) {
       return Ok(BuildOutput {
         artifact_paths: Vec::new(),
+      });
+    }
+    // hvigor `FastPackageHap` (`packOptions.fastBuildApp`): skip the HAP
+    // packaging and copy the compiled intermediates into
+    // `intermediates/fastApp/<target>/` for IDE fast deployment.
+    if args.fast_build_app {
+      return Self::run_fast_package(loader_jsons.as_slice()).map(|paths| BuildOutput {
+        artifact_paths: paths,
       });
     }
     let mut output_paths = Vec::new();

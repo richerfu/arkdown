@@ -194,6 +194,7 @@ impl SelfConsistencyOracle {
         coverage: false,
         scope: None,
         ohos_test_coverage: None,
+        fast_build_app: false,
         ohos_debug_asan: false,
         ohos_enable_hwasan: false,
         preview: false,

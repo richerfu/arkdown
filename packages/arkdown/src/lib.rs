@@ -1971,6 +1971,7 @@ async fn run_build(
     coverage: package_args.coverage,
     scope: None,
     ohos_test_coverage: None,
+    fast_build_app: false,
     ohos_debug_asan: package_args.ohos_debug_asan,
     ohos_enable_hwasan: package_args.ohos_enable_hwasan,
     preview: package_args.preview,

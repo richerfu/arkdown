@@ -77,6 +77,12 @@ pub struct BuildArgs {
   /// hvigor's `setTestDefaultParameters` injection.
   #[arg(long, default_value = None)]
   pub ohos_test_coverage: Option<bool>,
+  /// Fast build app: hvigor `packOptions.fastBuildApp` — skip the normal HAP
+  /// packaging and copy the compiled intermediates into
+  /// `intermediates/fastApp/<target>/` for IDE fast deployment
+  /// (hvigor `FastPackageHap`).
+  #[arg(long = "fast-build-app", default_value = "false")]
+  pub fast_build_app: bool,
   /// Build mode: debug, release
   #[arg(long, default_value = "debug")]
   pub mode: String,
