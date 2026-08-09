@@ -6692,7 +6692,6 @@ impl BuildCoordinator {
         super::unit_test::execute_unit_test(
           &module.src_path,
           &previewer_dir,
-          config.sdk_config.compile_api_version,
           coverage,
         )
         .map_err(|error| {
