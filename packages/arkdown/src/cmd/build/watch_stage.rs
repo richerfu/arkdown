@@ -241,6 +241,7 @@ impl WatchStage {
           coverage,
           scope: None,
           ohos_test_coverage: None,
+          fast_build_app: false,
           ohos_debug_asan,
           ohos_enable_hwasan,
           preview: false,
