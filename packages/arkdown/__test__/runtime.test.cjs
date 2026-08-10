@@ -54,6 +54,77 @@ test('hvigor project cache hash matches latest 32-character cache layout', () =>
   assert.equal(hvigorProjectHash(root).length, 32)
 })
 
+test('hvigor config dependencies are installed before package-backed plugins are evaluated', async (context) => {
+  const npm = path.join(path.dirname(process.execPath), process.platform === 'win32' ? 'npm.cmd' : 'npm')
+  if (!fs.existsSync(npm)) {
+    context.skip(`npm is not available next to ${process.execPath}`)
+    return
+  }
+
+  const root = tempProject()
+  const hvigorHome = tempProject()
+  const hvigorDir = path.join(root, 'hvigor')
+  const packageRoot = path.join(hvigorDir, 'fixture-plugin')
+  const marker = path.join(root, 'dependency-plugin.txt')
+  fs.mkdirSync(path.join(packageRoot, 'dist'), { recursive: true })
+  fs.writeFileSync(
+    path.join(packageRoot, 'package.json'),
+    JSON.stringify({
+      name: 'fixture-hvigor-workspace-plugin',
+      version: '1.0.0',
+      exports: { '.': { require: './dist/plugin.cjs' } },
+    }),
+  )
+  fs.writeFileSync(
+    path.join(packageRoot, 'dist', 'plugin.cjs'),
+    `exports.plugin = {
+      pluginId: 'fixture.workspace-dependency',
+      apply() { require('node:fs').writeFileSync(process.env.ARKDOWN_PLUGIN_DEPENDENCY_MARKER, 'loaded') }
+    }\n`,
+  )
+  fs.writeFileSync(
+    path.join(hvigorDir, 'hvigor-config.json5'),
+    `{
+      properties: { 'hvigor.dependency.useNpm': true },
+      dependencies: { 'fixture-hvigor-workspace-plugin': 'file:./fixture-plugin' }
+    }\n`,
+  )
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.ts'),
+    `import { plugin } from 'fixture-hvigor-workspace-plugin'\nexport default { plugins: [plugin] }\n`,
+  )
+  fs.writeFileSync(path.join(root, '.npmrc'), 'audit=false\nfund=false\n')
+
+  const previousHvigorHome = process.env.HVIGOR_USER_HOME
+  const previousMarker = process.env.ARKDOWN_PLUGIN_DEPENDENCY_MARKER
+  process.env.HVIGOR_USER_HOME = hvigorHome
+  process.env.ARKDOWN_PLUGIN_DEPENDENCY_MARKER = marker
+  try {
+    await new RuntimePluginLoader({ project: root }).load()
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'loaded')
+
+    const workspace = path.join(hvigorHome, 'project_caches', hvigorProjectHash(root), 'workspace')
+    const workspaceManifest = path.join(workspace, 'package.json')
+    const manifest = JSON.parse(fs.readFileSync(workspaceManifest, 'utf8'))
+    assert.equal(
+      manifest.dependencies['fixture-hvigor-workspace-plugin'],
+      path.join(hvigorDir, 'fixture-plugin'),
+    )
+    assert.ok(
+      fs.existsSync(path.join(workspace, 'node_modules', 'fixture-hvigor-workspace-plugin', 'dist', 'plugin.cjs')),
+    )
+
+    const modifiedAt = fs.statSync(workspaceManifest).mtimeMs
+    await new RuntimePluginLoader({ project: root }).load()
+    assert.equal(fs.statSync(workspaceManifest).mtimeMs, modifiedAt, 'current dependency workspace must be reused')
+  } finally {
+    if (previousHvigorHome === undefined) delete process.env.HVIGOR_USER_HOME
+    else process.env.HVIGOR_USER_HOME = previousHvigorHome
+    if (previousMarker === undefined) delete process.env.ARKDOWN_PLUGIN_DEPENDENCY_MARKER
+    else process.env.ARKDOWN_PLUGIN_DEPENDENCY_MARKER = previousMarker
+  }
+})
+
 test('Rust hvigor config merge preserves callback identity and array replacement', () => {
   const callback = () => 'live'
   const { mergeHvigorConfig } = require('../index.js')

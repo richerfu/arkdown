@@ -1524,12 +1524,8 @@ class RuntimePluginLoader {
     this.projectRoot = path.resolve(this.config.project || process.cwd())
     this.hvigorHost = new HvigorRuntimeHost(this.projectRoot, this.config, inspectHvigorContext)
     this.projectRoot = this.hvigorHost.projectRoot
-    this.hvigorWorkspaceNodeModules = configureHvigorNodePath(
-      this.projectRoot,
-      this.hvigorHost.projectHvigorConfigForResolution(),
-      this.hvigorHost.hvigorWorkspace(),
-    )
-    this.hvigorHost.hvigorWorkspaceNodeModules = this.hvigorWorkspaceNodeModules
+    this.hvigorWorkspaceNodeModules = null
+    this.hvigorWorkspacePrepared = false
     this.seen = new Set()
     this.projectHvigorOverrides = {}
     this.moduleHvigorOverrides = new Map()
@@ -1537,6 +1533,7 @@ class RuntimePluginLoader {
 
   async load() {
     const plugins = []
+    await this.prepareHvigorDependencyWorkspace()
     await this.hvigorHost.evaluateHvigorConfig()
     for (const plugin of await this.loadConfiguredPluginPaths()) {
       plugins.push(plugin)
@@ -1548,6 +1545,30 @@ class RuntimePluginLoader {
       plugins.push(plugin)
     }
     return new HvigorCompilePluginPlanner(this.config).apply(plugins)
+  }
+
+  async prepareHvigorDependencyWorkspace() {
+    if (this.hvigorWorkspacePrepared) return
+    const request = this.hvigorHost.hvigorPluginWorkspaceRequest()
+    if (request === null) {
+      this.hvigorWorkspacePrepared = true
+      return
+    }
+    const response = JSON.parse(
+      await nativeRuntimeBinding.prepareHvigorPluginWorkspace(JSON.stringify(request)),
+    )
+    if (response.error) {
+      const { code, message, ...details } = response.error
+      throw this.hvigorHost._error(code, message, details)
+    }
+    this.hvigorWorkspaceNodeModules = configureHvigorNodePath(
+      this.projectRoot,
+      request.projectConfig,
+      response.workspace,
+      response.nodeModules,
+    )
+    this.hvigorHost.hvigorWorkspaceNodeModules = this.hvigorWorkspaceNodeModules
+    this.hvigorWorkspacePrepared = true
   }
 
   toNativeBuildConfig() {
@@ -2479,7 +2500,6 @@ class HvigorRuntimeHost {
     const runtimeModel = this._loadRuntimeModel()
     this.projectRoot = path.resolve(runtimeModel.projectRoot)
     this._projectCacheHash = runtimeModel.projectCacheHash
-    this._hvigorWorkspace = runtimeModel.hvigorWorkspace
     this._projectProfile = runtimeModel.projectProfile || {}
     this._projectPackage = runtimeModel.projectPackage || {}
     this._appJson = runtimeModel.appJson
@@ -3246,12 +3266,17 @@ class HvigorRuntimeHost {
     }
   }
 
-  projectHvigorConfigForResolution() {
-    return this._projectHvigorConfigPath ? this._hvigorFileConfig : null
-  }
-
-  hvigorWorkspace() {
-    return this._hvigorWorkspace
+  hvigorPluginWorkspaceRequest() {
+    if (!this._projectHvigorConfigPath) return null
+    return {
+      projectRoot: this.projectRoot,
+      hvigorUserHome: getHvigorUserHome(),
+      homeDir: os.homedir(),
+      processExecutable: process.execPath,
+      nodeVersion: process.version,
+      projectConfig: this._clone(this._hvigorFileConfig),
+      userConfig: this._clone(this._userHvigorConfig),
+    }
   }
 
   validateBuildScriptBuildOption(buildOption, sourceFile, fieldPath) {
@@ -5207,7 +5232,7 @@ function hasHvigorfile(root) {
   ).length > 0
 }
 
-function configureHvigorNodePath(projectRoot, projectHvigorConfig, plannedWorkspace) {
+function configureHvigorNodePath(projectRoot, projectHvigorConfig, plannedWorkspace, plannedNodeModules) {
   let config = projectHvigorConfig
   if (config === undefined) {
     const snapshot = JSON.parse(
@@ -5227,7 +5252,7 @@ function configureHvigorNodePath(projectRoot, projectHvigorConfig, plannedWorksp
   const workspace =
     plannedWorkspace ||
     path.join(getHvigorUserHome(), 'project_caches', hvigorProjectHash(projectRoot), 'workspace')
-  const nodeModules = path.join(workspace, 'node_modules')
+  const nodeModules = plannedNodeModules || path.join(workspace, 'node_modules')
   process.env.WORKSPACE_DIR = workspace
   const nodePathEntries = (process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean)
   process.env.NODE_PATH = [nodeModules, ...nodePathEntries.filter((entry) => entry !== nodeModules)].join(
@@ -5235,7 +5260,9 @@ function configureHvigorNodePath(projectRoot, projectHvigorConfig, plannedWorksp
   )
   Module._initPaths()
   installHvigorTypeScriptExtension()
-  installHvigorResolvePatch()
+  if (process.versions.node.split('.')[0] === '14') {
+    installHvigorResolvePatch()
+  }
   const priorContext = hvigorDependencyContexts.findIndex((context) => context.nodeModules === nodeModules)
   if (priorContext >= 0) {
     hvigorDependencyContexts.splice(priorContext, 1)
