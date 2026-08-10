@@ -112,6 +112,9 @@ pub use plan_input::{
     ResourcePlanInput, SignPlanInput, WatchPlanInput,
 };
 
+// sdk
+pub use sdk::SdkEs2abcOptionSnapshot;
+
 // profiles
 pub use profiles::store::{
     ParsedProfile, ProfileFile, ProfileFileKind, ProfileRef, ProfileStore, RouterMapInventory,

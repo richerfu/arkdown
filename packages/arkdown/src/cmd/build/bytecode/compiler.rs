@@ -5,9 +5,11 @@
 //! plan, and dispatches to the backend implementation.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arkdown_core::{HvigorModuleSourceFile, HvigorNpmEntry};
 use arkdown_path::lexical_normalize;
+use arkdown_session::SdkEs2abcOptionSnapshot;
 use rustc_hash::FxHashSet;
 
 use crate::cmd::build::bytecode::backend::{BytecodeBackend, SdkEs2abcBackend};
@@ -27,6 +29,7 @@ use crate::cmd::build::bytecode::Ts2abcOutput;
 #[derive(Debug, Clone, Default)]
 pub struct Ts2abcCompiler {
   sdk_es2abc_path: Option<PathBuf>,
+  sdk_es2abc_options: Option<Arc<SdkEs2abcOptionSnapshot>>,
 }
 
 /// Backend selection for Rolldown-backed module-source bytecode compilation.
@@ -97,6 +100,7 @@ impl BytecodeAbcInput {
 pub struct RolldownBytecodeCompiler {
   backend: RolldownBytecodeBackendChoice,
   sdk_es2abc_path: PathBuf,
+  sdk_es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
   target_api_version: u32,
   target_api_sub_version: Option<String>,
   is_debug: bool,
@@ -111,12 +115,14 @@ impl RolldownBytecodeCompiler {
   pub fn new(
     backend: RolldownBytecodeBackendChoice,
     sdk_es2abc_path: PathBuf,
+    sdk_es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
     target_api_version: u32,
     is_debug: bool,
   ) -> Self {
     Self {
       backend,
       sdk_es2abc_path,
+      sdk_es2abc_options,
       target_api_version,
       target_api_sub_version: None,
       is_debug,
@@ -216,7 +222,10 @@ impl RolldownBytecodeCompiler {
     }
 
     let plan = builder.build()?;
-    let compiler = Ts2abcCompiler::with_sdk_es2abc_path(self.sdk_es2abc_path.clone());
+    let compiler = Ts2abcCompiler::with_sdk_es2abc(
+      self.sdk_es2abc_path.clone(),
+      Arc::clone(&self.sdk_es2abc_options),
+    );
     compiler.compile(&plan)
   }
 }
@@ -332,9 +341,13 @@ impl<'a> HvigorNpmModuleRequest<'a> {
 
 impl Ts2abcCompiler {
   /// Create a compiler that can execute SDK es2abc plans.
-  pub fn with_sdk_es2abc_path(sdk_es2abc_path: PathBuf) -> Self {
+  pub fn with_sdk_es2abc(
+    sdk_es2abc_path: PathBuf,
+    sdk_es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
+  ) -> Self {
     Self {
       sdk_es2abc_path: Some(sdk_es2abc_path),
+      sdk_es2abc_options: Some(sdk_es2abc_options),
     }
   }
 
@@ -349,6 +362,9 @@ impl Ts2abcCompiler {
       .sdk_es2abc_path
       .as_ref()
       .ok_or_else(|| Ts2abcError::MissingValue("sdk es2abc path is required".to_string()))?;
+    let es2abc_options = self.sdk_es2abc_options.as_ref().ok_or_else(|| {
+      Ts2abcError::MissingValue("sdk es2abc option snapshot is required".to_string())
+    })?;
     Self::validate_sdk_es2abc(es2abc_path)?;
 
     let mut options = self.plan_to_driver_options(plan)?;
@@ -363,7 +379,8 @@ impl Ts2abcCompiler {
     }
 
     options.cache_file = plan.output.cache_file.clone();
-    let backend = SdkEs2abcBackend::new(es2abc_path.clone()).with_input_file_list(input_file_list);
+    let backend = SdkEs2abcBackend::new(es2abc_path.clone(), Arc::clone(es2abc_options))
+      .with_input_file_list(input_file_list);
     backend.compile(&options)
   }
 
@@ -482,6 +499,25 @@ mod tests {
     CompileUnitPlan, ModuleSourceInput, RecordNamePlan, Ts2abcOutputPlan, Ts2abcPlan,
   };
 
+  fn sdk_options() -> Arc<SdkEs2abcOptionSnapshot> {
+    Arc::new(SdkEs2abcOptionSnapshot::from_options([
+      "--cache-file",
+      "--compile-context-info",
+      "--debug-info",
+      "--enable-abc-input",
+      "--enable-annotations",
+      "--enable-callable-name",
+      "--enable-release-column",
+      "--file-threads",
+      "--merge-abc",
+      "--npm-module-entry-list",
+      "--output",
+      "--remove-redundant-file",
+      "--target-api-sub-version",
+      "--target-api-version",
+    ]))
+  }
+
   fn plan(root: &Path) -> Ts2abcPlan {
     Ts2abcPlan {
       compile_units: vec![CompileUnitPlan {
@@ -571,7 +607,7 @@ mod tests {
   fn sdk_backend_rejects_missing_binary() {
     let tmp = tempfile::tempdir().unwrap();
     let plan = plan(tmp.path());
-    let err = Ts2abcCompiler::with_sdk_es2abc_path(tmp.path().join("missing-es2abc"))
+    let err = Ts2abcCompiler::with_sdk_es2abc(tmp.path().join("missing-es2abc"), sdk_options())
       .compile(&plan)
       .unwrap_err();
     assert!(matches!(err, Ts2abcError::SdkCompilerNotFound(_)));
@@ -584,7 +620,7 @@ mod tests {
     let es2abc = FakeEs2abc::write(tmp.path(), None);
 
     let plan = plan(tmp.path());
-    let output = Ts2abcCompiler::with_sdk_es2abc_path(es2abc)
+    let output = Ts2abcCompiler::with_sdk_es2abc(es2abc, sdk_options())
       .compile(&plan)
       .unwrap();
     assert_eq!(output.abc_path, tmp.path().join("modules.abc"));
@@ -598,6 +634,7 @@ mod tests {
     let compiler = RolldownBytecodeCompiler::new(
       RolldownBytecodeBackendChoice::Sdk,
       tmp.path().join("es2abc"),
+      sdk_options(),
       12,
       true,
     );
@@ -628,9 +665,14 @@ mod tests {
     let args_log = tmp.path().join("es2abc.args");
     let es2abc = FakeEs2abc::write(tmp.path(), Some(&args_log));
 
-    let compiler =
-      RolldownBytecodeCompiler::new(RolldownBytecodeBackendChoice::Sdk, es2abc, 12, true)
-        .with_target_api_sub_version(Some("beta3".to_string()));
+    let compiler = RolldownBytecodeCompiler::new(
+      RolldownBytecodeBackendChoice::Sdk,
+      es2abc,
+      sdk_options(),
+      12,
+      true,
+    )
+    .with_target_api_sub_version(Some("beta3".to_string()));
     compiler
       .compile(RolldownBytecodeCompileInput {
         module_source_files: vec![HvigorModuleSourceFile {
@@ -687,8 +729,13 @@ mod tests {
     let args_log = tmp.path().join("es2abc.args");
     let es2abc = FakeEs2abc::write(tmp.path(), Some(&args_log));
 
-    let compiler =
-      RolldownBytecodeCompiler::new(RolldownBytecodeBackendChoice::Sdk, es2abc, 12, true);
+    let compiler = RolldownBytecodeCompiler::new(
+      RolldownBytecodeBackendChoice::Sdk,
+      es2abc,
+      sdk_options(),
+      12,
+      true,
+    );
     compiler
       .compile(RolldownBytecodeCompileInput {
         module_source_files: vec![HvigorModuleSourceFile {
@@ -733,8 +780,13 @@ mod tests {
     let args_log = tmp.path().join("es2abc.args");
     let es2abc = FakeEs2abc::write(tmp.path(), Some(&args_log));
 
-    let compiler =
-      RolldownBytecodeCompiler::new(RolldownBytecodeBackendChoice::Sdk, es2abc, 12, true);
+    let compiler = RolldownBytecodeCompiler::new(
+      RolldownBytecodeBackendChoice::Sdk,
+      es2abc,
+      sdk_options(),
+      12,
+      true,
+    );
     compiler
       .compile(RolldownBytecodeCompileInput {
         module_source_files: vec![HvigorModuleSourceFile {
