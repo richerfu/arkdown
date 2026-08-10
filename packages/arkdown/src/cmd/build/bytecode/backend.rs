@@ -11,6 +11,9 @@
 //! | `SdkEs2abcBackend` | native SDK `es2abc` subprocess |
 
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use arkdown_session::SdkEs2abcOptionSnapshot;
 
 use crate::cmd::build::bytecode::driver::{Ts2abcOptions, Ts2abcOutput};
 use crate::cmd::build::bytecode::error::Ts2abcError;
@@ -45,14 +48,16 @@ pub(crate) trait BytecodeBackend: Send + Sync {
 #[derive(Debug, Clone)]
 pub(crate) struct SdkEs2abcBackend {
   es2abc_path: PathBuf,
+  es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
   input_file_list: Option<PathBuf>,
 }
 
 impl SdkEs2abcBackend {
   /// Create a new backend pointing to the given `es2abc` binary.
-  pub(crate) fn new(es2abc_path: PathBuf) -> Self {
+  pub(crate) fn new(es2abc_path: PathBuf, es2abc_options: Arc<SdkEs2abcOptionSnapshot>) -> Self {
     Self {
       es2abc_path,
+      es2abc_options,
       input_file_list: None,
     }
   }
@@ -68,9 +73,11 @@ impl SdkEs2abcBackend {
 impl BytecodeBackend for SdkEs2abcBackend {
   fn compile(&self, options: &Ts2abcOptions) -> Result<Ts2abcOutput, Ts2abcError> {
     // Delegate to the driver's implementation.
-    let backend =
-      crate::cmd::build::bytecode::driver::SdkEs2abcBackend::new(self.es2abc_path.clone())
-        .with_input_file_list(self.input_file_list.clone());
+    let backend = crate::cmd::build::bytecode::driver::SdkEs2abcBackend::new(
+      self.es2abc_path.clone(),
+      Arc::clone(&self.es2abc_options),
+    )
+    .with_input_file_list(self.input_file_list.clone());
     crate::cmd::build::bytecode::driver::BytecodeBackend::compile(&backend, options)
   }
 }

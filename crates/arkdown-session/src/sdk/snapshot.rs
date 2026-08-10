@@ -1,6 +1,7 @@
 //! [`SdkSnapshot`] — selected SDK, tool paths, and API version metadata.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use arkdown_core::SdkConfig;
 use arkdown_path::lexical_normalize;
@@ -9,6 +10,8 @@ use thiserror::Error;
 use crate::sdk_compile_plugin::{SdkCompilePluginSnapshot, SdkSupportExtensionSet};
 use crate::sdk_schemas::{SdkSchemaKind, SdkSchemaPath, SdkSchemaResolver};
 use crate::sdk_tools::{SdkToolKind, SdkToolPath, SdkToolResolver};
+
+use super::SdkEs2abcOptionSnapshot;
 
 /// Errors when building the SDK snapshot.
 #[derive(Debug, Error)]
@@ -33,6 +36,8 @@ pub struct SdkSnapshot {
     pub compile_sdk_version: String,
     /// SDK compile-plugin metadata resolved during session startup.
     pub compile_plugin: SdkCompilePluginSnapshot,
+    /// Actual `es2abc --help` option inventory, probed once at startup.
+    pub es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
 }
 
 impl SdkSnapshot {
@@ -56,12 +61,14 @@ impl SdkSnapshot {
             return Err(SdkSnapshotError::SdkRootNotFound(sdk_root));
         }
 
-        Ok(Self::from_parts(
+        let mut snapshot = Self::from_parts(
             sdk_root,
             config.compile_api_version,
             config.sdk_component_api_version,
             config.compile_sdk_version.clone(),
-        ))
+        );
+        snapshot.es2abc_options = Arc::new(SdkEs2abcOptionSnapshot::inspect(&config.es2abc_path));
+        Ok(snapshot)
     }
 
     /// Build from already resolved SDK parts.
@@ -83,6 +90,7 @@ impl SdkSnapshot {
             component_api_version,
             compile_sdk_version,
             compile_plugin,
+            es2abc_options: Arc::new(SdkEs2abcOptionSnapshot::default()),
         }
     }
 

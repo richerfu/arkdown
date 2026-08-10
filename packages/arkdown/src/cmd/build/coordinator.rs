@@ -6410,6 +6410,7 @@ impl BuildCoordinator {
         compiler: RolldownBytecodeCompiler::new(
           abc_ts2abc_backend_inner,
           config.sdk_config.es2abc_path.clone(),
+          Arc::clone(&session.sdk.es2abc_options),
           compile_target.api_version(),
           matches!(config.build_mode, BuildMode::Debug),
         )
@@ -6522,6 +6523,7 @@ impl BuildCoordinator {
           compiler: RolldownBytecodeCompiler::new(
             abc_ts2abc_backend_inner,
             config.sdk_config.es2abc_path.clone(),
+            Arc::clone(&session.sdk.es2abc_options),
             compile_target.api_version(),
             matches!(config.build_mode, BuildMode::Debug),
           )

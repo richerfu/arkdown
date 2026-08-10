@@ -1,6 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+
+use arkdown_session::SdkEs2abcOptionSnapshot;
 
 use crate::cmd::build::bytecode::compile_context::CompileContextInfo;
 use crate::cmd::build::bytecode::error::Ts2abcError;
@@ -145,13 +148,15 @@ impl<'a> SdkFileInfoManifest<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct SdkEs2abcBackend {
   es2abc_path: PathBuf,
+  es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
   input_file_list: Option<PathBuf>,
 }
 
 impl SdkEs2abcBackend {
-  pub(crate) fn new(es2abc_path: PathBuf) -> Self {
+  pub(crate) fn new(es2abc_path: PathBuf, es2abc_options: Arc<SdkEs2abcOptionSnapshot>) -> Self {
     Self {
       es2abc_path,
+      es2abc_options,
       input_file_list: None,
     }
   }
@@ -222,6 +227,7 @@ impl SdkEs2abcBackend {
     } else {
       self.append_direct_es2abc_args(&mut command, options, input_arg);
     }
+    self.validate_command_options(&command)?;
     Ok(command)
   }
 
@@ -283,9 +289,14 @@ impl SdkEs2abcBackend {
     if options.enable_annotations {
       command.arg("--enable-annotations");
     }
-    command
-      .arg("--enable-release-column")
-      .arg("--enable-callable-name");
+    command.arg("--enable-release-column");
+    // Hvigor loads `genAbc()` from the selected SDK's `compile_plugin.js`.
+    // API 20/21/23 module_mode.js does not emit this option, while API 24
+    // adds it together with compiler support. The actual tool inventory is
+    // the parity boundary, rather than a guessed API-version threshold.
+    if self.es2abc_options.supports("--enable-callable-name") {
+      command.arg("--enable-callable-name");
+    }
     if let Some(cache_file) = &options.cache_file {
       command
         .arg("--cache-file")
@@ -376,6 +387,36 @@ impl SdkEs2abcBackend {
       .min(16)
   }
 
+  fn validate_command_options(&self, command: &Command) -> Result<(), Ts2abcError> {
+    if !self.es2abc_options.is_available() {
+      return Err(Ts2abcError::SdkCompilerOptionProbeFailed {
+        program: self.es2abc_path.clone(),
+        reason: self
+          .es2abc_options
+          .probe_failure()
+          .unwrap_or("es2abc --help returned no option inventory")
+          .to_string(),
+      });
+    }
+
+    let mut unsupported = command
+      .get_args()
+      .filter_map(|argument| argument.to_str())
+      .filter_map(Es2abcCommandOption::new)
+      .filter(|option| !self.es2abc_options.supports(option.name()))
+      .map(|option| option.name().to_string())
+      .collect::<Vec<_>>();
+    unsupported.sort_unstable();
+    unsupported.dedup();
+    if unsupported.is_empty() {
+      return Ok(());
+    }
+    Err(Ts2abcError::UnsupportedSdkCompilerOptions {
+      program: self.es2abc_path.clone(),
+      options: unsupported.join(", "),
+    })
+  }
+
   fn input_file_arg(&self, options: &Ts2abcOptions) -> Result<OsString, Ts2abcError> {
     if let Some(input_file_list) = &self.input_file_list {
       return Ok(Es2abcPathArgument::new(input_file_list).at_prefixed());
@@ -387,6 +428,25 @@ impl SdkEs2abcBackend {
 
     let file_list = SdkFileInfoManifest::new(options).write()?;
     Ok(Es2abcPathArgument::new(&file_list).at_prefixed())
+  }
+}
+
+struct Es2abcCommandOption<'a> {
+  argument: &'a str,
+  name_end: usize,
+}
+
+impl<'a> Es2abcCommandOption<'a> {
+  fn new(argument: &'a str) -> Option<Self> {
+    let name = argument.strip_prefix("--")?;
+    let name_end = name
+      .find(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+      .unwrap_or(name.len());
+    (name_end > 0).then_some(Self { argument, name_end })
+  }
+
+  fn name(&self) -> &str {
+    &self.argument[..self.name_end + 2]
   }
 }
 
@@ -407,6 +467,41 @@ fn non_empty_str(value: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  const API_20_TO_23_OPTIONS: &[&str] = &[
+    "--branch-elimination",
+    "--cache-file",
+    "--commonjs",
+    "--compile-context-info",
+    "--debug-info",
+    "--dump-deps-info",
+    "--enable-abc-input",
+    "--enable-annotations",
+    "--enable-release-column",
+    "--extension",
+    "--file-threads",
+    "--merge-abc",
+    "--module",
+    "--module-record-field-name",
+    "--npm-module-entry-list",
+    "--opt-level",
+    "--opt-try-catch-func",
+    "--output",
+    "--outputProto",
+    "--remove-redundant-file",
+    "--target-api-sub-version",
+    "--target-api-version",
+    "--transform-lib",
+    "--use-define-semantic",
+  ];
+
+  fn sdk_options(enable_callable_name: bool) -> Arc<SdkEs2abcOptionSnapshot> {
+    let mut options = API_20_TO_23_OPTIONS.to_vec();
+    if enable_callable_name {
+      options.push("--enable-callable-name");
+    }
+    Arc::new(SdkEs2abcOptionSnapshot::from_options(options))
+  }
 
   fn module_mode_options() -> Ts2abcOptions {
     Ts2abcOptions {
@@ -447,14 +542,61 @@ mod tests {
     }
   }
 
-  fn args_for(options: &Ts2abcOptions) -> Vec<String> {
-    let backend = SdkEs2abcBackend::new(PathBuf::from("/fake/es2abc"))
-      .with_input_file_list(Some(PathBuf::from("/tmp/filesInfo.txt")));
+  fn args_for_sdk(options: &Ts2abcOptions, enable_callable_name: bool) -> Vec<String> {
+    let backend = SdkEs2abcBackend::new(
+      PathBuf::from("/fake/es2abc"),
+      sdk_options(enable_callable_name),
+    )
+    .with_input_file_list(Some(PathBuf::from("/tmp/filesInfo.txt")));
     let command = backend.build_command(options).expect("build command");
     command
       .get_args()
       .map(|arg| arg.to_string_lossy().into_owned())
       .collect()
+  }
+
+  fn args_for(options: &Ts2abcOptions) -> Vec<String> {
+    args_for_sdk(options, true)
+  }
+
+  /// API 20/21/23 SDK `module_mode.js` and `es2abc --help` both omit the
+  /// callable-name option; API 24 adds it at both boundaries.
+  #[test]
+  fn callable_name_matches_selected_sdk_capability() {
+    let options = module_mode_options();
+    let api_23_args = args_for_sdk(&options, false);
+    assert!(
+      !api_23_args
+        .iter()
+        .any(|arg| arg == "--enable-callable-name"),
+      "API 23 must not receive the API 24 option: {api_23_args:?}"
+    );
+
+    let api_24_args = args_for_sdk(&options, true);
+    assert!(
+      api_24_args
+        .iter()
+        .any(|arg| arg == "--enable-callable-name"),
+      "API 24 must preserve its SDK loader option: {api_24_args:?}"
+    );
+  }
+
+  #[test]
+  fn rejects_every_unsupported_planned_option_before_spawn() {
+    let options = module_mode_options();
+    let backend = SdkEs2abcBackend::new(
+      PathBuf::from("/fake/es2abc"),
+      Arc::new(SdkEs2abcOptionSnapshot::from_options(["--output"])),
+    )
+    .with_input_file_list(Some(PathBuf::from("/tmp/filesInfo.txt")));
+    let error = backend.build_command(&options).unwrap_err();
+    let Ts2abcError::UnsupportedSdkCompilerOptions { options, .. } = error else {
+      panic!("expected unsupported-option diagnostic, got {error}");
+    };
+    assert!(options.contains("--enable-release-column"), "{options}");
+    assert!(options.contains("--file-threads"), "{options}");
+    assert!(options.contains("--merge-abc"), "{options}");
+    assert!(options.contains("--target-api-version"), "{options}");
   }
 
   /// `--branch-elimination` is emitted only for release builds without

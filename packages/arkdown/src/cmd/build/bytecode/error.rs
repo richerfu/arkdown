@@ -20,6 +20,10 @@ pub enum Ts2abcError {
   SdkCompilerNotFound(PathBuf),
   #[error("SDK es2abc compiler is not executable: {0}")]
   SdkCompilerNotExecutable(PathBuf),
+  #[error("failed to inspect SDK es2abc options for {program}: {reason}")]
+  SdkCompilerOptionProbeFailed { program: PathBuf, reason: String },
+  #[error("SDK es2abc {program} does not support command options: {options}")]
+  UnsupportedSdkCompilerOptions { program: PathBuf, options: String },
   #[error("failed to run SDK es2abc {program}: {source}")]
   SdkCompilerIo {
     program: String,
