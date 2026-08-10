@@ -759,6 +759,30 @@ test('hvigor command runner maps assembleHap to the selected native module targe
   assert.equal(calls[0].nativeTaskRootsJson, undefined)
 })
 
+test('hvigor command runner maps test to the local unit-test native target', async () => {
+  const project = path.resolve(__dirname, '../../../tests/fixtures/minimal-hap')
+  const calls = []
+  const run = createTestHvigorCommand(async (config, _plugins, runtimeTasks) => {
+    calls.push(config)
+    assert.equal(typeof runtimeTasks.invoke, 'function')
+    return { artifacts: [], elapsedMs: 1 }
+  })
+
+  await run({
+    project,
+    tasks: ['test'],
+    executionMode: 'module',
+    prop: ['module=entry'],
+    module: 'entry',
+  })
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].target, 'test')
+  assert.equal(calls[0].module, 'entry')
+  assert.equal(calls[0].buildTargetName, undefined)
+  assert.deepEqual(JSON.parse(calls[0].nativeTaskRootsJson), [{ moduleName: 'entry', taskName: 'test' }])
+})
+
 test('module GenerateBuildProfile maps to its unqualified native cutoff boundary', async () => {
   const project = copyFixture('minimal-hap')
   const calls = []

@@ -62,6 +62,12 @@ enum RuntimeCommandKind {
   Sync,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeNativeOutputTarget {
+  Test,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeCommandTask {
@@ -84,6 +90,8 @@ struct RuntimeNativeTaskRoot {
 #[serde(rename_all = "camelCase")]
 struct RuntimeNativeBuildRequest {
   target: RuntimeTaskNodeKind,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  output_target: Option<RuntimeNativeOutputTarget>,
   #[serde(skip_serializing_if = "Option::is_none")]
   module: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -277,12 +285,14 @@ struct PlannedRuntimeTask {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RuntimeNativeRequestIdentity {
   target: RuntimeTaskNodeKind,
+  output_target: Option<RuntimeNativeOutputTarget>,
   module_name: Option<String>,
   target_name: Option<String>,
 }
 
 struct RuntimeNativeBuildRequestBuilder {
   target: RuntimeTaskNodeKind,
+  output_target: Option<RuntimeNativeOutputTarget>,
   module_name: Option<String>,
   target_name: Option<String>,
   node_names: Vec<String>,
@@ -642,6 +652,12 @@ impl RuntimeCommandPlanner {
           task_path: task.path.clone(),
           node_name: task.node_name.clone(),
         })?;
+      let output_target = Self::native_output_target(
+        task
+          .task_name
+          .split_once('@')
+          .map_or(task.task_name.as_str(), |(_, action)| action),
+      );
       let is_app_assembly = target == RuntimeTaskNodeKind::App && task.project_task;
       let selected_target = self
         .request
@@ -663,6 +679,7 @@ impl RuntimeCommandPlanner {
       };
       let identity = RuntimeNativeRequestIdentity {
         target,
+        output_target,
         module_name: module_name.clone(),
         target_name: target_name.clone(),
       };
@@ -670,6 +687,7 @@ impl RuntimeCommandPlanner {
         .entry(identity)
         .or_insert_with(|| RuntimeNativeBuildRequestBuilder {
           target,
+          output_target,
           module_name,
           target_name,
           node_names: Vec::new(),
@@ -721,6 +739,7 @@ impl RuntimeCommandPlanner {
           }
           RuntimeNativeBuildRequest {
             target: request.target,
+            output_target: request.output_target,
             module: request.module_name,
             target_name: request.target_name,
             node_names: request.node_names,
@@ -756,7 +775,14 @@ impl RuntimeCommandPlanner {
   fn is_native_action(action_name: &str) -> bool {
     matches!(
       action_name,
-      "PreBuild"
+      "test"
+        | "GenerateUnitTestResult"
+        | "UnitTestArkTS"
+        | "BuildUnitTestHook"
+        | "GenerateUnitTestTemplate"
+        | "UnitTestProcessProfile"
+        | "ReplaceUnitTestIndexFile"
+        | "PreBuild"
         | "CreateModuleInfo"
         | "CreateHarModuleInfo"
         | "GenerateMetadata"
@@ -811,5 +837,19 @@ impl RuntimeCommandPlanner {
         | "SignPackagesFromApp"
         | "SignApp"
     )
+  }
+
+  fn native_output_target(action_name: &str) -> Option<RuntimeNativeOutputTarget> {
+    matches!(
+      action_name,
+      "test"
+        | "GenerateUnitTestResult"
+        | "UnitTestArkTS"
+        | "BuildUnitTestHook"
+        | "GenerateUnitTestTemplate"
+        | "UnitTestProcessProfile"
+        | "ReplaceUnitTestIndexFile"
+    )
+    .then_some(RuntimeNativeOutputTarget::Test)
   }
 }
