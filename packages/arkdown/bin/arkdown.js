@@ -124,7 +124,7 @@ Examples:
 
 Options:
   --project <dir>     Project root. Defaults to current directory.
-  --target <kind>     Output artifact: hap, hsp, or har. Defaults to hap.
+  --target <kind>     Output artifact: hap, hsp, har, app, or test. Defaults to hap.
   --mode <mode>       Build mode: debug or release. Defaults to debug.
   --module, -m <name> Scope build to one module.
   --product <name>    Product name from build-profile.json5.

@@ -3349,6 +3349,19 @@ impl Drop for BuildTimingProbe<'_> {
 }
 
 impl BuildCoordinator {
+  fn arkts_compile_task_name(
+    output_target: &OutputTarget,
+    module_type: &OhosModuleType,
+  ) -> &'static str {
+    if matches!(output_target, OutputTarget::Test) {
+      "UnitTestArkTS"
+    } else if matches!(module_type, OhosModuleType::Har) {
+      "HarCompileArkTS"
+    } else {
+      "CompileArkTS"
+    }
+  }
+
   /// hvigor `FastPackageHap` (`packOptions.fastBuildApp`): copy the compiled
   /// intermediates into `intermediates/fastApp/<target>/` — `ets/` assets,
   /// compiled resources + `resources.index`, package context, module.json and
@@ -5231,7 +5244,19 @@ impl BuildCoordinator {
           )
         })?;
         task_lifecycle
-          .after(&module.name, Some(&module_target_name), "ReplaceUnitTestIndexFile")
+          .after(
+            &module.name,
+            Some(&module_target_name),
+            "ReplaceUnitTestIndexFile",
+          )
+          .await?;
+        // `BuildUnitTestHook` is an empty hvigor hook task whose boundary
+        // closes only after GenerateLoaderJson, CompileResource and
+        // ReplaceUnitTestIndexFile have completed. The Rust coordinator owns
+        // those actions directly, so it must expose the same hook boundary to
+        // the same-process task engine before UnitTestArkTS starts.
+        task_lifecycle
+          .marker(&module.name, Some(&module_target_name), "BuildUnitTestHook")
           .await?;
       }
 
@@ -5365,6 +5390,8 @@ impl BuildCoordinator {
         &module.src_path,
         module_target_name,
       );
+      let compile_task_name =
+        Self::arkts_compile_task_name(&config.output_target, &module.module_type);
       let module_package_plugins = package_plugins
         .iter()
         .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
@@ -5383,15 +5410,7 @@ impl BuildCoordinator {
       let cached_abc = output_dir.join("modules.abc");
       if !BuildPolicy::new(module_config.as_ref()).module_requires_arkts_compilation(module)? {
         task_lifecycle
-          .up_to_date(
-            &module.name,
-            Some(module_target_name),
-            if matches!(module.module_type, OhosModuleType::Har) {
-              "HarCompileArkTS"
-            } else {
-              "CompileArkTS"
-            },
-          )
+          .up_to_date(&module.name, Some(module_target_name), compile_task_name)
           .await?;
         task_lifecycle
           .up_to_date(&module.name, Some(module_target_name), "BuildJS")
@@ -5505,15 +5524,7 @@ impl BuildCoordinator {
 
       if cache_hit {
         task_lifecycle
-          .up_to_date(
-            &module.name,
-            Some(module_target_name),
-            if matches!(module.module_type, OhosModuleType::Har) {
-              "HarCompileArkTS"
-            } else {
-              "CompileArkTS"
-            },
-          )
+          .up_to_date(&module.name, Some(module_target_name), compile_task_name)
           .await?;
         task_lifecycle
           .up_to_date(&module.name, Some(module_target_name), "BuildJS")
@@ -5524,11 +5535,6 @@ impl BuildCoordinator {
         continue;
       }
 
-      let compile_task_name = if matches!(module.module_type, OhosModuleType::Har) {
-        "HarCompileArkTS"
-      } else {
-        "CompileArkTS"
-      };
       if !task_lifecycle
         .before(&module.name, Some(module_target_name), compile_task_name)
         .await?
@@ -6318,6 +6324,8 @@ impl BuildCoordinator {
       .zip(all_bc_har_deps.iter())
       .enumerate()
     {
+      let compile_task_name =
+        Self::arkts_compile_task_name(&config.output_target, &module.module_type);
       let module_package_plugins = package_plugins
         .iter()
         .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
@@ -6652,15 +6660,7 @@ impl BuildCoordinator {
 
       if compile_task_active[bundle_index] {
         task_lifecycle
-          .after(
-            &module.name,
-            Some(module_target_name),
-            if matches!(module.module_type, OhosModuleType::Har) {
-              "HarCompileArkTS"
-            } else {
-              "CompileArkTS"
-            },
-          )
+          .after(&module.name, Some(module_target_name), compile_task_name)
           .await?;
       }
       task_lifecycle
@@ -6688,17 +6688,34 @@ impl BuildCoordinator {
         .ets_loader_path
         .join("../../../previewer/common/bin");
       let coverage = args.ohos_test_coverage.unwrap_or(true);
-      for (module, _manifest, _loader_json, _resource_refs, _module_target_name, _module_config) in
+      for (module, _manifest, _loader_json, _resource_refs, module_target_name, _module_config) in
         loader_jsons.iter()
       {
-        super::unit_test::execute_unit_test(
-          &module.src_path,
-          &previewer_dir,
-          coverage,
-        )
-        .map_err(|error| {
-          anyhow::anyhow!("GenerateUnitTestResult failed for module '{}': {error}", module.name)
-        })?;
+        if task_lifecycle
+          .before(
+            &module.name,
+            Some(module_target_name),
+            "GenerateUnitTestResult",
+          )
+          .await?
+        {
+          super::unit_test::execute_unit_test(&module.src_path, &previewer_dir, coverage).map_err(
+            |error| {
+              anyhow::anyhow!(
+                "GenerateUnitTestResult failed for module '{}': {error}",
+                module.name
+              )
+            },
+          )?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(module_target_name),
+              "GenerateUnitTestResult",
+            )
+            .await?;
+        }
+        task_lifecycle.marker(&module.name, None, "test").await?;
       }
       return Ok(BuildOutput {
         artifact_paths: Vec::new(),

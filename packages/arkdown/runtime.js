@@ -1482,7 +1482,7 @@ class HvigorCommandInvocation {
 
     for (const request of plan.nativeRequests) {
       const nativeConfig = this.runtime.toNativeBuildConfig()
-      nativeConfig.target = request.target
+      nativeConfig.target = request.outputTarget ?? request.target
       nativeConfig.module = request.module
       nativeConfig.buildTargetName = request.targetName
       if (request.cutoffTaskRoots.length > 0) {

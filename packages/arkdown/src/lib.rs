@@ -1882,12 +1882,13 @@ async fn run_build(
     "hap" => OutputTarget::Hap,
     "hsp" => OutputTarget::Hsp,
     "har" => OutputTarget::Har,
+    "test" => OutputTarget::Test,
     // APP is a project-level aggregate. The startup snapshot uses HAP as its
     // neutral module target; AppBuildCoordinator derives HAP/HSP child configs
     // from this one immutable session.
     "app" => OutputTarget::Hap,
     other => {
-      anyhow::bail!("unsupported build target '{other}'; expected 'hap', 'hsp', 'har', or 'app'")
+      anyhow::bail!("unsupported build target '{other}'; expected 'hap', 'hsp', 'har', 'app', or 'test'")
     }
   };
   let build_mode = match mode.as_str() {

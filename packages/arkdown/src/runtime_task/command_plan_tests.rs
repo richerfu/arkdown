@@ -145,6 +145,67 @@ fn adds_custom_task_native_dependencies_and_cutoff_roots() {
 }
 
 #[test]
+fn maps_hvigor_test_to_the_local_test_output_target() {
+  let result = plan(json!({
+    "projectName": "demo",
+    "executionMode": "module",
+    "taskNames": ["test"],
+    "moduleSelections": [{ "moduleName": "entry" }],
+    "buildTargetName": "default",
+    "nodes": [{ "name": "entry", "kind": "hap", "projectTask": false }],
+    "tasks": [
+      task(
+        "entry:test",
+        "entry",
+        "test",
+        true,
+        false,
+        &["entry:default@GenerateUnitTestResult"]
+      ),
+      task(
+        "entry:default@GenerateUnitTestResult",
+        "entry",
+        "default@GenerateUnitTestResult",
+        true,
+        false,
+        &["entry:default@UnitTestArkTS"]
+      ),
+      task(
+        "entry:default@UnitTestArkTS",
+        "entry",
+        "default@UnitTestArkTS",
+        true,
+        false,
+        &[]
+      )
+    ]
+  }));
+
+  assert_eq!(
+    result["plan"]["tasks"],
+    json!([{
+      "taskPath": "entry:test",
+      "commandKind": "native"
+    }])
+  );
+  assert_eq!(
+    result["plan"]["nativeRequests"],
+    json!([{
+      "target": "hap",
+      "outputTarget": "test",
+      "module": "entry",
+      "targetName": "default",
+      "nodeNames": ["entry"],
+      "rootTaskPaths": ["entry:test"],
+      "cutoffTaskRoots": [{
+        "moduleName": "entry",
+        "taskName": "test"
+      }]
+    }])
+  );
+}
+
+#[test]
 fn preserves_latest_hvigor_first_sync_order() {
   let result = plan(json!({
     "projectName": "demo",
