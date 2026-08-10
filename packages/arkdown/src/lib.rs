@@ -29,6 +29,7 @@ mod build_script_runtime_model;
 pub mod cli_plan;
 pub mod cmd;
 mod hvigor_config_merge;
+mod hvigor_dependency_workspace;
 mod hvigor_json;
 mod hvigor_maintenance;
 mod hvigor_plugin_plan;
@@ -113,6 +114,21 @@ pub fn hvigor_project_cache_hash(project_root: String) -> napi::Result<String> {
   arkdown_session::BuildScriptProjectCacheIdentity::new(project_root)
     .map(|identity| identity.hash())
     .map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
+/// Prepare the per-project hvigor dependency workspace before evaluating any
+/// configuration plugin. Package installation and cache validation stay on
+/// the Rust startup boundary; JavaScript receives only the resolved workspace.
+#[napi]
+pub async fn prepare_hvigor_plugin_workspace(request_json: String) -> napi::Result<String> {
+  let runner = hvigor_dependency_workspace::HvigorPluginWorkspaceRunner::from_json(&request_json)
+    .map_err(|error| {
+      napi::Error::from_reason(format!("invalid hvigor plugin workspace request: {error:#}"))
+    })?;
+  runner
+    .response_json()
+    .await
+    .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
 }
 
 /// Load the immutable project and module model files once in Rust. JavaScript

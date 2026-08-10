@@ -312,6 +312,13 @@ export interface PluginCacheRequest {
 }
 
 /**
+ * Prepare the per-project hvigor dependency workspace before evaluating any
+ * configuration plugin. Package installation and cache validation stay on
+ * the Rust startup boundary; JavaScript receives only the resolved workspace.
+ */
+export declare function prepareHvigorPluginWorkspace(requestJson: string): Promise<string>
+
+/**
  * Normalize the public/runtime build request in Rust while preserving live
  * JavaScript extension values that the plugin glue may still reference.
  */

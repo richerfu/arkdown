@@ -605,6 +605,7 @@ module.exports.parsePluginAst = nativeBinding.parsePluginAst
 module.exports.planBuildScriptRuntime = nativeBinding.planBuildScriptRuntime
 module.exports.planHvigorCompilePlugins = nativeBinding.planHvigorCompilePlugins
 module.exports.planRolldownPackagePlugins = nativeBinding.planRolldownPackagePlugins
+module.exports.prepareHvigorPluginWorkspace = nativeBinding.prepareHvigorPluginWorkspace
 module.exports.prepareNativeBuildConfig = nativeBinding.prepareNativeBuildConfig
 module.exports.resolveBuildScriptPluginPath = nativeBinding.resolveBuildScriptPluginPath
 module.exports.runHvigorClean = nativeBinding.runHvigorClean
