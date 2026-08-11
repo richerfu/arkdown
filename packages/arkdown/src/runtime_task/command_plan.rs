@@ -776,8 +776,11 @@ impl RuntimeCommandPlanner {
     matches!(
       action_name,
       "test"
+        | "UnitTestBuild"
         | "GenerateUnitTestResult"
         | "UnitTestArkTS"
+        | "UnitTestCopyMockConfigJson"
+        | "ReplaceSourceMapInCoverageMode"
         | "BuildUnitTestHook"
         | "GenerateUnitTestTemplate"
         | "UnitTestProcessProfile"
@@ -843,8 +846,11 @@ impl RuntimeCommandPlanner {
     matches!(
       action_name,
       "test"
+        | "UnitTestBuild"
         | "GenerateUnitTestResult"
         | "UnitTestArkTS"
+        | "UnitTestCopyMockConfigJson"
+        | "ReplaceSourceMapInCoverageMode"
         | "BuildUnitTestHook"
         | "GenerateUnitTestTemplate"
         | "UnitTestProcessProfile"

@@ -736,7 +736,10 @@ impl<'a> PluginFactory<'a> {
             self.input.module_pkg_name.clone(),
         )
         .with_expand_import_path(self.input.expand_import_path.clone())
-        .with_hsp_har_package_names(self.input.hsp_har_package_names.clone());
+        .with_hsp_har_package_names(self.input.hsp_har_package_names.clone())
+        .with_disable_mock_setup_decorator(
+            self.plan.output_target != arkdown_core::OutputTarget::Preview,
+        );
         let ets_transform_plan = Arc::new(ets_transform_plan);
         let ets_transform_plugin: SharedPluginable = Arc::new(EtsTransformPlugin::from_plan(
             Arc::clone(&ets_transform_plan),
@@ -949,6 +952,7 @@ mod tests {
                 runtime_packages: crate::plan::BundleRuntimePackageInfo::default(),
                 byte_code_har_packages: Vec::new(),
                 preload_system_so_entries: Vec::new(),
+                mock_config: None,
             },
             output: BundleOutputOptions::default(),
             source_map: SourceMapPolicy::None,

@@ -61,6 +61,16 @@ pub struct HvigorCliConfig {
   pub build_version: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub coverage: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub scope: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub ohos_test_coverage: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub coverage_path_filter: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub coverage_mode: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub unit_test_replace_page: Option<String>,
 }
 
 impl Default for HvigorCliConfig {
@@ -96,6 +106,11 @@ impl Default for HvigorCliConfig {
       module: None,
       build_version: None,
       coverage: None,
+      scope: None,
+      ohos_test_coverage: None,
+      coverage_path_filter: None,
+      coverage_mode: None,
+      unit_test_replace_page: None,
     }
   }
 }
@@ -146,6 +161,16 @@ pub struct ArkdownBuildCliConfig {
   pub preview: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub coverage: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub scope: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub ohos_test_coverage: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub coverage_path_filter: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub coverage_mode: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub unit_test_replace_page: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub ohos_debug_asan: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -296,6 +321,7 @@ impl<'a> HvigorArgsParser<'a> {
       self.config.tasks.push(arg.clone());
       index += 1;
     }
+    self.apply_test_defaults();
     self.apply_properties()?;
     Ok(self.config)
   }
@@ -419,11 +445,70 @@ impl<'a> HvigorArgsParser<'a> {
           BuildVersionValidator::new(value).validate()?;
           self.config.build_version = value.map(str::to_string);
         }
-        "coverage" | "ohos-test-coverage" => self.config.coverage = Some(value == Some("true")),
+        "coverage" | "ohos-test-coverage" => {
+          let enabled = value == Some("true");
+          self.config.coverage = Some(enabled);
+          self.config.ohos_test_coverage = Some(enabled);
+        }
+        "scope" => self.config.scope = value.map(str::to_string),
+        "coverage-path-filter" => self.config.coverage_path_filter = value.map(str::to_string),
+        "coverage-mode" => self.config.coverage_mode = value.map(str::to_string),
+        "unit.test.replace.page" => {
+          self.config.unit_test_replace_page = value.map(str::to_string)
+        }
         _ => {}
       }
     }
     Ok(())
+  }
+
+  /// Latest hvigor `global-data.ts::setTestDefaultParameters` runs after CLI
+  /// parsing and before the OHOS plugin sees extra configuration. A JavaScript
+  /// `Map` supplies last-value-wins semantics while retaining the first key's
+  /// insertion position; `IndexMap` gives the native runtime the same stable
+  /// property order.
+  fn apply_test_defaults(&mut self) {
+    if !self.config.tasks.iter().any(|task| task == "test") {
+      return;
+    }
+    if self.config.execution_mode.is_none() {
+      self.config.execution_mode = Some("module".to_string());
+    }
+
+    let mut properties = indexmap::IndexMap::<String, String>::new();
+    for property in std::mem::take(&mut self.config.prop) {
+      // Hvigor's `getPropMap` destructures the first two `split('=')`
+      // elements. Preserve its truncation and `undefined` serialization.
+      let mut parts = property.split('=');
+      let key = parts.next().unwrap_or_default();
+      let value = parts.next().unwrap_or("undefined");
+      let key = if key == "coverage" {
+        "ohos-test-coverage"
+      } else {
+        key
+      };
+      properties.insert(key.to_string(), value.to_string());
+    }
+    for (key, value) in [
+      ("pageType", "page"),
+      ("product", "default"),
+      ("buildRoot", ".test"),
+      ("unitTestMode", "true"),
+      ("isLocalTest", "true"),
+      ("ohos-test-coverage", "true"),
+      (
+        "unit.test.replace.page",
+        "../../../.test/testability/pages/Index",
+      ),
+    ] {
+      properties
+        .entry(key.to_string())
+        .or_insert_with(|| value.to_string());
+    }
+    self.config.prop = properties
+      .into_iter()
+      .map(|(key, value)| format!("{key}={value}"))
+      .collect();
   }
 }
 
@@ -563,6 +648,27 @@ impl<'a> ArkdownBuildArgsParser<'a> {
         "--watch" => self.config.watch = Some(true),
         "--preview" => self.config.preview = Some(true),
         "--coverage" => self.config.coverage = Some(true),
+        "--scope" => self.config.scope = Some(self.required_value(&mut index, arg)?),
+        "--ohos-test-coverage" => {
+          let value = self.required_value(&mut index, arg)?;
+          self.config.ohos_test_coverage = Some(self.boolean(&value, arg)?);
+        }
+        "--coverage-path-filter" => {
+          self.config.coverage_path_filter = Some(self.required_value(&mut index, arg)?)
+        }
+        "--coverage-mode" => {
+          let value = self.required_value(&mut index, arg)?;
+          if !matches!(value.as_str(), "black" | "white" | "full") {
+            return Err(CliDiagnostic::new(
+              "INVALID_ARKDOWN_COVERAGE_MODE",
+              format!("{arg} must be black, white, or full: {value}"),
+            ));
+          }
+          self.config.coverage_mode = Some(value);
+        }
+        "--unit-test-replace-page" => {
+          self.config.unit_test_replace_page = Some(self.required_value(&mut index, arg)?)
+        }
         "--ohos-debug-asan" => self.config.ohos_debug_asan = Some(true),
         "--ohos-enable-hwasan" => self.config.ohos_enable_hwasan = Some(true),
         "--disable-abc-cache" => self.config.disable_abc_cache = Some(true),
@@ -612,6 +718,17 @@ impl<'a> ArkdownBuildArgsParser<'a> {
     match paths {
       Some(paths) => paths.push(value),
       None => *paths = Some(CliPathList::One(value)),
+    }
+  }
+
+  fn boolean(&self, value: &str, option: &str) -> Result<bool, CliDiagnostic> {
+    match value {
+      "true" => Ok(true),
+      "false" => Ok(false),
+      _ => Err(CliDiagnostic::new(
+        "INVALID_ARKDOWN_BOOLEAN_OPTION",
+        format!("{option} must be true or false: {value}"),
+      )),
     }
   }
 }

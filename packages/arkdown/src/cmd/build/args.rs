@@ -77,6 +77,16 @@ pub struct BuildArgs {
   /// hvigor's `setTestDefaultParameters` injection.
   #[arg(long, default_value = None)]
   pub ohos_test_coverage: Option<bool>,
+  /// Optional source-path filter forwarded to hvigor's
+  /// `testFrameworkPar.coveragePathFilter`.
+  #[arg(long = "coverage-path-filter")]
+  pub coverage_path_filter: Option<String>,
+  /// Hvigor coverage selection mode: `black`, `white`, or `full`.
+  #[arg(long = "coverage-mode", value_parser = ["black", "white", "full"])]
+  pub coverage_mode: Option<String>,
+  /// Replacement page used by `ReplaceUnitTestIndexFile` and Previewer.
+  #[arg(long = "unit-test-replace-page")]
+  pub unit_test_replace_page: Option<String>,
   /// Fast build app: hvigor `packOptions.fastBuildApp` — skip the normal HAP
   /// packaging and copy the compiled intermediates into
   /// `intermediates/fastApp/<target>/` for IDE fast deployment

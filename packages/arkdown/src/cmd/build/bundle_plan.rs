@@ -13,10 +13,10 @@ use rustc_hash::FxHashSet;
 
 use arkdown::plugins::ets_transform::{ModuleAnalyzerKind, RolldownEtsTransformPlan};
 use arkdown::{
-  BundleCachePolicy, BundleInput, BundleModuleMetaInfoFile, BundleOutput, BundleOutputOptions,
-  BundlePlan, BundlePluginSet, BundleRuntimePackageContext, BundleRuntimePackageInfo,
-  BundleSourceMapPackageInfo, Bundler, HvigorHarImportees, LoaderResourceJoin, PreloadSystemSoTask,
-  SourceMapPolicy,
+  BundleCachePolicy, BundleInput, BundleMockConfig, BundleModuleMetaInfoFile, BundleOutput,
+  BundleOutputOptions, BundlePlan, BundlePluginSet, BundleRuntimePackageContext,
+  BundleRuntimePackageInfo, BundleSourceMapPackageInfo, Bundler, HvigorHarImportees,
+  LoaderResourceJoin, PreloadSystemSoTask, SourceMapPolicy,
 };
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::ArkdownConfig;
@@ -25,6 +25,7 @@ use arkdown_profile::{LoaderJson, PkgContextInfoOpt};
 use arkdown_session::PackageSnapshot;
 
 use super::custom_config::ArkdownCustomConfig;
+use super::layout::{ModuleBuildLayout, ModuleSourceCacheLayout, ModuleSourceLayout};
 
 // ---------------------------------------------------------------------------
 // BundlePlan construction
@@ -88,6 +89,7 @@ pub(super) fn make_bundle_plan(
   loader_json_path: impl AsRef<Path>,
   output_dir: impl Into<PathBuf>,
   config: &ArkdownConfig,
+  module_target_name: &str,
   custom_cfg: Option<&ArkdownCustomConfig>,
   module_analyzer: ModuleAnalyzerKind,
   package_info: BundlePlanPackageInfo,
@@ -104,6 +106,36 @@ pub(super) fn make_bundle_plan(
     BundleModuleMetaInfoFileCollector::new(loader_json, config.product.bundle_name.as_str())
       .collect(&entries);
   let compile_target = HvigorCompileTarget::from_loader_json(loader_json, config);
+  let module_root = loader_json
+    .module_path_map
+    .get(&loader_json.module_name)
+    .map(PathBuf::from)
+    .unwrap_or_else(|| {
+      PathBuf::from(&loader_json.module_root_path)
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&loader_json.module_root_path))
+    });
+  let source_layout = ModuleSourceLayout::new(&module_root);
+  let build_layout = ModuleBuildLayout::for_output_target(
+    &config.output_target,
+    &module_root,
+    module_target_name,
+  );
+  let cache_root = PathBuf::from(&loader_json.cache_path);
+  let cache_layout = ModuleSourceCacheLayout::new(&cache_root);
+  let user_config_path = source_layout.mock_config_json5();
+  let mock_config = BundleMockConfig {
+    process: matches!(config.output_target, arkdown_core::OutputTarget::Preview | arkdown_core::OutputTarget::Test)
+      || module_target_name == "ohosTest",
+    user_config_path: user_config_path.is_file().then_some(user_config_path),
+    ets_source_root: source_layout.ets(),
+    transformed_output_path: build_layout.intermediates_mock_config_json(),
+    transformed_cache_path: cache_layout.transformed_mock_config_json(),
+    user_cache_path: cache_layout.user_mock_config_json5(),
+    dependencies: Vec::new(),
+  };
   BundlePlan {
     input: BundleInput {
       loader_json_path: loader_json_path.as_ref().to_path_buf(),
@@ -126,6 +158,7 @@ pub(super) fn make_bundle_plan(
       runtime_packages: runtime,
       byte_code_har_packages: loader_json.byte_code_har_info.keys().cloned().collect(),
       preload_system_so_entries: Vec::new(),
+      mock_config: Some(mock_config),
     },
     output: BundleOutputOptions {
       output_dir: output_dir.into(),

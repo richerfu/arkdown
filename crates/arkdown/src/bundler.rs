@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use arcstr::ArcStr;
 use arkdown_cache::CacheKeyMaterial;
+use indexmap::IndexMap;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, ImportExpression, StringLiteral};
 use oxc_ast_visit::{walk, Visit};
@@ -57,7 +58,8 @@ use crate::diagnostics::RolldownBuildDiagnostics;
 use crate::manual_chunks::{ChunkName, ManualChunkPolicy};
 use crate::output;
 use crate::plan::{
-    BundlePlan, BundleRuntimePackageContext, BundleRuntimePackageInfo, SourceMapPolicy,
+    BundleMockConfig, BundlePlan, BundleRuntimePackageContext, BundleRuntimePackageInfo,
+    SourceMapPolicy,
 };
 use crate::plugins::ets_transform::EtsTransformModuleMetadata;
 use crate::plugins::module_meta::ModuleMetaPlugin;
@@ -410,6 +412,7 @@ impl Bundler {
                     )
                 })?,
         )
+        .with_mock_config(plan.input.mock_config.as_ref())
         .write()?;
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump_with(
@@ -1347,6 +1350,7 @@ struct HvigorModuleSourceWriter<'a> {
     state: HvigorModuleSourceState,
     output_dir: PathBuf,
     processor: HvigorChunkModuleRequestProcessor,
+    mock_config: Option<&'a BundleMockConfig>,
 }
 
 #[derive(Default)]
@@ -1363,6 +1367,16 @@ struct HvigorModuleSourceRecord {
 struct HvigorModuleSourceWriteJob {
     module_id: String,
     path: PathBuf,
+}
+
+#[derive(Default)]
+struct HvigorMockConfigRewrites {
+    imports_by_module: FxHashMap<String, HvigorChunkImportMap>,
+}
+
+struct HvigorMockConfigSource {
+    source: String,
+    module_id: PathBuf,
 }
 
 impl<'a> HvigorModuleSourceWriter<'a> {
@@ -1396,7 +1410,13 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             state,
             output_dir,
             processor: HvigorChunkModuleRequestProcessor::new(bundle_name, module_name),
+            mock_config: None,
         }
+    }
+
+    fn with_mock_config(mut self, mock_config: Option<&'a BundleMockConfig>) -> Self {
+        self.mock_config = mock_config;
+        self
     }
 
     fn write(self) -> Result<Vec<HvigorModuleSourceFile>, ArkdownError> {
@@ -1420,6 +1440,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         module_ids.dedup();
 
         let module_records = self.module_source_record_index(&module_ids)?;
+        let mock_rewrites = self.prepare_mock_config(&module_records)?;
         let jobs = module_ids
             .iter()
             .filter_map(|module_id| {
@@ -1439,7 +1460,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         }
         let files = jobs
             .par_iter()
-            .map(|job| self.write_module_source(job, &module_records))
+            .map(|job| self.write_module_source(job, &module_records, &mock_rewrites))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
@@ -1452,6 +1473,298 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             self.remove_stale_output_files(&active_paths)?;
         }
         Ok(files)
+    }
+
+    /// Mirror ets-loader `ModuleSourceFile` mock processing at its ModuleMode
+    /// boundary. Runtime imports continue to reference the real OHM record;
+    /// `mock-config.json` maps that record to the configured mock. Static
+    /// imports made by a mock source receive the SDK `.origin` suffix and a
+    /// reverse entry so hamock can reach the unmocked implementation.
+    fn prepare_mock_config(
+        &self,
+        module_records: &HvigorModuleSourceRecordIndex,
+    ) -> Result<HvigorMockConfigRewrites, ArkdownError> {
+        let Some(options) = self.mock_config else {
+            return Ok(HvigorMockConfigRewrites::default());
+        };
+        let Some(config_path) = options
+            .process
+            .then_some(options.user_config_path.as_ref())
+            .flatten()
+        else {
+            self.remove_mock_config_cache(options)?;
+            return Ok(HvigorMockConfigRewrites::default());
+        };
+
+        let user_content = fs_err::read_to_string(config_path)
+            .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+        let user_document = json5::from_str::<serde_json::Value>(&user_content).map_err(|error| {
+            ArkdownError::Bundler(format!(
+                "invalid mock config '{}': {error}",
+                config_path.display()
+            ))
+        })?;
+        let user_entries = user_document.as_object().ok_or_else(|| {
+            ArkdownError::Bundler(format!(
+                "mock config '{}' must contain a JSON object",
+                config_path.display()
+            ))
+        })?;
+        let module_root = self.module_path_map.current_module_root();
+        let mut configured_sources = IndexMap::<String, HvigorMockConfigSource>::new();
+        let mut mock_module_ids = FxHashSet::default();
+        for (key, entry) in user_entries {
+            let Some(source) = entry.get("source").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if source.is_empty() {
+                continue;
+            }
+            let configured_path = PathBuf::from(source);
+            let module_id = if configured_path.has_root() {
+                configured_path
+            } else {
+                module_root.join(configured_path)
+            };
+            let module_id = arkdown_path::canonicalize_or_owned(&module_id);
+            if !module_id.is_file() {
+                return Err(ArkdownError::Bundler(format!(
+                    "mock source '{}' configured by '{}' does not exist",
+                    module_id.display(),
+                    config_path.display()
+                )));
+            }
+            mock_module_ids.insert(module_id.clone());
+            configured_sources.insert(
+                key.clone(),
+                HvigorMockConfigSource {
+                    source: source.to_string(),
+                    module_id,
+                },
+            );
+        }
+
+        let mut rewrites = HvigorMockConfigRewrites::default();
+        let mut transformed_entries = serde_json::Map::new();
+        // `collectMockConfigInfo()` eagerly converts dependency keys through
+        // `getMockConfigKey2ModuleInfoMap`, even when no source currently
+        // imports that dependency. Preserve that observable config output.
+        for (key, configured) in &configured_sources {
+            let Some(real_module_id) = self.mock_dependency_module_id(key, options) else {
+                continue;
+            };
+            let real_module_id = real_module_id.to_string_lossy();
+            let Some(real_ohm_url) =
+                self.ohm_url_for_resolved_id(&real_module_id, module_records)?
+            else {
+                continue;
+            };
+            let mock_module_id = configured.module_id.to_string_lossy();
+            let Some(mock_ohm_url) =
+                self.ohm_url_for_resolved_id(&mock_module_id, module_records)?
+            else {
+                continue;
+            };
+            transformed_entries
+                .entry(real_ohm_url)
+                .or_insert_with(|| serde_json::json!({ "source": mock_ohm_url }));
+        }
+        let mut module_ids = self.module_source_ids.clone();
+        module_ids.sort();
+        module_ids.dedup();
+        for module_id in module_ids {
+            let Some(source) = self.state.sources.get(&module_id) else {
+                continue;
+            };
+            let (imports, _) = self.imports_for_module(&module_id, module_records)?;
+            let canonical_module_id = arkdown_path::canonicalize_or_owned(Path::new(&module_id));
+            let is_mock_source = mock_module_ids.contains(&canonical_module_id);
+            let requests =
+                HvigorModuleRequestSpecifiers::new(source.code.as_ref(), &module_id)
+                    .collect_literals();
+            for request in requests {
+                let Some(ohm_url) = imports.get(&request.specifier) else {
+                    continue;
+                };
+                let configured = configured_sources
+                    .get(&request.specifier)
+                    .or_else(|| {
+                        self.local_mock_config_key(&module_id, &request.specifier, options)
+                            .and_then(|key| configured_sources.get(&key))
+                    });
+                if let Some(configured) = configured {
+                    let mock_module_id = configured.module_id.to_string_lossy();
+                    let mock_ohm_url = self
+                        .ohm_url_for_resolved_id(&mock_module_id, module_records)?
+                        .ok_or_else(|| {
+                            ArkdownError::Bundler(format!(
+                                "cannot derive OHM URL for mock source '{}'",
+                                configured.source
+                            ))
+                        })?;
+                    transformed_entries.entry(ohm_url.clone()).or_insert_with(|| {
+                        serde_json::json!({ "source": mock_ohm_url })
+                    });
+                }
+                if is_mock_source
+                    && !request.is_dynamic
+                    && !SourceClassifier::classify(&module_id).is_javascript_runtime()
+                {
+                    let origin_url = format!("{ohm_url}.origin");
+                    rewrites
+                        .imports_by_module
+                        .entry(module_id.clone())
+                        .or_default()
+                        .insert(request.specifier.clone(), origin_url.clone());
+                    transformed_entries
+                        .entry(origin_url)
+                        .or_insert_with(|| serde_json::json!({ "source": ohm_url }));
+                }
+            }
+        }
+        self.write_mock_config_artifacts(
+            options,
+            &user_document,
+            serde_json::Value::Object(transformed_entries),
+        )?;
+        Ok(rewrites)
+    }
+
+    fn mock_dependency_module_id(
+        &self,
+        key: &str,
+        options: &BundleMockConfig,
+    ) -> Option<PathBuf> {
+        let mut components = key.split(['/', '\\']);
+        let first = components.next()?;
+        if first.starts_with('.') {
+            return None;
+        }
+        let dependency_name = if first.starts_with('@') {
+            let package = components.next()?;
+            format!("{first}/{package}")
+        } else {
+            first.to_string()
+        };
+        let dependency = options
+            .dependencies
+            .iter()
+            .rev()
+            .find(|dependency| dependency.dependency_name == dependency_name)?;
+        let suffix = components.fold(PathBuf::new(), |path, component| path.join(component));
+        Some(if suffix.as_os_str().is_empty() {
+            dependency.main_file_path.clone()
+        } else {
+            dependency.package_root.join(suffix)
+        })
+    }
+
+    fn local_mock_config_key(
+        &self,
+        module_id: &str,
+        specifier: &str,
+        options: &BundleMockConfig,
+    ) -> Option<String> {
+        let resolved_id = self.state.resolved_imports.get(module_id)?.get(specifier)?;
+        let resolved_path = arkdown_path::canonicalize_or_owned(Path::new(resolved_id));
+        let source_root = arkdown_path::canonicalize_or_owned(&options.ets_source_root);
+        let relative = resolved_path.strip_prefix(source_root).ok()?;
+        Some(ArtifactPathSerializer::rel_to_slash(relative))
+    }
+
+    fn remove_mock_config_cache(
+        &self,
+        options: &BundleMockConfig,
+    ) -> Result<(), ArkdownError> {
+        for path in [
+            &options.transformed_cache_path,
+            &options.user_cache_path,
+        ] {
+            match fs_err::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(ArkdownError::Bundler(error.to_string())),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_mock_config_artifacts(
+        &self,
+        options: &BundleMockConfig,
+        user_document: &serde_json::Value,
+        transformed_document: serde_json::Value,
+    ) -> Result<(), ArkdownError> {
+        for path in [
+            &options.transformed_output_path,
+            &options.transformed_cache_path,
+            &options.user_cache_path,
+        ] {
+            if let Some(parent) = path.parent() {
+                fs_err::create_dir_all(parent)
+                    .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+            }
+        }
+
+        let serialized_user = serde_json::to_vec(user_document)
+            .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+        let cached_user = fs_err::read_to_string(&options.user_cache_path)
+            .ok()
+            .and_then(|content| json5::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|document| serde_json::to_vec(&document).ok());
+        let cache_is_usable = options.transformed_cache_path.is_file()
+            && cached_user.as_deref() == Some(serialized_user.as_slice());
+
+        if !cache_is_usable {
+            let transformed = serde_json::to_vec(&transformed_document)
+                .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+            fs_err::write(&options.transformed_output_path, &transformed)
+                .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+            fs_err::write(&options.transformed_cache_path, transformed)
+                .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+            let user_config_path = options.user_config_path.as_ref().ok_or_else(|| {
+                ArkdownError::Bundler("active mock processing has no user config path".to_string())
+            })?;
+            fs_err::copy(user_config_path, &options.user_cache_path)
+                .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+            return Ok(());
+        }
+
+        let cached_content = fs_err::read_to_string(&options.transformed_cache_path)
+            .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+        let mut cached_document = json5::from_str::<serde_json::Value>(&cached_content)
+            .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+        let cached_entries = cached_document.as_object_mut().ok_or_else(|| {
+            ArkdownError::Bundler(format!(
+                "cached mock config '{}' must contain a JSON object",
+                options.transformed_cache_path.display()
+            ))
+        })?;
+        let transformed_entries = transformed_document.as_object().ok_or_else(|| {
+            ArkdownError::Bundler("transformed mock config must contain a JSON object".to_string())
+        })?;
+        let mut changed = false;
+        for (key, value) in transformed_entries {
+            if !cached_entries.contains_key(key) {
+                cached_entries.insert(key.clone(), value.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            let merged = serde_json::to_vec(&cached_document)
+                .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+            fs_err::write(&options.transformed_output_path, &merged)
+                .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+            fs_err::write(&options.transformed_cache_path, merged)
+                .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+        } else {
+            fs_err::copy(
+                &options.transformed_cache_path,
+                &options.transformed_output_path,
+            )
+            .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn module_source_write_job(
@@ -1487,6 +1800,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         &self,
         job: &HvigorModuleSourceWriteJob,
         module_records: &HvigorModuleSourceRecordIndex,
+        mock_rewrites: &HvigorMockConfigRewrites,
     ) -> Result<Option<HvigorModuleSourceFile>, ArkdownError> {
         let module_id = job.module_id.as_str();
         let Some(source) = self.state.sources.get(module_id) else {
@@ -1496,8 +1810,15 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             return Ok(None);
         };
         let ownership = &module_record.ownership;
-        let (imports, imported_record_names) =
+        let (mut imports, imported_record_names) =
             self.imports_for_module(module_id, module_records)?;
+        if let Some(overrides) = mock_rewrites.imports_by_module.get(module_id) {
+            imports.extend(
+                overrides
+                    .iter()
+                    .map(|(specifier, request)| (specifier.clone(), request.clone())),
+            );
+        }
         let code = HvigorModuleSourceImportRewriter::new(source.code.as_ref(), module_id, &imports)
             .rewrite();
         let emits_javascript = self.state.javascript_module_ids.contains(module_id);
@@ -1889,6 +2210,63 @@ struct HvigorModuleSourceImportRewriter<'a> {
     request_rewrite_kind: HvigorModuleRequestRewriteKind,
 }
 
+/// Reusable module-request rewrite inventory for a transformed source file.
+///
+/// The unit-test coverage plugin runs after `etsTransform` but before
+/// `genAbc` in hvigor. Arkdown invokes the SDK-owned coverage transformer at
+/// the equivalent boundary and then replays the exact request rewrites that
+/// the initial Rolldown graph resolved for the module. Keeping this plan next
+/// to [`HvigorModuleSourceImportRewriter`] ensures both paths share the same
+/// ArkTS parser and literal-emission rules.
+pub struct HvigorModuleRequestRewritePlan {
+    module_id: String,
+    imports: HvigorChunkImportMap,
+}
+
+impl HvigorModuleRequestRewritePlan {
+    pub fn from_baseline(
+        module_id: impl Into<String>,
+        transformed_source: &str,
+        rewritten_source: &str,
+    ) -> Result<Self, ArkdownError> {
+        let module_id = module_id.into();
+        let transformed_requests =
+            HvigorModuleRequestSpecifiers::new(transformed_source, &module_id).collect_literals();
+        let rewritten_requests =
+            HvigorModuleRequestSpecifiers::new(rewritten_source, &module_id).collect_literals();
+        if transformed_requests.len() != rewritten_requests.len() {
+            return Err(ArkdownError::Bundler(format!(
+                "cannot capture module-request rewrites for '{module_id}': transformed source has {} requests but materialized source has {}",
+                transformed_requests.len(),
+                rewritten_requests.len()
+            )));
+        }
+
+        let mut imports = HvigorChunkImportMap::default();
+        for (transformed, rewritten) in transformed_requests.iter().zip(&rewritten_requests) {
+            if transformed.specifier == rewritten.specifier {
+                continue;
+            }
+            if let Some(previous) = imports.insert(
+                transformed.specifier.clone(),
+                rewritten.specifier.clone(),
+            ) {
+                if previous != rewritten.specifier {
+                    return Err(ArkdownError::Bundler(format!(
+                        "module request '{}' in '{module_id}' resolved to both '{}' and '{}'",
+                        transformed.specifier, previous, rewritten.specifier
+                    )));
+                }
+            }
+        }
+        Ok(Self { module_id, imports })
+    }
+
+    pub fn rewrite<'a>(&'a self, source: &'a str) -> Cow<'a, str> {
+        HvigorModuleSourceImportRewriter::new(source, &self.module_id, &self.imports).rewrite()
+    }
+}
+
 impl<'a> HvigorModuleSourceImportRewriter<'a> {
     fn new(source: &'a str, module_id: &'a str, imports: &'a HvigorChunkImportMap) -> Self {
         Self {
@@ -2023,20 +2401,21 @@ struct HvigorModuleRequestLiteralInventory {
 }
 
 impl HvigorModuleRequestLiteralInventory {
-    fn push(&mut self, literal: &StringLiteral<'_>) {
+    fn push(&mut self, literal: &StringLiteral<'_>, is_dynamic: bool) {
         self.literals.push(HvigorModuleRequestLiteral {
             specifier: literal.value.to_string(),
             source_span: HvigorSourceSpan {
                 start: literal.span.start,
                 end: literal.span.end,
             },
+            is_dynamic,
         });
     }
 }
 
 impl<'a> Visit<'a> for HvigorModuleRequestLiteralInventory {
     fn visit_import_declaration(&mut self, declaration: &oxc_ast::ast::ImportDeclaration<'a>) {
-        self.push(&declaration.source);
+        self.push(&declaration.source, false);
         walk::walk_import_declaration(self, declaration);
     }
 
@@ -2044,7 +2423,7 @@ impl<'a> Visit<'a> for HvigorModuleRequestLiteralInventory {
         &mut self,
         declaration: &oxc_ast::ast::LazyImportDeclaration<'a>,
     ) {
-        self.push(&declaration.source);
+        self.push(&declaration.source, false);
         walk::walk_lazy_import_declaration(self, declaration);
     }
 
@@ -2052,7 +2431,7 @@ impl<'a> Visit<'a> for HvigorModuleRequestLiteralInventory {
         &mut self,
         declaration: &oxc_ast::ast::ExportAllDeclaration<'a>,
     ) {
-        self.push(&declaration.source);
+        self.push(&declaration.source, false);
         walk::walk_export_all_declaration(self, declaration);
     }
 
@@ -2061,14 +2440,14 @@ impl<'a> Visit<'a> for HvigorModuleRequestLiteralInventory {
         declaration: &oxc_ast::ast::ExportNamedDeclaration<'a>,
     ) {
         if let Some(source) = &declaration.source {
-            self.push(source);
+            self.push(source, false);
         }
         walk::walk_export_named_declaration(self, declaration);
     }
 
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
         if let Expression::StringLiteral(source) = &expression.source {
-            self.push(source);
+            self.push(source, true);
         }
         walk::walk_import_expression(self, expression);
     }
@@ -2077,6 +2456,7 @@ impl<'a> Visit<'a> for HvigorModuleRequestLiteralInventory {
 struct HvigorModuleRequestLiteral {
     specifier: String,
     source_span: HvigorSourceSpan,
+    is_dynamic: bool,
 }
 
 struct HvigorModuleSourceImportPatch {
@@ -4511,6 +4891,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
                 runtime_packages: runtime_packages(&[("phone", "phone", "", "", "", false)]),
                 byte_code_har_packages: Vec::new(),
                 preload_system_so_entries: Vec::new(),
+                mock_config: None,
             },
             output: BundleOutputOptions::default(),
             source_map: SourceMapPolicy::External,
@@ -4618,6 +4999,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
                 runtime_packages: runtime_package_info,
                 byte_code_har_packages: Vec::new(),
                 preload_system_so_entries: Vec::new(),
+                mock_config: None,
             },
             output: BundleOutputOptions::default(),
             source_map: SourceMapPolicy::External,
@@ -6673,6 +7055,215 @@ textToSpeech.createEngine({});"#;
             state.sources.get(module_id).map(|source| source.code.as_str()),
             Some(ets_transform_source),
             "ModuleMode must materialize etsTransform output instead of Rolldown's parser-normalized source"
+        );
+    }
+
+    #[test]
+    fn coverage_retransform_replays_resolved_module_requests() {
+        let module_id = PathBuf::from("workspace")
+            .join("entry")
+            .join("src")
+            .join("main")
+            .join("ets")
+            .join("EntryAbility.ets");
+        let transformed = r#"import UIAbility from "@ohos.app.ability.UIAbility";
+import { helper } from "./helper";
+export default class EntryAbility extends UIAbility {}"#;
+        let materialized = r#"import UIAbility from "@ohos:app.ability.UIAbility";
+import { helper } from "@bundle:com.example/entry/ets/helper";
+export default class EntryAbility extends UIAbility {}"#;
+        let instrumented = r#"import UIAbility from "@ohos.app.ability.UIAbility";
+import { helper } from "./helper";
+class BjcCov {}
+export default class EntryAbility extends UIAbility {}"#;
+
+        let plan = HvigorModuleRequestRewritePlan::from_baseline(
+            module_id.to_string_lossy().as_ref(),
+            transformed,
+            materialized,
+        )
+        .expect("capture module request rewrite plan");
+        let rewritten = plan.rewrite(instrumented);
+
+        assert!(rewritten.contains("from \"@ohos:app.ability.UIAbility\""));
+        assert!(rewritten.contains("from \"@bundle:com.example/entry/ets/helper\""));
+        assert!(rewritten.contains("class BjcCov {}"));
+    }
+
+    #[test]
+    fn module_source_writer_generates_hvigor_mock_config_and_origin_import() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = app_root.path();
+        let module_root = project_root.join("entry");
+        let dependency_root = project_root.join("oh_modules").join("service-lib");
+        let src_root = module_root.join("src");
+        let ets_root = src_root.join("main").join("ets");
+        let main_source = ets_root.join("pages").join("Index.ets");
+        let service_source = ets_root.join("service").join("Service.ets");
+        let mock_root = src_root.join("mock");
+        let mock_source = mock_root.join("ServiceMock.ets");
+        let mock_config_path = mock_root.join("mock-config.json5");
+        let dependency_main = dependency_root.join("index.ets");
+        for path in [
+            &main_source,
+            &service_source,
+            &mock_source,
+            &mock_config_path,
+            &dependency_main,
+        ] {
+            fs_err::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        fs_err::write(
+            &main_source,
+            "import { load } from \"../service/Service\"; export const value = load();",
+        )
+        .unwrap();
+        fs_err::write(&service_source, "export const load = () => 1;").unwrap();
+        fs_err::write(
+            &mock_source,
+            "import { load } from \"../main/ets/service/Service\"; export const mock = load;",
+        )
+        .unwrap();
+        fs_err::write(
+            &mock_config_path,
+            r#"{
+              "service/Service.ets": { "source": "src/mock/ServiceMock.ets" },
+              "service-lib": { "source": "src/mock/ServiceMock.ets" }
+            }"#,
+        )
+        .unwrap();
+        fs_err::write(&dependency_main, "export const dependency = 1;").unwrap();
+        fs_err::write(
+            dependency_root.join("oh-package.json5"),
+            r#"{ "name": "service-lib", "version": "1.0.0", "main": "index.ets" }"#,
+        )
+        .unwrap();
+
+        let main_id = main_source.to_string_lossy().into_owned();
+        let service_id = service_source.to_string_lossy().into_owned();
+        let mock_id = mock_source.to_string_lossy().into_owned();
+        let mut state = HvigorModuleSourceState::default();
+        state.sources.insert(
+            main_id.clone(),
+            HvigorCollectedModuleSource {
+                code: fs_err::read_to_string(&main_source).unwrap().into(),
+            },
+        );
+        state.sources.insert(
+            service_id.clone(),
+            HvigorCollectedModuleSource {
+                code: fs_err::read_to_string(&service_source).unwrap().into(),
+            },
+        );
+        state.sources.insert(
+            mock_id.clone(),
+            HvigorCollectedModuleSource {
+                code: fs_err::read_to_string(&mock_source).unwrap().into(),
+            },
+        );
+        record_resolved_import(
+            &mut state,
+            &main_id,
+            "../service/Service",
+            &service_id,
+        );
+        record_resolved_import(
+            &mut state,
+            &mock_id,
+            "../main/ets/service/Service",
+            &service_id,
+        );
+        let facts = ModuleGraphFacts {
+            full_module_ids: vec![main_id.clone(), service_id, mock_id.clone()],
+            full_module_is_commonjs: FxHashMap::default(),
+        };
+        let module_path_map = HvigorModulePathMap::new(
+            "entry",
+            &module_root,
+            &[
+                ("entry".to_string(), module_root.clone()),
+                ("service-lib".to_string(), dependency_root.clone()),
+            ],
+        );
+        let runtime_packages = runtime_packages(&[(
+            "entry",
+            "entry",
+            "com.example",
+            "entry",
+            "1.0.0",
+            false,
+        )]);
+        let cache_root = project_root.join("cache");
+        let transformed_output_path = project_root.join("intermediates").join("mock-config.json");
+        let mock_options = BundleMockConfig {
+            process: true,
+            user_config_path: Some(mock_config_path.clone()),
+            ets_source_root: ets_root,
+            transformed_output_path: transformed_output_path.clone(),
+            transformed_cache_path: cache_root.join("mock-config.json"),
+            user_cache_path: cache_root.join("mock-config.json5"),
+            dependencies: vec![crate::plan::BundleMockDependency {
+                dependency_name: "service-lib".to_string(),
+                package_name: "service-lib".to_string(),
+                package_root: dependency_root,
+                main_file_path: dependency_main,
+            }],
+        };
+        let files = HvigorModuleSourceWriter::new(
+            "com.example",
+            "entry",
+            project_root,
+            &module_path_map,
+            &runtime_packages,
+            &[],
+            false,
+            &facts,
+            facts.full_module_ids.clone(),
+            state,
+            cache_root.clone(),
+        )
+        .with_mock_config(Some(&mock_options))
+        .write()
+        .unwrap();
+
+        let main_output = fs_err::read_to_string(
+            &files.iter().find(|file| file.module_id == main_id).unwrap().path,
+        )
+        .unwrap();
+        let mock_output = fs_err::read_to_string(
+            &files.iter().find(|file| file.module_id == mock_id).unwrap().path,
+        )
+        .unwrap();
+        assert!(!main_output.contains(".origin"), "{main_output}");
+        assert!(mock_output.contains(".origin\""), "{mock_output}");
+
+        let transformed = serde_json::from_slice::<serde_json::Value>(
+            &fs_err::read(&transformed_output_path).unwrap(),
+        )
+        .unwrap();
+        let entries = transformed.as_object().unwrap();
+        let (origin_url, origin_entry) = entries
+            .iter()
+            .find(|(key, _)| key.ends_with(".origin"))
+            .expect("origin mock entry");
+        let actual_url = origin_url.strip_suffix(".origin").unwrap();
+        assert_eq!(origin_entry["source"], actual_url);
+        assert!(entries[actual_url]["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("src/mock/ServiceMock")));
+        assert!(
+            entries
+                .keys()
+                .any(|url| url.contains("service-lib") && !url.ends_with(".origin")),
+            "dependency mock keys must be eagerly converted like collectMockConfigInfo: {entries:?}"
+        );
+        assert_eq!(
+            fs_err::read(&mock_options.transformed_cache_path).unwrap(),
+            fs_err::read(&transformed_output_path).unwrap()
+        );
+        assert_eq!(
+            fs_err::read(&mock_options.user_cache_path).unwrap(),
+            fs_err::read(&mock_config_path).unwrap()
         );
     }
 

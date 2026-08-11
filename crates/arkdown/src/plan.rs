@@ -98,6 +98,41 @@ pub struct BundleInput {
     /// Mirrors hvigor `ArkCompile.needPreloadSoFileSet`: the current module's
     /// `module.srcEntry`, home abilities, and source-HAR home abilities.
     pub preload_system_so_entries: Vec<PathBuf>,
+    /// SDK `ModuleSourceFile` mock processing paths and activation state.
+    ///
+    /// Paths are resolved by the CLI's typed module/cache layouts before the
+    /// bundler starts. The bundler never reconstructs build-directory strings
+    /// or assumes a host separator.
+    pub mock_config: Option<BundleMockConfig>,
+}
+
+/// Typed handoff for hvigor/ets-loader mock processing.
+#[derive(Debug, Clone)]
+pub struct BundleMockConfig {
+    /// `isPreview || isOhosTest || isLocalTest`.
+    pub process: bool,
+    /// `<module>/src/mock/mock-config.json5` when it exists.
+    pub user_config_path: Option<PathBuf>,
+    /// Absolute `<module>/src/main/ets` root used for local mock keys.
+    pub ets_source_root: PathBuf,
+    /// `intermediates/res/<target>/mock-config.json`.
+    pub transformed_output_path: PathBuf,
+    /// CompileArkTS cache `mock-config.json`.
+    pub transformed_cache_path: PathBuf,
+    /// CompileArkTS cache `mock-config.json5`.
+    pub user_cache_path: PathBuf,
+    /// `ModuleTaskService.getAllDependencies()` in traversal order. Repeated
+    /// names remain present so last-match lookup mirrors JavaScript `Map::set`.
+    pub dependencies: Vec<BundleMockDependency>,
+}
+
+/// Dependency lookup record consumed by SDK mock-config key normalization.
+#[derive(Debug, Clone)]
+pub struct BundleMockDependency {
+    pub dependency_name: String,
+    pub package_name: String,
+    pub package_root: PathBuf,
+    pub main_file_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -447,6 +482,7 @@ mod tests {
                 runtime_packages: BundleRuntimePackageInfo::default(),
                 byte_code_har_packages: Vec::new(),
                 preload_system_so_entries: Vec::new(),
+                mock_config: None,
             },
             output: BundleOutputOptions::default(),
             source_map: SourceMapPolicy::None,

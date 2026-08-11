@@ -69,6 +69,9 @@ pub struct RolldownEtsTransformPlan {
     pub expand_import_path: Option<arkdown_core::ExpandImportPath>,
     /// Remote HSP/HAR package names (OHM maps) that never expand.
     pub hsp_har_package_names: FxHashSet<String>,
+    /// Hvigor configures `mockParams` for every Ark compile; ets-loader removes
+    /// `@MockSetup` in every non-Preview transform.
+    pub disable_mock_setup_decorator: bool,
 }
 
 impl RolldownEtsTransformPlan {
@@ -108,6 +111,7 @@ impl RolldownEtsTransformPlan {
             pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+            disable_mock_setup_decorator: false,
         }
     }
 
@@ -119,6 +123,11 @@ impl RolldownEtsTransformPlan {
 
     pub fn with_hsp_har_package_names(mut self, names: FxHashSet<String>) -> Self {
         self.hsp_har_package_names = names;
+        self
+    }
+
+    pub fn with_disable_mock_setup_decorator(mut self, disable: bool) -> Self {
+        self.disable_mock_setup_decorator = disable;
         self
     }
 
@@ -189,6 +198,7 @@ impl RolldownEtsTransformPlan {
             pkg_name: self.pkg_name.clone(),
             expand_import_path: self.expand_import_path.clone(),
             hsp_har_package_names: self.hsp_har_package_names.clone(),
+            disable_mock_setup_decorator: self.disable_mock_setup_decorator,
         }
     }
 
@@ -2431,5 +2441,51 @@ struct PrivacyPageComponent {
             "pagePath must continue to point at the package source; got:\n{}",
             output.code
         );
+    }
+
+    #[test]
+    fn local_test_transform_removes_only_mock_setup_decorators() {
+        let project_root = PathBuf::from("virtual").join("project");
+        let module_root = project_root.join("entry");
+        let source_root = module_root.join("src").join("main").join("ets");
+        let mock_source = module_root
+            .join("src")
+            .join("mock")
+            .join("ServiceMock.ets");
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            project_root,
+            source_root,
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_checker_mode(CheckerMode::Off)
+        .with_disable_mock_setup_decorator(true);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .transform(
+                r#"@MockSetup
+@Keep
+class Service {
+  @MockSetup
+  value: number = 1;
+
+  @Keep
+  @MockSetup
+  load(@MockSetup input: number): number {
+    return input + this.value;
+  }
+}"#,
+                mock_source.to_string_lossy().as_ref(),
+            )
+            .unwrap()
+            .expect("mock decorator lowering must produce output");
+
+        assert!(!output.code.contains("MockSetup"), "{}", output.code);
+        assert_eq!(output.code.matches("@Keep").count(), 2, "{}", output.code);
     }
 }

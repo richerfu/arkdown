@@ -6,6 +6,26 @@ pub(super) struct ModuleSourceLayout<'a> {
   module_root: &'a Path,
 }
 
+/// CompileArkTS module-source cache paths owned by ets-loader's
+/// `ModuleSourceFile.generateMockConfigFile` lifecycle.
+pub(super) struct ModuleSourceCacheLayout<'a> {
+  root: &'a Path,
+}
+
+impl<'a> ModuleSourceCacheLayout<'a> {
+  pub(super) fn new(root: &'a Path) -> Self {
+    Self { root }
+  }
+
+  pub(super) fn transformed_mock_config_json(&self) -> PathBuf {
+    self.root.join("mock-config.json")
+  }
+
+  pub(super) fn user_mock_config_json5(&self) -> PathBuf {
+    self.root.join("mock-config.json5")
+  }
+}
+
 impl<'a> ModuleSourceLayout<'a> {
   pub(super) fn new(module_root: &'a Path) -> Self {
     Self { module_root }
@@ -25,6 +45,27 @@ impl<'a> ModuleSourceLayout<'a> {
 
   pub(super) fn module_json5(&self) -> PathBuf {
     self.src_main().join("module.json5")
+  }
+
+  /// `CoreModuleModelImpl.getMockConfigPath()` — fixed module mock manifest.
+  pub(super) fn mock_config_json5(&self) -> PathBuf {
+    self.module_root.join("src").join("mock").join("mock-config.json5")
+  }
+
+  pub(super) fn ohos_test_dir(&self) -> PathBuf {
+    self.module_root.join("src").join("ohosTest")
+  }
+
+  pub(super) fn ohos_test_module_json5(&self) -> PathBuf {
+    self.ohos_test_dir().join("module.json5")
+  }
+
+  pub(super) fn ohos_test_runner_ets(&self) -> PathBuf {
+    self
+      .ohos_test_dir()
+      .join("ets")
+      .join("testrunner")
+      .join("OpenHarmonyTestRunner.ets")
   }
 
   pub(super) fn target_ets(&self, target_name: &str) -> PathBuf {
@@ -120,6 +161,63 @@ impl<'a> ModuleBuildLayout<'a> {
   /// `.test/`, not under `.test/<product>/`.
   pub(super) fn testability_dir(&self) -> PathBuf {
     self.module_root.join(".test").join("testability")
+  }
+
+  pub(super) fn test_ability_ets(&self) -> PathBuf {
+    self.testability_dir().join("TestAbility.ets")
+  }
+
+  pub(super) fn testability_pages_dir(&self) -> PathBuf {
+    self.testability_dir().join("pages")
+  }
+
+  pub(super) fn unit_test_index_ets(&self) -> PathBuf {
+    self.testability_pages_dir().join("Index.ets")
+  }
+
+  pub(super) fn test_phone_settings_json(&self) -> PathBuf {
+    self
+      .testability_dir()
+      .join("phoneSettingConfig_Phone.json")
+  }
+
+  pub(super) fn ohos_test_source_root(&self) -> PathBuf {
+    self
+      .intermediates()
+      .join("src")
+      .join("ohosTest")
+  }
+
+  pub(super) fn ohos_test_ets_root(&self) -> PathBuf {
+    self.ohos_test_source_root().join("ets")
+  }
+
+  pub(super) fn ohos_test_resources_root(&self) -> PathBuf {
+    self.ohos_test_source_root().join("resources")
+  }
+
+  pub(super) fn ohos_test_runner_dir(&self) -> PathBuf {
+    self.ohos_test_ets_root().join("testrunner")
+  }
+
+  pub(super) fn ohos_test_ability_dir(&self) -> PathBuf {
+    self.ohos_test_ets_root().join("testability")
+  }
+
+  pub(super) fn ohos_test_pages_dir(&self) -> PathBuf {
+    self.ohos_test_ability_dir().join("pages")
+  }
+
+  pub(super) fn ohos_test_resources_base(&self) -> PathBuf {
+    self.ohos_test_resources_root().join("base")
+  }
+
+  pub(super) fn ohos_test_resource_element_dir(&self) -> PathBuf {
+    self.ohos_test_resources_base().join("element")
+  }
+
+  pub(super) fn ohos_test_resource_profile_dir(&self) -> PathBuf {
+    self.ohos_test_resources_base().join("profile")
   }
 
   /// `.test/<product>/intermediates/test/` — coverage data and init files.
@@ -378,6 +476,39 @@ impl<'a> ModuleBuildLayout<'a> {
 
   pub(super) fn loader_out_dir(&self) -> PathBuf {
     self.default_intermediate_dir("loader_out")
+  }
+
+  /// `intermediates/assets/<target>/ets` — UnitTestArkTS output consumed by
+  /// `@ohos/coverage` Previewer execution.
+  pub(super) fn test_assets_ets_dir(&self) -> PathBuf {
+    self.default_intermediate_nested_file("assets", ["ets"])
+  }
+
+  pub(super) fn test_assets_modules_abc(&self) -> PathBuf {
+    self.test_assets_ets_dir().join("modules.abc")
+  }
+
+  pub(super) fn test_assets_source_maps(&self) -> PathBuf {
+    self.test_assets_ets_dir().join("sourceMaps.map")
+  }
+
+  pub(super) fn intermediates_mock_config_json(&self) -> PathBuf {
+    self.default_intermediate_file("res", "mock-config.json")
+  }
+
+  pub(super) fn test_mock_config_output_json(&self) -> PathBuf {
+    self
+      .res_resources_dir()
+      .join("rawfile")
+      .join("mock")
+      .join("mock-config.json")
+  }
+
+  pub(super) fn test_coverage_source_map(&self) -> PathBuf {
+    self
+      .test_intermediates_dir()
+      .join("coverage_sourcemap")
+      .join("unitTestSourceMap.map")
   }
 
   pub(super) fn declarations_dir(&self) -> PathBuf {

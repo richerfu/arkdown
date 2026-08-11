@@ -187,6 +187,8 @@ impl<'a> CheckModuleRunner<'a> {
       paths,
       entries: sources.to_vec(),
       coverage_enabled: false,
+      coverage_path_filter: None,
+      coverage_mode: None,
       debug_line: false,
       byte_code_har_integrated_optimization: false,
     })

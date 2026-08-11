@@ -2045,6 +2045,7 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+        disable_mock_setup_decorator: false,
         checker_mode: crate::CheckerMode::Oxc,
     };
     let result = TransformHarness::transform_with_options(
@@ -2127,6 +2128,7 @@ export struct SecureModePage {
         pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+        disable_mock_setup_decorator: false,
         checker_mode: crate::CheckerMode::Oxc,
     };
     let result = TransformHarness::transform_with_options(
@@ -2244,6 +2246,7 @@ export struct SecureModePage {
         pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+        disable_mock_setup_decorator: false,
         checker_mode: crate::CheckerMode::Oxc,
     };
     let result = TransformHarness::transform_with_options(
@@ -4289,6 +4292,7 @@ struct WidgetCard {
         pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+            disable_mock_setup_decorator: false,
         checker_mode: crate::CheckerMode::Oxc,
         },
     )
@@ -4434,6 +4438,7 @@ struct ModalPage {
         pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+            disable_mock_setup_decorator: false,
         checker_mode: crate::CheckerMode::Oxc,
         },
     )

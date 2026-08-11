@@ -45,14 +45,16 @@ pub use arkdown_core::source_maps;
 
 // bundler — primary API
 pub use bundler::{
-    BundleOutput, Bundler, HvigorHarImportees, PreloadSystemSoTask, SourceMapInputFingerprint,
+    BundleOutput, Bundler, HvigorHarImportees, HvigorModuleRequestRewritePlan,
+    PreloadSystemSoTask, SourceMapInputFingerprint,
 };
 
 // plan — typed bundle plan (SPEC-048 Phase 4 primary input)
 pub use plan::{
-    BundleCachePolicy, BundleInput, BundleModuleMetaInfoFile, BundleOutputOptions, BundlePlan,
-    BundlePluginSet, BundleRuntimePackageContext, BundleRuntimePackageInfo,
-    BundleSourceMapPackageInfo, LoaderResourceJoin, SourceMapPolicy,
+    BundleCachePolicy, BundleInput, BundleMockConfig, BundleMockDependency,
+    BundleModuleMetaInfoFile, BundleOutputOptions, BundlePlan, BundlePluginSet,
+    BundleRuntimePackageContext, BundleRuntimePackageInfo, BundleSourceMapPackageInfo,
+    LoaderResourceJoin, SourceMapPolicy,
 };
 
 // compile_env — compile environment
