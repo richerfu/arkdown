@@ -1255,9 +1255,13 @@ fn test_loader_json_preview_and_test_compile_entry_uses_mock_config_sources() {
     fs::create_dir_all(&mock_dir).expect("create mock dir");
 
     let insight = ets_dir.join("Insight.ets");
+    let entry_ability = ets_dir.join("entryability").join("EntryAbility.ets");
     let mock_service = mock_dir.join("MockService.ets");
     let mock_page = mock_dir.join("PageMock.ts");
+    fs::create_dir_all(entry_ability.parent().expect("entry ability directory"))
+        .expect("create entry ability directory");
     fs::write(&insight, "export class Insight {}").expect("write insight source");
+    fs::write(&entry_ability, "export class EntryAbility {}").expect("write entry ability");
     fs::write(&mock_service, "export class MockService {}").expect("write mock service");
     fs::write(&mock_page, "export const page = true;").expect("write mock page");
     fs::write(mock_dir.join("types.d.ts"), "export interface Types {}").expect("write types");
@@ -1313,6 +1317,12 @@ fn test_loader_json_preview_and_test_compile_entry_uses_mock_config_sources() {
                     to_absolute_path_string(&mock_service),
                     to_absolute_path_string(&mock_page),
                 ]
+            );
+            assert!(
+                loader
+                    .compile_entry
+                    .contains(&"./ets/entryability/EntryAbility.ets".to_string()),
+                "UnitTestArkCompile.mainModulePath keeps the entry module ability in the internal compiler input"
             );
         }
         assert!(loader
@@ -3266,10 +3276,9 @@ fn test_loader_json_target_ets_src_added_to_source_roots() {
 /// unit-test compileEntry (`OutputTarget::Test` = `hvigorw test`). The
 /// `test` task compiles the generated `.test/testability` templates plus
 /// `src/test`; `src/ohosTest` participates in the separate `ohosTest`
-/// target build (`-p module=entry@ohosTest`), which is not yet routed
-/// through `OutputTarget` (see `collect_ohos_test_compile_entries`).
+/// target build (`-p module=entry@ohosTest`).
 #[test]
-fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
+fn test_loader_json_routes_ohos_test_sources_only_to_ohos_test_target() {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let project_root = tmp.path().to_path_buf();
     let module_root = project_root.join("entry");
@@ -3311,6 +3320,22 @@ fn test_loader_json_ohos_test_sources_injected_in_test_mode() {
         "src/ohosTest sources must NOT be in the local-test compileEntry; entries: {:?}",
         loader.hvigor_compile_entry
     );
+
+    let mut ohos_test_config = make_config(false);
+    ohos_test_config.project_root = project_root.clone();
+    let ohos_test_loader = LoaderJson::try_generate(
+        &ohos_test_config,
+        &module_cfg,
+        &make_manifest(),
+        "ohosTest",
+    )
+    .expect("generate ohosTest loader");
+    assert!(ohos_test_loader
+        .hvigor_compile_entry
+        .contains(&to_absolute_path_string(&test_ets.join("TestRunner.ets"))));
+    assert!(!ohos_test_loader
+        .hvigor_compile_entry
+        .contains(&to_absolute_path_string(&test_ets.join("TestTypes.d.ts"))));
 
     // Debug mode should NOT include ohosTest sources
     let debug_config = make_config(false);

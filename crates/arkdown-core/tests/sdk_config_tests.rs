@@ -59,3 +59,73 @@ fn arkguard_api_dirs_follow_loader_global_module_paths_and_component_metadata() 
         "OpenHarmony targets must not inherit sibling HarmonyOS API components"
     );
 }
+
+#[test]
+fn local_test_components_are_derived_from_the_selected_sdk_layout() {
+    let temp = tempfile::tempdir().expect("temporary IDE layout");
+    let contents = temp.path().join("Contents");
+    let sdk_default = contents.join("sdk").join("default");
+    let component = sdk_default.join("openharmony");
+    let loader = component
+        .join("ets")
+        .join("build-tools")
+        .join("ets-loader");
+    let previewer = component.join("previewer");
+    let hms_previewer = sdk_default.join("hms").join("previewer");
+    let coverage = contents
+        .join("tools")
+        .join("hvigor")
+        .join("hvigor-ohos-plugin")
+        .join("node_modules")
+        .join("@ohos")
+        .join("coverage");
+    fs::create_dir_all(previewer.join("common").join("bin")).expect("OHOS Previewer");
+    fs::create_dir_all(&hms_previewer).expect("HMS Previewer");
+    fs::write(hms_previewer.join("uni-package.json"), b"{}").expect("HMS metadata");
+    let coverage_command = coverage
+        .join("lib")
+        .join("src")
+        .join("commandLine")
+        .join("index.js");
+    fs::create_dir_all(coverage_command.parent().expect("coverage parent"))
+        .expect("coverage package");
+    fs::write(&coverage_command, b"module.exports = {};").expect("coverage entry");
+
+    let config = sdk_config(loader);
+    assert_eq!(config.previewer_component_path(), Some(previewer));
+    assert_eq!(config.hms_previewer_component_path(), Some(hms_previewer));
+    assert_eq!(config.hvigor_coverage_package_path(), Some(coverage));
+}
+
+#[test]
+fn local_test_coverage_supports_the_standalone_command_line_layout() {
+    let temp = tempfile::tempdir().expect("temporary command-line tools layout");
+    let distribution = temp.path().join("command-line-tools");
+    let component = distribution
+        .join("sdk")
+        .join("default")
+        .join("openharmony");
+    let loader = component
+        .join("ets")
+        .join("build-tools")
+        .join("ets-loader");
+    let coverage = distribution
+        .join("hvigor")
+        .join("hvigor-ohos-plugin")
+        .join("node_modules")
+        .join("@ohos")
+        .join("coverage");
+    let coverage_command = coverage
+        .join("lib")
+        .join("src")
+        .join("commandLine")
+        .join("index.js");
+    fs::create_dir_all(coverage_command.parent().expect("coverage parent"))
+        .expect("coverage package");
+    fs::write(&coverage_command, b"module.exports = {};").expect("coverage entry");
+
+    assert_eq!(
+        sdk_config(loader).hvigor_coverage_package_path(),
+        Some(coverage)
+    );
+}

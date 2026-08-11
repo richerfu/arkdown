@@ -30,11 +30,13 @@ use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, Hvigo
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
     Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression,
-    FormalParameterKind, Function, FunctionBody, FunctionType, ImportOrExportKind,
-    MethodDefinitionKind, MethodDefinitionType, Program, PropertyKey, Statement, StructElement,
-    StructStatement, TSModuleDeclarationBody, TSType,
+    FormalParameter, FormalParameterKind, Function, FunctionBody, FunctionType,
+    ImportOrExportKind, MethodDefinition, MethodDefinitionKind, MethodDefinitionType, Program,
+    PropertyDefinition, PropertyKey, Statement, StructElement, StructStatement,
+    TSModuleDeclarationBody, TSType,
 };
 use oxc_ast::NONE;
+use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
 #[cfg(test)]
@@ -124,6 +126,9 @@ pub struct TransformOptions {
     /// (`a2[i]` guard); local `file:` dependencies are not in the maps and
     /// do expand.
     pub hsp_har_package_names: FxHashSet<String>,
+    /// SDK `process_mock.disableMockDecorator`: `mockParams` is present for
+    /// every Ark compile, so only Preview builds retain `@MockSetup`.
+    pub disable_mock_setup_decorator: bool,
 }
 
 impl Default for TransformOptions {
@@ -146,6 +151,7 @@ impl Default for TransformOptions {
             pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+            disable_mock_setup_decorator: false,
         }
     }
 }
@@ -286,8 +292,13 @@ impl<'a> ArktsTransformer<'a> {
             });
         }
 
+        let mock_setup_decorators_lowered = if options.disable_mock_setup_decorator {
+            MockSetupDecoratorLowerer::new().program(&mut parsed.program)
+        } else {
+            false
+        };
         let syntax_detector = ArktsTransformSyntaxDetector::new();
-        if !syntax_detector.program(&parsed.program) {
+        if !mock_setup_decorators_lowered && !syntax_detector.program(&parsed.program) {
             return Ok(ArktsTransformOutput {
                 code: source.content.clone(),
                 source_map: None,
@@ -432,7 +443,8 @@ impl<'a> ArktsTransformer<'a> {
             })
             .collect::<Result<Vec<_>, EtsTransformError>>()?;
 
-        if concurrent_directives_lowered
+        if mock_setup_decorators_lowered
+            || concurrent_directives_lowered
             || global_context_calls_lowered
             || custom_dialog_controllers_lowered
             || !navigation_registrations.is_empty()
@@ -499,6 +511,59 @@ impl<'a> ArktsTransformer<'a> {
                 source_map: None,
             })
         }
+    }
+}
+
+/// AST equivalent of ets-loader `process_mock.disableMockDecorator`.
+///
+/// The SDK removes only the configured `@MockSetup` decorator from classes,
+/// class methods/accessors/constructors, properties, and parameters. Other
+/// decorators retain their original order and spelling.
+struct MockSetupDecoratorLowerer {
+    changed: bool,
+}
+
+impl MockSetupDecoratorLowerer {
+    fn new() -> Self {
+        Self { changed: false }
+    }
+
+    fn program<'a>(mut self, program: &mut Program<'a>) -> bool {
+        self.visit_program(program);
+        self.changed
+    }
+
+    fn strip<'a>(&mut self, decorators: &mut OxcVec<'a, Decorator<'a>>) {
+        let previous_len = decorators.len();
+        decorators.retain(|decorator| {
+            !matches!(
+                &decorator.expression,
+                Expression::Identifier(identifier) if identifier.name == "MockSetup"
+            )
+        });
+        self.changed |= decorators.len() != previous_len;
+    }
+}
+
+impl<'a> VisitMut<'a> for MockSetupDecoratorLowerer {
+    fn visit_class(&mut self, class: &mut Class<'a>) {
+        self.strip(&mut class.decorators);
+        walk_mut::walk_class(self, class);
+    }
+
+    fn visit_method_definition(&mut self, method: &mut MethodDefinition<'a>) {
+        self.strip(&mut method.decorators);
+        walk_mut::walk_method_definition(self, method);
+    }
+
+    fn visit_property_definition(&mut self, property: &mut PropertyDefinition<'a>) {
+        self.strip(&mut property.decorators);
+        walk_mut::walk_property_definition(self, property);
+    }
+
+    fn visit_formal_parameter(&mut self, parameter: &mut FormalParameter<'a>) {
+        self.strip(&mut parameter.decorators);
+        walk_mut::walk_formal_parameter(self, parameter);
     }
 }
 

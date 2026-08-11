@@ -64,10 +64,6 @@ impl<'a> ProfileModuleLayout<'a> {
         }
     }
 
-    pub(crate) fn build_root(&self) -> &str {
-        self.build_root
-    }
-
     pub(crate) fn src_main(&self) -> PathBuf {
         self.module_root.join("src").join("main")
     }
@@ -121,10 +117,29 @@ impl<'a> ProfileModuleLayout<'a> {
     }
 
     pub(crate) fn mock_config_json5(&self) -> PathBuf {
+        self.mock_sources_dir().join("mock-config.json5")
+    }
+
+    pub(crate) fn mock_sources_dir(&self) -> PathBuf {
+        self.module_root.join("src").join("mock")
+    }
+
+    pub(crate) fn test_sources_dir(&self) -> PathBuf {
+        self.module_root.join("src").join("test")
+    }
+
+    pub(crate) fn testability_dir(&self) -> PathBuf {
+        self.module_root.join(".test").join("testability")
+    }
+
+    pub(crate) fn ohos_test_template_ets_root(&self) -> PathBuf {
         self.module_root
+            .join(".test")
+            .join("default")
+            .join("intermediates")
             .join("src")
-            .join("mock")
-            .join("mock-config.json5")
+            .join("ohosTest")
+            .join("ets")
     }
 
     pub(crate) fn ohos_test_ets_root(&self) -> PathBuf {

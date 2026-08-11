@@ -779,6 +779,57 @@ impl SdkConfig {
         path.is_file().then_some(path)
     }
 
+    /// Previewer component selected by OHOS/HMOS SDK manager for local tests.
+    ///
+    /// The selected ETS component and Previewer are siblings under the same
+    /// runtime component root (`default/openharmony` for OpenHarmony and HMOS
+    /// compilation). Returning the component root matches
+    /// `GenerateUnitTestResult.getPreviewerPath()`.
+    pub fn previewer_component_path(&self) -> Option<std::path::PathBuf> {
+        let path = self.component_root()?.join("previewer");
+        path.join("common").join("bin").is_dir().then_some(path)
+    }
+
+    /// HMS Previewer sibling required by the HarmonyOS Previewer `-hsp`
+    /// argument. OpenHarmony callers intentionally do not request it.
+    pub fn hms_previewer_component_path(&self) -> Option<std::path::PathBuf> {
+        let path = self
+            .component_root()?
+            .parent()?
+            .join("hms")
+            .join("previewer");
+        path.join("uni-package.json").is_file().then_some(path)
+    }
+
+    /// Locate the `@ohos/coverage` implementation owned by the installed
+    /// hvigor OHOS plugin. DevEco and the standalone command-line tools place
+    /// hvigor at different distribution-relative roots; both candidates are
+    /// derived from the selected SDK component, never from a host-specific
+    /// absolute installation path.
+    pub fn hvigor_coverage_package_path(&self) -> Option<std::path::PathBuf> {
+        let sdk_root = self.component_root()?.parent()?.parent()?;
+        let distribution_root = sdk_root.parent()?;
+        [
+            distribution_root.join("hvigor"),
+            distribution_root.join("tools").join("hvigor"),
+        ]
+        .into_iter()
+        .map(|hvigor_root| {
+            hvigor_root
+                .join("hvigor-ohos-plugin")
+                .join("node_modules")
+                .join("@ohos")
+                .join("coverage")
+        })
+        .find(|path| {
+            path.join("lib")
+                .join("src")
+                .join("commandLine")
+                .join("index.js")
+                .is_file()
+        })
+    }
+
     /// Candidate directories containing `@ohos/*` API declaration files.
     ///
     /// Returns `["<sdk>/ets/api", "<sdk>/js/api"]` in priority order.

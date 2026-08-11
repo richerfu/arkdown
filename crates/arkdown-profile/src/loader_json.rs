@@ -888,15 +888,22 @@ impl LoaderJson {
             // templates before the module abilities (filesInfo.txt:
             // ResourceTable, TestAbility, Index, EntryAbility, List.test).
             // es2abc compiles in input order, so the entry order must match.
-            let testability_dir = module_cfg.src_path.join(".test/testability");
+            let testability_dir = module_layout.testability_dir();
             for entry in [
                 testability_dir.join("TestAbility.ets"),
-                testability_dir.join("pages/Index.ets"),
+                testability_dir.join("pages").join("Index.ets"),
             ] {
                 if entry.is_file() {
                     compile_entry.push(to_absolute_path_string(&entry));
                 }
             }
+            // `UnitTestArkCompile.initDefaultArkCompileConfig()` supplies
+            // `mainModulePath` for the first selected entry module. The SDK
+            // compiler consequently adds that module's ability and extension
+            // srcEntry values even though local-test loader.json serializes
+            // only mock sources and ResourceTable.ts. Arkdown's in-process
+            // bundler needs the same entries explicitly.
+            compile_entry.extend(runtime_entry_sources.iter().cloned());
         } else if target_name == "ohosTest" {
             // The `ohosTest` target compiles the generated template tree
             // (`.test/<product>/intermediates/src/ohosTest/ets/`) — the
@@ -905,13 +912,16 @@ impl LoaderJson {
             // resolve against the module ets root, which does not exist for
             // the ohosTest module; the absolute template paths below are the
             // compiler inputs.
-            let template_ets = module_cfg
-                .src_path
-                .join(".test/default/intermediates/src/ohosTest/ets");
+            let template_ets = module_layout.ohos_test_template_ets_root();
             for entry in [
-                template_ets.join("testability/TestAbility.ets"),
-                template_ets.join("testability/pages/Index.ets"),
-                template_ets.join("testrunner/OpenHarmonyTestRunner.ets"),
+                template_ets.join("testability").join("TestAbility.ets"),
+                template_ets
+                    .join("testability")
+                    .join("pages")
+                    .join("Index.ets"),
+                template_ets
+                    .join("testrunner")
+                    .join("OpenHarmonyTestRunner.ets"),
             ] {
                 if entry.is_file() {
                     compile_entry.push(to_absolute_path_string(&entry));
@@ -1095,12 +1105,12 @@ impl LoaderJson {
         });
         serialized_compile_entry.extend({
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "mock_compile_entries");
-            Self::collect_mock_compile_entries(config, module_cfg)
+            Self::collect_mock_compile_entries(config, module_cfg, target_name)
         });
-        // ohosTest (local-test injection): add src/ohosTest/ets/ sources for Test builds.
+        // Device-test target: add the module's src/ohosTest/ets sources.
         serialized_compile_entry.extend({
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "ohos_test_compile_entries");
-            Self::collect_ohos_test_compile_entries(config, module_cfg)
+            Self::collect_ohos_test_compile_entries(module_cfg, target_name)
         });
         serialized_compile_entry.extend({
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "app_startup_compile_entries");
@@ -1166,10 +1176,11 @@ impl LoaderJson {
             // `addResourceTable2CompileEntry` for local-test mode). The
             // testability templates and src/test sources reach the compiler
             // through moduleJson abilities / the replaced main_pages entry.
+            let mock_sources_dir = canonicalize_or_owned(&module_layout.mock_sources_dir());
             hvigor_compile_entry.retain(|entry| {
-                entry.ends_with("ResourceTable.ts")
-                    || entry.contains("/src/mock/")
-                    || entry.contains("/src/main/mock/")
+                let path = Path::new(entry);
+                path.file_name() == Some(OsStr::new("ResourceTable.ts"))
+                    || path.strip_prefix(&mock_sources_dir).is_ok()
             });
         }
         for path in &serialized_compile_entry {
@@ -1182,7 +1193,7 @@ impl LoaderJson {
         if matches!(config.output_target, OutputTarget::Test) {
             // The `src/test` suite participates in the local-test compiler
             // input surface (testability templates were added up front).
-            let test_sources = module_cfg.src_path.join("src/test");
+            let test_sources = module_layout.test_sources_dir();
             if test_sources.is_dir() {
                 for file in Self::collect_code_files(&test_sources) {
                     compile_entry.push(to_absolute_path_string(&file));
@@ -2168,11 +2179,13 @@ impl LoaderJson {
     fn collect_mock_compile_entries(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
+        target_name: &str,
     ) -> Vec<PathBuf> {
         if !matches!(
             config.output_target,
             OutputTarget::Preview | OutputTarget::Test
-        ) {
+        ) && target_name != "ohosTest"
+        {
             return vec![];
         }
 
@@ -2205,13 +2218,12 @@ impl LoaderJson {
     /// generated `.test/testability` templates plus `src/test` (see the
     /// local-test entry extension above). `src/ohosTest` participates in the
     /// separate `ohosTest` target build (`-p module=entry@ohosTest`), which is
-    /// not yet wired through `OutputTarget`. This collector is retained for
-    /// that future target routing and currently returns nothing.
+    /// is selected by the module target name rather than `OutputTarget`.
     fn collect_ohos_test_compile_entries(
-        config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
+        target_name: &str,
     ) -> Vec<PathBuf> {
-        if !matches!(config.output_target, OutputTarget::Test) {
+        if target_name != "ohosTest" {
             return vec![];
         }
 
@@ -2220,11 +2232,7 @@ impl LoaderJson {
             return vec![];
         }
 
-        // Local unit-test builds exclude `src/ohosTest` (hvigor `test` task
-        // compiler inputs; see the doc comment above). The ohosTest target
-        // build will collect this tree once routed through its own target.
-        let _ = test_ets_root;
-        Vec::new()
+        Self::collect_code_files(&test_ets_root)
     }
 
     fn collect_code_files(root: &Path) -> Vec<PathBuf> {

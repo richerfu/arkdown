@@ -73,8 +73,8 @@ use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
 };
 use arkdown::{
-  BundleCacheBridge, BundleSourceMapPackageInfo, PluginCacheModuleInventory,
-  ShouldInvalidCacheRequest, SourceMapPolicy,
+  BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo,
+  PluginCacheModuleInventory, ShouldInvalidCacheRequest, SourceMapPolicy,
 };
 
 use crate::cmd::ets_checker::{
@@ -2999,11 +2999,7 @@ fn build_cache_group_snapshots(
   );
 
   // 10. MockConfig — hash of src/mock/mock-config.json5 if it exists.
-  let mock_config_path = module
-    .src_path
-    .join("src")
-    .join("mock")
-    .join("mock-config.json5");
+  let mock_config_path = ModuleSourceLayout::new(&module.src_path).mock_config_json5();
   let mock_config_snap = file_hash(&mock_config_path, CacheGroupKey::MockConfig);
 
   vec![
@@ -3217,7 +3213,9 @@ impl ModuleTargetSelection {
       // `-p module=entry@ohosTest` without a build-profile entry as long as
       // `src/ohosTest/module.json5` exists).
       if requested_target == "ohosTest"
-        && module.src_path.join("src/ohosTest/module.json5").is_file()
+        && ModuleSourceLayout::new(&module.src_path)
+          .ohos_test_module_json5()
+          .is_file()
       {
         return Self {
           target: EffectiveTargetConfig {
@@ -3796,15 +3794,18 @@ impl BuildCoordinator {
       // runs for the `test` command entry (`hvigorw test`).
       if matches!(config.output_target, OutputTarget::Test) {
         let _timer = BuildTimingProbe::module(&module.name, "generate_unit_test_template");
-        let testability = module_layout.testability_dir();
-        if !testability.join("TestAbility.ets").is_file() {
+        if !module_layout.test_ability_ets().is_file() {
           let coverage = args.ohos_test_coverage.unwrap_or(true);
           let scope = args.scope.as_deref().unwrap_or("");
           // hvigor embeds the absolute module path (`pathInfo.getModulePath()`)
           // into the template; canonicalize so `--project .` does not leak
           // `./` segments into the generated file.
-          let module_path = std::fs::canonicalize(&module.src_path)
-            .unwrap_or_else(|_| config.project_root.join(&module.src_path));
+          let configured_module_path = if module.src_path.has_root() {
+            module.src_path.clone()
+          } else {
+            config.project_root.join(&module.src_path)
+          };
+          let module_path = canonicalize_or_owned(&configured_module_path);
           super::unit_test::generate_unit_test_template(
             &module_path,
             &super::unit_test::UnitTestTemplateParams {
@@ -3827,7 +3828,7 @@ impl BuildCoordinator {
       // (`-p module=entry@ohosTest`) copies the SDK test templates into
       // `.test/<product>/intermediates/src/ohosTest/`.
       if module_target_name == "ohosTest"
-        && module.src_path.join("src/ohosTest/module.json5").is_file()
+        && module_layout.source().ohos_test_module_json5().is_file()
       {
         let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
         if !super::unit_test::has_ohos_test_template(&module.src_path) {
@@ -3853,7 +3854,6 @@ impl BuildCoordinator {
           config,
           session,
           &module,
-          &module_context,
           module_build_option,
         );
         pre_build_validator
@@ -4060,7 +4060,7 @@ impl BuildCoordinator {
       // module document when the source module.json5 lacks `srcEntry`
       // abilities (templates-after-source-code-migration).
       let module_json5 = if module_target_name == "ohosTest" {
-        let ohos_test_json5 = module.src_path.join("src/ohosTest/module.json5");
+        let ohos_test_json5 = module_layout.source().ohos_test_module_json5();
         let content = std::fs::read_to_string(&ohos_test_json5).map_err(|error| {
           anyhow::anyhow!(
             "cannot read ohosTest module.json5 '{}': {error}",
@@ -4080,10 +4080,7 @@ impl BuildCoordinator {
           .abilities
           .iter()
           .all(|ability| ability.src_entry.is_empty())
-          && !module
-            .src_path
-            .join("src/ohosTest/ets/testrunner/OpenHarmonyTestRunner.ets")
-            .is_file();
+          && !module_layout.source().ohos_test_runner_ets().is_file();
         if template_after_migration {
           // `getOhosTestAbilityConfig()`: description/mainElement/pages +
           // the synthetic TestAbility, overlaid by the source module.json5
@@ -4774,7 +4771,7 @@ impl BuildCoordinator {
         // append the synthetic TestAbility to the processed profile and
         // overwrite the ark module json / module.json with the same document.
         if matches!(config.output_target, OutputTarget::Test)
-          && super::unit_test::has_test_ability_template(&module.src_path.join(".test"))
+          && module_layout.test_ability_ets().is_file()
         {
           let process_profile_json = module_layout.process_profile_module_json();
           let process_value = std::fs::read_to_string(&process_profile_json).map_err(|error| {
@@ -4850,9 +4847,7 @@ impl BuildCoordinator {
         // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
         // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
         if module_target_name == "ohosTest" {
-          let template_resources = module
-            .src_path
-            .join(".test/default/intermediates/src/ohosTest/resources");
+          let template_resources = module_layout.ohos_test_resources_root();
           if template_resources.is_dir() && !module_res_dirs.contains(&template_resources) {
             module_res_dirs.push(template_resources);
           }
@@ -4956,9 +4951,7 @@ impl BuildCoordinator {
         // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
         // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
         if module_target_name == "ohosTest" {
-          let template_resources = module
-            .src_path
-            .join(".test/default/intermediates/src/ohosTest/resources");
+          let template_resources = module_layout.ohos_test_resources_root();
           if template_resources.is_dir() && !res_dirs.contains(&template_resources) {
             res_dirs.push(template_resources);
           }
@@ -5236,6 +5229,10 @@ impl BuildCoordinator {
           &document,
           &module_layout.res_profile_dir(),
           module_json5.module.type_.as_str(),
+          args
+            .unit_test_replace_page
+            .as_deref()
+            .unwrap_or(super::unit_test::UNIT_TEST_REPLACE_PAGE),
         )
         .map_err(|error| {
           anyhow::anyhow!(
@@ -5268,8 +5265,7 @@ impl BuildCoordinator {
           .unwrap_or_else(|_| module.src_path.clone());
         loader_json.module_path_map.insert(
           module_json5.module.name.clone(),
-          arkdown_path::ArtifactPathSerializer::path_to_slash_string(&test_module_path)
-            .unwrap_or_else(|_| test_module_path.display().to_string()),
+          arkdown_path::ArtifactPathSerializer::path_to_slash_string(&test_module_path)?,
         );
       }
       loader_jsons.push((
@@ -5344,6 +5340,8 @@ impl BuildCoordinator {
             paths,
             entries,
             coverage_enabled: coverage_mode,
+            coverage_path_filter: args.coverage_path_filter.as_deref(),
+            coverage_mode: args.coverage_mode.as_deref(),
             debug_line: false,
             byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
           })
@@ -5362,6 +5360,7 @@ impl BuildCoordinator {
     // ── Step 3: Bundling ──────────────────────────────────────────────
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleStageOutput,)> = Vec::new();
+    let mut bundle_ets_transform_plans: Vec<Option<Arc<RolldownEtsTransformPlan>>> = Vec::new();
     let mut widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>> = Vec::new();
     let mut compile_task_active = Vec::new();
     let module_obfuscation_contexts = loader_jsons
@@ -5418,6 +5417,7 @@ impl BuildCoordinator {
         bundle_outs.push((BundleStageOutput::skipped_original_har(
           cached_abc, output_dir,
         ),));
+        bundle_ets_transform_plans.push(None);
         widget_bundle_outs.push(None);
         compile_task_active.push(false);
         continue;
@@ -5486,11 +5486,15 @@ impl BuildCoordinator {
         .is_none_or(|plan| plan.modules_abc_path.exists());
       let declaration_cache_ready = !matches!(module.module_type, OhosModuleType::Shared)
         || module_layout.declarations_dir().is_dir();
+      let unit_test_coverage_cache_ready = !matches!(config.output_target, OutputTarget::Test)
+        || !coverage_mode
+        || module_layout.test_init_coverage_json().is_file();
       let mut cache_hit = !disable_abc_cache
         && task_inputs.matches_cached(&cache_dir)
         && cached_abc.exists()
         && widget_cache_ready
-        && declaration_cache_ready;
+        && declaration_cache_ready
+        && unit_test_coverage_cache_ready;
       if cache_hit {
         // System-level check: compile-env + file changes + cache group changes.
         let system_request = ShouldInvalidCacheRequest {
@@ -5530,6 +5534,7 @@ impl BuildCoordinator {
           .up_to_date(&module.name, Some(module_target_name), "BuildJS")
           .await?;
         bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir),));
+        bundle_ets_transform_plans.push(None);
         widget_bundle_outs.push(None);
         compile_task_active.push(false);
         continue;
@@ -5545,6 +5550,7 @@ impl BuildCoordinator {
         bundle_outs.push((BundleStageOutput::skipped_original_har(
           cached_abc, output_dir,
         ),));
+        bundle_ets_transform_plans.push(None);
         widget_bundle_outs.push(None);
         compile_task_active.push(false);
         continue;
@@ -5603,6 +5609,7 @@ impl BuildCoordinator {
         &loader_json_out,
         PathBuf::from(&loader_json.ace_module_build),
         module_config.as_ref(),
+        module_target_name,
         Some(&custom_cfg),
         module_analyzer,
         BundlePlanPackageInfo {
@@ -5614,12 +5621,33 @@ impl BuildCoordinator {
         // The ohosTest module's ets root is the generated template tree
         // (`.test/<product>/intermediates/src/ohosTest/ets`); entry page
         // paths resolve against it (`testability/pages/Index`).
-        let template_ets = module
-          .src_path
-          .join(".test/default/intermediates/src/ohosTest/ets");
+        let template_ets = module_layout.ohos_test_ets_root();
         if template_ets.is_dir() {
           bundle_plan.input.project_path = template_ets;
         }
+      }
+      if let Some(mock_config) = bundle_plan.input.mock_config.as_mut() {
+        mock_config.dependencies = module_context
+          .deps
+          .edges
+          .iter()
+          .filter_map(|edge| {
+            let node = module_context.deps.nodes.get(&edge.package_name)?;
+            let main_file_path = edge.package_root.join(
+              node
+                .package
+                .as_ref()
+                .and_then(|package| package.package_json.main.as_deref())
+                .unwrap_or("index.js"),
+            );
+            Some(BundleMockDependency {
+              dependency_name: edge.alias.clone(),
+              package_name: node.package_name.clone(),
+              package_root: edge.package_root.clone(),
+              main_file_path,
+            })
+          })
+          .collect();
       }
       bundle_plan.input.module_record_roots = module_record_roots;
       // hvigor's widget pass compiles the form card sources into the main
@@ -6056,6 +6084,7 @@ impl BuildCoordinator {
       }
 
       bundle_outs.push((bundle_out,));
+      bundle_ets_transform_plans.push(Some(ets_transform_plan));
       widget_bundle_outs.push(widget_bundle_out);
     }
     progress.done();
@@ -6294,13 +6323,52 @@ impl BuildCoordinator {
 
     // ── Coverage instrumentation ──────────────────────────────────────
     if coverage_mode {
-      for (bundle_out,) in &bundle_outs {
-        for (_chunk_name, path) in &bundle_out.bundle_output.chunk_files {
-          if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
-            if let Ok(source) = fs_err::read_to_string(path) {
-              let file_id = ArtifactPathSerializer::path_to_slash_string(path)?;
-              let instrumented = CoverageInstrumenter::new(&source, &file_id).instrument();
-              let _ = fs_err::write(path, instrumented);
+      if matches!(config.output_target, OutputTarget::Test) {
+        for (
+          (
+            (module, _manifest, _loader_json, _resource_refs, _module_target_name, _module_config),
+            (bundle_out,),
+          ),
+          ets_transform_plan,
+        ) in loader_jsons
+          .iter()
+          .zip(bundle_outs.iter())
+          .zip(bundle_ets_transform_plans.iter())
+        {
+          if bundle_out.bundle_output.module_source_files.is_empty() {
+            continue;
+          }
+          let ets_transform_plan = ets_transform_plan.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+              "UnitTestArkTS coverage transform plan is missing for module '{}'",
+              module.name
+            )
+          })?;
+          super::unit_test::UnitTestCoverageInstrumentationPlan::from_build(
+            &config.sdk_config,
+            &config.project_root,
+            &module.src_path,
+            args.coverage_mode.as_deref(),
+            &bundle_out.bundle_output.module_source_files,
+            args.resolved_node_executable(),
+          )?
+          .execute(Arc::clone(ets_transform_plan))
+          .with_context(|| {
+            format!(
+              "UnitTestArkTS coverage instrumentation failed for module '{}'",
+              module.name
+            )
+          })?;
+        }
+      } else {
+        for (bundle_out,) in &bundle_outs {
+          for (_chunk_name, path) in &bundle_out.bundle_output.chunk_files {
+            if path.extension().and_then(|e| e.to_str()) == Some("js") && path.exists() {
+              if let Ok(source) = fs_err::read_to_string(path) {
+                let file_id = ArtifactPathSerializer::path_to_slash_string(path)?;
+                let instrumented = CoverageInstrumenter::new(&source, &file_id).instrument();
+                let _ = fs_err::write(path, instrumented);
+              }
             }
           }
         }
@@ -6658,9 +6726,27 @@ impl BuildCoordinator {
         }
       }
 
+      if matches!(config.output_target, OutputTarget::Test) {
+        let artifacts = super::unit_test::UnitTestArtifactWriter::new(&module.src_path);
+        artifacts.stage_compiled_assets(
+          &bundle_out.bundle_output.modules_abc_path,
+          bundle_out.bundle_output.source_maps_path.as_deref(),
+        )?;
+        if matches!(module.module_type, OhosModuleType::Shared) {
+          artifacts.write_hsp_build_config()?;
+        }
+      }
+
       if compile_task_active[bundle_index] {
         task_lifecycle
           .after(&module.name, Some(module_target_name), compile_task_name)
+          .await?;
+      }
+      if matches!(config.output_target, OutputTarget::Test)
+        && task_lifecycle.has_root(&module.name, None, "UnitTestBuild")
+      {
+        task_lifecycle
+          .marker(&module.name, None, "UnitTestBuild")
           .await?;
       }
       task_lifecycle
@@ -6681,32 +6767,90 @@ impl BuildCoordinator {
     // plus coverage data. hvigor `Test`/`UnitTestBuild` tasks never run the
     // pack graph.
     if matches!(config.output_target, OutputTarget::Test) {
-      // hvigor `GenerateUnitTestResult`: execute the local unit-test suite
-      // through the SDK Previewer (coverage.log + test_result.txt), then end.
-      let previewer_dir = config
-        .sdk_config
-        .ets_loader_path
-        .join("../../../previewer/common/bin");
       let coverage = args.ohos_test_coverage.unwrap_or(true);
       for (module, _manifest, _loader_json, _resource_refs, module_target_name, _module_config) in
         loader_jsons.iter()
       {
-        if task_lifecycle
+        let artifacts = super::unit_test::UnitTestArtifactWriter::new(&module.src_path);
+        if task_lifecycle.has_root(
+          &module.name,
+          Some(module_target_name),
+          "UnitTestCopyMockConfigJson",
+        ) && task_lifecycle
           .before(
             &module.name,
             Some(module_target_name),
-            "GenerateUnitTestResult",
+            "UnitTestCopyMockConfigJson",
           )
           .await?
         {
-          super::unit_test::execute_unit_test(&module.src_path, &previewer_dir, coverage).map_err(
-            |error| {
+          artifacts.copy_mock_config_json()?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(module_target_name),
+              "UnitTestCopyMockConfigJson",
+            )
+            .await?;
+        }
+        if task_lifecycle.has_root(
+          &module.name,
+          Some(module_target_name),
+          "ReplaceSourceMapInCoverageMode",
+        ) && task_lifecycle
+          .before(
+            &module.name,
+            Some(module_target_name),
+            "ReplaceSourceMapInCoverageMode",
+          )
+          .await?
+        {
+          artifacts.replace_source_map_in_coverage_mode(coverage)?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(module_target_name),
+              "ReplaceSourceMapInCoverageMode",
+            )
+            .await?;
+        }
+
+        let generate_result = args.native_task_roots.is_empty()
+          || task_lifecycle.has_root(&module.name, None, "test")
+          || task_lifecycle.has_root(
+            &module.name,
+            Some(module_target_name),
+            "GenerateUnitTestResult",
+          );
+        if generate_result
+          && task_lifecycle
+            .before(
+              &module.name,
+              Some(module_target_name),
+              "GenerateUnitTestResult",
+            )
+            .await?
+        {
+          let module_context = session.module_context(&module.name).ok_or_else(|| {
+            anyhow::anyhow!("missing module compile context for {}", module.name)
+          })?;
+          super::unit_test::UnitTestExecutionPlan::from_build(
+            &config.sdk_config,
+            &config.product.runtime_os,
+            &module.src_path,
+            &config.project_root,
+            &module.module_type,
+            module_context.deps.as_ref(),
+            coverage,
+            args.resolved_node_executable(),
+          )
+          .and_then(|plan| plan.execute())
+          .map_err(|error| {
               anyhow::anyhow!(
                 "GenerateUnitTestResult failed for module '{}': {error}",
                 module.name
               )
-            },
-          )?;
+            })?;
           task_lifecycle
             .after(
               &module.name,
@@ -6715,7 +6859,11 @@ impl BuildCoordinator {
             )
             .await?;
         }
-        task_lifecycle.marker(&module.name, None, "test").await?;
+        if args.native_task_roots.is_empty()
+          || task_lifecycle.has_root(&module.name, None, "test")
+        {
+          task_lifecycle.marker(&module.name, None, "test").await?;
+        }
       }
       return Ok(BuildOutput {
         artifact_paths: Vec::new(),

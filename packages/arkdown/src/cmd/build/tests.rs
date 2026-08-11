@@ -569,7 +569,7 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
       "/Volumes/PSSD/code/arkdown/tests/fixtures/minimal-hap/entry",
     ),
   };
-  let rendered = super::unit_test::render_page_index_template(&params);
+  let rendered = params.render_page_index().expect("render template");
   assert_eq!(
     rendered.as_bytes(),
     index_golden.as_slice(),
@@ -600,7 +600,7 @@ fn unit_test_template_coverage_false_and_scope_are_substituted() {
     coverage: false,
     module_path: std::path::Path::new("/tmp/example/entry"),
   };
-  let rendered = super::unit_test::render_page_index_template(&params);
+  let rendered = params.render_page_index().expect("render template");
   assert!(
     rendered.contains("\"-s coverage\": \"false\""),
     "coverage=false must render false"
@@ -688,6 +688,7 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
     &process_profile,
     &profile_dir,
     "entry",
+    super::unit_test::UNIT_TEST_REPLACE_PAGE,
   )
   .expect("replace");
   let module_doc: serde_json::Value =
@@ -714,10 +715,79 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
     &process_profile,
     &profile_dir,
     "entry",
+    super::unit_test::UNIT_TEST_REPLACE_PAGE,
   )
   .expect("replace keeps pages");
   let kept: serde_json::Value =
     serde_json::from_str(&std::fs::read_to_string(&res_module_json2).unwrap()).unwrap();
   assert_eq!(kept["module"]["pages"], "$profile:existing");
   assert!(profile_dir.join("main_pages.json").is_file());
+}
+
+#[test]
+fn unit_test_artifact_handoffs_use_the_typed_module_layout() {
+  use super::layout::ModuleBuildLayout;
+  use super::unit_test::UnitTestArtifactWriter;
+
+  let temp = tempfile::tempdir().expect("tempdir");
+  let module_root = temp.path().join("entry");
+  let compile_output = temp.path().join("compile-output");
+  std::fs::create_dir_all(&compile_output).expect("compile output");
+  let modules_abc = compile_output.join("modules.abc");
+  let source_maps = compile_output.join("sourceMaps.map");
+  std::fs::write(&modules_abc, b"abc").expect("ABC fixture");
+  std::fs::write(
+    &source_maps,
+    br#"{"entry":{"sources":["src/main/ets/Index.ets"],"mappings":"old"}}"#,
+  )
+  .expect("source map fixture");
+
+  let layout = ModuleBuildLayout::for_test(&module_root);
+  let writer = UnitTestArtifactWriter::new(&module_root);
+  writer
+    .stage_compiled_assets(&modules_abc, Some(&source_maps))
+    .expect("stage UnitTestArkTS assets");
+  assert_eq!(
+    std::fs::read(layout.test_assets_modules_abc()).expect("staged ABC"),
+    b"abc"
+  );
+  assert!(layout.test_assets_source_maps().is_file());
+
+  let mock_input = layout.intermediates_mock_config_json();
+  std::fs::create_dir_all(mock_input.parent().expect("mock input parent"))
+    .expect("mock input directory");
+  std::fs::write(&mock_input, b"{}").expect("mock config fixture");
+  writer.copy_mock_config_json().expect("copy mock config");
+  assert_eq!(
+    std::fs::read(layout.test_mock_config_output_json()).expect("copied mock config"),
+    b"{}"
+  );
+
+  let replacement = layout.test_coverage_source_map();
+  std::fs::create_dir_all(replacement.parent().expect("coverage map parent"))
+    .expect("coverage map directory");
+  std::fs::write(
+    &replacement,
+    br#""src/main/ets/Index.ets":{"mappings":"new"},"#,
+  )
+  .expect("coverage source map fixture");
+  writer
+    .replace_source_map_in_coverage_mode(true)
+    .expect("replace mappings");
+  let merged: serde_json::Value = serde_json::from_slice(
+    &std::fs::read(layout.test_assets_source_maps()).expect("merged source maps"),
+  )
+  .expect("parse merged source maps");
+  assert_eq!(merged["entry"]["mappings"], "new");
+
+  writer.write_hsp_build_config().expect("HSP buildConfig");
+  let build_config: serde_json::Value = serde_json::from_slice(
+    &std::fs::read(layout.test_build_config_json()).expect("HSP buildConfig output"),
+  )
+  .expect("parse HSP buildConfig");
+  assert_eq!(
+    build_config["aceModuleBuild"],
+    arkdown_path::ArtifactPathSerializer::path_to_slash_string(&layout.test_assets_ets_dir())
+      .expect("portable artifact path")
+  );
 }

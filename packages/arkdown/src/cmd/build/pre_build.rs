@@ -13,15 +13,16 @@ use anyhow::{anyhow, Context, Result};
 
 use rustc_hash::FxHashSet;
 
-use arkdown_core::{BuildMode, ModuleConfig, OhosModuleType};
-use arkdown_session::{BuildSession, ModuleCompileContext};
+use arkdown_core::{ModuleConfig, OhosModuleType};
+use arkdown_session::BuildSession;
+
+use super::layout::ModuleBuildLayout;
 
 /// Runs the pre-build validation set for one module target.
 pub(super) struct PreBuildValidator<'a> {
     config: &'a arkdown_core::ArkdownConfig,
     session: &'a BuildSession,
     module: &'a ModuleConfig,
-    module_context: &'a ModuleCompileContext,
     module_build_option: &'a arkdown_core::BuildOption,
 }
 
@@ -30,14 +31,12 @@ impl<'a> PreBuildValidator<'a> {
         config: &'a arkdown_core::ArkdownConfig,
         session: &'a BuildSession,
         module: &'a ModuleConfig,
-        module_context: &'a ModuleCompileContext,
         module_build_option: &'a arkdown_core::BuildOption,
     ) -> Self {
         Self {
             config,
             session,
             module,
-            module_context,
             module_build_option,
         }
     }
@@ -542,10 +541,11 @@ impl<'a> PreBuildValidator<'a> {
 
     /// `validateMockConfig`: mock-config.json5 `source` entries must exist.
     fn validate_mock_config(&self) -> Result<()> {
-        let mock_path = self
-            .module
-            .src_path
-            .join("src/main/mock/mock-config.json5");
+        // `CoreModuleModelImpl.getMockConfigPath()` owns the fixed
+        // `<module>/src/mock/mock-config.json5` location.
+        let mock_path = ModuleBuildLayout::new(&self.module.src_path)
+            .source()
+            .mock_config_json5();
         if !mock_path.is_file() {
             return Ok(());
         }

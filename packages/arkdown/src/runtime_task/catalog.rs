@@ -174,13 +174,10 @@ impl RuntimeTaskCatalog {
     );
     self.add_owned("compileNative", vec![target("BuildNativeWithCmake")]);
     self.add_owned("PreviewBuild", vec![target("PreviewArkTS")]);
-    self.add_owned(
-      "UnitTestBuild",
-      vec![
-        target("UnitTestArkTS"),
-        target("UnitTestCopyMockConfigJson"),
-      ],
-    );
+    // Latest 6.24.3 `UnitTestBuild.initTaskDepends` resolves only the
+    // target-scoped UnitTestArkTS hook. Mock copying and coverage source-map
+    // replacement remain independently selectable tasks.
+    self.add_owned("UnitTestBuild", vec![target("UnitTestArkTS")]);
     self.add_owned("test", vec![target("GenerateUnitTestResult")]);
     self.add_owned(
       "buildHotReloadResource",
@@ -663,5 +660,34 @@ mod tests {
         dependencies
       );
     }
+  }
+
+  #[test]
+  fn local_test_post_compile_tasks_remain_independently_selectable() {
+    let entries = entries(serde_json::json!({
+      "nodeName": "entry",
+      "kind": "hap",
+      "projectTask": false,
+      "targetNames": ["default"]
+    }));
+    let dependencies = |name: &str| {
+      entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .unwrap_or_else(|| panic!("missing task {name}"))
+        .dependencies
+        .clone()
+    };
+
+    assert_eq!(dependencies("UnitTestBuild"), ["entry:default@UnitTestArkTS"]);
+    assert_eq!(
+      dependencies("default@UnitTestCopyMockConfigJson"),
+      ["entry:default@UnitTestArkTS"]
+    );
+    assert_eq!(
+      dependencies("default@ReplaceSourceMapInCoverageMode"),
+      ["entry:default@UnitTestArkTS"]
+    );
+    assert_eq!(dependencies("test"), ["entry:default@GenerateUnitTestResult"]);
   }
 }

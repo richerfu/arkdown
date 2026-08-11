@@ -129,8 +129,37 @@ pub(crate) struct SdkEtsCheckerInput<'a> {
   pub(crate) paths: SdkEtsCheckerPaths,
   pub(crate) entries: Vec<PathBuf>,
   pub(crate) coverage_enabled: bool,
+  pub(crate) coverage_path_filter: Option<&'a str>,
+  pub(crate) coverage_mode: Option<&'a str>,
   pub(crate) debug_line: bool,
   pub(crate) byte_code_har_integrated_optimization: bool,
+}
+
+struct SdkEtsCheckerModuleLayout<'a> {
+  root: &'a Path,
+}
+
+impl<'a> SdkEtsCheckerModuleLayout<'a> {
+  fn new(root: &'a Path) -> Self {
+    Self { root }
+  }
+
+  fn mock_config_json5(&self) -> PathBuf {
+    self.root.join("src").join("mock").join("mock-config.json5")
+  }
+
+  fn ets_source_root(&self) -> PathBuf {
+    self.root.join("src").join("main").join("ets")
+  }
+
+  fn ets_source_root_artifact_path(&self) -> Result<String> {
+    let relative = self
+      .ets_source_root()
+      .strip_prefix(self.root)
+      .map_err(|error| anyhow::anyhow!("derive ETS source root: {error}"))?
+      .to_path_buf();
+    Ok(arkdown_path::ArtifactPathSerializer::rel_to_slash(&relative))
+  }
 }
 
 /// Collect the same root source set that latest `rollup-plugin-ets-checker`
@@ -217,6 +246,106 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       }
     }
     Ok(entries)
+  }
+
+  /// `ArkCompile.initDefaultArkCompileConfig().mockParams`, sourced from the
+  /// immutable session dependency graph instead of re-running OHPM lookup in
+  /// the checker process.
+  fn mock_params(&self) -> Result<Value> {
+    let module_layout = SdkEtsCheckerModuleLayout::new(&self.input.module_context.module.root);
+    let mock_config_path = module_layout.mock_config_json5();
+    let mut mock_config_key_to_module_info = Map::new();
+    let mut source_to_module_id = Map::new();
+
+    if mock_config_path.is_file() {
+      let content = std::fs::read_to_string(&mock_config_path).with_context(|| {
+        format!("read mock config {}", mock_config_path.display())
+      })?;
+      let entries = json5::from_str::<indexmap::IndexMap<String, Value>>(&content)
+        .with_context(|| format!("parse mock config {}", mock_config_path.display()))?;
+      for (key, entry) in entries {
+        if let Some(source) = entry.get("source").and_then(Value::as_str) {
+          if !source.is_empty() {
+            let source_path = self.input.module_context.module.root.join(source);
+            if source_path.is_file() {
+              source_to_module_id.insert(source.to_string(), Value::String(self.path(&source_path)?));
+            }
+          }
+        }
+        if key.starts_with('.') {
+          continue;
+        }
+        let mut components = key.split(['/', '\\']);
+        let Some(first) = components.next() else {
+          continue;
+        };
+        let package_key = if first.starts_with('@') {
+          components
+            .next()
+            .map(|second| format!("{first}/{second}"))
+            .unwrap_or_else(|| first.to_string())
+        } else {
+          first.to_string()
+        };
+        // `ModuleTaskService.getAllDependencies()` is folded into a Map by
+        // dependency name, so a later edge with the same alias wins. Preserve
+        // that traversal contract instead of guessing a package directory.
+        let Some(edge) = self
+          .input
+          .module_context
+          .deps
+          .edges
+          .iter()
+          .rev()
+          .find(|edge| edge.alias == package_key)
+        else {
+          continue;
+        };
+        let Some(node) = self
+          .input
+          .module_context
+          .deps
+          .nodes
+          .get(&edge.package_name)
+        else {
+          continue;
+        };
+        let package_root = &edge.package_root;
+        let consumed = if package_key.starts_with('@') { 2 } else { 1 };
+        let suffix = key
+          .split(['/', '\\'])
+          .skip(consumed)
+          .fold(PathBuf::new(), |path, component| path.join(component));
+        let file_path = if suffix.as_os_str().is_empty() {
+          node
+            .package
+            .as_ref()
+            .and_then(|package| package.package_json.main.as_deref())
+            .map_or_else(|| package_root.join("index.js"), |main| package_root.join(main))
+        } else {
+          package_root.join(suffix)
+        };
+        mock_config_key_to_module_info.insert(
+          key,
+          json!({
+            "meta": {
+              "pkgPath": self.path(package_root)?,
+              "pkgName": node.package_name,
+            },
+            "filePath": self.path(&file_path)?,
+          }),
+        );
+      }
+    }
+
+    Ok(json!({
+      "decorator": "@MockSetup",
+      "packageName": "@ohos/hamock",
+      "etsSourceRootPath": module_layout.ets_source_root_artifact_path()?,
+      "mockConfigPath": mock_config_path.is_file().then(|| self.path(&mock_config_path)).transpose()?,
+      "mockConfigKey2ModuleInfo": mock_config_key_to_module_info,
+      "source2ModuleIdMap": source_to_module_id,
+    }))
   }
 
   fn project_config(&self) -> Result<SdkEtsCheckerProjectConfig> {
@@ -540,16 +669,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     extras.insert("allModulePaths".to_string(), self.all_module_paths()?);
     extras.insert("routerMap".to_string(), Value::Object(Map::new()));
     extras.insert("compileBlockPkg".to_string(), Value::Array(Vec::new()));
-    extras.insert(
-      "mockParams".to_string(),
-      json!({
-        "decorator": "@MockSetup",
-        "packageName": "@ohos/hamock",
-        "etsSourceRootPath": "src/main/ets",
-        "mockConfigKey2ModuleInfo": {},
-        "source2ModuleIdMap": {},
-      }),
-    );
+    extras.insert("mockParams".to_string(), self.mock_params()?);
     extras.insert("copyCodeResourceEnable".to_string(), Value::Bool(false));
     extras.insert(
       "copyCodeResourceExcludes".to_string(),
@@ -607,14 +727,27 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       package_manager_type,
       local_properties_path: self.path(&self.input.config.project_root.join("local.properties"))?,
       is_preview: false,
-      is_ohos_test: false,
-      is_local_test: false,
+      is_ohos_test: self.input.target_name == "ohosTest",
+      is_local_test: matches!(
+        self.input.config.output_target,
+        arkdown_core::OutputTarget::Test
+      ),
       build_mode,
       watch_mode: "false".to_string(),
       ace_profile_path: self.path(&self.input.paths.ace_profile_path)?,
       ets_loader_path: self.path(&self.input.config.sdk_config.ets_loader_path)?,
       module_path: self.path(&module_root)?,
-      test_framework_par: Value::Object(Map::new()),
+      test_framework_par: json!({
+        "testMode": if matches!(self.input.config.output_target, arkdown_core::OutputTarget::Test) {
+          "unitTest"
+        } else if self.input.target_name == "ohosTest" {
+          "ohosTest"
+        } else {
+          ""
+        },
+        "coveragePathFilter": self.input.coverage_path_filter,
+        "coverageMode": self.input.coverage_mode,
+      }),
       need_coverage_insert: self.input.coverage_enabled,
       debug_line: self.input.debug_line,
       project_top_dir: self.path(&self.input.config.project_root)?,
@@ -1427,4 +1560,3 @@ struct SdkEtsCheckerResponse {
   #[serde(default)]
   diagnostics: Vec<SdkEtsCheckerDiagnostic>,
 }
-

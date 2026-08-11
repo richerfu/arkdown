@@ -64,3 +64,96 @@ fn direct_build_repeated_plugin_paths_keep_scalar_then_array_shape() {
     ]))
   );
 }
+
+#[test]
+fn hvigor_test_injects_exact_default_properties_and_module_mode() {
+  let config = PackageCliParser::parse_hvigor(&args(&["test"]))
+    .expect("hvigor local-test command should parse");
+
+  assert_eq!(config.execution_mode.as_deref(), Some("module"));
+  assert_eq!(
+    config.prop,
+    [
+      "pageType=page",
+      "product=default",
+      "buildRoot=.test",
+      "unitTestMode=true",
+      "isLocalTest=true",
+      "ohos-test-coverage=true",
+      "unit.test.replace.page=../../../.test/testability/pages/Index",
+    ]
+  );
+  assert_eq!(config.ohos_test_coverage, Some(true));
+  assert_eq!(
+    config.unit_test_replace_page.as_deref(),
+    Some("../../../.test/testability/pages/Index")
+  );
+}
+
+#[test]
+fn hvigor_test_preserves_first_property_order_and_explicit_overrides() {
+  let config = PackageCliParser::parse_hvigor(&args(&[
+    "test",
+    "-p",
+    "coverage=false",
+    "-p",
+    "scope=EntryAbilityTest",
+    "-p",
+    "coverage-mode=full",
+  ]))
+  .expect("hvigor local-test overrides should parse");
+
+  assert_eq!(config.prop[0], "ohos-test-coverage=false");
+  assert_eq!(config.prop[1], "scope=EntryAbilityTest");
+  assert_eq!(config.prop[2], "coverage-mode=full");
+  assert_eq!(config.ohos_test_coverage, Some(false));
+  assert_eq!(config.scope.as_deref(), Some("EntryAbilityTest"));
+  assert_eq!(config.coverage_mode.as_deref(), Some("full"));
+}
+
+#[test]
+fn hvigor_test_property_map_matches_split_and_undefined_semantics() {
+  let config = PackageCliParser::parse_hvigor(&args(&[
+    "test",
+    "-p",
+    "scope=Suite=Case",
+    "-p",
+    "customFlag",
+  ]))
+  .expect("hvigor local-test properties should parse");
+
+  assert!(config.prop.iter().any(|property| property == "scope=Suite"));
+  assert!(config
+    .prop
+    .iter()
+    .any(|property| property == "customFlag=undefined"));
+}
+
+#[test]
+fn direct_build_accepts_typed_local_test_options() {
+  let config = PackageCliParser::parse_build(&args(&[
+    "--target",
+    "test",
+    "--scope",
+    "EntryAbilityTest",
+    "--ohos-test-coverage",
+    "false",
+    "--coverage-path-filter",
+    "src/main/ets",
+    "--coverage-mode",
+    "black",
+    "--unit-test-replace-page",
+    "../../../generated/pages/Index",
+  ]))
+  .expect("typed local-test options should parse");
+
+  assert_eq!(config.target.as_deref(), Some("test"));
+  assert_eq!(config.scope.as_deref(), Some("EntryAbilityTest"));
+  assert_eq!(config.ohos_test_coverage, Some(false));
+  assert_eq!(config.coverage_path_filter.as_deref(), Some("src/main/ets"));
+  assert_eq!(config.coverage_mode.as_deref(), Some("black"));
+  assert_eq!(
+    config.unit_test_replace_page.as_deref(),
+    Some("../../../generated/pages/Index")
+  );
+}
