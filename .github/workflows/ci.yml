@@ -11,11 +11,6 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      run_hvigor_parity:
-        description: "Run SDK-backed hvigor parity on a self-hosted ohos-sdk runner"
-        required: false
-        default: false
-        type: boolean
       publish_package:
         description: "Publish packages/arkdown after all CI and platform checks pass"
         required: false
@@ -194,7 +189,6 @@ jobs:
     runs-on:
       - self-hosted
       - ohos-sdk
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_hvigor_parity }}
     needs: rust
 
     steps:
@@ -253,8 +247,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: parity-report-${{ github.sha }}
-          path: target/parity-reports/
-          if-no-files-found: ignore
+          path: target/parity/
+          if-no-files-found: error
           retention-days: 30
 
   package:
@@ -266,7 +260,7 @@ jobs:
       ${{
         always() &&
         needs.rust.result == 'success' &&
-        (needs.hvigor-parity.result == 'success' || needs.hvigor-parity.result == 'skipped')
+        needs.hvigor-parity.result == 'success'
       }}
     permissions:
       contents: read

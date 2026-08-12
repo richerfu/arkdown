@@ -18,6 +18,7 @@
 //! | [`SdkToolResolver::native_ninja_tool`] | `DefaultSdk.getNativeNinjaTool`          |
 //! | [`SdkToolResolver::llvm_strip`]        | `DefaultSdk.getSdkLlvmStrip`             |
 //! | [`SdkToolResolver::llvm_read_elf`]     | `DefaultSdk.getSdkLlvmReadElf`           |
+//! | [`SdkToolResolver::binxo`]             | `HmsCoreNativeComponent.getBinxoTool`    |
 
 use std::path::{Path, PathBuf};
 
@@ -56,6 +57,8 @@ pub enum SdkToolKind {
     LlvmStrip,
     /// `llvm-readelf` — LLVM readelf (native ELF inspection).
     LlvmReadElf,
+    /// `binxo` — HMS native BinXO post-processor.
+    Binxo,
 }
 
 impl SdkToolKind {
@@ -72,6 +75,7 @@ impl SdkToolKind {
             Self::NativeNinja => "ninja",
             Self::LlvmStrip => "llvm-strip",
             Self::LlvmReadElf => "llvm-readelf",
+            Self::Binxo => "binxo",
         }
     }
 }
@@ -171,6 +175,7 @@ impl SdkToolResolver {
             SdkToolKind::NativeNinja => self.native_ninja_tool(),
             SdkToolKind::LlvmStrip => self.llvm_strip(),
             SdkToolKind::LlvmReadElf => self.llvm_read_elf(),
+            SdkToolKind::Binxo => self.binxo(),
         }
     }
 
@@ -295,6 +300,20 @@ impl SdkToolResolver {
             self.sdk_root.join("native").join("llvm").join("bin"),
             "llvm-readelf",
             SdkToolKind::LlvmReadElf,
+        ))
+    }
+
+    /// Path to the BinXO executable from the sibling HMS native component.
+    ///
+    /// Upstream: `HmsCoreNativeComponent.getBinxoTool` in DevEco Studio
+    /// 6.1.1.280 resolves `<sdk-parent>/hms/native/BinXO/binxo[.exe]` instead
+    /// of looking below the selected OpenHarmony component.
+    pub fn binxo(&self) -> Option<SdkToolPath> {
+        let sdk_parent = self.sdk_root.parent()?;
+        Some(self.executable_at(
+            sdk_parent.join("hms").join("native").join("BinXO"),
+            "binxo",
+            SdkToolKind::Binxo,
         ))
     }
 }
@@ -445,6 +464,7 @@ mod tests {
             (SdkToolKind::NativeNinja, "ninja.exe"),
             (SdkToolKind::LlvmStrip, "llvm-strip.exe"),
             (SdkToolKind::LlvmReadElf, "llvm-readelf.exe"),
+            (SdkToolKind::Binxo, "binxo.exe"),
         ] {
             assert_eq!(
                 resolver
@@ -454,5 +474,25 @@ mod tests {
                 Some(std::ffi::OsStr::new(expected))
             );
         }
+    }
+
+    #[test]
+    fn binxo_uses_sibling_hms_native_component() {
+        let sdk = TestSdk::snapshot("/sdk/default/openharmony");
+
+        assert_eq!(
+            SdkToolResolver::for_host(&sdk, HostPlatform::Linux)
+                .binxo()
+                .unwrap()
+                .path,
+            PathBuf::from("/sdk/default/hms/native/BinXO/binxo")
+        );
+        assert_eq!(
+            SdkToolResolver::for_host(&sdk, HostPlatform::Windows)
+                .binxo()
+                .unwrap()
+                .path,
+            PathBuf::from("/sdk/default/hms/native/BinXO/binxo.exe")
+        );
     }
 }

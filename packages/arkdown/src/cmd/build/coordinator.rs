@@ -3670,6 +3670,10 @@ impl BuildCoordinator {
         .sdk
         .tool_path(SdkToolKind::LlvmStrip)
         .map(|tool| tool.path),
+      session
+        .sdk
+        .tool_path(SdkToolKind::Binxo)
+        .map(|tool| tool.path),
     );
     let sanitizer_native_policy = match (args.ohos_debug_asan, args.ohos_enable_hwasan) {
       (true, false) => Some(

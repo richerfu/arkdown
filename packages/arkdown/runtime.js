@@ -2685,7 +2685,6 @@ class HvigorRuntimeHost {
       projectRoot: this.projectRoot,
       configuredCacheDir: typeof configuredCacheDir === 'string' ? configuredCacheDir : undefined,
       sdkPath: typeof this.config.sdkPath === 'string' ? this.config.sdkPath : undefined,
-      homeDir: os.homedir(),
       compileSdkVersion:
         typeof this.config.compileSdkVersion === 'string' ? this.config.compileSdkVersion : undefined,
     }
@@ -2842,7 +2841,6 @@ class HvigorRuntimeHost {
             projectTask: task.node.isProject,
             configuredBuildDir: typeof configuredBuildDir === 'string' ? configuredBuildDir : undefined,
             sdkPath: typeof this.config.sdkPath === 'string' ? this.config.sdkPath : undefined,
-            homeDir: os.homedir(),
             projectProfile: this._projectProfile,
             targetNames: task.node.isProject
               ? []

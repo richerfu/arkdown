@@ -229,6 +229,7 @@ pub struct NativeSdkToolchain {
   cmake: Option<PathBuf>,
   ninja: Option<PathBuf>,
   llvm_strip: Option<PathBuf>,
+  binxo: Option<PathBuf>,
   native_dir: Option<PathBuf>,
   toolchain_file: Option<PathBuf>,
 }
@@ -239,6 +240,7 @@ impl NativeSdkToolchain {
     cmake: Option<PathBuf>,
     ninja: Option<PathBuf>,
     llvm_strip: Option<PathBuf>,
+    binxo: Option<PathBuf>,
   ) -> Self {
     let native_dir = sdk_root.join("native");
     let toolchain_file = native_dir
@@ -249,6 +251,7 @@ impl NativeSdkToolchain {
       cmake,
       ninja,
       llvm_strip,
+      binxo,
       native_dir: Some(native_dir),
       toolchain_file: Some(toolchain_file),
     }
@@ -325,6 +328,38 @@ struct ResolvedNativeSdkToolchain<'a> {
   ninja: &'a Path,
   native_dir: &'a Path,
   toolchain_file: &'a Path,
+}
+
+/// Exact DevEco Studio 6.1.1.280 `native-binxo.ts` command contract.
+struct NativeBinxoCommand<'a> {
+  executable: &'a Path,
+  source: &'a Path,
+  destination: &'a Path,
+}
+
+impl<'a> NativeBinxoCommand<'a> {
+  fn new(executable: &'a Path, source: &'a Path, destination: &'a Path) -> Self {
+    Self {
+      executable,
+      source,
+      destination,
+    }
+  }
+
+  fn command(&self) -> Command {
+    let mut command = Command::new(self.executable);
+    command
+      .arg("-A")
+      .arg("--hwasan-inputfile")
+      .arg(self.source)
+      .arg("--hwasan-outputfil")
+      .arg(self.destination);
+    command
+  }
+
+  fn execute(&self) -> std::io::Result<std::process::Output> {
+    self.command().output()
+  }
 }
 
 type NativeBuildResult<T> = Result<T, NativeBuildError>;
@@ -1556,19 +1591,14 @@ impl<'a> NativeLibCollector<'a> {
       }
     })?;
 
-    // SDK `default/hms/native/BinXO/binxo` — the hms component is a sibling
-    // of the native component under the SDK root.
-    let binxo_tool = self
-      .policy
-      .sdk_toolchain
-      .native_dir
-      .as_deref()
-      .and_then(|native_dir| native_dir.parent().map(Path::to_path_buf))
-      .unwrap_or_default()
-      .join("hms")
-      .join("native")
-      .join("BinXO")
-      .join("binxo");
+    let binxo_tool = self.policy.sdk_toolchain.binxo.as_deref();
+    let available_binxo_tool = binxo_tool.filter(|path| path.is_file());
+    if available_binxo_tool.is_none() {
+      tracing::warn!(
+        tool = binxo_tool.map(|path| path.display().to_string()),
+        "HMS native BinXO executable is unavailable; falling back to plain copies"
+      );
+    }
     let mut outputs = Vec::with_capacity(libs.len());
     for source in libs {
       let relative = Self::native_lib_identity(source);
@@ -1587,10 +1617,8 @@ impl<'a> NativeLibCollector<'a> {
           }
         })?;
       }
-      let excluded = exclude
-        .iter()
-        .any(|pattern| relative.contains(pattern));
-      if excluded || !binxo_tool.is_file() {
+      let excluded = exclude.iter().any(|pattern| relative.contains(pattern));
+      if excluded || available_binxo_tool.is_none() {
         // `copySoFile`: excluded (or unsupported) libraries are linked.
         std::fs::copy(&source, &destination).map_err(|error| {
           NativeBuildError::NativePostProcessFailed {
@@ -1599,15 +1627,11 @@ impl<'a> NativeLibCollector<'a> {
           }
         })?;
       } else {
-        let output = std::process::Command::new(&binxo_tool)
-          .arg("--asan")
-          .arg("--hwasan-input")
-          .arg(&source)
-          .arg("--hwasan-output")
-          .arg(&destination)
-          .output()
+        let binxo_tool = available_binxo_tool.expect("BinXO availability checked above");
+        let output = NativeBinxoCommand::new(binxo_tool, source, &destination)
+          .execute()
           .map_err(|error| NativeBuildError::NativePostProcessFailed {
-            path: binxo_tool.clone(),
+            path: binxo_tool.to_path_buf(),
             message: error.to_string(),
           })?;
         if !output.status.success() {
@@ -3294,6 +3318,27 @@ mod tests {
     assert_eq!(
       NativeBuildSanitizer::Hwasan.cmake_arg_for_abi("x86_64"),
       None
+    );
+  }
+
+  #[test]
+  fn binxo_command_matches_hvigor_native_binxo_worker_arguments() {
+    let command = NativeBinxoCommand::new(
+      Path::new("binxo"),
+      Path::new("input/libentry.so"),
+      Path::new("output/libentry.so"),
+    )
+    .command();
+
+    assert_eq!(
+      command.get_args().collect::<Vec<_>>(),
+      vec![
+        OsStr::new("-A"),
+        OsStr::new("--hwasan-inputfile"),
+        OsStr::new("input/libentry.so"),
+        OsStr::new("--hwasan-outputfil"),
+        OsStr::new("output/libentry.so"),
+      ]
     );
   }
 

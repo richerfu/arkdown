@@ -56,8 +56,8 @@ tests/integration/
 ## Prerequisites
 
 ```bash
-# Clone the test fixture (run once)
-git clone https://github.com/susns/HmosWorld tests/fixtures/hmosworld
+# Clone the test fixture (run once, from the arkdown repository root)
+git clone https://github.com/susns/HmosWorld tests/fixtures/hmosworld/HMOSWorld
 
 # Set SDK location for ets-loader transform
 export OHOS_SDK_HOME=/path/to/sdk/default/openharmony

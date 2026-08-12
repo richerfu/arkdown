@@ -28,11 +28,6 @@ struct SdkLocationEnvironment {
     ohos_sdk_home: Option<PathBuf>,
     ohos_ndk_home: Option<PathBuf>,
     ohos_sdk_native: Option<PathBuf>,
-    home: Option<PathBuf>,
-    local_app_data: Option<PathBuf>,
-    app_data: Option<PathBuf>,
-    program_files: Option<PathBuf>,
-    program_w6432: Option<PathBuf>,
 }
 
 impl SdkLocationEnvironment {
@@ -48,32 +43,22 @@ impl SdkLocationEnvironment {
             ohos_sdk_home: path("OHOS_SDK_HOME"),
             ohos_ndk_home: path("OHOS_NDK_HOME"),
             ohos_sdk_native: path("OHOS_SDK_NATIVE"),
-            home: path("HOME").or_else(|| path("USERPROFILE")),
-            local_app_data: path("LOCALAPPDATA"),
-            app_data: path("APPDATA"),
-            program_files: path("PROGRAMFILES"),
-            program_w6432: path("ProgramW6432"),
         }
     }
 }
 
-/// Host-aware SDK locator matching latest hvigor environment precedence and
-/// the SDK locations used by current DevEco Studio installations.
+/// SDK locator matching latest hvigor's configured-environment precedence.
 struct SdkLocator {
-    host: HostPlatform,
     environment: SdkLocationEnvironment,
 }
 
 impl SdkLocator {
     fn from_process() -> Self {
-        Self::new(
-            HostPlatform::CURRENT,
-            SdkLocationEnvironment::from_process(),
-        )
+        Self::new(SdkLocationEnvironment::from_process())
     }
 
-    fn new(host: HostPlatform, environment: SdkLocationEnvironment) -> Self {
-        Self { host, environment }
+    fn new(environment: SdkLocationEnvironment) -> Self {
+        Self { environment }
     }
 
     fn find_sdk_root(&self) -> Option<PathBuf> {
@@ -82,11 +67,10 @@ impl SdkLocator {
             .find(|candidate| looks_like_openharmony_base(&openharmony_base_from_root(candidate)))
     }
 
-    /// Return candidate SDK roots in observed hvigor precedence. Latest
-    /// hvigor 6.24.3 reads `DEVECO_SDK_HOME` for HarmonyOS and
-    /// `OHOS_BASE_SDK_HOME` for OpenHarmony. The NDK aliases and installation
-    /// locations keep the standalone arkdown CLI aligned with an IDE-owned SDK
-    /// even when it was not launched by the IDE process.
+    /// Return candidate SDK roots in observed hvigor precedence. Hvigor reads
+    /// `DEVECO_SDK_HOME` for HarmonyOS and
+    /// `OHOS_BASE_SDK_HOME` for OpenHarmony. NDK aliases remain supported for
+    /// standalone builds, but host installation directories are never guessed.
     fn candidates(&self) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
         for candidate in [
@@ -102,73 +86,7 @@ impl SdkLocator {
             Self::push_unique(&mut candidates, candidate.clone());
         }
 
-        match self.host {
-            HostPlatform::Macos => self.push_macos_candidates(&mut candidates),
-            HostPlatform::Windows => self.push_windows_candidates(&mut candidates),
-            HostPlatform::Linux | HostPlatform::OtherUnix => {
-                self.push_linux_candidates(&mut candidates);
-            }
-        }
         candidates
-    }
-
-    fn push_macos_candidates(&self, candidates: &mut Vec<PathBuf>) {
-        Self::push_unique(
-            candidates,
-            PathBuf::from("/Applications/DevEco-Studio.app/Contents/sdk"),
-        );
-        Self::push_unique(
-            candidates,
-            PathBuf::from("/Applications/DevEco Studio.app/Contents/sdk"),
-        );
-        if let Some(home) = &self.environment.home {
-            Self::push_unique(
-                candidates,
-                home.join("Applications/DevEco-Studio.app/Contents/sdk"),
-            );
-            Self::push_unique(candidates, home.join("Library/Huawei/Sdk"));
-            Self::push_unique(candidates, home.join("Library/OpenHarmony/Sdk"));
-        }
-    }
-
-    fn push_windows_candidates(&self, candidates: &mut Vec<PathBuf>) {
-        if let Some(local_app_data) = self.windows_local_app_data() {
-            Self::push_unique(candidates, local_app_data.join("Huawei").join("Sdk"));
-            Self::push_unique(
-                candidates,
-                local_app_data.join("Programs/Huawei/DevEco Studio/sdk"),
-            );
-        }
-        for program_files in [
-            self.environment.program_files.as_ref(),
-            self.environment.program_w6432.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            Self::push_unique(candidates, program_files.join("Huawei/DevEco Studio/sdk"));
-            Self::push_unique(candidates, program_files.join("DevEco Studio/sdk"));
-        }
-    }
-
-    fn push_linux_candidates(&self, candidates: &mut Vec<PathBuf>) {
-        if let Some(home) = &self.environment.home {
-            Self::push_unique(candidates, home.join("DevEco-Studio/sdk"));
-            Self::push_unique(candidates, home.join("deveco-studio/sdk"));
-        }
-        Self::push_unique(candidates, PathBuf::from("/opt/DevEco-Studio/sdk"));
-        Self::push_unique(candidates, PathBuf::from("/opt/deveco-studio/sdk"));
-        Self::push_unique(candidates, PathBuf::from("/opt/huawei/sdk"));
-    }
-
-    fn windows_local_app_data(&self) -> Option<PathBuf> {
-        self.environment.local_app_data.clone().or_else(|| {
-            self.environment
-                .app_data
-                .as_ref()
-                .and_then(|roaming| roaming.parent())
-                .map(|profile| profile.join("Local"))
-        })
     }
 
     fn push_unique(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
@@ -588,48 +506,25 @@ mod tests {
     }
 
     #[test]
-    fn test_sdk_locator_preserves_hvigor_environment_precedence_on_every_host() {
+    fn test_sdk_locator_uses_only_hvigor_environment_precedence() {
         let environment = SdkLocationEnvironment {
             deveco_sdk_home: Some(PathBuf::from("/env/deveco")),
             ohos_base_sdk_home: Some(PathBuf::from("/env/openharmony")),
             ohos_sdk_home: Some(PathBuf::from("/env/legacy")),
             ohos_ndk_home: Some(PathBuf::from("/env/ndk")),
             ohos_sdk_native: Some(PathBuf::from("/env/native")),
-            home: Some(PathBuf::from("/users/arkdown")),
-            local_app_data: Some(PathBuf::from("C:/Users/arkdown/AppData/Local")),
-            program_files: Some(PathBuf::from("C:/Program Files")),
-            ..SdkLocationEnvironment::default()
         };
 
-        for host in [
-            HostPlatform::Windows,
-            HostPlatform::Macos,
-            HostPlatform::Linux,
-        ] {
-            let candidates = SdkLocator::new(host, environment.clone()).candidates();
-            assert_eq!(
-                &candidates[..5],
-                &[
-                    PathBuf::from("/env/deveco"),
-                    PathBuf::from("/env/openharmony"),
-                    PathBuf::from("/env/legacy"),
-                    PathBuf::from("/env/ndk"),
-                    PathBuf::from("/env/native"),
-                ]
-            );
-        }
-
-        let windows = SdkLocator::new(HostPlatform::Windows, environment.clone()).candidates();
-        assert!(windows.contains(&PathBuf::from("C:/Users/arkdown/AppData/Local/Huawei/Sdk")));
-        assert!(windows.contains(&PathBuf::from("C:/Program Files/Huawei/DevEco Studio/sdk")));
-
-        let macos = SdkLocator::new(HostPlatform::Macos, environment.clone()).candidates();
-        assert!(macos.contains(&PathBuf::from(
-            "/Applications/DevEco-Studio.app/Contents/sdk"
-        )));
-
-        let linux = SdkLocator::new(HostPlatform::Linux, environment).candidates();
-        assert!(linux.contains(&PathBuf::from("/opt/DevEco-Studio/sdk")));
+        assert_eq!(
+            SdkLocator::new(environment).candidates(),
+            vec![
+                PathBuf::from("/env/deveco"),
+                PathBuf::from("/env/openharmony"),
+                PathBuf::from("/env/legacy"),
+                PathBuf::from("/env/ndk"),
+                PathBuf::from("/env/native"),
+            ]
+        );
     }
 
     #[test]
@@ -640,13 +535,10 @@ mod tests {
             fs::create_dir_all(openharmony.join(component)).expect("create SDK component");
         }
         let native = openharmony.join("native");
-        let locator = SdkLocator::new(
-            HostPlatform::Macos,
-            SdkLocationEnvironment {
-                ohos_ndk_home: Some(native.clone()),
-                ..SdkLocationEnvironment::default()
-            },
-        );
+        let locator = SdkLocator::new(SdkLocationEnvironment {
+            ohos_ndk_home: Some(native.clone()),
+            ..SdkLocationEnvironment::default()
+        });
 
         assert_eq!(locator.find_sdk_root(), Some(native.clone()));
         assert_eq!(openharmony_base_from_root(&native), openharmony);
