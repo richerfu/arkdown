@@ -4,45 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arkdown-core   = { workspace = true }
-thiserror      = { workspace = true }
-p256           = { workspace = true }
-rsa            = { workspace = true }
-signature      = { workspace = true }
-der            = { workspace = true }
-x509-cert      = { workspace = true }
-pkcs12         = { workspace = true }
-pkcs5          = { workspace = true }
-pkcs8          = { workspace = true }
-p12            = { workspace = true }
-aes            = { workspace = true }
-cbc            = { workspace = true }
-cms            = { workspace = true }
-const-oid      = { workspace = true }
-spki           = { workspace = true }
-rand           = { workspace = true }
-ring           = { workspace = true }
-rayon          = { workspace = true }
-fs-err         = { workspace = true }
-aes-gcm        = { workspace = true }
-pbkdf2         = { workspace = true }
-hex            = { workspace = true }
-tracing        = { workspace = true }
-bytes          = { workspace = true }
-serde_json     = { workspace = true }
-flate2         = { workspace = true }
-crc32fast      = { workspace = true }
-object         = { workspace = true }
-time           = { workspace = true }
-
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }
-
-[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
-sha2 = { workspace = true }
+aes-gcm      = { workspace = true }
+arkdown-core = { workspace = true }
+fs-err       = { workspace = true }
+hapsigner    = { workspace = true }
+hex          = { workspace = true }
+pbkdf2       = { workspace = true }
+sha2         = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-hex-literal = { workspace = true }
-zip = { workspace = true }
-base64 = { workspace = true }
+hapsigner = { workspace = true, features = ["development"] }
+tempfile  = { workspace = true }
+zip       = { workspace = true }

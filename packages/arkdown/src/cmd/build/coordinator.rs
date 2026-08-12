@@ -7836,7 +7836,7 @@ impl BuildCoordinator {
             .before(&module.name, Some(artifact_target_label), sign_task_name)
             .await?;
           let final_path = if sign_enabled && is_package_signed {
-            let sign_backend = SignBackendRunner::rust();
+            let sign_backend = SignBackendRunner::new();
             let sign_start = Instant::now();
             #[cfg(feature = "memory-diagnostics")]
             arkdown::memory_diagnostics::dump_with(

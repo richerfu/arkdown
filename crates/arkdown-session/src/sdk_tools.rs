@@ -41,7 +41,8 @@ pub enum SdkToolKind {
     Restool,
     /// `app_packing_tool.jar` (or legacy `hmos_app_packing_tool.jar`) packager.
     PackageTool,
-    /// `hapsigntoolv2.jar` — HAP signing. Replaced by `arkdown-sign` (SPEC-021).
+    /// `hapsigntoolv2.jar` — HAP signing. Replaced by `arkdown-sign` plus the
+    /// published `hapsigner` backend (SPEC-021).
     HapSignToolV2,
     /// `haptobin_tool.jar` — HAP-to-binary converter.
     HapToBin,
@@ -119,7 +120,8 @@ impl SdkToolPath {
 /// `src/sdk/default-sdk.js`.
 ///
 /// Note: `arkdown-resource` (SPEC-011) replaces `restool`,
-/// `arkdown-sign` (SPEC-021) replaces `hap-sign-tool.jar`. The resolver
+/// `arkdown-sign` and its published `hapsigner` backend (SPEC-021) replace
+/// `hap-sign-tool.jar`. The resolver
 /// still exposes these paths for SDK-level debugging and compatibility
 /// checks.
 #[derive(Debug, Clone)]
@@ -211,7 +213,8 @@ impl SdkToolResolver {
     /// Path to `hapsigntoolv2.jar`.
     ///
     /// Upstream: `DefaultSdk.getHapSignToolV2`.
-    /// Note: replaced by `arkdown-sign` (SPEC-021) at compile time.
+    /// Note: replaced by `arkdown-sign` plus published `hapsigner` (SPEC-021)
+    /// at compile time.
     pub fn hap_sign_tool_v2(&self) -> Option<SdkToolPath> {
         Some(self.toolchains_lib_file("hapsigntoolv2.jar", SdkToolKind::HapSignToolV2))
     }

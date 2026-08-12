@@ -42,6 +42,10 @@ arkdown-session = { path = "crates/arkdown-session" }
 arkdown-sign = { path = "crates/arkdown-sign" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
 
+# OpenHarmony signing backend. Keep the CLI disabled: arkdown owns project
+# discovery and orchestration, while hapsigner owns the signing formats.
+hapsigner = { version = "0.2.0", default-features = false }
+
 # Parser — ohos-rs OXC fork with ArkTS/ArkUI support.
 oxc = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808", features = ["full"] }
 oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
@@ -145,31 +149,14 @@ notify = "6"
 # Channels
 crossbeam-channel = "0.5"
 
-# Cryptography — pure Rust HAP signing (arkdown-sign, SPEC-021)
-p256        = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-rsa         = { version = "0.9",  features = ["sha2", "pem"] }
+# Cryptography used outside the published hapsigner backend.
 # sha2-asm uses GNU assembly sources and cannot be compiled by MSVC. Member
 # manifests enable it only for the supported macOS and Linux targets.
 sha2        = "0.10"
 semver      = "1"
-signature   = "2"
-der         = "0.7"
-x509-cert   = { version = "0.2", features = ["pem"] }
-pkcs12      = "0.1"
-pkcs5       = { version = "0.7", features = ["pbes2"] }
-pkcs8       = { version = "0.10", features = ["alloc", "pkcs5"] }
-cms         = "0.2"
-const-oid   = { version = "0.9", features = ["db"] }
-spki        = "0.7"
-rand        = "0.8"
-ring        = "0.17"
-p12         = "0.6"
 aes-gcm     = "0.10"
-aes         = { version = "0.8", features = ["zeroize"] }
-cbc         = "0.1"
 pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
 hex         = "0.4"
-hex-literal = "0.4"
 tempfile = "3"
 
 [profile.release]
@@ -180,9 +167,6 @@ codegen-units = 1
 opt-level = 3
 
 [profile.dev.package.zlib-rs]
-opt-level = 3
-
-[profile.dev.package.arkdown-sign]
 opt-level = 3
 
 [profile.dev.package.sha2]

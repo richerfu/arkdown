@@ -215,9 +215,9 @@ hvigor configures rollup via `arkts-pack.js::generateConfig()`. Key flags:
 
 | # | hvigor Step | Class / File | arkdown | Status |
 |---|---|---|---|---|
-| L1 | HAP signing: PKCS#12 + CMS SignedData + V2/V3 block | `SignHap` → `sign-hap.js` → `hap-sign-tool.jar` | SDK signing backend allowed for initial parity; `arkdown-sign` remains the Rust backend with ECDSA P-256, RSA-PSS, PKCS#12 loading, CMS generation, ZIP alignment | ✅ |
-| L2 | HSP signing | `SignHsp` | `arkdown-sign::sign_hsp()` (same code path) | ✅ |
-| L3 | HAR signing (optional) | `sign/har-sign-command-build.js` | When `signing_config` is present, HAR archive is signed via `HapSigner::sign_or_skip()` (same V2/V3 block pipeline as HAP/HSP); unsigned HAR is output when no signing config | ✅ |
+| L1 | HAP signing: local keystore + CMS SignedData + V2/V3 block | `SignHap` → `sign-hap.js` → `hap-sign-tool.jar` | `arkdown-sign` adapts build-profile/DevEco inputs to published `hapsigner` 0.2; signing algorithms, JKS/PKCS#12, CMS, ZIP alignment, code-sign blocks, and atomic replacement are owned by that dependency | ✅ |
+| L2 | HSP/APP and remote-HSP signing | `SignHsp`, `SignApp`, `SignRemoteHsp` | The same sequential `SignBackendRunner` delegates these ZIP application forms to `hapsigner` | ✅ |
+| L3 | HAR signing task | `sign/har-sign-command-build.js` | HAR remains outside the HAP/HSP signing-block runner; `PackageSignHar` parity is tracked separately | ⚠️ |
 
 ### Stage M — Advanced / Watch Mode
 

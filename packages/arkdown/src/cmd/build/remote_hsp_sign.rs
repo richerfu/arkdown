@@ -80,7 +80,7 @@ impl RemoteHspSigner {
       format!("create remote HSP cache at {}", cache_root.display())
     })?;
 
-    let sign_backend = SignBackendRunner::rust();
+    let sign_backend = SignBackendRunner::new();
     let mut signed_remote_hsps = BTreeMap::new();
     for candidate in candidates.values() {
       // `initAllSignRemoteHspList`: `<file>.hsp` → `<file>-signed.hsp`
