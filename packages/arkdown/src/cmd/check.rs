@@ -2,8 +2,9 @@
 //!
 //! `arkdown check` keeps the Rust/OXC structural validator and additionally
 //! invokes the installed SDK's `etsStandaloneChecker` for TypeScript semantic
-//! diagnostics. This is the same semantic owner used by latest hvigor:
-//! `ets-loader/lib/ets_checker.js::etsStandaloneChecker`.
+//! diagnostics. This is the same semantic owner used by Hvigor's ArkLint
+//! worker: `ets-loader/lib/ets_checker.js::etsStandaloneChecker`. Normal
+//! builds use the separate `etsChecker.buildStart` CompileArkTS entry.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

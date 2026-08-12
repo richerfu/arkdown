@@ -3,9 +3,12 @@
 //! The installed ets-loader owns TypeScript semantic diagnostics and the
 //! ArkTS linter.  Rust owns the stage plan, process lifecycle, path
 //! serialization, and deterministic diagnostic aggregation; the adjacent CJS
-//! file only loads `compile_plugin.js` and invokes `etsStandaloneChecker`.
+//! file loads `compile_plugin.js` and invokes the SDK-owned checker entry for
+//! the requested Hvigor phase.
 //!
 //! Upstream evidence:
+//! - `hvigor-arkts-compose/load-sdk-functions.js::loadSdkFunctions`
+//! - `ets-loader/rollup-plugin-ets-checker.js::etsChecker.buildStart`
 //! - `hvigor-arkts-compose/load-sdk-functions.js::runEtsStandaloneChecker`
 //! - `ets-loader/lib/ets_checker.js::etsStandaloneChecker`
 //! - `hvigor-ohos-plugin/tasks/worker/util.js::generateLoaderEnv`
@@ -225,6 +228,11 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       entries,
       project_config,
       loader_env,
+      phase: if self.input.loader_json.is_some() {
+        SdkEtsCheckerPhase::Compile
+      } else {
+        SdkEtsCheckerPhase::Standalone
+      },
     };
     Ok(SdkEtsCheckerPlan {
       module_name: self.input.module.name.clone(),
@@ -403,12 +411,10 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     );
     extras.insert("permission".to_string(), Value::Object(Map::new()));
     extras.insert("useGetCurrentBundleName".to_string(), Value::Bool(false));
-    // `etsStandaloneChecker()` does not call `main.js::initProjectConfig()`.
-    // Hvigor has already run `initConfig()` before its lint worker invokes it,
-    // so this flag is present in the real projectConfig.  Without it the SDK
-    // TypeScript fork parses SDK `@interface` declarations as ordinary TS and
-    // reports false semantic errors (for example `@arkts.lang.d.ets`).
-    // Upstream: ets-loader/main.js::initProjectConfig().
+    // Standalone checking does not call `main.js::initProjectConfig()`, while
+    // the CompileArkTS bridge does. Keep the effective flag in the shared
+    // project model so both official entry points parse SDK annotations the
+    // same way. Upstream: ets-loader/main.js::initProjectConfig().
     extras.insert("allowEtsAnnotations".to_string(), Value::Bool(true));
     extras.insert("projectArkOption".to_string(), Value::Object(Map::new()));
     extras.insert("sourceMapDir".to_string(), Value::String(String::new()));
@@ -805,7 +811,20 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
 
   fn loader_env(&self) -> Result<SdkEtsCheckerLoaderEnvironment> {
     let external_api_paths = self.external_api_paths()?;
-    let external_api_path_separator = if cfg!(windows) { ";" } else { ":" };
+    let external_api_paths_environment =
+      std::env::join_paths(external_api_paths.iter().map(std::path::Path::new))
+        .map_err(|error| {
+          anyhow::anyhow!(
+            "ARKDOWN_ETS_CHECKER_EXTERNAL_API_PATHS: cannot encode SDK component paths: {error}"
+          )
+        })?
+        .into_string()
+        .map_err(|value| {
+          anyhow::anyhow!(
+            "ARKDOWN_ETS_CHECKER_EXTERNAL_API_PATHS: SDK component path is not UTF-8: {}",
+            value.to_string_lossy()
+          )
+        })?;
     Ok(SdkEtsCheckerLoaderEnvironment {
       runtime_os: self.input.config.product.runtime_os.clone(),
       sdk_info: self.sdk_info()?,
@@ -824,7 +843,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       compile_tool: "rollup".to_string(),
       ability_type: String::new(),
       ace_compile_mode: self.compile_mode(),
-      external_api_paths: external_api_paths.join(external_api_path_separator),
+      external_api_paths: external_api_paths_environment,
       enable_debug_line: self.input.debug_line,
       is_fa_mode: None,
       is_first_build: "true".to_string(),
@@ -1170,25 +1189,16 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
 
   fn external_api_paths(&self) -> Result<Vec<String>> {
     let mut paths = Vec::new();
-    if self
-      .input
-      .config
-      .product
-      .runtime_os
-      .eq_ignore_ascii_case("HarmonyOS")
-    {
-      if let Some(sdk_root) = self
+    if self.input.config.sdk_config.compile_api_version > 9
+      && self
         .input
-        .session
-        .sdk
-        .sdk_root
-        .parent()
-        .and_then(Path::parent)
-      {
-        let hms_ets = sdk_root.join("hms").join("ets");
-        if hms_ets.is_dir() {
-          paths.push(self.path(&hms_ets)?);
-        }
+        .config
+        .product
+        .runtime_os
+        .eq_ignore_ascii_case("HarmonyOS")
+    {
+      if let Some(hms_ets) = self.input.config.sdk_config.hms_ets_component_path() {
+        paths.push(self.path(&hms_ets)?);
       }
     }
     Ok(paths)
@@ -1475,6 +1485,14 @@ struct SdkEtsCheckerRequest {
   entries: BTreeMap<String, String>,
   project_config: SdkEtsCheckerProjectConfig,
   loader_env: SdkEtsCheckerLoaderEnvironment,
+  phase: SdkEtsCheckerPhase,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SdkEtsCheckerPhase {
+  Compile,
+  Standalone,
 }
 
 #[derive(Debug, Serialize)]

@@ -801,6 +801,17 @@ impl SdkConfig {
         path.join("uni-package.json").is_file().then_some(path)
     }
 
+    /// HMS ArkTS declaration component selected for HarmonyOS compilation.
+    ///
+    /// `HosSdkInfo.getHmsArkDir()` returns the base directory of the sibling
+    /// HMS ETS component. The component is discovered relative to the selected
+    /// OpenHarmony ETS loader, matching SDK-manager layouts on every host
+    /// platform without relying on an IDE installation path.
+    pub fn hms_ets_component_path(&self) -> Option<std::path::PathBuf> {
+        let path = self.component_root()?.parent()?.join("hms").join("ets");
+        path.join("uni-package.json").is_file().then_some(path)
+    }
+
     /// Locate the `@ohos/coverage` implementation owned by the installed
     /// hvigor OHOS plugin. DevEco and the standalone command-line tools place
     /// hvigor at different distribution-relative roots; both candidates are

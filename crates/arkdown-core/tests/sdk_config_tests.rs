@@ -72,6 +72,7 @@ fn local_test_components_are_derived_from_the_selected_sdk_layout() {
         .join("ets-loader");
     let previewer = component.join("previewer");
     let hms_previewer = sdk_default.join("hms").join("previewer");
+    let hms_ets = sdk_default.join("hms").join("ets");
     let coverage = contents
         .join("tools")
         .join("hvigor")
@@ -82,6 +83,8 @@ fn local_test_components_are_derived_from_the_selected_sdk_layout() {
     fs::create_dir_all(previewer.join("common").join("bin")).expect("OHOS Previewer");
     fs::create_dir_all(&hms_previewer).expect("HMS Previewer");
     fs::write(hms_previewer.join("uni-package.json"), b"{}").expect("HMS metadata");
+    fs::create_dir_all(&hms_ets).expect("HMS ETS");
+    fs::write(hms_ets.join("uni-package.json"), b"{}").expect("HMS ETS metadata");
     let coverage_command = coverage
         .join("lib")
         .join("src")
@@ -94,6 +97,7 @@ fn local_test_components_are_derived_from_the_selected_sdk_layout() {
     let config = sdk_config(loader);
     assert_eq!(config.previewer_component_path(), Some(previewer));
     assert_eq!(config.hms_previewer_component_path(), Some(hms_previewer));
+    assert_eq!(config.hms_ets_component_path(), Some(hms_ets));
     assert_eq!(config.hvigor_coverage_package_path(), Some(coverage));
 }
 

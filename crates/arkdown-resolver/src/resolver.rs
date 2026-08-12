@@ -23,6 +23,12 @@ pub struct ResolverConfig {
     pub sdk_kits_dirs: Vec<PathBuf>,
     /// Paths to SDK `arkts/` directories (for `@arkts.*` specifiers).
     pub sdk_arkts_dirs: Vec<PathBuf>,
+    /// Non-package lookup roots from hvigor `arkts-pack.getResolveModules()`.
+    ///
+    /// The active module's `src/main` root precedes its generated profile
+    /// directory, allowing generated sources such as `BuildProfile.ets` to be
+    /// imported through the same bare-specifier lookup used by hvigor.
+    pub source_roots: Vec<PathBuf>,
     /// Absolute module lookup directories matching hvigor `getResolveModules()`.
     pub module_paths: Vec<PathBuf>,
     /// Map from package name → `PkgBriefInfo` (from `loader.json` `pkgBriefInfo`).
@@ -162,11 +168,12 @@ impl OhosResolver {
     ///
     /// Resolution order:
     /// 1. `@bundle:` / `@shared:` → external bundle / HSP reference
-    /// 2. Bare package names, including scoped `@ohos/*` packages, from
+    /// 2. Bare source names from hvigor's module source/profile roots
+    /// 3. Bare package names, including scoped `@ohos/*` packages, from
     ///    `pkg_name_to_pkg_info` / `oh_modules/`
-    /// 3. `@ohos/` → SDK API declaration
-    /// 4. `@kit.` → SDK kit declaration
-    /// 5. Relative (`./`, `../`) → local source file
+    /// 4. `@ohos/` → SDK API declaration
+    /// 5. `@kit.` → SDK kit declaration
+    /// 6. Relative (`./`, `../`) → local source file
     pub fn resolve(
         &self,
         specifier: &str,
@@ -208,14 +215,22 @@ impl OhosResolver {
             }
         }
 
-        // 2. Bare packages take precedence over SDK declarations. OHOS package
+        // 2. `arkts-pack.getResolveModules()` places `src/main` and the
+        // generated profile directory before both `oh_modules` roots. Resolve
+        // those as ordinary local sources rather than inventing a virtual
+        // BuildProfile module.
+        if let Some(resolved) = self.resolve_from_source_roots(&specifier, import_kind) {
+            return Ok(resolved);
+        }
+
+        // 3. Bare packages take precedence over SDK declarations. OHOS package
         // names often use the `@ohos/*` scope; hvigor resolves those through
         // dependency metadata/oh_modules before falling back to SDK APIs.
         if let Some(resolved) = self.resolve_bare_package(&specifier, importer, import_kind) {
             return Ok(resolved);
         }
 
-        // 3. @ohos/* / @ohos.* → SDK API declaration
+        // 4. @ohos/* / @ohos.* → SDK API declaration
         let api_filenames = specifier.sdk_api_filenames();
         if !api_filenames.is_empty() {
             if let Some(path) =
@@ -231,7 +246,7 @@ impl OhosResolver {
             });
         }
 
-        // 4. @kit.* → SDK kit declaration
+        // 5. @kit.* → SDK kit declaration
         let kit_filenames = specifier.sdk_kit_filenames();
         if !kit_filenames.is_empty() {
             if let Some(path) =
@@ -247,7 +262,7 @@ impl OhosResolver {
             });
         }
 
-        // 5. @arkts.* → SDK ArkTS declaration
+        // 6. @arkts.* → SDK ArkTS declaration
         let arkts_filenames = specifier.sdk_arkts_filenames();
         if !arkts_filenames.is_empty() {
             if let Some(path) =
@@ -263,7 +278,7 @@ impl OhosResolver {
             });
         }
 
-        // 6. Relative imports
+        // 7. Relative imports
         if specifier.is_relative() {
             if let Ok(resolution) = self
                 .fs_resolver_for(import_kind)
@@ -298,6 +313,34 @@ impl OhosResolver {
             specifier: specifier.as_str().to_string(),
             importer: ResolverPathText::new(importer).diagnostic_string(),
         })
+    }
+
+    fn resolve_from_source_roots(
+        &self,
+        specifier: &ResolverSpecifier<'_>,
+        import_kind: ResolveImportKind,
+    ) -> Option<OhosResolvedModule> {
+        if specifier.is_relative() || specifier.package_candidates().is_empty() {
+            return None;
+        }
+        let request = specifier.as_relative_request();
+        for root in &self.config.source_roots {
+            let resolution = self
+                .fs_resolver_for(import_kind)
+                .resolve(root, &request)
+                .ok();
+            let Some(resolution) = resolution else {
+                continue;
+            };
+            let resolved = arkdown_path::canonicalize_or_owned(&resolution.into_path_buf());
+            let resolved = self.apply_source_set_overlay(resolved);
+            return Some(OhosResolvedModule::LocalSource {
+                module_type: ModuleType::infer(&resolved),
+                path: resolved,
+                pkg_context: None,
+            });
+        }
+        None
     }
 
     fn resolve_bare_package(
@@ -694,6 +737,7 @@ mod tests {
             sdk_api_dirs,
             sdk_kits_dirs,
             sdk_arkts_dirs: vec![],
+            source_roots: vec![],
             module_paths: vec![],
             pkg_name_to_pkg_info,
             use_normalized_ohm_url: true,
@@ -864,6 +908,7 @@ mod tests {
             sdk_api_dirs: vec![],
             sdk_kits_dirs: vec![],
             sdk_arkts_dirs: vec![arkts_dir],
+            source_roots: vec![],
             module_paths: vec![],
             pkg_name_to_pkg_info: FxHashMap::default(),
             use_normalized_ohm_url: true,
@@ -1094,6 +1139,7 @@ mod tests {
             sdk_api_dirs: vec![],
             sdk_kits_dirs: vec![],
             sdk_arkts_dirs: vec![],
+            source_roots: vec![],
             module_paths: vec![module_root.join("oh_modules")],
             pkg_name_to_pkg_info: FxHashMap::default(),
             use_normalized_ohm_url: true,
@@ -1114,6 +1160,48 @@ mod tests {
                 assert_eq!(path, arkdown_path::canonicalize_or_owned(&entry));
             }
             _ => panic!("expected RemotePackage"),
+        }
+    }
+
+    #[test]
+    fn hvigor_generated_profile_root_resolves_bare_build_profile_as_local_source() {
+        let dir = TempDir::new().unwrap();
+        let module_root = dir.path().join("entry");
+        let source_root = module_root.join("src/main");
+        let generated_profile_root = module_root.join("build/default/generated/profile/default");
+        fs::create_dir_all(source_root.join("ets")).unwrap();
+        fs::create_dir_all(&generated_profile_root).unwrap();
+        let importer = source_root.join("ets/EntryAbility.ets");
+        let generated_profile = generated_profile_root.join("BuildProfile.ets");
+        fs::write(&importer, "import BuildProfile from 'BuildProfile';").unwrap();
+        fs::write(
+            &generated_profile,
+            "export default class BuildProfile {}",
+        )
+        .unwrap();
+
+        let resolver = OhosResolver::new(ResolverConfig {
+            project_root: dir.path().to_path_buf(),
+            sdk_api_dirs: vec![],
+            sdk_kits_dirs: vec![],
+            sdk_arkts_dirs: vec![],
+            source_roots: vec![source_root, generated_profile_root],
+            module_paths: vec![module_root.join("oh_modules")],
+            pkg_name_to_pkg_info: FxHashMap::default(),
+            use_normalized_ohm_url: true,
+            case_sensitive_check: false,
+            source_set_overlays: vec![],
+        });
+
+        let result = resolver.resolve("BuildProfile", &importer).unwrap();
+        match result {
+            OhosResolvedModule::LocalSource { path, .. } => {
+                assert_eq!(
+                    path,
+                    arkdown_path::canonicalize_or_owned(&generated_profile)
+                );
+            }
+            _ => panic!("expected generated BuildProfile to be a local source"),
         }
     }
 
@@ -1381,6 +1469,7 @@ mod tests {
             sdk_api_dirs: vec![],
             sdk_kits_dirs: vec![],
             sdk_arkts_dirs: vec![],
+            source_roots: vec![],
             module_paths: vec![],
             pkg_name_to_pkg_info: FxHashMap::default(),
             use_normalized_ohm_url: false,
@@ -1409,6 +1498,7 @@ mod tests {
             sdk_api_dirs: vec![],
             sdk_kits_dirs: vec![],
             sdk_arkts_dirs: vec![],
+            source_roots: vec![],
             module_paths: vec![],
             pkg_name_to_pkg_info: FxHashMap::default(),
             use_normalized_ohm_url: false,

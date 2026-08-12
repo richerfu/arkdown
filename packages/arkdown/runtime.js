@@ -3510,10 +3510,28 @@ class HvigorRuntimeHost {
     node.loaderConfig = value && typeof value === 'object' ? value.config : undefined
     node.exportValue = value
     const system = value && typeof value === 'object' && value.system ? value.system : value
-    const kind = system && system.__arkdownHvigorSystemKind
-    if (!kind) {
-      return
+    for (const plugin of this._systemPluginsFromExport(system)) {
+      this._bindSystemPlugin(node, plugin)
     }
+  }
+
+  _systemPluginsFromExport(system) {
+    if (system?.__arkdownHvigorSystemKind) {
+      return [system]
+    }
+    if (!system || (typeof system !== 'object' && typeof system !== 'function')) {
+      return []
+    }
+    // hvigor 6.24.3 configuration.bindSystemPlugins() iterates every named
+    // export when the hvigorfile has no default `{ system }` declaration.
+    // This is the shape produced by `export { hapTasks } from ...`.
+    return Object.keys(system)
+      .map((name) => system[name])
+      .filter((plugin) => plugin?.__arkdownHvigorSystemKind)
+  }
+
+  _bindSystemPlugin(node, system) {
+    const kind = system.__arkdownHvigorSystemKind
     node.kind = kind
     node.taskCatalog.invalidate()
     node.parent?.taskCatalog.invalidate()

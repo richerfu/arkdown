@@ -290,16 +290,50 @@ impl BuildScriptTargetSet {
             .descriptor
             .get("targets")
             .and_then(serde_json::Value::as_array);
-        let values = descriptor_targets
-            .filter(|targets| !targets.is_empty())
-            .or_else(|| {
-                module
-                    .build_profile
-                    .get("targets")
-                    .and_then(serde_json::Value::as_array)
-            })
+        // `CoreModuleModelImpl.getOrDefaultTargets()` owns the module target
+        // list and reads it from the module-level build profile. Project-level
+        // `modules[].targets` only supplies product applicability through
+        // `CoreProjectModelImpl.getTargetApplyProducts()`; it must not hide an
+        // `ohosTest` (or any other target) declared by the module.
+        let mut values = module
+            .build_profile
+            .get("targets")
+            .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default();
+        if !values.iter().any(|target| {
+            target.get("name").and_then(serde_json::Value::as_str) == Some("default")
+        }) {
+            values.push(serde_json::json!({ "name": "default" }));
+        }
+        for target in &mut values {
+            let Some(name) = target
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let descriptor_target = descriptor_targets
+                .and_then(|targets| {
+                    targets.iter().find(|candidate| {
+                        candidate
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(name.as_str())
+                    })
+                });
+            if let (Some(target), Some(descriptor_target)) =
+                (target.as_object_mut(), descriptor_target.and_then(serde_json::Value::as_object))
+            {
+                // Project target metadata supplies product/build-mode/output
+                // defaults. Module target fields remain authoritative when
+                // both profiles declare the same key.
+                for (key, value) in descriptor_target {
+                    target.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+        }
         let typed = values
             .iter()
             .enumerate()
@@ -415,11 +449,12 @@ impl BuildScriptTargetSet {
                 |index| self.values[index].clone(),
             )]);
         }
-        if self.values.is_empty() {
-            return Ok(vec![serde_json::json!({ "name": "default" })]);
-        }
+        // Hvigor `ModuleTaskService.targetNeedPack()` maps an implicit `all`
+        // to every product-applicable target except `ohosTest`. The latter is
+        // only selected by an explicit command/device-test injection.
         Ok(applicable
             .into_iter()
+            .filter(|index| self.typed[*index].name != "ohosTest")
             .map(|index| self.values[index].clone())
             .collect())
     }

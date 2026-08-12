@@ -3167,7 +3167,7 @@ impl TargetBuildExecutionPlan {
       BuildMode::Debug => "debug",
       BuildMode::Release => "release",
     };
-    let mut target_names = Vec::new();
+    let mut applicable_target_names = Vec::new();
     for module in config
       .modules
       .iter()
@@ -3176,12 +3176,44 @@ impl TargetBuildExecutionPlan {
       for target in
         build_options.applicable_targets(&module.name, &config.product.name, build_mode_name)
       {
-        if !target_names.contains(&target.name) {
-          target_names.push(target.name);
-        }
+        applicable_target_names.push(target.name);
       }
     }
-    Self { target_names }
+    Self::from_implicit_targets(applicable_target_names)
+  }
+
+  fn from_implicit_targets(target_names: impl IntoIterator<Item = String>) -> Self {
+    let mut selected = Vec::new();
+    for target_name in target_names {
+      // Hvigor 6.24.3 `ModuleTaskService.targetNeedPack()` treats an ordinary
+      // assemble as target `all`, but explicitly excludes `ohosTest`. Device
+      // tests and `module=<name>@ohosTest` select that target through the
+      // explicit branch above.
+      if target_name == "ohosTest" || selected.contains(&target_name) {
+        continue;
+      }
+      selected.push(target_name);
+    }
+    Self {
+      target_names: selected,
+    }
+  }
+}
+
+#[cfg(test)]
+mod target_build_execution_plan_tests {
+  use super::TargetBuildExecutionPlan;
+
+  #[test]
+  fn hvigor_implicit_all_builds_regular_targets_but_not_ohos_test() {
+    let plan = TargetBuildExecutionPlan::from_implicit_targets([
+      "default".to_string(),
+      "ohosTest".to_string(),
+      "phone".to_string(),
+      "default".to_string(),
+    ]);
+
+    assert_eq!(plan.target_names, ["default", "phone"]);
   }
 }
 
@@ -5804,6 +5836,22 @@ impl BuildCoordinator {
         sdk_api_dirs: config.sdk_config.ets_api_dirs(),
         sdk_kits_dirs: config.sdk_config.ets_kits_dirs(),
         sdk_arkts_dirs: config.sdk_config.ets_arkts_dirs(),
+        // hvigor `arkts-pack.getResolveModules()` searches the active source
+        // root before the generated profile directory. Keep these as typed
+        // paths so the resolver works identically on Windows and POSIX hosts.
+        resolve_source_roots: vec![
+          PathBuf::from(&loader_json.module_root_path),
+          module_layout
+            .build_profile_for_module(&module.module_type, &module_target_name)
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+              anyhow::anyhow!(
+                "cannot derive generated profile lookup root for module '{}'",
+                module.name
+              )
+            })?,
+        ],
         all_module_roots,
         resource_refs: resource_refs.clone(),
         component_metadata: component_metadata.clone(),

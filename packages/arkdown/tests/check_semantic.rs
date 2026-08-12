@@ -1,7 +1,7 @@
 //! Regression coverage for the SDK-owned TypeScript semantic phase.
 //!
-//! Latest hvigor delegates this work to
-//! `ets-loader/lib/ets_checker.js::etsStandaloneChecker`.  The fixture is
+//! Hvigor's ArkLint worker delegates this work to
+//! `ets-loader/lib/ets_checker.js::etsStandaloneChecker`. The fixture is
 //! copied before mutation so the checked-in source remains a valid build.
 
 use std::fs;

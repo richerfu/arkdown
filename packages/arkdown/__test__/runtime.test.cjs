@@ -1716,6 +1716,32 @@ export default hapTasks({
   )
 })
 
+test('hvigor 6.24.3 binds named hapTasks exports into the native assembly graph', async () => {
+  const project = copyFixture('minimal-hap')
+  fs.writeFileSync(
+    path.join(project, 'entry', 'hvigorfile.ts'),
+    `export { hapTasks } from '@ohos/hvigor-ohos-plugin'\n`,
+  )
+
+  const loader = new RuntimePluginLoader({ project })
+  await loader.load()
+  const entry = loader.hvigorHost._nodesByName.get('entry')
+  assert.equal(entry.kind, 'hap')
+  assert.deepEqual(entry.wrapper.getAllPluginIds(), ['com.ohos.hap'])
+
+  loader.hvigorHost.prepareDirectBuildCycle()
+  const bridge = loader.hvigorHost.createNativeTaskBridge()
+  const selection = JSON.parse(bridge.selectionJson)
+  const tasks = JSON.parse(bridge.tasksJson)
+  assert.deepEqual(selection.expectedRootPaths, ['entry:assembleHap'])
+  assert.equal(
+    tasks.some(
+      (task) => task.path === 'entry:default@ProcessProfile' && task.builtIn && task.enabled,
+    ),
+    true,
+  )
+})
+
 test('hvigor 6.24.3 TypeScript custom plugins bind context before apply and forward OHOS effects', async () => {
   const root = tempProject()
   const entry = path.join(root, 'entry')
