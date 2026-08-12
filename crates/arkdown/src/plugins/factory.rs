@@ -151,7 +151,8 @@ pub struct PluginFactoryInput {
     pub har_dedup: HarDedupFactoryMode,
     /// Built-in plugin names to disable for this build.
     ///
-    /// Populated from `arkdown.config.json` `plugins.disabled` via the coordinator.
+    /// Populated from `arkdown.config.toml` `plugins.disabled` (or its legacy
+    /// JSON fallback) via the coordinator.
     pub disabled_plugins: Vec<String>,
     /// `arkOptions.autoLazyImport` + `autoLazyFilter` + owning module package
     /// name, forwarded to the SDK `process_lazy_import.js` rewrite.

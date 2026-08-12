@@ -10,6 +10,7 @@ arkdown-path = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 json5 = { workspace = true }
+toml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }

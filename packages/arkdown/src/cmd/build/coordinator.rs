@@ -57,7 +57,6 @@ use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use super::bytecode_stage::{BytecodeStage, BytecodeStageInput};
 use super::code_resource::CodeResourceCopyPlan;
 use super::coverage_instrument::CoverageInstrumenter;
-use super::custom_config::ArkdownCustomConfigLoader;
 use super::generate_har_declarations::HarDeclarationGenerator;
 use super::har_dedup::HarDedupProjectPlan;
 use super::har_importee_cache::HarImporteeCache;
@@ -3606,7 +3605,7 @@ impl BuildCoordinator {
 
     let progress = Progress::new();
 
-    let custom_cfg = ArkdownCustomConfigLoader::new(&project_root).load();
+    let custom_cfg = session.custom_config.as_ref();
     let intermediate_writer = IntermediateArtifactWriter::new(&config.sdk_config.restool_path);
 
     let build_modules =
@@ -5614,7 +5613,7 @@ impl BuildCoordinator {
         PathBuf::from(&loader_json.ace_module_build),
         module_config.as_ref(),
         module_target_name,
-        Some(&custom_cfg),
+        Some(custom_cfg),
         module_analyzer,
         BundlePlanPackageInfo {
           source_map: source_map_packages,

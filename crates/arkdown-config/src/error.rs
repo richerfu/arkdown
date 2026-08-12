@@ -9,6 +9,9 @@ pub enum ConfigError {
     #[error("JSON5 parse error in {file}: {message}")]
     ParseError { file: PathBuf, message: String },
 
+    #[error("TOML parse error in {file}: {message}")]
+    TomlParseError { file: PathBuf, message: String },
+
     #[error("Schema validate failed in {file}: {message}")]
     ValidationError { file: PathBuf, message: String },
 

@@ -6,6 +6,7 @@ pub mod build_profile;
 pub mod build_script_plugin;
 pub mod build_script_runtime;
 pub mod build_script_schema;
+pub mod custom_config;
 pub mod error;
 pub mod hvigor_overrides;
 pub mod module_json;
@@ -23,6 +24,7 @@ pub use build_script_schema::{
     BuildScriptBuildOptionValidationRequest, BuildScriptSchemaDiagnostic,
     BuildScriptSchemaValidator,
 };
+pub use custom_config::{ArkdownCustomConfig, ArkdownCustomConfigLoader, ArkdownPluginsConfig};
 pub use error::ConfigError;
 pub use hvigor_overrides::{
     HvigorAppOptionOverride, HvigorSigningConfigOverride, HvigorSigningMaterialOverride,
