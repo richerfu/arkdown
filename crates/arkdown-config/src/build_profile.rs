@@ -1177,6 +1177,7 @@ pub struct BuildOptionProfileInventory {
     project: BuildProfileValue,
     raw_project: RawBuildProfile,
     modules: BTreeMap<String, ModuleBuildProfileSnapshot>,
+    build_profile_fields_override: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -1213,6 +1214,23 @@ impl BuildOptionProfileInventory {
         project_root: &Path,
         modules: &[arkdown_core::ModuleConfig],
         runtime_overrides: Option<&crate::RuntimeContextOverrides>,
+    ) -> Result<Self, ConfigError> {
+        let custom_config = crate::ArkdownCustomConfigLoader::new(project_root).load()?;
+        Self::load_with_custom_config(
+            project_root,
+            modules,
+            runtime_overrides,
+            &custom_config,
+        )
+    }
+
+    /// Load build profiles from startup inputs while reusing the already
+    /// parsed Arkdown project configuration.
+    pub fn load_with_custom_config(
+        project_root: &Path,
+        modules: &[arkdown_core::ModuleConfig],
+        runtime_overrides: Option<&crate::RuntimeContextOverrides>,
+        custom_config: &crate::ArkdownCustomConfig,
     ) -> Result<Self, ConfigError> {
         let project_path = project_root.join("build-profile.json5");
         let project_override =
@@ -1261,6 +1279,7 @@ impl BuildOptionProfileInventory {
             project,
             raw_project,
             modules: module_profiles,
+            build_profile_fields_override: custom_config.build_profile_fields.clone(),
         })
     }
 
@@ -1312,6 +1331,7 @@ impl BuildOptionProfileInventory {
             project: BuildProfileValue::from_value(project_profile),
             raw_project,
             modules,
+            build_profile_fields_override: serde_json::Map::new(),
         })
     }
 
@@ -1398,7 +1418,8 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
     }
 
     /// Apply statically extracted `hvigorfile.ts` overrides at hvigor's
-    /// highest-precedence layer.
+    /// highest-precedence layer. Arkdown-owned BuildProfile fields are applied
+    /// afterward so `arkdown.config.toml` can intentionally override them.
     pub fn with_build_script_override(mut self, override_value: serde_json::Value) -> Self {
         self.build_script_override = Some(override_value);
         self
@@ -1446,6 +1467,15 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
             );
         }
         effective.merge_layer(self.build_script_override.as_ref(), &module_snapshot.root);
+        let fields = &self.inventory.build_profile_fields_override;
+        if !fields.is_empty() {
+            let override_value = serde_json::json!({
+                "arkOptions": {
+                    "buildProfileFields": fields
+                }
+            });
+            effective.merge_layer(Some(&override_value), &self.inventory.project_root);
+        }
         if let Some(object) = effective.value.as_object_mut() {
             object.remove("name");
             object.remove("copyFrom");
@@ -1483,6 +1513,15 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
             effective.merge_display_layer(module.target_build_option(self.target_name));
         }
         effective.merge_display_layer(self.build_script_override.as_ref());
+        let fields = &self.inventory.build_profile_fields_override;
+        if !fields.is_empty() {
+            let override_value = serde_json::json!({
+                "arkOptions": {
+                    "buildProfileFields": fields
+                }
+            });
+            effective.merge_display_layer(Some(&override_value));
+        }
 
         // hvigor `validateBuildOptionSet` synthesizes `{name}` placeholders
         // for the DEFAULT/DEBUG/RELEASE option names, and the build-mode
@@ -3892,6 +3931,10 @@ mod tests {
                             },
                             arkOptions: {
                                 runtimeOnly: { packages: ["product-runtime"] },
+                                buildProfileFields: {
+                                    SHARED_FIELD: "product",
+                                    PRODUCT_ONLY: true
+                                },
                                 supportChunks: false
                             },
                             resOptions: {
@@ -4034,7 +4077,13 @@ mod tests {
         .with_build_script_override(serde_json::json!({
             "preloadSystemSo": true,
             "strictMode": { "caseSensitiveCheck": true },
-            "arkOptions": { "supportChunks": false }
+            "arkOptions": {
+                "supportChunks": false,
+                "buildProfileFields": {
+                    "SHARED_FIELD": "build-script",
+                    "SCRIPT_ONLY": 1
+                }
+            }
         }))
         .resolve()
         .unwrap();
@@ -4052,6 +4101,39 @@ mod tests {
                 .packages,
             ["product-runtime"]
         );
+
+        fs_err::write(
+            project_root.join("arkdown.config.toml"),
+            r#"
+                [build-profile]
+                SHARED_FIELD = "arkdown-config"
+                CUSTOM_ONLY = false
+            "#,
+        )
+        .unwrap();
+        let inventory = BuildOptionProfileInventory::load(project_root, &modules).unwrap();
+        let custom_option = EffectiveModuleBuildOptionResolver::new(
+            &inventory, "entry", "default", "debug", "phone",
+        )
+        .with_build_script_override(serde_json::json!({
+            "arkOptions": {
+                "buildProfileFields": {
+                    "SHARED_FIELD": "build-script",
+                    "SCRIPT_ONLY": 1
+                }
+            }
+        }))
+        .resolve()
+        .unwrap();
+        let fields = &custom_option
+            .ark_options
+            .as_ref()
+            .unwrap()
+            .build_profile_fields;
+        assert_eq!(fields["SHARED_FIELD"], "arkdown-config");
+        assert_eq!(fields["PRODUCT_ONLY"], true);
+        assert_eq!(fields["SCRIPT_ONLY"], 1);
+        assert_eq!(fields["CUSTOM_ONLY"], false);
     }
 
     /// Installed DevEco Studio 6.1.1 / hvigor 6.24.3:

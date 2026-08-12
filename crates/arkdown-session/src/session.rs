@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use arkdown_config::build_profile::BuildOptionProfileInventory;
+use arkdown_config::{
+    build_profile::BuildOptionProfileInventory, ArkdownCustomConfig,
+};
 
 use crate::artifacts::layout::ArtifactLayout;
 use crate::dependency_graph::snapshot::DependencyGraphSnapshot;
@@ -34,6 +36,9 @@ pub struct BuildSession {
     pub profiles: Arc<ProfileStore>,
     /// Project/module target and build-option models parsed once at startup.
     pub build_options: Arc<BuildOptionProfileInventory>,
+    /// Arkdown-owned project overrides loaded once from `arkdown.config.toml`
+    /// or its legacy JSON fallback.
+    pub custom_config: Arc<ArkdownCustomConfig>,
     /// Typed source, resource, dependency, and configuration watch inventory.
     pub watch_inputs: Arc<Vec<WatchPlanInput>>,
 }

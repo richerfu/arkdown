@@ -393,15 +393,18 @@ pub struct BundlePlan {
     /// Used by the plugin factory to decide whether to activate
     /// `HarDeduplicatePlugin` (HSP builds only).
     pub output_target: OutputTarget,
-    /// Override `shimMissingExports` from `arkdown.config.json`.
+    /// Override `shimMissingExports` from `arkdown.config.toml` (or its legacy
+    /// JSON fallback).
     ///
     /// When `Some`, overrides the bundler default (`true`).
     pub shim_missing_exports_override: Option<bool>,
-    /// Override tree-shaking from `arkdown.config.json`.
+    /// Override tree shaking from `arkdown.config.toml` (or its legacy JSON
+    /// fallback).
     ///
     /// When `Some`, overrides the build-mode-derived tree-shake setting.
     pub treeshake_override: Option<bool>,
-    /// Override the rolldown `context` string from `arkdown.config.json`.
+    /// Override the Rolldown `context` string from `arkdown.config.toml` (or
+    /// its legacy JSON fallback).
     ///
     /// When `Some`, overrides the default `"globalThis"`.
     pub context_override: Option<String>,

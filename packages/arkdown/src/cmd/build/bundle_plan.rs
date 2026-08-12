@@ -18,13 +18,12 @@ use arkdown::{
   BundleRuntimePackageInfo, BundleSourceMapPackageInfo, Bundler, HvigorHarImportees,
   LoaderResourceJoin, PreloadSystemSoTask, SourceMapPolicy,
 };
-use arkdown_config::build_profile::parse_api_version;
+use arkdown_config::{build_profile::parse_api_version, ArkdownCustomConfig};
 use arkdown_core::ArkdownConfig;
 use arkdown_path::{ArtifactPathSerializer, NormalizedOhmUrl};
 use arkdown_profile::{LoaderJson, PkgContextInfoOpt};
 use arkdown_session::PackageSnapshot;
 
-use super::custom_config::ArkdownCustomConfig;
 use super::layout::{ModuleBuildLayout, ModuleSourceCacheLayout, ModuleSourceLayout};
 
 // ---------------------------------------------------------------------------

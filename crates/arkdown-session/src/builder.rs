@@ -7,7 +7,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use arkdown_config::build_profile::BuildOptionProfileInventory;
-use arkdown_config::RuntimeContextOverrides;
+use arkdown_config::{ArkdownCustomConfigLoader, RuntimeContextOverrides};
 use arkdown_core::ArkdownConfig;
 
 use crate::fingerprint::{FingerprintError, InputFingerprintSet};
@@ -132,31 +132,43 @@ impl BuildSessionBuilder {
         // Phase 4: Build profile store.
         let profiles = ProfileStore::discover_project(&project)?;
 
-        // Phase 5: Parse project/module target and build-option models once.
-        let build_options = BuildOptionProfileInventory::load_with_runtime_overrides(
+        // Phase 5: Load Arkdown-owned project overrides once. Later stages
+        // consume this immutable snapshot rather than re-reading the file.
+        let custom_config = ArkdownCustomConfigLoader::new(&self.config.project_root)
+            .load()
+            .map_err(|error| BuildSessionError::Config(error.to_string()))?;
+
+        // Phase 6: Parse project/module target and build-option models once.
+        let build_options = BuildOptionProfileInventory::load_with_custom_config(
             &self.config.project_root,
             &self.config.modules,
             self.runtime_overrides.as_deref(),
+            &custom_config,
         )
         .map_err(|error| BuildSessionError::Config(error.to_string()))?;
 
-        // Phase 6: Build input fingerprints.
-        let fingerprints = InputFingerprintSet::build_with_runtime_overrides(
+        // Phase 7: Build input fingerprints.
+        let fingerprints = InputFingerprintSet::build_with_custom_config(
             &self.config,
             &project,
             &profiles,
             &sdk,
             self.runtime_overrides.as_deref(),
+            &custom_config,
         )?;
 
         Ok(BuildSession {
-            watch_inputs: Arc::new(WatchPlanInput::from_project(&project)),
+            watch_inputs: Arc::new(WatchPlanInput::from_project(
+                &project,
+                custom_config.source_path(),
+            )),
             project: Arc::new(project),
             sdk: Arc::new(sdk),
             paths: Arc::new(paths),
             fingerprints: Arc::new(fingerprints),
             profiles: Arc::new(profiles),
             build_options: Arc::new(build_options),
+            custom_config: Arc::new(custom_config),
         })
     }
 }

@@ -1,6 +1,6 @@
 //! Narrow plan input for the filesystem watch stage.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::dependency_graph::snapshot::DependencyNodeType;
 use crate::paths::ProjectPathLayout;
@@ -56,7 +56,7 @@ impl WatchPlanInput {
     /// Rollup watch graph observes source dependencies as compilation inputs.
     /// Configuration files are recorded explicitly instead of recursively
     /// watching the project root and observing generated build output.
-    pub fn from_project(project: &ProjectSnapshot) -> Vec<Self> {
+    pub fn from_project(project: &ProjectSnapshot, custom_config_path: Option<&Path>) -> Vec<Self> {
         project
             .module_order
             .iter()
@@ -65,6 +65,9 @@ impl WatchPlanInput {
                 let mut source_roots = module.source_roots.clone();
                 let mut resource_roots = module.resource_roots.clone();
                 let mut config_files = Self::project_config_files(project);
+                if let Some(path) = custom_config_path {
+                    config_files.push(path.to_path_buf());
+                }
 
                 Self::push_file(&mut config_files, module.module_json_path.as_ref());
                 Self::push_file(&mut config_files, module.package_path.as_ref());

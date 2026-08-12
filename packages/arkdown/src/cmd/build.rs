@@ -12,7 +12,6 @@ mod code_resource;
 mod code_resource_tests;
 pub mod coordinator;
 mod coverage_instrument;
-mod custom_config;
 mod generate_har_declarations;
 #[cfg(test)]
 mod generate_har_declarations_tests;
@@ -33,4 +32,3 @@ mod tests;
 mod watch_stage;
 
 pub use args::{BuildArgs, BuildCommand};
-

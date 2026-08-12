@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-use arkdown_config::RuntimeContextOverrides;
+use arkdown_config::{ArkdownCustomConfig, RuntimeContextOverrides};
 use arkdown_core::ArkdownConfig;
 use arkdown_path::{lexical_normalize, to_slash};
 use rayon::prelude::*;
@@ -131,9 +131,35 @@ impl InputFingerprintSet {
         sdk: &SdkSnapshot,
         runtime_overrides: Option<&RuntimeContextOverrides>,
     ) -> Result<Self, FingerprintError> {
+        Self::build_with_custom_config(
+            config,
+            project,
+            profiles,
+            sdk,
+            runtime_overrides,
+            &ArkdownCustomConfig::default(),
+        )
+    }
+
+    /// Build fingerprints including the selected Arkdown-owned configuration
+    /// file. Its content affects generated BuildProfile constants and bundler
+    /// options, so it belongs in the global configuration fingerprint.
+    pub fn build_with_custom_config(
+        config: &ArkdownConfig,
+        project: &ProjectSnapshot,
+        profiles: &ProfileStore,
+        sdk: &SdkSnapshot,
+        runtime_overrides: Option<&RuntimeContextOverrides>,
+        custom_config: &ArkdownCustomConfig,
+    ) -> Result<Self, FingerprintError> {
         let project_inputs = ProjectFingerprintInventory::new(project).build()?;
         Ok(Self {
-            config: Self::compute_config_hash(config, project, runtime_overrides)?,
+            config: Self::compute_config_hash(
+                config,
+                project,
+                runtime_overrides,
+                custom_config.source_path(),
+            )?,
             package_graph: Self::compute_package_hash(project, runtime_overrides)?,
             profiles: profiles.fingerprint(),
             resources: project_inputs.resources,
@@ -153,6 +179,7 @@ impl InputFingerprintSet {
         config: &ArkdownConfig,
         project: &ProjectSnapshot,
         runtime_overrides: Option<&RuntimeContextOverrides>,
+        custom_config_path: Option<&Path>,
     ) -> Result<Fingerprint, FingerprintError> {
         let mut builder = FingerprintBuilder::new("config", &project.root);
         let encoded = serde_json::to_vec(config).map_err(|source| FingerprintError::Serialize {
@@ -170,6 +197,9 @@ impl InputFingerprintSet {
             builder.add_value("runtime_context_overrides", &encoded);
         }
         builder.add_file_if_present(&project.root.join("build-profile.json5"))?;
+        if let Some(path) = custom_config_path {
+            builder.add_file(path)?;
+        }
         builder
             .add_file_if_present(&ProjectPathLayout::new(&project.root).app_scope_app_json5())?;
         for module in project.modules.values() {

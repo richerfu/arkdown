@@ -131,6 +131,23 @@ npx arkdown build --project ./my-app --target hap --mode debug
 or `--build-target-name` to select a more specific build configuration. Run `npx arkdown build --help` for
 the complete option list.
 
+### BuildProfile overrides
+
+Project-wide compile-time constants can be declared in `arkdown.config.toml`:
+
+```toml
+[build-profile]
+FEATURE_FLAG = true
+API_HOST = "https://example.com"
+RETRY_COUNT = 3
+```
+
+These values override same-named fields from the effective
+`buildOption.arkOptions.buildProfileFields` configuration after product,
+module, target, and build-script options are merged. Values must be strings,
+numbers, or booleans. The legacy `arkdown.config.json` file is used only when
+`arkdown.config.toml` is absent.
+
 ### Node.js API
 
 ```js
