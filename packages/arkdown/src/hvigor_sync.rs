@@ -24,7 +24,6 @@ pub struct HvigorCacheStateRequest {
   configured_cache_dir: Option<PathBuf>,
   #[serde(default)]
   sdk_path: Option<PathBuf>,
-  home_dir: PathBuf,
   #[serde(default)]
   compile_sdk_version: Option<String>,
 }
@@ -120,7 +119,7 @@ impl HvigorCacheState {
 
   pub fn new(request: HvigorCacheStateRequest) -> anyhow::Result<Self> {
     let cache_root = Self::cache_root_for(&request)?;
-    let sdk_inventory = HvigorSdkInventory::new(request.sdk_path.as_deref(), &request.home_dir)?;
+    let sdk_inventory = HvigorSdkInventory::new(request.sdk_path.as_deref())?;
     Ok(Self {
       request,
       cache_root,
@@ -236,7 +235,7 @@ pub(crate) struct HvigorSdkInventory {
 }
 
 impl HvigorSdkInventory {
-  pub(crate) fn new(explicit_sdk_path: Option<&Path>, home_dir: &Path) -> anyhow::Result<Self> {
+  pub(crate) fn new(explicit_sdk_path: Option<&Path>) -> anyhow::Result<Self> {
     let mut roots = Vec::new();
     if let Some(explicit_sdk_path) = explicit_sdk_path {
       Self::add_root(&mut roots, explicit_sdk_path)?;
@@ -250,61 +249,6 @@ impl HvigorSdkInventory {
     ] {
       if let Some(value) = std::env::var_os(variable) {
         Self::add_root(&mut roots, Path::new(&value))?;
-      }
-    }
-    if cfg!(target_os = "macos") {
-      for candidate in [
-        PathBuf::from("/Applications/DevEco-Studio.app/Contents/sdk"),
-        PathBuf::from("/Applications/DevEco Studio.app/Contents/sdk"),
-        home_dir.join("Applications/DevEco-Studio.app/Contents/sdk"),
-        home_dir.join("Library/Huawei/Sdk"),
-        home_dir.join("Library/OpenHarmony/Sdk"),
-      ] {
-        Self::add_root(&mut roots, &candidate)?;
-      }
-    } else if cfg!(target_os = "windows") {
-      let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| {
-          std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .map(|path| path.join("Local"))
-        });
-      if let Some(local_app_data) = local_app_data {
-        for candidate in [
-          local_app_data.join("Huawei").join("Sdk"),
-          local_app_data
-            .join("Programs")
-            .join("Huawei")
-            .join("DevEco Studio")
-            .join("sdk"),
-        ] {
-          Self::add_root(&mut roots, &candidate)?;
-        }
-      }
-      for variable in ["PROGRAMFILES", "ProgramW6432"] {
-        if let Some(program_files) = std::env::var_os(variable).map(PathBuf::from) {
-          for candidate in [
-            program_files
-              .join("Huawei")
-              .join("DevEco Studio")
-              .join("sdk"),
-            program_files.join("DevEco Studio").join("sdk"),
-          ] {
-            Self::add_root(&mut roots, &candidate)?;
-          }
-        }
-      }
-    } else {
-      for candidate in [
-        home_dir.join("DevEco-Studio/sdk"),
-        home_dir.join("deveco-studio/sdk"),
-        PathBuf::from("/opt/DevEco-Studio/sdk"),
-        PathBuf::from("/opt/deveco-studio/sdk"),
-        PathBuf::from("/opt/huawei/sdk"),
-      ] {
-        Self::add_root(&mut roots, &candidate)?;
       }
     }
     Ok(Self { roots })
@@ -491,7 +435,6 @@ impl HvigorSyncModelWriter {
       project_root: request.cache.project_root.clone(),
       configured_cache_dir: request.cache.configured_cache_dir.clone(),
       sdk_path: request.cache.sdk_path.clone(),
-      home_dir: request.cache.home_dir.clone(),
       compile_sdk_version: request.cache.compile_sdk_version.clone(),
     })?;
     let selected_node_names = request

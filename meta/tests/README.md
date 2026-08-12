@@ -50,7 +50,7 @@ cases derived from the installed IDE source.
 Clone the fixture:
 
 ```bash
-git clone https://github.com/susns/HmosWorld tests/fixtures/hmosworld
+git clone https://github.com/susns/HmosWorld tests/fixtures/hmosworld/HMOSWorld
 ```
 
 ## Origin Behavioral Parity

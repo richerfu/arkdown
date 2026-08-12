@@ -289,7 +289,6 @@ struct HvigorCleanRequest {
   configured_build_dir: Option<String>,
   #[serde(default)]
   sdk_path: Option<PathBuf>,
-  home_dir: PathBuf,
   #[serde(default)]
   project_profile: Value,
   #[serde(default)]
@@ -328,9 +327,8 @@ impl HvigorCleanRunner {
     let toolchain = if self.request.project_task {
       None
     } else {
-      let inventory =
-        HvigorSdkInventory::new(self.request.sdk_path.as_deref(), &self.request.home_dir)
-          .map_err(|error| HvigorMaintenanceError::SdkInventory(format!("{error:#}")))?;
+      let inventory = HvigorSdkInventory::new(self.request.sdk_path.as_deref())
+        .map_err(|error| HvigorMaintenanceError::SdkInventory(format!("{error:#}")))?;
       Some(NativeSdkToolchain::for_clean(inventory.native_ninja_tool()))
     };
     let stage = match toolchain.as_ref() {

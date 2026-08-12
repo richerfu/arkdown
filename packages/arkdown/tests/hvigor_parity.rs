@@ -117,7 +117,6 @@ fn minimal_hap_hvigor_parity_report() {
   );
 }
 
-#[test]
 /// Local unit-test chain (`hvigorw test`) parity: generated testability
 /// templates, TestAbility injection, loader/main_pages override, source maps
 /// and compile inputs, compared against real hvigor 6.24.3. The fixture
@@ -144,6 +143,7 @@ fn minimal_hap_ohos_test_hvigor_parity_report() {
   );
 }
 
+#[test]
 fn minimal_har_hvigor_parity_report() {
   run_parity_report_test(
     "tests/fixtures/minimal-har",
@@ -635,6 +635,7 @@ fn parity_referenced_fixtures_exist() {
   let repo_root = repo_root();
   for fixture in [
     "tests/fixtures/minimal-hap",
+    "tests/fixtures/minimal-hap-with-bc-har",
     "tests/fixtures/minimal-har",
     "tests/fixtures/minimal-hsp",
     "tests/fixtures/component-v2-lifecycle-hap",

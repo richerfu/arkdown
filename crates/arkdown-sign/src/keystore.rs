@@ -793,13 +793,16 @@ mod tests {
     #[test]
     #[ignore = "requires ~/.ohos/config signing materials on disk"]
     fn test_load_deveco_pbes2_p12() {
-        let p12_path = "/Users/ranger/.ohos/config/default_minimal-hap_YwKQ1z12UQE8RNArp0QtmNHBdgynkTMsX5TAEv24uWE=.p12";
-        let password = "BLvkWvzSyG4"; // decrypted from DevEco format
-        if !std::path::Path::new(p12_path).exists() {
+        let Some(p12_path) = std::env::var_os("ARKDOWN_TEST_DEVECO_P12") else {
             return;
-        }
+        };
+        let Ok(password) = std::env::var("ARKDOWN_TEST_DEVECO_P12_PASSWORD") else {
+            return;
+        };
+        let alias = std::env::var("ARKDOWN_TEST_DEVECO_P12_ALIAS")
+            .unwrap_or_else(|_| "debugKey".to_string());
         let p12_bytes = std::fs::read(p12_path).unwrap();
-        let key = SigningKey::from_pkcs12(&p12_bytes, password, "debugKey", password)
+        let key = SigningKey::from_pkcs12(&p12_bytes, &password, &alias, &password)
             .expect("should load PBES2 p12");
         assert!(!key.private_key_der.is_empty());
         assert!(!key.cert_chain.is_empty());
