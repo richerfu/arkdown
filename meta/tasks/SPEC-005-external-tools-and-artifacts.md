@@ -13,7 +13,7 @@ with typed Rust plans and runners.
 | Ark bytecode | `es2abc`, SDK Ark compiler, protoBin/cache-file handling | `packages/arkdown::cmd::build::bytecode` |
 | Resources | `restool` and SDK resource compiler/linker binaries | `arkdown-resource` |
 | Packaging | SDK package tools or Rust archive writer where selected | `arkdown-pack` |
-| Signing | SDK signing/verification binaries | `arkdown-sign` |
+| Signing | Published Rust `hapsigner` backend | `arkdown-sign` |
 | Native build | CMake, Ninja, LLVM strip, binxo, native library checks | `packages/arkdown::cmd::native_build` |
 | Device/test | external test/device runners where required | `packages/arkdown` mode runners |
 
@@ -113,10 +113,14 @@ selected and verified.
 `arkdown-sign` must own:
 
 - sign plan validation
-- command construction
-- signature file outputs
+- build-profile and DevEco password adaptation
+- sequential signing-stage orchestration
 - signed package outputs
 - remote HSP signing variants
+
+`hapsigner` owns keystore parsing, signature algorithms, CMS/signing-block
+encoding, archive alignment, internal code signing, verification, and atomic
+output replacement. `arkdown-sign` must not duplicate those format internals.
 
 Archive and signing order must be sequential or have a deterministic final
 merge.

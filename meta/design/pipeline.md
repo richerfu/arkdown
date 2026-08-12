@@ -420,7 +420,10 @@ HAP/HSP/HAR are OHOS-specific archive formats. HAR is a library archive containi
 
 ### hvigor behavior
 
-`SignHap` task uses the Huawei signing tool (hap-sign-tool) to sign the HAP. Signing credentials come from `build-profile.json5#app.signingConfigs`.
+Hvigor's `SignHap` task uses `hap-sign-tool`. Arkdown maps credentials from
+`build-profile.json5#app.signingConfigs` into the published Rust `hapsigner`
+backend through `arkdown-sign`; no Java signer or copied signing-format
+implementation is used.
 
 ---
 
@@ -458,7 +461,7 @@ ProcessCompiledResources
 PackageHap             ──── zip assembly
     │
     ▼
-SignHap                ──── hap-sign-tool
+SignHap                ──── arkdown-sign → hapsigner
     │
     ▼
 AssembleHap            ──── hook task (entry point for `hvigorw assembleHap`)
@@ -510,4 +513,3 @@ All dependency classification should consume `DependencyGraphSnapshot` from
 
 Until this migration is complete, the initial scanner is acceptable for parity.
 The `DependencyGraphSnapshot` API is already stable; only the call sites need updating.
-

@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use arkdown_core::SigningConfig;
+use hapsigner::DEFAULT_COMPATIBLE_VERSION;
 
 use crate::error::SignError;
-use crate::plan::SigningPassword;
+use crate::plan::{SignPlan, SigningMaterial, SigningPassword};
 
+/// Maps Arkdown's resolved build-profile entry to the hapsigner input plan.
 pub(crate) struct SigningConfigMaterial<'a> {
     config: &'a SigningConfig,
 }
@@ -14,42 +16,46 @@ impl<'a> SigningConfigMaterial<'a> {
         Self { config }
     }
 
-    pub(crate) fn cert_path(&self) -> &Path {
-        &self.config.cert_path
+    pub(crate) fn plan(&self, input: &Path, output: &Path) -> Result<SignPlan, SignError> {
+        let material_dir = self.material_dir();
+        let material = SigningMaterial {
+            keystore_path: self.config.store_file.clone(),
+            key_alias: self.config.key_alias.clone(),
+            store_password: self.password(
+                "ARKDOWN_STORE_PASSWORD",
+                &self.config.store_password,
+                &material_dir,
+            )?,
+            key_password: self.password(
+                "ARKDOWN_KEY_PASSWORD",
+                &self.config.key_password,
+                &material_dir,
+            )?,
+            profile_path: self.config.profile_path.clone(),
+            cert_path: self.config.cert_path.clone(),
+            sign_alg: self.config.sign_alg.clone(),
+            profile_signed: true,
+        };
+        Ok(SignPlan::new(
+            input.to_path_buf(),
+            output.to_path_buf(),
+            material,
+            DEFAULT_COMPATIBLE_VERSION,
+        ))
     }
 
-    pub(crate) fn key_alias(&self) -> &str {
-        &self.config.key_alias
-    }
-
-    pub(crate) fn key_password(&self) -> Result<String, SignError> {
-        self.resolve_password("ARKDOWN_KEY_PASSWORD", &self.config.key_password)
-    }
-
-    pub(crate) fn profile_path(&self) -> &Path {
-        &self.config.profile_path
-    }
-
-    pub(crate) fn sign_alg(&self) -> &str {
-        &self.config.sign_alg
-    }
-
-    pub(crate) fn store_file(&self) -> &Path {
-        &self.config.store_file
-    }
-
-    pub(crate) fn store_password(&self) -> Result<String, SignError> {
-        self.resolve_password("ARKDOWN_STORE_PASSWORD", &self.config.store_password)
-    }
-
-    fn resolve_password(&self, env_var: &str, ciphertext: &str) -> Result<String, SignError> {
+    fn password(
+        &self,
+        env_var: &str,
+        configured: &str,
+        material_dir: &Path,
+    ) -> Result<SigningPassword, SignError> {
         match std::env::var(env_var) {
-            Ok(password) => Ok(password),
-            Err(std::env::VarError::NotPresent) => SigningPassword::Encrypted {
-                ciphertext: ciphertext.to_owned(),
-                material_dir: self.material_dir(),
-            }
-            .resolve(),
+            Ok(password) => Ok(SigningPassword::plaintext(password)),
+            Err(std::env::VarError::NotPresent) => Ok(SigningPassword::encrypted(
+                configured,
+                material_dir.to_path_buf(),
+            )),
             Err(std::env::VarError::NotUnicode(_)) => {
                 Err(SignError::Config(format!("{env_var} must be valid UTF-8")))
             }

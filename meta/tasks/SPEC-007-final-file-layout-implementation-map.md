@@ -552,21 +552,17 @@ crates/arkdown-pack/src/
 crates/arkdown-sign/src/
   lib.rs
   plan.rs
-  runner.rs
-  command.rs
-  verify.rs
-  remote_hsp.rs
-  output.rs
-  diagnostics.rs
+  backend.rs
+  config_material.rs
   error.rs
 ```
 
 - `plan.rs`: sign plan and key/profile inputs.
-- `runner.rs`: sign stage runner.
-- `command.rs`: SDK signing command plan.
-- `verify.rs`: verification plan/runner.
-- `remote_hsp.rs`: remote HSP signing variants.
-- `output.rs`: signed artifact inventory.
+- `backend.rs`: sequential stage runner delegating application formats to the
+  published `hapsigner` crate.
+- `config_material.rs`: build-profile and DevEco password adaptation.
+- Signing format internals and verification live in `hapsigner`; they must not
+  be copied into this crate.
 
 ## `arkdown-obfuscate`
 

@@ -23,7 +23,6 @@ use arkdown_profile::{
 };
 use arkdown_session::{BuildSession, DuplicateDependencyValidator, SdkToolKind};
 use arkdown_sign::SignBackendRunner;
-use rayon::prelude::*;
 
 use crate::cmd::native_build::ProjectDebugSymbolCollector;
 
@@ -590,13 +589,13 @@ impl AppBuildCoordinator {
     let signed = tokio::task::spawn_blocking(move || {
       fs_err::create_dir_all(&signed_dir)?;
       inputs
-        .par_iter()
+        .iter()
         .map(|input| {
           let file_name = input
             .file_name()
             .context("embedded APP package has no filename")?;
           let output = signed_dir.join(file_name);
-          SignBackendRunner::rust().sign_or_skip(input, &output, Some(&config))?;
+          SignBackendRunner::new().sign_or_skip(input, &output, Some(&config))?;
           Ok(output)
         })
         .collect::<Result<Vec<_>>>()
@@ -621,7 +620,7 @@ impl AppBuildCoordinator {
     let worker_signed = signed.clone();
     let normal_signing_config = signing_config.clone();
     tokio::task::spawn_blocking(move || {
-      SignBackendRunner::rust().sign_or_skip(
+      SignBackendRunner::new().sign_or_skip(
         &worker_unsigned,
         &worker_signed,
         Some(&normal_signing_config),
@@ -643,7 +642,7 @@ impl AppBuildCoordinator {
       let worker_unsigned = all_unsigned;
       let worker_signed = all_signed.clone();
       tokio::task::spawn_blocking(move || {
-        SignBackendRunner::rust().sign_or_skip(
+        SignBackendRunner::new().sign_or_skip(
           &worker_unsigned,
           &worker_signed,
           Some(&worker_config),
