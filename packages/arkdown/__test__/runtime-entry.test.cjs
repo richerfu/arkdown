@@ -35,6 +35,7 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
     parseHvigorJsonText: actualNativeBinding.parseHvigorJsonText,
     mergeHvigorConfig: actualNativeBinding.mergeHvigorConfig,
     planBuildScriptRuntime: actualNativeBinding.planBuildScriptRuntime,
+    prepareHvigorPluginWorkspace: actualNativeBinding.prepareHvigorPluginWorkspace,
     prepareNativeBuildConfig: actualNativeBinding.prepareNativeBuildConfig,
     runHvigorClean: actualNativeBinding.runHvigorClean,
     runHvigorPrune: actualNativeBinding.runHvigorPrune,
