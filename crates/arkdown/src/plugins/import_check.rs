@@ -284,4 +284,24 @@ mod tests {
             "oh_modules paths are legal only when their package root comes from the dependency graph"
         );
     }
+
+    #[test]
+    fn allows_sibling_target_source_sets_below_the_hvigor_module_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_root = tmp.path().join("entry");
+        let importer = module_root.join("src/main/ets/pages/File.ets");
+        let importee = module_root.join("src/ohosTest/ets/test/utils/Reflection.ets");
+
+        let violation = ImportCheckPlugin::check_boundary(
+            &module_root,
+            &[],
+            importer.to_str().expect("utf8 importer"),
+            importee.to_str().expect("utf8 importee"),
+        );
+
+        assert!(
+            violation.is_none(),
+            "Hvigor allModulePaths treats src/main and src/ohosTest as source sets of one module"
+        );
+    }
 }

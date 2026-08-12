@@ -79,7 +79,7 @@ impl SigningMaterial {
     pub fn load(&self) -> Result<HapsignerSigningMaterial, SignError> {
         let algorithm = SigningAlgorithm::from_str(&self.sign_alg)?;
         self.validate_paths()?;
-        let material = FileSigningMaterial {
+        let mut material = FileSigningMaterial {
             keystore_path: self.keystore_path.clone(),
             profile_path: self.profile_path.clone(),
             certificate_path: self.cert_path.clone(),
@@ -89,7 +89,26 @@ impl SigningMaterial {
             profile_signed: self.profile_signed,
             algorithm,
         };
-        Ok(material.load()?)
+        match material.load() {
+            Ok(loaded) => Ok(loaded),
+            Err(error) => {
+                let replacement = match &error {
+                    hapsigner::SignError::KeyAliasNotFound { available, .. } => {
+                        KeystoreAliasSelector::new(&self.key_alias).select(available)
+                    }
+                    _ => None,
+                };
+                let Some(replacement) = replacement else {
+                    return Err(error.into());
+                };
+                // Hvigor forwards `keyAlias` unchanged to the Java signing
+                // tool. Java's JKS/PKCS#12 KeyStore providers resolve aliases
+                // case-insensitively; published hapsigner 0.2 exposes the
+                // canonical stored alias and currently compares it exactly.
+                material.key_alias = replacement.into_boxed_str();
+                Ok(material.load()?)
+            }
+        }
     }
 
     fn validate_paths(&self) -> Result<(), SignError> {
@@ -106,6 +125,25 @@ impl SigningMaterial {
             }
         }
         Ok(())
+    }
+}
+
+struct KeystoreAliasSelector<'a> {
+    requested: &'a str,
+}
+
+impl<'a> KeystoreAliasSelector<'a> {
+    fn new(requested: &'a str) -> Self {
+        Self { requested }
+    }
+
+    fn select(&self, available: &[String]) -> Option<String> {
+        let requested = self.requested.to_lowercase();
+        let mut matching = available
+            .iter()
+            .filter(|alias| alias.to_lowercase() == requested);
+        let selected = matching.next()?.clone();
+        matching.next().is_none().then_some(selected)
     }
 }
 
@@ -323,5 +361,25 @@ impl<'a> DevEcoPasswordResolver<'a> {
                 "DevEco AES-GCM decryption failed: wrong key or corrupt material".into(),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KeystoreAliasSelector;
+
+    #[test]
+    fn java_keystore_alias_lookup_uses_the_unique_case_insensitive_alias() {
+        let aliases = vec!["debugkey".to_string(), "release".to_string()];
+        assert_eq!(
+            KeystoreAliasSelector::new("debugKey").select(&aliases),
+            Some("debugkey".to_string())
+        );
+    }
+
+    #[test]
+    fn java_keystore_alias_lookup_rejects_ambiguous_case_variants() {
+        let aliases = vec!["debugkey".to_string(), "DEBUGKEY".to_string()];
+        assert_eq!(KeystoreAliasSelector::new("debugKey").select(&aliases), None);
     }
 }

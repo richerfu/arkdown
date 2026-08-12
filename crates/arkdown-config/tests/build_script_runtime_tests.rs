@@ -115,6 +115,83 @@ fn runtime_planner_selects_targets_and_merges_build_options_in_rust() {
 }
 
 #[test]
+fn runtime_planner_excludes_ohos_test_from_hvigor_implicit_all() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    std::fs::create_dir_all(&module_root).expect("create module");
+    let plan = BuildScriptRuntimePlanner::new(BuildScriptRuntimePlanRequest {
+        project_root: temp.path().to_path_buf(),
+        project_profile: json!({
+            "app": { "products": [{ "name": "default" }] },
+            "modules": [{
+                "name": "entry",
+                "srcPath": "./entry",
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }]
+        }),
+        modules: vec![BuildScriptRuntimeModulePlanRequest {
+            name: "entry".to_string(),
+            root: module_root,
+            descriptor: json!({
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }),
+            build_profile: json!({
+                "targets": [{ "name": "default" }, { "name": "ohosTest" }]
+            }),
+            build_script_override: None,
+        }],
+        product_name: "default".to_string(),
+        build_mode_name: "debug".to_string(),
+        module_selection: None,
+        build_target_name: None,
+    })
+    .plan()
+    .expect("plan implicit targets");
+
+    assert_eq!(plan.modules[0].selected_targets.len(), 1);
+    assert_eq!(plan.modules[0].selected_targets[0]["name"], "default");
+    assert!(plan.modules[0].build_options.contains_key("ohosTest"));
+}
+
+#[test]
+fn runtime_planner_selects_module_ohos_test_missing_from_project_target_mapping() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    std::fs::create_dir_all(&module_root).expect("create module");
+    let plan = BuildScriptRuntimePlanner::new(BuildScriptRuntimePlanRequest {
+        project_root: temp.path().to_path_buf(),
+        project_profile: json!({
+            "app": { "products": [{ "name": "default" }] },
+            "modules": [{
+                "name": "entry",
+                "srcPath": "./entry",
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }]
+        }),
+        modules: vec![BuildScriptRuntimeModulePlanRequest {
+            name: "entry".to_string(),
+            root: module_root,
+            descriptor: json!({
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }),
+            build_profile: json!({
+                "targets": [{ "name": "default" }, { "name": "ohosTest" }]
+            }),
+            build_script_override: None,
+        }],
+        product_name: "default".to_string(),
+        build_mode_name: "debug".to_string(),
+        module_selection: None,
+        build_target_name: Some("ohosTest".to_string()),
+    })
+    .plan()
+    .expect("plan explicit ohosTest target");
+
+    assert_eq!(plan.modules[0].selected_targets.len(), 1);
+    assert_eq!(plan.modules[0].selected_targets[0]["name"], "ohosTest");
+}
+
+#[test]
 fn runtime_planner_returns_typed_unknown_target_diagnostic() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("entry");

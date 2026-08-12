@@ -106,6 +106,10 @@ pub struct PluginFactoryInput {
     pub sdk_kits_dirs: Vec<PathBuf>,
     /// SDK `arkts/` directories for `@arkts.*` resolution.
     pub sdk_arkts_dirs: Vec<PathBuf>,
+    /// Ordered non-package roots from hvigor
+    /// `arkts-pack.getResolveModules()`: active `src/main`, then the generated
+    /// profile directory.
+    pub resolve_source_roots: Vec<PathBuf>,
     /// All module roots in the project: `(module_name, module_root)`.
     ///
     /// Used to build the `RolldownEtsTransformPlan::module_roots` list.
@@ -183,6 +187,7 @@ impl PluginFactoryInput {
             sdk_api_dirs: vec![],
             sdk_kits_dirs: vec![],
             sdk_arkts_dirs: vec![],
+            resolve_source_roots: vec![plan.input.module_root.clone()],
             all_module_roots: vec![(
                 plan.input.module_name.clone(),
                 plan.input.module_root.clone(),
@@ -676,8 +681,9 @@ impl<'a> PluginFactory<'a> {
             sdk_api_dirs: self.input.sdk_api_dirs,
             sdk_kits_dirs: self.input.sdk_kits_dirs,
             sdk_arkts_dirs: self.input.sdk_arkts_dirs,
+            source_roots: self.input.resolve_source_roots,
             module_paths: vec![
-                module_root.join("oh_modules"),
+                package_module_root.join("oh_modules"),
                 project_root.join("oh_modules"),
             ],
             pkg_name_to_pkg_info: self.input.pkg_name_to_pkg_info,
@@ -696,7 +702,12 @@ impl<'a> PluginFactory<'a> {
         // ── 4. ImportCheckPlugin (hvigor: sensitiveCheck) ────────────────────
         let import_check_plugin: SharedPluginable =
             Arc::new(ImportCheckPlugin::with_allowed_package_roots(
-                module_root.clone(),
+                // `import-check-plugin.ts::getBelongModulePath` compares
+                // resolved files with `allModulePaths`, whose entries are
+                // OHOS package roots. `loader.json#moduleRootPath` is only the
+                // active `src/main` source root and would incorrectly reject
+                // sibling target source sets such as `src/ohosTest`.
+                package_module_root.clone(),
                 self.input.allowed_package_roots,
             ));
 
