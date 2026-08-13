@@ -71,6 +71,7 @@ impl ModuleJsonWriter {
             output_path,
             resource_ids,
             None,
+            None,
         )
     }
 
@@ -80,6 +81,7 @@ impl ModuleJsonWriter {
         output_path: &Path,
         resource_ids: Option<&FxHashMap<String, u32>>,
         dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
+        dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<(), ArkdownError> {
         Self::write_with_optional_dependency_graph(
             manifest,
@@ -87,6 +89,7 @@ impl ModuleJsonWriter {
             output_path,
             resource_ids,
             Some(dependency_graph),
+            dependency_profile_roots,
         )
     }
 
@@ -96,6 +99,7 @@ impl ModuleJsonWriter {
         output_path: &Path,
         resource_ids: Option<&FxHashMap<String, u32>>,
         dependency_graph: Option<&crate::dependency_graph::LocalDependencyGraph>,
+        dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<(), ArkdownError> {
         let app_json5_fields = Self::read_app_json5_fields(config)?;
         let project_multi_projects = Self::read_project_multi_projects(config);
@@ -132,6 +136,7 @@ impl ModuleJsonWriter {
             config,
             raw_module5.as_ref(),
             dependency_graph,
+            dependency_profile_roots,
         )?;
         let has_insight_intent = Self::read_module_has_insight_intent(raw_module5.as_ref());
 
@@ -915,6 +920,7 @@ impl ModuleJsonWriter {
         config: &ArkdownConfig,
         raw_module5: Option<&serde_json::Value>,
         dependency_graph: Option<&crate::dependency_graph::LocalDependencyGraph>,
+        dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<DependencyProfileMerge, ArkdownError> {
         if matches!(manifest.module_type, OhosModuleType::Har) {
             return Ok(DependencyProfileMerge::default());
@@ -928,8 +934,11 @@ impl ModuleJsonWriter {
             return Ok(DependencyProfileMerge::default());
         };
 
-        let dependency_profiles =
-            Self::read_dependency_module_profiles(&module_cfg.src_path, &config.project_root)?;
+        let dependency_profiles = Self::read_dependency_module_profiles(
+            &module_cfg.src_path,
+            &config.project_root,
+            dependency_profile_roots,
+        )?;
         let compatible_api = parse_api_version(&config.product.compatible_sdk_version)
             .unwrap_or(config.sdk_config.compile_api_version);
 
@@ -1060,10 +1069,18 @@ impl ModuleJsonWriter {
     fn read_dependency_module_profiles(
         module_root: &Path,
         project_root: &Path,
+        dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<Vec<DependencyModuleProfile>, ArkdownError> {
         let mut profiles = Vec::new();
-        for package_dir in Self::collect_dependency_package_dirs(module_root, project_root)? {
-            if let Some(profile) = Self::read_dependency_module_profile(&package_dir) {
+        let discovered_roots;
+        let package_dirs = if let Some(roots) = dependency_profile_roots {
+            roots
+        } else {
+            discovered_roots = Self::collect_dependency_package_dirs(module_root, project_root)?;
+            &discovered_roots
+        };
+        for package_dir in package_dirs {
+            if let Some(profile) = Self::read_dependency_module_profile(package_dir) {
                 profiles.push(profile);
             }
         }
