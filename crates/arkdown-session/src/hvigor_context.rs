@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::dependency_graph::builder::DependencyGraphBuilder;
+use crate::dependency_graph::builder::{DependencyGraphBuilder, DependencySnapshotInventory};
 use crate::dependency_graph::snapshot::{
     DependencyGraphSnapshot, DependencyNodeSnapshot, DependencyNodeType,
 };
@@ -93,6 +93,7 @@ impl HvigorContextInspector {
         let profile = self.project_profile(&project_root)?;
         let modules = self.module_descriptors(&project_root, &profile);
         let remote_hsps = RemoteHspInventory::discover(&project_root, &modules)?;
+        let mut dependency_inventory = DependencySnapshotInventory::default();
 
         let project_graph = DependencyGraphBuilder::new(
             self.project_name(&project_root)?,
@@ -100,7 +101,7 @@ impl HvigorContextInspector {
             project_root.clone(),
         )
         .with_runtime_overrides(Arc::clone(&self.runtime_overrides))
-        .build();
+        .build_with_inventory(&mut dependency_inventory);
         let project =
             self.context_for_graph(&project_graph, &project_root, &project_root, &remote_hsps);
 
@@ -112,7 +113,7 @@ impl HvigorContextInspector {
                 module.root.clone(),
             )
             .with_runtime_overrides(Arc::clone(&self.runtime_overrides))
-            .build();
+            .build_with_inventory(&mut dependency_inventory);
             module_contexts.insert(
                 module.root.clone(),
                 self.context_for_graph(&graph, &module.root, &project_root, &remote_hsps),

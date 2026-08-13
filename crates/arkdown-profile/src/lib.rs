@@ -91,7 +91,8 @@ pub use plan::{
     ProfileProcessPlan,
 };
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -114,6 +115,7 @@ pub struct ProfileDependencyContext {
     graph: dependency_graph::LocalDependencyGraph,
     hsp_dependencies: Vec<arkdown_core::HspDependency>,
     app_version_code: u64,
+    dependency_profile_roots: Option<Vec<PathBuf>>,
 }
 
 impl ProfileDependencyContext {
@@ -128,6 +130,7 @@ impl ProfileDependencyContext {
             graph,
             hsp_dependencies,
             app_version_code,
+            dependency_profile_roots: None,
         }
     }
 
@@ -137,6 +140,12 @@ impl ProfileDependencyContext {
         session_graph: &arkdown_session::DependencyGraphSnapshot,
         app_version_code: u64,
     ) -> Self {
+        let dependency_profile_roots = DependencyProfileRootInventory::new(
+            &module_cfg.src_path,
+            &config.project_root,
+            session_graph,
+        )
+        .collect();
         let mut graph = dependency_graph::LocalDependencyGraph {
             nodes: indexmap::IndexMap::new(),
         };
@@ -189,6 +198,7 @@ impl ProfileDependencyContext {
             graph,
             hsp_dependencies,
             app_version_code,
+            dependency_profile_roots: Some(dependency_profile_roots),
         };
         context.apply_root_runtime_only_packages(config, module_cfg);
         context
@@ -196,6 +206,10 @@ impl ProfileDependencyContext {
 
     pub(crate) fn graph(&self) -> &dependency_graph::LocalDependencyGraph {
         &self.graph
+    }
+
+    pub(crate) fn dependency_profile_roots(&self) -> Option<&[PathBuf]> {
+        self.dependency_profile_roots.as_deref()
     }
 
     fn hsp_dependencies(&self) -> &[arkdown_core::HspDependency] {
@@ -256,6 +270,10 @@ impl ProfileDependencyContext {
         self.graph.nodes.retain(|_, node| {
             !roots.contains(&arkdown_path::canonicalize_or_owned(&node.pkg_root))
         });
+        if let Some(profile_roots) = self.dependency_profile_roots.as_mut() {
+            profile_roots
+                .retain(|root| !roots.contains(&arkdown_path::canonicalize_or_owned(root)));
+        }
         self
     }
 
@@ -358,6 +376,72 @@ impl ProfileDependencyContext {
             }
         }
         None
+    }
+}
+
+/// Dependency-only BFS roots used by hvigor's profile merge.
+///
+/// The session graph also carries dynamic and dev edges for bundling and test
+/// behavior. Profile merging follows only `dependencies`, so this inventory
+/// traverses that edge kind from the module and project roots in the same BFS
+/// order as `MergeProfile`, without reopening package manifests.
+struct DependencyProfileRootInventory<'a> {
+    module_root: &'a Path,
+    project_root: &'a Path,
+    edges_by_issuer: BTreeMap<
+        PathBuf,
+        Vec<&'a arkdown_session::dependency_graph::snapshot::DependencyEdgeSnapshot>,
+    >,
+}
+
+impl<'a> DependencyProfileRootInventory<'a> {
+    fn new(
+        module_root: &'a Path,
+        project_root: &'a Path,
+        graph: &'a arkdown_session::DependencyGraphSnapshot,
+    ) -> Self {
+        let mut edges_by_issuer = BTreeMap::<PathBuf, Vec<_>>::new();
+        for edge in &graph.edges {
+            if edge.kind
+                != arkdown_session::dependency_graph::snapshot::DependencyEdgeKind::Dependency
+            {
+                continue;
+            }
+            edges_by_issuer
+                .entry(arkdown_path::canonicalize_or_owned(&edge.issuer_root))
+                .or_default()
+                .push(edge);
+        }
+        Self {
+            module_root,
+            project_root,
+            edges_by_issuer,
+        }
+    }
+
+    fn collect(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        let mut queue = VecDeque::new();
+        let mut seen = FxHashSet::default();
+        queue.push_back(arkdown_path::canonicalize_or_owned(self.module_root));
+        if self.project_root != self.module_root {
+            queue.push_back(arkdown_path::canonicalize_or_owned(self.project_root));
+        }
+
+        while let Some(issuer_root) = queue.pop_front() {
+            let Some(edges) = self.edges_by_issuer.get(&issuer_root) else {
+                continue;
+            };
+            for edge in edges {
+                let dependency_root = edge.package_root.clone();
+                if !seen.insert(dependency_root.clone()) {
+                    continue;
+                }
+                queue.push_back(arkdown_path::canonicalize_or_owned(&dependency_root));
+                roots.push(dependency_root);
+            }
+        }
+        roots
     }
 }
 
@@ -564,6 +648,7 @@ impl ProfileProcessor {
             output_path,
             resource_ids,
             dependency_context.graph(),
+            dependency_context.dependency_profile_roots(),
         )
     }
 
@@ -598,6 +683,57 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn session_profile_roots_follow_dependency_only_bfs_order() {
+        use arkdown_session::dependency_graph::snapshot::{
+            DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+        let module = project.join("entry");
+        let a = project.join("a");
+        let b = project.join("b");
+        let c = project.join("c");
+        let dev = project.join("dev");
+        let hidden = project.join("hidden");
+        for root in [&module, &a, &b, &c, &dev, &hidden] {
+            std::fs::create_dir_all(root).expect("dependency root");
+        }
+        let edge = |issuer: &Path, alias: &str, root: &Path, kind: DependencyEdgeKind| {
+            DependencyEdgeSnapshot {
+                issuer_root: arkdown_path::canonicalize_or_owned(issuer),
+                alias: alias.to_string(),
+                version_spec: Some("1.0.0".to_string()),
+                package_name: alias.to_string(),
+                package_root: arkdown_path::canonicalize_or_owned(root),
+                kind,
+                is_transitive: issuer != module && issuer != project,
+            }
+        };
+        let graph = DependencyGraphSnapshot {
+            edges: vec![
+                edge(&module, "a", &a, DependencyEdgeKind::Dependency),
+                edge(&module, "dev", &dev, DependencyEdgeKind::DevDependency),
+                edge(project, "b", &b, DependencyEdgeKind::Dependency),
+                edge(&a, "c", &c, DependencyEdgeKind::Dependency),
+                edge(&dev, "hidden", &hidden, DependencyEdgeKind::Dependency),
+            ],
+            ..Default::default()
+        };
+
+        let roots = DependencyProfileRootInventory::new(&module, project, &graph).collect();
+
+        assert_eq!(
+            roots,
+            vec![
+                arkdown_path::canonicalize_or_owned(&a),
+                arkdown_path::canonicalize_or_owned(&b),
+                arkdown_path::canonicalize_or_owned(&c),
+            ]
+        );
+    }
+
     fn make_config() -> ArkdownConfig {
         ArkdownConfig {
             project_root: PathBuf::from("/project"),
@@ -625,7 +761,7 @@ mod tests {
                     preload_so: vec![],
                     deduplicate_har: false,
                     enable_source_code_check: true,
-            app_with_signed_pkg: false,
+                    app_with_signed_pkg: false,
                     generate_shared_tgz: None,
                     customized_har_base_package: None,
                     remove_permissions: vec![],

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use arkdown_config::RuntimeContextOverrides;
 use arkdown_core::OhosModuleType;
 use arkdown_path::canonicalize_or_owned;
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
 use crate::dependency_graph::snapshot::{
@@ -16,6 +17,197 @@ use crate::dependency_graph::snapshot::{
 };
 use crate::package::snapshot::PackageSnapshot;
 use crate::paths::ModulePathLayout;
+
+/// Build-session inventory for dependency package and module-profile snapshots.
+///
+/// Latest hvigor keeps dependency nodes in its process-level `DEP_NODE` cache
+/// and reuses their parsed package/profile objects across module dependency
+/// managers. Arkdown keeps the equivalent cache scoped to one immutable build
+/// session so later module graphs observe the same startup inputs without
+/// re-reading manifests.
+#[derive(Debug, Default)]
+pub(crate) struct DependencySnapshotInventory {
+    packages: FxHashMap<PathBuf, Option<Arc<PackageSnapshot>>>,
+    module_profiles: FxHashMap<PathBuf, Option<DependencyModuleProfileSnapshot>>,
+    resolved_roots: FxHashMap<(PathBuf, PathBuf, String), Option<PathBuf>>,
+    canonical_roots: FxHashMap<PathBuf, PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+struct DependencyTraversalState {
+    kind: DependencyEdgeKind,
+    is_transitive: bool,
+    is_dynamic: bool,
+}
+
+impl DependencySnapshotInventory {
+    pub(crate) fn insert_package(
+        &mut self,
+        package_root: &Path,
+        package: Option<Arc<PackageSnapshot>>,
+    ) {
+        self.packages.insert(package_root.to_path_buf(), package);
+    }
+
+    fn canonical_root(&mut self, root: &Path) -> PathBuf {
+        if let Some(canonical) = self.canonical_roots.get(root) {
+            return canonical.clone();
+        }
+        let canonical = canonicalize_or_owned(root);
+        self.canonical_roots
+            .insert(root.to_path_buf(), canonical.clone());
+        canonical
+    }
+
+    fn resolve_package_root(
+        &mut self,
+        issuer_root: &Path,
+        project_root: &Path,
+        alias: &str,
+    ) -> Option<PathBuf> {
+        let key = (
+            issuer_root.to_path_buf(),
+            project_root.to_path_buf(),
+            alias.to_string(),
+        );
+        if let Some(root) = self.resolved_roots.get(&key) {
+            return root.clone();
+        }
+
+        // Hvigor's `BasePackageResolver.resolvePackagePath()` deliberately
+        // resolves through the installed `oh_modules` hierarchy. The raw
+        // version specifier is not a fallback package root.
+        let mut current = Some(issuer_root);
+        let mut resolved = None;
+        while let Some(root) = current {
+            let candidate = root.join("oh_modules").join(alias);
+            if candidate.is_dir() {
+                resolved = Some(self.canonical_root(&candidate));
+                break;
+            }
+            if root == project_root {
+                break;
+            }
+            current = root.parent();
+        }
+        if resolved.is_none() {
+            let candidate = project_root.join("oh_modules").join(alias);
+            if candidate.is_dir() {
+                resolved = Some(self.canonical_root(&candidate));
+            }
+        }
+        self.resolved_roots.insert(key, resolved.clone());
+        resolved
+    }
+
+    fn read_package(
+        &mut self,
+        package_root: &Path,
+        project_root: &Path,
+        runtime_overrides: Option<&RuntimeContextOverrides>,
+    ) -> Option<Arc<PackageSnapshot>> {
+        if let Some(package) = self.packages.get(package_root) {
+            return package.clone();
+        }
+
+        let package = if let Some(runtime_overrides) = runtime_overrides {
+            let value =
+                if canonicalize_or_owned(package_root) == canonicalize_or_owned(project_root) {
+                    runtime_overrides.project.package.as_ref()
+                } else {
+                    runtime_overrides
+                        .module_for_root(package_root)
+                        .and_then(|module| module.package.as_ref())
+                };
+            if let Some(value) = value {
+                PackageSnapshot::from_runtime_value(package_root, value)
+                    .ok()
+                    .map(Arc::new)
+            } else {
+                PackageSnapshot::from_root(package_root)
+                    .ok()
+                    .flatten()
+                    .map(Arc::new)
+            }
+        } else {
+            PackageSnapshot::from_root(package_root)
+                .ok()
+                .flatten()
+                .map(Arc::new)
+        };
+        self.packages
+            .insert(package_root.to_path_buf(), package.clone());
+        package
+    }
+
+    fn read_module_profile(
+        &mut self,
+        package_root: &Path,
+    ) -> Option<DependencyModuleProfileSnapshot> {
+        if let Some(profile) = self.module_profiles.get(package_root) {
+            return profile.clone();
+        }
+
+        #[derive(Deserialize)]
+        struct DependencyProfile {
+            #[serde(default)]
+            app: Option<DependencyProfileApp>,
+            module: DependencyProfileModule,
+        }
+
+        #[derive(Deserialize)]
+        struct DependencyProfileModule {
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(rename = "type", default)]
+            module_type: Option<String>,
+            #[serde(default)]
+            distro: Option<DependencyProfileDistro>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DependencyProfileDistro {
+            #[serde(default)]
+            module_type: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DependencyProfileApp {
+            #[serde(default)]
+            bundle_name: Option<String>,
+            #[serde(default)]
+            bundle_type: Option<String>,
+            #[serde(default)]
+            version_code: Option<u64>,
+        }
+
+        let profile = ModulePathLayout::new(package_root)
+            .dependency_profile_candidates()
+            .into_iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .filter_map(|content| json5::from_str::<DependencyProfile>(&content).ok())
+            .next()
+            .map(|profile| {
+                let app = profile.app;
+                DependencyModuleProfileSnapshot {
+                    module_name: profile.module.name,
+                    module_type: profile
+                        .module
+                        .module_type
+                        .or_else(|| profile.module.distro.and_then(|distro| distro.module_type))
+                        .map(|module_type| OhosModuleType::from_type_str(&module_type)),
+                    bundle_name: app.as_ref().and_then(|app| app.bundle_name.clone()),
+                    bundle_type: app.as_ref().and_then(|app| app.bundle_type.clone()),
+                    version_code: app.and_then(|app| app.version_code),
+                }
+            });
+        self.module_profiles
+            .insert(package_root.to_path_buf(), profile.clone());
+        profile
+    }
+}
 
 /// Builds a dependency graph from package snapshot data.
 pub struct DependencyGraphBuilder {
@@ -73,8 +265,21 @@ impl DependencyGraphBuilder {
 
     /// Build the dependency graph snapshot.
     pub fn build(self) -> DependencyGraphSnapshot {
+        let mut inventory = DependencySnapshotInventory::default();
+        self.build_with_inventory(&mut inventory)
+    }
+
+    /// Build while reusing package/profile snapshots from the current session.
+    pub(crate) fn build_with_inventory(
+        self,
+        inventory: &mut DependencySnapshotInventory,
+    ) -> DependencyGraphSnapshot {
         let dependency_parameters = self.dependency_parameters.clone().unwrap_or_else(|| {
-            let project_package = self.read_package(&self.project_root);
+            let project_package = inventory.read_package(
+                &self.project_root,
+                &self.project_root,
+                self.runtime_overrides.as_deref(),
+            );
             DependencyParameterSnapshot::from_project_deferred(
                 &self.project_root,
                 project_package.as_deref(),
@@ -83,15 +288,19 @@ impl DependencyGraphBuilder {
         });
         let mut graph = DependencyGraphSnapshot {
             host_module: self.host_module.clone(),
-            host_root: canonicalize_or_owned(&self.host_root),
+            host_root: inventory.canonical_root(&self.host_root),
             dependency_parameters,
             ..Default::default()
         };
-        self.collect_dependencies(&mut graph);
+        self.collect_dependencies(&mut graph, inventory);
         graph
     }
 
-    fn collect_dependencies(&self, graph: &mut DependencyGraphSnapshot) {
+    fn collect_dependencies(
+        &self,
+        graph: &mut DependencyGraphSnapshot,
+        inventory: &mut DependencySnapshotInventory,
+    ) {
         let mut queue = VecDeque::new();
         let mut seen_roots = std::collections::BTreeSet::new();
         queue.push_back((self.host_root.clone(), 0usize));
@@ -100,7 +309,11 @@ impl DependencyGraphBuilder {
         }
 
         while let Some((package_root, depth)) = queue.pop_front() {
-            let Some(package) = self.read_package(&package_root) else {
+            let Some(package) = inventory.read_package(
+                &package_root,
+                &self.project_root,
+                self.runtime_overrides.as_deref(),
+            ) else {
                 continue;
             };
             for (dependencies, edge_kind, is_dynamic) in [
@@ -121,33 +334,39 @@ impl DependencyGraphBuilder {
                 ),
             ] {
                 for (alias, spec) in dependencies {
-                    let Some(dep_root) = self.resolve_dep_root(&package_root, spec, alias) else {
+                    let Some(dep_root) =
+                        inventory.resolve_package_root(&package_root, &self.project_root, alias)
+                    else {
                         continue;
                     };
-                    let dep_package = self.read_package(&dep_root);
-                    graph.edges.push(self.edge_snapshot(
-                        &package_root,
+                    let dep_package = inventory.read_package(
+                        &dep_root,
+                        &self.project_root,
+                        self.runtime_overrides.as_deref(),
+                    );
+                    let traversal = DependencyTraversalState {
+                        kind: edge_kind,
+                        is_transitive: depth > 0,
+                        is_dynamic,
+                    };
+                    let canonical_issuer_root = inventory.canonical_root(&package_root);
+                    let edge = self.edge_snapshot(
+                        &canonical_issuer_root,
                         alias,
                         spec,
                         &dep_root,
                         dep_package.as_deref(),
-                        edge_kind,
-                        depth > 0,
-                    ));
+                        traversal,
+                    );
                     if !seen_roots.insert(dep_root.clone()) {
+                        graph.edges.push(edge);
                         continue;
                     }
-                    let node = self.node_snapshot(
-                        alias,
-                        spec,
-                        &dep_root,
-                        dep_package.clone(),
-                        depth > 0,
-                        is_dynamic,
-                    );
+                    let node = self.node_snapshot(&edge, dep_package.clone(), traversal, inventory);
                     graph.roots_by_alias.insert(alias.clone(), dep_root.clone());
                     graph.nodes.insert(node.package_name.clone(), node);
                     queue.push_back((dep_root, depth + 1));
+                    graph.edges.push(edge);
                 }
             }
         }
@@ -160,81 +379,35 @@ impl DependencyGraphBuilder {
         spec: &str,
         root: &Path,
         package: Option<&PackageSnapshot>,
-        kind: DependencyEdgeKind,
-        is_transitive: bool,
+        traversal: DependencyTraversalState,
     ) -> DependencyEdgeSnapshot {
         DependencyEdgeSnapshot {
             // Keep issuer identity in the same canonical domain as host_root
             // and resolved package roots. This is observable on macOS where
             // `/tmp` aliases `/private/tmp`, and avoids equivalent Windows
             // drive/case spellings being misclassified as project globals.
-            issuer_root: canonicalize_or_owned(issuer_root),
+            issuer_root: issuer_root.to_path_buf(),
             alias: alias.to_string(),
             version_spec: Some(spec.to_string()),
             package_name: self.package_name(alias, package),
             package_root: root.to_path_buf(),
-            kind,
-            is_transitive,
+            kind: traversal.kind,
+            is_transitive: traversal.is_transitive,
         }
-    }
-
-    fn read_package(&self, package_root: &Path) -> Option<Arc<PackageSnapshot>> {
-        if let Some(runtime_overrides) = self.runtime_overrides.as_ref() {
-            let value = if canonicalize_or_owned(package_root)
-                == canonicalize_or_owned(&self.project_root)
-            {
-                runtime_overrides.project.package.as_ref()
-            } else {
-                runtime_overrides
-                    .module_for_root(package_root)
-                    .and_then(|module| module.package.as_ref())
-            };
-            if let Some(value) = value {
-                return PackageSnapshot::from_runtime_value(package_root, value)
-                    .ok()
-                    .map(Arc::new);
-            }
-        }
-        PackageSnapshot::from_root(package_root)
-            .ok()
-            .flatten()
-            .map(Arc::new)
-    }
-
-    fn resolve_dep_root(&self, issuer_root: &Path, _spec: &str, alias: &str) -> Option<PathBuf> {
-        // Hvigor's `BasePackageResolver.resolvePackagePath()` deliberately
-        // resolves the dependency alias through the installed `oh_modules`
-        // hierarchy. The raw version specifier (including `file:`) is not a
-        // fallback package root: an absent alias link means the dependency is
-        // not installed and must not enter the dependency graph.
-        let mut current = Some(issuer_root);
-        while let Some(root) = current {
-            let candidate = root.join("oh_modules").join(alias);
-            if candidate.is_dir() {
-                return Some(canonicalize_or_owned(&candidate));
-            }
-            if root == self.project_root {
-                break;
-            }
-            current = root.parent();
-        }
-        let candidate = self.project_root.join("oh_modules").join(alias);
-        candidate
-            .is_dir()
-            .then(|| canonicalize_or_owned(&candidate))
     }
 
     fn node_snapshot(
         &self,
-        alias: &str,
-        spec: &str,
-        root: &Path,
+        edge: &DependencyEdgeSnapshot,
         package: Option<Arc<PackageSnapshot>>,
-        is_transitive: bool,
-        is_dynamic: bool,
+        traversal: DependencyTraversalState,
+        inventory: &mut DependencySnapshotInventory,
     ) -> DependencyNodeSnapshot {
+        let alias = edge.alias.as_str();
+        let spec = edge.version_spec.as_deref().unwrap_or_default();
+        let root = &edge.package_root;
         let package_name = self.package_name(alias, package.as_deref());
-        let module_profile = self.read_dependency_module_profile(root);
+        let module_profile = inventory.read_module_profile(root);
         let direct_deps = package
             .as_ref()
             .map(|package| self.direct_dependency_aliases(package))
@@ -248,8 +421,8 @@ impl DependencyGraphBuilder {
             package,
             module_profile,
             is_runtime_only: false,
-            is_dynamic,
-            is_transitive,
+            is_dynamic: traversal.is_dynamic,
+            is_transitive: traversal.is_transitive,
             direct_deps,
         }
     }
@@ -306,67 +479,6 @@ impl DependencyGraphBuilder {
             Some("har") => DependencyNodeType::SourceHar,
             _ => DependencyNodeType::OhpmSource,
         }
-    }
-
-    fn read_dependency_module_profile(
-        &self,
-        root: &Path,
-    ) -> Option<DependencyModuleProfileSnapshot> {
-        #[derive(Deserialize)]
-        struct DependencyProfile {
-            #[serde(default)]
-            app: Option<DependencyProfileApp>,
-            module: DependencyProfileModule,
-        }
-
-        #[derive(Deserialize)]
-        struct DependencyProfileModule {
-            #[serde(default)]
-            name: Option<String>,
-            #[serde(rename = "type", default)]
-            module_type: Option<String>,
-            #[serde(default)]
-            distro: Option<DependencyProfileDistro>,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct DependencyProfileDistro {
-            #[serde(default)]
-            module_type: Option<String>,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct DependencyProfileApp {
-            #[serde(default)]
-            bundle_name: Option<String>,
-            #[serde(default)]
-            bundle_type: Option<String>,
-            #[serde(default)]
-            version_code: Option<u64>,
-        }
-
-        ModulePathLayout::new(root)
-            .dependency_profile_candidates()
-            .into_iter()
-            .filter_map(|path| std::fs::read_to_string(path).ok())
-            .filter_map(|content| json5::from_str::<DependencyProfile>(&content).ok())
-            .next()
-            .map(|profile| {
-                let app = profile.app;
-                DependencyModuleProfileSnapshot {
-                    module_name: profile.module.name,
-                    module_type: profile
-                        .module
-                        .module_type
-                        .or_else(|| profile.module.distro.and_then(|distro| distro.module_type))
-                        .map(|module_type| OhosModuleType::from_type_str(&module_type)),
-                    bundle_name: app.as_ref().and_then(|app| app.bundle_name.clone()),
-                    bundle_type: app.as_ref().and_then(|app| app.bundle_type.clone()),
-                    version_code: app.and_then(|app| app.version_code),
-                }
-            })
     }
 
     fn direct_dependency_aliases(&self, package: &PackageSnapshot) -> Vec<String> {
@@ -475,8 +587,8 @@ mod tests {
 
         let builder =
             DependencyGraphBuilder::new("entry", fixture.root(), fixture.root().join("entry"));
-        let package = builder
-            .read_package(&fixture.root().join("entry"))
+        let package = PackageSnapshot::from_root(&fixture.root().join("entry"))
+            .expect("read entry package")
             .expect("entry package");
 
         assert_eq!(
@@ -501,6 +613,62 @@ mod tests {
                 ("dev-lib", DependencyEdgeKind::DevDependency),
             ]
         );
+    }
+
+    #[test]
+    fn shared_inventory_reuses_hvigor_dep_node_package_and_profile_snapshots() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        for module in ["first", "second"] {
+            fixture.write_package(
+                module,
+                r#"{
+                  "name": "host",
+                  "version": "1.0.0",
+                  "dependencies": { "shared-har": "1.0.0" }
+                }"#,
+            );
+        }
+        fixture.write_package(
+            "oh_modules/shared-har",
+            r#"{ "name": "shared-har", "version": "1.0.0" }"#,
+        );
+        fixture.write_dependency_profile(
+            "oh_modules/shared-har",
+            "module.json5",
+            r#"{ "module": { "name": "shared", "type": "har" } }"#,
+        );
+
+        let mut inventory = DependencySnapshotInventory::default();
+        let first =
+            DependencyGraphBuilder::new("first", fixture.root(), fixture.root().join("first"))
+                .build_with_inventory(&mut inventory);
+
+        fixture.write_package(
+            "oh_modules/shared-har",
+            r#"{ "name": "changed-after-snapshot", "version": "2.0.0" }"#,
+        );
+        fixture.write_dependency_profile(
+            "oh_modules/shared-har",
+            "module.json5",
+            r#"{ "module": { "name": "changed", "type": "shared" } }"#,
+        );
+
+        let second =
+            DependencyGraphBuilder::new("second", fixture.root(), fixture.root().join("second"))
+                .build_with_inventory(&mut inventory);
+
+        for graph in [&first, &second] {
+            let node = graph.nodes.get("shared-har").expect("cached dependency");
+            assert_eq!(node.package.as_ref().unwrap().version, "1.0.0");
+            assert_eq!(node.node_type, DependencyNodeType::SourceHar);
+            assert_eq!(
+                node.module_profile
+                    .as_ref()
+                    .and_then(|profile| profile.module_name.as_deref()),
+                Some("shared")
+            );
+        }
     }
 
     #[test]

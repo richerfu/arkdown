@@ -6,11 +6,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arkdown_config::{ArkdownCustomConfig, RuntimeContextOverrides};
 use arkdown_core::ArkdownConfig;
 use arkdown_path::{lexical_normalize, to_slash};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -215,7 +217,8 @@ impl InputFingerprintSet {
         runtime_overrides: Option<&RuntimeContextOverrides>,
     ) -> Result<Fingerprint, FingerprintError> {
         let mut builder = FingerprintBuilder::new("package_graph", &project.root);
-        for path in builder.named_files_under(&project.root, "oh-package.json5")? {
+        let mut path_inventory = FingerprintPathInventory::default();
+        for path in path_inventory.named_files_under(&project.root, "oh-package.json5")? {
             builder.add_file(&path)?;
         }
         if let Some(runtime_overrides) = runtime_overrides {
@@ -286,18 +289,18 @@ struct ModuleInputPaths {
 #[derive(Debug)]
 struct ProjectFingerprintInventory<'a> {
     project: &'a ProjectSnapshot,
-    scanner: FingerprintBuilder,
+    paths: FingerprintPathInventory,
 }
 
 impl<'a> ProjectFingerprintInventory<'a> {
     fn new(project: &'a ProjectSnapshot) -> Self {
         Self {
             project,
-            scanner: FingerprintBuilder::new("input_inventory", &project.root),
+            paths: FingerprintPathInventory::default(),
         }
     }
 
-    fn build(&self) -> Result<ProjectFingerprintOutput, FingerprintError> {
+    fn build(mut self) -> Result<ProjectFingerprintOutput, FingerprintError> {
         let mut paths_by_module = BTreeMap::new();
         for module_name in &self.project.module_order {
             paths_by_module.insert(module_name.clone(), self.module_paths(module_name)?);
@@ -349,20 +352,23 @@ impl<'a> ProjectFingerprintInventory<'a> {
         })
     }
 
-    fn module_paths(&self, module_name: &str) -> Result<ModuleInputPaths, FingerprintError> {
-        let Some(module) = self.project.modules.get(module_name) else {
+    fn module_paths(&mut self, module_name: &str) -> Result<ModuleInputPaths, FingerprintError> {
+        let Some(module) = self.project.modules.get(module_name).cloned() else {
             return Ok(ModuleInputPaths::default());
         };
         let mut paths = ModuleInputPaths::default();
-        self.add_source_roots(&mut paths.sources, &module.source_roots)?;
-        self.add_resource_roots(&mut paths.resources, &module.resource_roots)?;
+        self.paths
+            .add_source_roots(&mut paths.sources, &module.source_roots)?;
+        self.paths
+            .add_resource_roots(&mut paths.resources, &module.resource_roots)?;
         if let Some(package_path) = &module.package_path {
             paths.dependencies.insert(package_path.clone());
         }
         if let Some(package) = module.package.as_deref() {
             if let Some(exports) = package.package_json.oh_exports.as_deref() {
                 for entry in exports {
-                    self.add_source_path(&mut paths.sources, &package.root.join(entry))?;
+                    self.paths
+                        .add_source_path(&mut paths.sources, &package.root.join(entry))?;
                 }
             }
         }
@@ -382,7 +388,7 @@ impl<'a> ProjectFingerprintInventory<'a> {
             }
         }
 
-        if let Some(graph) = self.project.dependency_graphs.get(module_name) {
+        if let Some(graph) = self.project.dependency_graphs.get(module_name).cloned() {
             for node in graph.nodes.values() {
                 let Some(package_root) = node.package_root.as_ref() else {
                     continue;
@@ -400,7 +406,7 @@ impl<'a> ProjectFingerprintInventory<'a> {
                     node.node_type,
                     DependencyNodeType::SourceHar | DependencyNodeType::OhpmSource
                 ) {
-                    self.add_source_roots(
+                    self.paths.add_source_roots(
                         &mut paths.sources,
                         &[package_root.join("src").join("main")],
                     )?;
@@ -412,11 +418,12 @@ impl<'a> ProjectFingerprintInventory<'a> {
                         .into_iter()
                         .flatten()
                         {
-                            self.add_source_path(&mut paths.sources, &package_root.join(entry))?;
+                            self.paths
+                                .add_source_path(&mut paths.sources, &package_root.join(entry))?;
                         }
                         if let Some(exports) = package.package_json.oh_exports.as_deref() {
                             for entry in exports {
-                                self.add_source_path(
+                                self.paths.add_source_path(
                                     &mut paths.sources,
                                     &package_root.join(entry),
                                 )?;
@@ -430,7 +437,7 @@ impl<'a> ProjectFingerprintInventory<'a> {
                         | DependencyNodeType::SharedHsp
                         | DependencyNodeType::IntegratedHsp
                 ) {
-                    self.add_resource_roots(
+                    self.paths.add_resource_roots(
                         &mut paths.resources,
                         &[package_root.join("src").join("main").join("resources")],
                     )?;
@@ -439,33 +446,60 @@ impl<'a> ProjectFingerprintInventory<'a> {
         }
 
         let app_scope_resources = project_layout.app_scope_resources();
-        self.add_resource_roots(&mut paths.resources, &[app_scope_resources])?;
+        self.paths
+            .add_resource_roots(&mut paths.resources, &[app_scope_resources])?;
         Ok(paths)
+    }
+}
+
+/// Sorted filesystem path snapshots reused by every module fingerprint.
+///
+/// A large workspace often exposes the same source HAR roots through dozens
+/// of host-module graphs. The first lookup freezes the directory contents for
+/// this build session; later lookups reuse the immutable list instead of
+/// walking the same tree again.
+#[derive(Debug, Default)]
+struct FingerprintPathInventory {
+    files_by_root: FxHashMap<PathBuf, Arc<[PathBuf]>>,
+}
+
+impl FingerprintPathInventory {
+    fn named_files_under(
+        &mut self,
+        root: &Path,
+        name: &str,
+    ) -> Result<Vec<PathBuf>, FingerprintError> {
+        Ok(self
+            .files_under(root)?
+            .iter()
+            .filter(|path| path.file_name().and_then(|value| value.to_str()) == Some(name))
+            .cloned()
+            .collect())
     }
 
     fn add_source_path(
-        &self,
+        &mut self,
         output: &mut BTreeSet<PathBuf>,
         path: &Path,
     ) -> Result<(), FingerprintError> {
         if path.is_dir() {
             return self.add_source_roots(output, &[path.to_path_buf()]);
         }
-        if path.is_file() && FingerprintBuilder::is_source_input(path) {
+        if path.is_file() && Self::is_source_input(path) {
             output.insert(path.to_path_buf());
         }
         Ok(())
     }
 
     fn add_source_roots(
-        &self,
+        &mut self,
         output: &mut BTreeSet<PathBuf>,
         roots: &[PathBuf],
     ) -> Result<(), FingerprintError> {
         for root in roots {
-            for path in self.scanner.files_under(root)? {
-                if FingerprintBuilder::is_source_input(&path) {
-                    output.insert(path);
+            for path in self.files_under(root)?.iter() {
+                if Self::is_source_input(path) {
+                    output.insert(path.clone());
                 }
             }
         }
@@ -473,14 +507,65 @@ impl<'a> ProjectFingerprintInventory<'a> {
     }
 
     fn add_resource_roots(
-        &self,
+        &mut self,
         output: &mut BTreeSet<PathBuf>,
         roots: &[PathBuf],
     ) -> Result<(), FingerprintError> {
         for root in roots {
-            output.extend(self.scanner.files_under(root)?);
+            output.extend(self.files_under(root)?.iter().cloned());
         }
         Ok(())
+    }
+
+    fn files_under(&mut self, root: &Path) -> Result<Arc<[PathBuf]>, FingerprintError> {
+        if let Some(files) = self.files_by_root.get(root) {
+            return Ok(Arc::clone(files));
+        }
+        if !root.is_dir() {
+            let files = Arc::from([]);
+            self.files_by_root
+                .insert(root.to_path_buf(), Arc::clone(&files));
+            return Ok(files);
+        }
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| !Self::is_generated_or_external_dir(entry.path(), root))
+        {
+            let entry = entry.map_err(|error| FingerprintError::Walk {
+                path: error
+                    .path()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| root.to_path_buf()),
+                message: error.to_string(),
+            })?;
+            if entry.file_type().is_file() {
+                files.push(entry.path().to_path_buf());
+            }
+        }
+        files.sort();
+        let files = Arc::from(files);
+        self.files_by_root
+            .insert(root.to_path_buf(), Arc::clone(&files));
+        Ok(files)
+    }
+
+    fn is_generated_or_external_dir(path: &Path, root: &Path) -> bool {
+        if path == root {
+            return false;
+        }
+        matches!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some(".git" | "build" | "out" | "node_modules")
+        )
+    }
+
+    fn is_source_input(path: &Path) -> bool {
+        matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("ets" | "ts" | "js" | "json" | "json5")
+        )
     }
 }
 
@@ -602,58 +687,6 @@ impl FingerprintBuilder {
         Ok(())
     }
 
-    fn named_files_under(&self, root: &Path, name: &str) -> Result<Vec<PathBuf>, FingerprintError> {
-        let mut files = Vec::new();
-        for path in self.files_under(root)? {
-            if path.file_name().and_then(|value| value.to_str()) == Some(name) {
-                files.push(path);
-            }
-        }
-        Ok(files)
-    }
-
-    fn files_under(&self, root: &Path) -> Result<Vec<PathBuf>, FingerprintError> {
-        if !root.is_dir() {
-            return Ok(Vec::new());
-        }
-        let mut files = Vec::new();
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| !Self::is_generated_or_external_dir(entry.path(), root))
-        {
-            let entry = entry.map_err(|error| FingerprintError::Walk {
-                path: error
-                    .path()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| root.to_path_buf()),
-                message: error.to_string(),
-            })?;
-            if entry.file_type().is_file() {
-                files.push(entry.path().to_path_buf());
-            }
-        }
-        files.sort();
-        Ok(files)
-    }
-
-    fn is_generated_or_external_dir(path: &Path, root: &Path) -> bool {
-        if path == root {
-            return false;
-        }
-        matches!(
-            path.file_name().and_then(|value| value.to_str()),
-            Some(".git" | "build" | "out" | "node_modules")
-        )
-    }
-
-    fn is_source_input(path: &Path) -> bool {
-        matches!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("ets" | "ts" | "js" | "json" | "json5")
-        )
-    }
-
     fn path_key(&self, path: &Path) -> String {
         path.strip_prefix(&self.base)
             .map(to_slash)
@@ -669,5 +702,27 @@ impl FingerprintBuilder {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&result);
         Fingerprint(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FingerprintPathInventory;
+
+    #[test]
+    fn path_inventory_freezes_one_sorted_walk_per_session_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("src");
+        std::fs::create_dir_all(&root).expect("source root");
+        std::fs::write(root.join("b.ets"), "b").expect("b source");
+        std::fs::write(root.join("a.ets"), "a").expect("a source");
+
+        let mut inventory = FingerprintPathInventory::default();
+        let first = inventory.files_under(&root).expect("first inventory");
+        assert_eq!(first.as_ref(), &[root.join("a.ets"), root.join("b.ets")]);
+
+        std::fs::write(root.join("c.ets"), "c").expect("late source");
+        let reused = inventory.files_under(&root).expect("reused inventory");
+        assert_eq!(reused.as_ref(), first.as_ref());
     }
 }

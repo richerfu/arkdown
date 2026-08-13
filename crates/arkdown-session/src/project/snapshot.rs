@@ -8,7 +8,7 @@ use arkdown_core::ArkdownConfig;
 use indexmap::IndexMap;
 use thiserror::Error;
 
-use crate::dependency_graph::builder::DependencyGraphBuilder;
+use crate::dependency_graph::builder::{DependencyGraphBuilder, DependencySnapshotInventory};
 use crate::dependency_graph::snapshot::{
     DependencyGraphSnapshot, DependencyParameterError, DependencyParameterSnapshot,
 };
@@ -173,6 +173,12 @@ impl ProjectSnapshot {
             parameter_file_override.as_deref(),
         )?;
 
+        let mut dependency_inventory = DependencySnapshotInventory::default();
+        dependency_inventory.insert_package(root, root_package.clone());
+        for module in modules.values() {
+            dependency_inventory.insert_package(&module.root, module.package.clone());
+        }
+
         let mut dependency_graphs = IndexMap::with_capacity(module_order.len());
         for module_name in &module_order {
             dependency_graphs.insert(
@@ -191,7 +197,7 @@ impl ProjectSnapshot {
                     }
                     builder
                         .with_dependency_parameters(dependency_parameters.clone())
-                        .build()
+                        .build_with_inventory(&mut dependency_inventory)
                 }),
             );
         }

@@ -359,9 +359,7 @@ impl<'a> DependencyRootScanner<'a> {
 
         while let Some(pkg_root) = queue.pop_front() {
             for edge in edge_index.dependency_edges(&pkg_root) {
-                let Some(dep_root) = self.resolve_root(&pkg_root, &edge.alias) else {
-                    continue;
-                };
+                let dep_root = edge.package_root.clone();
                 if !seen.insert(dep_root.clone()) {
                     continue;
                 }
