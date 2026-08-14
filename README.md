@@ -47,7 +47,7 @@ process reported by `/usr/bin/time`.
 | OS              | macOS 15.6.1, arm64                                   |
 | Node.js         | 22.21.1                                               |
 | OpenHarmony SDK | 6.1.0.31, API 23                                      |
-| arkdown         | 0.0.1-beta.5                                          |
+| arkdown         | 0.0.1-beta.6                                          |
 | hvigorw         | 6.24.3 (DevEco-bundled, run via `hvigor/tools/arkdown-hvigorw`) |
 
 ### Anonymous project scale
