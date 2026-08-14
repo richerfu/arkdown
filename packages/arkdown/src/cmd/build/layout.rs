@@ -49,7 +49,11 @@ impl<'a> ModuleSourceLayout<'a> {
 
   /// `CoreModuleModelImpl.getMockConfigPath()` — fixed module mock manifest.
   pub(super) fn mock_config_json5(&self) -> PathBuf {
-    self.module_root.join("src").join("mock").join("mock-config.json5")
+    self
+      .module_root
+      .join("src")
+      .join("mock")
+      .join("mock-config.json5")
   }
 
   pub(super) fn ohos_test_dir(&self) -> PathBuf {
@@ -66,6 +70,14 @@ impl<'a> ModuleSourceLayout<'a> {
       .join("ets")
       .join("testrunner")
       .join("OpenHarmonyTestRunner.ets")
+  }
+
+  pub(super) fn ohos_test_runner_ts(&self) -> PathBuf {
+    self
+      .ohos_test_dir()
+      .join("ets")
+      .join("testrunner")
+      .join("OpenHarmonyTestRunner.ts")
   }
 
   pub(super) fn target_ets(&self, target_name: &str) -> PathBuf {
@@ -85,10 +97,12 @@ pub(super) struct ModuleBuildLayout<'a> {
   module_root: &'a Path,
   /// Build root directory name under the module root.
   ///
-  /// `"build"` for normal HAP/HSP/HAR builds. Local unit-test builds
-  /// (`--target test`, mirroring `hvigorw test`) use `".test"` — hvigor
-  /// injects `buildRoot=.test` via `setTestDefaultParameters`.
+  /// `"build"` for normal HAP/HSP/HAR builds, `".preview"` for PreviewBuild,
+  /// and `".test"` for local unit-test builds.
   build_root: &'a str,
+  /// Selected product segment used by `ModulePathInfoIml` for every build,
+  /// test, and preview product directory.
+  product_name: &'a str,
   /// Target name segment in intermediate/loader/cache paths (hvigor
   /// `getIntermediatesProcessProfile()` etc. key by target).
   target_name: &'a str,
@@ -96,9 +110,14 @@ pub(super) struct ModuleBuildLayout<'a> {
 
 impl<'a> ModuleBuildLayout<'a> {
   pub(super) fn new(module_root: &'a Path) -> Self {
+    Self::for_product(module_root, "default")
+  }
+
+  pub(super) fn for_product(module_root: &'a Path, product_name: &'a str) -> Self {
     Self {
       module_root,
       build_root: "build",
+      product_name,
       target_name: "default",
     }
   }
@@ -106,20 +125,52 @@ impl<'a> ModuleBuildLayout<'a> {
   /// Layout for a named target configuration (e.g. `ohosTest`), which keys
   /// the intermediate/loader/cache directories like hvigor.
   pub(super) fn for_target(module_root: &'a Path, target_name: &'a str) -> Self {
-    let _ = target_name;
+    Self::for_target_product(module_root, "default", target_name)
+  }
+
+  pub(super) fn for_target_product(
+    module_root: &'a Path,
+    product_name: &'a str,
+    target_name: &'a str,
+  ) -> Self {
     Self {
       module_root,
       build_root: "build",
+      product_name,
       target_name,
     }
   }
 
   /// Unit-test build layout rooted at `<module>/.test` (hvigor `buildRoot=.test`).
   pub(super) fn for_test(module_root: &'a Path) -> Self {
+    Self::for_test_product(module_root, "default")
+  }
+
+  pub(super) fn for_test_product(module_root: &'a Path, product_name: &'a str) -> Self {
     Self {
       module_root,
       build_root: ".test",
+      product_name,
       target_name: "default",
+    }
+  }
+
+  /// Previewer layout rooted at `<module>/.preview`, matching
+  /// `ModulePathInfoIml.getModulePreviewPath()`.
+  pub(super) fn for_preview(module_root: &'a Path, target_name: &'a str) -> Self {
+    Self::for_preview_product(module_root, "default", target_name)
+  }
+
+  pub(super) fn for_preview_product(
+    module_root: &'a Path,
+    product_name: &'a str,
+    target_name: &'a str,
+  ) -> Self {
+    Self {
+      module_root,
+      build_root: ".preview",
+      product_name,
+      target_name,
     }
   }
 
@@ -131,12 +182,23 @@ impl<'a> ModuleBuildLayout<'a> {
     module_root: &'a Path,
     target_name: &'a str,
   ) -> Self {
+    Self::for_output_target_product(output_target, module_root, "default", target_name)
+  }
+
+  pub(super) fn for_output_target_product(
+    output_target: &arkdown_core::OutputTarget,
+    module_root: &'a Path,
+    product_name: &'a str,
+    target_name: &'a str,
+  ) -> Self {
     if matches!(output_target, arkdown_core::OutputTarget::Test) {
-      Self::for_test(module_root)
+      Self::for_test_product(module_root, product_name)
+    } else if matches!(output_target, arkdown_core::OutputTarget::Preview) {
+      Self::for_preview_product(module_root, product_name, target_name)
     } else if target_name != "default" {
-      Self::for_target(module_root, target_name)
+      Self::for_target_product(module_root, product_name, target_name)
     } else {
-      Self::new(module_root)
+      Self::for_product(module_root, product_name)
     }
   }
 
@@ -153,7 +215,10 @@ impl<'a> ModuleBuildLayout<'a> {
   }
 
   pub(super) fn build_default(&self) -> PathBuf {
-    self.module_root.join(self.build_root).join("default")
+    self
+      .module_root
+      .join(self.build_root)
+      .join(self.product_name)
   }
 
   /// `.test/testability/` — generated local unit-test template directory
@@ -176,16 +241,11 @@ impl<'a> ModuleBuildLayout<'a> {
   }
 
   pub(super) fn test_phone_settings_json(&self) -> PathBuf {
-    self
-      .testability_dir()
-      .join("phoneSettingConfig_Phone.json")
+    self.testability_dir().join("phoneSettingConfig_Phone.json")
   }
 
   pub(super) fn ohos_test_source_root(&self) -> PathBuf {
-    self
-      .intermediates()
-      .join("src")
-      .join("ohosTest")
+    self.intermediates().join("src").join("ohosTest")
   }
 
   pub(super) fn ohos_test_ets_root(&self) -> PathBuf {
@@ -225,7 +285,7 @@ impl<'a> ModuleBuildLayout<'a> {
     self
       .module_root
       .join(self.build_root)
-      .join("default")
+      .join(self.product_name)
       .join("intermediates")
       .join("test")
   }
@@ -240,7 +300,28 @@ impl<'a> ModuleBuildLayout<'a> {
   /// (hvigor `getTestBuildConfigPath`), referenced by loader.json
   /// `buildConfigPath` in local-test mode.
   pub(super) fn test_build_config_json(&self) -> PathBuf {
-    self.module_root.join(".test").join("config").join("buildConfig.json")
+    self
+      .module_root
+      .join(".test")
+      .join("config")
+      .join("buildConfig.json")
+  }
+
+  /// `.preview/config/buildConfig.json` — DevEco Previewer handoff.
+  pub(super) fn preview_build_config_json(&self) -> PathBuf {
+    self
+      .module_root
+      .join(".preview")
+      .join("config")
+      .join("buildConfig.json")
+  }
+
+  /// `.preview/PreviewBuildParam.json` — incremental restool handoff.
+  pub(super) fn preview_build_param_json(&self) -> PathBuf {
+    self
+      .module_root
+      .join(".preview")
+      .join("PreviewBuildParam.json")
   }
 
   /// `src/test/` — local unit-test source directory (`List.test.ets` etc.).
@@ -258,12 +339,22 @@ impl<'a> ModuleBuildLayout<'a> {
       .join(format!("{target_name}@PackageHar"))
   }
 
+  pub(super) fn package_sign_har_cache_dir(&self, target_name: &str) -> PathBuf {
+    self
+      .default_cache_dir(target_name)
+      .join(format!("{target_name}@PackageSignHar"))
+  }
+
   pub(super) fn outputs_default(&self) -> PathBuf {
     self.build_default().join("outputs").join("default")
   }
 
   pub(super) fn outputs_root(&self) -> PathBuf {
     self.build_default().join("outputs")
+  }
+
+  pub(super) fn target_output_dir(&self) -> PathBuf {
+    self.outputs_root().join(self.target_name)
   }
 
   pub(super) fn intermediates(&self) -> PathBuf {
@@ -446,16 +537,80 @@ impl<'a> ModuleBuildLayout<'a> {
   }
 
   pub(super) fn generated_pm_oh_package(&self, target_name: &str) -> PathBuf {
+    self.generated_pm_manifest(target_name, "oh-package.json5")
+  }
+
+  pub(super) fn generated_pm_package_json(&self, target_name: &str) -> PathBuf {
+    self.generated_pm_manifest(target_name, "package.json")
+  }
+
+  fn generated_pm_manifest(&self, target_name: &str, file_name: &str) -> PathBuf {
     self
       .build_default()
       .join("generated")
       .join("pm")
       .join(target_name)
-      .join("oh-package.json5")
+      .join(file_name)
   }
 
   pub(super) fn base_native_libs_json(&self) -> PathBuf {
     self.default_intermediate_file("patch", "base_native_libs.json")
+  }
+
+  pub(super) fn patch_dir(&self) -> PathBuf {
+    self.default_intermediate_dir("patch")
+  }
+
+  pub(super) fn patch_changed_file_list(&self) -> PathBuf {
+    self.patch_dir().join("changedFileList.json")
+  }
+
+  pub(super) fn patch_ets_dir(&self) -> PathBuf {
+    self.patch_dir().join("ets")
+  }
+
+  pub(super) fn patch_modules_abc(&self) -> PathBuf {
+    self.patch_ets_dir().join("modules.abc")
+  }
+
+  pub(super) fn patch_source_maps(&self) -> PathBuf {
+    self.patch_ets_dir().join("sourceMaps.map")
+  }
+
+  pub(super) fn patch_resources_dir(&self) -> PathBuf {
+    self.patch_dir().join("resources")
+  }
+
+  pub(super) fn patch_libs_dir(&self) -> PathBuf {
+    self.patch_dir().join("libs")
+  }
+
+  pub(super) fn patch_json(&self) -> PathBuf {
+    self.patch_dir().join("patch.json")
+  }
+
+  pub(super) fn patch_ets_state_json(&self) -> PathBuf {
+    self.patch_dir().join("ets.json")
+  }
+
+  pub(super) fn patch_last_libs_json(&self) -> PathBuf {
+    self.patch_dir().join("libs.json")
+  }
+
+  pub(super) fn quickfix_json(&self) -> PathBuf {
+    self.target_output_dir().join("quickfix.json")
+  }
+
+  pub(super) fn stripped_native_libs_dir(&self) -> PathBuf {
+    self.default_intermediate_dir("stripped_native_libs")
+  }
+
+  pub(super) fn process_libs_dir(&self) -> PathBuf {
+    self.default_intermediate_dir("libs")
+  }
+
+  pub(super) fn symbol_map(&self) -> PathBuf {
+    self.loader_out_dir().join("ets").join("symbolMap.map")
   }
 
   pub(super) fn hap_metadata_output_json(&self) -> PathBuf {
@@ -476,6 +631,18 @@ impl<'a> ModuleBuildLayout<'a> {
 
   pub(super) fn loader_out_dir(&self) -> PathBuf {
     self.default_intermediate_dir("loader_out")
+  }
+
+  /// `intermediates/loader_out/<target>/an` — root passed to the SDK packing
+  /// tool as `--an-path`.
+  pub(super) fn aot_an_dir(&self) -> PathBuf {
+    self.loader_out_dir().join("an")
+  }
+
+  /// AOT compiler output directory used by ets-loader for the only supported
+  /// target triple in Hvigor 6.1.1.280.
+  pub(super) fn aot_output_dir(&self) -> PathBuf {
+    self.aot_an_dir().join("arm64-v8a")
   }
 
   /// `intermediates/assets/<target>/ets` — UnitTestArkTS output consumed by
@@ -548,7 +715,16 @@ impl<'a> ModuleBuildLayout<'a> {
   }
 
   pub(super) fn output_pack_info(&self) -> PathBuf {
-    self.outputs_default().join("pack.info")
+    self.target_output_dir().join("pack.info")
+  }
+
+  /// `ModulePathInfoIml.getObfuscationExportRulePath()`.
+  ///
+  /// Hvigor scopes the exported consumer rules to both the selected product
+  /// and target. Keeping this on the module layout prevents project-level
+  /// `build/default` paths from leaking into named products and targets.
+  pub(super) fn obfuscation_export_rule_path(&self) -> PathBuf {
+    self.default_intermediate_file("obfuscation", "obfuscation.txt")
   }
 
   pub(super) fn output_mapping_source_maps(&self) -> PathBuf {
@@ -604,20 +780,6 @@ impl<'a> ProjectBuildLayout<'a> {
 
   pub(super) fn app_scope_resources(&self) -> PathBuf {
     self.project_root.join("AppScope").join("resources")
-  }
-
-  pub(super) fn obfuscation_default_dir(&self) -> PathBuf {
-    self
-      .project_root
-      .join("build")
-      .join("default")
-      .join("intermediates")
-      .join("obfuscation")
-      .join("default")
-  }
-
-  pub(super) fn obfuscation_txt(&self) -> PathBuf {
-    self.obfuscation_default_dir().join("obfuscation.txt")
   }
 }
 

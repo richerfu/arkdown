@@ -192,6 +192,8 @@ impl<'a> CheckModuleRunner<'a> {
       coverage_mode: None,
       debug_line: false,
       byte_code_har_integrated_optimization: false,
+      single_file_emit: false,
+      rollup_cache_use_source_hash: false,
     })
     .build()?;
     let output = SdkEtsCheckerRunner::new(&plan).run()?;

@@ -3,15 +3,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use napi::bindgen_prelude::{Either, Function, Object, Promise};
 use napi::threadsafe_function::{ThreadsafeCallContext, ThreadsafeFunction};
+use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cmd::build::coordinator::{
-  BuildAbcTransformEvent, BuildCycleEvent, BuildTaskEvent, BuildTaskObserver,
+  BuildAbcTransformEvent, BuildCycleEvent, BuildNativeCommandEvent, BuildTaskEvent,
+  BuildTaskObserver,
 };
 
 use super::engine::{RuntimeTaskCallback, RuntimeTaskEngine};
 use super::model::{
-  RuntimeTaskCallbackResult, RuntimeTaskDescriptor, RuntimeTaskOperation, RuntimeTaskSelection,
+  RuntimeTaskCallbackResult, RuntimeTaskDescriptor, RuntimeTaskModelBuilder, RuntimeTaskOperation,
+  RuntimeTaskSelection,
 };
 
 type StringOrPromise = Either<String, Promise<String>>;
@@ -29,6 +32,7 @@ pub struct RuntimeTaskBridgeSeed {
   tasks: Vec<RuntimeTaskDescriptor>,
   selection: RuntimeTaskSelection,
   callback: RuntimeTaskTsfn,
+  command_modifier_types: FxHashSet<u8>,
 }
 
 impl RuntimeTaskBridgeSeed {
@@ -39,6 +43,12 @@ impl RuntimeTaskBridgeSeed {
     let selection_json = object
       .get::<String>("selectionJson")?
       .ok_or_else(|| napi::Error::from_reason("runtime task bridge is missing selectionJson"))?;
+    let catalogs_json = object
+      .get::<String>("catalogsJson")?
+      .unwrap_or_else(|| "[]".to_string());
+    let removed_task_paths_json = object
+      .get::<String>("removedTaskPathsJson")?
+      .unwrap_or_else(|| "[]".to_string());
     let callback = object
       .get::<Function<(String,), StringOrPromise>>("invoke")?
       .ok_or_else(|| napi::Error::from_reason("runtime task bridge is missing invoke()"))?
@@ -48,10 +58,19 @@ impl RuntimeTaskBridgeSeed {
           data: (context.value,),
         })
       })?;
-    let mut tasks =
-      serde_json::from_str::<Vec<RuntimeTaskDescriptor>>(&tasks_json).map_err(|error| {
-        napi::Error::from_reason(format!("invalid runtime task descriptors: {error}"))
-      })?;
+    let command_modifier_types = object
+      .get::<Vec<u32>>("commandModifierTypes")?
+      .unwrap_or_default()
+      .into_iter()
+      .filter_map(|value| u8::try_from(value).ok())
+      .collect();
+    let mut tasks = RuntimeTaskModelBuilder::from_json_parts(
+      &catalogs_json,
+      &tasks_json,
+      &removed_task_paths_json,
+    )
+    .and_then(RuntimeTaskModelBuilder::build)
+    .map_err(|error| napi::Error::from_reason(format!("invalid runtime task model: {error}")))?;
     let selection =
       serde_json::from_str::<RuntimeTaskSelection>(&selection_json).map_err(|error| {
         napi::Error::from_reason(format!("invalid runtime task selection: {error}"))
@@ -61,6 +80,7 @@ impl RuntimeTaskBridgeSeed {
       tasks,
       selection,
       callback: Arc::new(callback),
+      command_modifier_types,
     })
   }
 
@@ -125,18 +145,27 @@ enum RuntimeTaskCommand {
     BuildAbcTransformEvent,
     oneshot::Sender<anyhow::Result<bool>>,
   ),
+  ModifyNativeCommand(
+    BuildNativeCommandEvent,
+    oneshot::Sender<anyhow::Result<Vec<String>>>,
+  ),
 }
 
 pub struct RuntimeTaskActorObserver {
   sender: mpsc::Sender<RuntimeTaskCommand>,
+  command_modifier_types: FxHashSet<u8>,
 }
 
 impl RuntimeTaskActorObserver {
   pub fn spawn(seed: RuntimeTaskBridgeSeed) -> anyhow::Result<Arc<dyn BuildTaskObserver>> {
+    let command_modifier_types = seed.command_modifier_types.clone();
     let engine = seed.into_engine()?;
     let (sender, receiver) = mpsc::channel(8);
     tokio::spawn(RuntimeTaskActor { engine, receiver }.run());
-    Ok(Arc::new(Self { sender }))
+    Ok(Arc::new(Self {
+      sender,
+      command_modifier_types,
+    }))
   }
 
   async fn request(
@@ -149,6 +178,20 @@ impl RuntimeTaskActorObserver {
     })?;
     receiver.await.map_err(|_| {
       anyhow::anyhow!("runtime task actor stopped before replying to the build event")
+    })?
+  }
+
+  async fn request_command(&self, event: BuildNativeCommandEvent) -> anyhow::Result<Vec<String>> {
+    let (sender, receiver) = oneshot::channel();
+    self
+      .sender
+      .send(RuntimeTaskCommand::ModifyNativeCommand(event, sender))
+      .await
+      .map_err(|_| {
+        anyhow::anyhow!("runtime task actor stopped before receiving the native command event")
+      })?;
+    receiver.await.map_err(|_| {
+      anyhow::anyhow!("runtime task actor stopped before replying to the native command event")
     })?
   }
 }
@@ -188,6 +231,17 @@ impl BuildTaskObserver for RuntimeTaskActorObserver {
       .request(|reply| RuntimeTaskCommand::TransformAbc(event, reply))
       .await
       .map(|_| ())
+  }
+
+  fn has_native_command_modifier(&self, builder_type: u8) -> bool {
+    self.command_modifier_types.contains(&builder_type)
+  }
+
+  async fn modify_native_command(
+    &self,
+    event: BuildNativeCommandEvent,
+  ) -> anyhow::Result<Vec<String>> {
+    self.request_command(event).await
   }
 }
 
@@ -263,6 +317,17 @@ impl RuntimeTaskActor {
               .transform_abc(event_json)
               .await
               .map(|_| true)
+              .map_err(Into::into),
+            Err(error) => Err(error.into()),
+          };
+          let _ = reply.send(result);
+        }
+        RuntimeTaskCommand::ModifyNativeCommand(event, reply) => {
+          let result = match serde_json::to_string(&event) {
+            Ok(event_json) => self
+              .engine
+              .modify_native_command(event_json)
+              .await
               .map_err(Into::into),
             Err(error) => Err(error.into()),
           };

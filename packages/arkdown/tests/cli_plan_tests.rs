@@ -130,6 +130,50 @@ fn hvigor_test_property_map_matches_split_and_undefined_semantics() {
 }
 
 #[test]
+fn hvigor_device_test_injects_exact_default_properties_and_module_mode() {
+  let config = PackageCliParser::parse_hvigor(&args(&["onDeviceTest"]))
+    .expect("hvigor device-test command should parse");
+
+  assert_eq!(config.execution_mode.as_deref(), Some("module"));
+  assert_eq!(
+    config.prop,
+    [
+      "product=default",
+      "buildMode=test",
+      "isOhosTest=true",
+      "ohos-test-coverage=true",
+    ]
+  );
+  assert_eq!(config.product.as_deref(), Some("default"));
+  assert_eq!(config.mode.as_deref(), Some("test"));
+  assert_eq!(config.ohos_test_coverage, Some(true));
+}
+
+#[test]
+fn hvigor_device_test_preserves_explicit_property_order_and_overrides() {
+  let config = PackageCliParser::parse_hvigor(&args(&[
+    "onDeviceTest",
+    "-p",
+    "coverage=false",
+    "-p",
+    "product=tablet",
+  ]))
+  .expect("hvigor device-test overrides should parse");
+
+  assert_eq!(
+    config.prop,
+    [
+      "ohos-test-coverage=false",
+      "product=tablet",
+      "buildMode=test",
+      "isOhosTest=true",
+    ]
+  );
+  assert_eq!(config.product.as_deref(), Some("tablet"));
+  assert_eq!(config.ohos_test_coverage, Some(false));
+}
+
+#[test]
 fn direct_build_accepts_typed_local_test_options() {
   let config = PackageCliParser::parse_build(&args(&[
     "--target",

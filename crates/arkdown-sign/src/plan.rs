@@ -111,7 +111,7 @@ impl SigningMaterial {
         }
     }
 
-    fn validate_paths(&self) -> Result<(), SignError> {
+    pub(crate) fn validate_paths(&self) -> Result<(), SignError> {
         for (label, path) in [
             ("keystore", &self.keystore_path),
             ("profile", &self.profile_path),
@@ -380,6 +380,9 @@ mod tests {
     #[test]
     fn java_keystore_alias_lookup_rejects_ambiguous_case_variants() {
         let aliases = vec!["debugkey".to_string(), "DEBUGKEY".to_string()];
-        assert_eq!(KeystoreAliasSelector::new("debugKey").select(&aliases), None);
+        assert_eq!(
+            KeystoreAliasSelector::new("debugKey").select(&aliases),
+            None
+        );
     }
 }

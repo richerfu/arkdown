@@ -1,8 +1,8 @@
+mod aot;
+#[cfg(test)]
+mod aot_tests;
 pub mod app_coordinator;
 pub mod args;
-mod packing_check;
-mod pre_build;
-mod remote_hsp_sign;
 mod bundle_plan;
 pub(crate) mod bytecode;
 mod bytecode_har_declaration;
@@ -12,6 +12,7 @@ mod code_resource;
 mod code_resource_tests;
 pub mod coordinator;
 mod coverage_instrument;
+mod device_test;
 mod generate_har_declarations;
 #[cfg(test)]
 mod generate_har_declarations_tests;
@@ -21,14 +22,26 @@ mod har_dedup_tests;
 mod har_importee_cache;
 #[cfg(test)]
 mod har_importee_cache_tests;
+mod hot_reload;
+#[cfg(test)]
+mod hot_reload_tests;
 mod intermediates;
 mod layout;
 mod module_plan;
+mod packing_check;
+mod pre_build;
 mod preload_system_so;
+mod preview;
+#[cfg(test)]
+mod preview_tests;
+mod quickfix;
+#[cfg(test)]
+mod quickfix_tests;
+mod remote_hsp_sign;
 mod syscap;
-mod unit_test;
 #[cfg(test)]
 mod tests;
+mod unit_test;
 mod watch_stage;
 
-pub use args::{BuildArgs, BuildCommand};
+pub use args::{BuildArgs, BuildCommand, HvigorRuntimeProperties};

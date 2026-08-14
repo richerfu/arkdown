@@ -9,6 +9,7 @@ const test = require('node:test')
 const { parsePluginAst, runRuntimeTasks } = require('../index.js')
 
 const {
+  HVIGOR_PARITY_VERSION,
   HvigorRuntimeHost,
   HvigorCompilePluginPlanner,
   RuntimePluginLoader,
@@ -32,6 +33,18 @@ function createTestHvigorCommand(nativeBuild, inspectHvigorContext) {
 
 function tempProject() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-runtime-'))
+}
+
+function fakeOhpmExecutable(root) {
+  if (process.platform === 'win32') {
+    const executable = path.join(root, 'fake-ohpm.cmd')
+    fs.writeFileSync(executable, '@echo off\r\nexit /b 0\r\n')
+    return executable
+  }
+  const executable = path.join(root, 'fake-ohpm')
+  fs.writeFileSync(executable, '#!/bin/sh\nexit 0\n')
+  fs.chmodSync(executable, 0o755)
+  return executable
 }
 
 function copyFixture(name) {
@@ -304,6 +317,28 @@ test('project taskTree keeps latest lazy assembleApp graph shape', async () => {
   ])
 })
 
+test('buildInfo command uses the native profile projection without invoking a build', async () => {
+  const project = path.resolve(__dirname, '../../../tests/fixtures/minimal-hap')
+  const run = createTestHvigorCommand(async () => {
+    throw new Error('native build must not run for buildInfo')
+  })
+
+  const result = await run({
+    project,
+    executionMode: 'project',
+    tasks: ['buildInfo'],
+    prop: ['json='],
+  })
+
+  assert.equal(result.artifacts.length, 0)
+  assert.equal(result.output.length, 1)
+  const info = JSON.parse(result.output[0])
+  assert.deepEqual(info.product, ['default'])
+  assert.deepEqual(info.module, ['entry'])
+  assert.deepEqual(info.buildMode, ['debug', 'release'])
+  assert.deepEqual(info.buildInfo.default.entry.default.debug, {})
+})
+
 test('hvigor command runner rejects an empty task list like latest 6.24.3', async () => {
   const project = path.resolve(__dirname, '../../../tests/fixtures/minimal-hap')
   const run = createTestHvigorCommand(async () => {
@@ -351,6 +386,107 @@ test('module clean delegates latest local and custom build-root behavior to Rust
   for (const directory of directories) assert.equal(fs.existsSync(directory), false)
 })
 
+test('OHOS context build paths follow InjectUtil build-cache and build-dir branches', async () => {
+  async function contextPaths(config) {
+    const loader = new RuntimePluginLoader(config)
+    await loader.load()
+    const host = loader.hvigorHost
+    const projectNode = [...host._nodesByName.values()].find((node) => node.isProject)
+    const moduleNode = host._nodesByName.get('entry')
+    const projectContext = host._ohosContextFor(projectNode)
+    const moduleContext = host._ohosContextFor(moduleNode)
+    let target
+    moduleContext.targets((candidate) => {
+      if (candidate.getTargetName() === 'default') target = candidate
+    })
+    assert.ok(target)
+    return { projectContext, moduleContext, target }
+  }
+
+  const project = copyFixture('minimal-hap')
+  const projectName = path.basename(project)
+  const moduleRoot = path.join(project, 'entry')
+  const cliBuildRoot = tempProject()
+  const cli = await contextPaths({
+    project,
+    product: 'default',
+    extParams: { 'build-cache-dir': `"${cliBuildRoot}"` },
+  })
+  const cliModuleBuild = path.join(
+    fs.realpathSync.native(cliBuildRoot),
+    projectName,
+    'entry',
+    'build',
+  )
+
+  // hvigor-ohos-plugin 6.24.3 ProjectPathInfoIml/ModulePathInfoIml pass
+  // supportBuildCacheDir=false for public output paths, but not for cache and
+  // intermediate paths. An explicit build-cache-dir therefore cannot relocate
+  // final outputs.
+  assert.equal(cli.projectContext.getBuildRootPath(), path.join(project, 'build'))
+  assert.equal(
+    cli.projectContext.getBuildProductOutputPath(),
+    path.join(project, 'build', 'outputs', 'default'),
+  )
+  assert.equal(cli.moduleContext.getBuildProductRootPath(), moduleRoot)
+  assert.equal(
+    cli.target.getBuildTargetOutputPath(),
+    path.join(moduleRoot, 'build', 'default', 'outputs', 'default'),
+  )
+  assert.equal(cli.target.getModulePathDetails().getModuleBuildPath(), cliModuleBuild)
+  assert.equal(
+    cli.target.getModulePathDetails().getIntermediatesRes(),
+    path.join(cliModuleBuild, 'default', 'intermediates', 'res', 'default'),
+  )
+  assert.equal(
+    cli.target.getModulePathDetails().getModuleBuildCachePath(),
+    path.join(cliModuleBuild, 'default', 'cache', 'default'),
+  )
+
+  const propertyBuildRoot = tempProject()
+  const property = await contextPaths({
+    project,
+    product: 'default',
+    hvigorProperties: { 'ohos.buildDir': propertyBuildRoot },
+  })
+  const canonicalPropertyBuildRoot = fs.realpathSync.native(propertyBuildRoot)
+  const propertyProjectBuild = path.join(canonicalPropertyBuildRoot, projectName, 'build')
+  const propertyModuleBuild = path.join(canonicalPropertyBuildRoot, projectName, 'entry', 'build')
+
+  assert.equal(property.projectContext.getBuildRootPath(), propertyProjectBuild)
+  assert.equal(
+    property.projectContext.getBuildProductOutputPath(),
+    path.join(propertyProjectBuild, 'outputs', 'default'),
+  )
+  assert.equal(property.moduleContext.getBuildProductRootPath(), moduleRoot)
+  assert.equal(
+    property.target.getBuildTargetOutputPath(),
+    path.join(propertyModuleBuild, 'default', 'outputs', 'default'),
+  )
+  assert.equal(property.target.getModulePathDetails().getModuleBuildPath(), propertyModuleBuild)
+})
+
+test('OHOS project context exposes selected SDK API and ETS component metadata', async () => {
+  const project = copyFixture('minimal-hap')
+  const sdkRoot = tempProject()
+  const etsLoader = path.join(sdkRoot, 'ets', 'build-tools', 'ets-loader')
+  fs.mkdirSync(etsLoader, { recursive: true })
+  fs.writeFileSync(
+    path.join(sdkRoot, 'ets', 'oh-uni-package.json'),
+    JSON.stringify({ data: { apiVersion: '17', version: '6.1.1.280', releaseType: 'Beta' } }),
+  )
+  const loader = new RuntimePluginLoader({ project, etsLoaderPath: etsLoader })
+  await loader.load()
+  const projectNode = [...loader.hvigorHost._nodesByName.values()].find((node) => node.isProject)
+  const sdk = loader.hvigorHost._ohosContextFor(projectNode).getSdkDetails()
+
+  assert.equal(sdk.isOhos(), false)
+  assert.equal(sdk.getSdkDir(), sdkRoot)
+  assert.equal(sdk.getSdkVersion(), 17)
+  assert.equal(sdk.getEtsComponentVersion(), '6.1.1.280')
+  assert.equal(sdk.getEtsComponentReleaseType(), 'Beta')
+})
+
 test('prune removes only latest-hvigor caches older than thirty days and runs wrapper pnpm', async () => {
   const userHome = tempProject()
   const staleRoot = path.join(userHome, 'project_caches', 'stale-cache')
@@ -377,6 +513,37 @@ test('prune removes only latest-hvigor caches older than thirty days and runs wr
     `Clear the hvigor cache file:  ${staleRoot}`,
     'Remove unreferenced packages from the store',
   ])
+})
+
+test('collectCoverage loads the compose runtime adjacent to the resolved hvigor plugin', async () => {
+  const project = tempProject()
+  const marker = path.join(project, 'coverage-call.json')
+  const nodeModules = path.join(project, 'workspace', 'node_modules')
+  const pluginRoot = path.join(nodeModules, '@ohos', 'hvigor-ohos-plugin')
+  const composeRoot = path.join(pluginRoot, 'node_modules', '@ohos', 'hvigor-arkts-compose')
+  fs.mkdirSync(composeRoot, { recursive: true })
+  fs.writeFileSync(
+    path.join(pluginRoot, 'package.json'),
+    JSON.stringify({ name: '@ohos/hvigor-ohos-plugin', main: 'index.js' }),
+  )
+  fs.writeFileSync(path.join(pluginRoot, 'index.js'), 'module.exports = {}\n')
+  fs.writeFileSync(
+    path.join(composeRoot, 'package.json'),
+    JSON.stringify({ name: '@ohos/hvigor-arkts-compose', main: 'index.js' }),
+  )
+  fs.writeFileSync(
+    path.join(composeRoot, 'index.js'),
+    `exports.generateReport = async (...args) => require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify(args))\n`,
+  )
+
+  const host = new HvigorRuntimeHost(project)
+  host.hvigorWorkspaceNodeModules = nodeModules
+  const projectPath = path.join(project, 'sources')
+  const reportPath = path.join(project, 'report')
+  const coverageFile = path.join(project, 'coverage.json')
+  await host._generateCoverageReport(projectPath, reportPath, coverageFile)
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), [projectPath, reportPath, coverageFile])
 })
 
 test('hvigor command runner executes a selected TypeScript custom task without a native build', async () => {
@@ -407,6 +574,176 @@ export default {
   await run({ project: root, executionMode: 'project', tasks: ['generateMarker'] })
 
   assert.equal(fs.readFileSync(marker, 'utf8'), 'generateMarker')
+})
+
+test('core TaskCreation remains lazy across the JS-to-Rust task model boundary', async () => {
+  const root = tempProject()
+  const realized = path.join(root, 'lazy-provider.txt')
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.js'),
+    `
+const fs = require('node:fs')
+const { getHvigorNode } = require('@ohos/hvigor')
+const node = getHvigorNode(__filename)
+node.getTaskContainer().registerTask({
+  details: {
+    name: 'lazyCustom',
+    group: 'Customize',
+    description: 'lazy custom task',
+    sourcePluginId: 'fixture.lazy',
+  },
+  depends: [],
+  dependsDefinedByUser: [],
+  provider() {
+    fs.writeFileSync(${JSON.stringify(realized)}, 'realized')
+    return node.task(() => {}, { name: 'lazyCustom' })
+  },
+})
+module.exports = { plugins: [] }
+`,
+  )
+
+  const loader = new RuntimePluginLoader({ project: root, executionMode: 'project' })
+  await loader.load()
+  assert.equal(fs.existsSync(realized), false)
+  assert.deepEqual(loader.hvigorHost._syncCustomTasks(loader.hvigorHost._nodesByName.get(path.basename(root))), [
+    {
+      taskName: 'lazyCustom',
+      group: 'Customize',
+      description: 'lazy custom task',
+      sourcePluginId: 'fixture.lazy',
+    },
+  ])
+  const lazyOverlay = JSON.parse(loader.hvigorHost.createNativeTaskBridge().tasksJson).find(
+    (task) => task.taskName === 'lazyCustom',
+  )
+  assert.equal(lazyOverlay.lazy, true)
+
+  loader.hvigorHost._commandEntryTasks = ['lazyCustom']
+  loader.hvigorHost.commandPlan()
+  assert.equal(fs.readFileSync(realized, 'utf8'), 'realized')
+})
+
+test('submitWorker executes on a reusable worker and keeps the owning task pending', async (context) => {
+  if (os.cpus().length <= 1) {
+    context.skip('Hvigor defines MAX_POOL_NUM as cpu count minus one')
+    return
+  }
+  const root = tempProject()
+  const marker = path.join(root, 'worker-result.json')
+  const workFile = path.join(root, 'worker-action.js')
+  const workPath = path.join(workFile, 'nested', 'increment')
+  fs.writeFileSync(
+    workFile,
+    [
+      'exports.nested = {',
+      '  increment(input, cacheManager) {',
+      "    const cache = cacheManager.mount('fixture')",
+      "    const count = (cache.get('count') || 0) + input",
+      "    cache.set('count', count)",
+      '    return count',
+      '  }',
+      '}',
+      '',
+    ].join('\n'),
+  )
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.ts'),
+    `
+import { Priority, TaskState, submitWorker } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+const controls: any[] = []
+const results: any[] = []
+export default {
+  plugins: [{
+    pluginId: 'worker-task',
+    apply(node: any) {
+      node.registerTask({
+        name: 'workerTask',
+        run() {
+          controls.push(submitWorker(node, 'workerTask', ${JSON.stringify(workPath)}, {
+            workInput: 1,
+            priority: Priority.FIRST,
+            targetWorkers: [0, 0, -1],
+            useReturnVal: true,
+            callback(value: number, workerId: number) { results.push([value, workerId]) }
+          }))
+          controls.push(submitWorker(node, 'workerTask', ${JSON.stringify(workPath)}, {
+            workInput: 2,
+            targetWorkers: [0],
+            useReturnVal: true,
+            callback(value: number, workerId: number) { results.push([value, workerId]) }
+          }))
+        },
+        afterRun() {
+          fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({
+            priority: Priority.FIRST,
+            state: TaskState.END,
+            results,
+            controls: controls.map((control) => ({
+              state: control.getState(),
+              workerId: control.getWorkerId(),
+              taskName: control.getTaskName(),
+              taskCompletePath: control.getTaskCompletePath(),
+            })),
+          }))
+        }
+      })
+    }
+  }]
+}
+`,
+  )
+  const run = createTestHvigorCommand(async () => {
+    throw new Error('native build must not run for a worker-backed custom task')
+  })
+
+  await run({ project: root, executionMode: 'project', tasks: ['workerTask'] })
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), {
+    priority: 0,
+    state: 'end',
+    results: [
+      [1, 0],
+      [3, 0],
+    ],
+    controls: [
+      { state: 'end', workerId: 0, taskName: 'workerTask', taskCompletePath: ':workerTask' },
+      { state: 'end', workerId: 0, taskName: 'workerTask', taskCompletePath: ':workerTask' },
+    ],
+  })
+})
+
+test('submitWorker returns a rejected TCB when parallel execution is disabled', async () => {
+  const root = tempProject()
+  const marker = path.join(root, 'worker-rejected.json')
+  fs.writeFileSync(path.join(root, 'work.js'), 'module.exports = () => 1\n')
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.js'),
+    `
+const fs = require('node:fs')
+const { submitWorker } = require('@ohos/hvigor')
+module.exports = { plugins: [{
+  pluginId: 'worker-reject',
+  apply(node) {
+    node.registerTask({
+      name: 'workerReject',
+      run() {
+        const control = submitWorker(node, 'workerReject', ${JSON.stringify(path.join(root, 'work.js'))}, {})
+        fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ state: control.getState(), workerId: control.getWorkerId() }))
+      }
+    })
+  }
+}] }
+`,
+  )
+  const run = createTestHvigorCommand(async () => {
+    throw new Error('native build must not run for a worker rejection task')
+  })
+
+  await run({ project: root, executionMode: 'project', tasks: ['workerReject'], parallel: false })
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), { state: 'reject' })
 })
 
 test('latest hvigor incremental task exports use FileSet and CoreTask class semantics', () => {
@@ -444,6 +781,132 @@ test('latest hvigor incremental task exports use FileSet and CoreTask class sema
   assert.equal(task.declareExecutionTool(), '')
   assert.equal(task.declareExecutionCommand(), '')
   assert.deepEqual(task.declareExecutionEnv(), new Map())
+})
+
+test('latest hvigor root exports every runtime value from the 6.24.3 public index', () => {
+  const hvigor = new HvigorRuntimeHost(tempProject())._makeHvigorMock()
+  const expected = `
+    AnalyzeModeMap BuildResult CUSTOM_WORKER_REQUEST CacheStore CacheStoreManager ContinualEvent
+    CoreTask DEFAULT_HVIGOR_CONFIG_JSON_FILE_NAME DefaultSyncTask DefaultTask DurationEvent
+    ExtendedErrorInfo FileSet FileUtil GlobalParam HVIGOR_PROJECT_WRAPPER_HOME HvigorBuildConst
+    HvigorCommonConst HvigorConfigLoader HvigorLogger HvigorSystemPlugin HvigorTaskGroupType
+    INCREMENTAL_OPTIMIZATION IgnoreSuperIncremental IncrementalExecTask Input InputFile InputFiles
+    Inputs Json5Reader LocalFileWriter LogLevelMap MAIN_THREAD MarkEvent MarkEventType
+    MetricEventType MetricFactory MetricLogType MetricService OHOS_ARK_COMPILE_SOURCE_MAP_DIR
+    OutputFile OutputFiles ParseJsonFile PathUtil PoolConstant Priority ProjectCacheService
+    ReplacePlaceHolderUtil ReportServiceImpl TaskDirectedAcyclicGraph TaskInput TaskOutput TaskProxy
+    TaskState Tasks TcbStore TraceManager TrackAPI WatchEvent WithParamReplacement WorkerEvent
+    WorkerPoolDelegator addExtensionHandler coreParameter defaultModelRegistry doCompilePluginTypeCheck
+    formatTime formatTimeToNumber getAlignTarget getConfiguration getHvigorConfigValue getHvigorNode
+    getNode globalData hash hashFile hvigor hvigorConfig hvigorCore iconv isLinux isMac isWindows
+    levelMap maxPathLength noop normalWorker parseJsonFile projectTaskDag
+    readJavaDaemonInfoFromCacheFile replaceBundleName replacer setCategoriesLevel splitTime
+    startEnvironment submitWorker watchWorker
+  `
+    .trim()
+    .split(/\s+/)
+
+  for (const exportName of expected) {
+    assert.equal(exportName in hvigor, true, exportName)
+  }
+})
+
+test('latest hvigor exports reuse singleton state while retaining caller-bound node lookup', () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  const projectFile = path.join(root, 'hvigorfile.ts')
+  const moduleFile = path.join(entry, 'hvigorfile.ts')
+  fs.mkdirSync(entry)
+  fs.writeFileSync(
+    path.join(root, 'build-profile.json5'),
+    `{ modules: [{ name: 'entry', srcPath: './entry', targets: [{ name: 'default' }] }] }\n`,
+  )
+  fs.writeFileSync(path.join(entry, 'build-profile.json5'), `{ targets: [{ name: 'default' }] }\n`)
+
+  const host = new HvigorRuntimeHost(root)
+  host.prepareHvigorfiles([projectFile, moduleFile])
+  const projectExports = host._makeHvigorMock(projectFile)
+  const repeatedProjectExports = host._makeHvigorMock(projectFile)
+  const moduleExports = host._makeHvigorMock(moduleFile)
+
+  assert.equal(projectExports, repeatedProjectExports)
+  assert.equal(projectExports.hvigor, moduleExports.hvigor)
+  assert.equal(projectExports.hvigorCore, moduleExports.hvigorCore)
+  assert.equal(projectExports.getNode().getNodeName(), path.basename(root))
+  assert.equal(moduleExports.getNode().getNodeName(), 'entry')
+  assert.equal(projectExports.hvigorCore.getProject().getName(), path.basename(root))
+})
+
+test('latest hvigor cache, DAG, metrics, trace, and system-plugin exports retain behavior', () => {
+  const root = tempProject()
+  const host = new HvigorRuntimeHost(root)
+  const hvigor = host._makeHvigorMock()
+
+  const manager = new hvigor.CacheStoreManager({ capacity: 2 })
+  const cache = manager.mount('fixture')
+  cache.set('first', 1).set('second', 2)
+  assert.equal(cache.get('first'), 1)
+  cache.set('third', 3)
+  assert.equal(cache.hasCache('second'), false)
+  assert.deepEqual([...cache.keys()], ['first', 'third'])
+  assert.equal(manager.cacheItemSize(), 2)
+
+  const dag = new hvigor.TaskDirectedAcyclicGraph()
+  dag.addEdge('compile', 'package')
+  dag.addEdge('package', 'sign')
+  assert.deepEqual([...dag.getAllStartNodes()], ['compile'])
+  assert.deepEqual([...dag.getAllEndNodes()], ['sign'])
+  assert.deepEqual(dag.checkCircle(), { hasCircle: false, circlePath: [] })
+  dag.addEdge('sign', 'compile')
+  assert.deepEqual(dag.checkCircle(), {
+    hasCircle: true,
+    circlePath: ['compile', 'package', 'sign', 'compile'],
+  })
+
+  const duration = hvigor.MetricFactory.createDurationEvent('entry:default@CompileArkTS', 'compile', 'build')
+  const child = duration.createSubEvent('worker', 'worker action').start()
+  child.stop()
+  duration.start().stop()
+  duration.setLog(undefined, hvigor.MetricLogType.INFO)
+  const report = hvigor.MetricService.getInstance().queryReport()
+  assert.equal(report.getName(), 'events')
+  assert.equal(report.getValue().some((event) => event.getId() === duration.getId()), true)
+  assert.equal(duration.additional.moduleName, 'entry')
+  assert.equal(duration.additional.targetName, 'default')
+
+  const trace = new hvigor.TraceManager()
+  let callbackCalled = false
+  trace.trace('entry.compile', { result: 'success' }, () => {
+    callbackCalled = true
+  })
+  trace.flush()
+  assert.equal(callbackCalled, true)
+  assert.deepEqual(
+    JSON.parse(
+      fs.readFileSync(path.join(root, '.hvigor', 'outputs', 'logs', 'details', 'details.json'), 'utf8'),
+    ),
+    { 'entry.compile': { result: 'success' } },
+  )
+  assert.equal(hvigor.TraceManager.transformKey('entry.compile'), 'entry_compile')
+
+  class FixturePlugin extends hvigor.HvigorSystemPlugin {
+    getContext() {
+      return { kind: 'fixture' }
+    }
+  }
+  const plugin = new FixturePlugin('fixture.plugin')
+  assert.equal(plugin.getPluginId(), 'fixture.plugin')
+  assert.equal(plugin.pluginVersion, HVIGOR_PARITY_VERSION)
+  assert.deepEqual(plugin.getContext(), { kind: 'fixture' })
+
+  const tcb = { getId: () => 'fixture-tcb' }
+  hvigor.TcbStore.add(tcb)
+  assert.equal(hvigor.TcbStore.getTCB('fixture-tcb'), tcb)
+  hvigor.TcbStore.clear()
+  assert.equal(hvigor.TcbStore.getTCB('fixture-tcb'), undefined)
+  assert.equal(hvigor.PoolConstant.MAX_POOL_NUM, os.cpus().length - 1)
+  assert.equal(hvigor.WorkerEvent.CUSTOM_WORKER_REQUEST, 'CUSTOM_WORKER_REQUEST')
+  assert.equal(hvigor.WatchEvent.WATCH_RESULT, 'WatchResult')
 })
 
 test('latest hvigor cross-platform, hash, JSON5, path, and placeholder utilities are executable', async () => {
@@ -987,8 +1450,20 @@ test('latest hvigor-config and CLI properties feed the shared Parameter model', 
         'ohos.integratedHsp.useGetCurrentBundleName': true,
         'ohos.byteCodeHar.integratedOptimization': true,
         'hvigor.keepDependency': false,
+        'ohos.align.target': 'tablet',
+        'ohos.arkCompile.sourceMapDir': 'maps',
+        'ohos.har.excludeHspDependencies': true,
+        'ohos.dependencies.types.enable': true,
+        'ohos.arkCompile.singleFileEmit': true,
+        'ohos.rollupCache.useSourceHash': true,
+        'ohos.processLib.optimization': true,
+        'ohos.compile.lib.entryfile': false,
+        'ohos.defaults.release.cmakebuildtype': 'RelWithDebInfo',
+        'ohos.fallback.target': 'phone,default',
+        'ohos.obfuscationRules.optimization': true,
+        'ohos.sign.har': true,
       },
-      execution: { incremental: true, parallel: false, optimizationStrategy: 'performance' },
+      execution: { incremental: true, parallel: false, daemon: false, optimizationStrategy: 'performance' },
       logging: { level: 'warn' },
       debugging: { stacktrace: true }
     }\n`,
@@ -1038,6 +1513,144 @@ module.exports = { plugins: [] }
   assert.equal(runtime.toNativeBuildConfig().byteCodeHarIntegratedOptimization, true)
   assert.equal(runtime.toNativeBuildConfig().keepDependency, false)
   assert.equal(runtime.toNativeBuildConfig().parameterFileOverride, 'params.json5')
+  assert.deepEqual(runtime.hvigorHost.runtimeProperties(runtime.hvigorHost.startParameters()), {
+    daemon: false,
+    alignTarget: 'tablet',
+    sourceMapDir: 'maps',
+    harExcludeHspDependencies: true,
+    dependenciesTypesEnable: true,
+    singleFileEmit: true,
+    rollupCacheUseSourceHash: true,
+    processLibOptimization: true,
+    compileLibEntryFile: false,
+    releaseCmakeBuildType: 'RelWithDebInfo',
+    fallbackTargets: ['phone', 'default'],
+    obfuscationRulesOptimization: true,
+    signHar: true,
+    previewerCompileResIncremental: false,
+    compileHspDependencies: false,
+    compileHspDependenciesTruthy: false,
+  })
+})
+
+test('preview compileHspDependencies preserves Hvigor literal and truthy predicates', () => {
+  const falseText = new HvigorRuntimeHost(tempProject(), {
+    prop: ['compileHspDependencies=false'],
+  }).runtimeProperties({})
+  assert.equal(falseText.compileHspDependencies, false)
+  assert.equal(falseText.compileHspDependenciesTruthy, true)
+
+  const trueText = new HvigorRuntimeHost(tempProject(), {
+    prop: ['compileHspDependencies=true'],
+  }).runtimeProperties({})
+  assert.equal(trueText.compileHspDependencies, true)
+  assert.equal(trueText.compileHspDependenciesTruthy, true)
+})
+
+test('BinXO extra config preserves Hvigor truthy override and CMake fallback predicates', () => {
+  const enabled = new HvigorRuntimeHost(tempProject(), {
+    prop: ['ohos-enable-hwasan=true', 'ohos-enable-binxo=true'],
+  })
+  assert.equal(enabled.binxoEnabled({ externalNativeOptions: {} }), true)
+  assert.deepEqual(enabled.runtimeProperties({}), {
+    daemon: false,
+    harExcludeHspDependencies: false,
+    dependenciesTypesEnable: false,
+    singleFileEmit: false,
+    rollupCacheUseSourceHash: false,
+    processLibOptimization: false,
+    fallbackTargets: [],
+    obfuscationRulesOptimization: false,
+    signHar: false,
+    previewerCompileResIncremental: false,
+    compileHspDependencies: false,
+    compileHspDependenciesTruthy: false,
+    hwasanConfig: true,
+    binxoConfig: true,
+  })
+
+  const explicitFalse = new HvigorRuntimeHost(tempProject(), {
+    prop: ['ohos-enable-binxo=false'],
+  })
+  assert.equal(
+    explicitFalse.binxoEnabled({
+      externalNativeOptions: { arguments: '-DOTHER=ON -DOHOS_ENABLE_BINXO=ON' },
+    }),
+    false,
+  )
+  assert.equal(explicitFalse.runtimeProperties({}).binxoConfig, false)
+
+  const fallback = new HvigorRuntimeHost(tempProject(), {})
+  assert.equal(
+    fallback.binxoEnabled({
+      externalNativeOptions: {
+        arguments: ['-DOTHER=ON', '-DOHOS_ENABLE_BINXO=ON -DVALUE=1'],
+      },
+    }),
+    true,
+  )
+  assert.equal(fallback.runtimeProperties({}).binxoConfig, undefined)
+})
+
+test('sanitizer extra config uses Hvigor exact true predicates', () => {
+  const host = new HvigorRuntimeHost(tempProject(), {
+    prop: [
+      'ohos-debug-asan=true',
+      'ohos-enable-tsan=true',
+      'ohos-enable-hwasan=false',
+      'ohos-enable-ubsan=true',
+    ],
+  })
+  const properties = host.runtimeProperties({})
+  assert.equal(properties.asanConfig, true)
+  assert.equal(properties.tsanConfig, true)
+  assert.equal(properties.hwasanConfig, false)
+  assert.equal(properties.ubsanConfig, true)
+
+  const native = new RuntimePluginLoader({
+    project: host.projectRoot,
+    prop: [
+      'ohos-debug-asan=true',
+      'ohos-enable-tsan=true',
+      'ohos-enable-hwasan=false',
+      'ohos-enable-ubsan=true',
+    ],
+  }).toNativeBuildConfig()
+  assert.equal(native.ohosDebugAsan, true)
+  assert.equal(native.ohosEnableTsan, true)
+  assert.equal(native.ohosEnableHwasan, false)
+  assert.equal(native.ohosEnableUbsan, true)
+})
+
+test('test commands inject Hvigor defaults without overriding explicit CLI properties', () => {
+  const localTest = new HvigorRuntimeHost(tempProject(), {
+    tasks: ['test'],
+    prop: ['product=custom', 'coverage=false', 'pageType=component'],
+  })
+  assert.deepEqual(localTest._parameter.getExtParamsInternal(), {
+    product: 'custom',
+    'ohos-test-coverage': 'false',
+    pageType: 'component',
+    buildRoot: '.test',
+    unitTestMode: 'true',
+    isLocalTest: 'true',
+    'unit.test.replace.page': '../../../.test/testability/pages/Index',
+  })
+  assert.equal(localTest._effectiveExecutionMode(), 'module')
+  assert.equal(localTest._effectiveBuildMode(), 'debug')
+
+  const deviceTest = new HvigorRuntimeHost(tempProject(), {
+    tasks: ['onDeviceTest'],
+    prop: ['product=phone'],
+  })
+  assert.deepEqual(deviceTest._parameter.getExtParamsInternal(), {
+    product: 'phone',
+    buildMode: 'test',
+    isOhosTest: 'true',
+    'ohos-test-coverage': 'true',
+  })
+  assert.equal(deviceTest._effectiveExecutionMode(), 'module')
+  assert.equal(deviceTest._effectiveBuildMode(), 'test')
 })
 
 test('byteCode HAR integrated optimization requires the literal boolean true', async () => {
@@ -1212,7 +1825,7 @@ hvigor.configEvaluated((config: any) => {
 })
 hvigor.nodesInitialized((runtime: any) => {
   const nodes = runtime.getAllNodes().map((node: any) => node.getNodeName() + ':' + node.classKind)
-  const dynamicNode = runtime.getNodeByName('dynamic', 'node')
+  const dynamicNode = runtime.getNodeByName('dynamic', 'module')
   fs.appendFileSync(${JSON.stringify(marker)}, 'nodesInitialized:' + nodes.join(',') + ':' + dynamicNode.getExtraOption('flavor') + '\\n')
 })
 hvigor.nodesEvaluated(() => fs.appendFileSync(${JSON.stringify(marker)}, 'nodesEvaluated\\n'))
@@ -1228,7 +1841,7 @@ hvigor.buildFinished((result: any) => fs.appendFileSync(${JSON.stringify(marker)
 
   assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split('\n'), [
     'configEvaluated',
-    `nodesInitialized:dynamic:node,${path.basename(root)}:project:fixture`,
+    `nodesInitialized:dynamic:module,${path.basename(root)}:project:fixture`,
     'nodesEvaluated',
     'taskGraphResolved',
     'buildFinished:true',
@@ -1685,6 +2298,97 @@ test('HvigorRuntimeHost._makeOhosPluginMock returns callable task functions', ()
   assert.deepEqual(host._effects.compilePluginPath, ['./from-hap.js'])
 })
 
+test('OHOS plugin root exports legacy factories and command modifier enum', () => {
+  const host = new HvigorRuntimeHost()
+  const mock = host._makeOhosPluginMock('fixture-hvigorfile.ts')
+
+  assert.equal(mock.CommandBuilderType.NINJA, 2)
+  assert.equal(mock.CommandBuilderType[2], 'NINJA')
+  assert.equal(typeof mock.registryCommandModifier, 'function')
+  assert.equal(typeof mock.getRemoteHspObjList, 'function')
+  const modifier = { modify: (command) => ['native-command-wrapper', ...command.slice(1), '--profile'] }
+  mock.registryCommandModifier(mock.CommandBuilderType.NINJA, modifier)
+  assert.equal(host._commandBuilderModifiers.get(2), modifier)
+  assert.deepEqual(host.createNativeTaskBridge().commandModifierTypes, [mock.CommandBuilderType.NINJA])
+  assert.deepEqual(
+    host._runNativeCommandModifier({
+      builderType: mock.CommandBuilderType.NINJA,
+      command: ['ninja', '-C', path.join('native', 'arm64-v8a')],
+    }),
+    ['native-command-wrapper', '-C', path.join('native', 'arm64-v8a'), '--profile'],
+  )
+
+  for (const factory of [mock.legacyAppTasks, mock.legacyHapTasks, mock.legacyHarTasks]) {
+    assert.throws(factory, (error) => error.code === 'ARKDOWN_UNSUPPORTED_LEGACY_FA_MODEL')
+  }
+})
+
+test('OHOS command modifier rejects results outside the official string-array contract', () => {
+  const host = new HvigorRuntimeHost()
+  const mock = host._makeOhosPluginMock('fixture-hvigorfile.ts')
+  mock.registryCommandModifier(mock.CommandBuilderType.NINJA, { modify: () => ['ninja', 1] })
+
+  assert.throws(
+    () =>
+      host._runNativeCommandModifier({
+        builderType: mock.CommandBuilderType.NINJA,
+        command: ['ninja'],
+      }),
+    (error) => error.code === 'ARKDOWN_INVALID_COMMAND_MODIFIER_RESULT',
+  )
+})
+
+test('getRemoteHspObjList follows module-first and highest-version project override semantics', async () => {
+  const project = copyFixture('minimal-hap')
+  const moduleRoot = path.join(project, 'entry')
+  const writeRemoteHsp = (root, directory, fileName, name, version, integratedHsp = false) => {
+    const output = path.join(root, 'oh_modules', '.hsp', directory)
+    fs.mkdirSync(output, { recursive: true })
+    fs.writeFileSync(path.join(output, fileName), 'HSP')
+    fs.writeFileSync(
+      path.join(output, 'oh-package.json5'),
+      JSON.stringify({ name, version, metadata: { integratedHsp } }),
+    )
+    return output
+  }
+  writeRemoteHsp(moduleRoot, 'module-chat', 'chat.hsp', '@fixture/chat', '1.2.0')
+  writeRemoteHsp(moduleRoot, 'module-map', 'map.hsp', '@fixture/map', '2.0.0-beta.1', true)
+  const projectChat = writeRemoteHsp(project, 'project-chat', 'chat.hsp', '@fixture/chat', '1.3.0')
+  writeRemoteHsp(project, 'project-map', 'map.hsp', '@fixture/map', '2.0.0-beta.2', true)
+
+  const loader = new RuntimePluginLoader({ project })
+  await loader.load()
+  const entry = loader.hvigorHost._nodesByName.get('entry')
+  const remoteHsps = loader.hvigorHost._makeOhosPluginMock().getRemoteHspObjList(entry.wrapper)
+
+  assert.deepEqual(
+    remoteHsps.map(({ hspFileName, hspVersion }) => [hspFileName, hspVersion]),
+    [
+      ['chat.hsp', '1.3.0'],
+      ['map.hsp', '2.0.0-beta.2'],
+    ],
+  )
+  assert.equal(remoteHsps[0].hspPath, path.join(projectChat, 'chat.hsp'))
+  assert.equal(remoteHsps[1].isIntegratedHsp, true)
+})
+
+test('getRemoteHspObjList rejects multiple HSP files with the official diagnostic', async () => {
+  const project = copyFixture('minimal-hap')
+  const invalid = path.join(project, 'entry', 'oh_modules', '.hsp', 'invalid')
+  fs.mkdirSync(invalid, { recursive: true })
+  fs.writeFileSync(path.join(invalid, 'one.hsp'), 'HSP')
+  fs.writeFileSync(path.join(invalid, 'two.hsp'), 'HSP')
+  fs.writeFileSync(path.join(invalid, 'oh-package.json5'), '{ name: "invalid", version: "1.0.0" }')
+
+  const loader = new RuntimePluginLoader({ project })
+  await loader.load()
+  const entry = loader.hvigorHost._nodesByName.get('entry')
+  assert.throws(
+    () => loader.hvigorHost._makeOhosPluginMock().getRemoteHspObjList(entry.wrapper),
+    (error) => error.code === 'ALLOW_ONE_HSP',
+  )
+})
+
 test('hvigorfile with hapTasks call captures compilePluginPath via HvigorRuntimeHost', async () => {
   const root = tempProject()
   const pluginFile = path.join(root, 'compile-plugin.js')
@@ -1733,13 +2437,15 @@ test('hvigor 6.24.3 binds named hapTasks exports into the native assembly graph'
   const bridge = loader.hvigorHost.createNativeTaskBridge()
   const selection = JSON.parse(bridge.selectionJson)
   const tasks = JSON.parse(bridge.tasksJson)
+  const catalogs = JSON.parse(bridge.catalogsJson)
   assert.deepEqual(selection.expectedRootPaths, ['entry:assembleHap'])
+  assert.equal(catalogs.find((catalog) => catalog.nodeName === 'entry').kind, 'hap')
   assert.equal(
-    tasks.some(
-      (task) => task.path === 'entry:default@ProcessProfile' && task.builtIn && task.enabled,
-    ),
-    true,
+    tasks.some((task) => task.path === 'entry:default@ProcessProfile'),
+    false,
+    'unrealized built-ins must be expanded from the compact Rust catalog instead of crossing N-API',
   )
+  assert.equal(tasks.some((task) => task.path === 'entry:assembleHap'), true)
 })
 
 test('hvigor 6.24.3 TypeScript custom plugins bind context before apply and forward OHOS effects', async () => {
@@ -1854,8 +2560,14 @@ export default { system: hapTasks, plugins }
   assert.equal(contextOverrides.modules[entry].buildProfile.buildOption.arkOptions.byteCodeHar, true)
 })
 
-test('OHOS context getters and setters use the Rust snapshot overlay contract', async () => {
+test('OHOS context getters and setters use the Rust snapshot overlay contract', async (context) => {
   const root = tempProject()
+  const previousOhpmBin = process.env.ohpmBin
+  process.env.ohpmBin = fakeOhpmExecutable(root)
+  context.after(() => {
+    if (previousOhpmBin === undefined) delete process.env.ohpmBin
+    else process.env.ohpmBin = previousOhpmBin
+  })
   const entry = path.join(root, 'entry')
   const marker = path.join(root, 'context.json')
   fs.mkdirSync(path.join(root, 'AppScope'), { recursive: true })
@@ -1986,6 +2698,27 @@ export default { system: hapTasks, plugins: [plugin] }
   assert.equal(overrides.modules[entry].moduleJson.module.description, '$string:changed')
   assert.equal(overrides.modules[entry].package.version, '8.0.0')
   assert.deepEqual(overrides.modules[entry].package.dependencies, { moduleDep: '5.0.0' })
+
+  const dependencyMapRoot = path.join(root, '.hvigor', 'dependencyMap')
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dependencyMapRoot, 'oh-package.json5'), 'utf8')), {
+    name: 'project',
+    version: '1.0.0',
+    dependencies: { projectDep: '2.0.0' },
+    devDependencies: { projectDev: '3.0.0' },
+    dynamicDependencies: { projectDynamic: '4.0.0' },
+    overrides: { projectDep: '2.1.0' },
+  })
+  const dependencyMap = JSON.parse(fs.readFileSync(path.join(dependencyMapRoot, 'dependencyMap.json5'), 'utf8'))
+  assert.equal(dependencyMap.rootDependency, './oh-package.json5')
+  assert.equal(dependencyMap.dependencyMap.entry, './entry/oh-package.json5')
+  assert.deepEqual(dependencyMap.modules.map(({ name }) => name), ['entry'])
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dependencyMapRoot, 'entry', 'oh-package.json5'), 'utf8')), {
+    name: 'entry',
+    version: '8.0.0',
+    dependencies: { moduleDep: '5.0.0' },
+    devDependencies: { moduleDev: '6.0.0' },
+    dynamicDependencies: { moduleDynamic: '7.0.0' },
+  })
 })
 
 test('TypeScript custom plugin apply failures retain plugin and hvigorfile diagnostics', async () => {
@@ -2100,6 +2833,157 @@ export default { system: ${fixture.factory}, plugins: [] }
       after: ['tasks', 'taskTree', fixture.task, fixture.root],
     })
   }
+})
+
+test('npm project task catalog resolves local HSP and HAR targets across module boundaries', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  const shared = path.join(root, 'shared')
+  const library = path.join(root, 'library')
+  const entryResult = path.join(root, 'entry-cross-module-tasks.json')
+  const harResult = path.join(root, 'npm-har-tasks.json')
+  for (const moduleRoot of [entry, shared, library]) fs.mkdirSync(moduleRoot)
+  fs.writeFileSync(
+    path.join(root, 'build-profile.json5'),
+    `{
+      app: { products: [{ name: 'default', compileSdkVersion: '12', compatibleSdkVersion: '12' }] },
+      modules: [
+        { name: 'entry', srcPath: './entry', targets: [{ name: 'default' }] },
+        { name: 'shared', srcPath: './shared', targets: [{ name: 'default' }] },
+        { name: 'library', srcPath: './library', targets: [{ name: 'default' }] }
+      ]
+    }\n`,
+  )
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'npm-project' }))
+  fs.writeFileSync(
+    path.join(root, 'hvigorfile.ts'),
+    `import { appTasks } from '@ohos/hvigor-ohos-plugin'\nexport default { system: appTasks, plugins: [] }\n`,
+  )
+  for (const [moduleRoot, name] of [
+    [entry, 'entry'],
+    [shared, 'shared'],
+    [library, 'library'],
+  ]) {
+    fs.writeFileSync(path.join(moduleRoot, 'build-profile.json5'), `{ targets: [{ name: 'default' }] }\n`)
+    fs.writeFileSync(
+      path.join(moduleRoot, 'package.json'),
+      JSON.stringify({
+        name,
+        ohos: {},
+        dependencies:
+          name === 'entry'
+            ? { shared: 'file:../shared', library: 'file:../library' }
+            : {},
+      }),
+    )
+  }
+  fs.writeFileSync(
+    path.join(entry, 'hvigorfile.ts'),
+    `
+import { hapTasks } from '@ohos/hvigor-ohos-plugin'
+import { getNode, hvigor } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+const node = getNode(__filename)!
+hvigor.nodesEvaluated(() => {
+  const dependencies = (name: string) => node.getTaskByName(name)!.getDependencies()
+  fs.writeFileSync(${JSON.stringify(entryResult)}, JSON.stringify({
+    merge: dependencies('default@MergeProfile'),
+    profile: dependencies('default@CreateBuildProfile'),
+    compile: dependencies('default@CompileArkTS'),
+    metadata: dependencies('default@GenerateMetadata'),
+  }))
+})
+export default { system: hapTasks, plugins: [] }
+`,
+  )
+  fs.writeFileSync(
+    path.join(shared, 'hvigorfile.ts'),
+    `import { hspTasks } from '@ohos/hvigor-ohos-plugin'\nexport default { system: hspTasks, plugins: [] }\n`,
+  )
+  fs.writeFileSync(
+    path.join(library, 'hvigorfile.ts'),
+    `
+import { harTasks } from '@ohos/hvigor-ohos-plugin'
+import { getNode, hvigor } from '@ohos/hvigor'
+import * as fs from 'node:fs'
+const node = getNode(__filename)!
+hvigor.nodesEvaluated(() => {
+  fs.writeFileSync(
+    ${JSON.stringify(harResult)},
+    JSON.stringify(node.getTaskByName('default@ProcessHarArtifacts')!.getDependencies()),
+  )
+})
+export default { system: harTasks, plugins: [] }
+`,
+  )
+
+  const loader = new RuntimePluginLoader({ project: root, module: 'entry', buildTargetName: 'default' })
+  assert.equal(loader.hvigorHost._isOhpmProject(), false)
+  await loader.load()
+  assert.equal(loader.hvigorHost._isOhpmProject(), false)
+  assert.deepEqual(JSON.parse(fs.readFileSync(entryResult, 'utf8')), {
+    merge: [
+      'entry:default@PreBuild',
+      'shared:default@MergeProfile',
+      'library:default@MergeProfile',
+    ],
+    profile: [
+      'entry:default@PreBuild',
+      'shared:default@CreateBuildProfile',
+      'library:default@CreateHarBuildProfile',
+    ],
+    compile: [
+      'entry:default@GenerateLoaderJson',
+      'entry:default@CompileResource',
+      'entry:default@CreateBuildProfile',
+      'library:default@CreateHarBuildProfile',
+    ],
+    metadata: ['entry:default@PreBuild', 'shared:default@GenerateMetadata'],
+  })
+  assert.deepEqual(JSON.parse(fs.readFileSync(harResult, 'utf8')), [
+    'library:default@ProcessObfuscationFiles',
+    'library:default@CacheNativeLibs',
+    'library:default@ProcessPackageJson',
+    'library:default@HarCompileArkTS',
+    'library:default@ProcessIntegratedHsp',
+  ])
+})
+
+test('configured Cangjie build is rejected before native packaging can omit its outputs', async () => {
+  const root = tempProject()
+  const entry = path.join(root, 'entry')
+  fs.mkdirSync(entry)
+  fs.writeFileSync(
+    path.join(root, 'build-profile.json5'),
+    `{
+      app: { products: [{ name: 'default', compileSdkVersion: '12', compatibleSdkVersion: '12' }] },
+      modules: [{ name: 'entry', srcPath: './entry', targets: [{ name: 'default' }] }]
+    }\n`,
+  )
+  fs.writeFileSync(
+    path.join(entry, 'build-profile.json5'),
+    `{
+      buildOption: {
+        cangjieOptions: { path: './src/main/cangjie/cjpm.toml', abiFilters: ['arm64-v8a'] }
+      },
+      targets: [{ name: 'default' }]
+    }\n`,
+  )
+  fs.writeFileSync(
+    path.join(entry, 'hvigorfile.ts'),
+    `import { hapTasks } from '@ohos/hvigor-ohos-plugin'\nexport default { system: hapTasks, plugins: [] }\n`,
+  )
+  const loader = new RuntimePluginLoader({ project: root, module: 'entry', buildTargetName: 'default' })
+  await loader.load()
+  assert.throws(
+    () => loader.toNativeBuildConfig(),
+    (error) => {
+      assert.equal(error.code, 'ARKDOWN_UNSUPPORTED_CANGJIE_BUILD')
+      assert.equal(error.module, 'entry')
+      assert.equal(error.target, 'default')
+      return true
+    },
+  )
 })
 
 test('latest project task catalog refreshes child assembly dependencies after module binding', async () => {

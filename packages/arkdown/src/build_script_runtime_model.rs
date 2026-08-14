@@ -8,6 +8,7 @@ use arkdown_config::{
 };
 use arkdown_session::{
   BuildScriptFileInventory, BuildScriptModuleModelLoader, BuildScriptRuntimeModelLoader,
+  HvigorSdkDetailsInventory, HvigorSdkDetailsRequest,
 };
 
 pub(crate) struct BuildScriptRuntimeModelNapiAdapter;
@@ -43,6 +44,19 @@ impl BuildScriptRuntimeModelNapiAdapter {
       .discover()
       .map_err(Self::model_error)?;
     Self::encode(&files, "build-script file inventory")
+  }
+
+  pub(crate) fn inspect_sdk_details(request_json: &str) -> Result<String> {
+    let request: HvigorSdkDetailsRequest = Self::decode(request_json, "Hvigor SDK details")?;
+    let snapshot = HvigorSdkDetailsInventory::new(request)
+      .inspect()
+      .map_err(|error| {
+        Error::new(
+          Status::GenericFailure,
+          format!("ARKDOWN_HVIGOR_SDK_DETAILS_FAILED: {error}"),
+        )
+      })?;
+    Self::encode(&snapshot, "Hvigor SDK details")
   }
 
   pub(crate) fn plan(request_json: &str) -> Result<String> {

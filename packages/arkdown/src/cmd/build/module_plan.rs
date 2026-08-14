@@ -3,18 +3,31 @@ use rustc_hash::FxHashSet;
 use arkdown_core::{ArkdownConfig, ModuleConfig, OutputTarget};
 use arkdown_path::{canonicalize_or_owned as canonical_or_owned, ModuleSpecifierText};
 
+use super::args::NativeTaskRoot;
+
 pub(super) struct ModuleSelectionPlanner;
 
 impl ModuleSelectionPlanner {
   pub(super) fn build_modules_for_target<'a>(
     config: &'a ArkdownConfig,
     selected_module: Option<&str>,
+    native_task_roots: &[NativeTaskRoot],
   ) -> anyhow::Result<Vec<&'a ModuleConfig>> {
     if let Some(selected) = selected_module {
       if !config.modules.iter().any(|module| module.name == selected) {
         anyhow::bail!("selected module '{selected}' does not exist in build-profile.json5");
       }
     }
+    let root_modules = native_task_roots
+      .iter()
+      .filter(|root| {
+        config
+          .modules
+          .iter()
+          .any(|module| module.name == root.module_name)
+      })
+      .map(|root| root.module_name.as_str())
+      .collect::<FxHashSet<_>>();
     let matching: Vec<&ModuleConfig> = config
       .modules
       .iter()
@@ -23,10 +36,16 @@ impl ModuleSelectionPlanner {
           .map(|selected| module.name == selected)
           .unwrap_or(true)
       })
+      // A direct module task is selected on its owning node(s), whereas a
+      // normal assemble has no cutoff roots. Preserve that distinction when
+      // the command omitted `-p module=...` so unrelated modules are not
+      // executed merely because they share an output kind.
+      .filter(|module| root_modules.is_empty() || root_modules.contains(module.name.as_str()))
       .filter(|module| {
         module
           .module_type
           .matches_output_target(&config.output_target)
+          || Self::is_hap_task_projection(config, module, native_task_roots)
       })
       .collect();
     if matching.is_empty() {
@@ -39,6 +58,29 @@ impl ModuleSelectionPlanner {
       );
     }
     Ok(matching)
+  }
+
+  /// Hvigor registers HAP packaging actions on HSP and HAR target services
+  /// for `genOnDeviceTestHap`. The command planner projects those actions to
+  /// `OutputTarget::Hap`; accept only the explicitly selected owner instead
+  /// of weakening the ordinary module-type/output validation.
+  fn is_hap_task_projection(
+    config: &ArkdownConfig,
+    module: &ModuleConfig,
+    native_task_roots: &[NativeTaskRoot],
+  ) -> bool {
+    matches!(config.output_target, OutputTarget::Hap)
+      && matches!(
+        module.module_type,
+        arkdown_core::OhosModuleType::Shared | arkdown_core::OhosModuleType::Har
+      )
+      && native_task_roots.iter().any(|root| {
+        root.module_name == module.name
+          && matches!(
+            root.task_name.as_str(),
+            "genOnDeviceTestHap" | "PackageHap" | "SignHap"
+          )
+      })
   }
 
   pub(super) fn resource_modules_for_build<'a>(

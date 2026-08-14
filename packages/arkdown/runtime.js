@@ -3,10 +3,12 @@
 const fs = require('node:fs')
 const crypto = require('node:crypto')
 const childProcess = require('node:child_process')
+const { EventEmitter } = require('node:events')
 const Module = require('node:module')
 const os = require('node:os')
 const path = require('node:path')
 const util = require('node:util')
+const { Worker } = require('node:worker_threads')
 const iconvLite = require('iconv-lite')
 const log4js = require('log4js')
 const nativeRuntimeBinding = require('./index.js')
@@ -42,6 +44,232 @@ const HVIGOR_TASK_STATE = Object.freeze({
   REJECT: 'reject',
   ERROR: 'error',
 })
+const HVIGOR_WORKER_PRIORITY = Object.freeze({
+  0: 'FIRST',
+  1: 'HEAVY',
+  2: 'MEDIUM',
+  3: 'LIGHT',
+  4: 'LAST',
+  FIRST: 0,
+  HEAVY: 1,
+  MEDIUM: 2,
+  LIGHT: 3,
+  LAST: 4,
+})
+const HVIGOR_POOL_STATE = Object.freeze({
+  INIT: 'init',
+  RUNNING: 'running',
+  STOP: 'stop',
+  CLOSE: 'close',
+  TERMINATED: 'terminated',
+})
+const HVIGOR_WORKER_EVENT = Object.freeze({
+  CLEAN_HVIGOR_CONFIG_LOADER: 'CLEAN_HVIGOR_CONFIG_LOADER',
+  CLEAN_HVIGOR_LOGGER: 'CLEAN_HVIGOR_LOGGER',
+  UNMOUNT_TSC_COMMON_CACHE_EVENT: 'UNMOUNT_TSC_COMMON_CACHE_EVENT',
+  UPDATE_LOG_LEVEL: 'UPDATE_LOG_LEVEL',
+  CUSTOM_WORKER_REQUEST: 'CUSTOM_WORKER_REQUEST',
+})
+const HVIGOR_WATCH_EVENT = Object.freeze({
+  WATCH_START: 'WatchStart',
+  WATCH_RESULT: 'WatchResult',
+  CLOSE_WATCH: 'CloseWatch',
+  WATCH_COMPILE_RESULT: 'WatchCompileResult',
+  WATCH_COMPILE_DATA: 'WatchCompileData',
+  WATCH_LOG: 'WatchLog',
+  TERMINATE_WORKER: 'TerminateWorker',
+  NEW_WATCH_WORKER: 'NewWatchWorker',
+  SEND_KEEP_ALIVE_SIGNAL: 'SendKeepAliveSignal',
+})
+const HVIGOR_METRIC_EVENT_TYPE = Object.freeze({
+  DURATION: 'duration',
+  INSTANT: 'instant',
+  COUNTER: 'counter',
+  GAUGE: 'gauge',
+  OBJECT: 'object',
+  METADATA: 'metadata',
+  MARK: 'mark',
+  LOG: 'log',
+  CONTINUAL: 'continual',
+})
+const HVIGOR_METRIC_LOG_TYPE = Object.freeze({
+  DEBUG: 'debug',
+  INFO: 'info',
+  WARN: 'warn',
+  ERROR: 'error',
+  DETAIL: 'detail',
+})
+const HVIGOR_MARK_EVENT_TYPE = Object.freeze({ HISTORY: 'history', OTHER: 'other' })
+const HVIGOR_MARK_EVENT_STATE = Object.freeze({
+  SUCCESS: 'success',
+  FAILED: 'failed',
+  RUNNING: 'running',
+})
+const HVIGOR_DURATION_EVENT_STATE = Object.freeze({
+  CREATED: 'created',
+  BEGINNING: 'beginning',
+  RUNNING: 'running',
+  FAILED: 'failed',
+  SUCCESS: 'success',
+  WARN: 'warn',
+})
+const OHOS_COMMAND_BUILDER_TYPE = Object.freeze({
+  0: 'NONE',
+  1: 'CMAKE',
+  2: 'NINJA',
+  NONE: 0,
+  CMAKE: 1,
+  NINJA: 2,
+})
+
+class HvigorPoolConstant {
+  static MAX_POOL_NUM = os.cpus().length - 1
+  static MIN_POOL_NUM = 0
+  static DEFAULT_MAX_IDLE_TIME = 600000
+  static DEFAULT_RECYCLE_INTERVAL = 600000
+  static WORKER_ACTION_PATH = './worker-action.js'
+  static WORK_DONE = 'work done'
+  static WORK_ERROR = 'work error'
+  static CALLBACK_ERROR = 'callback error'
+  static FILE_SUFFIX = '.js'
+  static UNKNOWN_LOG_TIME = 'unknown'
+  static ENCODING = 'utf8'
+  static TIME_PREFIX_LENGTH = 25
+  static CPU_LIMIT = 0.8
+  static FAIL_DISPATCH_INTERVAL = 100
+  static MAX_FAIL_ATTEMPTS = 5
+  static TSC_COMMON_CACHE_KEY = 'common'
+}
+
+class HvigorExtendedErrorInfo extends Error {
+  constructor(message, extraInfo, stack) {
+    super(message)
+    this.extraInfo = extraInfo
+    if (stack) this.stack = stack
+  }
+}
+
+class HvigorSystemPlugin {
+  constructor(pluginId) {
+    this.pluginVersion = HVIGOR_PARITY_VERSION
+    this.pluginId = pluginId
+  }
+
+  getPluginId() {
+    return this.pluginId
+  }
+}
+
+class HvigorTcbStore {
+  static tcbMap = new Map()
+
+  static getTCB(id) {
+    return this.tcbMap.get(id)
+  }
+
+  static clear() {
+    this.tcbMap.clear()
+  }
+
+  static add(tcb) {
+    this.tcbMap.set(tcb.getId(), tcb)
+  }
+}
+
+class HvigorTaskDirectedAcyclicGraph {
+  constructor() {
+    this._out = new Map()
+    this._in = new Map()
+  }
+
+  addNode(nodeKey) {
+    if (!this._out.has(nodeKey)) this._out.set(nodeKey, new Set())
+    if (!this._in.has(nodeKey)) this._in.set(nodeKey, new Set())
+  }
+
+  addEdge(originKey, targetKey) {
+    this.addNode(originKey)
+    this.addNode(targetKey)
+    this._out.get(originKey).add(targetKey)
+    this._in.get(targetKey).add(originKey)
+    return true
+  }
+
+  _hasEdge(originKey, targetKey, visited = new Set()) {
+    if (originKey === targetKey) return true
+    if (visited.has(originKey)) return false
+    visited.add(originKey)
+    for (const child of this.getChildren(originKey)) {
+      if (this._hasEdge(child, targetKey, visited)) return true
+    }
+    return false
+  }
+
+  removeNode(nodeKey) {
+    for (const child of this._out.get(nodeKey) || []) this._in.get(child)?.delete(nodeKey)
+    for (const parent of this._in.get(nodeKey) || []) this._out.get(parent)?.delete(nodeKey)
+    this._out.delete(nodeKey)
+    this._in.delete(nodeKey)
+  }
+
+  clear() {
+    this._out.clear()
+    this._in.clear()
+  }
+
+  getChildren(nodeKey) {
+    return this._out.get(nodeKey) || new Set()
+  }
+
+  getParent(nodeKey) {
+    return this._in.get(nodeKey) || new Set()
+  }
+
+  getAllStartNodes() {
+    return this.findAllZeroEdgeNodes(this._in)
+  }
+
+  getAllEndNodes() {
+    return this.findAllZeroEdgeNodes(this._out)
+  }
+
+  checkCircle() {
+    const visited = new Set()
+    const active = new Set()
+    const pathStack = []
+    for (const nodeKey of this._out.keys()) {
+      const circlePath = this.dfsCircleCheck(nodeKey, visited, active, pathStack)
+      if (circlePath) return { hasCircle: true, circlePath }
+    }
+    return { hasCircle: false, circlePath: [] }
+  }
+
+  dfsCircleCheck(nodeKey, visited, active, pathStack) {
+    if (active.has(nodeKey)) {
+      const start = pathStack.indexOf(nodeKey)
+      return [...pathStack.slice(start), nodeKey]
+    }
+    if (visited.has(nodeKey)) return undefined
+    visited.add(nodeKey)
+    active.add(nodeKey)
+    pathStack.push(nodeKey)
+    for (const child of this.getChildren(nodeKey)) {
+      const circlePath = this.dfsCircleCheck(child, visited, active, pathStack)
+      if (circlePath) return circlePath
+    }
+    pathStack.pop()
+    active.delete(nodeKey)
+    return undefined
+  }
+
+  findAllZeroEdgeNodes(edges) {
+    const result = new Set()
+    for (const [nodeKey, adjacent] of edges) {
+      if (adjacent.size === 0) result.add(nodeKey)
+    }
+    return result
+  }
+}
 
 class HvigorBuildConst {
   static MODULE_MODE = 'module'
@@ -462,13 +690,7 @@ function createHvigorPublicUtilities(host) {
 
   class PathUtil {
     static getHvigorCacheDir(logger) {
-      let configured = host._parameter.getExtParam('build-cache-dir') ?? host._parameter.getPropertyInternal('hvigor.cacheDir')
-      if (typeof configured !== 'string' || !path.isAbsolute(configured)) {
-        if (configured && logger) logger.warn(`Invalid custom hvigor data dir:${configured}`)
-        return path.join(host.projectRoot, '.hvigor')
-      }
-      if (fs.existsSync(configured)) configured = fs.realpathSync.native(configured)
-      return path.resolve(configured, path.basename(host.projectRoot), '.hvigor')
+      return host.hvigorCacheDir(logger)
     }
 
     static checkCopyPathIsSame(source, destination) {
@@ -1048,6 +1270,157 @@ function createHvigorPublicUtilities(host) {
     }
   }
 
+  class HvigorLruCache {
+    constructor(options) {
+      this.capacity = options?.capacity ?? 4
+      this.ttl = options?.ttl ?? 3600000
+      if (this.capacity < 0) this.capacity = undefined
+      if (this.ttl < 0) this.ttl = undefined
+      this.keysByRecency = new Map()
+    }
+
+    access(key) {
+      if (!this.keysByRecency.has(key)) return
+      const birth = this.keysByRecency.get(key)
+      this.keysByRecency.delete(key)
+      this.keysByRecency.set(key, birth)
+    }
+
+    set(key) {
+      if (this.keysByRecency.has(key)) {
+        this.access(key)
+        return undefined
+      }
+      this.keysByRecency.set(key, Date.now())
+      if (this.capacity === undefined || this.keysByRecency.size <= this.capacity) return undefined
+      const evicted = this.keysByRecency.keys().next().value
+      this.keysByRecency.delete(evicted)
+      return evicted
+    }
+
+    delete(key) {
+      this.keysByRecency.delete(key)
+    }
+
+    clear() {
+      this.keysByRecency.clear()
+    }
+
+    getTTL() {
+      return this.ttl
+    }
+  }
+
+  class CacheStore {
+    constructor(name, lruCache, pinned = false) {
+      this.caches = new Map()
+      this.hvigorMemoryThreshold = HvigorConfigLoader.getInstance().getPropertiesConfigValue(
+        'hvigor.memoryThreshold',
+      )
+      this.hvigorEnableMemoryCache = HvigorConfigLoader.getInstance().getPropertiesConfigValue(
+        'hvigor.enableMemoryCache',
+      )
+      this.name = name
+      this.lruCache = lruCache
+      this.pinned = pinned
+    }
+
+    getCache(key) {
+      this.lruCache.access(this.completeKey(key))
+      return this.caches.get(key)
+    }
+
+    get(key) {
+      return this.getCache(key)
+    }
+
+    set(key, value) {
+      return this.setCache(key, value)
+    }
+
+    setCache(key, value, pinned = false) {
+      if (
+        (this.hvigorMemoryThreshold && this.hvigorMemoryThreshold > 0) ||
+        this.hvigorEnableMemoryCache === false
+      ) {
+        return this
+      }
+      this.caches.set(key, value)
+      if (pinned || this.pinned) return this
+      const evicted = this.lruCache.set(this.completeKey(key))
+      if (evicted) this.caches.delete(this.parseCompleteKey(evicted))
+      return this
+    }
+
+    hasCache(key) {
+      return this.caches.has(key)
+    }
+
+    clear() {
+      for (const key of this.caches.keys()) this.lruCache.delete(this.completeKey(key))
+      this.caches.clear()
+    }
+
+    delete(key) {
+      this.lruCache.delete(this.completeKey(key))
+      return this.caches.delete(key)
+    }
+
+    size() {
+      return this.caches.size
+    }
+
+    keys() {
+      return this.caches.keys()
+    }
+
+    completeKey(key) {
+      return `${this.name}@${key}`
+    }
+
+    parseCompleteKey(key) {
+      return key.substring(this.name.length + 1)
+    }
+  }
+
+  class CacheStoreManager {
+    constructor(options) {
+      this.cacheStores = new Map()
+      this.lruCache = new HvigorLruCache(options)
+    }
+
+    mount(key, pinned = false) {
+      if (!this.cacheStores.has(key)) {
+        this.cacheStores.set(key, new CacheStore(key, this.lruCache, pinned))
+      }
+      return this.cacheStores.get(key)
+    }
+
+    unmount(key) {
+      this.cacheStores.get(key)?.clear()
+      return this.cacheStores.delete(key)
+    }
+
+    clear() {
+      this.lruCache.clear()
+      this.cacheStores.clear()
+    }
+
+    size() {
+      return this.cacheStores.size
+    }
+
+    keys() {
+      return this.cacheStores.keys()
+    }
+
+    cacheItemSize() {
+      let size = 0
+      for (const store of this.cacheStores.values()) size += store.size()
+      return size
+    }
+  }
+
   class LocalFileWriter {
     static instance
 
@@ -1299,6 +1672,1498 @@ function createHvigorPublicUtilities(host) {
     return descriptor
   }
 
+  class HvigorEventHead {
+    constructor(id, name, description, type) {
+      this.id = id
+      this.name = name
+      this.description = description
+      this.type = type
+    }
+  }
+
+  class HvigorEventBody {
+    constructor(pid, tid) {
+      this.pid = pid
+      this.tid = tid
+      this.startTime = Number(process.hrtime.bigint())
+    }
+  }
+
+  class HvigorBaseEvent {
+    constructor(head, body) {
+      this.head = head
+      this.body = body
+      this.additional = {}
+    }
+
+    setStartTime(time) {
+      this.body.startTime = time ?? Number(process.hrtime.bigint())
+    }
+
+    setEndTime(time) {
+      this.body.endTime = time ?? Number(process.hrtime.bigint())
+    }
+
+    setTotalTime(time) {
+      this.body.totalTime = time
+    }
+
+    getId() {
+      return this.head.id
+    }
+
+    getName() {
+      return this.head.name
+    }
+
+    getDescription() {
+      return this.head.description
+    }
+
+    setName(name) {
+      this.head.name = name
+    }
+
+    getType() {
+      return this.head.type
+    }
+
+    setType(type) {
+      this.head.type = type
+    }
+
+    getTid() {
+      return this.body.tid
+    }
+
+    setTid(tid) {
+      this.body.tid = tid
+      return this
+    }
+  }
+
+  class HvigorLogEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid, logType) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.LOG),
+        new HvigorEventBody(pid, tid),
+      )
+      this.additional = { logType, children: [] }
+    }
+
+    getLogType() {
+      return this.additional.logType
+    }
+
+    setLogType(type) {
+      this.additional.logType = type
+    }
+
+    getDurationId() {
+      return this.additional.durationId
+    }
+
+    setDurationId(durationId) {
+      this.additional.durationId = durationId
+    }
+
+    getContinualId() {
+      return this.additional.continualId
+    }
+
+    setContinualId(continualId) {
+      this.additional.continualId = continualId
+    }
+
+    addChild(id) {
+      if (id && !this.additional.children.includes(id)) this.additional.children.push(id)
+    }
+
+    setParent(id) {
+      this.additional.parent ||= id
+    }
+  }
+
+  class DurationEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, group, tid) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.DURATION),
+        new HvigorEventBody(pid, tid),
+      )
+      const moduleSeparator = name.indexOf(':')
+      const targetSeparator = name.indexOf('@')
+      this.additional = {
+        children: [],
+        state: HVIGOR_DURATION_EVENT_STATE.CREATED,
+        targetName:
+          moduleSeparator > 0 && targetSeparator > moduleSeparator
+            ? name.substring(moduleSeparator + 1, targetSeparator)
+            : '',
+        moduleName: moduleSeparator > 0 ? name.substring(0, moduleSeparator) : '',
+        category: group,
+        taskRunReasons: [],
+      }
+      this.log = HvigorLogger.getLogger('DurationEvent')
+    }
+
+    start(state = HVIGOR_DURATION_EVENT_STATE.RUNNING, time) {
+      this.setState(state)
+      this.setStartTime(time)
+      return this
+    }
+
+    stop(state = HVIGOR_DURATION_EVENT_STATE.SUCCESS, time) {
+      if (
+        [
+          HVIGOR_DURATION_EVENT_STATE.FAILED,
+          HVIGOR_DURATION_EVENT_STATE.SUCCESS,
+          HVIGOR_DURATION_EVENT_STATE.WARN,
+        ].includes(this.additional.state)
+      ) {
+        return this
+      }
+      this.body.endTime = time ?? Number(process.hrtime.bigint())
+      this.setState(state)
+      const service = MetricService.getInstance()
+      for (const childId of this.additional.children) {
+        const child = service.getEventById(childId)
+        if (child instanceof DurationEvent) child.stop(state)
+      }
+      return this
+    }
+
+    setState(state) {
+      this.additional.state = state
+    }
+
+    createSubEvent(name, description) {
+      const event = MetricFactory.createDurationEvent(name, description, '')
+      event.setParent(this.getId())
+      this.addChild(event.getId())
+      return event
+    }
+
+    addChild(childId) {
+      this.additional.children.push(childId)
+    }
+
+    setParent(parentId) {
+      this.additional.parent = parentId
+    }
+
+    getParent() {
+      return this.additional.parent
+    }
+
+    getChildren() {
+      return this.additional.children
+    }
+
+    setLog(name, type = HVIGOR_METRIC_LOG_TYPE.INFO, description, totalTime) {
+      const event = MetricFactory.createLogEvent(name ?? this.head.name, type, this.getTid(), description)
+      event.setDurationId(this.getId())
+      this.additional.logId = event.getId()
+      event.setStartTime(this.body.startTime)
+      event.setEndTime(this.body.endTime)
+      if (totalTime) event.setTotalTime(totalTime)
+      this.setParentLog(event)
+      this.setChildrenLog(event)
+    }
+
+    setParentLog(logEvent) {
+      const parent = MetricService.getInstance().getEventById(this.additional.parent)
+      if (!(parent instanceof DurationEvent)) return
+      const parentLog = MetricService.getInstance().getEventById(parent.additional.logId)
+      if (parentLog instanceof HvigorLogEvent) {
+        parentLog.addChild(logEvent.getId())
+        logEvent.setParent(parentLog.getId())
+      }
+    }
+
+    setChildrenLog(logEvent) {
+      for (const childId of this.additional.children) {
+        const child = MetricService.getInstance().getEventById(childId)
+        if (!(child instanceof DurationEvent) && !(child instanceof ContinualEvent)) continue
+        logEvent.addChild(child.additional.logId)
+        const childLog = MetricService.getInstance().getEventById(child.additional.logId)
+        if (childLog instanceof HvigorLogEvent) child.setParentLog(childLog)
+      }
+    }
+
+    setDetail(name) {
+      const event = MetricFactory.createLogEvent(name, HVIGOR_METRIC_LOG_TYPE.DETAIL, this.getTid())
+      event.setDurationId(this.getId())
+      this.additional.detailId = event.getId()
+    }
+
+    setCategory(category) {
+      this.additional.category = category
+    }
+
+    addTaskRunReason(taskRunReason) {
+      this.additional.taskRunReasons.push(taskRunReason)
+    }
+  }
+
+  class ContinualEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid, totalTime, frequency) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.CONTINUAL),
+        new HvigorEventBody(pid, tid),
+      )
+      this.additional = {
+        totalTime: totalTime ?? 0,
+        frequency: frequency ?? 0,
+        children: [],
+      }
+    }
+
+    setParent(parentId) {
+      this.additional.parent = parentId
+    }
+
+    getParent() {
+      return this.additional.parent
+    }
+
+    addChild(childId) {
+      this.additional.children.push(childId)
+    }
+
+    getChildren() {
+      return this.additional.children
+    }
+
+    createSubEvent(name, description) {
+      const event = MetricFactory.createContinualEvent(name, description)
+      event.setParent(this.getId())
+      this.addChild(event.getId())
+      return event
+    }
+
+    setLog(name, type, description) {
+      const event = MetricFactory.createLogEvent(name, type, this.getTid(), description)
+      event.setContinualId(this.getId())
+      this.additional.logId = event.getId()
+      event.setStartTime(this.body.startTime)
+      event.setEndTime(this.body.endTime)
+      this.setParentLog(event)
+      this.setChildrenLog(event)
+    }
+
+    setParentLog(logEvent) {
+      const parent = MetricService.getInstance().getEventById(this.additional.parent)
+      if (!(parent instanceof ContinualEvent) && !(parent instanceof DurationEvent)) return
+      const parentLog = MetricService.getInstance().getEventById(parent.additional.logId)
+      if (parentLog instanceof HvigorLogEvent) {
+        parentLog.addChild(logEvent.getId())
+        logEvent.setParent(parentLog.getId())
+      }
+    }
+
+    setDetail(name) {
+      const event = MetricFactory.createLogEvent(name, HVIGOR_METRIC_LOG_TYPE.DETAIL, this.getTid())
+      event.setContinualId(this.getId())
+      this.additional.detailId = event.getId()
+    }
+
+    setChildrenLog(logEvent) {
+      for (const childId of this.additional.children) {
+        const child = MetricService.getInstance().getEventById(childId)
+        if (!(child instanceof ContinualEvent)) continue
+        logEvent.addChild(child.additional.logId)
+        const childLog = MetricService.getInstance().getEventById(child.additional.logId)
+        if (childLog instanceof HvigorLogEvent) child.setParentLog(childLog)
+      }
+    }
+  }
+
+  class MarkEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.MARK),
+        new HvigorEventBody(pid, tid),
+      )
+      const now = new Date()
+      this.additional = {
+        time: {
+          year: now.getFullYear(),
+          month: now.getMonth() + 1,
+          day: now.getDate(),
+          hour: now.getHours(),
+          minute: now.getMinutes(),
+          second: now.getSeconds(),
+        },
+      }
+    }
+
+    start(state = HVIGOR_MARK_EVENT_STATE.RUNNING, time) {
+      this.setState(state)
+      this.setStartTime(time)
+    }
+
+    stop(state = HVIGOR_MARK_EVENT_STATE.SUCCESS, time) {
+      if ([HVIGOR_MARK_EVENT_STATE.FAILED, HVIGOR_MARK_EVENT_STATE.SUCCESS].includes(this.additional.state)) {
+        return
+      }
+      this.body.endTime = time ?? Number(process.hrtime.bigint())
+      this.setState(state)
+    }
+
+    setMarkType(markType) {
+      this.additional.markType = markType
+    }
+
+    setCategory(category) {
+      this.additional.category = category
+    }
+
+    setState(state) {
+      this.additional.state = state
+    }
+
+    setHvigorVersion(hvigorVersion) {
+      this.additional.hvigorVersion = hvigorVersion
+    }
+
+    setCompleteCommand(completeCommand) {
+      this.additional.completeCommand = completeCommand
+    }
+
+    setNodeVersion(nodeVersion) {
+      this.additional.nodeVersion = nodeVersion
+    }
+  }
+
+  class HvigorInstantEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.INSTANT),
+        new HvigorEventBody(pid, tid),
+      )
+      this.additional = {}
+      this.body.startTime = Number(process.hrtime.bigint())
+    }
+
+    setScope(scope) {
+      this.additional.scope = scope
+    }
+  }
+
+  class HvigorCounterEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid, success, failed) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.COUNTER),
+        new HvigorEventBody(pid, tid),
+      )
+      this.additional = { success: success ?? 0, failed: failed ?? 0 }
+      this.body.startTime = Number(process.hrtime.bigint())
+    }
+  }
+
+  class HvigorGaugeEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid, utilization) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.GAUGE),
+        new HvigorEventBody(pid, tid),
+      )
+      this.additional = { utilization }
+      this.body.startTime = Number(process.hrtime.bigint())
+    }
+  }
+
+  class HvigorObjectEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid, objectId, state, snapshot) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.OBJECT),
+        new HvigorEventBody(pid, tid),
+      )
+      this.additional = { objectId, state, snapshot }
+      this.body.startTime = Number(process.hrtime.bigint())
+    }
+  }
+
+  class HvigorMetadataEvent extends HvigorBaseEvent {
+    constructor(id, name, description, pid, tid, state) {
+      super(
+        new HvigorEventHead(id, name, description, HVIGOR_METRIC_EVENT_TYPE.METADATA),
+        new HvigorEventBody(pid, tid),
+      )
+      this.additional = { state }
+      this.body.startTime = Number(process.hrtime.bigint())
+    }
+
+    setCategory(category) {
+      this.additional.category = category
+    }
+
+    setSortIndex(sortIndex) {
+      this.additional.sortIndex = sortIndex
+    }
+
+    setLabel(label) {
+      this.additional.label = label
+    }
+
+    setContent(content) {
+      this.additional.content = content
+    }
+  }
+
+  class HvigorReport {
+    constructor(name, value) {
+      this.name = name
+      this.value = value
+    }
+
+    getName() {
+      return this.name
+    }
+
+    getValue() {
+      return this.value
+    }
+  }
+
+  class MetricService {
+    static instance
+
+    constructor() {
+      this.events = new Map()
+    }
+
+    submit(event) {
+      this.events.set(event.getId(), event)
+    }
+
+    getEventById(id) {
+      return id ? this.events.get(id) : undefined
+    }
+
+    queryReport() {
+      let events = this.filterDurationEvent(Array.from(this.events.values()))
+      events = this.filterLogEvent(events)
+      return new HvigorReport('events', events)
+    }
+
+    filterDurationEvent(events) {
+      return events.filter(
+        (event) =>
+          event.getType() !== HVIGOR_METRIC_EVENT_TYPE.DURATION ||
+          event.additional.state !== HVIGOR_DURATION_EVENT_STATE.CREATED,
+      )
+    }
+
+    filterLogEvent(events) {
+      return events.filter((event) => {
+        if (event.getType() !== HVIGOR_METRIC_EVENT_TYPE.LOG) return true
+        const duration = this.getEventById(event.additional.durationId)
+        if (duration?.additional.state === HVIGOR_DURATION_EVENT_STATE.CREATED) return false
+        return event.additional.logType !== HVIGOR_METRIC_LOG_TYPE.DETAIL || Boolean(duration)
+      })
+    }
+
+    clear() {
+      this.events.clear()
+    }
+
+    static getInstance() {
+      this.instance ||= new MetricService()
+      return this.instance
+    }
+  }
+
+  class MetricFactory {
+    static getUuid() {
+      return crypto.randomUUID()
+    }
+
+    static submit(event) {
+      MetricService.getInstance().submit(event)
+      return event
+    }
+
+    static createDurationEvent(name, description, group, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(new DurationEvent(this.getUuid(), name, description, process.pid, group, tid))
+    }
+
+    static createInstantEvent(name, description, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(new HvigorInstantEvent(this.getUuid(), name, description, process.pid, tid))
+    }
+
+    static createCounterEvent(name, description, success, failed, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(
+        new HvigorCounterEvent(this.getUuid(), name, description, process.pid, tid, success, failed),
+      )
+    }
+
+    static createGaugeEvent(name, utilization, description, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(
+        new HvigorGaugeEvent(this.getUuid(), name, description, process.pid, tid, utilization),
+      )
+    }
+
+    static createObjectEvent(name, objectId, state, description, snapshot, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(
+        new HvigorObjectEvent(this.getUuid(), name, description, process.pid, tid, objectId, state, snapshot),
+      )
+    }
+
+    static createMetadataEvent(name, state, description, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(new HvigorMetadataEvent(this.getUuid(), name, description, process.pid, tid, state))
+    }
+
+    static createMarkEvent(name, description, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(new MarkEvent(this.getUuid(), name, description, process.pid, tid))
+    }
+
+    static createLogEvent(name, type, tid = HVIGOR_MAIN_THREAD, description = '') {
+      return this.submit(new HvigorLogEvent(this.getUuid(), name, description, process.pid, tid, type))
+    }
+
+    static createContinualEvent(name, description, totalTime, frequency, tid = HVIGOR_MAIN_THREAD) {
+      return this.submit(
+        new ContinualEvent(this.getUuid(), name, description, process.pid, tid, totalTime, frequency),
+      )
+    }
+  }
+
+  class ReportServiceImpl {
+    static instance
+    static buildId
+    static data = []
+    static REPORT_INTERVAL_MS = 1000
+    static MB_CONVERTER = 1024
+
+    constructor() {
+      this.reportListeners = []
+      this.monitorTimeId = undefined
+    }
+
+    report() {
+      const report = this.getReport()
+      const reportDirectory = PathUtil.getReportDirPath()
+      fs.mkdirSync(reportDirectory, { recursive: true })
+      this.deleteUnusableFiles(reportDirectory)
+      this.storage(report, reportDirectory)
+    }
+
+    getReport() {
+      const report = { version: '2.0', ppid: process.ppid }
+      for (const listener of this.reportListeners) {
+        const section = listener.queryReport()
+        report[section.getName()] = section.getValue()
+      }
+      return report
+    }
+
+    storage(report, reportDirectory) {
+      const reports = fs
+        .readdirSync(reportDirectory)
+        .filter((name) => name.startsWith('report-') && name.endsWith('json'))
+        .sort(
+          (left, right) =>
+            fs.statSync(path.resolve(reportDirectory, right)).birthtimeMs -
+            fs.statSync(path.resolve(reportDirectory, left)).birthtimeMs,
+        )
+      for (const stale of reports.slice(9)) fs.rmSync(path.resolve(reportDirectory, stale), { force: true })
+      if (globalData.buildId === undefined) return
+      ReportServiceImpl.buildId = globalData.buildId
+      const baseName = `report-${globalData.buildId}`
+      LocalFileWriter.getInstance().write(path.resolve(reportDirectory, `${baseName}.json`), report)
+      if (coreParameter.properties['hvigor.analyzeHtml'] === true) {
+        this.generateHtmlResource(reportDirectory, baseName, report)
+      }
+    }
+
+    deleteUnusableFiles(reportDirectory) {
+      for (const name of fs.readdirSync(reportDirectory)) {
+        const retained =
+          /^report(-monitor)?-[0-9]+\.json$/.test(name) ||
+          (/^report-?[0-9]*\.html$/.test(name) && coreParameter.properties['hvigor.analyzeHtml'] !== true) ||
+          name === 'htmlResource' ||
+          name === 'upload'
+        if (!retained) fs.rmSync(path.resolve(reportDirectory, name), { recursive: true, force: true })
+      }
+    }
+
+    addListener(listener) {
+      this.reportListeners.push(listener)
+    }
+
+    removeListener(listener) {
+      const index = this.reportListeners.indexOf(listener)
+      if (index >= 0) this.reportListeners.splice(index, 1)
+    }
+
+    generateHtmlResource(reportDirectory, baseName, report) {
+      const payload = JSON.stringify(JSON.stringify(report)).replace(/<\//g, '<\\/')
+      const html = [
+        '<!doctype html>',
+        '<html><head><meta charset="utf-8"><title>Hvigor report</title></head>',
+        '<body><div id="root"></div>',
+        `<script>window.__HVIGOR_REPORT__ = ${payload};<\/script>`,
+        '</body></html>',
+      ].join('')
+      fs.writeFileSync(path.resolve(reportDirectory, `${baseName}.html`), html)
+    }
+
+    static getInstance() {
+      if (!this.instance) {
+        this.instance = new ReportServiceImpl()
+        const metricService = MetricService.getInstance()
+        this.instance.addListener(metricService)
+      }
+      return this.instance
+    }
+
+    startProcessMonitor() {
+      if (this.monitorTimeId) clearInterval(this.monitorTimeId)
+      ReportServiceImpl.data = []
+      this.monitorTimeId = setInterval(() => {
+        const memory = process.memoryUsage()
+        ReportServiceImpl.data.push({
+          time: Date.now(),
+          rss: this.convertToMb(memory.rss),
+          heapTotal: this.convertToMb(memory.heapTotal),
+          heapUsed: this.convertToMb(memory.heapUsed),
+          external: this.convertToMb(memory.external),
+          arrayBuffers: this.convertToMb(memory.arrayBuffers),
+        })
+      }, ReportServiceImpl.REPORT_INTERVAL_MS)
+      this.monitorTimeId.unref?.()
+    }
+
+    stopProcessMonitor() {
+      if (!this.monitorTimeId) return
+      clearInterval(this.monitorTimeId)
+      this.monitorTimeId = undefined
+      if (ReportServiceImpl.buildId === undefined) return
+      const reportDirectory = PathUtil.getReportDirPath()
+      fs.mkdirSync(reportDirectory, { recursive: true })
+      fs.writeFileSync(
+        path.join(reportDirectory, `report-monitor-${ReportServiceImpl.buildId}.json`),
+        JSON.stringify({ version: '1.0', pid: process.pid, data: ReportServiceImpl.data }, null, 2),
+        'utf-8',
+      )
+    }
+
+    convertToMb(input) {
+      return input / ReportServiceImpl.MB_CONVERTER / ReportServiceImpl.MB_CONVERTER
+    }
+  }
+
+  class TraceManager {
+    static instance
+
+    constructor() {
+      this.data = {}
+      this.callBackList = {}
+    }
+
+    trace(key, data, callback) {
+      this.data[key] = data
+      if (typeof callback === 'function') this.callBackList[key] = callback
+    }
+
+    flush() {
+      const data = structuredClone(this.data)
+      for (const callback of Object.values(this.callBackList)) callback()
+      const directory = path.resolve(PathUtil.getHvigorCacheDir(), 'outputs', 'logs', 'details')
+      fs.mkdirSync(directory, { recursive: true })
+      try {
+        fs.writeFileSync(path.resolve(directory, 'details.json'), JSON.stringify(data, hvigorReplacer, 2))
+      } catch {}
+    }
+
+    static transformKey(key) {
+      return key.replace(/\./g, '_')
+    }
+
+    static anonymize(value) {
+      return hvigorHash(value)
+    }
+
+    static trace(key, data, callback) {
+      this.instance ||= new TraceManager()
+      this.instance.trace(key, data, callback)
+    }
+  }
+
+  class HvigorSnapshotCacheService {
+    constructor(filePath, revive) {
+      this.filePath = filePath
+      this.revive = revive
+      this.cacheEntries = new Map()
+    }
+
+    initialize() {
+      if (!fs.existsSync(this.filePath)) return
+      try {
+        const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'))
+        for (const [key, value] of Object.entries(parsed || {})) {
+          this.cacheEntries.set(key, this.revive ? this.revive(value) : value)
+        }
+      } catch {}
+    }
+
+    clone(service) {
+      this.cacheEntries = new Map(service.cacheEntries)
+    }
+
+    close() {
+      this.cacheEntries.clear()
+    }
+
+    get(key) {
+      return this.cacheEntries.get(key)
+    }
+
+    set(key, value) {
+      this.cacheEntries.set(key, value)
+      return value
+    }
+
+    remove(key) {
+      this.cacheEntries.delete(key)
+    }
+
+    size() {
+      return this.cacheEntries.size
+    }
+
+    keys() {
+      return [...this.cacheEntries.keys()]
+    }
+
+    getCacheEntryContentMap() {
+      return new Map(this.cacheEntries)
+    }
+
+    serialize() {
+      return JSON.stringify(Object.fromEntries(this.cacheEntries), hvigorReplacer)
+    }
+  }
+
+  class HvigorValueEntry {
+    constructor(name, value) {
+      this.name = name
+      this.value = value
+    }
+
+    getName() {
+      return this.name
+    }
+
+    getValue() {
+      return this.value
+    }
+
+    getHash() {
+      return hvigorHash(JSON.stringify([this.name, this.value], hvigorReplacer))
+    }
+
+    static revive(value) {
+      return Object.assign(new HvigorValueEntry(value.name, value.value), value)
+    }
+  }
+
+  class HvigorTaskSnapshot {
+    constructor(task) {
+      const node = task.getNode()
+      const project = node.getProject()
+      this._inputs = []
+      this._successful = false
+      this._projectName = project.getName()
+      this._moduleName = node.getName()
+      this._taskName = task.getName()
+      this._key = ProjectCacheService.taskKey(this._taskName, node)
+      this._executionId = `${this._key}:${Date.now()}`
+      for (const [name, value] of task.declareInputs().entries()) this.addInput(name, value)
+      this._inputFiles = new Map(task.declareInputFiles().collect())
+      this._outputFiles = new Map(task.declareOutputFiles().collect())
+      if (task instanceof HvigorIncrementalExecTask) {
+        this.addInput('command', task.declareExecutionCommand())
+        this.addInput('toolchain', task.declareExecutionTool())
+        const environment = Array.from(task.declareExecutionEnv().entries())
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, value]) => `${key}:${value}${path.delimiter}`)
+          .join()
+        this.addInput('env', environment)
+      }
+    }
+
+    getKey() {
+      return this._key
+    }
+
+    compareTo(other) {
+      return (
+        this._successful &&
+        this._projectName === other.getProjectName() &&
+        this._moduleName === other.getModuleName() &&
+        this._taskName === other.getTaskName() &&
+        this.compareInputs(other) &&
+        HvigorTaskSnapshot.compareFiles(this._inputFiles, other.getInputFiles()) &&
+        HvigorTaskSnapshot.compareFiles(this._outputFiles, other.getOutputFiles())
+      )
+    }
+
+    updateFilesOptions(cacheService) {
+      for (const [filePath, options] of this._inputFiles) {
+        options.fileSnapShotHashValue = cacheService.currentFileSnapShotCacheService.get(filePath)?.hashValue
+      }
+      for (const [filePath, options] of this._outputFiles) {
+        options.fileSnapShotHashValue = cacheService.currentFileSnapShotCacheService.get(filePath)?.hashValue
+      }
+    }
+
+    updateCacheFilesOptions(cacheService) {
+      for (const [filePath, options] of this._inputFiles) {
+        options.fileSnapShotHashValue = cacheService.fileSnapShotCacheService.get(filePath)?.hashValue
+      }
+      for (const [filePath, options] of this._outputFiles) {
+        options.fileSnapShotHashValue = cacheService.fileSnapShotCacheService.get(filePath)?.hashValue
+      }
+    }
+
+    getModuleName() {
+      return this._moduleName
+    }
+
+    getTaskName() {
+      return this._taskName
+    }
+
+    getProjectName() {
+      return this._projectName
+    }
+
+    isSuccessful() {
+      return this._successful
+    }
+
+    setExecutedSuccessful() {
+      this._successful = true
+    }
+
+    addInput(name, value) {
+      const index = this._inputs.findIndex((entry) => entry.getName() === name)
+      if (index >= 0) this._inputs.splice(index, 1)
+      this._inputs.push(new HvigorValueEntry(name, value))
+    }
+
+    getInputs() {
+      return this._inputs
+    }
+
+    getExecutionId() {
+      return this._executionId
+    }
+
+    compareInputs(other) {
+      const entries = other.getInputs()
+      if (entries.length !== this._inputs.length) return false
+      const hashEntries = (values) =>
+        hvigorHash(
+          [...values]
+            .sort((left, right) => left.getName().localeCompare(right.getName()))
+            .map((entry) => entry.getHash())
+            .join(''),
+        )
+      return hashEntries(this._inputs) === hashEntries(entries)
+    }
+
+    getInputFiles() {
+      return this._inputFiles
+    }
+
+    getOutputFiles() {
+      return this._outputFiles
+    }
+
+    static compareFiles(left, right) {
+      if (left.size !== right.size) return false
+      for (const [filePath, options] of left) {
+        if (!right.has(filePath)) return false
+        if (JSON.stringify(options) !== JSON.stringify(right.get(filePath))) return false
+      }
+      return true
+    }
+
+    static revive(value) {
+      const snapshot = Object.create(HvigorTaskSnapshot.prototype)
+      Object.assign(snapshot, value)
+      snapshot._inputs = (value._inputs || []).map(HvigorValueEntry.revive)
+      snapshot._inputFiles = new Map(Object.entries(value._inputFiles || {}))
+      snapshot._outputFiles = new Map(Object.entries(value._outputFiles || {}))
+      return snapshot
+    }
+  }
+
+  class HvigorFileSnapshot {
+    constructor(filePath, options = {}, depth = 0) {
+      this.name = path.basename(filePath)
+      this.path = filePath
+      this.hashValue = ''
+      this.type = 'unknown'
+      this.isSymbolicLink = false
+      this.children = undefined
+      this.fileMetaData = undefined
+      this.capture(options, depth)
+    }
+
+    capture(options, depth) {
+      let stats
+      let linkStats
+      try {
+        stats = fs.statSync(this.path)
+        linkStats = fs.lstatSync(this.path)
+      } catch {
+        return
+      }
+      this.isSymbolicLink = linkStats.isSymbolicLink()
+      if (stats.isFile()) {
+        this.type = 'file'
+        this.fileMetaData = { size: stats.size, lastModifiedTime: stats.mtime.getTime() }
+        this.hashValue =
+          options.fileSnapShotHashValue ||
+          hvigorHash(`${this.name}${this.fileMetaData.size}${this.fileMetaData.lastModifiedTime}`)
+        return
+      }
+      if (!stats.isDirectory()) return
+      this.type = 'directory'
+      this.children = []
+      if (options.depth !== undefined && depth >= options.depth) return
+      let entries = []
+      try {
+        entries = fs.readdirSync(this.path).sort((left, right) => left.localeCompare(right))
+      } catch (error) {
+        if (!['EACCES', 'EPERM'].includes(error.code)) throw error
+      }
+      for (const name of entries) {
+        const childPath = path.join(this.path, name)
+        if (options.test instanceof RegExp) {
+          options.test.lastIndex = 0
+          if (!options.test.test(childPath)) continue
+        }
+        this.children.push(new HvigorFileSnapshot(childPath, options, depth + 1))
+      }
+      this.hashValue = hvigorHash(this.children.map((child) => `${child.name}${child.hashValue}`).join(''))
+    }
+
+    isHashEquals(other) {
+      return this.hashValue === other.hashValue
+    }
+
+    toJsonString() {
+      return JSON.stringify(this)
+    }
+
+    static revive(value) {
+      const snapshot = Object.create(HvigorFileSnapshot.prototype)
+      Object.assign(snapshot, value)
+      if (Array.isArray(value.children)) snapshot.children = value.children.map(HvigorFileSnapshot.revive)
+      return snapshot
+    }
+  }
+
+  class ProjectCacheService {
+    static instance
+
+    constructor(project) {
+      this.projectName = project.getName()
+      this.projectNodeDir = project.getNodeDir()
+      const cacheDirectory = path.resolve(PathUtil.getHvigorCacheDir(), 'cache')
+      this.projectTaskSnapShotCacheFilePath = path.join(cacheDirectory, 'task-cache.json')
+      this.projectFileSnapShotCacheFilePath = path.join(cacheDirectory, 'file-cache.json')
+      this.projectBuildInfoCacheFilePath = path.join(cacheDirectory, 'last-build-info.json')
+      this.metaFilePath = path.join(cacheDirectory, 'meta.json')
+      this.taskSnapShotCacheService = new HvigorSnapshotCacheService(
+        this.projectTaskSnapShotCacheFilePath,
+        HvigorTaskSnapshot.revive,
+      )
+      this.fileSnapShotCacheService = new HvigorSnapshotCacheService(
+        this.projectFileSnapShotCacheFilePath,
+        HvigorFileSnapshot.revive,
+      )
+      this.buildInfoCacheService = new HvigorSnapshotCacheService(this.projectBuildInfoCacheFilePath)
+      this.currentTaskSnapShotCacheService = new HvigorSnapshotCacheService(
+        this.projectTaskSnapShotCacheFilePath,
+      )
+      this.currentFileSnapShotCacheService = new HvigorSnapshotCacheService(
+        this.projectFileSnapShotCacheFilePath,
+      )
+    }
+
+    initialize() {
+      this.checkMetaInfo()
+      this.taskSnapShotCacheService.initialize()
+      this.fileSnapShotCacheService.initialize()
+      this.currentTaskSnapShotCacheService.clone(this.taskSnapShotCacheService)
+      this.currentFileSnapShotCacheService.clone(this.fileSnapShotCacheService)
+      this.buildInfoCacheService.initialize()
+    }
+
+    getTaskSnapShot(taskName, node) {
+      return this.taskSnapShotCacheService.get(ProjectCacheService.taskKey(taskName, node))
+    }
+
+    getFileSnapShot(filePath) {
+      return this.fileSnapShotCacheService.get(filePath)
+    }
+
+    updateFileSnapShot(key, snapshot) {
+      this.currentFileSnapShotCacheService.set(key, snapshot)
+    }
+
+    updateTaskSnapShot(key, snapshot) {
+      this.currentTaskSnapShotCacheService.set(key, snapshot)
+    }
+
+    getBuildInfo() {
+      return this.buildInfoCacheService.getCacheEntryContentMap()
+    }
+
+    close() {
+      ProjectCacheService.instance = undefined
+      if (!coreParameter.startParams.incrementalExecution) return
+      fs.mkdirSync(path.dirname(this.projectTaskSnapShotCacheFilePath), { recursive: true })
+      LocalFileWriter.getInstance().writeStr(
+        this.projectTaskSnapShotCacheFilePath,
+        this.currentTaskSnapShotCacheService.serialize(),
+      )
+      LocalFileWriter.getInstance().writeStr(
+        this.projectFileSnapShotCacheFilePath,
+        this.currentFileSnapShotCacheService.serialize(),
+      )
+      LocalFileWriter.getInstance().writeStr(
+        this.projectBuildInfoCacheFilePath,
+        this.buildInfoCacheService.serialize(),
+      )
+    }
+
+    checkMetaInfo() {
+      let lastVersion
+      try {
+        lastVersion = JSON.parse(fs.readFileSync(this.metaFilePath, 'utf-8')).hvigorVersion
+      } catch {}
+      if (lastVersion !== undefined && lastVersion !== HVIGOR_PARITY_VERSION) {
+        fs.rmSync(this.projectTaskSnapShotCacheFilePath, { force: true })
+        fs.rmSync(this.projectFileSnapShotCacheFilePath, { force: true })
+      }
+      fs.mkdirSync(path.dirname(this.metaFilePath), { recursive: true })
+      fs.writeFileSync(this.metaFilePath, JSON.stringify({ hvigorVersion: HVIGOR_PARITY_VERSION }, null, 2))
+    }
+
+    static getInstance(project) {
+      if (!this.instance) {
+        this.instance = new ProjectCacheService(project)
+        this.instance.initialize()
+      }
+      return this.instance
+    }
+
+    static taskKey(taskName, node) {
+      const projectName = node.getProject().getName()
+      return node.classKind === 'project'
+        ? `:${projectName}:${taskName}`
+        : `:${projectName}:${node.getName()}:${taskName}`
+    }
+  }
+
+  class TaskProxy {
+    constructor(task) {
+      this.task = task
+      this.taskNode = task.getNode()
+      this.project = this.taskNode.getProject()
+      this.projectCacheService = ProjectCacheService.getInstance(this.project)
+      this.cacheTaskSnapShot = this.projectCacheService.getTaskSnapShot(task.getName(), this.taskNode)
+      this.curInputFileSnapShotMap = new Map()
+      this.curTaskSnapShot = undefined
+      this.notDeclareAnyIncrementalLogic = false
+      this.useInputOutputCache = Boolean(
+        host._parameter.getPropertyInternal('hvigor.incremental.optimization'),
+      )
+      if (this.useInputOutputCache) {
+        this.notDeclareAnyIncrementalLogic =
+          task.declareInputs().size === 0 &&
+          task.declareInputFiles().collect().size === 0 &&
+          task.declareOutputFiles().collect().size === 0
+        if (task instanceof HvigorIncrementalExecTask) {
+          this.notDeclareAnyIncrementalLogic &&=
+            task.declareExecutionTool() === '' &&
+            task.declareExecutionCommand() === '' &&
+            task.declareExecutionEnv().size === 0
+        }
+      }
+    }
+
+    getFileCompareResult(filePath, options) {
+      const snapshot = new HvigorFileSnapshot(filePath, options)
+      const cached = this.projectCacheService.getFileSnapShot(filePath)
+      return [snapshot, cached ? !cached.isHashEquals(snapshot) : true]
+    }
+
+    taskInputValueChanged(inputKey) {
+      const cached = this.cacheTaskSnapShot?.getInputs().find((entry) => entry.getName() === inputKey)
+      this.curTaskSnapShot ||= new HvigorTaskSnapshot(this.task)
+      const current = this.curTaskSnapShot.getInputs().find((entry) => entry.getName() === inputKey)
+      return cached?.getValue() !== current?.getValue()
+    }
+
+    preExecute() {
+      if (this.useInputOutputCache && this.notDeclareAnyIncrementalLogic) return false
+      this.curTaskSnapShot = new HvigorTaskSnapshot(this.task)
+      if (!this.cacheTaskSnapShot?.isSuccessful()) return false
+      for (const [filePath, options] of this.task.declareInputFiles().collect()) {
+        if (!fs.existsSync(filePath)) {
+          throw new Error(`Failed to find the incremental input file: ${filePath}.`)
+        }
+        const [snapshot, changed] = this.getFileCompareResult(filePath, options)
+        if (changed) {
+          this.curInputFileSnapShotMap.set(filePath, snapshot)
+          return false
+        }
+      }
+      for (const [filePath, options] of this.task.declareOutputFiles().collect()) {
+        if (!fs.existsSync(filePath) || this.getFileCompareResult(filePath, options)[1]) return false
+      }
+      this.curTaskSnapShot.updateCacheFilesOptions(this.projectCacheService)
+      return this.cacheTaskSnapShot.compareTo(this.curTaskSnapShot)
+    }
+
+    async execute() {
+      if (typeof this.task.execute === 'function') {
+        await this.task.execute()
+      } else {
+        await this.task.getAction().call(this.task)
+      }
+      this.curTaskSnapShot ||= new HvigorTaskSnapshot(this.task)
+      this.curTaskSnapShot.setExecutedSuccessful()
+    }
+
+    postExecute() {
+      for (const [filePath, options] of this.task.declareInputFiles().collect()) {
+        const snapshot =
+          this.curInputFileSnapShotMap.get(filePath) || new HvigorFileSnapshot(filePath, options)
+        this.projectCacheService.updateFileSnapShot(filePath, snapshot)
+      }
+      for (const [filePath, options] of this.task.declareOutputFiles().collect()) {
+        this.projectCacheService.updateFileSnapShot(filePath, new HvigorFileSnapshot(filePath, options))
+      }
+      this.curTaskSnapShot ||= new HvigorTaskSnapshot(this.task)
+      this.curTaskSnapShot.setExecutedSuccessful()
+      this.curTaskSnapShot.updateFilesOptions(this.projectCacheService)
+      this.projectCacheService.updateTaskSnapShot(this.curTaskSnapShot.getKey(), this.curTaskSnapShot)
+    }
+
+    getCurTaskSnapShot() {
+      return this.curTaskSnapShot
+    }
+  }
+
+  class WorkerPoolDelegator {
+    static isActive = false
+    static needWarmUp = false
+
+    warmUp(_warmUpPath) {
+      if (!WorkerPoolDelegator.needWarmUp) return
+      for (let workerId = 0; workerId < host._workerPool.getMinPoolNum(); workerId++) {
+        host._workerPool.availableSlot([workerId])
+      }
+      WorkerPoolDelegator.needWarmUp = false
+      WorkerPoolDelegator.isActive = host._workerPool.isActive()
+    }
+
+    submit(task, workPath, options) {
+      const publicNode = task?.getNode?.()
+      const internalNode = publicNode?.__arkdownNode
+      const internalTask =
+        task?.__arkdownTaskWrapper?.task ||
+        task?.task ||
+        (internalNode && host._getTaskByName(internalNode, task?.getName?.()))
+      if (!internalTask) {
+        throw host._error(
+          'FAILED_TO_SUBMIT_WORKER_TASK_NOT_FOUND',
+          `worker task ${String(task?.getName?.())} is not registered on its Hvigor node`,
+        )
+      }
+      WorkerPoolDelegator.isActive = true
+      return host._workerPool.submit(internalTask, workPath, options)
+    }
+
+    async terminate() {
+      const result = await host._workerPool.shutdown()
+      WorkerPoolDelegator.isActive = !result
+      return result
+    }
+
+    getState() {
+      return host._workerPool.getState()
+    }
+
+    setState(state) {
+      host._workerPool.setState(state)
+    }
+
+    setRecycleInterval(recycleInterval) {
+      host._workerPool.setRecycleInterval(recycleInterval)
+    }
+
+    setMaxIdleTime(maxIdleTime) {
+      host._workerPool.setMaxIdleTime(maxIdleTime)
+    }
+
+    setErrorCallback(errorCallback) {
+      host._workerPool.setErrorCallback(errorCallback)
+    }
+
+    getLog(type) {
+      return host._workerPool.getLog(type)
+    }
+
+    clearLog(type) {
+      host._workerPool.clearLog(type)
+    }
+
+    getMaxPoolNum() {
+      return host._workerPool.getMaxPoolNum()
+    }
+
+    getMinPoolNum() {
+      return host._workerPool.getMinPoolNum()
+    }
+
+    setResident(resident) {
+      host._workerPool.setResident(resident)
+    }
+
+    isActive() {
+      return WorkerPoolDelegator.isActive
+    }
+  }
+
+  class HvigorWatchWorker {
+    constructor() {
+      this.workerMap = new Map()
+      this.nextWorkerId = 1
+    }
+
+    getWorker(id) {
+      return this.workerMap.get(id)?.worker
+    }
+
+    async getLastWatchResult(id) {
+      const item = this.workerMap.get(id)
+      if (!item) return true
+      if (item.lastWatchResult.finish) return item.lastWatchResult.result
+      return new Promise((resolve) => item.resultResolvers.add(resolve))
+    }
+
+    sendCompileMsgToWorker() {
+      for (const item of this.workerMap.values()) {
+        if (item.taskName.includes('HotReload')) item.worker.postMessage({ event: 'HOT_COMPILE' })
+      }
+    }
+
+    sendNewWatchMsgToProcess(id) {
+      this.workerMap.get(id)?.worker.postMessage({ event: 'PAUSE_PRINT_ERR', data: false })
+    }
+
+    createWorker(task, filename, hasCustomTerminate, callback, options, customAction) {
+      const workerId = this.nextWorkerId++
+      const worker = new Worker(filename, options)
+      const item = {
+        worker,
+        taskName: task.getName(),
+        hasCustomTerminate,
+        keepAlive: false,
+        lastWatchResult: { finish: true, result: true },
+        resultResolvers: new Set(),
+        customActions: new Map(),
+      }
+      if (customAction) item.customActions.set(customAction.customType, customAction.action)
+      this.workerMap.set(workerId, item)
+      const completion = new Promise((resolve, reject) => {
+        item.resolve = resolve
+        item.reject = reject
+      })
+      task.pendingPromises.add(completion)
+      worker.on('message', async (message) => {
+        if (message?.event === HVIGOR_CUSTOM_WORKER_REQUEST) {
+          const action = item.customActions.get(message.customType)
+          if (action) await action(message.param)
+          worker.postMessage({ ...message, done: true })
+          return
+        }
+        if (message?.event === HvigorPoolConstant.WORK_DONE) {
+          await callback(message.returnVal)
+          item.resolve('succeed')
+          return
+        }
+        if (message?.event === HvigorPoolConstant.WORK_ERROR) {
+          await callback(message.returnVal)
+          const detail = message.error || message.returnVal
+          item.reject(
+            detail?.warnMsg
+              ? new HvigorExtendedErrorInfo(detail.message, { warnMsg: detail.warnMsg })
+              : new Error(typeof detail === 'string' ? detail : detail?.message || 'watch worker failed'),
+          )
+          return
+        }
+        if (message?.type === HVIGOR_WATCH_EVENT.WATCH_START) {
+          item.lastWatchResult.finish = false
+        } else if (message?.type === HVIGOR_WATCH_EVENT.WATCH_RESULT) {
+          for (const resolve of item.resultResolvers) resolve(message.content)
+          item.resultResolvers.clear()
+          item.lastWatchResult = { finish: true, result: message.content }
+        } else if (message?.type === HVIGOR_WATCH_EVENT.TERMINATE_WORKER) {
+          this.terminateWorker(message.content)
+        }
+        if (Object.values(HVIGOR_WATCH_EVENT).includes(message?.type)) {
+          for (const lifecycleCallback of host._watchWorkerMessageCallbacks) {
+            await lifecycleCallback(message)
+          }
+        }
+      })
+      worker.on('error', (error) => item.reject(error))
+      this.sendNewWatchMsgToProcess(workerId)
+      return String(workerId)
+    }
+
+    terminate(id) {
+      const item = this.workerMap.get(id)
+      if (item?.hasCustomTerminate) {
+        item.worker.postMessage({ type: HVIGOR_WATCH_EVENT.TERMINATE_WORKER, content: id })
+      } else {
+        this.terminateWorker(id)
+      }
+    }
+
+    terminateWorker(id) {
+      this.workerMap.get(id)?.worker.terminate()
+      this.workerMap.delete(id)
+    }
+  }
+
+  class HvigorNormalWorker {
+    constructor() {
+      this.maxWorkerNum = HvigorPoolConstant.MAX_POOL_NUM > 1 ? HvigorPoolConstant.MAX_POOL_NUM - 1 : 1
+      this.runningThreadCount = 0
+      this.queue = []
+      this.nextWorkerId = 1
+    }
+
+    createWorker(task, filename, _hasCustomTerminate, callback, options) {
+      const workerId = this.nextWorkerId++
+      const completion = new Promise((resolve, reject) => {
+        this.queue.push({ workerId, task, filename, callback, options, resolve, reject })
+        this.processNextTask()
+      })
+      task.pendingPromises.add(completion)
+      return String(workerId)
+    }
+
+    reset() {
+      this.runningThreadCount = 0
+      this.queue.length = 0
+    }
+
+    processNextTask() {
+      while (this.runningThreadCount < this.maxWorkerNum && this.queue.length > 0) {
+        this.executeWorker(this.queue.shift())
+      }
+    }
+
+    executeWorker(work) {
+      const worker = new Worker(work.filename, work.options)
+      this.runningThreadCount += 1
+      const finish = () => {
+        this.runningThreadCount -= 1
+        this.processNextTask()
+      }
+      worker.on('message', async (message) => {
+        try {
+          if (message?.event === HvigorPoolConstant.WORK_DONE) {
+            await work.callback(message.returnVal)
+            await worker.terminate()
+            finish()
+            work.resolve(true)
+          } else if (message?.event === HvigorPoolConstant.WORK_ERROR) {
+            await work.callback(message.returnVal)
+            finish()
+            work.reject(new Error(message.error?.message || message.returnVal?.message || 'normal worker failed'))
+          }
+        } catch (error) {
+          finish()
+          work.reject(error)
+        }
+      })
+      worker.on('error', (error) => {
+        finish()
+        work.reject(error)
+      })
+    }
+  }
+
+  class Tasks extends HvigorDefaultTask {
+    constructor(node) {
+      super(node, {
+        name: 'tasks',
+        group: HVIGOR_TASK_GROUP_TYPE.HELP_TASK_GROUP,
+        isEnabled: true,
+        sourcePluginId: 'hvigor',
+        description: 'Displays the tasks of the HvigorCoreNode.',
+      })
+    }
+
+    registryAction() {
+      return () => {
+        const lines = [
+          '--------------------------------------------------------------------------',
+          `All tasks from hvigor node '${this.node.getName()}'`,
+          '--------------------------------------------------------------------------',
+          ...this.transformInfos(this.node.getAllTasks()),
+        ]
+        HvigorLogger.getLogger('no-pattern-info').info(lines.join(os.EOL))
+      }
+    }
+
+    transformInfos(tasks) {
+      const groups = new Map()
+      for (const task of tasks) {
+        const group = task.getGroup()
+        if (!groups.has(group)) groups.set(group, [])
+        groups.get(group).push(task)
+      }
+      const lines = []
+      for (const [group, groupTasks] of groups) {
+        lines.push(`${group} tasks`, '-------------')
+        for (const task of groupTasks) {
+          lines.push(task.getDescription() ? `${task.getName()} - ${task.getDescription()}` : task.getName())
+        }
+        lines.push('')
+      }
+      return lines
+    }
+  }
+
+  const projectTaskDag = new HvigorTaskDirectedAcyclicGraph()
+  const watchWorker = new HvigorWatchWorker()
+  const normalWorker = new HvigorNormalWorker()
+  const readJavaDaemonInfoFromCacheFile = () => {
+    const filePath = path.resolve(getHvigorUserHome(), 'daemon', 'cache', 'java-daemon.json')
+    if (!fs.existsSync(filePath)) return undefined
+    try {
+      return JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+    } catch {
+      return undefined
+    }
+  }
+
+  host._metricCompatibility = { MetricFactory, MetricService }
+
   return {
     ParseJsonFile,
     parseJsonFile,
@@ -1311,6 +3176,33 @@ function createHvigorPublicUtilities(host) {
     HvigorLogger,
     LocalFileWriter,
     LogLevelMap,
+    CacheStore,
+    CacheStoreManager,
+    ContinualEvent,
+    DurationEvent,
+    ExtendedErrorInfo: HvigorExtendedErrorInfo,
+    HvigorSystemPlugin,
+    MarkEvent,
+    MarkEventType: HVIGOR_MARK_EVENT_TYPE,
+    MetricEventType: HVIGOR_METRIC_EVENT_TYPE,
+    MetricFactory,
+    MetricLogType: HVIGOR_METRIC_LOG_TYPE,
+    MetricService,
+    PoolConstant: HvigorPoolConstant,
+    ProjectCacheService,
+    ReportServiceImpl,
+    TaskDirectedAcyclicGraph: HvigorTaskDirectedAcyclicGraph,
+    TaskProxy,
+    Tasks,
+    TcbStore: HvigorTcbStore,
+    TraceManager,
+    WatchEvent: HVIGOR_WATCH_EVENT,
+    WorkerEvent: HVIGOR_WORKER_EVENT,
+    WorkerPoolDelegator,
+    normalWorker,
+    projectTaskDag,
+    readJavaDaemonInfoFromCacheFile,
+    watchWorker,
     TrackAPI,
     addExtensionHandler,
     addLayout: log4js.addLayout,
@@ -1541,6 +3433,7 @@ class RuntimePluginLoader {
     for (const plugin of await this.loadHvigorfiles()) {
       plugins.push(plugin)
     }
+    this.hvigorHost.prepareOhpmDependencyWorkspace()
     for (const plugin of await this.loadBuildProfileCompilePlugins()) {
       plugins.push(plugin)
     }
@@ -1572,7 +3465,9 @@ class RuntimePluginLoader {
   }
 
   toNativeBuildConfig() {
+    this.hvigorHost.assertSupportedBuildExtensions()
     const startParams = this.hvigorHost.startParameters()
+    const runtimeProperties = this.hvigorHost.runtimeProperties(startParams)
     const projectHvigorOverridesJson =
       Object.keys(this.projectHvigorOverrides).length > 0
         ? this.serializeOverrides(
@@ -1591,6 +3486,14 @@ class RuntimePluginLoader {
     const alignDeviceTypes = this.hvigorHost.alignDeviceTypes()
     return toNativeBuildConfig(this.config, {
       defaultCache: startParams.incrementalExecution,
+      mode: this.hvigorHost._effectiveBuildMode(),
+      enableSignTask: this.hvigorHost.enableSignTask(),
+      fastBuildApp: this.hvigorHost.fastBuildApp(),
+      ohosDebugAsan: runtimeProperties.asanConfig,
+      ohosEnableHwasan: runtimeProperties.hwasanConfig,
+      ohosEnableTsan: runtimeProperties.tsanConfig,
+      ohosEnableUbsan: runtimeProperties.ubsanConfig,
+      ohosEnableBinxo: runtimeProperties.binxoConfig,
       projectHvigorOverridesJson,
       moduleHvigorOverridesJson,
       runtimeContextOverridesJson:
@@ -1605,6 +3508,11 @@ class RuntimePluginLoader {
       byteCodeHarIntegratedOptimization: this.hvigorHost.byteCodeHarIntegratedOptimization(),
       keepDependency: this.hvigorHost.keepDependency(),
       parameterFileOverride: this.hvigorHost.parameterFileOverride(),
+      hvigorRuntimePropertiesJson: this.serializeOverrides(
+        runtimeProperties,
+        'hvigor runtime properties',
+      ),
+      hvigorCacheDir: this.hvigorHost.hvigorCacheDir(),
     })
   }
 
@@ -2104,17 +4012,71 @@ class HvigorTaskCatalog {
     return this.taskDefinitions.entries()
   }
 
-  _load() {
+  request() {
     const targetNames = this.host._targetEntriesFor(this.node).map((target) => target.name)
-    const request = {
+    const compileApiVersion = this.host._compileApiVersion()
+    const compatibleApiVersion = this.host._compatibleApiVersion()
+    const ohpmProject = this.host._isOhpmProject()
+    const unitTestProcess = this.host._parameter.getExtParam('unitTestMode') === 'true'
+    const ohosTestCoverage = this.host._parameter.getExtParam('ohos-test-coverage') === 'true'
+    const previewProcess =
+      this.host._parameter.getExtParam('previewMode') === 'true' ||
+      this.host._commandEntryTasks.includes('PreviewBuild')
+    const inTest =
+      this.host._parameter.getExtParam('isLocalTest') === 'true' ||
+      this.host._parameter.getExtParam('isOhosTest') === 'true'
+    return {
       nodeName: this.node.name,
       kind: this.node.kind,
       projectTask: this.node.isProject,
+      projectRoot: this.host.projectRoot,
+      nodeRoot: this.node.root,
+      etsLoaderPath: this.host.config.etsLoaderPath,
+      jsLoaderPath: this.host.config.jsLoaderPath,
+      hasRollupPluginInEtsLoader:
+        this.host.config.hasRollupPluginInEtsLoader ?? this.host.config.hasRollupPlugin,
+      hasRollupPluginInJsLoader: this.host.config.hasRollupPluginInJsLoader,
       buildTargetName: this.host.config.buildTargetName,
       targetNames,
+      targetOptions: this.node.isProject
+        ? []
+          : targetNames.map((name) => {
+            const buildOption = this.host._buildOptionFor(this.node, { name })
+            return {
+              name,
+              deduplicateHar: Boolean(buildOption?.packOptions?.deduplicateHar),
+              binxoEnabled: this.host.binxoEnabled(buildOption),
+              ohpmProject,
+              compileApiVersion,
+              compatibleApiVersion,
+              openSourceHar: this.host._isOpenSourceHar(buildOption),
+              externalNativeOptions: Boolean(buildOption?.externalNativeOptions),
+              useNormalizedOhmUrl: Boolean(buildOption?.strictMode?.useNormalizedOHMUrl),
+              hspDependencies: this.host._taskDependencyTargets(this.node, name, 'hsp'),
+              harDependencies: this.host._taskDependencyTargets(this.node, name, 'har'),
+            }
+          }),
       childModules: this.node.children.map((child) => ({ name: child.name, kind: child.kind })),
       syncVersionChanged: this.host._syncVersionChanged,
+      fastBuildApp: this.host.fastBuildApp(),
+      buildAppSkipSignHap: this.host.buildAppSkipSignHap(),
+      commandEntryTest: this.host._commandEntryTasks.includes('test'),
+      unitTestProcess,
+      ohosTestCoverage,
+      previewProcess,
+      previewCompileResourceIncremental:
+        this.host._parameter.getExtParam('compileResInc') === 'true',
+      inTest,
+      deviceTest: this.host._commandEntryTasks.includes('onDeviceTest'),
+      hotReload:
+        this.host._parameter.getExtParam('hotReload') === 'true' &&
+        Boolean(this.host.startParameters().daemon),
+      coldReload: this.host._commandEntryTasks.includes('assembleDevHqf'),
     }
+  }
+
+  _load() {
+    const request = this.request()
     const entries = JSON.parse(nativeRuntimeBinding.runtimeTaskCatalog(JSON.stringify(request)))
     return new Map(entries.map((entry) => [entry.name, entry]))
   }
@@ -2136,22 +4098,58 @@ class HvigorTaskView {
     return this.task.definition.name
   }
 
+  getNameInternal() {
+    return this.getName()
+  }
+
   getDependencies() {
     return [...this.task.dependencies, ...this.task.userDependencies].map((dependency) =>
       dependency.startsWith(':') ? dependency.slice(1) : dependency,
     )
   }
 
+  getDependenciesInternal() {
+    return this.getDependencies()
+  }
+
+  getGroup() {
+    return this.task.definition.group || this.task.node.taskCatalog.get(this.getName())?.group || 'Other'
+  }
+
+  getDescription() {
+    return this.task.definition.description || this.task.node.taskCatalog.get(this.getName())?.description || ''
+  }
+
+  getPath() {
+    return this.task.path
+  }
+
+  getNode() {
+    return this.task.node.wrapper
+  }
+
   setEnable(enabled) {
     this.task.enabled = enabled
+  }
+
+  setEnableInternal(enabled) {
+    this.setEnable(enabled)
   }
 
   beforeRun(callback) {
     this.task.beforeRunHooks.push({ callback, declared: false })
   }
 
+  beforeRunInternal(callback) {
+    this.beforeRun(callback)
+  }
+
   afterRun(callback) {
     this.task.afterRunHooks.push({ callback, declared: false })
+  }
+
+  afterRunInternal(callback) {
+    this.afterRun(callback)
   }
 }
 
@@ -2168,8 +4166,20 @@ class HvigorNodeDescriptorView {
     return this.children
   }
 
+  getChildNodeInternal() {
+    return this.getChildNode()
+  }
+
   getRootNode() {
     return this.rootDescriptor
+  }
+
+  getRootNodeInternal() {
+    return this.getRootNode()
+  }
+
+  setChildNode(children) {
+    this.children = children
   }
 }
 
@@ -2209,6 +4219,11 @@ class HvigorConfigView {
       throw this.host._error('SOME_PATH_NOT_FOUND', `module path does not exist: ${srcPath}`)
     }
     this.children.push(this._child(name, srcPath, { extraOptions }))
+    this.rootDescriptor.setChildNode(this.children)
+  }
+
+  includeNodeInternal(name, srcPath, extraOptions) {
+    this.includeNode(name, srcPath, extraOptions)
   }
 
   excludeNodeByName(name) {
@@ -2219,16 +4234,32 @@ class HvigorConfigView {
     this.rootDescriptor.children = this.children
   }
 
+  excludeNodeByNameInternal(name) {
+    this.excludeNodeByName(name)
+  }
+
   getAllNodeDescriptor() {
     return this.children
+  }
+
+  getAllNodeDescriptorInternal() {
+    return this.getAllNodeDescriptor()
   }
 
   getRootNodeDescriptor() {
     return this.rootDescriptor
   }
 
+  getRootNodeDescriptorInternal() {
+    return this.getRootNodeDescriptor()
+  }
+
   getNodeDescriptorByName(name) {
     return this.children.find((descriptor) => descriptor.name === name)
+  }
+
+  getNodeDescriptorByNameInternal(name) {
+    return this.getNodeDescriptorByName(name)
   }
 
   applyToHost() {
@@ -2286,6 +4317,391 @@ class HvigorToolingModelRegistry {
  */
 class HvigorCoreTask {}
 
+/**
+ * CoreTask adapter for Rust-owned built-in tasks and object-style HvigorTask
+ * registrations. The public Task wrapper intentionally remains a distinct
+ * object, matching CoreTaskImpl#getHvigorTask in hvigor 6.24.3.
+ */
+class HvigorCoreTaskView extends HvigorCoreTask {
+  constructor(host, task) {
+    super()
+    this.host = host
+    this.task = task
+  }
+
+  getAction() {
+    if (typeof this.task.definition.run === 'function') return this.task.definition.run
+    return async () => {
+      const action = this.host._runtimeBuiltinActions.get(this.task.path)
+      if (typeof action !== 'function') {
+        throw this.host._error(
+          'ARKDOWN_BUILTIN_TASK_ACTION_NOT_BOUND',
+          `built-in task ${this.task.path} can only execute inside the Rust Hvigor task runtime`,
+        )
+      }
+      return action()
+    }
+  }
+
+  getNode() {
+    return this.task.node.coreWrapper
+  }
+
+  getName() {
+    return this.task.definition.name
+  }
+
+  getPath() {
+    return this.task.path
+  }
+
+  getDependsOn() {
+    return [...this.task.dependencies, ...this.task.userDependencies]
+  }
+
+  setDependsOn(...dependencies) {
+    this.host._setCoreTaskDependencies(this.task, dependencies)
+    return this
+  }
+
+  addDependsOn(dependency) {
+    this.host._addCoreTaskDependency(this.task, dependency)
+    return this
+  }
+
+  dependsOn(dependency, targetNode) {
+    this.host._addCoreTaskDependency(this.task, dependency, targetNode)
+    return this
+  }
+
+  getEnabled() {
+    return this.task.enabled
+  }
+
+  setEnabled(enabled) {
+    this.task.enabled = enabled
+    return this
+  }
+
+  setDescription(description) {
+    this.task.definition.description = description
+    return this
+  }
+
+  getDescription() {
+    return this.task.definition.description || ''
+  }
+
+  setGroup(group) {
+    this.task.definition.group = group
+    return this
+  }
+
+  getGroup() {
+    return this.task.definition.group || 'Other'
+  }
+
+  doNotTrackState(reason) {
+    this.task.trackState = false
+    this.task.unTrackStateReason = reason
+  }
+
+  getSourcePluginId() {
+    return this.task.definition.sourcePluginId || ''
+  }
+
+  onFailed(error) {
+    return this.task.taskContext?.onFailed?.(error)
+  }
+
+  getHvigorTask() {
+    return this.task.wrapper
+  }
+
+  beforeRun(callback) {
+    this.task.beforeRunHooks.push({ callback, declared: false })
+  }
+
+  afterRun(callback) {
+    this.task.afterRunHooks.push({ callback, declared: false })
+  }
+
+  getTaskLog() {
+    return this.host._publicUtilities.HvigorLogger.getLogger(this.getPath())
+  }
+
+  getWorkerPool() {
+    return new this.host._publicUtilities.WorkerPoolDelegator()
+  }
+
+  taskShouldDo() {
+    return this.task.taskContext?.taskShouldDo?.() !== false
+  }
+
+  async execute() {
+    await this.host._runTaskBeforeHooks(this.task)
+    await this.getAction().call(this)
+    await this.host._awaitRuntimeTaskPendingPromises(this.task)
+  }
+}
+
+class HvigorTaskContainerView {
+  constructor(host, node) {
+    this.host = host
+    this.node = node
+  }
+
+  addTask(task) {
+    this.host._registerTask(this.node, task)
+  }
+
+  registerTask(creation) {
+    this.host._registerLazyTaskCreation(this.node, creation)
+  }
+
+  deleteTask(taskName) {
+    const existed = this.hasTask(taskName)
+    this.node.tasks.delete(taskName)
+    this.node.lazyTaskCreations.delete(taskName)
+    if (this.node.taskCatalog.has(taskName)) this.node.deletedCatalogTasks.add(taskName)
+    return existed
+  }
+
+  findTask(taskName) {
+    const task = this.host._getTaskByName(this.node, taskName)
+    return task ? this.host._coreTaskFor(task) : undefined
+  }
+
+  getTask(taskName) {
+    return this.findTask(taskName)
+  }
+
+  getLazyTask(taskName) {
+    return this.host._taskCreationFor(this.node, taskName)
+  }
+
+  getTaskDepends(taskName) {
+    const task = this.host._getTaskByName(this.node, taskName)
+    if (!task) throw new Error(`Task ${taskName} not find.`)
+    return this.host._coreTaskFor(task).getDependsOn()
+  }
+
+  hasTask(taskName) {
+    return this.host._hasTask(this.node, taskName)
+  }
+
+  getAllTasks() {
+    return Array.from(this.node.tasks.values(), (task) => this.host._coreTaskFor(task))
+  }
+
+  getAllTasksCA() {
+    return this.host._allTaskCreations(this.node)
+  }
+
+  getTaskPaths() {
+    return this.host._allTaskNames(this.node)
+  }
+
+  clearTasks() {
+    this.node.tasks.clear()
+    this.node.lazyTaskCreations.clear()
+    for (const [taskName] of this.node.taskCatalog.entries()) this.node.deletedCatalogTasks.add(taskName)
+  }
+}
+
+/**
+ * Per-build HvigorCore state. Official hvigor exposes this object as a
+ * singleton; keeping it on HvigorRuntimeHost preserves identity across every
+ * mocked `require('@ohos/hvigor')` call without leaking state across builds.
+ */
+class HvigorCoreRuntimeView {
+  constructor(host) {
+    this.host = host
+    this.project = undefined
+    this.extraConfig = new Map(Object.entries(host._parameter.getExtParamsInternal()))
+    this.cacheMap = new Map()
+    this.metaInfo = new Map()
+    this.changedModuleNameList = new Set()
+    this.moduleDepRelationMap = new Map()
+    this.compileDependArr = new Set()
+    this.afterNodeInternalHooks = new Map()
+    this.nodesEvaluatedInternalHooks = []
+    this.nodesBeforeEvaluatedInternalHooks = []
+  }
+
+  getHvigorVersion() {
+    return HVIGOR_PARITY_VERSION
+  }
+
+  getModuleDepRelationMap() {
+    return this.moduleDepRelationMap
+  }
+
+  setChangedModuleNameList(changedModuleNameList) {
+    this.changedModuleNameList = changedModuleNameList
+  }
+
+  getChangedModuleNameList() {
+    return this.changedModuleNameList
+  }
+
+  setCompileDependArr(compileDependArr) {
+    this.compileDependArr = compileDependArr
+  }
+
+  getCompileDependArr() {
+    return this.compileDependArr
+  }
+
+  _metaFilePath() {
+    return path.join(this.host.hvigorCacheDir(), 'cache', 'meta.json')
+  }
+
+  _readMeta() {
+    const metaFile = this._metaFilePath()
+    if (!fs.existsSync(metaFile)) return {}
+    try {
+      const value = JSON.parse(fs.readFileSync(metaFile, 'utf8'))
+      return value && typeof value === 'object' ? value : {}
+    } catch (cause) {
+      throw this.host._error('INVALID_HVIGOR_META_FILE', `failed to read Hvigor metadata ${metaFile}`, {
+        cause,
+        path: metaFile,
+      })
+    }
+  }
+
+  versionChanged() {
+    const changed = this.getMetaProperty('hvigorVersion') !== HVIGOR_PARITY_VERSION
+    if (changed) this.updateMetaProperty('hvigorVersion', HVIGOR_PARITY_VERSION)
+    return changed
+  }
+
+  updateMetaProperty(property, value) {
+    this.metaInfo.set(property, value)
+  }
+
+  writeMetaProperties() {
+    if (this.metaInfo.size === 0) return
+    const metaFile = this._metaFilePath()
+    const metadata = this._readMeta()
+    for (const [property, value] of this.metaInfo) metadata[property] = value
+    fs.mkdirSync(path.dirname(metaFile), { recursive: true })
+    fs.writeFileSync(metaFile, JSON.stringify(metadata))
+    this.metaInfo.clear()
+  }
+
+  getMetaProperty(property) {
+    return this._readMeta()[property]
+  }
+
+  getProject() {
+    return this.project
+  }
+
+  getParameter() {
+    return this.host._parameter
+  }
+
+  getModuleByScriptPath(buildScriptFilePath) {
+    return this.host._nodeForFile(buildScriptFilePath, false)?.coreWrapper
+  }
+
+  getHvigorNodeByScriptPath(buildScriptFilePath) {
+    return this.host._nodeForFile(buildScriptFilePath, false)?.wrapper
+  }
+
+  getParentNodeByScriptPath(buildScriptFilePath) {
+    return this.host._nodeForFile(buildScriptFilePath, false)?.parent?.wrapper
+  }
+
+  getSubNodeByScriptPath(buildScriptFilePath) {
+    const node = this.host._nodeForFile(buildScriptFilePath, false)
+    return node ? node.children.map((child) => child.wrapper) : undefined
+  }
+
+  getExtraConfig() {
+    return this.extraConfig
+  }
+
+  setExtraConfig(value) {
+    this.extraConfig = value
+  }
+
+  isCommandEntryTask(taskName) {
+    return this.host._commandEntryTasks.includes(taskName)
+  }
+
+  setCommandEntryTasks(commandEntryTasks) {
+    this.host._commandEntryTasks = commandEntryTasks
+  }
+
+  getCommandEntryTasks() {
+    return this.host._commandEntryTasks.length > 0 ? this.host._commandEntryTasks : undefined
+  }
+
+  initRootProject(project) {
+    this.project = project
+  }
+
+  reset() {
+    this.extraConfig.clear()
+    for (const node of this.host._nodesByFile.values()) {
+      node.taskContainer.clearTasks()
+      node.taskGraph.clear()
+    }
+    this.host._nodesByFile.clear()
+    this.host._nodeAliasesByFile.clear()
+    this.host._nodesByName.clear()
+    this.host._commandEntryTasks = []
+    this.project = undefined
+    this.host._invalidateRuntimePlan()
+  }
+
+  hvigorAfterNodeInternalHook(hvigorNodeName, callback) {
+    const callbacks = this.afterNodeInternalHooks.get(hvigorNodeName) || []
+    callbacks.push(callback)
+    this.afterNodeInternalHooks.set(hvigorNodeName, callbacks)
+  }
+
+  getHvigorAfterNodeInternalHookList(hvigorNodeName) {
+    return this.afterNodeInternalHooks.get(hvigorNodeName)
+  }
+
+  hvigorNodeEvaluatedInternalHook(callback) {
+    this.nodesEvaluatedInternalHooks.push(callback)
+  }
+
+  hvigorNodeBeforeEvaluatedInternalHook(callback) {
+    this.nodesBeforeEvaluatedInternalHooks.push(callback)
+  }
+
+  getCache(cacheName) {
+    if (!this.cacheMap.has(cacheName)) this.cacheMap.set(cacheName, new Map())
+    return this.cacheMap.get(cacheName)
+  }
+
+  cleanCache() {
+    this.cacheMap.clear()
+    this.changedModuleNameList.clear()
+    this.moduleDepRelationMap.clear()
+  }
+
+  getHvigorNodesEvaluatedInternalHook() {
+    return this.nodesEvaluatedInternalHooks
+  }
+
+  getHvigorNodesBeforeEvaluatedInternalHook() {
+    return this.nodesBeforeEvaluatedInternalHooks
+  }
+
+  clearHvigorInternalHookList() {
+    this.afterNodeInternalHooks.clear()
+    this.nodesEvaluatedInternalHooks = []
+    this.nodesBeforeEvaluatedInternalHooks = []
+  }
+}
+
 class HvigorTaskPendingPromises {
   constructor() {
     this.promiseSet = new Set()
@@ -2304,6 +4720,374 @@ class HvigorTaskPendingPromises {
   }
 }
 
+class HvigorWorkerTaskControlBlock extends EventEmitter {
+  constructor(pool, work, task, options, state = HVIGOR_TASK_STATE.WAITING) {
+    super()
+    this.pool = pool
+    this.work = work
+    this.task = task
+    this.callback = typeof options?.callback === 'function' ? options.callback : () => {}
+    this.callbackInput = Array.isArray(options?.callbackInput) ? options.callbackInput : []
+    this.useReturnValue = Boolean(options?.useReturnVal)
+    this.customActions = new Map()
+    this.submitTime = Date.now()
+    this.startTime = undefined
+    this.endTime = undefined
+    this.workerId = undefined
+    this.state = state
+  }
+
+  getId() {
+    return this.work.id
+  }
+
+  getWorkerId() {
+    return this.workerId
+  }
+
+  getSubmitTime() {
+    return this.submitTime
+  }
+
+  getStartTime() {
+    return this.startTime
+  }
+
+  getEndTime() {
+    return this.endTime
+  }
+
+  getState() {
+    return this.state
+  }
+
+  getPriority() {
+    return this.work.priority
+  }
+
+  getCallback() {
+    return this.callback
+  }
+
+  getCallbackInput() {
+    return this.callbackInput
+  }
+
+  setPriority(priority) {
+    if (this.state !== HVIGOR_TASK_STATE.WAITING) return false
+    this.work.priority = priority
+    this.pool.update(this)
+    return true
+  }
+
+  setCallback(callback, callbackInput) {
+    if (![HVIGOR_TASK_STATE.WAITING, HVIGOR_TASK_STATE.RUNNING].includes(this.state)) return false
+    this.callback = callback
+    if (callbackInput !== undefined) this.callbackInput = callbackInput
+    return true
+  }
+
+  setCustomAction(customType, action) {
+    if (![HVIGOR_TASK_STATE.WAITING, HVIGOR_TASK_STATE.RUNNING].includes(this.state)) return false
+    this.customActions.set(customType, action)
+    return true
+  }
+
+  popCustomAction(customType) {
+    const action = this.customActions.get(customType)
+    this.customActions.delete(customType)
+    return action
+  }
+
+  getTaskCompletePath() {
+    return this.task.path
+  }
+
+  getTaskName() {
+    return this.task.definition.name
+  }
+
+  getTaskPath() {
+    return this.task.node.name
+  }
+
+  useReturnVal() {
+    return this.useReturnValue
+  }
+}
+
+class HvigorWorkerPool {
+  constructor(host) {
+    this.host = host
+    this.maxWorkers = Math.max(0, os.cpus().length - 1)
+    this.minWorkers = 0
+    this.nextWorkId = 0
+    this.nextSequence = 0
+    this.queue = []
+    this.slots = new Map()
+    this.closing = false
+    this.state = HVIGOR_POOL_STATE.RUNNING
+    this.resident = false
+    this.recycleInterval = HvigorPoolConstant.DEFAULT_RECYCLE_INTERVAL
+    this.maxIdleTime = HvigorPoolConstant.DEFAULT_MAX_IDLE_TIME
+    this.errorCallback = undefined
+    this.logs = new Map()
+  }
+
+  submit(task, workPath, options = {}) {
+    const targetWorkers = this.filteredTargetWorkers(options.targetWorkers)
+    const work = {
+      id: String(this.nextWorkId++),
+      sequence: this.nextSequence++,
+      priority: options.priority ?? HVIGOR_WORKER_PRIORITY.MEDIUM,
+      targetWorkers,
+      workPath,
+      workInput: options.workInput,
+    }
+    const accepted =
+      this.host.startParameters().parallelExecution &&
+      !this.closing &&
+      this.state === HVIGOR_POOL_STATE.RUNNING &&
+      this.maxWorkers > 0 &&
+      (targetWorkers === undefined || targetWorkers.length > 0)
+    const tcb = new HvigorWorkerTaskControlBlock(
+      this,
+      work,
+      task,
+      options,
+      accepted ? HVIGOR_TASK_STATE.WAITING : HVIGOR_TASK_STATE.REJECT,
+    )
+    HvigorTcbStore.add(tcb)
+    if (!accepted) return tcb
+
+    const completion = new Promise((resolve, reject) => {
+      work.resolve = resolve
+      work.reject = reject
+    })
+    const pendingPromises = task.taskContext?.pendingPromises
+    if (!pendingPromises || typeof pendingPromises.add !== 'function') {
+      throw this.host._error(
+        'FAILED_TO_SUBMIT_WORKER_TASK_NOT_SUPPORTED',
+        `task ${task.path} does not expose Hvigor pending promises`,
+      )
+    }
+    pendingPromises.add(completion)
+    work.tcb = tcb
+    this.queue.push(work)
+    this.sortQueue()
+    this.dispatch()
+    return tcb
+  }
+
+  filteredTargetWorkers(targetWorkers) {
+    if (!Array.isArray(targetWorkers)) return undefined
+    const seen = new Set()
+    return targetWorkers.filter((workerId) => {
+      if (!Number.isInteger(workerId) || workerId < 0 || workerId >= this.maxWorkers || seen.has(workerId)) {
+        return false
+      }
+      seen.add(workerId)
+      return true
+    })
+  }
+
+  update(tcb) {
+    if (tcb.getState() !== HVIGOR_TASK_STATE.WAITING) return
+    this.sortQueue()
+    this.dispatch()
+  }
+
+  sortQueue() {
+    this.queue.sort((left, right) => left.priority - right.priority || left.sequence - right.sequence)
+  }
+
+  dispatch() {
+    if (this.closing) return
+    let dispatched
+    do {
+      dispatched = false
+      for (let index = 0; index < this.queue.length; index++) {
+        const work = this.queue[index]
+        const slot = this.availableSlot(work.targetWorkers)
+        if (slot === undefined) continue
+        this.queue.splice(index, 1)
+        this.start(slot, work)
+        dispatched = true
+        break
+      }
+    } while (dispatched)
+  }
+
+  availableSlot(targetWorkers) {
+    const allowed = targetWorkers || Array.from({ length: this.maxWorkers }, (_, index) => index)
+    for (const workerId of allowed) {
+      const slot = this.slots.get(workerId)
+      if (slot === undefined) return this.createSlot(workerId)
+      if (!slot.busy) return slot
+    }
+    return undefined
+  }
+
+  createSlot(workerId) {
+    const worker = new Worker(path.join(__dirname, 'hvigor-worker.js'))
+    const slot = { workerId, worker, busy: false, work: undefined }
+    worker.on('message', (message) => this.onMessage(slot, message))
+    worker.on('error', (error) => this.onWorkerError(slot, error))
+    worker.on('exit', (code) => this.onWorkerExit(slot, code))
+    worker.unref()
+    this.slots.set(workerId, slot)
+    return slot
+  }
+
+  start(slot, work) {
+    slot.busy = true
+    slot.work = work
+    slot.worker.ref()
+    work.tcb.workerId = slot.workerId
+    work.tcb.state = HVIGOR_TASK_STATE.RUNNING
+    slot.worker.postMessage({
+      id: work.id,
+      workPath: work.workPath,
+      workInput: work.workInput,
+    })
+  }
+
+  async onMessage(slot, message) {
+    const work = slot.work
+    if (!work || message?.id !== work.id) return
+    if (message.event === HVIGOR_CUSTOM_WORKER_REQUEST) {
+      const action = work.tcb.popCustomAction(message.customType)
+      try {
+        await action?.(message.param)
+      } finally {
+        slot.worker.postMessage({ ...message, done: true })
+      }
+      return
+    }
+    work.tcb.startTime = message.startTime
+    work.tcb.endTime = message.endTime ?? Number(process.hrtime.bigint())
+    if (message.event === 'work error') {
+      const error = this.workerError(message.returnVal)
+      this.finish(slot, work, HVIGOR_TASK_STATE.ERROR, error)
+      return
+    }
+    try {
+      const callbackArgs = work.tcb.useReturnVal()
+        ? [message.returnVal, slot.workerId]
+        : [...work.tcb.getCallbackInput(), slot.workerId]
+      await work.tcb.getCallback()(...callbackArgs)
+      this.finish(slot, work, HVIGOR_TASK_STATE.END)
+    } catch (error) {
+      this.finish(slot, work, HVIGOR_TASK_STATE.ERROR, error)
+    }
+  }
+
+  workerError(value) {
+    const error = new Error(value?.message || 'worker execution failed')
+    error.name = value?.name || 'Error'
+    if (value?.stack) error.stack = value.stack
+    if (value?.extraInfo !== undefined) error.extraInfo = value.extraInfo
+    return error
+  }
+
+  finish(slot, work, state, error) {
+    work.tcb.state = state
+    slot.busy = false
+    slot.work = undefined
+    slot.worker.unref()
+    if (error === undefined) {
+      work.resolve(true)
+      work.tcb.emit('work done', work.id)
+    } else {
+      work.reject(error)
+      work.tcb.emit('work error', { id: work.id, error })
+      this.errorCallback?.(error)
+    }
+    this.dispatch()
+  }
+
+  onWorkerError(slot, error) {
+    const work = slot.work
+    if (work) {
+      work.tcb.endTime = Number(process.hrtime.bigint())
+      this.finish(slot, work, HVIGOR_TASK_STATE.ERROR, error)
+    }
+  }
+
+  onWorkerExit(slot, code) {
+    this.slots.delete(slot.workerId)
+    const work = slot.work
+    if (work && work.tcb.getState() === HVIGOR_TASK_STATE.RUNNING) {
+      const error = new Error(`Hvigor worker ${slot.workerId} exited with code ${code}`)
+      work.tcb.endTime = Number(process.hrtime.bigint())
+      work.tcb.state = HVIGOR_TASK_STATE.ERROR
+      work.reject(error)
+      work.tcb.emit('work error', { id: work.id, error })
+    }
+    this.dispatch()
+  }
+
+  async shutdown() {
+    this.closing = true
+    this.state = HVIGOR_POOL_STATE.TERMINATED
+    const workers = Array.from(this.slots.values(), (slot) => slot.worker.terminate())
+    this.slots.clear()
+    await Promise.allSettled(workers)
+    return true
+  }
+
+  getState() {
+    return this.state
+  }
+
+  setState(state) {
+    this.state = state
+    if (state === HVIGOR_POOL_STATE.RUNNING) {
+      this.closing = false
+      this.dispatch()
+    } else if (state === HVIGOR_POOL_STATE.TERMINATED) {
+      this.closing = true
+    }
+  }
+
+  setRecycleInterval(recycleInterval) {
+    this.recycleInterval = recycleInterval
+  }
+
+  setMaxIdleTime(maxIdleTime) {
+    this.maxIdleTime = maxIdleTime
+  }
+
+  setErrorCallback(errorCallback) {
+    this.errorCallback = errorCallback
+  }
+
+  getLog(type) {
+    return this.logs.get(type)
+  }
+
+  clearLog(type) {
+    if (type === undefined) this.logs.clear()
+    else this.logs.delete(type)
+  }
+
+  getMaxPoolNum() {
+    return this.maxWorkers
+  }
+
+  getMinPoolNum() {
+    return this.minWorkers
+  }
+
+  setResident(resident) {
+    this.resident = resident
+  }
+
+  isActive() {
+    return this.state !== HVIGOR_POOL_STATE.TERMINATED && (this.slots.size > 0 || this.queue.length > 0)
+  }
+}
+
 class HvigorDefaultTask extends HvigorCoreTask {
   constructor(node, taskInfo) {
     super()
@@ -2319,6 +5103,28 @@ class HvigorDefaultTask extends HvigorCoreTask {
     this.afterRunHooks = []
     this.unTrackStateReason = undefined
     this.pendingPromises = new HvigorTaskPendingPromises()
+    this.subDurationEventMap = new Map()
+    this.workerDelegator = undefined
+    this.taskExecutedStatus = {
+      upToDate: false,
+      successful: false,
+      workerTimePeriod: undefined,
+      isUpToDate() {
+        return this.upToDate
+      },
+      setUpToDate(value = true) {
+        this.upToDate = value
+      },
+      setWorkerTimePeriod(period) {
+        this.workerTimePeriod = period
+      },
+    }
+    const metricFactory = node?.__arkdownHost?._metricCompatibility?.MetricFactory
+    this.durationEvent = metricFactory?.createDurationEvent(
+      node.classKind === 'project' ? `:${this.name}` : `${node.getName()}:${this.name}`,
+      this.description,
+      this.group,
+    )
     this.__arkdownTaskWrapper = undefined
     this.__arkdownClassTask = true
   }
@@ -2329,6 +5135,30 @@ class HvigorDefaultTask extends HvigorCoreTask {
 
   getAction() {
     return this.registryAction()
+  }
+
+  getWorkerPool() {
+    const WorkerPoolDelegator = this.node?.__arkdownHost?._publicUtilities?.WorkerPoolDelegator
+    if (!WorkerPoolDelegator) {
+      throw new Error('Hvigor worker pool is unavailable before the task is bound to an Hvigor node')
+    }
+    this.workerDelegator ||= new WorkerPoolDelegator()
+    return this.workerDelegator
+  }
+
+  async execute() {
+    try {
+      for (const callback of [...this.beforeRunHooks].reverse()) await callback.call(this)
+      await this.getAction().call(this)
+      const pending = this.pendingPromises.get()
+      this.pendingPromises.clear()
+      await Promise.all(pending)
+      for (const callback of this.afterRunHooks) await callback.call(this)
+      this.taskExecutedStatus.successful = true
+    } catch (error) {
+      await this.onFailed(error)
+      throw error
+    }
   }
 
   getNode() {
@@ -2422,6 +5252,20 @@ class HvigorDefaultTask extends HvigorCoreTask {
 
   onFailed(_error) {}
 
+  getTaskLog() {
+    return this.node?.__arkdownHost?._publicUtilities?.HvigorLogger.getLogger(this.getPath())
+  }
+
+  addSubDurationEvent(workId) {
+    const event = this.durationEvent?.createSubEvent(`work:${workId}`, '')
+    if (event) this.subDurationEventMap.set(workId, event)
+    return event
+  }
+
+  getSubDurationEvent(workId) {
+    return this.subDurationEventMap.get(workId)
+  }
+
   getHvigorTask() {
     return this.__arkdownTaskWrapper
   }
@@ -2484,6 +5328,11 @@ class HvigorRuntimeHost {
     this.config = config || {}
     this.inspectHvigorContext = inspectHvigorContext
     this._nodesByFile = new Map()
+    // CommonJS canonicalizes paths through filesystem aliases (for example
+    // `/var` to `/private/var` on macOS) before exposing `__filename`. Keep
+    // those loader-discovered spellings separate from the primary inventory
+    // so node iteration remains unique and performs no additional realpath IO.
+    this._nodeAliasesByFile = new Map()
     this._nodesByName = new Map()
     this._configEvaluatedCallbacks = []
     this._nodesInitializedCallbacks = []
@@ -2501,7 +5350,8 @@ class HvigorRuntimeHost {
     this.projectRoot = path.resolve(runtimeModel.projectRoot)
     this._projectCacheHash = runtimeModel.projectCacheHash
     this._projectProfile = runtimeModel.projectProfile || {}
-    this._projectPackage = runtimeModel.projectPackage || {}
+    this._projectOhPackageExists = Boolean(runtimeModel.projectOhPackageExists)
+    this._projectNpmPackageExists = Boolean(runtimeModel.projectNpmPackageExists)
     this._appJson = runtimeModel.appJson
     this._projectHvigorConfigPath = runtimeModel.projectHvigorConfigPath
     this._hvigorFileConfig = runtimeModel.projectHvigorConfig || {}
@@ -2510,13 +5360,20 @@ class HvigorRuntimeHost {
     this._fallbackModuleRoots = toArray(runtimeModel.fallbackModuleRoots).map((root) => path.resolve(root))
     this._runtimeModuleModelsByRoot = new Map()
     this._runtimePlanCache = undefined
+    this._commandEntryTasks = toArray(this.config.tasks ?? this.config.task)
     this._selectedProductName = this.config.product || this._projectProfile.app?.products?.[0]?.name || 'default'
+    this._usesOhpm = this._isOhpmProject()
+    this._projectPackage = this._usesOhpm
+      ? runtimeModel.projectPackage || {}
+      : runtimeModel.projectNpmPackage || {}
     this._moduleDescriptors = toArray(runtimeModel.modules).map((module) =>
       this._descriptorFromRuntimeModel(module),
     )
     this._hvigorConfig = new HvigorConfigView(this)
     this._parameter = this._makeParameter()
-    this._commandEntryTasks = toArray(this.config.tasks ?? this.config.task)
+    this._hvigorCore = new HvigorCoreRuntimeView(this)
+    this._hvigorApi = undefined
+    this._hvigorExports = new Map()
     this._nativeCommandRoots = []
     this._nativeSelectionRoots = undefined
     this._nativeRequiredBoundaryTasks = []
@@ -2527,10 +5384,13 @@ class HvigorRuntimeHost {
     this._hvigorTypeScriptRoots = new Set()
     this._runtimeProjectOverrides = {}
     this._runtimeModuleOverrides = new Map()
+    this._ohpmPackageModelUpdated = false
     this._projectHvigorOverrides = {}
     this._moduleHvigorOverrides = new Map()
     this._contextInspection = undefined
     this._toolingModelRegistry = new HvigorToolingModelRegistry()
+    this._commandBuilderModifiers = new Map()
+    this._workerPool = new HvigorWorkerPool(this)
     this._syncNodeNames = undefined
     this._syncVersionChanged = this._readSyncVersionChanged()
   }
@@ -2592,9 +5452,422 @@ class HvigorRuntimeHost {
     return Boolean(this._parameter.getPropertyInternal('hvigor.keepDependency'))
   }
 
+  enableSignTask() {
+    return Boolean(this._parameter.getPropertyInternal('enableSignTask'))
+  }
+
+  fastBuildApp() {
+    const enabled = Boolean(
+      this._selectedProductDefinition()?.buildOption?.packOptions?.fastBuildApp ??
+        this._projectProfile.app?.buildOption?.packOptions?.fastBuildApp,
+    )
+    if (!enabled) return false
+    return this.config.target === 'app' || this._commandEntryTasks.some((task) => /(^|:)assembleApp$/.test(task))
+  }
+
+  buildAppSkipSignHap() {
+    const enabled = Boolean(
+      this._selectedProductDefinition()?.buildOption?.packOptions?.buildAppSkipSignHap ??
+        this._projectProfile.app?.buildOption?.packOptions?.buildAppSkipSignHap,
+    )
+    return enabled && this._commandEntryTasks.includes('assembleApp')
+  }
+
+  _apiVersion(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
+    if (typeof value !== 'string') return undefined
+    const normalized = value.trim()
+    if (/^\d+$/.test(normalized)) return Number(normalized)
+    const parenthesized = normalized.match(/\((\d+)\)$/)
+    return parenthesized ? Number(parenthesized[1]) : undefined
+  }
+
+  _compileApiVersion() {
+    const product = this._selectedProductDefinition()
+    return (
+      this._apiVersion(product.compileSdkVersion) ??
+      this._apiVersion(this.config.compileApiVersion) ??
+      this._apiVersion(this.config.compileSdkVersion) ??
+      this._apiVersion(product.targetSdkVersion) ??
+      this._apiVersion(product.compatibleSdkVersion) ??
+      10
+    )
+  }
+
+  _compatibleApiVersion() {
+    const product = this._selectedProductDefinition()
+    return (
+      this._apiVersion(product.compatibleSdkVersion) ??
+      this._apiVersion(this.config.compatibleApiVersion) ??
+      this._apiVersion(this.config.compatibleSdkVersion) ??
+      this._compileApiVersion()
+    )
+  }
+
+  _isOhpmProject() {
+    return (
+      this._compileApiVersion() >= 9 &&
+      (this._projectOhPackageExists || !this._projectNpmPackageExists)
+    )
+  }
+
+  _isOpenSourceHar(buildOption) {
+    const debug = buildOption?.debuggable === undefined || Boolean(buildOption.debuggable)
+    if (debug) return true
+    return buildOption?.arkOptions?.obfuscation?.ruleOptions?.enable !== true
+  }
+
+  _localModuleDependencies(node) {
+    const project = node.isProject ? node : node.parent
+    if (!project) return []
+    const declarations = {
+      ...node.modulePackage?.dependencies,
+      ...node.modulePackage?.dynamicDependencies,
+    }
+    const dependencies = []
+    const seen = new Set()
+    for (const [alias, specifier] of Object.entries(declarations)) {
+      let dependency = project.children.find(
+        (candidate) => candidate !== node && (candidate.name === alias || candidate.modulePackage?.name === alias),
+      )
+      if (!dependency && typeof specifier === 'string' && specifier.startsWith('file:')) {
+        const declaredRoot = path.resolve(node.root, specifier.slice('file:'.length))
+        dependency = project.children.find(
+          (candidate) => candidate !== node && this._pathIdentity(candidate.root) === this._pathIdentity(declaredRoot),
+        )
+      }
+      if (!dependency || !['hsp', 'har'].includes(dependency.kind) || seen.has(dependency.name)) continue
+      seen.add(dependency.name)
+      dependencies.push(dependency)
+    }
+    return dependencies
+  }
+
+  _dependencyTargetName(ownerTargetName, dependency, kind) {
+    const targets = this._targetEntriesFor(dependency)
+    const targetNames = targets.map((target) => target.name)
+    const explicit = this._moduleSelections().find(
+      (selection) => selection.moduleName === dependency.name && selection.targetName,
+    )?.targetName
+    if (explicit && targetNames.includes(explicit)) return explicit
+    if (kind === 'har' && ownerTargetName === 'ohosTest' && targetNames.includes('default')) {
+      return 'default'
+    }
+    const aligned = this._parameter.getPropertyInternal('ohos.align.target')
+    if (typeof aligned === 'string' && targetNames.includes(aligned)) return aligned
+    if (targetNames.includes(ownerTargetName)) return ownerTargetName
+    if (targetNames.includes('default')) return 'default'
+    return targetNames[0] || 'default'
+  }
+
+  _taskDependencyTargets(node, targetName, kind) {
+    return this._localModuleDependencies(node)
+      .filter((dependency) => dependency.kind === kind)
+      .map((dependency) => {
+        const dependencyTargetName = this._dependencyTargetName(targetName, dependency, kind)
+        const dependencyTarget = { name: dependencyTargetName }
+        const buildOption = this._buildOptionFor(dependency, dependencyTarget)
+        return {
+          moduleName: dependency.name,
+          moduleRoot: dependency.root,
+          targetName: dependencyTargetName,
+          externalNativeOptions: Boolean(buildOption?.externalNativeOptions),
+          useNormalizedOhmUrl: Boolean(buildOption?.strictMode?.useNormalizedOHMUrl),
+        }
+      })
+  }
+
+  assertSupportedBuildExtensions() {
+    for (const node of this._nodesByName.values()) {
+      if (node.isProject) continue
+      for (const target of this._targetEntriesFor(node)) {
+        const cangjieOptions = this._buildOptionFor(node, target)?.cangjieOptions
+        if (
+          cangjieOptions &&
+          typeof cangjieOptions === 'object' &&
+          Object.prototype.hasOwnProperty.call(cangjieOptions, 'path')
+        ) {
+          throw this._error(
+            'ARKDOWN_UNSUPPORTED_CANGJIE_BUILD',
+            `Cangjie compilation is configured for ${node.name}:${target.name}, but Arkdown cannot execute the external @ohos/cangjie-build-support task pipeline yet`,
+            {
+              module: node.name,
+              target: target.name,
+              feature: 'cangjieOptions',
+            },
+          )
+        }
+      }
+    }
+  }
+
+  binxoEnabled(buildOption) {
+    const configured = this._parameter.getExtParam('ohos-enable-binxo')
+    if (configured) return configured === 'true'
+    const values = buildOption?.externalNativeOptions?.arguments
+    const argumentsList = (typeof values === 'string' ? [values] : toArray(values))
+      .flatMap((value) => (typeof value === 'string' ? value.trim().split(' ') : []))
+      .filter((value) => value.startsWith('-'))
+    return argumentsList.includes('-DOHOS_ENABLE_BINXO=ON')
+  }
+
+  runtimeProperties(startParams) {
+    const properties = this._parameter.getPropertiesInternal()
+    const alignTarget = properties['ohos.align.target']
+    if (alignTarget !== undefined && typeof alignTarget !== 'string') {
+      throw this._error('INVALID_ALIGN_TARGET', 'ohos.align.target must be a string')
+    }
+    const sourceMapDir = properties[OHOS_ARK_COMPILE_SOURCE_MAP_DIR]
+    if (sourceMapDir !== undefined && typeof sourceMapDir !== 'string') {
+      throw this._error(
+        'INVALID_SOURCE_MAP_DIR',
+        `${OHOS_ARK_COMPILE_SOURCE_MAP_DIR} must be a string`,
+      )
+    }
+    const fallback = properties['ohos.fallback.target']
+    const fallbackTargets =
+      fallback === undefined || fallback === ''
+        ? []
+        : typeof fallback === 'string'
+          ? fallback.split(',')
+          : Array.isArray(fallback) && fallback.every((value) => typeof value === 'string')
+            ? fallback.slice()
+            : null
+    if (fallbackTargets === null) {
+      throw this._error(
+        'INVALID_FALLBACK_TARGET',
+        'ohos.fallback.target must be a comma-separated string or string array',
+      )
+    }
+    const releaseCmakeBuildType = properties['ohos.defaults.release.cmakebuildtype']
+    if (releaseCmakeBuildType !== undefined && typeof releaseCmakeBuildType !== 'string') {
+      throw this._error(
+        'INVALID_CMAKE_BUILD_TYPE',
+        'ohos.defaults.release.cmakebuildtype must be a string',
+      )
+    }
+    const compileLibEntryFile = properties['ohos.compile.lib.entryfile']
+    if (compileLibEntryFile !== undefined && typeof compileLibEntryFile !== 'boolean') {
+      throw this._error(
+        'INVALID_COMPILE_LIB_ENTRY_FILE',
+        'ohos.compile.lib.entryfile must be a boolean',
+      )
+    }
+    const previewerReplacePage = this._parameter.getExtParam('previewer.replace.page')
+    const mainModule = this._parameter.getExtParam('mainModule')
+    const pageType = this._parameter.getExtParam('pageType')
+    for (const [name, value] of [
+      ['previewer.replace.page', previewerReplacePage],
+      ['mainModule', mainModule],
+      ['pageType', pageType],
+    ]) {
+      if (value !== undefined && typeof value !== 'string') {
+        throw this._error('INVALID_PREVIEW_PROPERTY', `${name} must be a string`)
+      }
+    }
+    const compileHspDependencies = this._parameter.getExtParam('compileHspDependencies')
+    const asanConfig = this._parameter.getExtParam('ohos-debug-asan')
+    const tsanConfig = this._parameter.getExtParam('ohos-enable-tsan')
+    const hwasanConfig = this._parameter.getExtParam('ohos-enable-hwasan')
+    const ubsanConfig = this._parameter.getExtParam('ohos-enable-ubsan')
+    const binxoConfig = this._parameter.getExtParam('ohos-enable-binxo')
+    const runtimeProperties = {
+      daemon: Boolean(startParams?.daemon),
+      harExcludeHspDependencies: properties['ohos.har.excludeHspDependencies'] === true,
+      dependenciesTypesEnable: properties['ohos.dependencies.types.enable'] === true,
+      singleFileEmit: Boolean(properties['ohos.arkCompile.singleFileEmit']),
+      rollupCacheUseSourceHash: properties['ohos.rollupCache.useSourceHash'] === true,
+      processLibOptimization: Boolean(properties['ohos.processLib.optimization']),
+      fallbackTargets,
+      obfuscationRulesOptimization: properties['ohos.obfuscationRules.optimization'] === true,
+      signHar: properties['ohos.sign.har'] === true,
+      previewerCompileResIncremental:
+        this._parameter.getExtParam('compileResInc') === 'true',
+      // Upstream intentionally has two different predicates for this value:
+      // PreviewerArkCompile compares with the literal string "true", while
+      // ReplacePreviewerPage uses JavaScript truthiness.
+      compileHspDependencies: compileHspDependencies === 'true',
+      compileHspDependenciesTruthy: Boolean(compileHspDependencies),
+    }
+    if (typeof alignTarget === 'string' && alignTarget.length > 0) runtimeProperties.alignTarget = alignTarget
+    if (sourceMapDir !== undefined) runtimeProperties.sourceMapDir = sourceMapDir
+    if (compileLibEntryFile !== undefined) runtimeProperties.compileLibEntryFile = compileLibEntryFile
+    if (releaseCmakeBuildType !== undefined) runtimeProperties.releaseCmakeBuildType = releaseCmakeBuildType
+    if (previewerReplacePage !== undefined) runtimeProperties.previewerReplacePage = previewerReplacePage
+    if (mainModule !== undefined) runtimeProperties.mainModule = mainModule
+    if (pageType !== undefined) runtimeProperties.pageType = pageType
+    if (asanConfig !== undefined) runtimeProperties.asanConfig = asanConfig === 'true'
+    if (tsanConfig !== undefined) runtimeProperties.tsanConfig = tsanConfig === 'true'
+    if (ubsanConfig !== undefined) runtimeProperties.ubsanConfig = ubsanConfig === 'true'
+    // BinxoValidationService treats only a truthy extra-config value as an
+    // override; an absent or empty string falls back to CMake arguments. A
+    // truthy value is enabled only when it is the literal string "true".
+    if (hwasanConfig) runtimeProperties.hwasanConfig = hwasanConfig === 'true'
+    if (binxoConfig) runtimeProperties.binxoConfig = binxoConfig === 'true'
+    const withDeduplicate = this._parameter.getExtParam('withDeduplicate')
+    if (withDeduplicate !== undefined) {
+      runtimeProperties.withDeduplicate = withDeduplicate === 'true'
+    }
+    return runtimeProperties
+  }
+
   parameterFileOverride() {
+    if (!this._usesOhpm) return undefined
     const value = this._parameter.getExtParamInternal('parameterFile')
-    return typeof value === 'string' && value.length > 0 ? value : undefined
+    const parameterFile = typeof value === 'string' && value.length > 0 ? value : this._projectPackage?.parameterFile
+    return this._replaceStringParameters(parameterFile, this._projectPackage?.properties)
+  }
+
+  hvigorCacheDir(logger) {
+    let configured =
+      this._parameter.getExtParam('build-cache-dir') ?? this._parameter.getPropertyInternal('hvigor.cacheDir')
+    if (typeof configured !== 'string' || !path.isAbsolute(configured)) {
+      if (configured && logger) logger.warn(`Invalid custom hvigor data dir:${configured}`)
+      return path.join(this.projectRoot, '.hvigor')
+    }
+    if (fs.existsSync(configured)) configured = fs.realpathSync.native(configured)
+    return path.resolve(configured, path.basename(this.projectRoot), '.hvigor')
+  }
+
+  /**
+   * Materialize the in-memory oh-package models and invoke OHPM at the same
+   * post-nodesEvaluated boundary as
+   * `OhpmLoadInstallService.ohpmLoadInstallForBuild` in Hvigor 6.24.3.
+   * Original project manifests remain untouched; OHPM consumes the generated
+   * dependency-map tree under the Hvigor cache directory.
+   */
+  prepareOhpmDependencyWorkspace() {
+    if (!this._usesOhpm || this._isOnlyCleanCommand()) return
+
+    const targetName = typeof this.config.buildTargetName === 'string' ? this.config.buildTargetName : ''
+    const targetDir = path.resolve(this.hvigorCacheDir(), 'dependencyMap', targetName)
+    const mapFile = path.join(targetDir, 'dependencyMap.json5')
+    const hadDependencyMap = fs.existsSync(mapFile)
+    fs.mkdirSync(targetDir, { recursive: true })
+
+    const parameterFile = this.parameterFileOverride()
+    const projectPackage = this._clone(this._projectPackage) || {}
+    projectPackage.parameterFile = parameterFile
+    let changed = this._writeJsonIfChanged(path.join(targetDir, HvigorCommonConst.OH_PACKAGE_JSON), projectPackage)
+
+    const dependencyMap = {}
+    const modules = []
+    const moduleNames = new Set()
+    for (const descriptor of this._moduleDescriptors) {
+      const name = descriptor.name
+      this._validateDependencyMapModuleName(name)
+      const node = Array.from(this._nodesByFile.values()).find(
+        (candidate) => !candidate.isProject && this._pathIdentity(candidate.root) === this._pathIdentity(descriptor.root),
+      )
+      const modulePackage = this._clone(node?.modulePackage ?? descriptor.modulePackage) || {}
+      const moduleDir = path.join(targetDir, name)
+      fs.mkdirSync(moduleDir, { recursive: true })
+      changed = this._writeJsonIfChanged(path.join(moduleDir, HvigorCommonConst.OH_PACKAGE_JSON), modulePackage) || changed
+      dependencyMap[name] = `./${name}/${HvigorCommonConst.OH_PACKAGE_JSON}`
+      modules.push({ name, srcPath: path.relative(mapFile, descriptor.root) })
+      moduleNames.add(name)
+    }
+
+    for (const entry of fs.readdirSync(targetDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || moduleNames.has(entry.name)) continue
+      const redundant = path.join(targetDir, entry.name)
+      fs.rmSync(redundant, { recursive: true, force: true })
+      changed = true
+    }
+
+    const map = {
+      basePath: mapFile,
+      targetName: targetName || undefined,
+      rootDependency: `./${HvigorCommonConst.OH_PACKAGE_JSON}`,
+      dependencyMap,
+      modules,
+    }
+    changed = this._writeJsonIfChanged(mapFile, map) || changed
+
+    const enforce = this._parameter.getExtParamInternal('enforce-ohpm') === 'true'
+    const moduleConfigurationChanged = hadDependencyMap && changed
+    if (!this._ohpmPackageModelUpdated && !moduleConfigurationChanged && !enforce) return
+
+    const configuredExecutable = process.env.ohpmBin
+    const executable =
+      typeof configuredExecutable === 'string' && configuredExecutable.length > 0 && fs.existsSync(configuredExecutable)
+        ? configuredExecutable
+        : 'ohpm'
+    const probe = childProcess.spawnSync(executable, ['-v'], {
+      cwd: this.projectRoot,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    if (probe.error?.code === 'ENOENT') {
+      this._warn(
+        'OHPM_EXECUTABLE_NOT_FOUND',
+        'need to configure ohpm environment in your system, please see official guide to configure ohpm environment',
+      )
+      return
+    }
+    if (probe.error) {
+      throw this._error('OHPM_INSTALL_FAILED', `failed to execute ${executable}: ${probe.error.message}`, {
+        cause: probe.error,
+        executable,
+      })
+    }
+
+    const args = ['i', '--all', '--target_path', targetDir]
+    if (parameterFile) args.push(`--parameterFile=${parameterFile}`)
+    const install = childProcess.spawnSync(executable, args, {
+      cwd: this.projectRoot,
+      stdio: 'inherit',
+      windowsHide: true,
+    })
+    if (install.error || install.status !== 0) {
+      throw this._error(
+        'OHPM_INSTALL_FAILED',
+        install.error
+          ? `failed to execute ${executable}: ${install.error.message}`
+          : `${executable} exited with status ${install.status}`,
+        { cause: install.error, executable, status: install.status, args },
+      )
+    }
+  }
+
+  _isOnlyCleanCommand() {
+    return this._commandEntryTasks.length === 1 && this._commandEntryTasks[0] === 'clean'
+  }
+
+  _writeJsonIfChanged(file, value) {
+    const content = JSON.stringify(value)
+    try {
+      if (fs.readFileSync(file, 'utf8') === content) return false
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    fs.writeFileSync(file, content)
+    return true
+  }
+
+  _replaceStringParameters(value, properties) {
+    if (typeof value !== 'string' || !properties || !value.includes('${')) return value
+    return value.replace(/\$\{([^}]+)\}/g, (match, key) => {
+      let current = properties
+      for (const component of key.trim().split('.')) {
+        if (current === null || typeof current !== 'object') return match
+        current = current[component]
+      }
+      return current !== null && typeof current !== 'object' && current !== undefined ? String(current) : match
+    })
+  }
+
+  _validateDependencyMapModuleName(name) {
+    if (
+      typeof name !== 'string' ||
+      name.length === 0 ||
+      name === '.' ||
+      name === '..' ||
+      name.includes('/') ||
+      name.includes('\\')
+    ) {
+      throw this._error('INVALID_HVIGOR_MODULE_NAME', `module name cannot be materialized in dependencyMap: ${name}`)
+    }
   }
 
   recordProjectHvigorOverrides(overrides) {
@@ -2651,7 +5924,7 @@ class HvigorRuntimeHost {
       cache: this._hvigorCacheStateRequest(),
       projectName: projectNode?.name || path.basename(this.projectRoot),
       selectedProductName: this._selectedProductName,
-      mode: this.config.mode || 'debug',
+      mode: this._effectiveBuildMode(),
       configBuildVersion: this.config.buildVersion,
       parameterBuildVersion: this._parameter.getExtParam('buildVersion'),
       projectProfile: this._clone(this._projectProfile) || {},
@@ -2691,7 +5964,7 @@ class HvigorRuntimeHost {
   }
 
   _syncCustomTasks(node) {
-    return Array.from(node.tasks.values())
+    const tasks = Array.from(node.tasks.values())
       .filter((task) => !task.builtIn)
       .map((task) => ({
         taskName: task.definition.name,
@@ -2699,10 +5972,21 @@ class HvigorRuntimeHost {
         description: task.definition.description || '',
         sourcePluginId: task.definition.sourcePluginId || '',
       }))
+    for (const [taskName, creation] of node.lazyTaskCreations) {
+      if (node.tasks.has(taskName)) continue
+      tasks.push({
+        taskName,
+        group: creation.details?.group || 'Customize',
+        description: creation.details?.description || '',
+        sourcePluginId: creation.details?.sourcePluginId || '',
+      })
+    }
+    return tasks
   }
 
   _replaceProjectRuntimeValue(key, value) {
     this._runtimeProjectOverrides[key] = this._clone(value)
+    if (key === 'package') this._ohpmPackageModelUpdated = true
     this._contextInspection = undefined
     if (key === 'buildProfile') this._invalidateRuntimePlan()
   }
@@ -2712,6 +5996,7 @@ class HvigorRuntimeHost {
     const current = this._runtimeModuleOverrides.get(root) || {}
     current[key] = this._clone(value)
     this._runtimeModuleOverrides.set(root, current)
+    if (key === 'package') this._ohpmPackageModelUpdated = true
     this._contextInspection = undefined
     if (key === 'buildProfile') this._invalidateRuntimePlan()
   }
@@ -2762,7 +6047,7 @@ class HvigorRuntimeHost {
     const allNodes = Array.from(this._nodesByFile.values())
     const request = {
       projectName: path.basename(this.projectRoot),
-      executionMode: this.config.executionMode,
+      executionMode: this._effectiveExecutionMode(),
       sync: Boolean(this.config.sync),
       syncVersionChanged: this._syncVersionChanged,
       taskNames: this._commandEntryTasks,
@@ -2777,7 +6062,9 @@ class HvigorRuntimeHost {
           .filter((task) => !task.builtIn && task.definition.__arkdownSyncTask)
           .map((task) => task.path),
       })),
-      tasks: this._runtimeTaskDescriptors(),
+      catalogs: this._runtimeTaskCatalogRequests(),
+      removedTaskPaths: this._removedRuntimeTaskPaths(),
+      tasks: this._runtimeTaskOverlays(),
     }
     const response = JSON.parse(nativeRuntimeBinding.runtimeCommandPlan(JSON.stringify(request)))
     if (response.error) {
@@ -2845,7 +6132,7 @@ class HvigorRuntimeHost {
             targetNames: task.node.isProject
               ? []
               : this._targetEntriesFor(task.node).map((target) => target.name),
-            buildMode: this.config.mode || 'debug',
+            buildMode: this._effectiveBuildMode(),
           }),
         )
         return this._decodeMaintenanceOutput(responseJson, 'clean')
@@ -2854,6 +6141,30 @@ class HvigorRuntimeHost {
       action = () => this.pruneHvigorCaches()
     } else if (commandKind === 'sync') {
       action = () => []
+    } else if (commandKind === 'buildInfo') {
+      action = () => {
+        const responseJson = nativeRuntimeBinding.runHvigorBuildInfo(
+          JSON.stringify({
+            projectRoot: this.projectRoot,
+            nodeName: task.node.name,
+            projectTask: task.node.isProject,
+            module: this._parameter.getExtParam('module'),
+            json: this._parameter.getExtParam('json') === '',
+            resolve: this._parameter.getExtParam('buildOption') === '',
+          }),
+        )
+        return this._decodeMaintenanceOutput(responseJson, 'buildInfo')
+      }
+    } else if (commandKind === 'collectCoverage') {
+      action = async () => {
+        const message = 'Generate coverage statistics reports based on instrumentation dotting data'
+        await this._generateCoverageReport(
+          this._parameter.getExtParam('projectPath'),
+          this._parameter.getExtParam('reportPath'),
+          this._parameter.getExtParam('coverageFile'),
+        )
+        return [message]
+      }
     } else {
       throw this._error('INVALID_ARKDOWN_COMMAND_TASK', `task ${task.path} is not a standalone command task`)
     }
@@ -2864,6 +6175,26 @@ class HvigorRuntimeHost {
   async pruneHvigorCaches(hvigorUserHome = getHvigorUserHome()) {
     const responseJson = await nativeRuntimeBinding.runHvigorPrune(JSON.stringify({ hvigorUserHome }))
     return this._decodeMaintenanceOutput(responseJson, 'prune')
+  }
+
+  async _generateCoverageReport(projectPath, reportPath, coverageFile) {
+    try {
+      const pluginEntry = this.hvigorWorkspaceNodeModules
+        ? require.resolve('@ohos/hvigor-ohos-plugin', { paths: [this.hvigorWorkspaceNodeModules] })
+        : require.resolve('@ohos/hvigor-ohos-plugin')
+      const pluginRequire = Module.createRequire(pluginEntry)
+      const compose = pluginRequire('@ohos/hvigor-arkts-compose')
+      if (typeof compose.generateReport !== 'function') {
+        throw new TypeError('@ohos/hvigor-arkts-compose does not export generateReport')
+      }
+      await compose.generateReport(projectPath, reportPath, coverageFile)
+    } catch (cause) {
+      throw this._error(
+        'ARKDOWN_COVERAGE_RUNTIME_NOT_FOUND',
+        `collectCoverage requires the Hvigor 6.24.3 coverage runtime: ${cause.message}`,
+        { cause },
+      )
+    }
   }
 
   _decodeMaintenanceOutput(responseJson, operation) {
@@ -2958,7 +6289,7 @@ class HvigorRuntimeHost {
   }
 
   createNativeTaskBridge(options = {}) {
-    const tasks = this._runtimeTaskDescriptors()
+    const tasks = this._runtimeTaskOverlays()
     const selection = {
       projectRoot: this.projectRoot,
       cacheEnabled: Boolean(this._parameter.getCoreStartParams().incrementalExecution),
@@ -2970,7 +6301,12 @@ class HvigorRuntimeHost {
     }
     return {
       tasksJson: JSON.stringify(tasks),
+      catalogsJson: JSON.stringify(this._runtimeTaskCatalogRequests()),
+      removedTaskPathsJson: JSON.stringify(this._removedRuntimeTaskPaths()),
       selectionJson: JSON.stringify(selection),
+      commandModifierTypes: Array.from(this._commandBuilderModifiers)
+        .filter(([, modifier]) => modifier)
+        .map(([builderType]) => builderType),
       invoke: (operationJson) => this.invokeNativeTaskOperation(operationJson),
     }
   }
@@ -2985,7 +6321,22 @@ class HvigorRuntimeHost {
     this._runtimeBuiltinActions.clear()
   }
 
-  _runtimeTaskDescriptors() {
+  _runtimeTaskCatalogRequests() {
+    return Array.from(this._nodesByFile.values(), (node) => node.taskCatalog.request())
+  }
+
+  _removedRuntimeTaskPaths() {
+    const paths = []
+    for (const node of this._nodesByFile.values()) {
+      for (const taskName of node.deletedCatalogTasks) {
+        paths.push(node.isProject ? `:${taskName}` : `${node.name}:${taskName}`)
+      }
+    }
+    paths.sort()
+    return paths
+  }
+
+  _runtimeTaskOverlays() {
     const descriptors = []
     this._runtimeTasksByPath.clear()
     for (const node of this._nodesByFile.values()) {
@@ -2993,6 +6344,31 @@ class HvigorRuntimeHost {
       for (const task of node.tasks.values()) {
         this._runtimeTasksByPath.set(task.path, task)
         descriptors.push(this._runtimeTaskDescriptor(task, realizationOrder))
+        realizationOrder += 1
+      }
+      for (const [taskName, creation] of node.lazyTaskCreations) {
+        if (node.tasks.has(taskName)) continue
+        descriptors.push(this._runtimeLazyTaskDescriptor(node, creation, realizationOrder))
+        realizationOrder += 1
+      }
+    }
+    descriptors.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+    return descriptors
+  }
+
+  _runtimeTaskReportDescriptors() {
+    const descriptors = []
+    this._runtimeTasksByPath.clear()
+    for (const node of this._nodesByFile.values()) {
+      let realizationOrder = 0
+      for (const task of node.tasks.values()) {
+        this._runtimeTasksByPath.set(task.path, task)
+        descriptors.push(this._runtimeTaskDescriptor(task, realizationOrder))
+        realizationOrder += 1
+      }
+      for (const [taskName, creation] of node.lazyTaskCreations) {
+        if (node.tasks.has(taskName)) continue
+        descriptors.push(this._runtimeLazyTaskDescriptor(node, creation, realizationOrder))
         realizationOrder += 1
       }
       for (const [taskName, definition] of node.taskCatalog.entries()) {
@@ -3014,6 +6390,7 @@ class HvigorRuntimeHost {
       taskName: task.definition.name,
       builtIn: task.builtIn,
       projectTask: task.node.isProject,
+      lazy: false,
       realized: true,
       group: task.builtIn
         ? (task.definition.group ?? catalogDefinition?.group ?? 'Other')
@@ -3044,6 +6421,38 @@ class HvigorRuntimeHost {
     }
   }
 
+  _runtimeLazyTaskDescriptor(node, creation, realizationOrder) {
+    const taskName = creation.details.name
+    const dependencies = [...toArray(creation.depends), ...toArray(creation.dependsDefinedByUser)]
+      .filter((reference) => typeof reference === 'string')
+      .map((reference) => this._qualifiedTaskDependency(node, reference))
+    return {
+      path: node.isProject ? `:${taskName}` : `${node.name}:${taskName}`,
+      nodeName: node.name,
+      taskName,
+      builtIn: false,
+      projectTask: node.isProject,
+      lazy: true,
+      realized: false,
+      group: creation.details.group || 'Customize',
+      description: creation.details.description || '',
+      realizationOrder,
+      enabled: true,
+      trackState: true,
+      refreshDeclarations: false,
+      hasBeforeRun: false,
+      hasAfterRun: false,
+      hasFailed: false,
+      hasTaskShouldDo: false,
+      graphBoundCustom: dependencies.length > 0,
+      dependencies,
+      userDependencies: [],
+      inputProperties: [],
+      inputFiles: [],
+      outputFiles: [],
+    }
+  }
+
   _runtimeBuiltinTaskDescriptor(node, definition, realizationOrder) {
     return {
       path: node.isProject ? `:${definition.name}` : `${node.name}:${definition.name}`,
@@ -3051,6 +6460,7 @@ class HvigorRuntimeHost {
       taskName: definition.name,
       builtIn: true,
       projectTask: node.isProject,
+      lazy: false,
       realized: false,
       group: definition.group,
       description: definition.description,
@@ -3078,7 +6488,11 @@ class HvigorRuntimeHost {
       await this._runTransformAbcEvent(JSON.parse(operation.nativeEventJson))
       return '{}'
     }
-    const task = this._runtimeTasksByPath.get(operation?.taskPath)
+    if (operation?.phase === 'modifyNativeCommand') {
+      const command = this._runNativeCommandModifier(JSON.parse(operation.nativeEventJson))
+      return JSON.stringify({ command })
+    }
+    const task = this._runtimeTaskForPath(operation?.taskPath)
     if (!task) {
       throw this._error(
         'ARKDOWN_RUNTIME_TASK_NOT_FOUND',
@@ -3086,6 +6500,21 @@ class HvigorRuntimeHost {
       )
     }
     try {
+      if (operation.phase === 'realize') {
+        const descriptor = this._runtimeTaskDescriptor(task, 0)
+        return JSON.stringify({
+          enabled: descriptor.enabled,
+          trackState: descriptor.trackState,
+          refreshDeclarations: descriptor.refreshDeclarations,
+          hasBeforeRun: descriptor.hasBeforeRun,
+          hasAfterRun: descriptor.hasAfterRun,
+          hasFailed: descriptor.hasFailed,
+          hasTaskShouldDo: descriptor.hasTaskShouldDo,
+          inputProperties: descriptor.inputProperties,
+          inputFiles: descriptor.inputFiles,
+          outputFiles: descriptor.outputFiles,
+        })
+      }
       if (operation.phase === 'beforeAlways') {
         await task.taskContext.beforeAlwaysAction()
         const declarations = collectHvigorIncrementalDeclarations(task.taskContext)
@@ -3147,6 +6576,21 @@ class HvigorRuntimeHost {
     }
   }
 
+  _runtimeTaskForPath(taskPath) {
+    const existing = this._runtimeTasksByPath.get(taskPath)
+    if (existing || typeof taskPath !== 'string') return existing
+    const separator = taskPath.indexOf(':')
+    if (separator < 0) return undefined
+    const nodeName = taskPath.slice(0, separator)
+    const taskName = taskPath.slice(separator + 1)
+    const node = nodeName
+      ? this._nodesByName.get(nodeName)
+      : Array.from(this._nodesByFile.values()).find((candidate) => candidate.isProject)
+    const task = node ? this._getTaskByName(node, taskName) : undefined
+    if (task) this._runtimeTasksByPath.set(task.path, task)
+    return task
+  }
+
   async _awaitRuntimeTaskPendingPromises(task) {
     const pendingPromises = task.taskContext?.pendingPromises
     if (!pendingPromises || typeof pendingPromises.get !== 'function') return
@@ -3163,7 +6607,7 @@ class HvigorRuntimeHost {
           projectTask: node.isProject,
           kind: node.kind,
           reportKind,
-          tasks: this._runtimeTaskDescriptors(),
+          tasks: this._runtimeTaskReportDescriptors(),
         }),
       ),
     ]
@@ -3172,8 +6616,12 @@ class HvigorRuntimeHost {
   async runBuildFinished(error, report = null) {
     const callbacks = this._buildFinishedCallbacks.splice(0)
     const result = new HvigorBuildResult(error, report)
-    for (const callback of callbacks) {
-      await callback(result)
+    try {
+      for (const callback of callbacks) {
+        await callback(result)
+      }
+    } finally {
+      await this._workerPool.shutdown()
     }
   }
 
@@ -3221,7 +6669,7 @@ class HvigorRuntimeHost {
       root,
       moduleProfile: model.buildProfile || {},
       moduleJson: model.moduleJson,
-      modulePackage: model.package || {},
+      modulePackage: this._usesOhpm ? model.package || {} : model.npmPackage || {},
     }
   }
 
@@ -3360,16 +6808,17 @@ class HvigorRuntimeHost {
         properties[key.slice('properties.'.length)] = this._configPropertyValue(entry.slice(separator + 1))
       }
     }
+    this._applyCommandDefaultExtParams(extParams)
     const execution = this._hvigorFileConfig.execution || {}
     const debugging = this._hvigorFileConfig.debugging || {}
     const logging = this._hvigorFileConfig.logging || {}
-    const incrementalExecution = Boolean(this.config.cache ?? execution.incremental ?? false)
+    const incrementalExecution = Boolean(this.config.cache ?? execution.incremental ?? true)
     const parallelExecution = Boolean(this.config.parallel ?? execution.parallel ?? true)
     const hvigorfileTypeCheck = Boolean(
       this.config.enableBuildScriptTypeCheck ?? this.config.typeCheck ?? execution.typeCheck ?? false,
     )
     const printStackTrace = Boolean(this.config.stacktrace ?? debugging.stacktrace ?? false)
-    const daemon = Boolean(this.config.daemon ?? execution.daemon ?? false)
+    const daemon = Boolean(this.config.daemon ?? execution.daemon ?? true)
     const analyze = this.config.analyze ?? execution.analyze ?? 'normal'
     const optimizationStrategy = this.config.optimizationStrategy ?? execution.optimizationStrategy ?? 'memory'
     const logLevel = this.config.logLevel ?? logging.level ?? 'info'
@@ -3445,6 +6894,45 @@ class HvigorRuntimeHost {
     }
   }
 
+  _applyCommandDefaultExtParams(extParams) {
+    // Hvigor 6.24.3 `global-data.js::{setTestDefaultParameters,
+    // setDeviceTestDefaultParameters}` fills only absent `-p` values. Keep the
+    // same ordering: explicit extParams/prop values win over command defaults.
+    const defaults = this._commandEntryTasks.includes('test')
+      ? {
+          pageType: 'page',
+          product: 'default',
+          buildRoot: '.test',
+          unitTestMode: 'true',
+          isLocalTest: 'true',
+          'ohos-test-coverage': 'true',
+          'unit.test.replace.page': '../../../.test/testability/pages/Index',
+        }
+      : this._commandEntryTasks.includes('onDeviceTest')
+        ? {
+            product: 'default',
+            buildMode: 'test',
+            isOhosTest: 'true',
+            'ohos-test-coverage': 'true',
+          }
+        : undefined
+    if (!defaults) return
+    for (const [key, value] of Object.entries(defaults)) {
+      if (!Object.hasOwn(extParams, key)) extParams[key] = value
+    }
+  }
+
+  _effectiveBuildMode() {
+    return this._parameter?.getExtParam('buildMode') || this.config.mode || this.config.buildMode || 'debug'
+  }
+
+  _effectiveExecutionMode() {
+    if (this.config.executionMode) return this.config.executionMode
+    return this._commandEntryTasks.some((task) => task === 'test' || task === 'onDeviceTest')
+      ? 'module'
+      : undefined
+  }
+
   _configPropertyValue(value) {
     if (typeof value !== 'string') return value
     if (value === 'true') return true
@@ -3485,6 +6973,10 @@ class HvigorRuntimeHost {
           projectNode.children.push(node)
         }
       }
+      // hvigor-core initRootProject runs after the complete project/module
+      // hierarchy exists. Plugins can then query either the core nodes or the
+      // public HvigorNode wrappers without forcing another filesystem scan.
+      this._hvigorCore.initRootProject(projectNode.coreWrapper)
     }
   }
 
@@ -3618,7 +7110,7 @@ class HvigorRuntimeHost {
 
   _nodeForFile(file, create = false) {
     const normalized = this._normalizeFile(file)
-    let node = this._nodesByFile.get(normalized)
+    let node = this._nodesByFile.get(normalized) || this._nodeAliasesByFile.get(normalized)
     if (node || !create) {
       return node
     }
@@ -3650,10 +7142,17 @@ class HvigorRuntimeHost {
       systemPlugins: new Map(),
       pluginIds: [],
       tasks: new Map(),
+      lazyTaskCreations: new Map(),
+      catalogTaskCreations: new Map(),
+      deletedCatalogTasks: new Set(),
+      taskGraph: new HvigorTaskDirectedAcyclicGraph(),
+      taskMap: new Map(),
+      externalSubModules: new Map(),
       transformAbcActions: new Map(),
       extraOptions: new Map(Object.entries(descriptor?.extraOptions || {})),
       beforeNodeEvaluateCallbacks: [],
       afterNodeEvaluateCallbacks: [],
+      afterBindSystemPluginsCallbacks: [],
       loaderConfig: undefined,
       exportValue: undefined,
       moduleProfile: isProject ? this._projectProfile : descriptor.moduleProfile || {},
@@ -3661,6 +7160,8 @@ class HvigorRuntimeHost {
       modulePackage: isProject ? this._projectPackage : descriptor.modulePackage || {},
     }
     node.taskCatalog = new HvigorTaskCatalog(this, node)
+    node.taskContainer = new HvigorTaskContainerView(this, node)
+    node.coreWrapper = this._makeCoreNodeWrapper(node)
     node.wrapper = this._makeNodeWrapper(node)
     this._initializeCoreTasks(node)
     this._nodesByFile.set(normalized, node)
@@ -3669,31 +7170,170 @@ class HvigorRuntimeHost {
     return node
   }
 
+  _aliasBuildScriptFile(alias, source) {
+    const node = this._nodeForFile(source, false)
+    if (node) {
+      this._nodeAliasesByFile.set(this._normalizeFile(alias), node)
+    }
+  }
+
+  _makeCoreNodeWrapper(node) {
+    const host = this
+    const wrapper = {
+      classKind: node.isProject ? 'project' : 'module',
+      getName: () => node.name,
+      getBuildFilePath: () => host._normalizeFile(node.file),
+      getBuildProfilePath: () => path.join(node.root, HvigorCommonConst.BUILD_PROFILE_FILE),
+      getNodeDir: () => node.root,
+      getPackageJsonPath: () =>
+        path.join(
+          node.root,
+          host._usesOhpm ? HvigorCommonConst.OH_PACKAGE_JSON : HvigorCommonConst.PACKAGE_JSON,
+        ),
+      findModuleByName: (name) => {
+        const project = node.isProject ? node : node.parent
+        return (
+          project?.children.find((child) => child.name === name)?.coreWrapper ||
+          project?.externalSubModules.get(name)
+        )
+      },
+      bindPlugin: (plugin) => {
+        const pluginId = plugin?.getPluginId?.()
+        if (typeof pluginId !== 'string' || pluginId.length === 0) {
+          throw host._error('REGISTRY_PLUGIN_ERROR', 'Hvigor system plugin must expose a non-empty plugin id')
+        }
+        if (node.systemPlugins.has(pluginId)) {
+          throw host._error('REGISTRY_PLUGIN_ERROR', `plugin ${pluginId} is already bound to ${node.name}`)
+        }
+        node.systemPlugins.set(pluginId, plugin)
+        return plugin
+      },
+      bindPluginContextFunc: (pluginId, factory) => {
+        node.contextFactories.set(pluginId, factory)
+        node.pluginIds.push(pluginId)
+      },
+      getPluginById: (pluginId) => node.systemPlugins.get(pluginId),
+      getContext: (pluginId) => {
+        const factory = node.contextFactories.get(pluginId)
+        return typeof factory === 'function' ? factory() : undefined
+      },
+      getAllPluginIds: () => node.pluginIds,
+      getProject: () => (node.isProject ? node : node.parent)?.coreWrapper,
+      loadConfig: (config) => {
+        node.loaderConfig = config
+      },
+      getConfigOpt: () => host._makeConfig(node),
+      addExtraOption: (key, value) => node.extraOptions.set(key, value),
+      getExtraOption: (key) => node.extraOptions.get(key),
+      getTaskPaths: () =>
+        host
+          ._allTaskNames(node)
+          .map((taskName) => (node.isProject ? `:${taskName}` : `${node.name}:${taskName}`)),
+      getTaskDepends: (taskName) => {
+        const separator = taskName.lastIndexOf(':')
+        const localName = separator >= 0 ? taskName.slice(separator + 1) : taskName
+        return node.taskContainer.getTaskDepends(localName)
+      },
+      getAllTasks: () => node.taskContainer.getAllTasks(),
+      getAllTasksCA: () => node.taskContainer.getAllTasksCA(),
+      getTaskByName: (name) => node.taskContainer.findTask(name),
+      getTaskCAByName: (name) => node.taskContainer.getLazyTask(name),
+      task: (action, taskInfo) => {
+        const task = new HvigorDefaultTask(wrapper, taskInfo)
+        task.registryAction = () => (typeof action === 'function' ? action : hvigorNoop)
+        host._registerTask(node, task)
+        return task
+      },
+      registry: (task) => {
+        host._registerTask(node, task)
+        return task
+      },
+      registerTask: (task) => host._registerTask(node, task),
+      getTaskContext: () => ({ moduleName: node.name, modulePath: node.root }),
+      hasTask: (name) => host._hasTask(node, name),
+      registryDependsOnTask: (originalTask, ...dependsOnTasks) => {
+        node.taskMap.set(originalTask, dependsOnTasks)
+        for (const dependency of dependsOnTasks) originalTask.dependsOn(dependency)
+      },
+      getTaskContainer: () => node.taskContainer,
+      getTaskGraph: () => node.taskGraph,
+      clearTaskGraph: () => node.taskGraph.clear(),
+      beforeNodeEvaluate: (callback) =>
+        node.beforeNodeEvaluateCallbacks.push({ callback, thisArg: wrapper }),
+      afterNodeEvaluate: (callback) =>
+        node.afterNodeEvaluateCallbacks.push({ callback, thisArg: wrapper }),
+      executeNodeHook: (hookType) => host._executeNodeHook(node, hookType),
+      afterBindSystemPlugins: (callback) =>
+        node.afterBindSystemPluginsCallbacks.push({ callback, thisArg: wrapper }),
+      executeAfterBindSystemPluginsHook: () => host._executeAfterBindSystemPluginsHooks(node),
+    }
+    if (node.isProject) {
+      wrapper.getSubModules = () => {
+        const modules = new Map(node.children.map((child) => [child.name, child.coreWrapper]))
+        for (const [name, module] of node.externalSubModules) modules.set(name, module)
+        return modules
+      }
+      wrapper.addSubModule = (module) => {
+        const name = module?.getName?.()
+        if (typeof name !== 'string' || name.length === 0) {
+          throw host._error('INVALID_HVIGOR_MODULE_NAME', 'Hvigor module must expose a non-empty name')
+        }
+        const internalModule = module.__arkdownNode
+        if (internalModule) {
+          internalModule.parent = node
+          if (!node.children.includes(internalModule)) node.children.push(internalModule)
+        } else {
+          node.externalSubModules.set(name, module)
+        }
+      }
+      wrapper.getAllSubModules = () => Array.from(wrapper.getSubModules().values())
+    }
+    Object.defineProperties(wrapper, {
+      __arkdownHost: { value: host },
+      __arkdownNode: { value: node },
+    })
+    return wrapper
+  }
+
   _makeNodeWrapper(node) {
     const normalizedFile = new HvigorNormalizedFile(node.root)
     const wrapper = {
       nodeDir: normalizedFile,
-      classKind: node.isProject ? 'project' : 'node',
+      classKind: node.isProject ? 'project' : 'module',
       getNodeDir: () => normalizedFile,
       getNodeName: () => node.name,
+      getNodeNameInternal: () => node.name,
       getNodePath: () => node.root,
+      getNodePathInternal: () => node.root,
       getParentNode: () => node.parent?.wrapper,
+      getParentNodeInternal: () => node.parent?.wrapper,
       getProject: () => (node.isProject ? node : node.parent)?.wrapper,
       findModuleByName: (name) => {
         const project = node.isProject ? node : node.parent
         return project?.children.find((child) => child.name === name)?.wrapper
       },
       subNodes: (callback) => node.children.forEach((child) => callback(child.wrapper)),
+      subNodesInternal: (callback) => node.children.forEach((child) => callback(child.wrapper)),
       getSubNodeByName: (name) => node.children.find((child) => child.name === name)?.wrapper,
+      getSubNodeByNameInternal: (name) => node.children.find((child) => child.name === name)?.wrapper,
       getContext: (pluginId) => {
         const factory = node.contextFactories.get(pluginId)
         return typeof factory === 'function' ? factory() : undefined
       },
+      getContextInternal: (pluginId) => {
+        const factory = node.contextFactories.get(pluginId)
+        return typeof factory === 'function' ? factory() : undefined
+      },
       getAllPluginIds: () => [...node.pluginIds],
+      getAllPluginIdsInternal: () => [...node.pluginIds],
       getConfigOpt: () => this._makeConfig(node),
+      getConfigOptInternal: () => this._makeConfig(node),
       addExtraOption: (key, value) => node.extraOptions.set(key, value),
+      addExtraOptionInternal: (key, value) => node.extraOptions.set(key, value),
       getExtraOption: (key) => node.extraOptions.get(key),
+      getExtraOptionInternal: (key) => node.extraOptions.get(key),
       registerTask: (task) => this._registerTask(node, task),
+      registerTaskInternal: (task) => this._registerTask(node, task),
       getTaskByName: (name) => {
         const task = this._getTaskByName(node, name)
         if (!task) {
@@ -3701,13 +7341,32 @@ class HvigorRuntimeHost {
         }
         return task?.wrapper
       },
+      getTaskByNameInternal: (name) => {
+        const task = this._getTaskByName(node, name)
+        if (!task) {
+          this._warn('HVIGOR_TASK_NOT_FOUND', `The task '${name}' cannot be found on the current node.`)
+        }
+        return task?.wrapper
+      },
       getAllTasks: () => Array.from(node.tasks.values(), (task) => task.wrapper),
-      beforeNodeEvaluate: (callback) => node.beforeNodeEvaluateCallbacks.push(callback),
-      afterNodeEvaluate: (callback) => node.afterNodeEvaluateCallbacks.push(callback),
+      getAllTasksInternal: () => Array.from(node.tasks.values(), (task) => task.wrapper),
+      beforeNodeEvaluate: (callback) =>
+        node.beforeNodeEvaluateCallbacks.push({ callback, thisArg: wrapper }),
+      beforeNodeEvaluateInternal: (callback) =>
+        node.beforeNodeEvaluateCallbacks.push({ callback, thisArg: wrapper }),
+      afterNodeEvaluate: (callback) =>
+        node.afterNodeEvaluateCallbacks.push({ callback, thisArg: wrapper }),
+      afterNodeEvaluateInternal: (callback) =>
+        node.afterNodeEvaluateCallbacks.push({ callback, thisArg: wrapper }),
       getPluginById: (pluginId) => node.systemPlugins.get(pluginId),
     }
     // getNode(__filename) historically exposed these aliases as well.
     wrapper.getName = wrapper.getNodeName
+    wrapper.getNodeDirInternal = wrapper.getNodeDir
+    Object.defineProperties(wrapper, {
+      __arkdownHost: { value: this },
+      __arkdownNode: { value: node },
+    })
     return wrapper
   }
 
@@ -3775,9 +7434,10 @@ class HvigorRuntimeHost {
           projectProfile: this._projectProfile,
           modules: this._runtimePlanModules(),
           productName: this._selectedProductName,
-          buildModeName: this.config.mode || 'debug',
+          buildModeName: this._effectiveBuildMode(),
           moduleSelection: typeof rawModuleSelection === 'string' ? rawModuleSelection : undefined,
           buildTargetName: this.config.buildTargetName,
+          deviceTest: this._commandEntryTasks.includes('onDeviceTest'),
         }),
       ),
     )
@@ -3819,9 +7479,7 @@ class HvigorRuntimeHost {
   }
 
   _selectedProduct() {
-    const product = toArray(this._projectProfile.app?.products).find(
-      (candidate) => candidate.name === this._selectedProductName,
-    ) || { name: this._selectedProductName }
+    const product = this._selectedProductDefinition()
     const appOpt = this._projectHvigorOverrides?.appOpt || {}
     return {
       getProductName: () => product.name,
@@ -3831,24 +7489,39 @@ class HvigorRuntimeHost {
     }
   }
 
+  _selectedProductDefinition() {
+    return (
+      toArray(this._projectProfile.app?.products).find(
+        (candidate) => candidate.name === this._selectedProductName,
+      ) || { name: this._selectedProductName }
+    )
+  }
+
   _buildOptionFor(node, target) {
     const plan = this._runtimePlanFor(node)
     return this._clone(plan.buildOptions[target.name] || plan.buildOptions.default || {})
   }
 
   _targetFor(node, target) {
-    const moduleBuildPath = path.join(node.root, 'build', this._selectedProductName)
+    const moduleBuildPath = this._moduleBuildPath(node)
+    const moduleProductPath = path.join(moduleBuildPath, this._selectedProductName)
+    const moduleOutputPath = path.join(
+      this._moduleBuildPath(node, false),
+      this._selectedProductName,
+      'outputs',
+      target.name,
+    )
     return {
       getTargetName: () => target.name,
       getCurrentProduct: () => this._selectedProduct(),
       // ModuleTargetImpl._getBuildOption() in hvigor 6.24.3 returns a cloned,
       // deeply frozen snapshot. Mutations must go through the module context.
       getBuildOption: () => this._freezeClone(this._buildOptionFor(node, target)),
-      getBuildTargetOutputPath: () => path.join(moduleBuildPath, 'outputs', target.name),
+      getBuildTargetOutputPath: () => moduleOutputPath,
       getModulePathDetails: () => ({
         getModuleBuildPath: () => moduleBuildPath,
-        getIntermediatesRes: () => path.join(moduleBuildPath, 'intermediates', 'res'),
-        getModuleBuildCachePath: () => path.join(moduleBuildPath, 'cache'),
+        getIntermediatesRes: () => path.join(moduleProductPath, 'intermediates', 'res', target.name),
+        getModuleBuildCachePath: () => path.join(moduleProductPath, 'cache', target.name),
       }),
     }
   }
@@ -3867,6 +7540,64 @@ class HvigorRuntimeHost {
       resolved = fs.realpathSync.native(resolved)
     } catch {}
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  }
+
+  _configuredBuildDirectory(supportBuildCacheDir = true) {
+    const buildCacheDir = this._parameter.getExtParam('build-cache-dir')
+    let configured = buildCacheDir
+    if (!configured || supportBuildCacheDir) {
+      configured ||= this._parameter.getPropertyInternal('ohos.buildDir')
+      if (
+        configured &&
+        this._parameter.getExtParam('previewMode') !== 'true' &&
+        this._parameter.getExtParam('isLocalTest') !== 'true' &&
+        this._parameter.getExtParam('isOhosTest') !== 'true'
+      ) {
+        return String(configured).replace(/^'|'$/g, '').replace(/^"|"$/g, '')
+      }
+    }
+    return undefined
+  }
+
+  _buildCacheParentDirectory(localRoot, relativeRoot, supportBuildCacheDir = true) {
+    let configured = this._configuredBuildDirectory(supportBuildCacheDir)
+    if (!configured || !path.isAbsolute(configured)) return localRoot
+    if (fs.existsSync(configured)) {
+      try {
+        configured = fs.realpathSync.native(configured)
+      } catch {}
+    }
+    return path.join(configured, relativeRoot.replace(':', path.sep))
+  }
+
+  _projectBuildPath() {
+    const projectName = path.basename(this.projectRoot)
+    return path.resolve(
+      this._buildCacheParentDirectory(this.projectRoot, projectName, false),
+      'build',
+    )
+  }
+
+  _moduleBuildCacheParent(node) {
+    const projectName = path.basename(this.projectRoot)
+    const moduleRelativePath = path.relative(this.projectRoot, node.root)
+    return this._buildCacheParentDirectory(
+      node.root,
+      path.join(projectName, moduleRelativePath),
+    )
+  }
+
+  _moduleBuildPath(node, supportBuildCacheDir = true) {
+    const projectName = path.basename(this.projectRoot)
+    const moduleRelativePath = path.relative(this.projectRoot, node.root)
+    return path.resolve(
+      this._buildCacheParentDirectory(
+        node.root,
+        path.join(projectName, moduleRelativePath),
+        supportBuildCacheDir,
+      ),
+      'build',
+    )
   }
 
   _inspectHvigorContext() {
@@ -3944,7 +7675,20 @@ class HvigorRuntimeHost {
   }
 
   _setPackageValue(owner, key, value) {
+    this._validateDependencyVersions(value)
     owner[key] = this._clone(value)
+  }
+
+  _validateDependencyVersions(value) {
+    for (const key in value) {
+      if (typeof value[key] !== 'string') {
+        throw this._error(
+          'DEPENDENCY_VERSION_IS_NOT_A_STRING',
+          `dependency version is not a string: ${String(value[key])}`,
+          { dependency: key, version: value[key] },
+        )
+      }
+    }
   }
 
   _targetArtifactNames(node) {
@@ -3956,19 +7700,44 @@ class HvigorRuntimeHost {
   }
 
   _sdkDetails() {
-    const sdkDir =
-      this.config.sdkPath ||
-      process.env.OHOS_SDK_HOME ||
-      process.env.DEVECO_SDK_HOME ||
-      path.dirname(this.config.etsLoaderPath || '')
-    const sdkVersion = this.config.compileSdkVersion || this.config.targetSdkVersion || ''
-    return {
-      isOhos: () => this.config.runtimeOS !== 'HarmonyOS',
+    if (this._sdkDetailsValue) return this._sdkDetailsValue
+    const isOhos =
+      (this._selectedProductDefinition().runtimeOS || this.config.runtimeOS) !== 'HarmonyOS'
+    const requestedApi = this._compileApiVersion()
+    let inventory
+    try {
+      inventory = JSON.parse(
+        nativeRuntimeBinding.inspectHvigorSdkDetails(
+          JSON.stringify({
+            projectRoot: this.projectRoot,
+            sdkPath: this.config.sdkPath,
+            etsLoaderPath: this.config.etsLoaderPath,
+            isOhos,
+            requestedApi,
+          }),
+        ),
+      )
+    } catch (cause) {
+      throw this._error('INVALID_SDK_COMPONENT_METADATA', cause.message, { cause })
+    }
+    const sdkDir = inventory.sdkDir || ''
+    const metadata = inventory.metadata
+    const product = this._selectedProductDefinition()
+    const explicitlyConfiguredSdkVersion =
+      this._apiVersion(product.compileSdkVersion) ??
+      this._apiVersion(this.config.compileApiVersion) ??
+      this._apiVersion(this.config.compileSdkVersion)
+    const sdkVersion = explicitlyConfiguredSdkVersion ?? metadata?.apiVersion ?? requestedApi
+    const etsComponentVersion = this.config.etsComponentVersion || metadata?.version || ''
+    const etsComponentReleaseType = this.config.etsComponentReleaseType || metadata?.releaseType || 'Release'
+    this._sdkDetailsValue = {
+      isOhos: () => isOhos,
       getSdkDir: () => sdkDir,
       getSdkVersion: () => sdkVersion,
-      getEtsComponentVersion: () => this.config.etsComponentVersion || sdkVersion,
-      getEtsComponentReleaseType: () => this.config.etsComponentReleaseType || 'Release',
+      getEtsComponentVersion: () => etsComponentVersion,
+      getEtsComponentReleaseType: () => etsComponentReleaseType,
     }
+    return this._sdkDetailsValue
   }
 
   _ohosContextFor(node) {
@@ -3976,13 +7745,13 @@ class HvigorRuntimeHost {
       return node.ohosContext
     }
     if (node.kind === 'app') {
-      const buildRoot = path.join(node.root, 'build')
+      const buildRoot = this._projectBuildPath()
       node.ohosContext = {
         getProjectName: () => node.name,
         getProjectPath: () => node.root,
         getBuildRootPath: () => buildRoot,
         getBuildProductOutputPath: () => path.join(buildRoot, 'outputs', this._selectedProductName),
-        getBuildMode: () => this.config.mode || 'debug',
+        getBuildMode: () => this._effectiveBuildMode(),
         getBuildProfileOpt: () => this._clone(this._projectProfile),
         getCurrentProduct: () => this._selectedProduct(),
         getAppJsonOpt: () => this._clone(this._appJson),
@@ -4032,8 +7801,11 @@ class HvigorRuntimeHost {
       getModuleName: () => node.name,
       getModulePath: () => node.root,
       getModuleType: () => this._moduleTypeForKind(node.kind),
-      getBuildProductRootPath: () => path.join(node.root, 'build', this._selectedProductName),
-      getBuildMode: () => this.config.mode || 'debug',
+      // OhosModuleContextImpl resolves the configured cache parent against the
+      // absolute module path. The latter wins, so this public API returns the
+      // module root even when intermediates use a custom build directory.
+      getBuildProductRootPath: () => path.resolve(this._moduleBuildCacheParent(node), node.root),
+      getBuildMode: () => this._effectiveBuildMode(),
       targets: (callback) => this._targetEntriesFor(node).forEach((target) => callback(this._targetFor(node, target))),
       getTargetArtifactNames: () => new Map(artifactNames),
       getTargetArtifactName: (targetName) => artifactNames.get(targetName),
@@ -4073,6 +7845,9 @@ class HvigorRuntimeHost {
         this._replaceModuleRuntimeValue(node, 'package', node.modulePackage)
       },
       setVersion: (version) => {
+        if (typeof version !== 'string') {
+          throw this._error('VERSION_IS_NOT_A_STRING', `version is not a string: ${String(version)}`, { version })
+        }
         node.modulePackage.version = version
         this._replaceModuleRuntimeValue(node, 'package', node.modulePackage)
       },
@@ -4248,7 +8023,156 @@ class HvigorRuntimeHost {
     }
   }
 
+  _coreTaskFor(task) {
+    if (task.taskContext?.__arkdownClassTask) return task.taskContext
+    task.coreWrapper ||= new HvigorCoreTaskView(this, task)
+    return task.coreWrapper
+  }
+
+  _taskCreationFor(node, taskName) {
+    const customCreation = node.lazyTaskCreations.get(taskName)
+    if (customCreation) return customCreation
+    if (node.deletedCatalogTasks.has(taskName)) return undefined
+    const definition = node.taskCatalog.get(taskName)
+    if (!definition) return undefined
+    let creation = node.catalogTaskCreations.get(taskName)
+    if (!creation) {
+      creation = {
+        provider: () => this._coreTaskFor(this._realizeBuiltinTask(node, definition)),
+        depends: [...definition.dependencies],
+        details: {
+          name: definition.name,
+          group: definition.group,
+          description: definition.description,
+          sourcePluginId: definition.sourcePluginId,
+        },
+        dependsDefinedByUser: [],
+      }
+      node.catalogTaskCreations.set(taskName, creation)
+    }
+    return creation
+  }
+
+  _allTaskCreations(node) {
+    const creations = []
+    const names = new Set()
+    for (const [taskName, creation] of node.lazyTaskCreations) {
+      creations.push(creation)
+      names.add(taskName)
+    }
+    for (const [taskName] of node.taskCatalog.entries()) {
+      if (names.has(taskName) || node.deletedCatalogTasks.has(taskName)) continue
+      creations.push(this._taskCreationFor(node, taskName))
+    }
+    return creations
+  }
+
+  _allTaskNames(node) {
+    const names = new Set(node.tasks.keys())
+    for (const taskName of node.lazyTaskCreations.keys()) names.add(taskName)
+    for (const [taskName] of node.taskCatalog.entries()) {
+      if (!node.deletedCatalogTasks.has(taskName)) names.add(taskName)
+    }
+    return Array.from(names)
+  }
+
+  _hasTask(node, taskName) {
+    return (
+      node.tasks.has(taskName) ||
+      node.lazyTaskCreations.has(taskName) ||
+      (!node.deletedCatalogTasks.has(taskName) && node.taskCatalog.has(taskName))
+    )
+  }
+
+  _registerLazyTaskCreation(node, creation) {
+    const taskName = creation?.details?.name
+    if (typeof taskName !== 'string' || taskName.length === 0 || typeof creation.provider !== 'function') {
+      throw this._error(
+        'INVALID_HVIGOR_TASK_CREATION',
+        `lazy task creation on ${node.name} must contain details.name and provider()`,
+      )
+    }
+    if (this._hasTask(node, taskName)) throw new Error(`Duplicate task ${taskName}.`)
+    node.lazyTaskCreations.set(taskName, creation)
+  }
+
+  _realizeLazyTask(node, taskName, creation) {
+    const provided = creation.provider()
+    if (!provided || typeof provided.getName !== 'function') {
+      throw this._error(
+        'INVALID_HVIGOR_TASK_CREATION_PROVIDER',
+        `lazy task ${taskName} on ${node.name} did not provide a CoreTask`,
+      )
+    }
+    if (!node.tasks.has(provided.getName())) this._registerTask(node, provided)
+    const task = node.tasks.get(provided.getName())
+    if (!task) {
+      throw this._error(
+        'INVALID_HVIGOR_TASK_CREATION_PROVIDER',
+        `lazy task ${taskName} on ${node.name} was not registered by its provider`,
+      )
+    }
+    const coreTask = this._coreTaskFor(task)
+    const dependencies = [
+      ...new Set([...toArray(coreTask.getDependsOn?.()), ...toArray(creation.depends)]),
+    ]
+    this._setCoreTaskDependencies(task, dependencies)
+    return task
+  }
+
+  _coreDependencyReference(task, dependency, targetNode) {
+    const taskName = typeof dependency?.getName === 'function' ? dependency.getName() : dependency
+    if (typeof taskName !== 'string' || taskName.length === 0) {
+      throw this._error('INVALID_HVIGOR_TASK_DEPENDENCY', `task ${task.path} has an invalid dependency`)
+    }
+    if (taskName.includes(':')) return taskName
+    let owner = task.node
+    if (targetNode !== undefined) {
+      if (typeof targetNode === 'string') {
+        const project = task.node.isProject ? task.node : task.node.parent
+        owner =
+          targetNode === ':' || targetNode === project?.name
+            ? project
+            : project?.children.find((candidate) => candidate.name === targetNode)
+      } else {
+        owner = targetNode?.__arkdownNode
+      }
+      if (!owner) {
+        throw this._error(
+          'CANNOT_FIND_NODE_SETTING_TASK',
+          `cannot find node ${String(targetNode)} while configuring dependency of ${task.path}`,
+        )
+      }
+    }
+    return owner.isProject ? `:${taskName}` : `${owner.name}:${taskName}`
+  }
+
+  _setCoreTaskDependencies(task, dependencies) {
+    task.userDependencies = dependencies.map((dependency) =>
+      this._coreDependencyReference(task, dependency),
+    )
+    this._updateCoreTaskGraph(task)
+  }
+
+  _addCoreTaskDependency(task, dependency, targetNode) {
+    task.userDependencies.push(this._coreDependencyReference(task, dependency, targetNode))
+    task.userDependencies = [...new Set(task.userDependencies)]
+    this._updateCoreTaskGraph(task)
+  }
+
+  _updateCoreTaskGraph(task) {
+    const taskCore = this._coreTaskFor(task)
+    task.node.taskGraph.addNode(taskCore)
+    for (const reference of [...task.dependencies, ...task.userDependencies]) {
+      const target = this._taskReference(task, reference, true).task
+      if (target) task.node.taskGraph.addEdge(taskCore, this._coreTaskFor(target))
+    }
+  }
+
   _getTaskByName(node, name) {
+    if (node.deletedCatalogTasks.has(name) && !node.tasks.has(name) && !node.lazyTaskCreations.has(name)) {
+      return undefined
+    }
     const existing = node.tasks.get(name)
     if (existing) {
       const lazyDefinition = node.taskCatalog.get(name)
@@ -4257,6 +8181,8 @@ class HvigorRuntimeHost {
       }
       return existing
     }
+    const lazyCreation = node.lazyTaskCreations.get(name)
+    if (lazyCreation) return this._realizeLazyTask(node, name, lazyCreation)
     const definition = node.taskCatalog.get(name)
     return definition ? this._realizeBuiltinTask(node, definition) : undefined
   }
@@ -4284,7 +8210,9 @@ class HvigorRuntimeHost {
       afterRunHooks: [],
     }
     task.wrapper = new HvigorTaskView(task)
+    task.coreWrapper = new HvigorCoreTaskView(this, task)
     node.tasks.set(definition.name, task)
+    node.deletedCatalogTasks.delete(definition.name)
     return task
   }
 
@@ -4328,6 +8256,7 @@ class HvigorRuntimeHost {
           ...definition,
           context: definition.context == null ? undefined : definition.context.apply(),
         }
+    taskContext.pendingPromises ||= new HvigorTaskPendingPromises()
     const input = new HvigorTaskInput()
     const output = new HvigorTaskOutput()
     if (classIncrementalTask) {
@@ -4375,8 +8304,11 @@ class HvigorRuntimeHost {
     task.wrapper = new HvigorTaskView(task)
     if (classTask) {
       registration.__arkdownTaskWrapper = task.wrapper
+      registration.__arkdownInternalTask = task
     }
+    task.coreWrapper = classTask ? registration : new HvigorCoreTaskView(this, task)
     node.tasks.set(definition.name, task)
+    node.deletedCatalogTasks.delete(definition.name)
     for (const reference of Array.isArray(definition.postDependencies) ? definition.postDependencies : []) {
       if (typeof reference !== 'string') {
         continue
@@ -4462,6 +8394,20 @@ class HvigorRuntimeHost {
     return true
   }
 
+  _runNativeCommandModifier(event) {
+    const modifier = this._commandBuilderModifiers.get(event?.builderType)
+    if (!modifier) return event.command
+    const command = modifier.modify([...event.command])
+    if (!Array.isArray(command) || command.some((argument) => typeof argument !== 'string')) {
+      throw this._error(
+        'ARKDOWN_INVALID_COMMAND_MODIFIER_RESULT',
+        `CommandBuilderModifier.modify() must return string[] for builder type ${String(event.builderType)}`,
+        { builderType: event.builderType },
+      )
+    }
+    return command
+  }
+
   _captureTaskEffect(opts, file, kind) {
     const node = file ? this._nodeForFile(file, true) : null
     const effects = node?.effects || this._effects
@@ -4486,6 +8432,66 @@ class HvigorRuntimeHost {
     return factory
   }
 
+  _legacySystemFactory(kind, file) {
+    const factory = () => {
+      throw this._error(
+        'ARKDOWN_UNSUPPORTED_LEGACY_FA_MODEL',
+        `legacy${kind[0].toUpperCase()}${kind.slice(1)}Tasks requires the legacy FA/JSBUNDLE pipeline, which arkdown does not support`,
+        { kind, file },
+      )
+    }
+    Object.defineProperty(factory, '__arkdownHvigorSystemKind', { value: `legacy-${kind}` })
+    return factory
+  }
+
+  _publicNodePath(node) {
+    if (typeof node?.getNodePath === 'function') return path.resolve(node.getNodePath())
+    const nodeDir = node?.getNodeDir?.()
+    if (typeof nodeDir === 'string') return path.resolve(nodeDir)
+    if (typeof nodeDir?.getPath === 'function') return path.resolve(nodeDir.getPath())
+    throw this._error('FAILED_TO_GET_REMOTE_HSP_NODE_PATH', 'getRemoteHspObjList expects an Hvigor node')
+  }
+
+  _getRemoteHspObjList(node) {
+    const moduleRoot = this._publicNodePath(node)
+    const project = node?.getProject?.()
+    const projectRoot = project ? this._publicNodePath(project) : this.projectRoot
+    const response = JSON.parse(
+      nativeRuntimeBinding.inspectRemoteHspObjects(JSON.stringify({ moduleRoot, projectRoot })),
+    )
+    if (response.error) {
+      const { code, message, ...details } = response.error
+      throw this._error(code, message, details)
+    }
+    return response.objects
+  }
+
+  _registryCommandModifier(builderType, modifier) {
+    this._commandBuilderModifiers.set(builderType, modifier)
+  }
+
+  _submitWorker(publicNode, taskName, workPath, options) {
+    const nodeName = publicNode?.getNodeNameInternal?.() ?? publicNode?.getNodeName?.()
+    const node = this._nodesByName.get(nodeName)
+    if (!node) {
+      throw this._error(
+        'FAILED_TO_SUBMIT_WORKER_MODULE_NOT_FOUND',
+        `worker node ${String(nodeName)} was not found`,
+      )
+    }
+    const task = this._getTaskByName(node, taskName)
+    if (!task) {
+      throw this._error(
+        'FAILED_TO_SUBMIT_WORKER_TASK_NOT_FOUND',
+        `worker task ${String(taskName)} was not found on node ${node.name}`,
+      )
+    }
+    if (typeof workPath !== 'string') {
+      throw new TypeError('submitWorker workPath must be a string')
+    }
+    return this._workerPool.submit(task, workPath, options)
+  }
+
   _makeOhosPluginMock(file = this._activeFile) {
     const OhosPluginId = Object.freeze({
       OHOS_APP_PLUGIN: 'com.ohos.app',
@@ -4499,11 +8505,25 @@ class HvigorRuntimeHost {
       hapTasks: this._systemFactory('hap', file),
       hspTasks: this._systemFactory('hsp', file),
       harTasks: this._systemFactory('har', file),
+      legacyAppTasks: this._legacySystemFactory('app', file),
+      legacyHapTasks: this._legacySystemFactory('hap', file),
+      legacyHarTasks: this._legacySystemFactory('har', file),
+      getRemoteHspObjList: (node) => this._getRemoteHspObjList(node),
+      CommandBuilderType: OHOS_COMMAND_BUILDER_TYPE,
+      registryCommandModifier: (builderType, modifier) =>
+        this._registryCommandModifier(builderType, modifier),
     }
   }
 
   _makeHvigorMock(file = this._activeFile) {
     const host = this
+    const callerFile = file || host._activeFile
+    const cacheKey =
+      typeof callerFile === 'string' && callerFile.length > 0
+        ? host._normalizeFile(callerFile)
+        : '<unbound>'
+    const cached = host._hvigorExports.get(cacheKey)
+    if (cached) return cached
     const publicUtilities = (host._publicUtilities ||= createHvigorPublicUtilities(host))
     const registerLifecycle = (name, callbacks, callback) => {
       if (typeof callback !== 'function') {
@@ -4526,7 +8546,7 @@ class HvigorRuntimeHost {
       const root = nodes.find((node) => node.isProject)
       return [...nodes.filter((node) => node !== root), ...(root ? [root] : [])].map((node) => node.wrapper)
     }
-    const hvigor = {
+    const hvigor = (host._hvigorApi ||= {
       getRootNode: rootNode,
       getAllNodes: allNodes,
       getNodeByName: (name, classKind) =>
@@ -4553,14 +8573,18 @@ class HvigorRuntimeHost {
       getProject: rootNode,
       getHvigorUserHome,
       getHvigorVersion: () => HVIGOR_PARITY_VERSION,
-    }
-    return {
-      getNode: (scriptPath) => host._nodeForFile(scriptPath || file, false)?.wrapper,
-      getHvigorNode: (scriptPath) => host._nodeForFile(scriptPath || file, false)?.wrapper,
+    })
+    const exports = {
+      getNode: (scriptPath) => host._nodeForFile(scriptPath || callerFile || host._activeFile, false)?.wrapper,
+      getHvigorNode: (scriptPath) =>
+        host._nodeForFile(scriptPath || callerFile || host._activeFile, false)?.coreWrapper,
       hvigor,
       hvigorConfig: host._hvigorConfig,
       BuildResult: HvigorBuildResult,
       AnalyzeModeMap: HVIGOR_ANALYZE_MODE_MAP,
+      CacheStore: publicUtilities.CacheStore,
+      CacheStoreManager: publicUtilities.CacheStoreManager,
+      ContinualEvent: publicUtilities.ContinualEvent,
       GlobalParam: publicUtilities.GlobalParam,
       HvigorConfigLoader: publicUtilities.HvigorConfigLoader,
       HvigorLogger: publicUtilities.HvigorLogger,
@@ -4571,17 +8595,44 @@ class HvigorRuntimeHost {
       DEFAULT_HVIGOR_CONFIG_JSON_FILE_NAME: HVIGOR_DEFAULT_CONFIG_FILE_NAME,
       DefaultTask: HvigorDefaultTask,
       DefaultSyncTask: HvigorDefaultSyncTask,
+      DurationEvent: publicUtilities.DurationEvent,
+      ExtendedErrorInfo: publicUtilities.ExtendedErrorInfo,
       FileUtil: publicUtilities.FileUtil,
+      HvigorSystemPlugin: publicUtilities.HvigorSystemPlugin,
       IncrementalExecTask: HvigorIncrementalExecTask,
       INCREMENTAL_OPTIMIZATION: HVIGOR_INCREMENTAL_OPTIMIZATION,
       Json5Reader: publicUtilities.Json5Reader,
       MAIN_THREAD: HVIGOR_MAIN_THREAD,
+      MarkEvent: publicUtilities.MarkEvent,
+      MarkEventType: publicUtilities.MarkEventType,
+      MetricEventType: publicUtilities.MetricEventType,
+      MetricFactory: publicUtilities.MetricFactory,
+      MetricLogType: publicUtilities.MetricLogType,
+      MetricService: publicUtilities.MetricService,
       OHOS_ARK_COMPILE_SOURCE_MAP_DIR,
       ParseJsonFile: publicUtilities.ParseJsonFile,
       PathUtil: publicUtilities.PathUtil,
+      PoolConstant: publicUtilities.PoolConstant,
+      ProjectCacheService: publicUtilities.ProjectCacheService,
       ReplacePlaceHolderUtil: HvigorReplacePlaceHolderUtil,
+      ReportServiceImpl: publicUtilities.ReportServiceImpl,
       TrackAPI: publicUtilities.TrackAPI,
       TaskState: HVIGOR_TASK_STATE,
+      Priority: HVIGOR_WORKER_PRIORITY,
+      TaskDirectedAcyclicGraph: publicUtilities.TaskDirectedAcyclicGraph,
+      TaskProxy: publicUtilities.TaskProxy,
+      Tasks: publicUtilities.Tasks,
+      TcbStore: publicUtilities.TcbStore,
+      TraceManager: publicUtilities.TraceManager,
+      WatchEvent: publicUtilities.WatchEvent,
+      WorkerEvent: publicUtilities.WorkerEvent,
+      WorkerPoolDelegator: publicUtilities.WorkerPoolDelegator,
+      normalWorker: publicUtilities.normalWorker,
+      projectTaskDag: publicUtilities.projectTaskDag,
+      readJavaDaemonInfoFromCacheFile: publicUtilities.readJavaDaemonInfoFromCacheFile,
+      submitWorker: (node, taskName, workPath, options) =>
+        host._submitWorker(node, taskName, workPath, options),
+      watchWorker: publicUtilities.watchWorker,
       WithParamReplacement: publicUtilities.WithParamReplacement,
       HVIGOR_PROJECT_WRAPPER_HOME: path.resolve(host.projectRoot, 'hvigor'),
       HvigorBuildConst,
@@ -4628,17 +8679,12 @@ class HvigorRuntimeHost {
       startEnvironment: publicUtilities.startEnvironment,
       defaultModelRegistry: host._toolingModelRegistry,
       HvigorTaskGroupType: HVIGOR_TASK_GROUP_TYPE,
-      hvigorCore: {
-        getHvigorVersion: () => HVIGOR_PARITY_VERSION,
-        getProject: rootNode,
-        getParameter: () => host._parameter,
-        getExtraConfig: () => hvigor.getExtraConfig(),
-        getCommandEntryTasks: () => hvigor.getCommandEntryTask(),
-        isCommandEntryTask: (taskName) => hvigor.isCommandEntryTask(taskName),
-      },
+      hvigorCore: host._hvigorCore,
       TaskInput: HvigorTaskInput,
       TaskOutput: HvigorTaskOutput,
     }
+    host._hvigorExports.set(cacheKey, exports)
+    return exports
   }
 
   loadWithModuleMocks(file, callback) {
@@ -5398,6 +9444,9 @@ async function loadModule(file, host) {
   // Clear the require cache so that reloads (watch mode, test isolation)
   // always get a fresh copy — matching hvigor's behaviour.
   const resolved = require.resolve(file)
+  if (host) {
+    host._aliasBuildScriptFile(resolved, file)
+  }
   delete require.cache[resolved]
   return host ? host.loadWithModuleMocks(file, () => require(resolved)) : require(resolved)
 }

@@ -9,7 +9,9 @@ mod declaration_emit;
 pub(crate) mod decorator;
 mod entry;
 mod expand_import_path;
-pub(crate) use expand_import_path::{apply as apply_expand_import_path, apply_to_program as apply_expand_import_path_to_program};
+pub(crate) use expand_import_path::{
+    apply as apply_expand_import_path, apply_to_program as apply_expand_import_path_to_program,
+};
 mod global_rewrite;
 mod navigation;
 pub(crate) mod source_emit;
@@ -30,10 +32,9 @@ use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, Hvigo
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
     Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression,
-    FormalParameter, FormalParameterKind, Function, FunctionBody, FunctionType,
-    ImportOrExportKind, MethodDefinition, MethodDefinitionKind, MethodDefinitionType, Program,
-    PropertyDefinition, PropertyKey, Statement, StructElement, StructStatement,
-    TSModuleDeclarationBody, TSType,
+    FormalParameter, FormalParameterKind, Function, FunctionBody, FunctionType, ImportOrExportKind,
+    MethodDefinition, MethodDefinitionKind, MethodDefinitionType, Program, PropertyDefinition,
+    PropertyKey, Statement, StructElement, StructStatement, TSModuleDeclarationBody, TSType,
 };
 use oxc_ast::NONE;
 use oxc_ast_visit::{walk_mut, VisitMut};

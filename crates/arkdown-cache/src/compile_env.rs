@@ -48,10 +48,11 @@ pub struct CompileEnvCacheMaterial {
     pub cache_path: String,
     /// Build mode: `"debug"` or `"release"`.
     pub build_mode: String,
-    /// Whether `useSourceHash` is active (affects per-file hash strategy).
+    /// Whether `useSourceHash` is active (affects cached-module storage).
     ///
-    /// When `true`, hvigor hashes source file content for cache keys instead
-    /// of relying on modification timestamps.
+    /// When `true`, Huawei's Rollup fork stores a source-content SHA-256 in
+    /// `originalCode` and clears cached transformed `code`; invalidation is
+    /// content-based in either mode.
     pub use_source_hash: bool,
     /// Whether `usePathPlaceholder` is active (replaces absolute paths with
     /// placeholders in cache keys for relocatable caches).
@@ -135,7 +136,8 @@ impl CompileEnvFingerprint {
 /// for CI/CD environments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileEnvCachePolicy {
-    /// When `true`, per-file content hash is used instead of mtime.
+    /// When `true`, cached modules retain a content hash instead of source
+    /// text. This is a storage policy, not an mtime-based invalidation mode.
     pub use_source_hash: bool,
     /// When `true`, absolute paths are replaced with placeholders to produce
     /// relocatable cache entries.

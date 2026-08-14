@@ -28,34 +28,11 @@ export interface ArkdownPlugin {
   name?: string
   order?: 'first' | 'last' | ((nameToIndex: Record<string, number>) => number)
   buildStart?: (this: HvigorPluginContext) => void | Promise<void>
-  resolveId?: (
-    id: string,
-    importer?: string | null,
-    options?: JsResolveIdOptions,
-  ) =>
-    | string
-    | JsResolveIdOutput
-    | false
-    | null
-    | undefined
-    | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveId?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
   load?: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>
-  transform?: (
-    code: string,
-    id: string,
-  ) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
+  transform?: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
   moduleParsed?: (moduleInfo: HvigorModuleInfo) => void | Promise<void>
-  resolveDynamicImport?: (
-    id: string,
-    importer?: string | null,
-    options?: JsResolveIdOptions,
-  ) =>
-    | string
-    | JsResolveIdOutput
-    | false
-    | null
-    | undefined
-    | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveDynamicImport?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
   beforeBuildEnd?: (this: HvigorPluginContext, input?: unknown) => unknown
   buildEnd?: (this: HvigorPluginContext, error?: Error) => void | Promise<void>
   shouldInvalidCache?: (request: PluginCacheRequest) => boolean | Promise<boolean>
@@ -93,14 +70,7 @@ export interface ArkdownPlugin {
  * Plugins are wrapped synchronously before spawning the async build task,
  * so non-Send JS values (Env, Array) don't cross the tokio task boundary.
  */
-export declare function build(
-  config: BuildConfig,
-  plugins?: Array<ArkdownPlugin> | undefined | null,
-  runtimeTasks?:
-    | { tasksJson: string; selectionJson: string; invoke: (operationJson: string) => string | Promise<string> }
-    | undefined
-    | null,
-): Promise<BuildResult>
+export declare function build(config: BuildConfig, plugins?: Array<ArkdownPlugin> | undefined | null, runtimeTasks?: { tasksJson: string; selectionJson: string; invoke: (operationJson: string) => string | Promise<string> } | undefined | null): Promise<BuildResult>
 
 export interface BuildConfig {
   project?: string
@@ -120,6 +90,9 @@ export interface BuildConfig {
   unitTestReplacePage?: string
   ohosDebugAsan?: boolean
   ohosEnableHwasan?: boolean
+  ohosEnableTsan?: boolean
+  ohosEnableUbsan?: boolean
+  ohosEnableBinxo?: boolean
   disableAbcCache?: boolean
   cacheFile?: string
   checker?: string
@@ -135,11 +108,7 @@ export interface BuildResult {
 }
 
 /** Collect and resolve plugin paths from a callback-produced hvigorfile value. */
-export declare function collectBuildScriptPluginPaths(
-  value: unknown,
-  baseDir: string,
-  includeCompilePluginFile?: boolean | undefined | null,
-): string
+export declare function collectBuildScriptPluginPaths(value: unknown, baseDir: string, includeCompilePluginFile?: boolean | undefined | null): string
 
 /**
  * Compile one hvigor TypeScript configuration module through Rust OXC and
@@ -239,7 +208,17 @@ export declare function hvigorSyncVersionChanged(requestJson: string): boolean
  */
 export declare function inspectHvigorContext(config: HvigorContextInspectConfig): string
 
-export type JsHookSideEffects = boolean | string
+/** Resolve plugin-facing SDK details once in the Rust session inventory. */
+export declare function inspectHvigorSdkDetails(requestJson: string): string
+
+/**
+ * Inspect `oh_modules/.hsp` using the official module-first,
+ * highest-version selection contract.
+ */
+export declare function inspectRemoteHspObjects(requestJson: string): string
+
+export type JsHookSideEffects =
+  boolean | string
 
 export interface JsJsonSourceMap {
   file?: string
@@ -259,7 +238,8 @@ export interface JsLoadOutput {
   moduleType?: string
 }
 
-export type JsResolvedExternal = boolean | string
+export type JsResolvedExternal =
+  boolean | string
 
 export interface JsResolveIdOptions {
   attributes: Record<string, string>
@@ -274,7 +254,8 @@ export interface JsResolveIdOutput {
   packageJsonPath?: string
 }
 
-export type JsSourceMap = string | JsJsonSourceMap
+export type JsSourceMap =
+  string | JsJsonSourceMap
 
 export interface JsTransformOutput {
   code?: string
@@ -358,14 +339,16 @@ export declare function prepareHvigorPluginWorkspace(requestJson: string): Promi
  * Normalize the public/runtime build request in Rust while preserving live
  * JavaScript extension values that the plugin glue may still reference.
  */
-export declare function prepareNativeBuildConfig(
-  config: object,
-  overlay: RuntimeBuildConfigOverlay | undefined | null,
-  processExecutable: string,
-): object
+export declare function prepareNativeBuildConfig(config: object, overlay: RuntimeBuildConfigOverlay | undefined | null, processExecutable: string): object
 
 /** Resolve one configured plugin path with latest-hvigor extension order. */
 export declare function resolveBuildScriptPluginPath(candidate: string, baseDir: string): string | null
+
+/**
+ * Render Hvigor's built-in `buildInfo` task from the immutable Rust profile
+ * inventory. JavaScript remains responsible only for task hook dispatch.
+ */
+export declare function runHvigorBuildInfo(requestJson: string): string
 
 /** Execute latest-hvigor project/module clean behavior in Rust. */
 export declare function runHvigorClean(requestJson: string): Promise<string>
@@ -377,14 +360,18 @@ export declare function runHvigorPrune(requestJson: string): Promise<string>
  * Execute custom hvigor command roots through the Rust-owned task graph.
  * JavaScript remains only the callback host for user-authored task actions.
  */
-export declare function runRuntimeTasks(runtimeTasks: {
-  tasksJson: string
-  selectionJson: string
-  invoke: (operationJson: string) => string | Promise<string>
-}): Promise<Array<string>>
+export declare function runRuntimeTasks(runtimeTasks: { tasksJson: string; selectionJson: string; invoke: (operationJson: string) => string | Promise<string> }): Promise<Array<string>>
 
 export interface RuntimeBuildConfigOverlay {
   defaultCache?: boolean
+  mode?: string
+  enableSignTask?: boolean
+  fastBuildApp?: boolean
+  ohosDebugAsan?: boolean
+  ohosEnableHwasan?: boolean
+  ohosEnableTsan?: boolean
+  ohosEnableUbsan?: boolean
+  ohosEnableBinxo?: boolean
   projectHvigorOverridesJson?: string
   moduleHvigorOverridesJson?: string
   runtimeContextOverridesJson?: string
@@ -396,6 +383,8 @@ export interface RuntimeBuildConfigOverlay {
   byteCodeHarIntegratedOptimization?: boolean
   keepDependency?: boolean
   parameterFileOverride?: string
+  hvigorRuntimePropertiesJson?: string
+  hvigorCacheDir?: string
 }
 
 /**

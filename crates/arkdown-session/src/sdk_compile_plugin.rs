@@ -202,6 +202,24 @@ pub struct ComponentMetadata {
     pub release_type: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ComponentVersion([u64; 4]);
+
+impl ComponentVersion {
+    fn parse(version: &str) -> Option<Self> {
+        let mut parts = [0_u64; 4];
+        let mut count = 0;
+        for (index, part) in version.split('.').enumerate() {
+            if index >= parts.len() {
+                return None;
+            }
+            parts[index] = part.parse().ok()?;
+            count += 1;
+        }
+        (count > 0).then_some(Self(parts))
+    }
+}
+
 impl ComponentMetadata {
     /// Read ETS component metadata from `<sdk>/ets/oh-uni-package.json`.
     ///
@@ -234,6 +252,17 @@ impl ComponentMetadata {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
+    }
+
+    /// `SdkComponent.requireUISyntax()` is true for component versions below
+    /// 3.2.2.5, except the one 3.2.1.4 compatibility release. The current ETS
+    /// and JS components share this behavior; using the ETS metadata here is
+    /// sufficient because both are selected from the same SDK API component.
+    pub fn requires_ui_syntax(&self) -> bool {
+        let Some(version) = ComponentVersion::parse(&self.version) else {
+            return false;
+        };
+        version < ComponentVersion([3, 2, 2, 5]) && version != ComponentVersion([3, 2, 1, 4])
     }
 }
 
@@ -420,5 +449,20 @@ mod tests {
         assert_eq!(meta.version, "6.0.1.112");
         assert_eq!(meta.release_type, "Canary");
         std::fs::remove_dir_all(root).expect("remove temp sdk root");
+    }
+
+    #[test]
+    fn ui_syntax_requirement_matches_sdk_component_thresholds() {
+        let metadata = |version: &str| ComponentMetadata {
+            version: version.to_string(),
+            release_type: "Release".to_string(),
+        };
+
+        assert!(metadata("3.2.1.3").requires_ui_syntax());
+        assert!(!metadata("3.2.1.4").requires_ui_syntax());
+        assert!(metadata("3.2.2.4").requires_ui_syntax());
+        assert!(!metadata("3.2.2.5").requires_ui_syntax());
+        assert!(!metadata("6.1.1.125").requires_ui_syntax());
+        assert!(!metadata("invalid").requires_ui_syntax());
     }
 }

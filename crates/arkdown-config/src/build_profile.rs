@@ -403,6 +403,10 @@ pub struct RawBuildOption {
     /// Native library packaging options.
     #[serde(rename = "nativeLib", default)]
     pub native_lib: Option<RawNativeLibOption>,
+    /// Optional Cangjie compiler integration supplied by the external
+    /// `@ohos/cangjie-build-support` package in Hvigor 6.24.3.
+    #[serde(default)]
+    pub cangjie_options: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -466,6 +470,8 @@ pub struct RawNativeLibOption {
     #[serde(default)]
     pub header_path: Option<StringList>,
     #[serde(default)]
+    pub libraries_info: Option<Vec<RawNativeLibraryInfo>>,
+    #[serde(default)]
     pub exclude_from_har: Option<bool>,
     #[serde(default)]
     pub exclude_so_from_interface_har: Option<bool>,
@@ -473,6 +479,15 @@ pub struct RawNativeLibOption {
     pub exclude_so_from_binxo: Option<StringList>,
     #[serde(default)]
     pub debug_symbol: Option<RawNativeDebugSymbolOption>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawNativeLibraryInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub link_libraries: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -577,6 +592,10 @@ pub struct RawResOptions {
     /// `isNeedExclude`: excluded && !local && host is not a HAR module).
     #[serde(rename = "excludeHarRes", default)]
     pub exclude_har_res: Vec<String>,
+    /// Optional stable resource-id seed. Hvigor resolves relative values
+    /// against the project root in `ProcessIdDefinedFile`.
+    #[serde(default)]
+    pub id_defined_file_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -637,6 +656,8 @@ pub struct RawStrictMode {
     /// JSON key is `useNormalizedOHMUrl` (all-caps OHM — not camelCase).
     #[serde(rename = "useNormalizedOHMUrl", default)]
     pub use_normalized_ohm_url: bool,
+    #[serde(rename = "noExternalImportByPath", default)]
+    pub no_external_import_by_path: Option<bool>,
     #[serde(rename = "duplicateDependencyCheck", default)]
     pub duplicate_dependency_check: bool,
 }
@@ -738,17 +759,32 @@ impl<'a> BuildOptionDecoder<'a> {
     }
 
     pub(crate) fn decode(&self) -> Result<arkdown_core::BuildOption, ConfigError> {
+        if self
+            .raw
+            .and_then(|option| option.cangjie_options.as_ref())
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|options| options.contains_key("path"))
+        {
+            return Err(ConfigError::UnsupportedFeature {
+                feature: "cangjieOptions",
+                file: self.profile_path.to_path_buf(),
+                message: "Arkdown cannot execute the external @ohos/cangjie-build-support task pipeline yet; refusing to omit Cangjie compilation and package stale native outputs"
+                    .to_string(),
+            });
+        }
         let strict_mode = self
             .raw
             .and_then(|option| option.strict_mode.as_ref())
             .map(|strict| arkdown_core::StrictModeConfig {
                 case_sensitive_check: strict.case_sensitive_check,
                 use_normalized_ohm_url: strict.use_normalized_ohm_url,
+                no_external_import_by_path: strict.no_external_import_by_path,
                 duplicate_dependency_check: strict.duplicate_dependency_check,
             })
             .unwrap_or(arkdown_core::StrictModeConfig {
                 case_sensitive_check: false,
                 use_normalized_ohm_url: false,
+                no_external_import_by_path: None,
                 duplicate_dependency_check: false,
             });
         let raw_ark_options = self.raw.and_then(|option| option.ark_options.as_ref());
@@ -770,11 +806,12 @@ impl<'a> BuildOptionDecoder<'a> {
             byte_code_har: options.byte_code_har,
             bundled_dependencies: options.bundled_dependencies.unwrap_or(false),
             integrated_hsp: options.integrated_hsp,
-            widget: options.widget.as_ref().map(|widget| {
-                arkdown_core::WidgetArkOptions {
+            widget: options
+                .widget
+                .as_ref()
+                .map(|widget| arkdown_core::WidgetArkOptions {
                     transitive_deps: widget.transitive_deps.unwrap_or(false),
-                }
-            }),
+                }),
             branch_elimination: options.branch_elimination,
             transform_lib: options.transform_lib.clone(),
             skip_oh_modules_lint: options.skip_oh_modules_lint,
@@ -854,6 +891,7 @@ impl<'a> BuildOptionDecoder<'a> {
                     ignore_resource_pattern: resources.ignore_resource_pattern.clone(),
                     qualifiers_config: resources.qualifiers_config.clone(),
                     exclude_har_res: resources.exclude_har_res.clone(),
+                    id_defined_file_path: resources.id_defined_file_path.clone(),
                 });
         let preload_so = self
             .raw
@@ -1065,6 +1103,11 @@ pub struct RawTargetResource {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RawTargetConfig {
+    /// Target-scoped device types. Hvigor uses the module manifest device list
+    /// when this is absent or empty and validates every configured value is a
+    /// member of that manifest list.
+    #[serde(default)]
+    pub device_type: Vec<String>,
     #[serde(default)]
     pub distro_filter: Option<serde_json::Value>,
     #[serde(default)]
@@ -1122,6 +1165,8 @@ pub struct EffectiveTargetConfig {
     pub source_abilities: Vec<RawTargetAbility>,
     /// Target-specific source roots, preserved as manifest-relative strings.
     pub source_roots: Vec<String>,
+    /// Target-scoped `config.deviceType`; empty means module device types.
+    pub device_types: Vec<String>,
     /// Distribution/distro filter configuration from `target.config`.
     /// `None` when the target has no filter configured.
     pub distribution_filter: Option<serde_json::Value>,
@@ -1147,6 +1192,11 @@ impl EffectiveTargetConfig {
                 .source
                 .as_ref()
                 .map(|source| source.source_roots.clone())
+                .unwrap_or_default(),
+            device_types: target
+                .config
+                .as_ref()
+                .map(|config| config.device_type.clone())
                 .unwrap_or_default(),
             distribution_filter: target.config.as_ref().and_then(|config| {
                 config
@@ -1216,12 +1266,7 @@ impl BuildOptionProfileInventory {
         runtime_overrides: Option<&crate::RuntimeContextOverrides>,
     ) -> Result<Self, ConfigError> {
         let custom_config = crate::ArkdownCustomConfigLoader::new(project_root).load()?;
-        Self::load_with_custom_config(
-            project_root,
-            modules,
-            runtime_overrides,
-            &custom_config,
-        )
+        Self::load_with_custom_config(project_root, modules, runtime_overrides, &custom_config)
     }
 
     /// Load build profiles from startup inputs while reusing the already
@@ -1354,6 +1399,29 @@ impl BuildOptionProfileInventory {
             .into_iter()
             .map(EffectiveTargetConfig::from_raw)
             .collect()
+    }
+
+    /// Return every target declared for a module in profile order without
+    /// applying product or build-mode filters.
+    ///
+    /// Hvigor `TargetUtils.computeTargets()` uses `getTargetOptions()` for
+    /// `ohos.align.target`. In that mode `checkHasTargetApplyProduct()` also
+    /// bypasses `applyToProducts`, so aligned and fallback target lookup must
+    /// inspect the declared target set rather than the ordinary applicable
+    /// subset.
+    pub fn declared_targets(&self, module_name: &str) -> Vec<EffectiveTargetConfig> {
+        self.raw_project
+            .modules
+            .iter()
+            .find(|module| module.name == module_name)
+            .map(|module| {
+                module
+                    .targets
+                    .iter()
+                    .map(EffectiveTargetConfig::from_raw)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Select the effective target using hvigor's target precedence.
@@ -1532,12 +1600,11 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
             .unwrap_or_else(|| self.build_mode_name.to_string());
         let name_in_presets = matches!(option_name.as_str(), "default" | "debug" | "release");
         if name_in_presets {
-            effective.value =
-                BuildOptionValue::merge_values(
-                    &serde_json::json!({ "name": option_name }),
-                    &effective.value,
-                    "",
-                );
+            effective.value = BuildOptionValue::merge_values(
+                &serde_json::json!({ "name": option_name }),
+                &effective.value,
+                "",
+            );
         }
         // `getDefaultModuleBuildOpt` then `getDefaultBuildModeBuildOpt` are
         // merged last in `initModuleBuildOptionMap` and only fill keys the
@@ -2578,6 +2645,15 @@ impl<'a> NativeBuildOptionMerger<'a> {
                 self.effective.native_lib.header_paths =
                     header_paths.as_slice().iter().map(PathBuf::from).collect();
             }
+            if let Some(libraries_info) = native_lib.libraries_info.as_ref() {
+                self.effective.native_lib.libraries_info = libraries_info
+                    .iter()
+                    .map(|library| arkdown_core::NativeLibraryInfo {
+                        name: library.name.clone(),
+                        link_libraries: library.link_libraries.clone(),
+                    })
+                    .collect();
+            }
             if let Some(exclude_from_har) = native_lib.exclude_from_har {
                 self.effective.native_lib.exclude_from_har = exclude_from_har;
             }
@@ -2590,6 +2666,7 @@ impl<'a> NativeBuildOptionMerger<'a> {
                     exclude_so_from_binxo.as_slice().to_vec();
             }
             if let Some(debug_symbol) = native_lib.debug_symbol.as_ref() {
+                self.effective.native_lib.debug_symbol_configured = true;
                 if let Some(strip) = debug_symbol.strip {
                     self.effective.native_lib.debug_symbol.strip = strip;
                 }
@@ -3001,10 +3078,7 @@ mod tests {
             Some(std::path::Path::new("./aop-lib.js"))
         );
         assert_eq!(ark_options.skip_oh_modules_lint, Some(true));
-        assert_eq!(
-            ark_options.re_export_check_mode.as_deref(),
-            Some("strict")
-        );
+        assert_eq!(ark_options.re_export_check_mode.as_deref(), Some("strict"));
         assert_eq!(ark_options.auto_lazy_import, Some(true));
         let filter = ark_options.auto_lazy_filter.as_ref().unwrap();
         assert_eq!(filter.include, vec!["@ohos/foo"]);
@@ -3096,6 +3170,7 @@ mod tests {
                         strictMode: {
                             caseSensitiveCheck: true,
                             useNormalizedOHMUrl: true,
+                            noExternalImportByPath: false,
                             duplicateDependencyCheck: true,
                         },
                         arkOptions: {
@@ -3129,6 +3204,7 @@ mod tests {
         let strict = build_option.strict_mode.as_ref().unwrap();
         assert!(strict.case_sensitive_check);
         assert!(strict.use_normalized_ohm_url);
+        assert_eq!(strict.no_external_import_by_path, Some(false));
         assert!(strict.duplicate_dependency_check);
         let runtime_only = build_option
             .ark_options
@@ -3824,6 +3900,7 @@ mod tests {
                 .unwrap_or_default(),
             source_abilities: vec![],
             source_roots: vec![],
+            device_types: vec![],
             distribution_filter: None,
             build_mode_set: vec![],
         };
@@ -4209,5 +4286,32 @@ mod tests {
             explicit_true.har_artifact_type,
             arkdown_core::HarArtifactType::Bytecode
         );
+    }
+
+    #[test]
+    fn configured_cangjie_pipeline_is_rejected_instead_of_silently_omitted() {
+        let raw: RawBuildOption = json5::from_str(
+            r#"{
+                cangjieOptions: {
+                    path: "./src/main/cangjie/cjpm.toml",
+                    abiFilters: ["arm64-v8a"]
+                }
+            }"#,
+        )
+        .expect("build option");
+        let error = BuildOptionDecoder::new(
+            Some(&raw),
+            std::path::Path::new("entry"),
+            std::path::Path::new("entry/build-profile.json5"),
+        )
+        .decode()
+        .expect_err("Cangjie outputs must never be silently omitted");
+        assert!(matches!(
+            error,
+            ConfigError::UnsupportedFeature {
+                feature: "cangjieOptions",
+                ..
+            }
+        ));
     }
 }

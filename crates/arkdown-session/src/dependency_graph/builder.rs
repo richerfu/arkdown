@@ -40,6 +40,36 @@ struct DependencyTraversalState {
     is_dynamic: bool,
 }
 
+#[derive(Clone, Copy)]
+enum DependencyPackageManager {
+    Ohpm,
+    Npm,
+}
+
+impl DependencyPackageManager {
+    fn from_ohpm_project(use_ohpm: bool) -> Self {
+        if use_ohpm {
+            Self::Ohpm
+        } else {
+            Self::Npm
+        }
+    }
+
+    fn modules_directory(self) -> &'static str {
+        match self {
+            Self::Ohpm => "oh_modules",
+            Self::Npm => "node_modules",
+        }
+    }
+
+    fn manifest_name(self) -> &'static str {
+        match self {
+            Self::Ohpm => "oh-package.json5",
+            Self::Npm => "package.json",
+        }
+    }
+}
+
 impl DependencySnapshotInventory {
     pub(crate) fn insert_package(
         &mut self,
@@ -64,6 +94,7 @@ impl DependencySnapshotInventory {
         issuer_root: &Path,
         project_root: &Path,
         alias: &str,
+        package_manager: DependencyPackageManager,
     ) -> Option<PathBuf> {
         let key = (
             issuer_root.to_path_buf(),
@@ -74,27 +105,28 @@ impl DependencySnapshotInventory {
             return root.clone();
         }
 
-        // Hvigor's `BasePackageResolver.resolvePackagePath()` deliberately
-        // resolves through the installed `oh_modules` hierarchy. The raw
-        // version specifier is not a fallback package root.
+        // Hvigor's `BasePackageResolver.resolvePackagePath()` walks from the
+        // issuer to the filesystem root through the package-manager-specific
+        // installation directory. The raw version specifier is not a
+        // fallback package root.
+        let modules_directory = package_manager.modules_directory();
         let mut current = Some(issuer_root);
         let mut resolved = None;
         while let Some(root) = current {
-            let candidate = root.join("oh_modules").join(alias);
+            let search_root = root
+                .file_name()
+                .filter(|name| {
+                    name.to_string_lossy()
+                        .eq_ignore_ascii_case(modules_directory)
+                })
+                .and_then(|_| root.parent())
+                .unwrap_or(root);
+            let candidate = search_root.join(modules_directory).join(alias);
             if candidate.is_dir() {
                 resolved = Some(self.canonical_root(&candidate));
                 break;
             }
-            if root == project_root {
-                break;
-            }
-            current = root.parent();
-        }
-        if resolved.is_none() {
-            let candidate = project_root.join("oh_modules").join(alias);
-            if candidate.is_dir() {
-                resolved = Some(self.canonical_root(&candidate));
-            }
+            current = search_root.parent();
         }
         self.resolved_roots.insert(key, resolved.clone());
         resolved
@@ -105,6 +137,7 @@ impl DependencySnapshotInventory {
         package_root: &Path,
         project_root: &Path,
         runtime_overrides: Option<&RuntimeContextOverrides>,
+        package_manager: DependencyPackageManager,
     ) -> Option<Arc<PackageSnapshot>> {
         if let Some(package) = self.packages.get(package_root) {
             return package.clone();
@@ -120,20 +153,30 @@ impl DependencySnapshotInventory {
                         .and_then(|module| module.package.as_ref())
                 };
             if let Some(value) = value {
-                PackageSnapshot::from_runtime_value(package_root, value)
-                    .ok()
-                    .map(Arc::new)
+                PackageSnapshot::from_runtime_manifest_value(
+                    package_root,
+                    &package_root.join(package_manager.manifest_name()),
+                    value,
+                )
+                .ok()
+                .map(Arc::new)
             } else {
-                PackageSnapshot::from_root(package_root)
-                    .ok()
-                    .flatten()
-                    .map(Arc::new)
-            }
-        } else {
-            PackageSnapshot::from_root(package_root)
+                PackageSnapshot::from_manifest(
+                    package_root,
+                    &package_root.join(package_manager.manifest_name()),
+                )
                 .ok()
                 .flatten()
                 .map(Arc::new)
+            }
+        } else {
+            PackageSnapshot::from_manifest(
+                package_root,
+                &package_root.join(package_manager.manifest_name()),
+            )
+            .ok()
+            .flatten()
+            .map(Arc::new)
         };
         self.packages
             .insert(package_root.to_path_buf(), package.clone());
@@ -217,6 +260,7 @@ pub struct DependencyGraphBuilder {
     runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
     parameter_file_override: Option<PathBuf>,
     dependency_parameters: Option<DependencyParameterSnapshot>,
+    package_manager: DependencyPackageManager,
 }
 
 impl DependencyGraphBuilder {
@@ -232,7 +276,13 @@ impl DependencyGraphBuilder {
             runtime_overrides: None,
             parameter_file_override: None,
             dependency_parameters: None,
+            package_manager: DependencyPackageManager::Ohpm,
         }
+    }
+
+    pub(crate) fn with_package_manager(mut self, use_ohpm: bool) -> Self {
+        self.package_manager = DependencyPackageManager::from_ohpm_project(use_ohpm);
+        self
     }
 
     /// Apply the loader objects mutated by OHOS plugin contexts while keeping
@@ -279,12 +329,18 @@ impl DependencyGraphBuilder {
                 &self.project_root,
                 &self.project_root,
                 self.runtime_overrides.as_deref(),
+                self.package_manager,
             );
-            DependencyParameterSnapshot::from_project_deferred(
-                &self.project_root,
-                project_package.as_deref(),
-                self.parameter_file_override.as_deref(),
-            )
+            match self.package_manager {
+                DependencyPackageManager::Ohpm => {
+                    DependencyParameterSnapshot::from_project_deferred(
+                        &self.project_root,
+                        project_package.as_deref(),
+                        self.parameter_file_override.as_deref(),
+                    )
+                }
+                DependencyPackageManager::Npm => DependencyParameterSnapshot::default(),
+            }
         });
         let mut graph = DependencyGraphSnapshot {
             host_module: self.host_module.clone(),
@@ -313,6 +369,7 @@ impl DependencyGraphBuilder {
                 &package_root,
                 &self.project_root,
                 self.runtime_overrides.as_deref(),
+                self.package_manager,
             ) else {
                 continue;
             };
@@ -334,15 +391,19 @@ impl DependencyGraphBuilder {
                 ),
             ] {
                 for (alias, spec) in dependencies {
-                    let Some(dep_root) =
-                        inventory.resolve_package_root(&package_root, &self.project_root, alias)
-                    else {
+                    let Some(dep_root) = inventory.resolve_package_root(
+                        &package_root,
+                        &self.project_root,
+                        alias,
+                        self.package_manager,
+                    ) else {
                         continue;
                     };
                     let dep_package = inventory.read_package(
                         &dep_root,
                         &self.project_root,
                         self.runtime_overrides.as_deref(),
+                        self.package_manager,
                     );
                     let traversal = DependencyTraversalState {
                         kind: edge_kind,
@@ -417,7 +478,11 @@ impl DependencyGraphBuilder {
             package_name,
             version_spec: Some(spec.to_string()),
             package_root: Some(root.to_path_buf()),
-            node_type: self.classify_package(package.as_deref(), module_profile.as_ref()),
+            node_type: self.classify_package(
+                package.as_deref(),
+                module_profile.as_ref(),
+                self.package_manager,
+            ),
             package,
             module_profile,
             is_runtime_only: false,
@@ -438,6 +503,7 @@ impl DependencyGraphBuilder {
         &self,
         package: Option<&PackageSnapshot>,
         module_profile: Option<&DependencyModuleProfileSnapshot>,
+        package_manager: DependencyPackageManager,
     ) -> DependencyNodeType {
         if package.is_some_and(|package| {
             Path::new(&package.name)
@@ -461,6 +527,14 @@ impl DependencyGraphBuilder {
             .unwrap_or(false)
         {
             return DependencyNodeType::BytecodeHar;
+        }
+        // npm packages are Harmony dependencies only when their package.json
+        // carries the `ohos` marker. Without it Hvigor keeps the dependency as
+        // an ordinary npm node even if a coincidental module profile exists.
+        if matches!(package_manager, DependencyPackageManager::Npm)
+            && !package.is_some_and(|package| package.package_json.extra.contains_key("ohos"))
+        {
+            return DependencyNodeType::OhpmSource;
         }
         // Mirrors hvigor-ohos-plugin's
         // `DependencyManager.getDependencyTypeByProfile`: packaged source HARs

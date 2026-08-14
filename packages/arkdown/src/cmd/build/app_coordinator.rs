@@ -14,9 +14,9 @@ use anyhow::{Context, Result};
 use arkdown::plugins::factory::PackagePlugin;
 use arkdown_core::{ArkdownConfig, OutputTarget};
 use arkdown_pack::{
-  AppArchiveUnpacker, AppArtifactInput, AppArtifactStager, AppNormalizePlan, AppPackagePlan,
-  AppPackageRunner, ProjectPackInfoBuilder, RemoteHspCollector, RemoteHspDependencyScope,
-  StagedAppArtifacts, UnpackedAppArtifacts,
+  AppArchiveUnpacker, AppArtifactInput, AppArtifactStager, AppModulePackageKind, AppNormalizePlan,
+  AppPackageMode, AppPackagePlan, AppPackageRunner, ProjectPackInfoBuilder, RemoteHspCollector,
+  RemoteHspDependencyScope, StagedAppArtifacts, UnpackedAppArtifacts,
 };
 use arkdown_profile::{
   PrivacyProfileProcessor, ProjectPrivacyProfileInput, ProjectPrivacyProfileOutput,
@@ -27,10 +27,10 @@ use arkdown_sign::SignBackendRunner;
 use crate::cmd::native_build::ProjectDebugSymbolCollector;
 
 use super::args::BuildArgs;
-use super::remote_hsp_sign::RemoteHspSigner;
 use super::coordinator::{
   BuildCoordinator, BuildOutput, BuildTaskLifecycle, BuildTaskObserver, NativeTaskCutoffReached,
 };
+use super::layout::ModuleBuildLayout;
 
 pub struct AppBuildCoordinator {
   session: Arc<BuildSession>,
@@ -176,24 +176,6 @@ impl AppBuildCoordinator {
       None
     };
 
-    // hvigor `SignProjectRemoteHsp`/`SignModuleRemoteHsp` (per-target common
-    // tasks): signed remote HSP copies under
-    // `build/cache/<product>/remote_hsp/` plus `remoteHspCache.json`, before
-    // the app packaging.
-    if lifecycle.before(&project_name, None, "SignRemoteHsp").await? {
-      let signer = RemoteHspSigner::new(self.config.clone(), self.session.clone());
-      let cache_file = tokio::task::spawn_blocking(move || signer.run())
-        .await
-        .context("SignRemoteHsp worker failed")??;
-      if let Some(cache_file) = cache_file {
-        tracing::info!(
-          cache = %cache_file.display(),
-          "remote HSP cache written"
-        );
-      }
-      lifecycle.after(&project_name, None, "SignRemoteHsp").await?;
-    }
-
     let package_runner = self.package_runner()?;
     let pack_res_path = if lifecycle
       .before(&project_name, None, "GeneratePackRes")
@@ -307,7 +289,34 @@ impl AppBuildCoordinator {
             unsigned_path.display()
           )
         })?;
-      artifacts.push(AppArtifactInput::local(unsigned_path, module.name.clone()));
+      if self.args.fast_build_app {
+        let target_name = unsigned_path
+          .file_name()
+          .and_then(OsStr::to_str)
+          .context("fast APP artifact directory has no UTF-8 target name")?;
+        let kind = if module.module_type.matches_output_target(&OutputTarget::Hsp) {
+          AppModulePackageKind::Hsp
+        } else {
+          AppModulePackageKind::Hap
+        };
+        let destination = ModuleBuildLayout::for_target_product(
+          &module.src_path,
+          &self.config.product.name,
+          target_name,
+        )
+        .outputs_root()
+        .join(target_name)
+        .join("app")
+        .join(&module.name);
+        artifacts.push(AppArtifactInput::local_fast_directory(
+          unsigned_path,
+          module.name.clone(),
+          kind,
+          destination,
+        ));
+      } else {
+        artifacts.push(AppArtifactInput::local(unsigned_path, module.name.clone()));
+      }
     }
     artifacts.sort_by_key(|artifact| match &artifact.role {
       arkdown_pack::AppArtifactRole::Local { module_name } => self
@@ -435,6 +444,9 @@ impl AppBuildCoordinator {
       hsp_paths,
       output_layout.unsigned_app(),
     );
+    if self.args.fast_build_app {
+      plan.mode = AppPackageMode::FastApp;
+    }
     plan.pac_json_path = privacy_profile.map(|output| output.processed_path.clone());
     plan.pack_res_path = pack_res_path.map(Path::to_path_buf);
     plan.compress_level = self.app_compress_level();
@@ -459,8 +471,17 @@ impl AppBuildCoordinator {
       .hap_paths
       .iter()
       .chain(&staged.hsp_paths)
+      .filter(|path| {
+        matches!(
+          path.extension().and_then(OsStr::to_str),
+          Some("hap" | "hsp")
+        )
+      })
       .cloned()
       .collect::<Vec<_>>();
+    if input_paths.is_empty() {
+      return Ok((staged.hap_paths.clone(), staged.hsp_paths.clone()));
+    }
     let plan = AppNormalizePlan::new(
       input_paths,
       self.args.align_device_types.clone(),
@@ -475,6 +496,12 @@ impl AppBuildCoordinator {
       paths
         .iter()
         .filter_map(|path| {
+          if !matches!(
+            path.extension().and_then(OsStr::to_str),
+            Some("hap" | "hsp")
+          ) {
+            return Some(path.clone());
+          }
           let file_name = path.file_name()?;
           selected_package_file_names
             .contains(file_name.to_str()?)
@@ -516,6 +543,9 @@ impl AppBuildCoordinator {
       if stale.is_file() {
         fs_err::remove_file(stale)?;
       }
+    }
+    if !self.args.enable_sign_task {
+      return Ok(());
     }
     let Some(signing_config) = self.config.product.signing_config.clone() else {
       return Ok(());
@@ -611,6 +641,14 @@ impl AppBuildCoordinator {
     let unsigned = output_layout.unsigned_app();
     if !unsigned.is_file() {
       anyhow::bail!("PackageApp output is missing: {}", unsigned.display());
+    }
+    for stale in [output_layout.signed_app(), output_layout.all_signed_app()] {
+      if stale.is_file() {
+        fs_err::remove_file(stale)?;
+      }
+    }
+    if !self.args.enable_sign_task {
+      return Ok(vec![unsigned]);
     }
     let Some(signing_config) = self.config.product.signing_config.clone() else {
       return Ok(vec![unsigned]);

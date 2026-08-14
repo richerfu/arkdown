@@ -7,6 +7,14 @@ use napi_derive::napi;
 #[napi(object)]
 pub struct RuntimeBuildConfigOverlay {
   pub default_cache: Option<bool>,
+  pub mode: Option<String>,
+  pub enable_sign_task: Option<bool>,
+  pub fast_build_app: Option<bool>,
+  pub ohos_debug_asan: Option<bool>,
+  pub ohos_enable_hwasan: Option<bool>,
+  pub ohos_enable_tsan: Option<bool>,
+  pub ohos_enable_ubsan: Option<bool>,
+  pub ohos_enable_binxo: Option<bool>,
   pub project_hvigor_overrides_json: Option<String>,
   pub module_hvigor_overrides_json: Option<String>,
   pub runtime_context_overrides_json: Option<String>,
@@ -18,6 +26,8 @@ pub struct RuntimeBuildConfigOverlay {
   pub byte_code_har_integrated_optimization: Option<bool>,
   pub keep_dependency: Option<bool>,
   pub parameter_file_override: Option<String>,
+  pub hvigor_runtime_properties_json: Option<String>,
+  pub hvigor_cache_dir: Option<String>,
 }
 
 /// V8 bridge for the Rust-owned native build request boundary. Arbitrary
@@ -57,7 +67,7 @@ impl<'env> NativeBuildConfigNapiAdapter<'env> {
     "xmx",
     "logLevel",
   ];
-  const RUNTIME_OWNED_FIELDS: [&'static str; 11] = [
+  const RUNTIME_OWNED_FIELDS: [&'static str; 15] = [
     "projectHvigorOverridesJson",
     "moduleHvigorOverridesJson",
     "runtimeContextOverridesJson",
@@ -69,6 +79,10 @@ impl<'env> NativeBuildConfigNapiAdapter<'env> {
     "keepDependency",
     "parameterFileOverride",
     "runtimeNodeExecutable",
+    "enableSignTask",
+    "fastBuildApp",
+    "hvigorRuntimePropertiesJson",
+    "hvigorCacheDir",
   ];
 
   pub fn new(env: Env, config: Object<'env>, process_executable: String) -> Self {
@@ -130,6 +144,14 @@ impl<'env> NativeBuildConfigNapiAdapter<'env> {
         output.set("cache", value)?;
       }
     }
+    self.set_optional(output, "mode", overlay.mode)?;
+    self.set_optional(output, "enableSignTask", overlay.enable_sign_task)?;
+    self.set_optional(output, "fastBuildApp", overlay.fast_build_app)?;
+    self.set_optional(output, "ohosDebugAsan", overlay.ohos_debug_asan)?;
+    self.set_optional(output, "ohosEnableHwasan", overlay.ohos_enable_hwasan)?;
+    self.set_optional(output, "ohosEnableTsan", overlay.ohos_enable_tsan)?;
+    self.set_optional(output, "ohosEnableUbsan", overlay.ohos_enable_ubsan)?;
+    self.set_optional(output, "ohosEnableBinxo", overlay.ohos_enable_binxo)?;
     self.set_optional(
       output,
       "projectHvigorOverridesJson",
@@ -169,6 +191,12 @@ impl<'env> NativeBuildConfigNapiAdapter<'env> {
       "parameterFileOverride",
       overlay.parameter_file_override,
     )?;
+    self.set_optional(
+      output,
+      "hvigorRuntimePropertiesJson",
+      overlay.hvigor_runtime_properties_json,
+    )?;
+    self.set_optional(output, "hvigorCacheDir", overlay.hvigor_cache_dir)?;
     Ok(())
   }
 

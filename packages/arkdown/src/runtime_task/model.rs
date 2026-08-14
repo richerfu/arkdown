@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+
+use super::catalog::{RuntimeTaskCatalog, RuntimeTaskCatalogRequest};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,6 +14,8 @@ pub struct RuntimeTaskDescriptor {
   pub task_name: String,
   pub built_in: bool,
   pub project_task: bool,
+  #[serde(default)]
+  pub lazy: bool,
   pub enabled: bool,
   pub track_state: bool,
   pub refresh_declarations: bool,
@@ -36,6 +41,100 @@ impl RuntimeTaskDescriptor {
     !self.input_properties.is_empty()
       || !self.input_files.is_empty()
       || !self.output_files.is_empty()
+  }
+}
+
+/// Expands Rust-owned built-in task catalogs and applies the comparatively
+/// small set of JavaScript task overlays. The V8 boundary never needs to
+/// serialize the complete built-in graph back to Rust.
+pub struct RuntimeTaskModelBuilder {
+  catalogs: Vec<RuntimeTaskCatalogRequest>,
+  overlays: Vec<RuntimeTaskDescriptor>,
+  removed_task_paths: FxHashSet<String>,
+}
+
+impl RuntimeTaskModelBuilder {
+  pub fn from_json_parts(
+    catalogs_json: &str,
+    overlays_json: &str,
+    removed_task_paths_json: &str,
+  ) -> anyhow::Result<Self> {
+    Ok(Self {
+      catalogs: serde_json::from_str(catalogs_json)?,
+      overlays: serde_json::from_str(overlays_json)?,
+      removed_task_paths: serde_json::from_str::<Vec<String>>(removed_task_paths_json)?
+        .into_iter()
+        .collect(),
+    })
+  }
+
+  pub fn new(
+    catalogs: Vec<RuntimeTaskCatalogRequest>,
+    overlays: Vec<RuntimeTaskDescriptor>,
+    removed_task_paths: Vec<String>,
+  ) -> Self {
+    Self {
+      catalogs,
+      overlays,
+      removed_task_paths: removed_task_paths.into_iter().collect(),
+    }
+  }
+
+  pub fn build(self) -> anyhow::Result<Vec<RuntimeTaskDescriptor>> {
+    let mut descriptors = Vec::new();
+    let mut built_in_indexes = FxHashMap::default();
+    for request in self.catalogs {
+      let node_name = request.node_name.clone();
+      let project_task = request.project_task;
+      for entry in RuntimeTaskCatalog::new(request).entries()? {
+        let path = if project_task {
+          format!(":{}", entry.name)
+        } else {
+          format!("{node_name}:{}", entry.name)
+        };
+        if self.removed_task_paths.contains(&path) {
+          continue;
+        }
+        let index = descriptors.len();
+        built_in_indexes.insert(path.clone(), index);
+        descriptors.push(RuntimeTaskDescriptor {
+          path,
+          node_name: node_name.clone(),
+          task_name: entry.name,
+          built_in: true,
+          project_task,
+          lazy: false,
+          enabled: true,
+          track_state: true,
+          refresh_declarations: false,
+          has_before_run: false,
+          has_after_run: false,
+          has_failed: false,
+          has_task_should_do: false,
+          graph_bound_custom: false,
+          dependencies: entry.dependencies,
+          user_dependencies: Vec::new(),
+          input_properties: Vec::new(),
+          input_files: Vec::new(),
+          output_files: Vec::new(),
+        });
+      }
+    }
+
+    for overlay in self.overlays {
+      if self.removed_task_paths.contains(&overlay.path) {
+        continue;
+      }
+      if overlay.built_in {
+        if let Some(index) = built_in_indexes.get(&overlay.path).copied() {
+          descriptors[index] = overlay;
+          continue;
+        }
+      }
+      descriptors.push(overlay);
+    }
+    descriptors.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(descriptors)
   }
 }
 
@@ -129,21 +228,31 @@ pub struct RuntimeTaskOperation {
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeTaskOperationPhase {
   BeforeAlways,
+  Realize,
   TaskShouldDo,
   BeforeRun,
   Run,
   AfterRun,
   Failed,
   TransformAbc,
+  ModifyNativeCommand,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskCallbackResult {
+  pub enabled: Option<bool>,
+  pub track_state: Option<bool>,
+  pub refresh_declarations: Option<bool>,
+  pub has_before_run: Option<bool>,
+  pub has_after_run: Option<bool>,
+  pub has_failed: Option<bool>,
+  pub has_task_should_do: Option<bool>,
   pub task_should_do: Option<bool>,
   pub input_properties: Option<Vec<RuntimeTaskProperty>>,
   pub input_files: Option<Vec<String>>,
   pub output_files: Option<Vec<String>>,
+  pub command: Option<Vec<String>>,
   #[serde(default)]
   pub output: Vec<String>,
 }
@@ -159,6 +268,7 @@ mod tests {
       task_name: path.rsplit(':').next().unwrap().to_string(),
       built_in,
       project_task: false,
+      lazy: false,
       enabled: true,
       track_state: true,
       refresh_declarations: false,
@@ -219,5 +329,47 @@ mod tests {
     let mut expected_inputs = tasks[0].input_files.clone();
     expected_inputs.sort_by_key(|path| RuntimeTaskSelection::path_identity(path, cfg!(windows)));
     assert_eq!(selection.declared_input_paths(&tasks), expected_inputs);
+  }
+
+  #[test]
+  fn expands_builtin_catalogs_and_applies_only_javascript_overlays() {
+    let catalog = serde_json::from_value(serde_json::json!({
+      "nodeName": "entry",
+      "kind": "hap",
+      "projectTask": false,
+      "buildTargetName": "default",
+      "targetNames": ["default"],
+      "targetOptions": [{
+        "name": "default",
+        "compileApiVersion": 12,
+        "compatibleApiVersion": 12
+      }]
+    }))
+    .unwrap();
+    let mut tasks_overlay = task("entry:tasks", true, Vec::new());
+    tasks_overlay.enabled = false;
+    let custom_overlay = task("entry:custom", false, Vec::new());
+
+    let model = RuntimeTaskModelBuilder::new(
+      vec![catalog],
+      vec![tasks_overlay, custom_overlay],
+      vec!["entry:default@CollectDebugSymbol".to_string()],
+    )
+    .build()
+    .unwrap();
+
+    assert!(
+      model.len() > 70,
+      "Rust must expand the complete HAP catalog"
+    );
+    assert!(model
+      .iter()
+      .any(|task| task.path == "entry:custom" && !task.built_in));
+    assert!(model
+      .iter()
+      .any(|task| task.path == "entry:tasks" && !task.enabled));
+    assert!(!model
+      .iter()
+      .any(|task| task.path == "entry:default@CollectDebugSymbol"));
   }
 }

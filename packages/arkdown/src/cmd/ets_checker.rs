@@ -32,6 +32,60 @@ use arkdown_session::{BuildSession, ModuleCompileContext};
 
 static CHECKER_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Resolves the single HAR entry accepted by Hvigor's `ArkLinter.findAvailableEntry`.
+///
+/// The linter reads `oh-package.json5#main`; when it is absent it probes
+/// `index.ets`, `index.ts`, then `index.js` at the module root. Keeping this
+/// lookup in the SDK-checker owner prevents the runtime task bridge from
+/// inventing a second entry-resolution policy.
+pub(crate) struct ArkLinterEntryResolver<'a> {
+  module_root: &'a Path,
+}
+
+impl<'a> ArkLinterEntryResolver<'a> {
+  pub(crate) fn new(module_root: &'a Path) -> Self {
+    Self { module_root }
+  }
+
+  pub(crate) fn resolve(&self) -> Result<PathBuf> {
+    let package_path = self.module_root.join("oh-package.json5");
+    let source = std::fs::read_to_string(&package_path)
+      .with_context(|| format!("read ArkLinter package manifest {}", package_path.display()))?;
+    let package: Value = json5::from_str(&source).with_context(|| {
+      format!(
+        "parse ArkLinter package manifest {}",
+        package_path.display()
+      )
+    })?;
+    if let Some(main) = package
+      .get("main")
+      .and_then(Value::as_str)
+      .filter(|main| !main.is_empty())
+    {
+      let entry = lexical_normalize(&self.module_root.join(main));
+      if entry.is_file() {
+        return Ok(entry);
+      }
+      anyhow::bail!(
+        "ARKDOWN_ARK_LINTER_INVALID_MAIN: invalid main file '{}' defined in {}",
+        main,
+        package_path.display()
+      );
+    }
+
+    for file_name in ["index.ets", "index.ts", "index.js"] {
+      let entry = self.module_root.join(file_name);
+      if entry.is_file() {
+        return Ok(entry);
+      }
+    }
+    anyhow::bail!(
+      "ARKDOWN_ARK_LINTER_MAIN_NOT_FOUND: no available main file is defined in {}",
+      package_path.display()
+    )
+  }
+}
+
 /// All filesystem paths supplied to the SDK checker for one module.
 ///
 /// Build callers pass the same generated paths used by CompileArkTS.  The
@@ -136,6 +190,8 @@ pub(crate) struct SdkEtsCheckerInput<'a> {
   pub(crate) coverage_mode: Option<&'a str>,
   pub(crate) debug_line: bool,
   pub(crate) byte_code_har_integrated_optimization: bool,
+  pub(crate) single_file_emit: bool,
+  pub(crate) rollup_cache_use_source_hash: bool,
 }
 
 struct SdkEtsCheckerModuleLayout<'a> {
@@ -161,7 +217,9 @@ impl<'a> SdkEtsCheckerModuleLayout<'a> {
       .strip_prefix(self.root)
       .map_err(|error| anyhow::anyhow!("derive ETS source root: {error}"))?
       .to_path_buf();
-    Ok(arkdown_path::ArtifactPathSerializer::rel_to_slash(&relative))
+    Ok(arkdown_path::ArtifactPathSerializer::rel_to_slash(
+      &relative,
+    ))
   }
 }
 
@@ -266,9 +324,8 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     let mut source_to_module_id = Map::new();
 
     if mock_config_path.is_file() {
-      let content = std::fs::read_to_string(&mock_config_path).with_context(|| {
-        format!("read mock config {}", mock_config_path.display())
-      })?;
+      let content = std::fs::read_to_string(&mock_config_path)
+        .with_context(|| format!("read mock config {}", mock_config_path.display()))?;
       let entries = json5::from_str::<indexmap::IndexMap<String, Value>>(&content)
         .with_context(|| format!("parse mock config {}", mock_config_path.display()))?;
       for (key, entry) in entries {
@@ -276,7 +333,8 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
           if !source.is_empty() {
             let source_path = self.input.module_context.module.root.join(source);
             if source_path.is_file() {
-              source_to_module_id.insert(source.to_string(), Value::String(self.path(&source_path)?));
+              source_to_module_id
+                .insert(source.to_string(), Value::String(self.path(&source_path)?));
             }
           }
         }
@@ -309,13 +367,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
         else {
           continue;
         };
-        let Some(node) = self
-          .input
-          .module_context
-          .deps
-          .nodes
-          .get(&edge.package_name)
-        else {
+        let Some(node) = self.input.module_context.deps.nodes.get(&edge.package_name) else {
           continue;
         };
         let package_root = &edge.package_root;
@@ -329,7 +381,10 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
             .package
             .as_ref()
             .and_then(|package| package.package_json.main.as_deref())
-            .map_or_else(|| package_root.join("index.js"), |main| package_root.join(main))
+            .map_or_else(
+              || package_root.join("index.js"),
+              |main| package_root.join(main),
+            )
         } else {
           package_root.join(suffix)
         };
@@ -393,6 +448,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     let build_mode = match self.input.config.build_mode {
       BuildMode::Debug => "Debug",
       BuildMode::Release => "Release",
+      BuildMode::Test => "Test",
     }
     .to_string();
     let project_path = self.input.paths.ace_module_root.clone();
@@ -421,7 +477,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     extras.insert(
       "branchElimination".to_string(),
       Value::Bool(
-        !matches!(self.input.config.build_mode, BuildMode::Debug)
+        self.input.config.build_mode.is_release()
           && ark_options
             .and_then(|options| options.branch_elimination)
             .unwrap_or(false),
@@ -433,8 +489,8 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     // SDK `import_path_expand.js` calls `depName2DepInfo.has(pkgName)` and
     // reads `entry.pkgRootPath`; an empty object makes `{}.has` throw.
     extras.insert(
-        "depName2DepInfo".to_string(),
-        self.dependency_name2_dep_info(),
+      "depName2DepInfo".to_string(),
+      self.dependency_name2_dep_info(),
     );
     extras.insert("depName2OhExports".to_string(), Value::Object(Map::new()));
     extras.insert(
@@ -446,7 +502,10 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     extras.insert("useNativeResolver".to_string(), Value::Bool(true));
     extras.insert("shouldEmitJs".to_string(), Value::Bool(true));
     extras.insert("useTscResolve".to_string(), Value::Bool(false));
-    extras.insert("singleFileEmit".to_string(), Value::Bool(false));
+    extras.insert(
+      "singleFileEmit".to_string(),
+      Value::Bool(self.input.single_file_emit),
+    );
     extras.insert("userProjectConfig".to_string(), self.user_project_config());
     extras.insert(
       "executionMode".to_string(),
@@ -691,7 +750,10 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       "preloadSoFilePath".to_string(),
       Value::String(self.path(&self.input.paths.workspace.join("preload.json"))?),
     );
-    extras.insert("useSourceHash".to_string(), Value::Bool(false));
+    extras.insert(
+      "useSourceHash".to_string(),
+      Value::Bool(self.input.rollup_cache_use_source_hash),
+    );
     extras.insert("localModuleParamMap".to_string(), Value::Object(Map::new()));
     extras.insert("otherPaths".to_string(), self.other_paths(&project_path)?);
     extras.insert(

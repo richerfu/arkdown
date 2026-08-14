@@ -42,6 +42,13 @@ impl<'a> ModulePathLayout<'a> {
         self.src_main().join("module.json5")
     }
 
+    pub fn ohos_test_module_json5(&self) -> PathBuf {
+        self.module_root
+            .join("src")
+            .join("ohosTest")
+            .join("module.json5")
+    }
+
     /// Dependency profile candidates in the same precedence order used by
     /// hvigor's `DependencyManager.getDependencyTypeByProfile`.
     pub fn dependency_profile_candidates(&self) -> [PathBuf; 3] {
@@ -55,6 +62,10 @@ impl<'a> ModulePathLayout<'a> {
 
     pub fn oh_package_json5(&self) -> PathBuf {
         self.module_root.join("oh-package.json5")
+    }
+
+    pub fn package_json(&self) -> PathBuf {
+        self.module_root.join("package.json")
     }
 
     pub fn ets_source_root(&self) -> PathBuf {

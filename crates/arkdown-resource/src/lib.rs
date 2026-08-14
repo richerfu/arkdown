@@ -28,6 +28,7 @@
 
 pub mod backend;
 pub mod error;
+pub mod id_defined;
 pub mod plan;
 
 mod model;
@@ -36,6 +37,7 @@ mod runtime_key;
 // Re-export the primary public API at crate root.
 pub use backend::{ResourceBackend, ResourceBackendRunner, SdkRestoolBackend};
 pub use error::ResourceError;
+pub use id_defined::IdDefinedFileProcessor;
 pub use model::{ResourceCompileConfig, ResourceCompileInput, ResourceCompileOutput, ResourceInfo};
 pub use plan::{
     ResourceCompileOptions, ResourceCompilePlan, ResourceDependencyInput, ResourceInputRoot,

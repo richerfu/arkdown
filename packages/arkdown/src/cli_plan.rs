@@ -176,6 +176,12 @@ pub struct ArkdownBuildCliConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub ohos_enable_hwasan: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub ohos_enable_tsan: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub ohos_enable_ubsan: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub ohos_enable_binxo: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub disable_abc_cache: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub cache_file: Option<String>,
@@ -322,6 +328,7 @@ impl<'a> HvigorArgsParser<'a> {
       index += 1;
     }
     self.apply_test_defaults();
+    self.apply_device_test_defaults();
     self.apply_properties()?;
     Ok(self.config)
   }
@@ -453,9 +460,7 @@ impl<'a> HvigorArgsParser<'a> {
         "scope" => self.config.scope = value.map(str::to_string),
         "coverage-path-filter" => self.config.coverage_path_filter = value.map(str::to_string),
         "coverage-mode" => self.config.coverage_mode = value.map(str::to_string),
-        "unit.test.replace.page" => {
-          self.config.unit_test_replace_page = value.map(str::to_string)
-        }
+        "unit.test.replace.page" => self.config.unit_test_replace_page = value.map(str::to_string),
         _ => {}
       }
     }
@@ -500,6 +505,46 @@ impl<'a> HvigorArgsParser<'a> {
         "unit.test.replace.page",
         "../../../.test/testability/pages/Index",
       ),
+    ] {
+      properties
+        .entry(key.to_string())
+        .or_insert_with(|| value.to_string());
+    }
+    self.config.prop = properties
+      .into_iter()
+      .map(|(key, value)| format!("{key}={value}"))
+      .collect();
+  }
+
+  /// Latest hvigor `global-data.ts::setDeviceTestDefaultParameters` runs
+  /// after local-test defaults and before the parsed CLI properties are
+  /// exposed to the OHOS plugin. Keep the same Map insertion and override
+  /// semantics as `setTestDefaultParameters`.
+  fn apply_device_test_defaults(&mut self) {
+    if !self.config.tasks.iter().any(|task| task == "onDeviceTest") {
+      return;
+    }
+    if self.config.execution_mode.is_none() {
+      self.config.execution_mode = Some("module".to_string());
+    }
+
+    let mut properties = indexmap::IndexMap::<String, String>::new();
+    for property in std::mem::take(&mut self.config.prop) {
+      let mut parts = property.split('=');
+      let key = parts.next().unwrap_or_default();
+      let value = parts.next().unwrap_or("undefined");
+      let key = if key == "coverage" {
+        "ohos-test-coverage"
+      } else {
+        key
+      };
+      properties.insert(key.to_string(), value.to_string());
+    }
+    for (key, value) in [
+      ("product", "default"),
+      ("buildMode", "test"),
+      ("isOhosTest", "true"),
+      ("ohos-test-coverage", "true"),
     ] {
       properties
         .entry(key.to_string())
@@ -671,6 +716,9 @@ impl<'a> ArkdownBuildArgsParser<'a> {
         }
         "--ohos-debug-asan" => self.config.ohos_debug_asan = Some(true),
         "--ohos-enable-hwasan" => self.config.ohos_enable_hwasan = Some(true),
+        "--ohos-enable-tsan" => self.config.ohos_enable_tsan = Some(true),
+        "--ohos-enable-ubsan" => self.config.ohos_enable_ubsan = Some(true),
+        "--ohos-enable-binxo" => self.config.ohos_enable_binxo = Some(true),
         "--disable-abc-cache" => self.config.disable_abc_cache = Some(true),
         "--cache-file" => self.config.cache_file = Some(self.required_value(&mut index, arg)?),
         "--checker" => self.config.checker = Some(self.required_value(&mut index, arg)?),

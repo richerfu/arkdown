@@ -136,6 +136,23 @@ pub struct Ts2abcOutputPlan {
   pub cache_file: Option<PathBuf>,
 }
 
+/// Reload-specific symbol-table handoff owned by SDK
+/// `ModuleColdreloadMode`/`ModuleHotreloadMode`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ts2abcReloadMode {
+  /// Initial hot-reload build: persist the base symbol table for later
+  /// incremental compilations.
+  Dump,
+  Cold,
+  Hot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ts2abcReloadPlan {
+  pub mode: Ts2abcReloadMode,
+  pub symbol_table_path: PathBuf,
+}
+
 // ---------------------------------------------------------------------------
 // Ts2abcPlan
 // ---------------------------------------------------------------------------
@@ -198,6 +215,8 @@ pub struct Ts2abcPlan {
   pub branch_elimination: bool,
   /// es2abc `--transform-lib` AOP transform library path when configured.
   pub transform_lib: Option<PathBuf>,
+  /// Existing base-build symbol table consumed by incremental reload ABC.
+  pub reload: Option<Ts2abcReloadPlan>,
 }
 
 impl Ts2abcPlan {
@@ -267,6 +286,7 @@ pub struct Ts2abcPlanBuilder {
   enable_abc_input: bool,
   branch_elimination: bool,
   transform_lib: Option<PathBuf>,
+  reload: Option<Ts2abcReloadPlan>,
 }
 
 impl Ts2abcPlanBuilder {
@@ -292,6 +312,7 @@ impl Ts2abcPlanBuilder {
       enable_abc_input: false,
       branch_elimination: false,
       transform_lib: None,
+      reload: None,
     }
   }
 
@@ -365,6 +386,12 @@ impl Ts2abcPlanBuilder {
     self
   }
 
+  /// Compile an incremental reload ABC against the base build's symbol map.
+  pub fn with_reload(mut self, reload: Ts2abcReloadPlan) -> Self {
+    self.reload = Some(reload);
+    self
+  }
+
   /// Enable upstream ABC input merge mode.
   pub fn with_abc_input(mut self) -> Self {
     self.enable_abc_input = true;
@@ -427,6 +454,7 @@ impl Ts2abcPlanBuilder {
       enable_abc_input: self.enable_abc_input,
       branch_elimination: self.branch_elimination,
       transform_lib: self.transform_lib,
+      reload: self.reload,
     };
     plan.validate()?;
     Ok(plan)

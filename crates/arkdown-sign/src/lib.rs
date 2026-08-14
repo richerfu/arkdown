@@ -10,6 +10,6 @@ mod config_material;
 pub mod error;
 pub mod plan;
 
-pub use backend::SignBackendRunner;
+pub use backend::{HarSignBackendRunner, SignBackendRunner};
 pub use error::SignError;
 pub use plan::{SignPlan, SigningMaterial, SigningPassword};

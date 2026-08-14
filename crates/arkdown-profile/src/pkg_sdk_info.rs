@@ -131,11 +131,14 @@ mod tests {
             src_main: PathBuf::from("/entry/src/main"),
             module_json_path: None,
             module_json: None,
+            module_json_value: None,
+            ohos_test_module_json_value: None,
             module_type: OhosModuleType::Entry,
             package_path: None,
             package: Some(current_package),
             source_roots: Vec::new(),
             resource_roots: Vec::new(),
+            related_entry_modules: None,
         };
         let direct_package = package("direct-har", "2.0.0");
         let transitive_package = package("shared-hsp", "3.0.0");

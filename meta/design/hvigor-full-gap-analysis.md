@@ -1,9 +1,9 @@
 # hvigor Full Pipeline Gap Analysis
 
 Comprehensive mapping of every hvigor build step against the current arkdown implementation.
-Source data: the DevEco Studio-bundled hvigor and SDK under
-`/Applications/DevEco-Studio.app/Contents/tools/hvigor/` and
-`/Applications/DevEco-Studio.app/Contents/sdk/` (verified 2026-08-04).
+Source data: the checked-in DevEco Studio 6.1.1.280 reconstruction under
+`hvigor/ts-readable/` plus SDK tools resolved from the selected build session
+(verified 2026-08-04). No host installation path is part of the parity contract.
 
 Status symbols: ✅ implemented + parity-verified, 🔄 partial (gaps listed), ❌ not started.
 
@@ -551,11 +551,11 @@ coverage.
 
 | Area | URL |
 |---|---|
-| ArkCompile task (full) | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/src/tasks/ark-compile.js` |
-| Rollup plugin setup | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-compose/dist/src/arkts-pack.js` |
-| Build orchestration | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build.js` |
-| SDK plugin loading | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-compose/dist/src/util/load-sdk-functions.js` |
-| Importee processing | `/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor-ohos-plugin/node_modules/@ohos/hvigor-arkts-base/dist/src/build-steps/process-importee.js` |
+| ArkCompile task (full) | `hvigor/ts-readable/hvigor-ohos-plugin/src/tasks/ark-compile.ts` |
+| Rollup plugin setup | `hvigor/ts-readable/hvigor-arkts-compose/dist/src/arkts-pack.ts` |
+| Build orchestration | `hvigor/ts-readable/hvigor-arkts-base/dist/src/build.ts` |
+| SDK plugin loading | `hvigor/ts-readable/hvigor-arkts-compose/dist/src/util/load-sdk-functions.ts` |
+| Importee processing | `hvigor/ts-readable/hvigor-arkts-base/dist/src/build-steps/process-importee.ts` |
 | assembly-emitter.cpp | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/assembler/assembly-emitter.cpp` |
 | assembly-emitter.h | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/assembler/assembly-emitter.h` |
 | Panda bytecode ISA | `https://github.com/openharmony/arkcompiler_runtime_core/blob/master/static_core/isa/isa.yaml` |

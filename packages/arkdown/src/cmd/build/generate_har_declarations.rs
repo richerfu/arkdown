@@ -22,6 +22,7 @@ use super::layout::ModuleBuildLayout;
 
 pub(super) struct HarDeclarationGenerator<'a> {
   module_root: &'a Path,
+  product_name: &'a str,
   source_dir: &'a Path,
   module_output_prefix: PathBuf,
   output_prefix: PathBuf,
@@ -29,10 +30,16 @@ pub(super) struct HarDeclarationGenerator<'a> {
 }
 
 impl<'a> HarDeclarationGenerator<'a> {
-  pub(super) fn new_har(module_root: &'a Path, source_dir: &'a Path, module_name: &str) -> Self {
+  pub(super) fn new_har(
+    module_root: &'a Path,
+    product_name: &'a str,
+    source_dir: &'a Path,
+    module_name: &str,
+  ) -> Self {
     let module_output_prefix = PathBuf::from(module_name);
     Self {
       module_root,
+      product_name,
       source_dir,
       output_prefix: module_output_prefix.join("src/main/ets"),
       module_output_prefix,
@@ -43,10 +50,16 @@ impl<'a> HarDeclarationGenerator<'a> {
   /// Hvigor's `getIntermediatesEtsTgzPath(moduleName)` places HSP
   /// declarations below `<module>/src/main/ets` before PackageSharedHar copies
   /// them to the interface HAR staging directory.
-  pub(super) fn new_hsp(module_root: &'a Path, source_dir: &'a Path, module_name: &str) -> Self {
+  pub(super) fn new_hsp(
+    module_root: &'a Path,
+    product_name: &'a str,
+    source_dir: &'a Path,
+    module_name: &str,
+  ) -> Self {
     let module_output_prefix = PathBuf::from(module_name);
     Self {
       module_root,
+      product_name,
       source_dir,
       output_prefix: module_output_prefix.join("src/main/ets"),
       module_output_prefix,
@@ -71,7 +84,8 @@ impl<'a> HarDeclarationGenerator<'a> {
         self.source_dir.display()
       );
     }
-    let output_dir = ModuleBuildLayout::new(self.module_root).declarations_dir();
+    let output_dir =
+      ModuleBuildLayout::for_product(self.module_root, self.product_name).declarations_dir();
     if output_dir.exists() {
       fs_err::remove_dir_all(&output_dir).with_context(|| {
         format!(
@@ -253,7 +267,10 @@ impl<'a> HarSourceDeclaration<'a> {
         let expression = &decorator.expression;
         out.push_str(&format!("@{}\r\n", source[expression.span()].trim()));
       }
-      out.push_str(&format!("declare struct {} {{\r\n", struct_statement.id.name));
+      out.push_str(&format!(
+        "declare struct {} {{\r\n",
+        struct_statement.id.name
+      ));
       for element in &struct_statement.body.body {
         match element {
           oxc_ast::ast::StructElement::PropertyDefinition(property) => {
@@ -316,4 +333,3 @@ impl<'a> HarSourceDeclaration<'a> {
     Ok(out)
   }
 }
-

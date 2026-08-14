@@ -6,6 +6,7 @@
 //! - `build-profile-utils.getCustomTypePathIfExists`
 //! - `AbstractCompileNode.collectCustomTypes`
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use arkdown_path::canonicalize_or_owned;
@@ -62,6 +63,16 @@ pub struct CustomTypeInventory {
     pub declaration_inputs: Vec<PathBuf>,
 }
 
+/// Dependency-owned custom type declarations collected by
+/// `ArkCompile.getDependencyCustomTypes()`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DependencyCustomTypeInput {
+    pub package_name: String,
+    pub package_root: PathBuf,
+    pub configured_types: Vec<String>,
+    pub declared_dependencies: BTreeSet<String>,
+}
+
 pub struct CustomTypeResolver<'a> {
     module_name: &'a str,
     module_root: &'a Path,
@@ -94,7 +105,21 @@ impl<'a> CustomTypeResolver<'a> {
         &self,
         configured_types: &[String],
     ) -> Result<CustomTypeInventory, CustomTypeError> {
-        if configured_types.is_empty() {
+        self.resolve_with_dependencies(configured_types, &[])
+    }
+
+    /// Resolve host types and the dependency types enabled by
+    /// `ohos.dependencies.types.enable` in one deterministic inventory.
+    pub fn resolve_with_dependencies(
+        &self,
+        configured_types: &[String],
+        dependency_types: &[DependencyCustomTypeInput],
+    ) -> Result<CustomTypeInventory, CustomTypeError> {
+        if configured_types.is_empty()
+            && dependency_types
+                .iter()
+                .all(|dependency| dependency.configured_types.is_empty())
+        {
             return Ok(CustomTypeInventory::default());
         }
         if self.compile_api_version < 10 {
@@ -124,8 +149,56 @@ impl<'a> CustomTypeResolver<'a> {
             }
         }
 
+        let mut compiler_types = configured_types.to_vec();
+        for dependency in dependency_types {
+            for configured in &dependency.configured_types {
+                if dependency.declared_dependencies.contains(configured)
+                    || dependency
+                        .declared_dependencies
+                        .contains(&format!("@types/{configured}"))
+                {
+                    if !configured_types.contains(configured) {
+                        tracing::warn!(
+                            dependency = %dependency.package_name,
+                            custom_type = configured,
+                            "dependency custom type names another dependency; configure it on the host module"
+                        );
+                    }
+                    continue;
+                }
+                let Some(declaration_input) =
+                    Self::find_declaration_path(&dependency.package_root, configured)
+                else {
+                    tracing::warn!(
+                        dependency = %dependency.package_name,
+                        custom_type = configured,
+                        "dependency custom type cannot be resolved"
+                    );
+                    continue;
+                };
+                let compiler_type = {
+                    let configured_path = Path::new(configured);
+                    if configured_path.has_root() {
+                        configured_path.to_path_buf()
+                    } else {
+                        dependency.package_root.join(configured_path)
+                    }
+                };
+                let compiler_type = canonicalize_or_owned(&compiler_type)
+                    .to_string_lossy()
+                    .into_owned();
+                if !compiler_types.contains(&compiler_type) {
+                    compiler_types.push(compiler_type);
+                }
+                let declaration_input = canonicalize_or_owned(&declaration_input);
+                if seen_inputs.insert(declaration_input.clone()) {
+                    declaration_inputs.push(declaration_input);
+                }
+            }
+        }
+
         Ok(CustomTypeInventory {
-            compiler_types: configured_types.to_vec(),
+            compiler_types,
             declaration_inputs,
         })
     }
@@ -185,15 +258,8 @@ impl<'a> CustomTypeResolver<'a> {
             });
         }
 
-        for candidate in [
-            self.append_suffix(&base, ".d.ets"),
-            self.append_suffix(&base, ".d.ts"),
-            base.join("index.d.ets"),
-            base.join("index.d.ts"),
-        ] {
-            if candidate.exists() {
-                return Ok(candidate);
-            }
+        if let Some(candidate) = Self::find_declaration_path(self.module_root, configured) {
+            return Ok(candidate);
         }
 
         Err(CustomTypeError::NotFound {
@@ -202,10 +268,27 @@ impl<'a> CustomTypeResolver<'a> {
         })
     }
 
-    fn append_suffix(&self, path: &Path, suffix: &str) -> PathBuf {
+    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
         let mut value = path.as_os_str().to_os_string();
         value.push(suffix);
         PathBuf::from(value)
+    }
+
+    fn find_declaration_path(root: &Path, configured: &str) -> Option<PathBuf> {
+        let configured_path = Path::new(configured);
+        let base = if configured_path.has_root() {
+            configured_path.to_path_buf()
+        } else {
+            root.join(configured_path)
+        };
+        [
+            Self::append_suffix(&base, ".d.ets"),
+            Self::append_suffix(&base, ".d.ts"),
+            base.join("index.d.ets"),
+            base.join("index.d.ts"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.exists())
     }
 }
 
@@ -321,5 +404,53 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn appends_hvigor_dependency_custom_types_and_skips_dependency_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let module_root = temp.path().join("entry");
+        let dependency_root = temp.path().join("source-har");
+        std::fs::create_dir_all(&module_root).unwrap();
+        std::fs::create_dir_all(dependency_root.join("types/runtime")).unwrap();
+        std::fs::write(
+            dependency_root.join("types/runtime/index.d.ets"),
+            "declare interface Runtime {}",
+        )
+        .unwrap();
+        let graph = DependencyGraphSnapshot::default();
+        let inventory = CustomTypeResolver::new(
+            "entry",
+            &module_root,
+            &temp.path().join("build-profile.json5"),
+            12,
+            true,
+            &graph,
+        )
+        .resolve_with_dependencies(
+            &[],
+            &[DependencyCustomTypeInput {
+                package_name: "source-har".to_string(),
+                package_root: dependency_root.clone(),
+                configured_types: vec!["./types/runtime".to_string(), "nested-types".to_string()],
+                declared_dependencies: BTreeSet::from(["nested-types".to_string()]),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            inventory.compiler_types,
+            [
+                canonicalize_or_owned(&dependency_root.join("types/runtime"))
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+        assert_eq!(
+            inventory.declaration_inputs,
+            [canonicalize_or_owned(
+                &dependency_root.join("types/runtime/index.d.ets")
+            )]
+        );
     }
 }

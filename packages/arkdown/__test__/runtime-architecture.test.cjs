@@ -15,6 +15,13 @@ test('JavaScript remains plugin glue around Rust OXC Rolldown planners', () => {
     'function collectCompilePluginPaths',
     'function resolvePluginPath',
     'function validateHvigorCompilePlugin',
+    '_sdkRootFromEtsLoader',
+    '_sdkComponentRoots',
+    '_sdkComponentMetadata',
+    '_remoteHspObject',
+    '_remoteHspVersionWins',
+    '_hasRollupPlugin',
+    '_shouldBuildCmake',
   ]) {
     assert.equal(runtime.includes(removed), false, `${removed} must not return to the JavaScript runtime`)
   }
@@ -26,6 +33,10 @@ test('JavaScript remains plugin glue around Rust OXC Rolldown planners', () => {
     'collectBuildScriptPluginPaths',
     'prepareNativeBuildConfig',
     'mergeHvigorConfig',
+    'inspectHvigorSdkDetails',
+    'inspectRemoteHspObjects',
+    'runtimeCommandPlan',
+    'runtimeTaskCatalog',
   ]) {
     assert.equal(runtime.includes(`nativeRuntimeBinding.${nativeBoundary}`), true)
   }

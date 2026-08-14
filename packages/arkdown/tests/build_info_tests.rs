@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use arkdown_napi::cmd::build_info::build_info_value;
+use arkdown_napi::cmd::build_info::{build_info_value, HvigorBuildInfoRunner};
 use serde_json::Value;
 
 fn fixture_root() -> PathBuf {
@@ -116,4 +116,45 @@ fn module_build_info_reads_module_level_targets_like_hvigor() {
   assert_eq!(ohos_test_debug["debuggable"], true);
   let ohos_test_release = &info["buildInfo"]["ohosTest"]["release"];
   assert!(ohos_test_release.get("arkOptions").is_none());
+}
+
+#[test]
+fn runtime_build_info_preserves_project_module_dispatch_and_json_output() {
+  let skipped_project = HvigorBuildInfoRunner::from_json(
+    &serde_json::json!({
+      "projectRoot": fixture_root(),
+      "nodeName": "minimal-hap",
+      "projectTask": true,
+      "module": "entry@default",
+      "json": true,
+      "resolve": true
+    })
+    .to_string(),
+  )
+  .and_then(|runner| runner.response_json())
+  .expect("project buildInfo response");
+  assert_eq!(
+    serde_json::from_str::<Value>(&skipped_project).unwrap()["output"],
+    serde_json::json!([]),
+    "BuildInfo.registryAction returns early on the project node when -p module is present"
+  );
+
+  let module_response = HvigorBuildInfoRunner::from_json(
+    &serde_json::json!({
+      "projectRoot": fixture_root(),
+      "nodeName": "entry",
+      "projectTask": false,
+      "module": "entry@default",
+      "json": true,
+      "resolve": false
+    })
+    .to_string(),
+  )
+  .and_then(|runner| runner.response_json())
+  .expect("module buildInfo response");
+  let response = serde_json::from_str::<Value>(&module_response).unwrap();
+  let output = response["output"][0].as_str().expect("pretty JSON output");
+  let info = serde_json::from_str::<Value>(output).expect("embedded buildInfo JSON");
+  assert_eq!(info["buildMode"], serde_json::json!(["debug", "release"]));
+  assert_eq!(info["buildInfo"]["default"]["debug"], serde_json::json!({}));
 }

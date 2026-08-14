@@ -68,15 +68,16 @@ impl UnitTestTemplateParams<'_> {
   /// `@ohos/coverage` `pageIndexTemplate(testTemplateParam)` with
   /// `fileOperte.js` platform path serialization.
   pub(crate) fn render_page_index(&self) -> Result<String> {
-    let module_path =
-      arkdown_path::ArtifactPathSerializer::path_to_slash_string(self.module_path)?;
+    let module_path = arkdown_path::ArtifactPathSerializer::path_to_slash_string(self.module_path)?;
     let coverage = if self.coverage { "true" } else { "false" };
-    Ok(PAGE_INDEX_TEMPLATE
-      .replace("__MODULE_PATH__", &module_path)
-      .replace("__BUNDLE_NAME__", self.bundle_name)
-      .replace("__MODULE_NAME__", self.module_name)
-      .replace("__SCOPE__", self.scope)
-      .replace("__COVERAGE__", coverage))
+    Ok(
+      PAGE_INDEX_TEMPLATE
+        .replace("__MODULE_PATH__", &module_path)
+        .replace("__BUNDLE_NAME__", self.bundle_name)
+        .replace("__MODULE_NAME__", self.module_name)
+        .replace("__SCOPE__", self.scope)
+        .replace("__COVERAGE__", coverage),
+    )
   }
 }
 
@@ -85,13 +86,17 @@ impl UnitTestTemplateParams<'_> {
 /// calling `@ohos/coverage` `generateTemplateFile`.
 pub(crate) fn generate_unit_test_template(
   module_root: &Path,
+  product_name: &str,
   params: &UnitTestTemplateParams<'_>,
 ) -> Result<()> {
-  let layout = ModuleBuildLayout::for_test(module_root);
+  let layout = ModuleBuildLayout::for_test_product(module_root, product_name);
   std::fs::create_dir_all(layout.testability_pages_dir())?;
   std::fs::write(layout.unit_test_index_ets(), params.render_page_index()?)?;
   std::fs::write(layout.test_ability_ets(), TEST_ABILITY_TEMPLATE)?;
-  std::fs::write(layout.test_phone_settings_json(), PHONE_SETTING_CONFIG_TEMPLATE)?;
+  std::fs::write(
+    layout.test_phone_settings_json(),
+    PHONE_SETTING_CONFIG_TEMPLATE,
+  )?;
   Ok(())
 }
 
@@ -101,8 +106,12 @@ pub(crate) fn generate_unit_test_template(
 /// `generateOhosTestTemplateFile`). API >= 11 uses the `@kit.*` template
 /// variants (`TestAbility_withKit.ets`, `OpenHarmonyTestRunner_mock.ets`);
 /// older SDKs use the plain templates.
-pub(crate) fn generate_ohos_test_template(module_root: &Path, api_version: u32) -> Result<()> {
-  let layout = ModuleBuildLayout::for_test(module_root);
+pub(crate) fn generate_ohos_test_template(
+  module_root: &Path,
+  product_name: &str,
+  api_version: u32,
+) -> Result<()> {
+  let layout = ModuleBuildLayout::for_test_product(module_root, product_name);
   let runner_dir = layout.ohos_test_runner_dir();
   let ability_dir = layout.ohos_test_ability_dir();
   let pages_dir = layout.ohos_test_pages_dir();
@@ -123,21 +132,27 @@ pub(crate) fn generate_ohos_test_template(module_root: &Path, api_version: u32) 
       TEST_ABILITY_WITH_KIT_TEMPLATE,
     )
   } else {
-    (OPEN_HARMONY_TEST_RUNNER_TEMPLATE, TEST_ABILITY_TEMPLATE_OHOS)
+    (
+      OPEN_HARMONY_TEST_RUNNER_TEMPLATE,
+      TEST_ABILITY_TEMPLATE_OHOS,
+    )
   };
   std::fs::write(runner_dir.join("OpenHarmonyTestRunner.ets"), runner_src)?;
   std::fs::write(ability_dir.join("TestAbility.ets"), ability_src)?;
   std::fs::write(pages_dir.join("Index.ets"), OHOS_TEST_INDEX_TEMPLATE)?;
   std::fs::write(element_dir.join("color.json"), OHOS_TEST_COLOR_TEMPLATE)?;
   std::fs::write(element_dir.join("string.json"), OHOS_TEST_STRING_TEMPLATE)?;
-  std::fs::write(profile_dir.join("test_pages.json"), OHOS_TEST_PAGES_TEMPLATE)?;
+  std::fs::write(
+    profile_dir.join("test_pages.json"),
+    OHOS_TEST_PAGES_TEMPLATE,
+  )?;
   Ok(())
 }
 
 /// Whether the generated `ohosTest` template exists — used to gate the
 /// ohosTest compile inputs.
-pub(crate) fn has_ohos_test_template(module_root: &Path) -> bool {
-  ModuleBuildLayout::for_test(module_root)
+pub(crate) fn has_ohos_test_template(module_root: &Path, product_name: &str) -> bool {
+  ModuleBuildLayout::for_test_product(module_root, product_name)
     .ohos_test_ability_dir()
     .join("TestAbility.ets")
     .is_file()
@@ -145,8 +160,11 @@ pub(crate) fn has_ohos_test_template(module_root: &Path) -> bool {
 
 /// Whether the generated `ohosTest` template exists — used to gate the
 /// ohosTest compile inputs.
-pub(crate) fn ohos_test_template_root(module_root: &Path) -> std::path::PathBuf {
-  ModuleBuildLayout::for_test(module_root).ohos_test_ets_root()
+pub(crate) fn ohos_test_template_root(
+  module_root: &Path,
+  product_name: &str,
+) -> std::path::PathBuf {
+  ModuleBuildLayout::for_test_product(module_root, product_name).ohos_test_ets_root()
 }
 
 /// Typed `GenerateUnitTestResult` input. The SDK component roots and HSP
@@ -302,9 +320,7 @@ impl UnitTestExecutionPlan {
       .status()
       .map_err(|error| anyhow::anyhow!("start @ohos/coverage runner failed: {error}"))?;
     if !status.success() {
-      anyhow::bail!(
-        "ARKDOWN_UNIT_TEST_RESULT_FAILED: @ohos/coverage exited with status {status}"
-      );
+      anyhow::bail!("ARKDOWN_UNIT_TEST_RESULT_FAILED: @ohos/coverage exited with status {status}");
     }
     Ok(())
   }
@@ -358,6 +374,7 @@ impl UnitTestCoverageInstrumentationPlan {
     sdk_config: &SdkConfig,
     project_path: &Path,
     module_path: &Path,
+    product_name: &str,
     coverage_mode: Option<&str>,
     module_sources: &[HvigorModuleSourceFile],
     node_executable: PathBuf,
@@ -378,7 +395,7 @@ impl UnitTestCoverageInstrumentationPlan {
         })
       })
       .collect();
-    let layout = ModuleBuildLayout::for_test(module_path);
+    let layout = ModuleBuildLayout::for_test_product(module_path, product_name);
     Ok(Self {
       module_path: arkdown_path::canonicalize_or_owned(module_path),
       project_path: arkdown_path::canonicalize_or_owned(project_path),
@@ -396,11 +413,8 @@ impl UnitTestCoverageInstrumentationPlan {
     let mut request_rewrite_plans = Vec::with_capacity(self.sources.len());
     for source in &self.sources {
       let original_source = std::fs::read_to_string(&source.module_id)?;
-      let transformed_source = self.transform_module_source(
-        &transformer,
-        &original_source,
-        &source.module_id,
-      )?;
+      let transformed_source =
+        self.transform_module_source(&transformer, &original_source, &source.module_id)?;
       let materialized_source = std::fs::read_to_string(&source.source_path)?;
       request_rewrite_plans.push(HvigorModuleRequestRewritePlan::from_baseline(
         arkdown_path::ArtifactPathSerializer::path_to_slash_string(&source.module_id)?,
@@ -435,11 +449,8 @@ impl UnitTestCoverageInstrumentationPlan {
         continue;
       }
       let instrumented_source = std::fs::read_to_string(&source.source_path)?;
-      let transformed_source = self.transform_module_source(
-        &transformer,
-        &instrumented_source,
-        &source.module_id,
-      )?;
+      let transformed_source =
+        self.transform_module_source(&transformer, &instrumented_source, &source.module_id)?;
       std::fs::write(
         &source.source_path,
         rewrite_plan.rewrite(&transformed_source).as_bytes(),
@@ -464,10 +475,12 @@ impl UnitTestCoverageInstrumentationPlan {
       // module-request pass, so the original text is their correct baseline.
       return Ok(source.to_string());
     };
-    Ok(output
-      .module_source_code
-      .map(|source| source.to_string())
-      .unwrap_or(output.code))
+    Ok(
+      output
+        .module_source_code
+        .map(|source| source.to_string())
+        .unwrap_or(output.code),
+    )
   }
 }
 
@@ -525,9 +538,22 @@ pub(crate) struct UnitTestArtifactWriter<'a> {
 }
 
 impl<'a> UnitTestArtifactWriter<'a> {
-  pub(crate) fn new(module_root: &'a Path) -> Self {
+  pub(crate) fn new(module_root: &'a Path, product_name: &'a str) -> Self {
     Self {
-      layout: ModuleBuildLayout::for_test(module_root),
+      layout: ModuleBuildLayout::for_test_product(module_root, product_name),
+    }
+  }
+
+  /// Device-test variant of Hvigor's shared `TestCopyMockConfigJson` action.
+  /// Unlike local unit tests it keeps the normal `build/<product>` root and
+  /// writes into the selected `ohosTest` target's compiled resources.
+  pub(crate) fn for_ohos_test(
+    module_root: &'a Path,
+    product_name: &'a str,
+    target_name: &'a str,
+  ) -> Self {
+    Self {
+      layout: ModuleBuildLayout::for_target_product(module_root, product_name, target_name),
     }
   }
 
@@ -576,9 +602,8 @@ impl<'a> UnitTestArtifactWriter<'a> {
     if fragment.ends_with(',') {
       fragment.pop();
     }
-    let replacements = serde_json::from_str::<serde_json::Map<String, Value>>(&format!(
-      "{{{fragment}}}"
-    ))?;
+    let replacements =
+      serde_json::from_str::<serde_json::Map<String, Value>>(&format!("{{{fragment}}}"))?;
     let mut source_maps = serde_json::from_slice::<Value>(&std::fs::read(&output)?)?;
     let Some(source_map_entries) = source_maps.as_object_mut() else {
       return Ok(());
@@ -633,9 +658,9 @@ pub(crate) fn inject_unit_test_ability(
   process_profile: &mut Value,
   module_type: &str,
 ) -> Result<()> {
-  let document = process_profile.as_object_mut().ok_or_else(|| {
-    anyhow::anyhow!("process_profile module.json is not a JSON object")
-  })?;
+  let document = process_profile
+    .as_object_mut()
+    .ok_or_else(|| anyhow::anyhow!("process_profile module.json is not a JSON object"))?;
 
   let is_har = module_type == "har";
   let is_hsp = module_type == "shared";
@@ -660,10 +685,12 @@ pub(crate) fn inject_unit_test_ability(
     .get_mut("module")
     .and_then(Value::as_object_mut)
     .ok_or_else(|| anyhow::anyhow!("process_profile module.json lacks module object"))?;
-  let abilities = module.entry("abilities").or_insert_with(|| Value::Array(Vec::new()));
-  let abilities = abilities.as_array_mut().ok_or_else(|| {
-    anyhow::anyhow!("process_profile module.json abilities is not an array")
-  })?;
+  let abilities = module
+    .entry("abilities")
+    .or_insert_with(|| Value::Array(Vec::new()));
+  let abilities = abilities
+    .as_array_mut()
+    .ok_or_else(|| anyhow::anyhow!("process_profile module.json abilities is not an array"))?;
 
   let (start_window_icon, start_window_background) = abilities
     .first()
@@ -788,7 +815,7 @@ const TEST_ABILITY_TEMPLATE: &str = "\n    import AbilityConstant from '@ohos.ap
 /// `@ohos/coverage` `phoneSettingConfigTemplate` — fixed phone settings.
 const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n        \"1.0.1\": {\n          \"Language\": {\n            \"args\": {\n              \"Language\": \"zh_CN\"\n            }\n          }\n        }\n      },\n      \"frontend\": {\n        \"1.0.0\": {\n          \"Resolution\": {\n            \"args\": {\n              \"Resolution\": \"360*780\"\n            }\n          },\n          \"DeviceType\": {\n            \"args\": {\n              \"DeviceType\": \"phone\"\n            }\n          }\n        }\n      }\n    }\n  ";
 
-  const OPEN_HARMONY_TEST_RUNNER_TEMPLATE: &str = "
+const OPEN_HARMONY_TEST_RUNNER_TEMPLATE: &str = "
     import hilog from '@ohos.hilog';\n
     import TestRunner from '@ohos.application.testRunner';\n
     import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';\n
@@ -853,7 +880,7 @@ const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n    
     }
   ";
 
-  const OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE: &str = "
+const OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE: &str = "
     import { abilityDelegatorRegistry, TestRunner } from '@kit.TestKit';\n
     import { UIAbility, common, application } from '@kit.AbilityKit';\n
     import { BusinessError } from '@kit.BasicServicesKit';\n
@@ -982,7 +1009,7 @@ const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n    
     }
   ";
 
-  const TEST_ABILITY_TEMPLATE_OHOS: &str = "
+const TEST_ABILITY_TEMPLATE_OHOS: &str = "
     import UIAbility from '@ohos.app.ability.UIAbility';\n
     import AbilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry';\n
     import hilog from '@ohos.hilog';\n
@@ -1035,7 +1062,7 @@ const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n    
     }
   ";
 
-  const TEST_ABILITY_WITH_KIT_TEMPLATE: &str = "
+const TEST_ABILITY_WITH_KIT_TEMPLATE: &str = "
     import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';\n
     import { abilityDelegatorRegistry } from '@kit.TestKit';\n
     import { hilog } from '@kit.PerformanceAnalysisKit';\n
@@ -1093,7 +1120,7 @@ const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n    
     }
   ";
 
-  const OHOS_TEST_INDEX_TEMPLATE: &str = "
+const OHOS_TEST_INDEX_TEMPLATE: &str = "
     @Entry\n
     @Component\n
     struct Index {\n
@@ -1113,7 +1140,7 @@ const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n    
     }
   ";
 
-  const OHOS_TEST_COLOR_TEMPLATE: &str = "
+const OHOS_TEST_COLOR_TEMPLATE: &str = "
     {\n
       \"color\": [\n
         {\n
@@ -1124,7 +1151,7 @@ const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n    
     }
   ";
 
-  const OHOS_TEST_STRING_TEMPLATE: &str = "
+const OHOS_TEST_STRING_TEMPLATE: &str = "
     {\n
       \"string\": [\n
         {\n
@@ -1143,7 +1170,7 @@ const PHONE_SETTING_CONFIG_TEMPLATE: &str = "\n    {\n      \"setting\": {\n    
     }
   ";
 
-  const OHOS_TEST_PAGES_TEMPLATE: &str = "
+const OHOS_TEST_PAGES_TEMPLATE: &str = "
     {\n
       \"src\": [\n
         \"testability/pages/Index\"\n

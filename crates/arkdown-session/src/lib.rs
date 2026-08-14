@@ -50,6 +50,7 @@ pub mod paths;
 pub mod plan_input;
 pub mod profiles;
 pub mod project;
+pub mod remote_hsp;
 pub mod resolver_index;
 pub mod resource_inventory;
 pub mod resources;
@@ -113,7 +114,10 @@ pub use plan_input::{
 };
 
 // sdk
-pub use sdk::SdkEs2abcOptionSnapshot;
+pub use sdk::{
+    HvigorSdkComponentMetadata, HvigorSdkDetailsError, HvigorSdkDetailsInventory,
+    HvigorSdkDetailsRequest, HvigorSdkDetailsSnapshot, SdkEs2abcOptionSnapshot,
+};
 
 // profiles
 pub use profiles::store::{
@@ -150,6 +154,10 @@ pub use dependency_views::{
 pub use hvigor_context::{
     HvigorContextInspectError, HvigorContextInspector, HvigorContextSnapshot,
     HvigorDependencyContextSnapshot, OhpmDependencyInfo,
+};
+
+pub use remote_hsp::{
+    RemoteHspObject, RemoteHspObjectError, RemoteHspObjectInventory, RemoteHspObjectRequest,
 };
 
 // sdk_tools

@@ -1,6 +1,6 @@
 //! [`ModuleSnapshot`] — immutable per-module stable inputs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_config::RuntimeModuleContextOverrides;
@@ -28,6 +28,10 @@ pub enum ModuleSnapshotError {
     /// `oh-package.json5` could not be parsed.
     #[error("failed to parse package manifest {path}: {message}")]
     PackageJsonParse { path: PathBuf, message: String },
+
+    /// Module `build-profile.json5` could not be parsed.
+    #[error("failed to parse module build profile {path}: {message}")]
+    BuildProfileParse { path: PathBuf, message: String },
 }
 
 /// OHOS module type.
@@ -78,6 +82,18 @@ pub struct ModuleSnapshot {
     pub module_json_path: Option<PathBuf>,
     /// Parsed `module.json5` content.
     pub module_json: Option<ModuleJson5>,
+    /// Complete `module.json5` value from the same immutable snapshot read.
+    ///
+    /// The typed model intentionally exposes only build fields owned by core,
+    /// while Hvigor consumers such as `MakePackInfo` also project schema fields
+    /// including ability `visible`/`forms`. Keeping the raw value prevents a
+    /// later filesystem re-read and preserves values replaced through the JS
+    /// `OhosModuleContext` setter.
+    pub module_json_value: Option<Arc<serde_json::Value>>,
+    /// Optional `src/ohosTest/module.json5` source-set value captured with the
+    /// main module snapshot. Hvigor switches the complete source-set model for
+    /// this target instead of overlaying it at packaging time.
+    pub ohos_test_module_json_value: Option<Arc<serde_json::Value>>,
     /// Module type.
     pub module_type: OhosModuleType,
     /// Absolute path to `oh-package.json5`.
@@ -88,6 +104,11 @@ pub struct ModuleSnapshot {
     pub source_roots: Vec<PathBuf>,
     /// Resource root directories.
     pub resource_roots: Vec<PathBuf>,
+    /// Feature-module `entryModules` from the module build profile.
+    ///
+    /// `None` preserves the distinction between an absent field and an
+    /// explicitly empty list used by Hvigor's `checkEntryModules` predicate.
+    pub related_entry_modules: Option<Vec<String>>,
 }
 
 impl ModuleSnapshot {
@@ -103,51 +124,104 @@ impl ModuleSnapshot {
         name: &str,
         runtime_override: Option<&RuntimeModuleContextOverrides>,
     ) -> Result<Self, ModuleSnapshotError> {
+        Self::from_root_with_runtime_override_and_package_manifest(
+            root,
+            name,
+            runtime_override,
+            &ModulePathLayout::new(root).oh_package_json5(),
+        )
+    }
+
+    pub(crate) fn from_root_with_runtime_override_and_package_manifest(
+        root: &std::path::Path,
+        name: &str,
+        runtime_override: Option<&RuntimeModuleContextOverrides>,
+        package_path: &std::path::Path,
+    ) -> Result<Self, ModuleSnapshotError> {
         let layout = ModulePathLayout::new(root);
         let src_main = layout.src_main();
 
         // Read module.json5.
         let module_json_path = layout.module_json5();
-        let (module_json_path_opt, module_json, module_type) = if let Some(value) =
-            runtime_override.and_then(|overrides| overrides.module_json.as_ref())
-        {
-            let parsed: ModuleJson5 = serde_json::from_value(value.clone()).map_err(|error| {
+        let (module_json_path_opt, module_json, module_json_value, module_type) =
+            if let Some(value) =
+                runtime_override.and_then(|overrides| overrides.module_json.as_ref())
+            {
+                let parsed: ModuleJson5 =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        ModuleSnapshotError::ModuleJsonParse {
+                            path: module_json_path.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                let module_type = OhosModuleType::parse(&parsed.module.type_);
+                (
+                    Some(module_json_path),
+                    Some(parsed),
+                    Some(Arc::new(value.clone())),
+                    module_type,
+                )
+            } else if module_json_path.is_file() {
+                let content = std::fs::read_to_string(&module_json_path).map_err(|source| {
+                    ModuleSnapshotError::Io {
+                        path: module_json_path.clone(),
+                        source,
+                    }
+                })?;
+                let value: serde_json::Value = json5::from_str(&content).map_err(|error| {
+                    ModuleSnapshotError::ModuleJsonParse {
+                        path: module_json_path.clone(),
+                        message: error.to_string(),
+                    }
+                })?;
+                let parsed: ModuleJson5 =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        ModuleSnapshotError::ModuleJsonParse {
+                            path: module_json_path.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                let mtype = OhosModuleType::parse(&parsed.module.type_);
+                (
+                    Some(module_json_path),
+                    Some(parsed),
+                    Some(Arc::new(value)),
+                    mtype,
+                )
+            } else {
+                (None, None, None, OhosModuleType::Entry)
+            };
+        let ohos_test_module_json_path = layout.ohos_test_module_json5();
+        let ohos_test_module_json_value = if ohos_test_module_json_path.is_file() {
+            let content =
+                std::fs::read_to_string(&ohos_test_module_json_path).map_err(|source| {
+                    ModuleSnapshotError::Io {
+                        path: ohos_test_module_json_path.clone(),
+                        source,
+                    }
+                })?;
+            let value = json5::from_str::<serde_json::Value>(&content).map_err(|error| {
                 ModuleSnapshotError::ModuleJsonParse {
-                    path: module_json_path.clone(),
+                    path: ohos_test_module_json_path,
                     message: error.to_string(),
                 }
             })?;
-            let module_type = OhosModuleType::parse(&parsed.module.type_);
-            (Some(module_json_path), Some(parsed), module_type)
-        } else if module_json_path.is_file() {
-            let content = std::fs::read_to_string(&module_json_path).map_err(|source| {
-                ModuleSnapshotError::Io {
-                    path: module_json_path.clone(),
-                    source,
-                }
-            })?;
-            let parsed: ModuleJson5 = json5::from_str(&content).map_err(|error| {
-                ModuleSnapshotError::ModuleJsonParse {
-                    path: module_json_path.clone(),
-                    message: error.to_string(),
-                }
-            })?;
-            let mtype = OhosModuleType::parse(&parsed.module.type_);
-            (Some(module_json_path), Some(parsed), mtype)
+            Some(Arc::new(value))
         } else {
-            (None, None, OhosModuleType::Entry)
+            None
         };
 
-        // Read oh-package.json5.
-        let package_path = layout.oh_package_json5();
+        // Read the project-selected OHPM/npm manifest. Hvigor makes this
+        // decision once at project scope and applies it to every module.
+        let package_path = package_path.to_path_buf();
         let (package_path_opt, package) = if let Some(value) =
             runtime_override.and_then(|overrides| overrides.package.as_ref())
         {
-            let snapshot = PackageSnapshot::from_runtime_value(root, value)
+            let snapshot = PackageSnapshot::from_runtime_manifest_value(root, &package_path, value)
                 .map_err(Self::package_snapshot_error)?;
             (Some(package_path), Some(Arc::new(snapshot)))
         } else if package_path.is_file() {
-            let snapshot = PackageSnapshot::from_root(root)
+            let snapshot = PackageSnapshot::from_manifest(root, &package_path)
                 .map_err(Self::package_snapshot_error)?
                 .map(Arc::new);
             (Some(package_path), snapshot)
@@ -172,18 +246,50 @@ impl ModuleSnapshot {
             resource_roots.push(res_root);
         }
 
+        let related_entry_modules = Self::read_related_entry_modules(root)?;
+
         Ok(ModuleSnapshot {
             name: name.to_string(),
             root: root.to_path_buf(),
             src_main,
             module_json_path: module_json_path_opt,
             module_json,
+            module_json_value,
+            ohos_test_module_json_value,
             module_type,
             package_path: package_path_opt,
             package,
             source_roots,
             resource_roots,
+            related_entry_modules,
         })
+    }
+
+    fn read_related_entry_modules(
+        module_root: &Path,
+    ) -> Result<Option<Vec<String>>, ModuleSnapshotError> {
+        let path = module_root.join("build-profile.json5");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&path).map_err(|source| ModuleSnapshotError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let value: serde_json::Value =
+            json5::from_str(&content).map_err(|error| ModuleSnapshotError::BuildProfileParse {
+                path,
+                message: error.to_string(),
+            })?;
+        Ok(value.get("entryModules").map(|entries| {
+            entries
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        }))
     }
 
     fn package_snapshot_error(error: PackageSnapshotError) -> ModuleSnapshotError {

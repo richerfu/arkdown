@@ -45,8 +45,8 @@ pub use arkdown_core::source_maps;
 
 // bundler — primary API
 pub use bundler::{
-    BundleOutput, Bundler, HvigorHarImportees, HvigorModuleRequestRewritePlan,
-    PreloadSystemSoTask, SourceMapInputFingerprint,
+    BundleOutput, Bundler, HvigorHarImportees, HvigorModuleRequestRewritePlan, PreloadSystemSoTask,
+    SourceMapInputFingerprint,
 };
 
 // plan — typed bundle plan (SPEC-048 Phase 4 primary input)

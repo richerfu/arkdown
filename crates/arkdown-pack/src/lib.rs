@@ -6,9 +6,10 @@ pub mod plan;
 pub mod zip_writer;
 
 pub use app::{
-    AppArchiveUnpacker, AppArtifactInput, AppArtifactRole, AppArtifactStager, AppNormalizePlan,
-    AppPackagePlan, AppPackageRunner, AppPackingCommand, ProjectPackInfoBuilder,
-    ProjectPackInfoOutput, RemoteHspCandidate, RemoteHspCollector, RemoteHspDependencyScope, StagedAppArtifacts,
+    AppArchiveUnpacker, AppArtifactFormat, AppArtifactInput, AppArtifactRole, AppArtifactStager,
+    AppModulePackageKind, AppNormalizePlan, AppPackageMode, AppPackagePlan, AppPackageRunner,
+    AppPackingCommand, HqfPackagePlan, ProjectPackInfoBuilder, ProjectPackInfoOutput,
+    RemoteHspCandidate, RemoteHspCollector, RemoteHspDependencyScope, StagedAppArtifacts,
     UnpackedAppArtifacts,
 };
 pub use error::PackError;
@@ -18,7 +19,7 @@ pub use integrated_hsp::{
 pub use packager::{
     minify_package_intermediate_module_json, BundledHarResourceInput, HarBundledDependencyInput,
     HarPackInput, HarPackageParameterInput, HarVariantInput, HspInterfaceHarInput, HspTgzInput,
-    PackAbility, PackInput, Packager,
+    PackInfoInput, PackInfoModuleInput, PackInput, Packager,
 };
 pub use plan::{
     PackageEntry, PackageEntrySource, PackageKind, PackageOutput, PackagePlan, PackageToolMode,
@@ -56,7 +57,7 @@ mod tests {
                     preload_so: vec![],
                     deduplicate_har: false,
                     enable_source_code_check: true,
-            app_with_signed_pkg: false,
+                    app_with_signed_pkg: false,
                     generate_shared_tgz: None,
                     customized_har_base_package: None,
                     remove_permissions: vec![],
@@ -70,6 +71,7 @@ mod tests {
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
+                        no_external_import_by_path: None,
                         duplicate_dependency_check: false,
                     },
                     ark_options: None,
@@ -109,10 +111,12 @@ mod tests {
         let packager = Packager::new(make_config());
         let result = packager.pack_hap(PackInput {
             module_name: "entry".to_string(),
+            target_name: "default".to_string(),
             abc_path: abc,
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
+            pack_info_path: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -128,9 +132,9 @@ mod tests {
             installation_free: false,
             delivery_with_install: true,
             source_maps_path: None,
+            aot_mode: None,
             pkg_context_info_path: None,
             pkg_sdk_info_path: None,
-            abilities: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -167,10 +171,12 @@ mod tests {
         packager
             .pack_hap(PackInput {
                 module_name: "entry".to_string(),
+                target_name: "default".to_string(),
                 abc_path: abc,
                 resources_index: res,
                 module_json: modj,
                 pack_info_module_json: None,
+                pack_info_path: None,
                 native_libs: vec![],
                 compress_native_libs: false,
                 output_path: out.clone(),
@@ -180,9 +186,9 @@ mod tests {
                 bundle_build_version: None,
                 bundle_type: "app".to_string(),
                 source_maps_path: None,
+                aot_mode: None,
                 pkg_context_info_path: None,
                 pkg_sdk_info_path: None,
-                abilities: vec![],
                 integrated_hsps: vec![],
                 privacy_profile_path: None,
                 syscap_path: None,
@@ -208,10 +214,12 @@ mod tests {
         let packager = Packager::new(make_config());
         let result = packager.pack_hap(PackInput {
             module_name: "entry".to_string(),
+            target_name: "default".to_string(),
             abc_path: tmp.path().join("missing.abc"),
             resources_index: tmp.path().join("missing.index"),
             module_json: tmp.path().join("missing.json"),
             pack_info_module_json: None,
+            pack_info_path: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: tmp.path().join("out.hap"),
@@ -227,9 +235,9 @@ mod tests {
             installation_free: false,
             delivery_with_install: true,
             source_maps_path: None,
+            aot_mode: None,
             pkg_context_info_path: None,
             pkg_sdk_info_path: None,
-            abilities: vec![],
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -308,10 +316,12 @@ mod tests {
         let packager = Packager::new(make_config());
         let result = packager.pack_hsp(PackInput {
             module_name: "shared".to_string(),
+            target_name: "default".to_string(),
             abc_path: abc,
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
+            pack_info_path: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -327,9 +337,9 @@ mod tests {
             installation_free: false,
             delivery_with_install: true,
             source_maps_path: None,
+            aot_mode: None,
             pkg_context_info_path: None,
             pkg_sdk_info_path: None,
-            abilities: vec![],
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -356,10 +366,12 @@ mod tests {
         packager
             .pack_hap(PackInput {
                 module_name: "entry".to_string(),
+                target_name: "default".to_string(),
                 abc_path: abc,
                 resources_index: res,
                 module_json: modj,
                 pack_info_module_json: None,
+                pack_info_path: None,
                 native_libs: vec![],
                 compress_native_libs: false,
                 output_path: out.clone(),
@@ -369,9 +381,9 @@ mod tests {
                 bundle_build_version: None,
                 bundle_type: "app".to_string(),
                 source_maps_path: None,
+                aot_mode: None,
                 pkg_context_info_path: None,
                 pkg_sdk_info_path: None,
-                abilities: vec![],
                 privacy_profile_path: None,
                 syscap_path: None,
                 device_types: vec![],
@@ -409,10 +421,12 @@ mod tests {
         packager
             .pack_hap(PackInput {
                 module_name: "entry".to_string(),
+                target_name: "default".to_string(),
                 abc_path: abc,
                 resources_index: res,
                 module_json: modj,
                 pack_info_module_json: None,
+                pack_info_path: None,
                 native_libs: vec![],
                 compress_native_libs: false,
                 output_path: out.clone(),
@@ -423,9 +437,9 @@ mod tests {
                 bundle_type: "app".to_string(),
 
                 source_maps_path: None,
+                aot_mode: None,
                 pkg_context_info_path: None,
                 pkg_sdk_info_path: None,
-                abilities: vec![],
                 privacy_profile_path: Some(privacy),
                 syscap_path: None,
                 integrated_hsps: vec![],

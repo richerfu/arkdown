@@ -32,11 +32,34 @@ pub enum AppArtifactRole {
     RemoteHsp,
 }
 
-/// One HAP/HSP participating in project `pack.info` and APP construction.
+/// Logical package kind supplied to app-packing-tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppModulePackageKind {
+    Hap,
+    Hsp,
+}
+
+/// Physical representation accepted by hvigor's `PackageApp` task.
+///
+/// Normal builds stage HAP/HSP archives. `fastBuildApp` stages the directory
+/// emitted by `FastPackageHap`/`FastPackageHsp` and invokes the SDK tool with
+/// `--mode fastApp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppArtifactFormat {
+    Archive,
+    FastDirectory {
+        kind: AppModulePackageKind,
+        destination: PathBuf,
+    },
+}
+
+/// One HAP/HSP (or fast-package directory) participating in project
+/// `pack.info` and APP construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppArtifactInput {
     pub path: PathBuf,
     pub role: AppArtifactRole,
+    pub format: AppArtifactFormat,
 }
 
 impl AppArtifactInput {
@@ -46,6 +69,22 @@ impl AppArtifactInput {
             role: AppArtifactRole::Local {
                 module_name: module_name.into(),
             },
+            format: AppArtifactFormat::Archive,
+        }
+    }
+
+    pub fn local_fast_directory(
+        path: PathBuf,
+        module_name: impl Into<String>,
+        kind: AppModulePackageKind,
+        destination: PathBuf,
+    ) -> Self {
+        Self {
+            path,
+            role: AppArtifactRole::Local {
+                module_name: module_name.into(),
+            },
+            format: AppArtifactFormat::FastDirectory { kind, destination },
         }
     }
 
@@ -53,11 +92,27 @@ impl AppArtifactInput {
         Self {
             path,
             role: AppArtifactRole::RemoteHsp,
+            format: AppArtifactFormat::Archive,
         }
     }
 
     pub fn extension(&self) -> Option<&str> {
         self.path.extension().and_then(OsStr::to_str)
+    }
+
+    pub fn package_kind(&self) -> Result<AppModulePackageKind, PackError> {
+        match &self.format {
+            AppArtifactFormat::FastDirectory { kind, .. } => Ok(*kind),
+            AppArtifactFormat::Archive => match self.extension() {
+                Some("hap") => Ok(AppModulePackageKind::Hap),
+                Some("hsp") => Ok(AppModulePackageKind::Hsp),
+                extension => Err(PackError::InvalidAppPlan(format!(
+                    "APP input {} must use .hap or .hsp, got {:?}",
+                    self.path.display(),
+                    extension
+                ))),
+            },
+        }
     }
 }
 
@@ -98,6 +153,40 @@ impl<'a> RemoteHspCollector<'a> {
 
     pub fn collect_candidates(&self) -> Result<BTreeMap<String, RemoteHspCandidate>, PackError> {
         self.collect_candidates_impl()
+    }
+
+    /// Candidates owned by `SignProjectRemoteHsp`: only the project-level
+    /// `oh_modules/.hsp` repository is inspected, once per module dependency
+    /// scope.
+    pub fn collect_project_candidates(
+        &self,
+    ) -> Result<BTreeMap<String, RemoteHspCandidate>, PackError> {
+        let mut candidates = BTreeMap::new();
+        for scope in self.scopes {
+            self.scan_repository(
+                &self.project_root.join("oh_modules").join(".hsp"),
+                &scope.package_names,
+                &mut candidates,
+            )?;
+        }
+        Ok(candidates)
+    }
+
+    /// Candidates owned by `SignModuleRemoteHsp`: only each module-local
+    /// `oh_modules/.hsp` repository is inspected. Project candidates are
+    /// handled by the task dependency above.
+    pub fn collect_module_candidates(
+        &self,
+    ) -> Result<BTreeMap<String, RemoteHspCandidate>, PackError> {
+        let mut candidates = BTreeMap::new();
+        for scope in self.scopes {
+            self.scan_repository(
+                &scope.module_root.join("oh_modules").join(".hsp"),
+                &scope.package_names,
+                &mut candidates,
+            )?;
+        }
+        Ok(candidates)
     }
 
     pub fn collect_for_app(
@@ -143,18 +232,15 @@ impl<'a> RemoteHspCollector<'a> {
     }
 
     fn collect_candidates_impl(&self) -> Result<BTreeMap<String, RemoteHspCandidate>, PackError> {
-        let mut candidates = BTreeMap::new();
-        for scope in self.scopes {
-            self.scan_repository(
-                &scope.module_root.join("oh_modules").join(".hsp"),
-                &scope.package_names,
-                &mut candidates,
-            )?;
-            self.scan_repository(
-                &self.project_root.join("oh_modules").join(".hsp"),
-                &scope.package_names,
-                &mut candidates,
-            )?;
+        let mut candidates = self.collect_module_candidates()?;
+        for (name, candidate) in self.collect_project_candidates()? {
+            let replace = candidates
+                .get(&name)
+                .map(|current| candidate.version >= current.version)
+                .unwrap_or(true);
+            if replace {
+                candidates.insert(name, candidate);
+            }
         }
         Ok(candidates)
     }
@@ -327,13 +413,13 @@ impl<'a> ProjectPackInfoBuilder<'a> {
         let mut accumulator = ProjectPackInfoAccumulator::new(self.align_device_types);
         for artifact in self.artifacts {
             self.validate_artifact(artifact)?;
-            let pack_info = self.read_archive_json(&artifact.path, "pack.info")?;
+            let pack_info = self.read_artifact_json(artifact, "pack.info")?;
             match &artifact.role {
                 AppArtifactRole::Local { module_name } => {
                     accumulator.merge_local(&pack_info, module_name)?;
                 }
                 AppArtifactRole::RemoteHsp => {
-                    let module_json = self.read_archive_json(&artifact.path, "module.json")?;
+                    let module_json = self.read_artifact_json(artifact, "module.json")?;
                     accumulator.merge_remote(&pack_info, &module_json, &artifact.path)?;
                 }
             }
@@ -396,16 +482,53 @@ impl<'a> ProjectPackInfoBuilder<'a> {
     }
 
     fn validate_artifact(&self, artifact: &AppArtifactInput) -> Result<(), PackError> {
-        if !artifact.path.is_file() {
-            return Err(PackError::MissingInput(artifact.path.display().to_string()));
+        match &artifact.format {
+            AppArtifactFormat::Archive => {
+                if !artifact.path.is_file() {
+                    return Err(PackError::MissingInput(artifact.path.display().to_string()));
+                }
+                artifact.package_kind().map(|_| ())
+            }
+            AppArtifactFormat::FastDirectory { destination, .. } => {
+                if !artifact.path.is_dir() {
+                    return Err(PackError::MissingInput(artifact.path.display().to_string()));
+                }
+                if matches!(artifact.role, AppArtifactRole::RemoteHsp) {
+                    return Err(PackError::InvalidAppPlan(
+                        "remote HSP inputs cannot use the fast-package directory format"
+                            .to_string(),
+                    ));
+                }
+                if destination.file_name().is_none() {
+                    return Err(PackError::InvalidAppPlan(format!(
+                        "fast APP destination has no module name: {}",
+                        destination.display()
+                    )));
+                }
+                Ok(())
+            }
         }
-        match artifact.extension() {
-            Some("hap" | "hsp") => Ok(()),
-            extension => Err(PackError::InvalidAppPlan(format!(
-                "APP input {} must use .hap or .hsp, got {:?}",
-                artifact.path.display(),
-                extension
-            ))),
+    }
+
+    fn read_artifact_json(
+        &self,
+        artifact: &AppArtifactInput,
+        entry_name: &str,
+    ) -> Result<serde_json::Value, PackError> {
+        match artifact.format {
+            AppArtifactFormat::Archive => self.read_archive_json(&artifact.path, entry_name),
+            AppArtifactFormat::FastDirectory { .. } => {
+                let path = artifact.path.join(entry_name);
+                let bytes = fs_err::read(&path).map_err(|error| {
+                    PackError::InvalidAppPlan(format!(
+                        "{} is missing {entry_name}: {error}",
+                        artifact.path.display()
+                    ))
+                })?;
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    PackError::MalformedPackInfo(format!("{}: {error}", path.display()))
+                })
+            }
         }
     }
 
@@ -706,51 +829,25 @@ impl<'a> AppArtifactStager<'a> {
         let mut hsp_names = BTreeSet::new();
         let mut plans = Vec::with_capacity(self.artifacts.len());
         for artifact in self.artifacts {
-            let extension = artifact.extension().ok_or_else(|| {
-                PackError::InvalidAppPlan(format!(
-                    "APP artifact has no UTF-8 extension: {}",
-                    artifact.path.display()
-                ))
-            })?;
-            if !matches!(extension, "hap" | "hsp") {
-                return Err(PackError::InvalidAppPlan(format!(
-                    "APP artifact {} must use .hap or .hsp",
-                    artifact.path.display()
-                )));
-            }
-            let file_name = artifact
-                .path
+            let kind = artifact.package_kind()?;
+            let destination = self.destination(artifact)?;
+            let output_name = destination
                 .file_name()
                 .and_then(OsStr::to_str)
                 .ok_or_else(|| {
                     PackError::InvalidAppPlan(format!(
-                        "APP artifact filename is not valid UTF-8: {}",
-                        artifact.path.display()
+                        "APP artifact output name is not valid UTF-8: {}",
+                        destination.display()
                     ))
                 })?;
-            let names = if extension == "hap" {
+            let names = if kind == AppModulePackageKind::Hap {
                 &mut hap_names
             } else {
                 &mut hsp_names
             };
-            if !names.insert(file_name.to_string()) {
-                return Err(PackError::DuplicateAppArtifactName(file_name.to_string()));
+            if !names.insert(output_name.to_string()) {
+                return Err(PackError::DuplicateAppArtifactName(output_name.to_string()));
             }
-
-            let destination = match artifact.role {
-                AppArtifactRole::Local { .. } => {
-                    let parent = artifact.path.parent().ok_or_else(|| {
-                        PackError::InvalidAppPlan(format!(
-                            "APP artifact has no output directory: {}",
-                            artifact.path.display()
-                        ))
-                    })?;
-                    parent
-                        .join("app")
-                        .join(file_name.replacen("-unsigned", "", 1))
-                }
-                AppArtifactRole::RemoteHsp => artifact.path.clone(),
-            };
             plans.push((artifact.clone(), destination));
         }
 
@@ -765,11 +862,19 @@ impl<'a> AppArtifactStager<'a> {
                         ))
                     })?;
                     fs_err::create_dir_all(parent)?;
-                    fs_err::copy(&artifact.path, destination)?;
+                    match artifact.format {
+                        AppArtifactFormat::Archive => {
+                            fs_err::copy(&artifact.path, destination)?;
+                        }
+                        AppArtifactFormat::FastDirectory { .. } => {
+                            Self::copy_directory(&artifact.path, destination)?;
+                        }
+                    }
                 }
                 Ok(AppArtifactInput {
                     path: destination.clone(),
                     role: artifact.role.clone(),
+                    format: artifact.format.clone(),
                 })
             })
             .collect::<Result<Vec<_>, PackError>>()?;
@@ -777,10 +882,9 @@ impl<'a> AppArtifactStager<'a> {
         let mut hap_paths = Vec::new();
         let mut hsp_paths = Vec::new();
         for artifact in &staged {
-            match artifact.extension() {
-                Some("hap") => hap_paths.push(artifact.path.clone()),
-                Some("hsp") => hsp_paths.push(artifact.path.clone()),
-                _ => unreachable!("extensions were validated before staging"),
+            match artifact.package_kind()? {
+                AppModulePackageKind::Hap => hap_paths.push(artifact.path.clone()),
+                AppModulePackageKind::Hsp => hsp_paths.push(artifact.path.clone()),
             }
         }
         Ok(StagedAppArtifacts {
@@ -789,11 +893,87 @@ impl<'a> AppArtifactStager<'a> {
             hsp_paths,
         })
     }
+
+    fn destination(&self, artifact: &AppArtifactInput) -> Result<PathBuf, PackError> {
+        match (&artifact.role, &artifact.format) {
+            (AppArtifactRole::RemoteHsp, AppArtifactFormat::Archive) => Ok(artifact.path.clone()),
+            (AppArtifactRole::RemoteHsp, AppArtifactFormat::FastDirectory { .. }) => {
+                Err(PackError::InvalidAppPlan(
+                    "remote HSP inputs cannot use the fast-package directory format".to_string(),
+                ))
+            }
+            (
+                AppArtifactRole::Local { .. },
+                AppArtifactFormat::FastDirectory { destination, .. },
+            ) => Ok(destination.clone()),
+            (AppArtifactRole::Local { .. }, AppArtifactFormat::Archive) => {
+                let file_name = artifact
+                    .path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .ok_or_else(|| {
+                        PackError::InvalidAppPlan(format!(
+                            "APP artifact filename is not valid UTF-8: {}",
+                            artifact.path.display()
+                        ))
+                    })?;
+                let parent = artifact.path.parent().ok_or_else(|| {
+                    PackError::InvalidAppPlan(format!(
+                        "APP artifact has no output directory: {}",
+                        artifact.path.display()
+                    ))
+                })?;
+                Ok(parent
+                    .join("app")
+                    .join(file_name.replacen("-unsigned", "", 1)))
+            }
+        }
+    }
+
+    fn copy_directory(source: &Path, destination: &Path) -> Result<(), PackError> {
+        fs_err::create_dir_all(destination)?;
+        for entry in walkdir::WalkDir::new(source) {
+            let entry = entry?;
+            let relative = entry.path().strip_prefix(source).map_err(|error| {
+                PackError::InvalidAppPlan(format!(
+                    "cannot stage fast APP directory {}: {error}",
+                    source.display()
+                ))
+            })?;
+            let output = destination.join(relative);
+            if entry.file_type().is_dir() {
+                fs_err::create_dir_all(&output)?;
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = output.parent() {
+                    fs_err::create_dir_all(parent)?;
+                }
+                fs_err::copy(entry.path(), output)?;
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Typed input to the SDK `--mode app` operation.
+/// SDK APP packaging mode selected by hvigor `PackageApp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPackageMode {
+    App,
+    FastApp,
+}
+
+impl AppPackageMode {
+    fn as_sdk_argument(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::FastApp => "fastApp",
+        }
+    }
+}
+
+/// Typed input to the SDK `--mode app` / `--mode fastApp` operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPackagePlan {
+    pub mode: AppPackageMode,
     pub pack_info_path: PathBuf,
     pub hap_paths: Vec<PathBuf>,
     pub hsp_paths: Vec<PathBuf>,
@@ -806,6 +986,33 @@ pub struct AppPackagePlan {
     pub normal_module_limit: usize,
 }
 
+/// Typed SDK `app_packing_tool.jar --mode hqf` input used by
+/// `PackageHqf.getColdReloadCommand()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HqfPackagePlan {
+    pub patch_json_path: PathBuf,
+    pub native_libs_path: PathBuf,
+    pub ets_path: PathBuf,
+    pub resources_path: PathBuf,
+    pub output_path: PathBuf,
+}
+
+impl HqfPackagePlan {
+    pub fn validate(&self) -> Result<(), PackError> {
+        if !self.patch_json_path.is_file() {
+            return Err(PackError::MissingInput(
+                self.patch_json_path.display().to_string(),
+            ));
+        }
+        for directory in [&self.native_libs_path, &self.ets_path, &self.resources_path] {
+            if !directory.is_dir() {
+                return Err(PackError::MissingInput(directory.display().to_string()));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl AppPackagePlan {
     pub fn new(
         pack_info_path: PathBuf,
@@ -814,6 +1021,7 @@ impl AppPackagePlan {
         output_path: PathBuf,
     ) -> Self {
         Self {
+            mode: AppPackageMode::App,
             pack_info_path,
             hap_paths,
             hsp_paths,
@@ -839,7 +1047,11 @@ impl AppPackagePlan {
             ));
         }
         for path in self.hap_paths.iter().chain(&self.hsp_paths) {
-            if !path.is_file() {
+            let valid_input = match self.mode {
+                AppPackageMode::App => path.is_file(),
+                AppPackageMode::FastApp => path.is_file() || path.is_dir(),
+            };
+            if !valid_input {
                 return Err(PackError::MissingInput(path.display().to_string()));
             }
             self.validate_comma_free_path(path)?;
@@ -960,6 +1172,19 @@ impl AppPackingCommand {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+
+    fn execute_hqf(&self, output_path: &Path) -> Result<(), PackError> {
+        let output = Command::new(&self.program).args(&self.args).output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(output_path);
+        Err(PackError::HqfPackingToolFailed {
+            status: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
 }
 
 /// Executes hvigor-compatible APP and EntryCard resource packing commands.
@@ -972,11 +1197,16 @@ pub struct AppPackageRunner {
 
 impl AppPackageRunner {
     pub fn new(package_tool_path: PathBuf) -> Self {
-        Self::for_host(
-            package_tool_path,
-            OsString::from("java"),
-            HostPlatform::CURRENT,
-        )
+        let host = HostPlatform::CURRENT;
+        let executable = OsString::from(host.executable_name("java"));
+        let java_executable = std::env::var_os("JAVA_HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+            .map(|home| home.join("bin").join(&executable))
+            .filter(|path| path.is_file())
+            .map(PathBuf::into_os_string)
+            .unwrap_or(executable);
+        Self::for_host(package_tool_path, java_executable, host)
     }
 
     pub fn for_host(
@@ -997,6 +1227,14 @@ impl AppPackageRunner {
             fs_err::create_dir_all(parent)?;
         }
         command.execute(&plan.output_path)
+    }
+
+    pub fn pack_hqf(&self, plan: &HqfPackagePlan) -> Result<(), PackError> {
+        let command = self.hqf_command(plan)?;
+        if let Some(parent) = plan.output_path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+        command.execute_hqf(&plan.output_path)
     }
 
     pub fn generate_pack_res(
@@ -1029,7 +1267,9 @@ impl AppPackageRunner {
             command.args.push("--pack-res-path".into());
             command.args.push(pack_res_path.as_os_str().to_owned());
         }
-        command.args.extend(["--mode".into(), "app".into()]);
+        command
+            .args
+            .extend(["--mode".into(), plan.mode.as_sdk_argument().into()]);
         command.args.push("--pack-info-path".into());
         command
             .args
@@ -1060,6 +1300,32 @@ impl AppPackageRunner {
             command.args.push(pac_json_path.as_os_str().to_owned());
         }
         Ok(command)
+    }
+
+    pub fn hqf_command(&self, plan: &HqfPackagePlan) -> Result<AppPackingCommand, PackError> {
+        plan.validate()?;
+        self.validate_package_tool()?;
+        Ok(AppPackingCommand {
+            program: self.java_executable.clone(),
+            args: vec![
+                "-jar".into(),
+                self.package_tool_path.as_os_str().to_owned(),
+                "--mode".into(),
+                "hqf".into(),
+                "--json-path".into(),
+                plan.patch_json_path.as_os_str().to_owned(),
+                "--lib-path".into(),
+                plan.native_libs_path.as_os_str().to_owned(),
+                "--ets-path".into(),
+                plan.ets_path.as_os_str().to_owned(),
+                "--resources-path".into(),
+                plan.resources_path.as_os_str().to_owned(),
+                "--out-path".into(),
+                plan.output_path.as_os_str().to_owned(),
+                "--force".into(),
+                "true".into(),
+            ],
+        })
     }
 
     pub fn pack_res_command(

@@ -26,6 +26,8 @@ pub struct BuildScriptRuntimePlanRequest {
     pub module_selection: Option<String>,
     #[serde(default)]
     pub build_target_name: Option<String>,
+    #[serde(default)]
+    pub device_test: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +187,7 @@ impl BuildScriptRuntimePlanner {
                 &self.request.product_name,
                 &self.request.build_mode_name,
                 self.request.build_target_name.as_deref(),
+                self.request.device_test,
             )?;
             let effective_target =
                 targets.effective(&self.request.product_name, &self.request.build_mode_name);
@@ -301,9 +304,10 @@ impl BuildScriptTargetSet {
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if !values.iter().any(|target| {
-            target.get("name").and_then(serde_json::Value::as_str) == Some("default")
-        }) {
+        if !values
+            .iter()
+            .any(|target| target.get("name").and_then(serde_json::Value::as_str) == Some("default"))
+        {
             values.push(serde_json::json!({ "name": "default" }));
         }
         for target in &mut values {
@@ -314,18 +318,15 @@ impl BuildScriptTargetSet {
             else {
                 continue;
             };
-            let descriptor_target = descriptor_targets
-                .and_then(|targets| {
-                    targets.iter().find(|candidate| {
-                        candidate
-                            .get("name")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(name.as_str())
-                    })
-                });
-            if let (Some(target), Some(descriptor_target)) =
-                (target.as_object_mut(), descriptor_target.and_then(serde_json::Value::as_object))
-            {
+            let descriptor_target = descriptor_targets.and_then(|targets| {
+                targets.iter().find(|candidate| {
+                    candidate.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str())
+                })
+            });
+            if let (Some(target), Some(descriptor_target)) = (
+                target.as_object_mut(),
+                descriptor_target.and_then(serde_json::Value::as_object),
+            ) {
                 // Project target metadata supplies product/build-mode/output
                 // defaults. Module target fields remain authoritative when
                 // both profiles declare the same key.
@@ -405,12 +406,21 @@ impl BuildScriptTargetSet {
         product_name: &str,
         build_mode_name: &str,
         build_target_name: Option<&str>,
+        device_test: bool,
     ) -> Result<Vec<serde_json::Value>, BuildScriptRuntimePlanDiagnostic> {
         let selected_entries = Self::selected_module_entries(module_name, selections);
-        if !selections.is_empty() && selected_entries.is_empty() {
-            return Ok(Vec::new());
-        }
         let applicable = self.applicable_indices(product_name, build_mode_name);
+        // `ModuleTaskService.targetNeedPack()` overwrites the normal
+        // computeTargets result for `onDeviceTest`: only `default` and
+        // `ohosTest` remain selected, while module filtering and product
+        // applicability still apply.
+        if device_test {
+            return Ok(applicable
+                .into_iter()
+                .filter(|index| matches!(self.typed[*index].name.as_str(), "default" | "ohosTest"))
+                .map(|index| self.values[index].clone())
+                .collect());
+        }
         let mut selected_target_names = Vec::new();
         let mut seen_target_names = BTreeSet::new();
         for target_name in selected_entries
@@ -449,9 +459,12 @@ impl BuildScriptTargetSet {
                 |index| self.values[index].clone(),
             )]);
         }
-        // Hvigor `ModuleTaskService.targetNeedPack()` maps an implicit `all`
-        // to every product-applicable target except `ohosTest`. The latter is
-        // only selected by an explicit command/device-test injection.
+        // Hvigor 6.24.3 `TargetUtils.computeTargets()` treats a module with no
+        // module-specific CLI entry as `all`, even when another module was
+        // explicitly selected. Every module therefore still registers its
+        // applicable target tasks; command roots decide which outputs execute.
+        // This keeps local HSP/HAR dependency targets addressable from a
+        // selected HAP module.
         Ok(applicable
             .into_iter()
             .filter(|index| self.typed[*index].name != "ohosTest")

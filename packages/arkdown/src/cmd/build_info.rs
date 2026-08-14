@@ -25,9 +25,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use arkdown_config::build_profile::{BuildOptionProfileInventory, EffectiveModuleBuildOptionResolver, RawBuildProfile};
+use arkdown_config::build_profile::{
+  BuildOptionProfileInventory, EffectiveModuleBuildOptionResolver, RawBuildProfile,
+};
 
 /// hvigor `BuildInfo` task arguments.
 #[derive(Args, Debug)]
@@ -50,6 +53,79 @@ pub struct BuildInfoArgs {
   /// Without this flag every buildInfo entry is `{}`.
   #[arg(long)]
   pub resolve: bool,
+}
+
+/// Same-process request for Hvigor's built-in `buildInfo` task.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HvigorBuildInfoRequest {
+  project_root: PathBuf,
+  node_name: String,
+  project_task: bool,
+  #[serde(default)]
+  module: Option<String>,
+  #[serde(default)]
+  json: bool,
+  #[serde(default)]
+  resolve: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HvigorBuildInfoResponse {
+  output: Vec<String>,
+}
+
+/// Owns the file-backed build-profile projection used by the runtime task.
+pub struct HvigorBuildInfoRunner {
+  request: HvigorBuildInfoRequest,
+}
+
+impl HvigorBuildInfoRunner {
+  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
+    Ok(Self {
+      request: serde_json::from_str(request_json)?,
+    })
+  }
+
+  pub fn response_json(&self) -> anyhow::Result<String> {
+    serde_json::to_string(&HvigorBuildInfoResponse {
+      output: self.output()?,
+    })
+    .map_err(Into::into)
+  }
+
+  fn output(&self) -> anyhow::Result<Vec<String>> {
+    // `BuildInfo.registryAction`: when `-p module=...` is present the project
+    // task returns immediately and the selected module task owns the output.
+    if self.request.project_task && self.request.module.is_some() {
+      return Ok(Vec::new());
+    }
+
+    let info = if !self.request.project_task && self.request.module.is_none() {
+      // A module-node buildInfo without `-p module` parses the module profile
+      // through getProjectBuildInfo. Module profiles have no app/modules
+      // inventory, so Hvigor emits this empty project-shaped projection.
+      json!({
+        "product": [],
+        "module": [],
+        "buildMode": [],
+        "buildInfo": {},
+      })
+    } else {
+      build_info_value(
+        &self.request.project_root,
+        self.request.module.as_deref(),
+        self.request.resolve,
+      )?
+    };
+    let output = if self.request.json {
+      serde_json::to_string_pretty(&info)?
+    } else {
+      formatted_text(&self.request.node_name, &info)
+    };
+    Ok(vec![output])
+  }
 }
 
 pub fn run(args: BuildInfoArgs) -> anyhow::Result<()> {
@@ -89,12 +165,9 @@ pub fn build_info_value(
     None,
     None,
   )?;
-  let inventory = BuildOptionProfileInventory::load_with_runtime_overrides(
-    project_root,
-    &config.modules,
-    None,
-  )
-  .map_err(|error| anyhow::anyhow!("build-info failed: {error}"))?;
+  let inventory =
+    BuildOptionProfileInventory::load_with_runtime_overrides(project_root, &config.modules, None)
+      .map_err(|error| anyhow::anyhow!("build-info failed: {error}"))?;
 
   let build_modes = profile
     .app
@@ -190,7 +263,14 @@ fn module_build_info(
       // to `"default"`.
       modes.insert(
         build_mode.clone(),
-        build_option_entry(inventory, module_name, &target_name, build_mode, "default", resolve),
+        build_option_entry(
+          inventory,
+          module_name,
+          &target_name,
+          build_mode,
+          "default",
+          resolve,
+        ),
       );
     }
     targets.insert(target_name, Value::Object(modes));
@@ -263,8 +343,14 @@ fn build_option_entry(
   if !resolve {
     return Value::Object(Map::new());
   }
-  match EffectiveModuleBuildOptionResolver::new(inventory, module_name, product, build_mode, target_name)
-    .resolve_display_value()
+  match EffectiveModuleBuildOptionResolver::new(
+    inventory,
+    module_name,
+    product,
+    build_mode,
+    target_name,
+  )
+  .resolve_display_value()
   {
     Ok(value) => value,
     Err(error) => json!({ "_error": error.to_string() }),
@@ -282,18 +368,21 @@ fn print_formatted(
   let node = module_param
     .map(|param| param.split('@').next().unwrap_or(param).to_string())
     .unwrap_or_else(|| ":".to_string());
+  let output = formatted_text(&node, info);
+  let mut stdout = std::io::stdout().lock();
+  writeln!(stdout, "{output}")?;
+  let _ = project_root;
+  Ok(())
+}
+
+fn formatted_text(node: &str, info: &Value) -> String {
   let mut lines = vec![
     "--------------------------------------------------------------------------".to_string(),
     format!("All build information from hvigor node '{node}'"),
     "--------------------------------------------------------------------------".to_string(),
   ];
   append_formatted_recursively(info, &mut lines, 0);
-  let mut stdout = std::io::stdout().lock();
-  for line in lines {
-    writeln!(stdout, "{line}")?;
-  }
-  let _ = project_root;
-  Ok(())
+  lines.join(if cfg!(windows) { "\r\n" } else { "\n" })
 }
 
 /// `createFormatInfoRecursively`: objects/arrays recurse with depth prefix,

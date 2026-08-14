@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use arkdown_config::{
-    build_profile::BuildOptionProfileInventory, ArkdownCustomConfig,
-};
+use arkdown_config::{build_profile::BuildOptionProfileInventory, ArkdownCustomConfig};
 
 use crate::artifacts::layout::ArtifactLayout;
 use crate::dependency_graph::snapshot::DependencyGraphSnapshot;

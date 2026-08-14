@@ -17,8 +17,17 @@ impl<'a> SigningConfigMaterial<'a> {
     }
 
     pub(crate) fn plan(&self, input: &Path, output: &Path) -> Result<SignPlan, SignError> {
+        Ok(SignPlan::new(
+            input.to_path_buf(),
+            output.to_path_buf(),
+            self.material()?,
+            DEFAULT_COMPATIBLE_VERSION,
+        ))
+    }
+
+    pub(crate) fn material(&self) -> Result<SigningMaterial, SignError> {
         let material_dir = self.material_dir();
-        let material = SigningMaterial {
+        Ok(SigningMaterial {
             keystore_path: self.config.store_file.clone(),
             key_alias: self.config.key_alias.clone(),
             store_password: self.password(
@@ -35,13 +44,7 @@ impl<'a> SigningConfigMaterial<'a> {
             cert_path: self.config.cert_path.clone(),
             sign_alg: self.config.sign_alg.clone(),
             profile_signed: true,
-        };
-        Ok(SignPlan::new(
-            input.to_path_buf(),
-            output.to_path_buf(),
-            material,
-            DEFAULT_COMPATIBLE_VERSION,
-        ))
+        })
     }
 
     fn password(

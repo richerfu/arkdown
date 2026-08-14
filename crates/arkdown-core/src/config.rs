@@ -2,13 +2,34 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Debug or Release build.
+/// Hvigor build mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildMode {
     /// No optimization, debug info included, no obfuscation.
     Debug,
     /// Tree-shaking, optimization, obfuscation (if configured).
     Release,
+    /// Device-test build. Hvigor preserves the `test` mode for target and
+    /// build-option binding, while its preset compile behavior is debug-like.
+    Test,
+}
+
+impl BuildMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+            Self::Test => "test",
+        }
+    }
+
+    pub const fn is_debuggable(&self) -> bool {
+        matches!(self, Self::Debug | Self::Test)
+    }
+
+    pub const fn is_release(&self) -> bool {
+        matches!(self, Self::Release)
+    }
 }
 
 /// The target artifact type.
@@ -297,6 +318,10 @@ pub struct NativeLibOption {
     /// Native C/C++ header directories exported under `include/` in HARs.
     #[serde(default)]
     pub header_paths: Vec<PathBuf>,
+    /// `nativeLib.librariesInfo`: link-interface metadata exported through
+    /// ConfigureCmake-generated imported targets.
+    #[serde(default)]
+    pub libraries_info: Vec<NativeLibraryInfo>,
     /// Whether transitive HAR runtime libraries are excluded from HAR output.
     #[serde(default = "default_true")]
     pub exclude_from_har: bool,
@@ -311,6 +336,11 @@ pub struct NativeLibOption {
     /// Native debug-symbol/strip policy.
     #[serde(default)]
     pub debug_symbol: NativeDebugSymbolOption,
+    /// Whether `nativeLib.debugSymbol` was present in the effective Hvigor
+    /// configuration. The SDK omits `debugSymbol` from native cache JSON when
+    /// the option is absent, even though strip behavior still defaults true.
+    #[serde(skip)]
+    pub debug_symbol_configured: bool,
 }
 
 impl Default for NativeLibOption {
@@ -319,12 +349,22 @@ impl Default for NativeLibOption {
             collect_all_libs: false,
             filter: NativeLibFilterOption::default(),
             header_paths: Vec::new(),
+            libraries_info: Vec::new(),
             exclude_from_har: true,
             exclude_so_from_interface_har: false,
             exclude_so_from_binxo: Vec::new(),
             debug_symbol: NativeDebugSymbolOption::default(),
+            debug_symbol_configured: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeLibraryInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub link_libraries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -403,10 +443,45 @@ pub struct NativeLibPackageSelection {
 pub struct StrictModeConfig {
     pub case_sensitive_check: bool,
     pub use_normalized_ohm_url: bool,
+    /// `strictMode.noExternalImportByPath`; absence is significant because
+    /// hvigor defaults it to `true` only when normalized OHM URLs are enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_external_import_by_path: Option<bool>,
     /// Project APP preflight from hvigor's
     /// `DuplicateDependencyCheck.doTaskAction`.
     #[serde(default)]
     pub duplicate_dependency_check: bool,
+}
+
+impl StrictModeConfig {
+    /// Effective value returned by hvigor
+    /// `TargetTaskService.isNoExternalImportByPath()`.
+    pub fn is_no_external_import_by_path(&self) -> bool {
+        self.no_external_import_by_path
+            .unwrap_or(self.use_normalized_ohm_url)
+    }
+}
+
+#[cfg(test)]
+mod strict_mode_tests {
+    use super::StrictModeConfig;
+
+    #[test]
+    fn no_external_import_defaults_to_normalized_ohm_url_like_hvigor() {
+        let normalized = StrictModeConfig {
+            case_sensitive_check: false,
+            use_normalized_ohm_url: true,
+            no_external_import_by_path: None,
+            duplicate_dependency_check: false,
+        };
+        assert!(normalized.is_no_external_import_by_path());
+
+        let explicitly_relaxed = StrictModeConfig {
+            no_external_import_by_path: Some(false),
+            ..normalized
+        };
+        assert!(!explicitly_relaxed.is_no_external_import_by_path());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -629,6 +704,9 @@ pub struct ResOptions {
     /// bundled-resource map (`har-target-util.js::isNeedExclude`).
     #[serde(default)]
     pub exclude_har_res: Vec<String>,
+    /// `resOptions.idDefinedFilePath`; relative paths are project-root based.
+    #[serde(default)]
+    pub id_defined_file_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

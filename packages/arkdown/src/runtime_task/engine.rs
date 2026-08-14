@@ -191,6 +191,35 @@ impl RuntimeTaskEngine {
       })
   }
 
+  pub async fn modify_native_command(
+    &mut self,
+    native_event_json: String,
+  ) -> Result<Vec<String>, RuntimeTaskEngineError> {
+    let operation = RuntimeTaskOperation {
+      phase: RuntimeTaskOperationPhase::ModifyNativeCommand,
+      task_path: None,
+      error: None,
+      native_event_json: Some(native_event_json),
+    };
+    let result =
+      self
+        .callback
+        .invoke(operation)
+        .await
+        .map_err(|source| RuntimeTaskEngineError::Callback {
+          phase: "modifyNativeCommand",
+          task: "<native-command>".to_string(),
+          source,
+        })?;
+    result
+      .command
+      .ok_or_else(|| RuntimeTaskEngineError::Callback {
+        phase: "modifyNativeCommand",
+        task: "<native-command>".to_string(),
+        source: anyhow::anyhow!("JavaScript command modifier returned no command array"),
+      })
+  }
+
   pub async fn execute_command_roots(&mut self) -> Result<Vec<String>, RuntimeTaskEngineError> {
     self.begin_cycle();
     let roots = self.command_roots.clone();
@@ -276,6 +305,7 @@ impl RuntimeTaskEngine {
     if self.completed.contains(&id) {
       return Ok(());
     }
+    self.realize_lazy_task(id).await?;
     let task = self.graph.task(id).descriptor.clone();
     if !task.enabled {
       self.completed.insert(id);
@@ -289,6 +319,48 @@ impl RuntimeTaskEngine {
       return Err(error);
     }
     self.completed.insert(id);
+    Ok(())
+  }
+
+  async fn realize_lazy_task(&mut self, id: RuntimeTaskId) -> Result<(), RuntimeTaskEngineError> {
+    if !self.graph.task(id).descriptor.lazy {
+      return Ok(());
+    }
+    let update = self
+      .invoke_task(id, RuntimeTaskOperationPhase::Realize)
+      .await?;
+    let descriptor = &mut self.graph.task_mut(id).descriptor;
+    descriptor.lazy = false;
+    if let Some(enabled) = update.enabled {
+      descriptor.enabled = enabled;
+    }
+    if let Some(track_state) = update.track_state {
+      descriptor.track_state = track_state;
+    }
+    if let Some(refresh_declarations) = update.refresh_declarations {
+      descriptor.refresh_declarations = refresh_declarations;
+    }
+    if let Some(has_before_run) = update.has_before_run {
+      descriptor.has_before_run = has_before_run;
+    }
+    if let Some(has_after_run) = update.has_after_run {
+      descriptor.has_after_run = has_after_run;
+    }
+    if let Some(has_failed) = update.has_failed {
+      descriptor.has_failed = has_failed;
+    }
+    if let Some(has_task_should_do) = update.has_task_should_do {
+      descriptor.has_task_should_do = has_task_should_do;
+    }
+    if let Some(properties) = update.input_properties {
+      descriptor.input_properties = properties;
+    }
+    if let Some(files) = update.input_files {
+      descriptor.input_files = files;
+    }
+    if let Some(files) = update.output_files {
+      descriptor.output_files = files;
+    }
     Ok(())
   }
 
@@ -439,12 +511,14 @@ impl RuntimeTaskEngine {
   const fn phase_name(phase: RuntimeTaskOperationPhase) -> &'static str {
     match phase {
       RuntimeTaskOperationPhase::BeforeAlways => "beforeAlways",
+      RuntimeTaskOperationPhase::Realize => "realize",
       RuntimeTaskOperationPhase::TaskShouldDo => "taskShouldDo",
       RuntimeTaskOperationPhase::BeforeRun => "beforeRun",
       RuntimeTaskOperationPhase::Run => "run",
       RuntimeTaskOperationPhase::AfterRun => "afterRun",
       RuntimeTaskOperationPhase::Failed => "failed",
       RuntimeTaskOperationPhase::TransformAbc => "transformAbc",
+      RuntimeTaskOperationPhase::ModifyNativeCommand => "modifyNativeCommand",
     }
   }
 }
@@ -463,6 +537,7 @@ mod tests {
     task_should_do: Option<bool>,
     fail_run_for: Option<String>,
     command_output: BTreeMap<String, Vec<String>>,
+    realize_with_hooks: bool,
   }
 
   #[async_trait]
@@ -484,6 +559,13 @@ mod tests {
         anyhow::bail!("fixture run failed");
       }
       Ok(RuntimeTaskCallbackResult {
+        enabled: matches!(phase, RuntimeTaskOperationPhase::Realize).then_some(true),
+        has_before_run: (matches!(phase, RuntimeTaskOperationPhase::Realize)
+          && self.realize_with_hooks)
+          .then_some(true),
+        has_after_run: (matches!(phase, RuntimeTaskOperationPhase::Realize)
+          && self.realize_with_hooks)
+          .then_some(true),
         task_should_do: self.task_should_do,
         output: if matches!(phase, RuntimeTaskOperationPhase::Run) {
           self
@@ -506,6 +588,7 @@ mod tests {
       task_name: path.rsplit(':').next().unwrap().to_string(),
       built_in,
       project_task: false,
+      lazy: false,
       enabled: true,
       track_state: false,
       refresh_declarations: false,
@@ -570,6 +653,38 @@ mod tests {
         "beforeRun:entry:custom",
         "run:entry:custom",
         "afterRun:entry:custom",
+      ]
+    );
+  }
+
+  #[tokio::test]
+  async fn lazy_javascript_task_is_realized_only_when_selected_for_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let mut lazy = task("entry:lazy", false, &[]);
+    lazy.lazy = true;
+    lazy.has_before_run = false;
+    lazy.has_after_run = false;
+    let mut engine = RuntimeTaskEngine::new(
+      vec![lazy],
+      selection(root.path(), "entry:lazy", false),
+      Box::new(RecordingCallback {
+        operations: Arc::clone(&operations),
+        realize_with_hooks: true,
+        ..RecordingCallback::default()
+      }),
+    )
+    .unwrap();
+
+    engine.execute_command_roots().await.unwrap();
+
+    assert_eq!(
+      operations.lock().unwrap().as_slice(),
+      [
+        "realize:entry:lazy",
+        "beforeRun:entry:lazy",
+        "run:entry:lazy",
+        "afterRun:entry:lazy",
       ]
     );
   }

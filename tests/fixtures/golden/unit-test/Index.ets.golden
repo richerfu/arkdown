@@ -9,8 +9,8 @@
     const savePath = '__savePath__';
     const readPath = '__readPath__';
     const testMode: string = '__testMode__';
-    global[savePath] = "/Volumes/PSSD/code/arkdown/tests/fixtures/minimal-hap/entry/.test/default/intermediates/test/coverage_data/js_coverage.json";
-    global[readPath] = "/Volumes/PSSD/code/arkdown/tests/fixtures/minimal-hap/entry/.test/default/intermediates/test/coverage_data/js_coverage.json"
+    global[savePath] = "__MODULE_PATH__/.test/default/intermediates/test/coverage_data/js_coverage.json";
+    global[readPath] = "__MODULE_PATH__/.test/default/intermediates/test/coverage_data/js_coverage.json"
     global[testMode] = 'unitTest';
 
     @Entry

@@ -76,6 +76,7 @@ fn runtime_planner_selects_targets_and_merges_build_options_in_rust() {
         build_mode_name: "debug".to_string(),
         module_selection: Some("entry@phone".to_string()),
         build_target_name: None,
+        device_test: false,
     };
 
     let plan = BuildScriptRuntimePlanner::new(request)
@@ -144,6 +145,7 @@ fn runtime_planner_excludes_ohos_test_from_hvigor_implicit_all() {
         build_mode_name: "debug".to_string(),
         module_selection: None,
         build_target_name: None,
+        device_test: false,
     })
     .plan()
     .expect("plan implicit targets");
@@ -183,6 +185,7 @@ fn runtime_planner_selects_module_ohos_test_missing_from_project_target_mapping(
         build_mode_name: "debug".to_string(),
         module_selection: None,
         build_target_name: Some("ohosTest".to_string()),
+        device_test: false,
     })
     .plan()
     .expect("plan explicit ohosTest target");
@@ -219,6 +222,7 @@ fn runtime_planner_returns_typed_unknown_target_diagnostic() {
         build_mode_name: "debug".to_string(),
         module_selection: Some("entry@missing".to_string()),
         build_target_name: None,
+        device_test: false,
     };
 
     let diagnostic = BuildScriptRuntimePlanner::new(request)
@@ -263,6 +267,7 @@ fn runtime_planner_resolves_compile_plugin_paths_inside_module_boundary() {
         build_mode_name: "debug".to_string(),
         module_selection: None,
         build_target_name: None,
+        device_test: false,
     };
 
     let plan = BuildScriptRuntimePlanner::new(request)
@@ -272,4 +277,93 @@ fn runtime_planner_resolves_compile_plugin_paths_inside_module_boundary() {
     assert_eq!(plan.compile_plugin_records[0].file, plugin_file);
     assert_eq!(plan.compile_plugin_records[0].module_root, module_root);
     assert_eq!(plan.compile_plugin_records[0].target_name, "default");
+}
+
+#[test]
+fn runtime_planner_device_test_selects_default_and_ohos_test_targets() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    std::fs::create_dir_all(&module_root).expect("create module");
+    let plan = BuildScriptRuntimePlanner::new(BuildScriptRuntimePlanRequest {
+        project_root: temp.path().to_path_buf(),
+        project_profile: json!({
+            "app": { "products": [{ "name": "default" }] },
+            "modules": [{
+                "name": "entry",
+                "srcPath": "./entry",
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }]
+        }),
+        modules: vec![BuildScriptRuntimeModulePlanRequest {
+            name: "entry".to_string(),
+            root: module_root,
+            descriptor: json!({
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }),
+            build_profile: json!({
+                "targets": [
+                    { "name": "default" },
+                    { "name": "ohosTest" },
+                    { "name": "phone" }
+                ]
+            }),
+            build_script_override: None,
+        }],
+        product_name: "default".to_string(),
+        build_mode_name: "test".to_string(),
+        module_selection: Some("entry@phone".to_string()),
+        build_target_name: Some("phone".to_string()),
+        device_test: true,
+    })
+    .plan()
+    .expect("plan device-test targets");
+
+    let names = plan.modules[0]
+        .selected_targets
+        .iter()
+        .map(|target| target["name"].as_str().expect("target name"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["default", "ohosTest"]);
+}
+
+#[test]
+fn module_specific_selection_keeps_other_module_targets_registered_like_hvigor() {
+    let temp = tempfile::tempdir().expect("temp project");
+    let entry_root = temp.path().join("entry");
+    let library_root = temp.path().join("library");
+    std::fs::create_dir_all(&entry_root).expect("create entry");
+    std::fs::create_dir_all(&library_root).expect("create library");
+    let modules = [(&entry_root, "entry"), (&library_root, "library")]
+        .into_iter()
+        .map(|(root, name)| BuildScriptRuntimeModulePlanRequest {
+            name: name.to_string(),
+            root: root.to_path_buf(),
+            descriptor: json!({
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }),
+            build_profile: json!({ "targets": [{ "name": "default" }] }),
+            build_script_override: None,
+        })
+        .collect();
+    let plan = BuildScriptRuntimePlanner::new(BuildScriptRuntimePlanRequest {
+        project_root: temp.path().to_path_buf(),
+        project_profile: json!({
+            "app": { "products": [{ "name": "default" }] },
+            "modules": [
+                { "name": "entry", "srcPath": "./entry" },
+                { "name": "library", "srcPath": "./library" }
+            ]
+        }),
+        modules,
+        product_name: "default".to_string(),
+        build_mode_name: "debug".to_string(),
+        module_selection: Some("entry@default".to_string()),
+        build_target_name: None,
+        device_test: false,
+    })
+    .plan()
+    .expect("plan module-specific selection");
+
+    assert_eq!(plan.modules[0].selected_targets[0]["name"], "default");
+    assert_eq!(plan.modules[1].selected_targets[0]["name"], "default");
 }

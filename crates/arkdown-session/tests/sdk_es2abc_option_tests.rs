@@ -38,7 +38,9 @@ fn probe_accepts_options_from_stdout_and_stderr_on_nonzero_help_exit() {
         "#!/bin/sh\nprintf '  --target-api-version=<value>\\n'\nprintf '  --enable-release-column\\n' >&2\nexit 1\n",
     )
     .expect("write fake compiler");
-    let mut permissions = fs::metadata(&compiler).expect("compiler metadata").permissions();
+    let mut permissions = fs::metadata(&compiler)
+        .expect("compiler metadata")
+        .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&compiler, permissions).expect("make fake compiler executable");
 

@@ -16,6 +16,29 @@ pub(super) struct IntermediateArtifactWriter {
   restool_layout: RestoolLayout,
 }
 
+/// One entry-module projection emitted for a feature module by Hvigor's
+/// `AbstractGenerateMetadata.generateFeatureMetadata`.
+pub(super) struct RelatedEntryMetadata {
+  pub(super) module_name: String,
+  pub(super) device_types: Vec<String>,
+  pub(super) distro_filter: Option<serde_json::Value>,
+}
+
+/// Stable inputs owned by the `GenerateMetadata` task action.
+pub(super) struct PackageMetadataInput<'a> {
+  pub(super) project_root: &'a Path,
+  pub(super) module_root: &'a Path,
+  pub(super) output_target: &'a OutputTarget,
+  pub(super) product_name: &'a str,
+  pub(super) target_name: &'a str,
+  pub(super) module_name: &'a str,
+  pub(super) module_type: &'a OhosModuleType,
+  pub(super) artifact_name: Option<&'a str>,
+  pub(super) device_types: &'a [String],
+  pub(super) is_signed: bool,
+  pub(super) related_entries: Vec<RelatedEntryMetadata>,
+}
+
 /// SDK-specific package handoff for the aggregated source map.
 ///
 /// HAP/HSP and source HAR stages materialize `intermediates/source_map`, while
@@ -125,10 +148,12 @@ impl IntermediateArtifactWriter {
   pub(super) fn write_module_info(
     &self,
     module_root: &Path,
+    product_name: &str,
     target_name: &str,
     should_write: bool,
   ) -> Result<()> {
-    let output = ModuleBuildLayout::new(module_root).generated_module_info(target_name);
+    let output =
+      ModuleBuildLayout::for_product(module_root, product_name).generated_module_info(target_name);
     if output.is_file() {
       fs_err::remove_file(&output)?;
     }
@@ -149,7 +174,7 @@ impl IntermediateArtifactWriter {
     res_out: &Path,
   ) -> Result<()> {
     if loader_json.router_map.is_empty() {
-      return self.write_empty_router_map_intermediates(&module.src_path);
+      return self.write_empty_router_map_intermediates(&module.src_path, &config.product.name);
     }
 
     let loader_router_map = serde_json::json!({
@@ -177,7 +202,7 @@ impl IntermediateArtifactWriter {
             })
             .collect::<Vec<_>>()
     });
-    let module_layout = ModuleBuildLayout::new(&module.src_path);
+    let module_layout = ModuleBuildLayout::for_product(&module.src_path, &config.product.name);
     self.write_router_map_task_outputs(&module_layout, &loader_router_map, &temp_router_map)?;
     let resource_layout = ResourceOutputLayout::new(res_out);
     self.write_bytes(
@@ -190,10 +215,14 @@ impl IntermediateArtifactWriter {
   /// Latest IDE owner: `ProcessRouterMap.generateTempRouterMap` always writes
   /// both task outputs when its router-map input is an empty array. The
   /// resource profile remains absent because there is no route to advertise.
-  pub(super) fn write_empty_router_map_intermediates(&self, module_root: &Path) -> Result<()> {
+  pub(super) fn write_empty_router_map_intermediates(
+    &self,
+    module_root: &Path,
+    product_name: &str,
+  ) -> Result<()> {
     let empty_router_map = serde_json::json!({ "routerMap": [] });
     self.write_router_map_task_outputs(
-      &ModuleBuildLayout::new(module_root),
+      &ModuleBuildLayout::for_product(module_root, product_name),
       &empty_router_map,
       &empty_router_map,
     )
@@ -402,19 +431,35 @@ impl IntermediateArtifactWriter {
     })
   }
 
-  pub(super) fn write_profile_intermediates(
+  pub(super) fn write_merge_profile_intermediate(
     &self,
-    module_root: &Path,
-    output_target: &OutputTarget,
-    target_name: &str,
-    final_module_json: &Path,
+    module_layout: &ModuleBuildLayout<'_>,
+    final_value: &serde_json::Value,
+    current_extension_ability_count: usize,
+  ) -> Result<()> {
+    let mut merge_value = self.profile_without_resource_ids(final_value.clone());
+    self.retain_current_extension_abilities(&mut merge_value, current_extension_ability_count);
+    if let Some(module) = merge_value
+      .get_mut("module")
+      .and_then(|value| value.as_object_mut())
+    {
+      // Hvigor's MergeProfile contains only the current module's extension
+      // abilities. ProcessProfile subsequently appends dependency HAR
+      // extension abilities and its runtime compiler fields.
+      module.remove("virtualMachine");
+      module.remove("compileMode");
+      module.remove("dependencies");
+    }
+    self.write_profile_json(&module_layout.merge_profile_module_json(), &merge_value)
+  }
+
+  pub(super) fn write_process_profile_intermediates(
+    &self,
+    module_layout: &ModuleBuildLayout<'_>,
+    final_value: &serde_json::Value,
     current_extension_ability_count: usize,
     form_widget_abilities: &[serde_json::Value],
   ) -> Result<()> {
-    let content = fs_err::read_to_string(final_module_json)?;
-    let final_value: serde_json::Value = serde_json::from_str(&content)?;
-    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root, target_name);
-
     let process_value = self.profile_without_resource_ids(final_value.clone());
     self.write_profile_json(&module_layout.process_profile_module_json(), &process_value)?;
 
@@ -441,23 +486,6 @@ impl IntermediateArtifactWriter {
       }
     }
     self.write_json_minified(&module_layout.res_ark_module_json(), &resource_ark_value)?;
-
-    let mut merge_value = process_value;
-    self.retain_current_extension_abilities(&mut merge_value, current_extension_ability_count);
-    if let Some(module) = merge_value
-      .get_mut("module")
-      .and_then(|value| value.as_object_mut())
-    {
-      // Hvigor's MergeProfile contains only the current module's extension
-      // abilities. ProcessProfile subsequently appends dependency HAR
-      // extension abilities. ModuleJsonWriter has already produced the latter
-      // shape, with current entries first, so restore the earlier stage by
-      // retaining exactly the source module's typed entry count.
-      module.remove("virtualMachine");
-      module.remove("compileMode");
-      module.remove("dependencies");
-    }
-    self.write_profile_json(&module_layout.merge_profile_module_json(), &merge_value)?;
 
     Ok(())
   }
@@ -580,8 +608,12 @@ impl IntermediateArtifactWriter {
     let project_root = canonical_or_owned(project_root);
     let module_root = canonical_or_owned(&module.src_path);
     let res_out = canonical_or_owned(res_out);
-    let module_layout =
-        ModuleBuildLayout::for_output_target(&config.output_target, &module_root, target_name);
+    let module_layout = ModuleBuildLayout::for_output_target_product(
+      &config.output_target,
+      &module_root,
+      &config.product.name,
+      target_name,
+    );
     let resource_layout = ResourceOutputLayout::new(&res_out);
     let project_layout = ProjectBuildLayout::new(&project_root);
     let extension_path = self
@@ -1095,49 +1127,169 @@ impl IntermediateArtifactWriter {
     Ok(())
   }
 
-  /// Write the package output metadata produced by hvigor's
-  /// `AbstractGenerateMetadata`. HAP and HSP use distinct directories and
-  /// artifact-name keys, while optional remote-HSP metadata is omitted when
-  /// no remote HSPs are signed.
-  pub(super) fn write_package_metadata(
-    &self,
-    module_root: &Path,
-    output_target: &OutputTarget,
-    artifact_name: &str,
-    device_types: &[String],
-    is_signed: bool,
-  ) -> Result<()> {
-    let module_layout = ModuleBuildLayout::for_output_target(output_target, module_root, "default");
-    let (metadata_path, name_key) = match output_target {
-      OutputTarget::Hsp => (module_layout.hsp_metadata_output_json(), "hspName"),
-      OutputTarget::Hap | OutputTarget::Preview | OutputTarget::Test => {
-        (module_layout.hap_metadata_output_json(), "hapName")
-      }
-      OutputTarget::Har => anyhow::bail!("HAR builds do not generate HAP/HSP output metadata"),
+  /// Execute Hvigor 6.24.3 `AbstractGenerateMetadata.doTaskAction` before
+  /// packaging. The task predicts the output name from target configuration;
+  /// it does not inspect a package that has already been produced.
+  pub(super) fn write_package_metadata(&self, input: PackageMetadataInput<'_>) -> Result<()> {
+    if matches!(input.module_type, OhosModuleType::Har) && input.target_name != "ohosTest" {
+      return Ok(());
+    }
+    let module_layout = ModuleBuildLayout::for_output_target_product(
+      input.output_target,
+      input.module_root,
+      input.product_name,
+      input.target_name,
+    );
+    let metadata_path = if matches!(input.module_type, OhosModuleType::Shared) {
+      module_layout.hsp_metadata_output_json()
+    } else {
+      module_layout.hap_metadata_output_json()
     };
     if let Some(parent) = metadata_path.parent() {
       fs_err::create_dir_all(parent)?;
     }
-    let device_types = if device_types.is_empty() {
+    let device_types = if input.device_types.is_empty() {
       vec!["phone".to_string()]
     } else {
-      device_types.to_vec()
+      input.device_types.to_vec()
     };
-    let mut entry = serde_json::Map::new();
-    entry.insert(
-      name_key.to_string(),
-      serde_json::Value::String(artifact_name.to_string()),
-    );
-    entry.insert(
-      "deviceTypes".to_string(),
-      serde_json::to_value(device_types)?,
-    );
-    entry.insert("isSigned".to_string(), serde_json::Value::Bool(is_signed));
-    let metadata = serde_json::Value::Array(vec![serde_json::Value::Object(entry)]);
+    let remote_hsps =
+      self.signed_remote_hsp_metadata(input.project_root, input.product_name, input.is_signed)?;
+    let related_entries: &[RelatedEntryMetadata] = if matches!(
+      input.module_type,
+      OhosModuleType::Feature
+    ) && !input.related_entries.is_empty()
+    {
+      &input.related_entries
+    } else {
+      &[]
+    };
+    let metadata_entries = if related_entries.is_empty() {
+      vec![self.package_metadata_entry(&input, &device_types, None, remote_hsps.as_ref())]
+    } else {
+      related_entries
+        .iter()
+        .map(|related| {
+          self.package_metadata_entry(&input, &device_types, Some(related), remote_hsps.as_ref())
+        })
+        .collect()
+    };
+    let metadata = serde_json::Value::Array(metadata_entries);
     let mut content = serde_json::to_string(&metadata)?;
     content.push('\n');
     fs_err::write(metadata_path, content.as_bytes())?;
     Ok(())
+  }
+
+  fn package_metadata_entry(
+    &self,
+    input: &PackageMetadataInput<'_>,
+    device_types: &[String],
+    related_entry: Option<&RelatedEntryMetadata>,
+    remote_hsps: Option<&serde_json::Value>,
+  ) -> serde_json::Value {
+    let extension = if matches!(input.module_type, OhosModuleType::Shared) {
+      "hsp"
+    } else {
+      "hap"
+    };
+    let default_base = related_entry.map_or_else(
+      || format!("{}-{}", input.module_name, input.target_name),
+      |related| {
+        format!(
+          "{}-{}-{}",
+          input.module_name, related.module_name, input.target_name
+        )
+      },
+    );
+    let package_name = if let Some(artifact_name) = input.artifact_name {
+      if input.is_signed {
+        format!("{artifact_name}.{extension}")
+      } else {
+        format!("{artifact_name}-unsigned.{extension}")
+      }
+    } else if input.is_signed {
+      format!("{default_base}-signed.{extension}")
+    } else {
+      format!("{default_base}-unsigned.{extension}")
+    };
+
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+      if matches!(input.module_type, OhosModuleType::Shared) {
+        "hspName"
+      } else {
+        "hapName"
+      }
+      .to_string(),
+      package_name.into(),
+    );
+    entry.insert("deviceTypes".to_string(), serde_json::json!(device_types));
+    entry.insert("isSigned".to_string(), input.is_signed.into());
+    if let Some(related) = related_entry {
+      let related_device_types = if related.device_types.is_empty() {
+        vec!["phone".to_string()]
+      } else {
+        related.device_types.clone()
+      };
+      entry.insert(
+        "entryModule".to_string(),
+        serde_json::json!({
+          "moduleName": related.module_name,
+          "distroFilter": related.distro_filter,
+          "deviceType": related_device_types,
+        }),
+      );
+    }
+    if let Some(remote_hsps) = remote_hsps {
+      entry.insert("dependRemoteHsps".to_string(), remote_hsps.clone());
+    }
+    serde_json::Value::Object(entry)
+  }
+
+  fn signed_remote_hsp_metadata(
+    &self,
+    project_root: &Path,
+    product_name: &str,
+    is_signed: bool,
+  ) -> Result<Option<serde_json::Value>> {
+    if !is_signed {
+      return Ok(None);
+    }
+    let cache_path = project_root
+      .join("build")
+      .join("cache")
+      .join(product_name)
+      .join("remote_hsp")
+      .join("remoteHspCache.json");
+    if !cache_path.is_file() {
+      return Ok(Some(serde_json::Value::Array(Vec::new())));
+    }
+    let cache: serde_json::Value = serde_json::from_slice(&fs_err::read(&cache_path)?)?;
+    let entries = cache
+      .get("signedRemoteHsps")
+      .and_then(serde_json::Value::as_object)
+      .into_iter()
+      .flat_map(|entries| entries.values())
+      .map(|entry| {
+        let signed_path = entry
+          .get("signedRemoteHspPath")
+          .or_else(|| entry.get("signedHspPath"))
+          .and_then(serde_json::Value::as_str)
+          .unwrap_or_default();
+        let hsp_name = Path::new(signed_path)
+          .file_name()
+          .and_then(|name| name.to_str())
+          .unwrap_or_default();
+        serde_json::json!({
+          "hspName": hsp_name,
+          "hspVersion": entry.get("version").cloned().unwrap_or(serde_json::Value::Null),
+          "hspPath": signed_path,
+          "soPath": entry.get("soPath").cloned().unwrap_or_else(|| "".into()),
+        })
+      })
+      .collect::<Vec<_>>();
+    Ok(Some(serde_json::Value::Array(entries)))
   }
 
   pub(super) fn extract_zip_entry(

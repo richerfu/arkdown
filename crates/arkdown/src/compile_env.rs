@@ -256,10 +256,7 @@ impl<'a> CompileEnvironmentBuildMode<'a> {
     }
 
     fn as_str(&self) -> &'static str {
-        match self.value {
-            BuildMode::Debug => "debug",
-            BuildMode::Release => "release",
-        }
+        self.value.as_str()
     }
 }
 

@@ -12,9 +12,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use oxc_allocator::{Allocator, CloneIn};
-use oxc_ast::ast::{
-    ImportDeclaration, ImportDeclarationSpecifier, Program, Statement,
-};
+use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, Program, Statement};
 use oxc_ast::AstBuilder;
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
@@ -45,8 +43,12 @@ pub(crate) fn apply_to_program<'a>(
     if !expand.enable {
         return false;
     }
-    let rewriter =
-        ImportPathExpander::new(id, &expand.exclude, &options.sources, &options.hsp_har_package_names);
+    let rewriter = ImportPathExpander::new(
+        id,
+        &expand.exclude,
+        &options.sources,
+        &options.hsp_har_package_names,
+    );
     rewriter.expand(program, allocator)
 }
 
@@ -149,7 +151,10 @@ impl<'a> ImportPathExpander<'a> {
             || specifier.contains("@ohos.")
             || specifier.contains("@arkts.")
             || (specifier.starts_with("lib") && specifier.ends_with(".so"))
-            || self.exclude.iter().any(|excluded| excluded.as_str() == specifier)
+            || self
+                .exclude
+                .iter()
+                .any(|excluded| excluded.as_str() == specifier)
             || self.hsp_har_package_names.contains(specifier)
         {
             return Vec::new();
@@ -160,12 +165,10 @@ impl<'a> ImportPathExpander<'a> {
         let Some(import_specifiers) = import.specifiers.as_ref() else {
             return Vec::new();
         };
-        if import_specifiers.iter().any(|s| {
-            matches!(
-                s,
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)
-            )
-        }) {
+        if import_specifiers
+            .iter()
+            .any(|s| matches!(s, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)))
+        {
             return Vec::new();
         }
 
@@ -175,8 +178,9 @@ impl<'a> ImportPathExpander<'a> {
             .last()
             .map(|candidate| candidate.package_name().to_string())
             .unwrap_or_else(|| specifier.to_string());
-        let Some(entry) =
-            self.sources.resolve_static_with_declarations(Path::new(self.importer), specifier)
+        let Some(entry) = self
+            .sources
+            .resolve_static_with_declarations(Path::new(self.importer), specifier)
         else {
             return Vec::new();
         };
@@ -247,8 +251,7 @@ impl<'a> ImportPathExpander<'a> {
                     }
                 }
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                    let imported_name =
-                        specifier.imported.name().as_str();
+                    let imported_name = specifier.imported.name().as_str();
                     let Some((decl_file, export_name, is_default)) = self.resolve_symbol(
                         &entry_path,
                         imported_name,
@@ -370,7 +373,14 @@ impl<'a> ImportPathExpander<'a> {
         package_root: &Path,
     ) -> Option<(PathBuf, String, bool)> {
         let mut seen = FxHashSet::default();
-        self.trace_export(entry, symbol, is_default, package_name, package_root, &mut seen)
+        self.trace_export(
+            entry,
+            symbol,
+            is_default,
+            package_name,
+            package_root,
+            &mut seen,
+        )
     }
 
     fn trace_export(
@@ -403,11 +413,7 @@ impl<'a> ImportPathExpander<'a> {
                         let local_name = element.local.name().as_str();
                         let exported_name = element.exported.name().as_str();
                         if exported_name == symbol {
-                            return Some((
-                                file.to_path_buf(),
-                                local_name.to_string(),
-                                is_default,
-                            ));
+                            return Some((file.to_path_buf(), local_name.to_string(), is_default));
                         }
                     }
                 }
@@ -418,10 +424,10 @@ impl<'a> ImportPathExpander<'a> {
                     let Some(source_specifier) = export.source.as_ref() else {
                         continue;
                     };
-                    let Some(resolved) = self.sources.resolve_relative_with_declarations(
-                        file,
-                        source_specifier.value.as_str(),
-                    ) else {
+                    let Some(resolved) = self
+                        .sources
+                        .resolve_relative_with_declarations(file, source_specifier.value.as_str())
+                    else {
                         continue;
                     };
                     for element in &export.specifiers {
@@ -441,10 +447,10 @@ impl<'a> ImportPathExpander<'a> {
                 }
                 // `export * from "./mod"` — recurse for the symbol.
                 Statement::ExportAllDeclaration(export) => {
-                    let Some(resolved) = self.sources.resolve_relative_with_declarations(
-                        file,
-                        export.source.value.as_str(),
-                    ) else {
+                    let Some(resolved) = self
+                        .sources
+                        .resolve_relative_with_declarations(file, export.source.value.as_str())
+                    else {
                         continue;
                     };
                     if let Some(result) = self.trace_export(
@@ -460,11 +466,7 @@ impl<'a> ImportPathExpander<'a> {
                 }
                 // `export default <decl>` — the default export lives here.
                 Statement::ExportDefaultDeclaration(_) if is_default && symbol == "default" => {
-                    return Some((
-                        file.to_path_buf(),
-                        "default".to_string(),
-                        true,
-                    ));
+                    return Some((file.to_path_buf(), "default".to_string(), true));
                 }
                 // Direct `export const/function/class foo` declarations.
                 Statement::ExportNamedDeclaration(export)
@@ -473,11 +475,7 @@ impl<'a> ImportPathExpander<'a> {
                     if let Some(declaration) = export.declaration.as_ref() {
                         let names = declaration_names(declaration);
                         if names.iter().any(|name| name == symbol) {
-                            return Some((
-                                file.to_path_buf(),
-                                symbol.to_string(),
-                                is_default,
-                            ));
+                            return Some((file.to_path_buf(), symbol.to_string(), is_default));
                         }
                     }
                 }
@@ -559,7 +557,12 @@ mod tests {
         TransformSourceSnapshot::new(map)
     }
 
-    fn expand(source: &str, id: &str, options: &TransformOptions, sources: &TransformSourceSnapshot) -> String {
+    fn expand(
+        source: &str,
+        id: &str,
+        options: &TransformOptions,
+        sources: &TransformSourceSnapshot,
+    ) -> String {
         apply(source, id, options, sources).into_owned()
     }
 
@@ -590,7 +593,12 @@ mod tests {
             ),
         ]);
         let source = "import { foo, bar } from '@ohos/mylib';\nconsole.log(foo, bar);";
-        let out = expand(source, "/project/entry/src/main/ets/Index.ets", &options(), &sources);
+        let out = expand(
+            source,
+            "/project/entry/src/main/ets/Index.ets",
+            &options(),
+            &sources,
+        );
         assert!(
             out.contains("import { foo } from \"@ohos/mylib/src/impl\""),
             "got: {out}"
@@ -613,7 +621,12 @@ mod tests {
             "export function foo() {}\n",
         )]);
         let source = "import { foo } from '@ohos/mylib';\nconsole.log(foo);";
-        let out = expand(source, "/project/entry/src/main/ets/Index.ets", &options(), &sources);
+        let out = expand(
+            source,
+            "/project/entry/src/main/ets/Index.ets",
+            &options(),
+            &sources,
+        );
         assert!(
             out.contains("import { foo } from \"@ohos/mylib/Index\""),
             "got: {out}"
@@ -638,8 +651,16 @@ mod tests {
             enable: true,
             exclude: vec!["@ohos/mylib".to_string()],
         });
-        let out = expand(&source, "/project/entry/src/main/ets/Index.ets", &options, &sources);
-        assert!(out.contains("from '@kit.PerformanceAnalysisKit'"), "got: {out}");
+        let out = expand(
+            &source,
+            "/project/entry/src/main/ets/Index.ets",
+            &options,
+            &sources,
+        );
+        assert!(
+            out.contains("from '@kit.PerformanceAnalysisKit'"),
+            "got: {out}"
+        );
         assert!(out.contains("from './local'"), "got: {out}");
         assert!(out.contains("from '@ohos/mylib'"), "got: {out}");
     }
@@ -651,7 +672,12 @@ mod tests {
             "export { foo } from './src/impl';\n",
         )]);
         let source = "import { foo } from '@ohos/mylib';\nconsole.log(foo);";
-        let out = expand(source, "/project/entry/src/main/ets/Index.ets", &TransformOptions::default(), &sources);
+        let out = expand(
+            source,
+            "/project/entry/src/main/ets/Index.ets",
+            &TransformOptions::default(),
+            &sources,
+        );
         assert_eq!(out, source, "disabled expansion must not rewrite");
     }
 }

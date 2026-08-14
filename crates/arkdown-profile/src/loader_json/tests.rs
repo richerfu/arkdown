@@ -9,6 +9,22 @@ use arkdown_core::{
 
 use super::*;
 
+#[test]
+fn compile_lib_entry_property_matches_hvigor_full_compilation_truth_table() {
+    // GenerateLoaderJson.isFullCompilationEnabled in Hvigor 6.24.2:
+    // (!isFormWidget || property !== undefined) && !property.
+    assert!(LoaderCompilationPolicy::default().is_full_compilation_enabled(false));
+    assert!(!LoaderCompilationPolicy::default().is_full_compilation_enabled(true));
+    assert!(LoaderCompilationPolicy::from_hvigor_property(Some(false))
+        .is_full_compilation_enabled(false));
+    assert!(LoaderCompilationPolicy::from_hvigor_property(Some(false))
+        .is_full_compilation_enabled(true));
+    assert!(!LoaderCompilationPolicy::from_hvigor_property(Some(true))
+        .is_full_compilation_enabled(false));
+    assert!(!LoaderCompilationPolicy::from_hvigor_property(Some(true))
+        .is_full_compilation_enabled(true));
+}
+
 fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
     ArkdownConfig {
         project_root: PathBuf::from("/project"),
@@ -27,6 +43,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url,
+                    no_external_import_by_path: None,
                     duplicate_dependency_check: false,
                 },
                 ark_options: None,
@@ -36,7 +53,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                 preload_so: vec![],
                 deduplicate_har: false,
                 enable_source_code_check: true,
-            app_with_signed_pkg: false,
+                app_with_signed_pkg: false,
                 generate_shared_tgz: None,
                 customized_har_base_package: None,
                 remove_permissions: vec![],
@@ -230,7 +247,8 @@ fn test_loader_json_does_not_scan_unreferenced_form_profiles() {
     config.project_root = tmp.path().to_path_buf();
     let mut module_cfg = make_module_cfg();
     module_cfg.src_path = module_root;
-    let loader = LoaderJson::try_generate(&config, &module_cfg, &make_manifest(), "default").unwrap();
+    let loader =
+        LoaderJson::try_generate(&config, &module_cfg, &make_manifest(), "default").unwrap();
 
     assert!(
         !loader
@@ -1148,7 +1166,7 @@ fn test_loader_json_serializes_patch_config_from_build_config() {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let project_root = tmp.path();
     let module_root = project_root.join("entry");
-    let build_config = module_root.join("build/default/config/buildConfig.json");
+    let build_config = module_root.join("build/config/buildConfig.json");
     fs::create_dir_all(build_config.parent().unwrap()).expect("create build config dir");
     fs::write(
         &build_config,
@@ -1185,7 +1203,7 @@ fn test_loader_json_omits_patch_config_for_test_target() {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let project_root = tmp.path();
     let module_root = project_root.join("entry");
-    let build_config = module_root.join("build/default/config/buildConfig.json");
+    let build_config = module_root.join(".test/config/buildConfig.json");
     fs::create_dir_all(build_config.parent().unwrap()).expect("create build config dir");
     fs::write(
         &build_config,
@@ -1210,7 +1228,7 @@ fn test_loader_json_preview_serializes_build_config_path() {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let project_root = tmp.path();
     let module_root = project_root.join("entry");
-    let build_config = module_root.join("build/default/config/buildConfig.json");
+    let build_config = module_root.join(".preview/config/buildConfig.json");
     fs::create_dir_all(build_config.parent().unwrap()).expect("create build config dir");
     fs::write(
         &build_config,
@@ -1231,7 +1249,7 @@ fn test_loader_json_preview_serializes_build_config_path() {
         value
             .get("buildConfigPath")
             .and_then(serde_json::Value::as_str),
-        Some("build/default/config/buildConfig.json")
+        Some(".preview/config/buildConfig.json")
     );
     assert_eq!(
         value
@@ -3323,13 +3341,9 @@ fn test_loader_json_routes_ohos_test_sources_only_to_ohos_test_target() {
 
     let mut ohos_test_config = make_config(false);
     ohos_test_config.project_root = project_root.clone();
-    let ohos_test_loader = LoaderJson::try_generate(
-        &ohos_test_config,
-        &module_cfg,
-        &make_manifest(),
-        "ohosTest",
-    )
-    .expect("generate ohosTest loader");
+    let ohos_test_loader =
+        LoaderJson::try_generate(&ohos_test_config, &module_cfg, &make_manifest(), "ohosTest")
+            .expect("generate ohosTest loader");
     assert!(ohos_test_loader
         .hvigor_compile_entry
         .contains(&to_absolute_path_string(&test_ets.join("TestRunner.ets"))));

@@ -832,8 +832,7 @@ impl LoaderByteCodeHarFields {
     ) -> IndexMap<String, Vec<PathBuf>> {
         let mut grouped: IndexMap<String, Vec<PathBuf>> = IndexMap::new();
         let mut extra_importees: IndexMap<String, Vec<String>> = IndexMap::new();
-        let mut queue =
-            std::collections::VecDeque::<(String, PathBuf, Option<String>)>::new();
+        let mut queue = std::collections::VecDeque::<(String, PathBuf, Option<String>)>::new();
         let mut seen = FxHashSet::default();
 
         Self::enqueue_root_dependencies(module_root, &mut queue);
@@ -847,7 +846,8 @@ impl LoaderByteCodeHarFields {
         }
 
         while let Some((dep_name, issuer_root, topmost)) = queue.pop_front() {
-            for pkg_dir in Self::candidate_dep_dirs(&dep_name, &issuer_root, module_root, project_root)
+            for pkg_dir in
+                Self::candidate_dep_dirs(&dep_name, &issuer_root, module_root, project_root)
             {
                 let root_key = ByteCodeHarScanEntry::path_key(&pkg_dir);
                 if !seen.insert(root_key) {
@@ -866,9 +866,9 @@ impl LoaderByteCodeHarFields {
                 if Self::is_hsp_dependency(&pkg_dir) || Self::is_so_dependency(&dep_name) {
                     continue;
                 }
-                if OhPkgMinimal::load(&issuer_root).is_some_and(|issuer| {
-                    issuer.dev_dependencies.contains_key(&dep_name)
-                }) {
+                if OhPkgMinimal::load(&issuer_root)
+                    .is_some_and(|issuer| issuer.dev_dependencies.contains_key(&dep_name))
+                {
                     continue;
                 }
 
@@ -896,21 +896,17 @@ impl LoaderByteCodeHarFields {
                         if is_har {
                             // `collectSourceCodeHarInfo`: entry file + the
                             // whole `src/main/ets` source tree.
-                            if let Some(entry) =
-                                Self::resolve_package_entry_path(&pkg_dir, &pkg)
-                            {
+                            if let Some(entry) = Self::resolve_package_entry_path(&pkg_dir, &pkg) {
                                 grouped.entry(blocker.to_string()).or_default().push(entry);
                             }
-                            let ets_root =
-                                ProfileModuleLayout::new(&pkg_dir).ets_source_root();
+                            let ets_root = ProfileModuleLayout::new(&pkg_dir).ets_source_root();
                             if ets_root.is_dir() {
                                 grouped
                                     .entry(blocker.to_string())
                                     .or_default()
                                     .extend(Self::collect_code_files(&ets_root));
                             }
-                        } else if let Some(entry) =
-                            Self::resolve_package_entry_path(&pkg_dir, &pkg)
+                        } else if let Some(entry) = Self::resolve_package_entry_path(&pkg_dir, &pkg)
                         {
                             // `collectEntryPath` for ordinary npm packages.
                             grouped.entry(blocker.to_string()).or_default().push(entry);
@@ -1051,12 +1047,9 @@ impl LoaderByteCodeHarFields {
             return;
         };
         let package_name = specifier.package_name();
-        let Some(pkg_root) = Self::resolve_dependency_root(
-            package_name,
-            module_root,
-            module_root,
-            project_root,
-        ) else {
+        let Some(pkg_root) =
+            Self::resolve_dependency_root(package_name, module_root, module_root, project_root)
+        else {
             return;
         };
         let Some(pkg) = OhPkgMinimal::load(&pkg_root) else {
@@ -2649,10 +2642,8 @@ mod tests {
         );
         write_file(&npm_pkg_d.join("index.js"), "export default 4;");
 
-        let grouped = LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
-            tmp.path(),
-            tmp.path(),
-        );
+        let grouped =
+            LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(tmp.path(), tmp.path());
 
         let files = grouped
             .get("bc-har-a")
@@ -2667,15 +2658,18 @@ mod tests {
             })
             .collect();
         assert!(
-            rel.iter().any(|p| p.ends_with("source-har-b/src/main/ets/index.ets")),
+            rel.iter()
+                .any(|p| p.ends_with("source-har-b/src/main/ets/index.ets")),
             "source HAR entry must be collected; got: {rel:?}"
         );
         assert!(
-            rel.iter().any(|p| p.ends_with("source-har-b/src/main/ets/other.ets")),
+            rel.iter()
+                .any(|p| p.ends_with("source-har-b/src/main/ets/other.ets")),
             "source HAR ets tree must be collected; got: {rel:?}"
         );
         assert!(
-            rel.iter().any(|p| p.ends_with("source-har-c/src/main/ets/index.ets")),
+            rel.iter()
+                .any(|p| p.ends_with("source-har-c/src/main/ets/index.ets")),
             "transitive source HAR (two levels below the BC HAR) must be collected; got: {rel:?}"
         );
         assert!(
@@ -2732,10 +2726,8 @@ mod tests {
             "export default 5;",
         );
 
-        let grouped = LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
-            tmp.path(),
-            tmp.path(),
-        );
+        let grouped =
+            LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(tmp.path(), tmp.path());
         let files = grouped.get("bc-har-a").expect("group exists");
         assert!(
             !files
@@ -2775,14 +2767,13 @@ mod tests {
         );
         write_file(&dev_only.join("index.js"), "export default 6;");
 
-        let grouped = LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
-            tmp.path(),
-            tmp.path(),
-        );
+        let grouped =
+            LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(tmp.path(), tmp.path());
         assert!(
-            grouped.values().flatten().all(|path| !path
-                .to_string_lossy()
-                .contains("dev-only")),
+            grouped
+                .values()
+                .flatten()
+                .all(|path| !path.to_string_lossy().contains("dev-only")),
             "devDependencies are dropped from the walk"
         );
     }

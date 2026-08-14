@@ -1,10 +1,154 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use arkdown::SourceMapInputFingerprint;
+use arkdown_session::{ModuleSnapshot, ProjectSnapshot};
+use indexmap::IndexMap;
 use tempfile::TempDir;
 
+use super::coordinator::PackInfoFormResourceResolver;
 use super::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
-use super::layout::RestoolLayout;
+use super::layout::{ModuleBuildLayout, RestoolLayout};
+
+#[test]
+fn make_pack_info_form_profiles_follow_form_widget_module_source_set() {
+  let temp = TempDir::new().expect("create form resource fixture root");
+  let entry_root = temp.path().join("entry");
+  let widget_root = temp.path().join("widget");
+  let default_widget_root = temp.path().join("default-widget");
+  for (root, name, module_type) in [
+    (&entry_root, "entry", "entry"),
+    (&widget_root, "widget", "shared"),
+    (&default_widget_root, "default-widget", "shared"),
+  ] {
+    let source = root.join("src").join("main");
+    std::fs::create_dir_all(&source).expect("create module source set");
+    std::fs::write(
+      source.join("module.json5"),
+      serde_json::json!({
+        "module": {
+          "name": name,
+          "type": module_type
+        }
+      })
+      .to_string(),
+    )
+    .expect("write module manifest");
+  }
+  let widget_test = widget_root.join("src").join("ohosTest");
+  std::fs::create_dir_all(&widget_test).expect("create widget test source set");
+  std::fs::write(
+    widget_test.join("module.json5"),
+    r#"{"module":{"name":"widget_test","type":"shared"}}"#,
+  )
+  .expect("write widget test manifest");
+
+  let mut modules = IndexMap::new();
+  for (root, name) in [
+    (&entry_root, "entry"),
+    (&widget_root, "widget"),
+    (&default_widget_root, "default-widget"),
+  ] {
+    modules.insert(
+      name.to_string(),
+      Arc::new(ModuleSnapshot::from_root(root, name).expect("snapshot module")),
+    );
+  }
+  let project = ProjectSnapshot {
+    root: temp.path().to_path_buf(),
+    bundle_name: "com.example.form".to_string(),
+    version_code: 1,
+    version_name: "1.0.0".to_string(),
+    build_version: None,
+    min_compatible_version_code: None,
+    bundle_type: "app".to_string(),
+    product_name: "default".to_string(),
+    module_order: modules.keys().cloned().collect(),
+    modules,
+    root_package: None,
+    dependency_graphs: IndexMap::new(),
+  };
+  let resolver = PackInfoFormResourceResolver::new(&project);
+
+  let redirected = resolver
+    .resolve(
+      "entry",
+      "ohosTest",
+      &serde_json::json!({
+        "module": { "formWidgetModule": "widget" }
+      }),
+    )
+    .expect("resolve widget test resources");
+  assert_eq!(
+    redirected,
+    [widget_root.join("src").join("ohosTest").join("resources")]
+  );
+
+  let target_fallback = resolver
+    .resolve(
+      "entry",
+      "ohosTest",
+      &serde_json::json!({
+        "module": { "formWidgetModule": "default-widget" }
+      }),
+    )
+    .expect("fall back to widget default resources");
+  assert_eq!(
+    target_fallback,
+    [default_widget_root
+      .join("src")
+      .join("main")
+      .join("resources")]
+  );
+
+  let missing_widget_fallback = resolver
+    .resolve(
+      "entry",
+      "default",
+      &serde_json::json!({
+        "module": { "formWidgetModule": "missing-widget" }
+      }),
+    )
+    .expect("fall back to the current module like FormUtil");
+  assert_eq!(
+    missing_widget_fallback,
+    [entry_root.join("src").join("main").join("resources")]
+  );
+}
+
+#[test]
+fn ohos_test_mock_config_uses_normal_build_target_resources() {
+  let temp = TempDir::new().expect("create ohosTest mock fixture root");
+  let layout = ModuleBuildLayout::for_target_product(temp.path(), "demo", "ohosTest");
+  let input = layout.intermediates_mock_config_json();
+  std::fs::create_dir_all(input.parent().expect("mock input parent"))
+    .expect("create mock input directory");
+  std::fs::write(&input, b"{\"mock\":true}").expect("write transformed mock config");
+
+  super::unit_test::UnitTestArtifactWriter::for_ohos_test(temp.path(), "demo", "ohosTest")
+    .copy_mock_config_json()
+    .expect("copy ohosTest mock config");
+
+  let output = layout.test_mock_config_output_json();
+  assert_eq!(
+    output,
+    temp
+      .path()
+      .join("build")
+      .join("demo")
+      .join("intermediates")
+      .join("res")
+      .join("ohosTest")
+      .join("resources")
+      .join("rawfile")
+      .join("mock")
+      .join("mock-config.json")
+  );
+  assert_eq!(
+    std::fs::read(output).expect("read copied mock config"),
+    b"{\"mock\":true}"
+  );
+}
 
 #[test]
 fn bytecode_har_release_source_maps_move_to_compile_cache_like_hvigor() {
@@ -230,7 +374,7 @@ fn empty_router_map_writes_latest_process_router_map_task_outputs() {
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
-    .write_empty_router_map_intermediates(temp.path())
+    .write_empty_router_map_intermediates(temp.path(), "default")
     .expect("write empty ProcessRouterMap outputs");
 
   for output in [
@@ -252,7 +396,7 @@ fn module_info_writer_matches_latest_conditional_output_and_stale_cleanup() {
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
   writer
-    .write_module_info(&module_root, "default", true)
+    .write_module_info(&module_root, "default", "default", true)
     .expect("write enabled ModuleInfo.ts");
   assert_eq!(
     std::fs::read_to_string(&output).expect("read ModuleInfo.ts"),
@@ -260,7 +404,7 @@ fn module_info_writer_matches_latest_conditional_output_and_stale_cleanup() {
   );
 
   writer
-    .write_module_info(&module_root, "default", false)
+    .write_module_info(&module_root, "default", "default", false)
     .expect("remove stale disabled ModuleInfo.ts");
   assert!(!output.exists());
 }
@@ -275,6 +419,71 @@ fn package_har_cache_path_matches_latest_target_scoped_task_cache() {
     module_root
       .join("build/default/cache/default")
       .join("default@PackageHar")
+  );
+}
+
+#[test]
+fn module_layout_scopes_build_test_and_preview_outputs_by_selected_product() {
+  let module_root = PathBuf::from("project").join("entry");
+  let product_name = "paid";
+
+  let build = ModuleBuildLayout::for_output_target_product(
+    &arkdown_core::OutputTarget::Hap,
+    &module_root,
+    product_name,
+    "phone",
+  );
+  assert_eq!(
+    build.loader_json(),
+    module_root
+      .join("build")
+      .join(product_name)
+      .join("intermediates")
+      .join("loader")
+      .join("phone")
+      .join("loader.json")
+  );
+  assert_eq!(
+    build.obfuscation_export_rule_path(),
+    module_root
+      .join("build")
+      .join(product_name)
+      .join("intermediates")
+      .join("obfuscation")
+      .join("phone")
+      .join("obfuscation.txt")
+  );
+  assert_eq!(
+    build.output_pack_info(),
+    module_root
+      .join("build")
+      .join(product_name)
+      .join("outputs")
+      .join("phone")
+      .join("pack.info")
+  );
+
+  let test = ModuleBuildLayout::for_test_product(&module_root, product_name);
+  assert_eq!(
+    test.test_init_coverage_json(),
+    module_root
+      .join(".test")
+      .join(product_name)
+      .join("intermediates")
+      .join("test")
+      .join("init_coverage.json")
+  );
+
+  let preview = ModuleBuildLayout::for_preview_product(&module_root, product_name, "phone");
+  assert_eq!(
+    preview.generated_resource_table_typescript(),
+    module_root
+      .join(".preview")
+      .join(product_name)
+      .join("generated")
+      .join("r")
+      .join("phone")
+      .join("ResourceTable.ts")
   );
 }
 
@@ -365,19 +574,23 @@ fn merge_profile_precedes_dependency_extension_ability_collection() {
   )
   .expect("write final module profile");
   let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+  let final_value: serde_json::Value =
+    serde_json::from_slice(&std::fs::read(&final_module_json).expect("read final module profile"))
+      .expect("parse final module profile");
+  let layout = super::layout::ModuleBuildLayout::new(&module_root);
 
   writer
-    .write_profile_intermediates(
-      &module_root,
-      &arkdown_core::OutputTarget::Hap,
-      "default",
-      &final_module_json,
-      2,
-      &[],
-    )
-    .expect("write staged profiles");
+    .write_merge_profile_intermediate(&layout, &final_value, 2)
+    .expect("write MergeProfile output");
 
-  let layout = super::layout::ModuleBuildLayout::new(&module_root);
+  assert!(layout.merge_profile_module_json().is_file());
+  assert!(!layout.process_profile_module_json().exists());
+  assert!(!layout.res_ark_module_json().exists());
+
+  writer
+    .write_process_profile_intermediates(&layout, &final_value, 2, &[])
+    .expect("write ProcessProfile outputs");
+
   let merge: serde_json::Value = serde_json::from_slice(
     &std::fs::read(layout.merge_profile_module_json()).expect("read merge profile"),
   )
@@ -535,6 +748,71 @@ async fn unqualified_module_hook_root_matches_a_targetless_boundary() {
   assert!(cutoff.is::<NativeTaskCutoffReached>());
 }
 
+#[test]
+fn direct_legacy_compile_task_preserves_the_selected_hvigor_boundary() {
+  use super::args::NativeTaskRoot;
+  use super::coordinator::BuildCoordinator;
+  use arkdown_core::{OhosModuleType, OutputTarget};
+
+  let roots = vec![NativeTaskRoot {
+    module_name: "library".to_string(),
+    target_name: Some("default".to_string()),
+    task_name: "HarBuildArkTS".to_string(),
+  }];
+  assert_eq!(
+    BuildCoordinator::selected_arkts_compile_task_name(
+      &roots,
+      "library",
+      "default",
+      &OutputTarget::Har,
+      &OhosModuleType::Har,
+    ),
+    "HarBuildArkTS"
+  );
+  assert_eq!(
+    BuildCoordinator::selected_arkts_compile_task_name(
+      &roots,
+      "other",
+      "default",
+      &OutputTarget::Har,
+      &OhosModuleType::Har,
+    ),
+    "HarCompileArkTS"
+  );
+}
+
+#[test]
+fn sanitizer_profile_flags_merge_extra_config_and_cmake_arguments() {
+  use super::coordinator::SanitizerProfileFlags;
+  use arkdown_core::ExternalNativeOptions;
+
+  let native = ExternalNativeOptions {
+    arguments: vec![
+      "-DOTHER=ON -DOHOS_ENABLE_TSAN=ON".to_string(),
+      "-DOHOS_ENABLE_UBSAN=ON".to_string(),
+    ],
+    ..ExternalNativeOptions::default()
+  };
+  let flags =
+    SanitizerProfileFlags::new(true, false, false, false).with_cmake_arguments(Some(&native));
+  let temp = tempfile::tempdir().expect("tempdir");
+  let module_json = temp.path().join("module.json");
+  std::fs::write(&module_json, r#"{"app":{},"module":{"name":"entry"}}"#)
+    .expect("write module json");
+
+  flags
+    .apply_to_module_json(&module_json)
+    .expect("apply sanitizer flags");
+
+  let value: serde_json::Value =
+    serde_json::from_slice(&std::fs::read(module_json).expect("read module json"))
+      .expect("parse module json");
+  assert_eq!(value["app"]["asanEnabled"], true);
+  assert_eq!(value["app"]["tsanEnabled"], true);
+  assert_eq!(value["app"]["ubsanEnabled"], true);
+  assert_eq!(value["app"]["hwasanEnabled"], serde_json::Value::Null);
+}
+
 // ── Local unit-test chain oracle tests ──────────────────────────────────────
 // Golden files captured from a real hvigor 6.24.3 `hvigorw test` run over the
 // minimal-hap fixture (see meta/design/hvigor-remaining-diff-audit.md E).
@@ -551,13 +829,32 @@ const GOLDEN_UNIT_TEST_DIR: &str = concat!(
 
 #[test]
 fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
-  let index_golden = std::fs::read(format!("{GOLDEN_UNIT_TEST_DIR}/Index.ets.golden"))
-    .expect("hvigor-generated Index.ets golden must exist");
+  let module_path = std::fs::canonicalize(
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .join("..")
+      .join("..")
+      .join("tests")
+      .join("fixtures")
+      .join("minimal-hap")
+      .join("entry"),
+  )
+  .expect("minimal-hap entry fixture must exist");
+  let serialized_module_path =
+    arkdown_path::ArtifactPathSerializer::path_to_slash_string(&module_path)
+      .expect("fixture path must serialize");
+  let index_golden_template =
+    std::fs::read_to_string(format!("{GOLDEN_UNIT_TEST_DIR}/Index.ets.golden"))
+      .expect("hvigor-generated Index.ets golden must exist");
+  let index_golden = index_golden_template
+    .strip_suffix('\n')
+    .unwrap_or(&index_golden_template)
+    .replace("__MODULE_PATH__", &serialized_module_path);
   let ability_golden = std::fs::read(format!("{GOLDEN_UNIT_TEST_DIR}/TestAbility.ets.golden"))
     .expect("hvigor-generated TestAbility.ets golden must exist");
-  let phone_golden =
-    std::fs::read(format!("{GOLDEN_UNIT_TEST_DIR}/phoneSettingConfig_Phone.json.golden"))
-      .expect("hvigor-generated phoneSettingConfig golden must exist");
+  let phone_golden = std::fs::read(format!(
+    "{GOLDEN_UNIT_TEST_DIR}/phoneSettingConfig_Phone.json.golden"
+  ))
+  .expect("hvigor-generated phoneSettingConfig golden must exist");
 
   let params = super::unit_test::UnitTestTemplateParams {
     bundle_name: "com.example.arkdown.test",
@@ -565,19 +862,17 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
     scope: "",
     // Golden files captured from a `hvigorw test -p ohos-test-coverage=false` run.
     coverage: false,
-    module_path: std::path::Path::new(
-      "/Volumes/PSSD/code/arkdown/tests/fixtures/minimal-hap/entry",
-    ),
+    module_path: &module_path,
   };
   let rendered = params.render_page_index().expect("render template");
   assert_eq!(
     rendered.as_bytes(),
-    index_golden.as_slice(),
+    index_golden.as_bytes(),
     "rendered Index.ets must equal the hvigor-generated file"
   );
 
   let dir = tempfile::tempdir().expect("tempdir");
-  super::unit_test::generate_unit_test_template(dir.path(), &params)
+  super::unit_test::generate_unit_test_template(dir.path(), "default", &params)
     .expect("template generation");
   assert_eq!(
     std::fs::read(dir.path().join(".test/testability/TestAbility.ets")).unwrap(),
@@ -585,7 +880,12 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
     "TestAbility.ets must equal the hvigor-generated file"
   );
   assert_eq!(
-    std::fs::read(dir.path().join(".test/testability/phoneSettingConfig_Phone.json")).unwrap(),
+    std::fs::read(
+      dir
+        .path()
+        .join(".test/testability/phoneSettingConfig_Phone.json")
+    )
+    .unwrap(),
     phone_golden,
     "phoneSettingConfig must equal the hvigor-generated file"
   );
@@ -593,12 +893,14 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
 
 #[test]
 fn unit_test_template_coverage_false_and_scope_are_substituted() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  let module_path = dir.path().join("example").join("entry");
   let params = super::unit_test::UnitTestTemplateParams {
     bundle_name: "com.example.arkdown.test",
     module_name: "entry",
     scope: "ActsAbilityTest",
     coverage: false,
-    module_path: std::path::Path::new("/tmp/example/entry"),
+    module_path: &module_path,
   };
   let rendered = params.render_page_index().expect("render template");
   assert!(
@@ -613,9 +915,14 @@ fn unit_test_template_coverage_false_and_scope_are_substituted() {
     rendered.contains("abilityDelegatorArguments.testCaseNames = \"ActsAbilityTest\""),
     "scope must be injected into testCaseNames"
   );
+  let serialized_module_path =
+    arkdown_path::ArtifactPathSerializer::path_to_slash_string(&module_path)
+      .expect("test module path must serialize");
   assert!(
-    rendered.contains("global[savePath] = \"/tmp/example/entry/.test/default/intermediates/test/coverage_data/js_coverage.json\""),
-    "module path must be embedded verbatim"
+    rendered.contains(&format!(
+      "global[savePath] = \"{serialized_module_path}/.test/default/intermediates/test/coverage_data/js_coverage.json\""
+    )),
+    "module path must be embedded through the portable artifact serializer"
   );
 }
 
@@ -645,13 +952,19 @@ fn unit_test_process_profile_injects_test_ability_like_hvigor() {
   let abilities = document["module"]["abilities"].as_array().unwrap();
   assert_eq!(abilities.len(), 2, "one TestAbility appended");
   assert_eq!(abilities[1]["name"], "TestAbility");
-  assert_eq!(abilities[1]["srcEntrance"], "../../.test/testability/TestAbility.ets");
+  assert_eq!(
+    abilities[1]["srcEntrance"],
+    "../../.test/testability/TestAbility.ets"
+  );
   assert_eq!(abilities[1]["startWindowIcon"], "$media:startIcon");
   assert_eq!(
     abilities[1]["startWindowBackground"],
     "$color:start_window_background"
   );
-  assert_eq!(document["module"]["deliveryWithInstall"], serde_json::Value::Null);
+  assert_eq!(
+    document["module"]["deliveryWithInstall"],
+    serde_json::Value::Null
+  );
   // entry module keeps deliveryWithInstall untouched
 }
 
@@ -694,10 +1007,9 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
   let module_doc: serde_json::Value =
     serde_json::from_str(&std::fs::read_to_string(&res_module_json).unwrap()).unwrap();
   assert_eq!(module_doc["module"]["pages"], "$profile:main_pages");
-  let main_pages: serde_json::Value = serde_json::from_str(
-    &std::fs::read_to_string(profile_dir.join("main_pages.json")).unwrap(),
-  )
-  .unwrap();
+  let main_pages: serde_json::Value =
+    serde_json::from_str(&std::fs::read_to_string(profile_dir.join("main_pages.json")).unwrap())
+      .unwrap();
   assert_eq!(
     main_pages["src"][0],
     super::unit_test::UNIT_TEST_REPLACE_PAGE
@@ -743,7 +1055,7 @@ fn unit_test_artifact_handoffs_use_the_typed_module_layout() {
   .expect("source map fixture");
 
   let layout = ModuleBuildLayout::for_test(&module_root);
-  let writer = UnitTestArtifactWriter::new(&module_root);
+  let writer = UnitTestArtifactWriter::new(&module_root, "default");
   writer
     .stage_compiled_assets(&modules_abc, Some(&source_maps))
     .expect("stage UnitTestArkTS assets");

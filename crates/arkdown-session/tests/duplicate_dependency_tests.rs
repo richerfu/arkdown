@@ -59,6 +59,7 @@ fn strict_app_check_reports_local_and_remote_hars_shared_by_hsps() {
         version_code: 1,
         version_name: "1.0.0".to_string(),
         build_version: None,
+        min_compatible_version_code: None,
         bundle_type: "app".to_string(),
         product_name: "default".to_string(),
         module_order: vec![
@@ -98,11 +99,14 @@ fn module(name: &str, root: &Path, module_type: OhosModuleType) -> ModuleSnapsho
         src_main: root.join("src/main"),
         module_json_path: None,
         module_json: None,
+        module_json_value: None,
+        ohos_test_module_json_value: None,
         module_type,
         package_path: None,
         package: None,
         source_roots: Vec::new(),
         resource_roots: Vec::new(),
+        related_entry_modules: None,
     }
 }
 

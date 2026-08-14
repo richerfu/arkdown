@@ -21,7 +21,7 @@ use crate::cmd::build::bytecode::file_info::{
 };
 use crate::cmd::build::bytecode::plan::{
   CompileUnitPlan, ModuleSourceInput, RecordNamePlan, Ts2abcOutputPlan, Ts2abcPlan,
-  Ts2abcPlanBuilder,
+  Ts2abcPlanBuilder, Ts2abcReloadPlan,
 };
 use crate::cmd::build::bytecode::Ts2abcOutput;
 
@@ -109,6 +109,7 @@ pub struct RolldownBytecodeCompiler {
   branch_elimination: bool,
   /// es2abc `--transform-lib` AOP transform library path when configured.
   transform_lib: Option<PathBuf>,
+  reload: Option<Ts2abcReloadPlan>,
 }
 
 impl RolldownBytecodeCompiler {
@@ -128,6 +129,7 @@ impl RolldownBytecodeCompiler {
       is_debug,
       branch_elimination: false,
       transform_lib: None,
+      reload: None,
     }
   }
 
@@ -148,6 +150,11 @@ impl RolldownBytecodeCompiler {
   /// Pass `arkOptions.transformLib` to es2abc as `--transform-lib`.
   pub fn with_transform_lib(mut self, path: Option<PathBuf>) -> Self {
     self.transform_lib = path;
+    self
+  }
+
+  pub fn with_reload(mut self, reload: Option<Ts2abcReloadPlan>) -> Self {
+    self.reload = reload;
     self
   }
 
@@ -177,6 +184,9 @@ impl RolldownBytecodeCompiler {
     }
     if let Some(transform_lib) = &self.transform_lib {
       builder = builder.with_transform_lib(transform_lib.clone());
+    }
+    if let Some(reload) = &self.reload {
+      builder = builder.with_reload(reload.clone());
     }
 
     let npm_entries_path = input.cache_dir.join("npmEntries.txt");
@@ -438,6 +448,7 @@ impl Ts2abcCompiler {
       npm_module_entry_list: plan.npm_module_entry_list.clone(),
       branch_elimination: plan.branch_elimination,
       transform_lib: plan.transform_lib.clone(),
+      reload: plan.reload.clone(),
     })
   }
 
@@ -556,6 +567,7 @@ mod tests {
       enable_abc_input: false,
       branch_elimination: false,
       transform_lib: None,
+      reload: None,
     }
   }
 

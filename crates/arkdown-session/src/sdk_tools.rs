@@ -11,6 +11,7 @@
 //! | [`SdkToolResolver::restool`]           | `DefaultSdk.getRestool`                  |
 //! | [`SdkToolResolver::package_tool`]      | `DefaultSdk.getPackageTool`              |
 //! | [`SdkToolResolver::hap_sign_tool_v2`]  | `DefaultSdk.getHapSignToolV2`            |
+//! | [`SdkToolResolver::sdk_sign_tool_full`]| `HosSdkToolchainsComponent.getHosSignTool` |
 //! | [`SdkToolResolver::hap_to_bin`]        | `DefaultSdk.getHapTobin`                 |
 //! | [`SdkToolResolver::syscap_tool`]       | `DefaultSdk.getSysCapTool`               |
 //! | [`SdkToolResolver::verify_sign_config_tool`] | `DefaultSdk.getVerifySignConfigTool` |
@@ -44,6 +45,8 @@ pub enum SdkToolKind {
     /// `hapsigntoolv2.jar` — HAP signing. Replaced by `arkdown-sign` plus the
     /// published `hapsigner` backend (SPEC-021).
     HapSignToolV2,
+    /// `sdk-sign-tool-full.jar` — HarmonyOS SDK/HAR directory signing.
+    SdkSignToolFull,
     /// `haptobin_tool.jar` — HAP-to-binary converter.
     HapToBin,
     /// `syscap-tool` — system capability validator.
@@ -69,6 +72,7 @@ impl SdkToolKind {
             Self::Restool => "restool",
             Self::PackageTool => "app_packing_tool.jar",
             Self::HapSignToolV2 => "hapsigntoolv2.jar",
+            Self::SdkSignToolFull => "sdk-sign-tool-full.jar",
             Self::HapToBin => "haptobin_tool.jar",
             Self::SyscapTool => "syscap_tool",
             Self::VerifySignConfigTool => "hap-sign-tool.jar",
@@ -127,6 +131,7 @@ impl SdkToolPath {
 #[derive(Debug, Clone)]
 pub struct SdkToolResolver {
     sdk_root: PathBuf,
+    component_api_version: u32,
     compile_sdk_version: String,
     host: HostPlatform,
 }
@@ -144,9 +149,22 @@ impl SdkToolResolver {
     pub fn for_host(sdk: &SdkSnapshot, host: HostPlatform) -> Self {
         Self {
             sdk_root: sdk.sdk_root.clone(),
+            component_api_version: sdk.component_api_version,
             compile_sdk_version: sdk.compile_sdk_version.clone(),
             host,
         }
+    }
+
+    /// Mirror `CommonSdkInfo.isPreviewCompileResourceIncrement()` and
+    /// `SdkComponent.supportCompileResourceIncrement()`.
+    pub fn supports_preview_compile_resource_increment(&self, harmony_os: bool) -> bool {
+        let minimum = if harmony_os {
+            [3, 1, 1, 2]
+        } else {
+            [3, 2, 7, 2]
+        };
+        self.component_api_version >= 9
+            && SdkVersionText::new(&self.compile_sdk_version).is_at_least(minimum)
     }
 
     // -----------------------------------------------------------------------
@@ -170,6 +188,7 @@ impl SdkToolResolver {
             SdkToolKind::Restool => self.restool(),
             SdkToolKind::PackageTool => self.package_tool(),
             SdkToolKind::HapSignToolV2 => self.hap_sign_tool_v2(),
+            SdkToolKind::SdkSignToolFull => self.sdk_sign_tool_full(),
             SdkToolKind::HapToBin => self.hap_to_bin(),
             SdkToolKind::SyscapTool => self.syscap_tool(),
             SdkToolKind::VerifySignConfigTool => self.verify_sign_config_tool(),
@@ -217,6 +236,13 @@ impl SdkToolResolver {
     /// at compile time.
     pub fn hap_sign_tool_v2(&self) -> Option<SdkToolPath> {
         Some(self.toolchains_lib_file("hapsigntoolv2.jar", SdkToolKind::HapSignToolV2))
+    }
+
+    /// Path to `sdk-sign-tool-full.jar` used by HarmonyOS `PackageSignHar`.
+    ///
+    /// Upstream: `HosSdkToolchainsComponent.getHosSignTool`.
+    pub fn sdk_sign_tool_full(&self) -> Option<SdkToolPath> {
+        Some(self.toolchains_lib_file("sdk-sign-tool-full.jar", SdkToolKind::SdkSignToolFull))
     }
 
     /// Path to `haptobin_tool.jar`.
@@ -344,6 +370,18 @@ impl<'a> SdkVersionText<'a> {
         }
         actual.any(|component| component != 0)
     }
+
+    fn is_at_least(&self, expected: [u32; 4]) -> bool {
+        self.is_higher_than(expected) || self.components() == expected
+    }
+
+    fn components(&self) -> [u32; 4] {
+        let mut parts = self
+            .value
+            .split('.')
+            .map(|component| component.parse::<u32>().unwrap_or(0));
+        std::array::from_fn(|_| parts.next().unwrap_or(0))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +442,10 @@ mod tests {
         assert_eq!(
             resolver.verify_sign_config_tool().unwrap().path,
             PathBuf::from("/sdk/ohos/12/toolchains/lib/hap-sign-tool.jar")
+        );
+        assert_eq!(
+            resolver.sdk_sign_tool_full().unwrap().path,
+            PathBuf::from("/sdk/ohos/12/toolchains/lib/sdk-sign-tool-full.jar")
         );
         assert!(!resolver
             .package_tool()

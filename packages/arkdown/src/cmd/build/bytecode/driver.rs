@@ -10,6 +10,7 @@ use crate::cmd::build::bytecode::error::Ts2abcError;
 use crate::cmd::build::bytecode::file_info::{
   FileInfoInput, FileInfoLine, FileInfoManifestPath, FileInfoManifestText,
 };
+use crate::cmd::build::bytecode::plan::{Ts2abcReloadMode, Ts2abcReloadPlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ts2abcInput {
@@ -55,6 +56,7 @@ pub struct Ts2abcOptions {
   pub branch_elimination: bool,
   /// es2abc `--transform-lib` AOP transform library path when configured.
   pub transform_lib: Option<PathBuf>,
+  pub reload: Option<Ts2abcReloadPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +304,7 @@ impl SdkEs2abcBackend {
         .arg("--cache-file")
         .arg(Es2abcPathArgument::new(cache_file).cache_file());
     }
+    self.append_reload_args(command, options);
     if options.dump_deps_info {
       command.arg("--dump-deps-info");
     }
@@ -377,7 +380,31 @@ impl SdkEs2abcBackend {
     if let Some(npm_entries) = &options.npm_module_entry_list {
       command.arg("--npm-module-entry-list").arg(npm_entries);
     }
+    self.append_reload_args(command, options);
     command.arg(input_arg);
+  }
+
+  fn append_reload_args(&self, command: &mut Command, options: &Ts2abcOptions) {
+    let Some(reload) = &options.reload else {
+      return;
+    };
+    match reload.mode {
+      Ts2abcReloadMode::Dump => {
+        command
+          .arg("--dump-symbol-table")
+          .arg(&reload.symbol_table_path);
+      }
+      Ts2abcReloadMode::Cold | Ts2abcReloadMode::Hot => {
+        command
+          .arg("--input-symbol-table")
+          .arg(&reload.symbol_table_path)
+          .arg(match reload.mode {
+            Ts2abcReloadMode::Cold => "--cold-reload",
+            Ts2abcReloadMode::Hot => "--hot-reload",
+            Ts2abcReloadMode::Dump => unreachable!("handled above"),
+          });
+      }
+    }
   }
 
   fn file_threads(&self) -> usize {
@@ -471,6 +498,7 @@ mod tests {
   const API_20_TO_23_OPTIONS: &[&str] = &[
     "--branch-elimination",
     "--cache-file",
+    "--cold-reload",
     "--commonjs",
     "--compile-context-info",
     "--debug-info",
@@ -488,6 +516,9 @@ mod tests {
     "--opt-try-catch-func",
     "--output",
     "--outputProto",
+    "--hot-reload",
+    "--dump-symbol-table",
+    "--input-symbol-table",
     "--remove-redundant-file",
     "--target-api-sub-version",
     "--target-api-version",
@@ -539,6 +570,7 @@ mod tests {
       npm_module_entry_list: None,
       branch_elimination: false,
       transform_lib: None,
+      reload: None,
     }
   }
 
@@ -651,5 +683,63 @@ mod tests {
       Some("/tmp/aop-lib.js"),
       "transform-lib must carry the configured path; args: {args:?}"
     );
+  }
+
+  #[test]
+  fn cold_reload_uses_the_existing_symbol_map_after_program_cache() {
+    let mut options = module_mode_options();
+    options.cache_file = Some(PathBuf::from("/tmp/modules.cache"));
+    options.reload = Some(Ts2abcReloadPlan {
+      mode: Ts2abcReloadMode::Cold,
+      symbol_table_path: PathBuf::from("/tmp/loader_out/ets/symbolMap.map"),
+    });
+
+    let args = args_for_sdk(&options, false);
+    let cache = args.iter().position(|arg| arg == "--cache-file").unwrap();
+    let symbol = args
+      .iter()
+      .position(|arg| arg == "--input-symbol-table")
+      .unwrap();
+    let reload = args.iter().position(|arg| arg == "--cold-reload").unwrap();
+    assert!(cache < symbol && symbol < reload, "args: {args:?}");
+    assert_eq!(
+      args.get(symbol + 1).map(String::as_str),
+      Some("/tmp/loader_out/ets/symbolMap.map")
+    );
+  }
+
+  #[test]
+  fn hot_reload_selects_the_sdk_hot_reload_switch() {
+    let mut options = module_mode_options();
+    options.reload = Some(Ts2abcReloadPlan {
+      mode: Ts2abcReloadMode::Hot,
+      symbol_table_path: PathBuf::from("/tmp/symbolMap.map"),
+    });
+
+    let args = args_for_sdk(&options, false);
+    assert!(args.iter().any(|arg| arg == "--hot-reload"));
+    assert!(!args.iter().any(|arg| arg == "--cold-reload"));
+  }
+
+  #[test]
+  fn first_hot_reload_build_dumps_the_symbol_table_without_reload_flags() {
+    let mut options = module_mode_options();
+    options.reload = Some(Ts2abcReloadPlan {
+      mode: Ts2abcReloadMode::Dump,
+      symbol_table_path: PathBuf::from("/tmp/old-map/symbolMap.map"),
+    });
+
+    let args = args_for_sdk(&options, false);
+    let dump = args
+      .iter()
+      .position(|arg| arg == "--dump-symbol-table")
+      .expect("dump-symbol-table flag present");
+    assert_eq!(
+      args.get(dump + 1).map(String::as_str),
+      Some("/tmp/old-map/symbolMap.map")
+    );
+    assert!(!args.iter().any(|arg| arg == "--input-symbol-table"));
+    assert!(!args.iter().any(|arg| arg == "--hot-reload"));
+    assert!(!args.iter().any(|arg| arg == "--cold-reload"));
   }
 }

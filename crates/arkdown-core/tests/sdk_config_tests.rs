@@ -66,10 +66,7 @@ fn local_test_components_are_derived_from_the_selected_sdk_layout() {
     let contents = temp.path().join("Contents");
     let sdk_default = contents.join("sdk").join("default");
     let component = sdk_default.join("openharmony");
-    let loader = component
-        .join("ets")
-        .join("build-tools")
-        .join("ets-loader");
+    let loader = component.join("ets").join("build-tools").join("ets-loader");
     let previewer = component.join("previewer");
     let hms_previewer = sdk_default.join("hms").join("previewer");
     let hms_ets = sdk_default.join("hms").join("ets");
@@ -105,14 +102,8 @@ fn local_test_components_are_derived_from_the_selected_sdk_layout() {
 fn local_test_coverage_supports_the_standalone_command_line_layout() {
     let temp = tempfile::tempdir().expect("temporary command-line tools layout");
     let distribution = temp.path().join("command-line-tools");
-    let component = distribution
-        .join("sdk")
-        .join("default")
-        .join("openharmony");
-    let loader = component
-        .join("ets")
-        .join("build-tools")
-        .join("ets-loader");
+    let component = distribution.join("sdk").join("default").join("openharmony");
+    let loader = component.join("ets").join("build-tools").join("ets-loader");
     let coverage = distribution
         .join("hvigor")
         .join("hvigor-ohos-plugin")

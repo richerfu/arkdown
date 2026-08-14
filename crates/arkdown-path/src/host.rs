@@ -35,6 +35,20 @@ impl HostPlatform {
             stem.to_string()
         }
     }
+
+    /// Return the platform package-manager command shim name.
+    ///
+    /// Node distributions expose npm/pnpm-style launchers as `.cmd` files on
+    /// Windows and as extensionless executables on Unix. This is deliberately
+    /// separate from [`Self::executable_name`], because treating a command
+    /// shim as a native `.exe` silently selects a path that does not exist.
+    pub fn command_shim_name(self, stem: &str) -> String {
+        if self == Self::Windows {
+            format!("{stem}.cmd")
+        } else {
+            stem.to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -50,5 +64,7 @@ mod tests {
         assert_eq!(HostPlatform::Macos.executable_name("restool"), "restool");
         assert_eq!(HostPlatform::Linux.executable_name("cmake"), "cmake");
         assert_eq!(HostPlatform::OtherUnix.executable_name("node"), "node");
+        assert_eq!(HostPlatform::Windows.command_shim_name("npm"), "npm.cmd");
+        assert_eq!(HostPlatform::Macos.command_shim_name("npm"), "npm");
     }
 }

@@ -21,6 +21,13 @@ use arkdown_pack::{RemoteHspCollector, RemoteHspDependencyScope};
 use arkdown_session::BuildSession;
 use arkdown_sign::SignBackendRunner;
 
+/// Repository owned by one of hvigor's two remote-HSP signing tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RemoteHspSignScope {
+  Project,
+  Module,
+}
+
 /// Signs all remote HSP dependencies of every module into the hvigor
 /// `build/cache/<product>/remote_hsp/` layout.
 pub(super) struct RemoteHspSigner {
@@ -33,10 +40,15 @@ impl RemoteHspSigner {
     Self { config, session }
   }
 
-  /// hvigor `SignProjectRemoteHsp`/`SignModuleRemoteHsp` doTaskAction: no-op
-  /// without a signing config (`taskShouldDo` → `isSigned`), then collect
-  /// (version-deduped, dependency-filtered) and sign.
-  pub(super) fn run(&self) -> anyhow::Result<Option<PathBuf>> {
+  /// hvigor `SignProjectRemoteHsp`/`SignModuleRemoteHsp` doTaskAction for one
+  /// module target. The project task scans only the project repository and the
+  /// module task scans only the module repository; their shared cache manifest
+  /// is merged as each task completes.
+  pub(super) fn run_for_module(
+    &self,
+    module_name: &str,
+    scope: RemoteHspSignScope,
+  ) -> anyhow::Result<Option<PathBuf>> {
     let Some(signing_config) = self.config.product.signing_config.as_ref() else {
       return Ok(None);
     };
@@ -45,6 +57,7 @@ impl RemoteHspSigner {
       .config
       .modules
       .iter()
+      .filter(|module| module.name == module_name)
       .filter_map(|module| {
         let context = self.session.module_context(&module.name)?;
         Some(RemoteHspDependencyScope::new(
@@ -62,9 +75,11 @@ impl RemoteHspSigner {
     }
 
     let collector = RemoteHspCollector::new(&self.config.project_root, &scopes);
-    let candidates = collector
-      .collect_candidates()
-      .map_err(anyhow::Error::from)?;
+    let candidates = match scope {
+      RemoteHspSignScope::Project => collector.collect_project_candidates(),
+      RemoteHspSignScope::Module => collector.collect_module_candidates(),
+    }
+    .map_err(anyhow::Error::from)?;
     if candidates.is_empty() {
       return Ok(None);
     }
@@ -76,12 +91,12 @@ impl RemoteHspSigner {
       .join("cache")
       .join(&self.config.product.name)
       .join("remote_hsp");
-    fs_err::create_dir_all(&cache_root).with_context(|| {
-      format!("create remote HSP cache at {}", cache_root.display())
-    })?;
+    fs_err::create_dir_all(&cache_root)
+      .with_context(|| format!("create remote HSP cache at {}", cache_root.display()))?;
 
+    let cache_file = cache_root.join("remoteHspCache.json");
     let sign_backend = SignBackendRunner::new();
-    let mut signed_remote_hsps = BTreeMap::new();
+    let mut signed_remote_hsps = Self::existing_signed_remote_hsps(&cache_file)?;
     for candidate in candidates.values() {
       // `initAllSignRemoteHspList`: `<file>.hsp` → `<file>-signed.hsp`
       // under the hsp directory name; `submitSignWorker` mkdirs the output
@@ -91,9 +106,8 @@ impl RemoteHspSigner {
         .join(&candidate.directory_name)
         .join(&signed_file_name);
       if let Some(parent) = output.parent() {
-        fs_err::create_dir_all(parent).with_context(|| {
-          format!("create remote HSP output dir at {}", parent.display())
-        })?;
+        fs_err::create_dir_all(parent)
+          .with_context(|| format!("create remote HSP output dir at {}", parent.display()))?;
       }
       if output.is_file() {
         // `submitSignWorker` skips existing outputs; the cache file still
@@ -123,7 +137,6 @@ impl RemoteHspSigner {
     // required remote HSP is signed. The `signingConfig` block mirrors the
     // merged `{name, material}` entry hvigor stores in
     // `GlobalProjectDataService`.
-    let cache_file = cache_root.join("remoteHspCache.json");
     fs_err::write(
       &cache_file,
       serde_json::to_string_pretty(&serde_json::json!({
@@ -134,6 +147,27 @@ impl RemoteHspSigner {
     )
     .with_context(|| format!("write {}", cache_file.display()))?;
     Ok(Some(cache_file))
+  }
+
+  fn existing_signed_remote_hsps(
+    cache_file: &std::path::Path,
+  ) -> anyhow::Result<BTreeMap<String, serde_json::Value>> {
+    if !cache_file.is_file() {
+      return Ok(BTreeMap::new());
+    }
+    let bytes =
+      fs_err::read(cache_file).with_context(|| format!("read {}", cache_file.display()))?;
+    let value: serde_json::Value =
+      serde_json::from_slice(&bytes).with_context(|| format!("parse {}", cache_file.display()))?;
+    Ok(
+      value
+        .get("signedRemoteHsps")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .map(|(name, entry)| (name.clone(), entry.clone()))
+        .collect(),
+    )
   }
 }
 

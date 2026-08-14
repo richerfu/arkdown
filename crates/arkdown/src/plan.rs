@@ -454,7 +454,17 @@ impl BundlePlan {
 
     /// Return `true` if this is a debug build.
     pub fn is_debug(&self) -> bool {
-        matches!(self.build_mode, BuildMode::Debug)
+        self.build_mode.is_debuggable()
+    }
+
+    /// Return the effective Rollup/Rolldown tree-shaking switch.
+    ///
+    /// Hvigor 6.24.3 `hvigor-arkts-compose/src/arkts-pack.ts#generateConfig`
+    /// enables tree shaking exactly for release builds. Arkdown's project
+    /// config may explicitly override that default for compatibility tooling.
+    pub fn treeshake_enabled(&self) -> bool {
+        self.treeshake_override
+            .unwrap_or(self.build_mode.is_release())
     }
 }
 
@@ -513,5 +523,21 @@ mod tests {
     fn validate_fails_for_missing_loader_json() {
         let plan = make_plan(PathBuf::from("/nonexistent/loader.json"));
         assert!(plan.validate().is_err());
+    }
+
+    #[test]
+    fn treeshake_matches_hvigor_release_default_and_explicit_override() {
+        let mut plan = make_plan(PathBuf::from("/nonexistent/loader.json"));
+        assert!(!plan.treeshake_enabled());
+
+        plan.build_mode = BuildMode::Release;
+        assert!(plan.treeshake_enabled());
+
+        plan.treeshake_override = Some(false);
+        assert!(!plan.treeshake_enabled());
+
+        plan.build_mode = BuildMode::Debug;
+        plan.treeshake_override = Some(true);
+        assert!(plan.treeshake_enabled());
     }
 }

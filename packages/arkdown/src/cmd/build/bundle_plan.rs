@@ -117,17 +117,20 @@ pub(super) fn make_bundle_plan(
         .unwrap_or_else(|| PathBuf::from(&loader_json.module_root_path))
     });
   let source_layout = ModuleSourceLayout::new(&module_root);
-  let build_layout = ModuleBuildLayout::for_output_target(
+  let build_layout = ModuleBuildLayout::for_output_target_product(
     &config.output_target,
     &module_root,
+    &config.product.name,
     module_target_name,
   );
   let cache_root = PathBuf::from(&loader_json.cache_path);
   let cache_layout = ModuleSourceCacheLayout::new(&cache_root);
   let user_config_path = source_layout.mock_config_json5();
   let mock_config = BundleMockConfig {
-    process: matches!(config.output_target, arkdown_core::OutputTarget::Preview | arkdown_core::OutputTarget::Test)
-      || module_target_name == "ohosTest",
+    process: matches!(
+      config.output_target,
+      arkdown_core::OutputTarget::Preview | arkdown_core::OutputTarget::Test
+    ) || module_target_name == "ohosTest",
     user_config_path: user_config_path.is_file().then_some(user_config_path),
     ets_source_root: source_layout.ets(),
     transformed_output_path: build_layout.intermediates_mock_config_json(),
@@ -253,7 +256,10 @@ impl<'a> BundleModuleMetaInfoFileCollector<'a> {
     if self.loader_json.use_normalized_ohm_url {
       return format!("&{module_name}/build/generated/r/ResourceTable&");
     }
-    format!("{}/{module_name}/build/generated/r/ResourceTable", self.bundle_name)
+    format!(
+      "{}/{module_name}/build/generated/r/ResourceTable",
+      self.bundle_name
+    )
   }
 }
 

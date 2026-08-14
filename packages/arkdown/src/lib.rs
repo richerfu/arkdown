@@ -37,6 +37,7 @@ mod hvigor_script;
 mod hvigor_sync;
 mod native_build_config;
 pub mod progress;
+mod remote_hsp;
 mod runtime_task;
 pub mod task_cache;
 
@@ -123,8 +124,10 @@ pub fn hvigor_project_cache_hash(project_root: String) -> napi::Result<String> {
 pub async fn prepare_hvigor_plugin_workspace(request_json: String) -> napi::Result<String> {
   let runner = hvigor_dependency_workspace::HvigorPluginWorkspaceRunner::from_json(&request_json)
     .map_err(|error| {
-      napi::Error::from_reason(format!("invalid hvigor plugin workspace request: {error:#}"))
-    })?;
+    napi::Error::from_reason(format!(
+      "invalid hvigor plugin workspace request: {error:#}"
+    ))
+  })?;
   runner
     .response_json()
     .await
@@ -149,6 +152,19 @@ pub fn load_build_script_module_model(request_json: String) -> napi::Result<Stri
 #[napi]
 pub fn discover_build_script_files(request_json: String) -> napi::Result<String> {
   build_script_runtime_model::BuildScriptRuntimeModelNapiAdapter::discover_files(&request_json)
+}
+
+/// Resolve plugin-facing SDK details once in the Rust session inventory.
+#[napi]
+pub fn inspect_hvigor_sdk_details(request_json: String) -> napi::Result<String> {
+  build_script_runtime_model::BuildScriptRuntimeModelNapiAdapter::inspect_sdk_details(&request_json)
+}
+
+/// Inspect `oh_modules/.hsp` using the official module-first,
+/// highest-version selection contract.
+#[napi]
+pub fn inspect_remote_hsp_objects(request_json: String) -> napi::Result<String> {
+  remote_hsp::RemoteHspNapiAdapter::inspect(&request_json)
 }
 
 /// Resolve target selection, effective build options, and compile-plugin
@@ -1401,12 +1417,21 @@ pub struct BuildConfig {
   pub unit_test_replace_page: Option<String>,
   pub ohos_debug_asan: Option<bool>,
   pub ohos_enable_hwasan: Option<bool>,
+  pub ohos_enable_tsan: Option<bool>,
+  pub ohos_enable_ubsan: Option<bool>,
+  pub ohos_enable_binxo: Option<bool>,
   pub disable_abc_cache: Option<bool>,
   pub cache_file: Option<String>,
   pub checker: Option<String>,
   #[napi(ts_type = "'oxc' | 'yuku'")]
   pub module_analyzer: Option<String>,
   pub cache: Option<bool>,
+  /// Runtime-owned Hvigor `enableSignTask` property.
+  #[napi(skip_typescript)]
+  pub enable_sign_task: Option<bool>,
+  /// Runtime-owned selected-product `packOptions.fastBuildApp` value.
+  #[napi(skip_typescript)]
+  pub fast_build_app: Option<bool>,
   #[napi(ts_type = "string | string[]")]
   pub compile_plugin_path: Option<String>,
   #[napi(ts_type = "string | string[]")]
@@ -1444,6 +1469,12 @@ pub struct BuildConfig {
   /// Runtime-owned hvigor `hvigor.keepDependency` property.
   #[napi(skip_typescript)]
   pub keep_dependency: Option<bool>,
+  /// Runtime-owned typed OHOS plugin property snapshot.
+  #[napi(skip_typescript)]
+  pub hvigor_runtime_properties_json: Option<String>,
+  /// Runtime-owned project-scoped `PathUtil.getHvigorCacheDir()` result.
+  #[napi(skip_typescript)]
+  pub hvigor_cache_dir: Option<String>,
   /// Runtime-owned hvigor CLI `parameterFile` extra-parameter override.
   #[napi(skip_typescript)]
   pub parameter_file_override: Option<String>,
@@ -1590,11 +1621,16 @@ pub fn build<'a>(
     unit_test_replace_page,
     ohos_debug_asan,
     ohos_enable_hwasan,
+    ohos_enable_tsan,
+    ohos_enable_ubsan,
+    ohos_enable_binxo,
     disable_abc_cache,
     cache_file,
     checker,
     module_analyzer,
     cache,
+    enable_sign_task,
+    fast_build_app,
     compile_plugin_path: _,
     hvigor_plugin_file: _,
     project_hvigor_overrides_json,
@@ -1608,6 +1644,8 @@ pub fn build<'a>(
     integrated_hsp_use_get_current_bundle_name,
     byte_code_har_integrated_optimization,
     keep_dependency,
+    hvigor_runtime_properties_json,
+    hvigor_cache_dir,
     parameter_file_override,
     runtime_node_executable,
     native_task_roots_json,
@@ -1628,11 +1666,16 @@ pub fn build<'a>(
     unit_test_replace_page,
     ohos_debug_asan: ohos_debug_asan.unwrap_or(false),
     ohos_enable_hwasan: ohos_enable_hwasan.unwrap_or(false),
+    ohos_enable_tsan: ohos_enable_tsan.unwrap_or(false),
+    ohos_enable_ubsan: ohos_enable_ubsan.unwrap_or(false),
+    ohos_enable_binxo: ohos_enable_binxo.unwrap_or(false),
     disable_abc_cache: disable_abc_cache.unwrap_or(false),
     cache_file,
     checker,
     module_analyzer,
     cache: cache.unwrap_or(true),
+    enable_sign_task: enable_sign_task.unwrap_or(true),
+    fast_build_app: fast_build_app.unwrap_or(false),
     project_hvigor_overrides_json,
     module_hvigor_overrides_json,
     runtime_context_overrides_json,
@@ -1645,6 +1688,15 @@ pub fn build<'a>(
       .unwrap_or(false),
     byte_code_har_integrated_optimization: byte_code_har_integrated_optimization.unwrap_or(false),
     keep_dependency: keep_dependency.unwrap_or(true),
+    hvigor_properties: hvigor_runtime_properties_json
+      .as_deref()
+      .map(serde_json::from_str::<crate::cmd::build::HvigorRuntimeProperties>)
+      .transpose()
+      .map_err(|error| {
+        napi::Error::from_reason(format!("invalid hvigor runtime properties: {error}"))
+      })?
+      .unwrap_or_default(),
+    hvigor_cache_dir,
     parameter_file_override,
     runtime_node_executable,
     native_task_roots_json,
@@ -1737,6 +1789,15 @@ pub fn runtime_command_plan(request_json: String) -> napi::Result<String> {
   crate::runtime_task::RuntimeCommandPlanner::response_json(&request_json).map_err(|error| {
     napi::Error::from_reason(format!("invalid runtime command plan request: {error:#}"))
   })
+}
+
+/// Render Hvigor's built-in `buildInfo` task from the immutable Rust profile
+/// inventory. JavaScript remains responsible only for task hook dispatch.
+#[napi]
+pub fn run_hvigor_build_info(request_json: String) -> napi::Result<String> {
+  crate::cmd::build_info::HvigorBuildInfoRunner::from_json(&request_json)
+    .and_then(|runner| runner.response_json())
+    .map_err(|error| napi::Error::from_reason(format!("buildInfo failed: {error:#}")))
 }
 
 /// Execute latest-hvigor project/module clean behavior in Rust.
@@ -1847,11 +1908,16 @@ struct PackageBuildArgs {
   unit_test_replace_page: Option<String>,
   ohos_debug_asan: bool,
   ohos_enable_hwasan: bool,
+  ohos_enable_tsan: bool,
+  ohos_enable_ubsan: bool,
+  ohos_enable_binxo: bool,
   disable_abc_cache: bool,
   cache_file: Option<String>,
   checker: Option<String>,
   module_analyzer: Option<String>,
   cache: bool,
+  enable_sign_task: bool,
+  fast_build_app: bool,
   project_hvigor_overrides_json: Option<String>,
   module_hvigor_overrides_json: Option<String>,
   runtime_context_overrides_json: Option<String>,
@@ -1863,6 +1929,8 @@ struct PackageBuildArgs {
   integrated_hsp_use_get_current_bundle_name: bool,
   byte_code_har_integrated_optimization: bool,
   keep_dependency: bool,
+  hvigor_properties: crate::cmd::build::HvigorRuntimeProperties,
+  hvigor_cache_dir: Option<String>,
   parameter_file_override: Option<String>,
   runtime_node_executable: Option<String>,
   native_task_roots_json: Option<String>,
@@ -1903,19 +1971,25 @@ async fn run_build(
     "hap" => OutputTarget::Hap,
     "hsp" => OutputTarget::Hsp,
     "har" => OutputTarget::Har,
+    "preview" => OutputTarget::Preview,
     "test" => OutputTarget::Test,
     // APP is a project-level aggregate. The startup snapshot uses HAP as its
     // neutral module target; AppBuildCoordinator derives HAP/HSP child configs
     // from this one immutable session.
     "app" => OutputTarget::Hap,
     other => {
-      anyhow::bail!("unsupported build target '{other}'; expected 'hap', 'hsp', 'har', 'app', or 'test'")
+      anyhow::bail!(
+        "unsupported build target '{other}'; expected 'hap', 'hsp', 'har', 'app', 'preview', or 'test'"
+      )
     }
   };
   let build_mode = match mode.as_str() {
     "debug" => BuildMode::Debug,
     "release" => BuildMode::Release,
-    other => anyhow::bail!("unsupported build mode '{other}'; expected 'debug' or 'release'"),
+    "test" => BuildMode::Test,
+    other => {
+      anyhow::bail!("unsupported build mode '{other}'; expected 'debug', 'release', or 'test'")
+    }
   };
 
   let project_hvigor_overrides = package_args
@@ -2012,9 +2086,13 @@ async fn run_build(
     coverage_path_filter: package_args.coverage_path_filter,
     coverage_mode: package_args.coverage_mode,
     unit_test_replace_page: package_args.unit_test_replace_page,
-    fast_build_app: false,
+    fast_build_app: package_args.fast_build_app,
+    enable_sign_task: package_args.enable_sign_task,
     ohos_debug_asan: package_args.ohos_debug_asan,
     ohos_enable_hwasan: package_args.ohos_enable_hwasan,
+    ohos_enable_tsan: package_args.ohos_enable_tsan,
+    ohos_enable_ubsan: package_args.ohos_enable_ubsan,
+    ohos_enable_binxo: package_args.ohos_enable_binxo,
     preview: package_args.preview,
     disable_abc_cache: package_args.disable_abc_cache || !package_args.cache,
     cache_file: package_args.cache_file.map(std::path::PathBuf::from),
@@ -2039,12 +2117,14 @@ async fn run_build(
       .integrated_hsp_use_get_current_bundle_name,
     byte_code_har_integrated_optimization: package_args.byte_code_har_integrated_optimization,
     keep_dependency: package_args.keep_dependency,
+    hvigor_properties: package_args.hvigor_properties,
     parameter_file_override: package_args
       .parameter_file_override
       .map(std::path::PathBuf::from),
     node_executable: package_args
       .runtime_node_executable
       .map(std::path::PathBuf::from),
+    hvigor_cache_dir: package_args.hvigor_cache_dir.map(std::path::PathBuf::from),
     native_task_roots,
   };
 

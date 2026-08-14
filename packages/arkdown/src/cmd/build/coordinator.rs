@@ -39,15 +39,16 @@ use arkdown_path::{
   NormalizedOhmUrl,
 };
 use arkdown_session::dependency_graph::snapshot::{
-  DependencyEdgeKind, DependencyNodeSnapshot, DependencyNodeType,
+  DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeSnapshot, DependencyNodeType,
 };
 use arkdown_session::module::snapshot::OhosModuleType as SessionOhosModuleType;
-use arkdown_session::{BuildSession, ModuleCompileContext, PackageSnapshot, SdkToolKind};
-use arkdown_sign::SignBackendRunner;
+use arkdown_session::{
+  BuildSession, ModuleCompileContext, PackageSnapshot, ProjectSnapshot, SdkToolKind,
+};
+use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
-use super::args::{AbcBackendChoice, BuildArgs, NativeTaskRoot};
-use super::packing_check::PackingCheck;
-use super::pre_build::PreBuildValidator;
+use super::aot::AotArtifactWriter;
+use super::args::{AbcBackendChoice, BuildArgs, HvigorRuntimeProperties, NativeTaskRoot};
 use super::bundle_plan::{
   make_bundle_plan, BundlePackageOutput, BundlePlanPackageInfo, BundleRuntimePackageInfoBuilder,
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
@@ -60,29 +61,42 @@ use super::coverage_instrument::CoverageInstrumenter;
 use super::generate_har_declarations::HarDeclarationGenerator;
 use super::har_dedup::HarDedupProjectPlan;
 use super::har_importee_cache::HarImporteeCache;
-use super::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
+use super::hot_reload::{
+  HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
+  ReloadResourceTaskPlan,
+};
+use super::intermediates::{
+  IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, SourceMapPackageHandoff,
+};
 use super::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
 };
 use super::module_plan::ModuleSelectionPlanner;
+use super::packing_check::PackingCheck;
+use super::pre_build::PreBuildValidator;
 use super::preload_system_so::{PreloadSystemSoArtifactWriter, PreloadSystemSoPlan};
+use super::quickfix::{
+  ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
+  QuickFixTaskPlan, QuickFixVersionStore,
+};
+use super::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
 use super::syscap::SyscapTransform;
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
 };
 use arkdown::{
-  BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo,
-  PluginCacheModuleInventory, ShouldInvalidCacheRequest, SourceMapPolicy,
+  BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo, PluginCacheModuleInventory,
+  ShouldInvalidCacheRequest, SourceMapPolicy,
 };
 
 use crate::cmd::ets_checker::{
-  SdkEtsCheckerBatch, SdkEtsCheckerEntryCollector, SdkEtsCheckerInput, SdkEtsCheckerPaths,
-  SdkEtsCheckerPlan, SdkEtsCheckerPlanBuilder,
+  ArkLinterEntryResolver, SdkEtsCheckerBatch, SdkEtsCheckerEntryCollector, SdkEtsCheckerInput,
+  SdkEtsCheckerPaths, SdkEtsCheckerPlan, SdkEtsCheckerPlanBuilder,
 };
 use crate::cmd::native_build::{
-  DebugSymbolCollector, HvigorModuleCleanStage, NativeLibCollectionPolicy, NativeLibCollector,
-  NativeLibPackageInfo, NativeSdkToolchain,
+  DebugSymbolCollector, HvigorModuleCleanStage, NativeBuildSanitizers, NativeCmakeLocalDependency,
+  NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
 };
 use crate::progress::Progress;
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
@@ -106,20 +120,23 @@ use arkdown_obfuscate::{
   ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator,
 };
 use arkdown_pack::{
-  minify_package_intermediate_module_json, BundledHarResourceInput, HarBundledDependencyInput,
-  HarPackInput, HarPackageParameterInput, HarVariantInput, HspInterfaceHarInput, HspTgzInput,
-  IntegratedHspCandidate, IntegratedHspCollector, PackAbility, PackInput, Packager,
+  minify_package_intermediate_module_json, AppPackageRunner, BundledHarResourceInput,
+  HarBundledDependencyInput, HarPackInput, HarPackageParameterInput, HarVariantInput,
+  HspInterfaceHarInput, HspTgzInput, IntegratedHspCandidate, IntegratedHspCollector, PackInfoInput,
+  PackInfoModuleInput, PackInput, Packager,
 };
 use arkdown_profile::{
   BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarDependencyRoot,
-  ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, FormProfileProcessor,
-  LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput, OhExportsProcessor,
-  PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
+  ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, DependencyCustomTypeInput,
+  FormProfileProcessor, LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput,
+  OhExportsProcessor, PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
   PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
   ProfileProcessor,
 };
 use arkdown_resolver::{OhPackage, PkgBriefInfo};
-use arkdown_resource::{ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput};
+use arkdown_resource::{
+  IdDefinedFileProcessor, ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -129,6 +146,110 @@ use arkdown_resource::{ResourceBackendRunner, ResourceCompileConfig, ResourceCom
 pub struct BuildOutput {
   /// Absolute paths to all produced artifacts (signed HAP/HSP/HAR files).
   pub artifact_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct ModulePackInfoPlan {
+  input: PackInfoInput,
+  output_path: PathBuf,
+  /// Related entry suffix used by `getModuleTargetOutputFileName`.
+  related_entry: Option<String>,
+}
+
+/// Resolves the source resource model consumed by Hvigor's `MakePackInfo`.
+///
+/// `ModuleModelImpl.getFormJsonObjByTargetName` keeps extension-ability
+/// metadata on the HAP module, but redirects each referenced form profile to
+/// the HSP named by `formWidgetModule`. The redirected module independently
+/// selects the requested source set and falls back to `default` when that
+/// source set is absent.
+pub(super) struct PackInfoFormResourceResolver<'a> {
+  project: &'a ProjectSnapshot,
+}
+
+impl<'a> PackInfoFormResourceResolver<'a> {
+  pub(super) fn new(project: &'a ProjectSnapshot) -> Self {
+    Self { project }
+  }
+
+  pub(super) fn resolve(
+    &self,
+    module_name: &str,
+    target_name: &str,
+    module_json: &serde_json::Value,
+  ) -> Result<Vec<PathBuf>> {
+    let current_module = self.project.modules.get(module_name).ok_or_else(|| {
+      anyhow::anyhow!("missing build session module snapshot for '{module_name}'")
+    })?;
+    let resource_module = module_json
+      .pointer("/module/formWidgetModule")
+      .and_then(serde_json::Value::as_str)
+      .and_then(|widget_module| self.project.modules.get(widget_module))
+      .unwrap_or(current_module);
+    let source = ModuleSourceLayout::new(&resource_module.root);
+    let resources =
+      if target_name == "ohosTest" && resource_module.ohos_test_module_json_value.is_some() {
+        source.target_resources("ohosTest")
+      } else {
+        source.resources()
+      };
+    Ok(vec![resources])
+  }
+}
+
+#[derive(Debug, Clone)]
+struct ModulePackageArtifact {
+  pack_info_path: PathBuf,
+  package_path: PathBuf,
+  signed_path: PathBuf,
+}
+
+impl ModulePackageArtifact {
+  fn for_module_target(
+    module: &ModuleConfig,
+    module_config: &ArkdownConfig,
+    target_name: &str,
+    extension: &str,
+    output_dir: &Path,
+    pack_info_plans: &[ModulePackInfoPlan],
+  ) -> Vec<Self> {
+    let plans = if matches!(module_config.output_target, OutputTarget::Hap) {
+      pack_info_plans
+    } else {
+      pack_info_plans.get(..1).unwrap_or_default()
+    };
+    plans
+      .iter()
+      .map(|plan| {
+        let archive_module_name = plan
+          .related_entry
+          .as_deref()
+          .map(|entry| format!("{}-{entry}", module.name))
+          .unwrap_or_else(|| module.name.clone());
+        let name = ArtifactOutputName::new(
+          module_config.product.artifact_name.as_deref(),
+          &archive_module_name,
+          target_name,
+          extension,
+        );
+        let package_path = if matches!(module_config.output_target, OutputTarget::Har) {
+          output_dir.join(name.har())
+        } else {
+          output_dir.join(name.unsigned())
+        };
+        let signed_path = if matches!(module_config.output_target, OutputTarget::Har) {
+          output_dir.join(name.signed_har())
+        } else {
+          output_dir.join(name.signed())
+        };
+        Self {
+          pack_info_path: plan.output_path.clone(),
+          package_path,
+          signed_path,
+        }
+      })
+      .collect()
+  }
 }
 
 /// Selected ArkTS diagnostic policy.
@@ -250,6 +371,41 @@ pub enum BuildTaskEventPhase {
   UpToDate,
 }
 
+/// Internal bridge event for OHOS plugin `CommandBuilderModifier` callbacks.
+/// The command contains the executable and base arguments before Hvigor
+/// appends `externalNativeOptions.targets`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildNativeCommandEvent {
+  phase: BuildNativeCommandEventPhase,
+  pub builder_type: u8,
+  pub module_name: String,
+  pub target_name: String,
+  pub abi: String,
+  pub command: Vec<String>,
+}
+
+impl BuildNativeCommandEvent {
+  const NINJA_BUILDER_TYPE: u8 = 2;
+
+  fn ninja(module_name: &str, target_name: &str, abi: &str, command: Vec<String>) -> Self {
+    Self {
+      phase: BuildNativeCommandEventPhase::ModifyNativeCommand,
+      builder_type: Self::NINJA_BUILDER_TYPE,
+      module_name: module_name.to_string(),
+      target_name: target_name.to_string(),
+      abi: abi.to_string(),
+      command,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum BuildNativeCommandEventPhase {
+  ModifyNativeCommand,
+}
+
 /// Marks one complete native pipeline execution inside a normal, multi-target,
 /// or watch build. The Node runtime uses these markers to reset custom-task
 /// execution state and persist successful incremental snapshots per cycle.
@@ -338,6 +494,12 @@ pub trait BuildTaskObserver: Send + Sync {
   async fn after_task(&self, event: BuildTaskEvent) -> Result<()>;
   async fn task_up_to_date(&self, event: BuildTaskEvent) -> Result<()>;
   async fn transform_abc(&self, event: BuildAbcTransformEvent) -> Result<()>;
+  fn has_native_command_modifier(&self, _builder_type: u8) -> bool {
+    false
+  }
+  async fn modify_native_command(&self, event: BuildNativeCommandEvent) -> Result<Vec<String>> {
+    Ok(event.command)
+  }
 }
 
 pub(super) struct BuildTaskLifecycle {
@@ -502,6 +664,39 @@ impl BuildTaskLifecycle {
       )?)
       .await
   }
+
+  async fn execute_ninja_build(
+    &self,
+    module_name: &str,
+    target_name: &str,
+    collector: &NativeLibCollector<'_>,
+  ) -> Result<()> {
+    let Some(observer) = self.observer.as_ref().filter(|observer| {
+      observer.has_native_command_modifier(BuildNativeCommandEvent::NINJA_BUILDER_TYPE)
+    }) else {
+      return collector
+        .build_native()
+        .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"));
+    };
+    let commands = collector
+      .native_build_commands()
+      .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"))?;
+    if commands.is_empty() {
+      return Ok(());
+    }
+    for command in commands {
+      let event = BuildNativeCommandEvent::ninja(
+        module_name,
+        target_name,
+        command.abi(),
+        command.modifier_command()?,
+      );
+      let modified = observer.modify_native_command(event).await?;
+      command.with_modifier_command(modified)?.execute()?;
+    }
+    collector.report_native_build_success();
+    Ok(())
+  }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -630,29 +825,25 @@ impl<'a> WidgetCompileArktsPass<'a> {
       .as_ref()
       .and_then(|options| options.widget.as_ref())
       .is_some_and(|widget| widget.transitive_deps);
-    loader_json.pkg_name2_other_compile_files = Some(
-      if transitive_deps {
-        LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
-          &self.module.src_path,
-          &self.config.project_root,
+    loader_json.pkg_name2_other_compile_files = Some(if transitive_deps {
+      LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
+        &self.module.src_path,
+        &self.config.project_root,
+      )
+      .into_iter()
+      .map(|(package_name, files)| {
+        (
+          package_name,
+          files
+            .into_iter()
+            .map(|path| ArtifactPathSerializer::path_to_slash_string(&path).unwrap_or_default())
+            .collect(),
         )
-        .into_iter()
-        .map(|(package_name, files)| {
-          (
-            package_name,
-            files
-              .into_iter()
-              .map(|path| {
-                ArtifactPathSerializer::path_to_slash_string(&path).unwrap_or_default()
-              })
-              .collect(),
-          )
-        })
-        .collect()
-      } else {
-        IndexMap::new()
-      },
-    );
+      })
+      .collect()
+    } else {
+      IndexMap::new()
+    });
     Ok(loader_json)
   }
 
@@ -743,28 +934,30 @@ fn merge_form_widget_abilities(
   let path = extension_module.src_path.join("src/main/module.json5");
   let content = std::fs::read_to_string(&path)
     .map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
-  let extension_json: arkdown_core::ModuleJson5 =
-    json5::from_str(&content).map_err(|error| anyhow::anyhow!("parse {}: {error}", path.display()))?;
-  Ok(extension_json
-    .module
-    .extension_abilities
-    .iter()
-    .filter(|ability| ability.extension_type == "form")
-    .map(|ability| {
-      serde_json::json!({
-        "name": ability.name,
-        "type": "form",
-        "metadata": ability.metadata.iter().map(|entry| {
-          let mut value = serde_json::Map::new();
-          value.insert("name".into(), entry.name.clone().into());
-          if let Some(resource) = entry.resource.as_ref() {
-            value.insert("resource".into(), resource.clone().into());
-          }
-          serde_json::Value::Object(value)
-        }).collect::<Vec<_>>(),
+  let extension_json: arkdown_core::ModuleJson5 = json5::from_str(&content)
+    .map_err(|error| anyhow::anyhow!("parse {}: {error}", path.display()))?;
+  Ok(
+    extension_json
+      .module
+      .extension_abilities
+      .iter()
+      .filter(|ability| ability.extension_type == "form")
+      .map(|ability| {
+        serde_json::json!({
+          "name": ability.name,
+          "type": "form",
+          "metadata": ability.metadata.iter().map(|entry| {
+            let mut value = serde_json::Map::new();
+            value.insert("name".into(), entry.name.clone().into());
+            if let Some(resource) = entry.resource.as_ref() {
+              value.insert("resource".into(), resource.clone().into());
+            }
+            serde_json::Value::Object(value)
+          }).collect::<Vec<_>>(),
+        })
       })
-    })
-    .collect())
+      .collect(),
+  )
 }
 
 struct TransformSourceSnapshotBuilder<'a> {
@@ -1059,6 +1252,7 @@ struct ModuleObfuscationContext {
   config: Option<ObfuscationConfig>,
   dependency_rule_files: Vec<PathBuf>,
   output_target: OutputTarget,
+  har_artifact_type: HarArtifactType,
   target_name: Option<String>,
 }
 
@@ -1196,7 +1390,11 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
       project_path: ModuleBuildLayout::new(&self.module.src_path).source().ets(),
       cache_path: PathBuf::from(&self.loader_json.cache_path),
       ace_module_build: PathBuf::from(&self.loader_json.ace_module_build),
-      ace_module_json_path: ModuleBuildLayout::new(&self.module.src_path).res_ark_module_json(),
+      ace_module_json_path: ModuleBuildLayout::for_product(
+        &self.module.src_path,
+        &self.config.product.name,
+      )
+      .res_ark_module_json(),
       compile_sdk_version: self.config.sdk_config.compile_sdk_version.clone(),
       compatible_sdk_version: parse_api_version(&self.config.product.compatible_sdk_version)
         .unwrap_or(self.config.sdk_config.compile_api_version),
@@ -1327,10 +1525,10 @@ impl ModuleObfuscationContext {
       .ark_options
       .as_ref()
       .and_then(|options| options.obfuscation.clone());
-    let dependency_rule_files = if effective
-      .as_ref()
-      .is_some_and(|obfuscation| obfuscation.is_enabled_for_mode(&config.build_mode))
-    {
+    let dependency_rule_files = if effective.as_ref().is_some_and(|obfuscation| {
+      obfuscation.is_enabled_for_mode(&config.build_mode)
+        || !obfuscation.consumer_rule_files.is_empty()
+    }) {
       let module_context = session
         .module_context(&module.name)
         .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
@@ -1342,6 +1540,7 @@ impl ModuleObfuscationContext {
       config: effective,
       dependency_rule_files,
       output_target: config.output_target.clone(),
+      har_artifact_type: build_option.har_artifact_type,
       target_name: None,
     })
   }
@@ -1358,6 +1557,63 @@ impl ModuleObfuscationContext {
       .config
       .as_ref()
       .is_some_and(|config| config.is_enabled_for_mode(build_mode))
+  }
+
+  /// `ProcessObfuscationFiles.taskShouldDo()` from hvigor 6.24.3.
+  fn should_process_consumer_rules(
+    &self,
+    module_context: &ModuleCompileContext,
+    build_mode: &BuildMode,
+  ) -> bool {
+    if !matches!(self.output_target, OutputTarget::Har) {
+      return false;
+    }
+    let target_name = self.target_name.as_deref().unwrap_or("default");
+    let source_layout = ModuleSourceLayout::new(&module_context.module.root);
+    let default_ets = source_layout.ets();
+    let target_ets = source_layout.target_ets(target_name);
+    let has_ets_source = default_ets.is_dir()
+      || (target_name != "default" && target_ets.is_dir())
+      || module_context
+        .module
+        .source_roots
+        .iter()
+        .any(|root| root == &default_ets || root == &target_ets);
+    let is_obfuscated_har = !build_mode.is_debuggable()
+      && (self
+        .config
+        .as_ref()
+        .is_some_and(|config| config.enable_obfuscation)
+        || matches!(self.har_artifact_type, HarArtifactType::Obfuscation));
+    has_ets_source
+      && !is_obfuscated_har
+      && self
+        .config
+        .as_ref()
+        .is_some_and(|config| !config.consumer_rule_files.is_empty())
+  }
+
+  /// `ProcessObfuscationFiles.doTaskAction()`.
+  fn process_consumer_rules(
+    &self,
+    module_context: &ModuleCompileContext,
+    build_mode: &BuildMode,
+    compile_api_version: u32,
+    output_path: PathBuf,
+  ) -> Result<()> {
+    if !self.should_process_consumer_rules(module_context, build_mode)
+      || compile_api_version < 10
+      || build_mode.is_debuggable()
+    {
+      return Ok(());
+    }
+    let config = self.config.as_ref().ok_or_else(|| {
+      anyhow::anyhow!("ProcessObfuscationFiles lost its resolved obfuscation configuration")
+    })?;
+    ConsumerObfuscationFileWriter::new(config.consumer_rule_files.clone(), output_path)
+      .with_dependency_rule_files(self.dependency_rule_files.clone())
+      .write()
+      .map_err(|error| anyhow::anyhow!("Generate obfuscation.txt failed: {error}"))
   }
 }
 
@@ -1694,6 +1950,7 @@ struct CompileEnvKeyBuilder<'a> {
   loader_json: &'a LoaderJson,
   obfuscation_enabled: bool,
   target_name: &'a str,
+  use_source_hash: bool,
 }
 
 impl<'a> CompileEnvKeyBuilder<'a> {
@@ -1703,6 +1960,7 @@ impl<'a> CompileEnvKeyBuilder<'a> {
     loader_json: &'a LoaderJson,
     obfuscation_enabled: bool,
     target_name: &'a str,
+    use_source_hash: bool,
   ) -> Self {
     Self {
       config,
@@ -1710,6 +1968,7 @@ impl<'a> CompileEnvKeyBuilder<'a> {
       loader_json,
       obfuscation_enabled,
       target_name,
+      use_source_hash,
     }
   }
 
@@ -1722,7 +1981,7 @@ impl<'a> CompileEnvKeyBuilder<'a> {
     let compiler_cache_path = arkdown_cache::compiler_cache_path(&self.loader_json.cache_path);
 
     Ok(format!(
-      "{}#target={}",
+      "{}#target={}#useSourceHash={}",
       arkdown_cache::CompileEnv::from_plan(
         self.config.sdk_config.compile_sdk_version.clone(),
         self.config.product.compatible_sdk_version.clone(),
@@ -1733,7 +1992,8 @@ impl<'a> CompileEnvKeyBuilder<'a> {
         compiler_cache_path,
       )
       .to_key_string(),
-      self.target_name
+      self.target_name,
+      self.use_source_hash,
     ))
   }
 }
@@ -2045,22 +2305,71 @@ impl<'a> PkgContextInfoInputBuilder<'a> {
   }
 }
 
-struct SanitizerProfileFlags {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SanitizerProfileFlags {
   asan: bool,
+  tsan: bool,
   hwasan: bool,
+  ubsan: bool,
 }
 
 impl SanitizerProfileFlags {
-  fn new(asan: bool, hwasan: bool) -> Self {
-    Self { asan, hwasan }
+  pub(super) fn new(asan: bool, tsan: bool, hwasan: bool, ubsan: bool) -> Self {
+    Self {
+      asan,
+      tsan,
+      hwasan,
+      ubsan,
+    }
   }
 
-  fn apply_to_module_json(&self, path: &Path) -> Result<()> {
-    if !self.asan && !self.hwasan {
+  /// `AbstractMergeProfile` ORs exact extra-config predicates with the
+  /// flattened effective CMake arguments for each target.
+  pub(super) fn with_cmake_arguments(
+    self,
+    external_native_options: Option<&arkdown_core::ExternalNativeOptions>,
+  ) -> Self {
+    let contains = |expected: &str| {
+      external_native_options
+        .into_iter()
+        .flat_map(|options| options.arguments.iter())
+        .flat_map(|argument| argument.split_whitespace())
+        .any(|argument| argument == expected)
+    };
+    Self {
+      asan: self.asan || contains("-DOHOS_ENABLE_ASAN=ON"),
+      tsan: self.tsan || contains("-DOHOS_ENABLE_TSAN=ON"),
+      hwasan: self.hwasan || contains("-DOHOS_ENABLE_HWASAN=ON"),
+      ubsan: self.ubsan || contains("-DOHOS_ENABLE_UBSAN=ON"),
+    }
+  }
+
+  fn native_sanitizers(self) -> NativeBuildSanitizers {
+    NativeBuildSanitizers::new(self.asan, self.tsan, self.hwasan, self.ubsan)
+  }
+
+  fn enabled_count(self) -> usize {
+    [self.asan, self.tsan, self.hwasan, self.ubsan]
+      .into_iter()
+      .filter(|enabled| *enabled)
+      .count()
+  }
+
+  pub(super) fn apply_to_module_json(&self, path: &Path) -> Result<()> {
+    if self.enabled_count() == 0 {
       return Ok(());
     }
     let content = fs_err::read_to_string(path)?;
     let mut value: serde_json::Value = serde_json::from_str(&content)?;
+    self.apply_to_value(&mut value)?;
+    fs_err::write(path, serde_json::to_vec(&value)?)?;
+    Ok(())
+  }
+
+  pub(super) fn apply_to_value(&self, value: &mut serde_json::Value) -> Result<()> {
+    if self.enabled_count() == 0 {
+      return Ok(());
+    }
     let root = value
       .as_object_mut()
       .ok_or_else(|| anyhow::anyhow!("module.json root must be an object"))?;
@@ -2072,10 +2381,15 @@ impl SanitizerProfileFlags {
     if self.asan {
       app.insert("asanEnabled".to_string(), serde_json::Value::Bool(true));
     }
+    if self.tsan {
+      app.insert("tsanEnabled".to_string(), serde_json::Value::Bool(true));
+    }
     if self.hwasan {
       app.insert("hwasanEnabled".to_string(), serde_json::Value::Bool(true));
     }
-    fs_err::write(path, serde_json::to_vec(&value)?)?;
+    if self.ubsan {
+      app.insert("ubsanEnabled".to_string(), serde_json::Value::Bool(true));
+    }
     Ok(())
   }
 }
@@ -2146,6 +2460,7 @@ struct CompileContextInfoWriter<'a> {
   /// `isFormWidgetModule`: the widget pass joins form card sources into the
   /// main es2abc input only on the form widget module itself.
   form_widget_module: bool,
+  compile_entry_override: Option<Vec<String>>,
 }
 
 impl<'a> CompileContextInfoWriter<'a> {
@@ -2163,7 +2478,13 @@ impl<'a> CompileContextInfoWriter<'a> {
       bundle_type,
       bundle_name,
       form_widget_module,
+      compile_entry_override: None,
     }
+  }
+
+  fn with_compile_entry_override(mut self, entries: Option<&[String]>) -> Self {
+    self.compile_entry_override = entries.map(<[String]>::to_vec);
+    self
   }
 
   fn write(&self, output_path: &Path) -> Result<()> {
@@ -2214,46 +2535,63 @@ impl<'a> CompileContextInfoWriter<'a> {
     let mut entries = Vec::new();
     let mut seen_entries = FxHashSet::default();
     let source_records = self.source_record_index();
-    for source_entry in self.loader_json.hvigor_compile_entry.iter() {
-      if let Some(record_name) = self.record_name_for_source_entry(source_entry, &source_records) {
-        if seen_entries.insert(record_name.clone()) {
-          entries.push(record_name);
-        }
-      }
-    }
-    let other_compile_files = self
-      .loader_json
-      .other_compile_files
-      .iter()
-      .map(String::as_str)
-      .collect::<BTreeSet<_>>();
-    for source_entry in self.loader_json.compile_entry.iter() {
-      if other_compile_files.contains(source_entry.as_str()) {
-        continue;
-      }
-      if let Some(record_name) = self.record_name_for_source_entry(source_entry, &source_records) {
-        if seen_entries.insert(record_name.clone()) {
-          entries.push(record_name);
-        }
-      }
-    }
-    for runtime_entry in &self.loader_json.runtime_entry_sources {
-      if let Some(record_name) = self.record_name_for_source_entry(runtime_entry, &source_records) {
-        if seen_entries.insert(record_name.clone()) {
-          entries.push(record_name);
-        }
-      }
-    }
-    // hvigor's widget pass (`needSubmitArkTsWidget`) compiles the form card
-    // sources into the main es2abc input (`filesInfo.txt`) in addition to the
-    // dedicated `widgets.abc` — but only on the form widget module itself.
-    // The form extension module (HAP) keeps them out (`getFormJsonArr`
-    // returns [] for `isFormExtensionModule`).
-    if self.form_widget_module {
-      for form_entry in &self.loader_json.form_entry_sources {
-        if let Some(record_name) = self.record_name_for_source_entry(form_entry, &source_records) {
+    if let Some(compile_entry_override) = self.compile_entry_override.as_ref() {
+      // SDK ModuleHotreloadMode replaces `projectConfig.entryObj` with the
+      // changed path list before regenerating compileContextInfo.json.
+      for source_entry in compile_entry_override {
+        if let Some(record_name) = self.record_name_for_source_entry(source_entry, &source_records)
+        {
           if seen_entries.insert(record_name.clone()) {
             entries.push(record_name);
+          }
+        }
+      }
+    } else {
+      for source_entry in self.loader_json.hvigor_compile_entry.iter() {
+        if let Some(record_name) = self.record_name_for_source_entry(source_entry, &source_records)
+        {
+          if seen_entries.insert(record_name.clone()) {
+            entries.push(record_name);
+          }
+        }
+      }
+      let other_compile_files = self
+        .loader_json
+        .other_compile_files
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+      for source_entry in self.loader_json.compile_entry.iter() {
+        if other_compile_files.contains(source_entry.as_str()) {
+          continue;
+        }
+        if let Some(record_name) = self.record_name_for_source_entry(source_entry, &source_records)
+        {
+          if seen_entries.insert(record_name.clone()) {
+            entries.push(record_name);
+          }
+        }
+      }
+      for runtime_entry in &self.loader_json.runtime_entry_sources {
+        if let Some(record_name) = self.record_name_for_source_entry(runtime_entry, &source_records)
+        {
+          if seen_entries.insert(record_name.clone()) {
+            entries.push(record_name);
+          }
+        }
+      }
+      // hvigor's widget pass (`needSubmitArkTsWidget`) compiles the form card
+      // sources into the main es2abc input (`filesInfo.txt`) in addition to the
+      // dedicated `widgets.abc` — but only on the form widget module itself.
+      // The form extension module (HAP) keeps them out (`getFormJsonArr`
+      // returns [] for `isFormExtensionModule`).
+      if self.form_widget_module {
+        for form_entry in &self.loader_json.form_entry_sources {
+          if let Some(record_name) = self.record_name_for_source_entry(form_entry, &source_records)
+          {
+            if seen_entries.insert(record_name.clone()) {
+              entries.push(record_name);
+            }
           }
         }
       }
@@ -2901,7 +3239,12 @@ fn build_cache_group_snapshots(
   project_root: &Path,
   byte_code_har_integrated_optimization: bool,
 ) -> Vec<CacheGroupSnapshot> {
-  let module_layout = ModuleBuildLayout::for_output_target(&config.output_target, &module.src_path, "default");
+  let module_layout = ModuleBuildLayout::for_output_target_product(
+    &config.output_target,
+    &module.src_path,
+    &config.product.name,
+    "default",
+  );
 
   // Helper: FNV-1a hash over file content; returns CacheGroupSnapshot.
   let file_hash = |path: &PathBuf, key: CacheGroupKey| -> CacheGroupSnapshot {
@@ -3033,10 +3376,7 @@ fn build_share_context_json(
   args: &BuildArgs,
   module: Option<&ModuleConfig>,
 ) -> String {
-  let build_mode = match config.build_mode {
-    BuildMode::Debug => "debug",
-    BuildMode::Release => "release",
-  };
+  let build_mode = config.build_mode.as_str();
   let target = args.target.as_str();
   serde_json::json!({
       "share": {
@@ -3100,7 +3440,7 @@ impl<'a> PluginCacheInvalidationRunner<'a> {
     };
 
     for record in inventory.modules() {
-      let module = match record.read(self.cache_dir) {
+      let module = match inventory.read_module(record, self.cache_dir) {
         Ok(module) => Arc::new(module),
         Err(error) => {
           tracing::warn!(
@@ -3158,15 +3498,35 @@ impl TargetBuildExecutionPlan {
     build_options: &BuildOptionProfileInventory,
     args: &BuildArgs,
   ) -> Self {
+    if Self::is_device_test(args) {
+      let has_ohos_test = config.modules.iter().any(|module| {
+        args.module.as_ref().is_none_or(|name| name == &module.name)
+          && ModuleSourceLayout::new(&module.src_path)
+            .ohos_test_module_json5()
+            .is_file()
+      });
+      let mut target_names = Vec::with_capacity(2);
+      // Build the test HAP first so the default target's
+      // GenerateDeviceCoverage action can consume both completed packages.
+      // Hvigor's DAG imposes the same dependency without prescribing worker
+      // scheduling order.
+      if has_ohos_test {
+        target_names.push("ohosTest".to_string());
+      }
+      target_names.push("default".to_string());
+      return Self { target_names };
+    }
+    if let Some(align_target) = Self::aligned_target_for_action(&config.output_target, args) {
+      return Self {
+        target_names: vec![align_target],
+      };
+    }
     if let Some(target_name) = args.build_target_name.as_ref() {
       return Self {
         target_names: vec![target_name.clone()],
       };
     }
-    let build_mode_name = match config.build_mode {
-      BuildMode::Debug => "debug",
-      BuildMode::Release => "release",
-    };
+    let build_mode_name = config.build_mode.as_str();
     let mut applicable_target_names = Vec::new();
     for module in config
       .modules
@@ -3180,6 +3540,23 @@ impl TargetBuildExecutionPlan {
       }
     }
     Self::from_implicit_targets(applicable_target_names)
+  }
+
+  fn is_device_test(args: &BuildArgs) -> bool {
+    args.native_task_roots.iter().any(|root| {
+      matches!(
+        root.task_name.as_str(),
+        "onDeviceTest" | "GenerateDeviceCoverage"
+      )
+    })
+  }
+
+  fn aligned_target_for_action(output_target: &OutputTarget, args: &BuildArgs) -> Option<String> {
+    let test_action = matches!(output_target, OutputTarget::Test)
+      || args.build_target_name.as_deref() == Some("ohosTest");
+    (!test_action)
+      .then(|| args.hvigor_properties.align_target.clone())
+      .flatten()
   }
 
   fn from_implicit_targets(target_names: impl IntoIterator<Item = String>) -> Self {
@@ -3202,7 +3579,9 @@ impl TargetBuildExecutionPlan {
 
 #[cfg(test)]
 mod target_build_execution_plan_tests {
-  use super::TargetBuildExecutionPlan;
+  use super::{
+    BuildArgs, EffectiveTargetConfig, ModuleTargetSelection, OutputTarget, TargetBuildExecutionPlan,
+  };
 
   #[test]
   fn hvigor_implicit_all_builds_regular_targets_but_not_ohos_test() {
@@ -3215,6 +3594,152 @@ mod target_build_execution_plan_tests {
 
     assert_eq!(plan.target_names, ["default", "phone"]);
   }
+
+  #[test]
+  fn hvigor_align_target_overrides_normal_target_but_not_test_actions() {
+    let mut args = BuildArgs::default();
+    args.build_target_name = Some("phone".to_string());
+    args.hvigor_properties.align_target = Some("aligned".to_string());
+
+    assert_eq!(
+      TargetBuildExecutionPlan::aligned_target_for_action(&OutputTarget::Hap, &args).as_deref(),
+      Some("aligned")
+    );
+    assert_eq!(
+      TargetBuildExecutionPlan::aligned_target_for_action(&OutputTarget::Test, &args),
+      None
+    );
+    args.build_target_name = Some("ohosTest".to_string());
+    assert_eq!(
+      TargetBuildExecutionPlan::aligned_target_for_action(&OutputTarget::Hap, &args),
+      None
+    );
+  }
+
+  #[test]
+  fn hvigor_target_candidates_use_first_existing_fallback_then_default() {
+    let targets = ["default", "tablet", "wearable"]
+      .into_iter()
+      .map(|name| EffectiveTargetConfig {
+        name: name.to_string(),
+        ..EffectiveTargetConfig::default()
+      })
+      .collect::<Vec<_>>();
+
+    let selected = ModuleTargetSelection::first_named_target(
+      &targets,
+      ["missing-align", "missing-fallback", "wearable", "default"],
+    )
+    .expect("fallback target");
+    assert_eq!(selected.name, "wearable");
+  }
+
+  #[test]
+  fn hvigor_device_test_builds_ohos_test_before_default_and_ignores_explicit_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let module_root = temp.path().join("entry");
+    std::fs::create_dir_all(module_root.join("src/ohosTest")).unwrap();
+    std::fs::write(
+      module_root.join("src/ohosTest/module.json5"),
+      "{ module: { name: 'entry_test', type: 'entry' } }",
+    )
+    .unwrap();
+    let config = arkdown_core::ArkdownConfig {
+      project_root: temp.path().to_path_buf(),
+      build_mode: arkdown_core::BuildMode::Debug,
+      output_target: OutputTarget::Hap,
+      product: arkdown_core::ProductConfig {
+        name: "default".to_string(),
+        artifact_name: None,
+        bundle_name: "com.example.device.test".to_string(),
+        compatible_sdk_version: "5.0.0(12)".to_string(),
+        compatible_sdk_version_stage: None,
+        target_sdk_version: None,
+        runtime_os: "OpenHarmony".to_string(),
+        signing_config: None,
+        build_option: arkdown_core::BuildOption {
+          strict_mode: arkdown_core::StrictModeConfig {
+            case_sensitive_check: false,
+            use_normalized_ohm_url: true,
+            no_external_import_by_path: None,
+            duplicate_dependency_check: false,
+          },
+          ark_options: None,
+          res_options: None,
+          source_option: None,
+          preload_system_so: false,
+          preload_so: Vec::new(),
+          deduplicate_har: false,
+          app_with_signed_pkg: false,
+          enable_source_code_check: true,
+          generate_shared_tgz: None,
+          customized_har_base_package: None,
+          remove_permissions: Vec::new(),
+          aot_compile_mode: None,
+          host_pgo: None,
+          ap_path: None,
+          abi_filters: Vec::new(),
+          external_native_options: None,
+          har_artifact_type: arkdown_core::HarArtifactType::Original,
+          native_lib: arkdown_core::NativeLibOption::default(),
+        },
+        version_code: None,
+        version_name: None,
+        build_version: None,
+        app_options: arkdown_core::AppOptionOverride::default(),
+      },
+      modules: vec![arkdown_core::ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: arkdown_core::OhosModuleType::Entry,
+      }],
+      sdk_config: arkdown_core::SdkConfig {
+        ets_loader_path: temp.path().join("sdk").join("ets-loader"),
+        es2abc_path: temp.path().join("sdk").join("es2abc"),
+        restool_path: temp.path().join("sdk").join("restool"),
+        compile_api_version: 12,
+        sdk_component_api_version: 12,
+        has_rollup_plugin: true,
+        compile_sdk_version: "6.0.0.47".to_string(),
+      },
+    };
+    let build_options = arkdown_config::build_profile::BuildOptionProfileInventory::from_values(
+      temp.path(),
+      serde_json::json!({
+        "modules": [{
+          "name": "entry",
+          "srcPath": "./entry",
+          "targets": [{
+            "name": "ohosTest",
+            "config": { "deviceType": ["phone", "tablet"] }
+          }]
+        }]
+      }),
+      &[],
+    )
+    .expect("empty startup build-profile inventory");
+    let mut args = BuildArgs::default();
+    args.build_target_name = Some("phone".to_string());
+    args.native_task_roots.push(super::NativeTaskRoot {
+      module_name: "entry".to_string(),
+      target_name: None,
+      task_name: "onDeviceTest".to_string(),
+    });
+    let dependency_target = ModuleTargetSelection::resolve_dependency(
+      &config,
+      &build_options,
+      &config.modules[0],
+      Some("ohosTest"),
+      &args.hvigor_properties,
+    );
+    assert_eq!(
+      dependency_target.target.device_types,
+      ["phone", "tablet"],
+      "declared ohosTest target data takes precedence over the synthetic source-set target"
+    );
+    let plan = TargetBuildExecutionPlan::new(&config, &build_options, &args);
+    assert_eq!(plan.target_names, ["ohosTest", "default"]);
+  }
 }
 
 struct ModuleTargetSelection {
@@ -3222,19 +3747,32 @@ struct ModuleTargetSelection {
 }
 
 impl ModuleTargetSelection {
-  fn resolve(
+  fn resolve_build(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
     requested_target: Option<&str>,
+    properties: &HvigorRuntimeProperties,
   ) -> Self {
-    let build_mode_name = match config.build_mode {
-      BuildMode::Debug => "debug",
-      BuildMode::Release => "release",
-    };
+    let build_mode_name = config.build_mode.as_str();
+    let is_test_action =
+      matches!(config.output_target, OutputTarget::Test) || requested_target == Some("ohosTest");
+    if !is_test_action {
+      if let Some(align_target) = properties.align_target.as_deref() {
+        let declared = build_options.declared_targets(&module.name);
+        let candidates = std::iter::once(align_target)
+          .chain(properties.fallback_targets.iter().map(String::as_str))
+          .chain(std::iter::once("default"));
+        if let Some(target) = Self::first_named_target(&declared, candidates) {
+          return Self { target };
+        }
+        return Self::default_target();
+      }
+    }
     if let Some(requested_target) = requested_target {
-      let requested = build_options
-        .applicable_targets(&module.name, &config.product.name, build_mode_name)
+      let applicable =
+        build_options.applicable_targets(&module.name, &config.product.name, build_mode_name);
+      let requested = applicable
         .into_iter()
         .find(|target| target.name == requested_target);
       if let Some(target) = requested {
@@ -3248,12 +3786,7 @@ impl ModuleTargetSelection {
           .ohos_test_module_json5()
           .is_file()
       {
-        return Self {
-          target: EffectiveTargetConfig {
-            name: "ohosTest".to_string(),
-            ..EffectiveTargetConfig::default()
-          },
-        };
+        return Self::named_synthetic_target("ohosTest");
       }
       tracing::debug!(
         module = %module.name,
@@ -3263,11 +3796,92 @@ impl ModuleTargetSelection {
     }
     let target = build_options
       .effective_target(&module.name, &config.product.name, build_mode_name)
-      .unwrap_or_else(|| EffectiveTargetConfig {
-        name: "default".to_string(),
-        ..EffectiveTargetConfig::default()
-      });
+      .unwrap_or_else(Self::default_target_config);
     Self { target }
+  }
+
+  fn resolve_dependency(
+    config: &ArkdownConfig,
+    build_options: &BuildOptionProfileInventory,
+    module: &ModuleConfig,
+    super_target: Option<&str>,
+    properties: &HvigorRuntimeProperties,
+  ) -> Self {
+    if super_target == Some("ohosTest") {
+      let build_mode_name = config.build_mode.as_str();
+      if let Some(target) = build_options
+        .applicable_targets(&module.name, &config.product.name, build_mode_name)
+        .into_iter()
+        .find(|target| target.name == "ohosTest")
+      {
+        return Self { target };
+      }
+      if ModuleSourceLayout::new(&module.src_path)
+        .ohos_test_module_json5()
+        .is_file()
+      {
+        return Self::named_synthetic_target("ohosTest");
+      }
+      return Self::default_target();
+    }
+    if matches!(config.output_target, OutputTarget::Test) {
+      return Self::default_target();
+    }
+
+    let build_mode_name = config.build_mode.as_str();
+    let targets = if properties.align_target.is_some() {
+      build_options.declared_targets(&module.name)
+    } else {
+      build_options.applicable_targets(&module.name, &config.product.name, build_mode_name)
+    };
+    let candidates = properties
+      .align_target
+      .as_deref()
+      .into_iter()
+      .chain(super_target.filter(|target| *target != "all"))
+      .chain(properties.fallback_targets.iter().map(String::as_str))
+      .chain(std::iter::once("default"));
+    if let Some(target) = Self::first_named_target(&targets, candidates) {
+      return Self { target };
+    }
+    let target = build_options
+      .effective_target(&module.name, &config.product.name, build_mode_name)
+      .unwrap_or_else(Self::default_target_config);
+    Self { target }
+  }
+
+  fn first_named_target<'a>(
+    targets: &[EffectiveTargetConfig],
+    candidates: impl IntoIterator<Item = &'a str>,
+  ) -> Option<EffectiveTargetConfig> {
+    for candidate in candidates {
+      if let Some(target) = targets.iter().find(|target| target.name == candidate) {
+        return Some(target.clone());
+      }
+    }
+    None
+  }
+
+  fn named_synthetic_target(name: &str) -> Self {
+    Self {
+      target: EffectiveTargetConfig {
+        name: name.to_string(),
+        ..EffectiveTargetConfig::default()
+      },
+    }
+  }
+
+  fn default_target() -> Self {
+    Self {
+      target: Self::default_target_config(),
+    }
+  }
+
+  fn default_target_config() -> EffectiveTargetConfig {
+    EffectiveTargetConfig {
+      name: "default".to_string(),
+      ..EffectiveTargetConfig::default()
+    }
   }
 }
 
@@ -3278,24 +3892,57 @@ struct ModuleBuildConfiguration {
 }
 
 impl ModuleBuildConfiguration {
-  fn resolve(
+  fn resolve_build(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
     requested_target: Option<&str>,
     build_script_override: Option<&serde_json::Value>,
+    properties: &HvigorRuntimeProperties,
   ) -> Result<Self> {
-    let target =
-      ModuleTargetSelection::resolve(config, build_options, module, requested_target).target;
+    let target = ModuleTargetSelection::resolve_build(
+      config,
+      build_options,
+      module,
+      requested_target,
+      properties,
+    )
+    .target;
+    Self::resolve_for_target(config, build_options, module, target, build_script_override)
+  }
+
+  fn resolve_dependency(
+    config: &ArkdownConfig,
+    build_options: &BuildOptionProfileInventory,
+    module: &ModuleConfig,
+    super_target: Option<&str>,
+    build_script_override: Option<&serde_json::Value>,
+    properties: &HvigorRuntimeProperties,
+  ) -> Result<Self> {
+    let target = ModuleTargetSelection::resolve_dependency(
+      config,
+      build_options,
+      module,
+      super_target,
+      properties,
+    )
+    .target;
+    Self::resolve_for_target(config, build_options, module, target, build_script_override)
+  }
+
+  fn resolve_for_target(
+    config: &ArkdownConfig,
+    build_options: &BuildOptionProfileInventory,
+    module: &ModuleConfig,
+    target: EffectiveTargetConfig,
+    build_script_override: Option<&serde_json::Value>,
+  ) -> Result<Self> {
     let target_name = target.name.clone();
     let mut resolver = EffectiveModuleBuildOptionResolver::new(
       build_options,
       &module.name,
       &config.product.name,
-      match config.build_mode {
-        BuildMode::Debug => "debug",
-        BuildMode::Release => "release",
-      },
+      config.build_mode.as_str(),
       &target_name,
     );
     if let Some(build_script_override) = build_script_override {
@@ -3309,6 +3956,13 @@ impl ModuleBuildConfiguration {
     })?;
     let mut resolved = config.clone();
     resolved.product.build_option = build_option;
+    // Hvigor always packages the synthetic `ohosTest` target as a HAP,
+    // regardless of whether the owning module normally produces HAP, HSP,
+    // or HAR artifacts (`deviceTestComputeDepends` always points the test
+    // side at `SignHap`).
+    if target_name == "ohosTest" {
+      resolved.output_target = OutputTarget::Hap;
+    }
     Ok(Self {
       target_name,
       target,
@@ -3317,13 +3971,195 @@ impl ModuleBuildConfiguration {
   }
 }
 
+/// Builds the local target-service inventory consumed by Hvigor's
+/// `ConfigureCmake.PackageResolver`. This keeps dependency target selection in
+/// the coordinator and passes only resolved immutable native data to the
+/// native domain owner.
+struct NativeCmakeLocalDependencyInventoryBuilder<'a> {
+  config: &'a ArkdownConfig,
+  session: &'a BuildSession,
+  args: &'a BuildArgs,
+  target_name: &'a str,
+  dependencies: &'a DependencyGraphSnapshot,
+}
+
+impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
+  fn new(
+    config: &'a ArkdownConfig,
+    session: &'a BuildSession,
+    args: &'a BuildArgs,
+    target_name: &'a str,
+    dependencies: &'a DependencyGraphSnapshot,
+  ) -> Self {
+    Self {
+      config,
+      session,
+      args,
+      target_name,
+      dependencies,
+    }
+  }
+
+  fn build(&self) -> Result<Vec<NativeCmakeLocalDependency>> {
+    let dependency_roots = self
+      .dependencies
+      .nodes
+      .values()
+      .filter_map(|node| node.package_root.as_deref())
+      .map(canonicalize_or_owned)
+      .collect::<FxHashSet<_>>();
+    let mut dependencies = Vec::new();
+    for module in self
+      .config
+      .modules
+      .iter()
+      .filter(|module| dependency_roots.contains(&canonicalize_or_owned(&module.src_path)))
+    {
+      let resolved = ModuleBuildConfiguration::resolve_dependency(
+        self.config,
+        self.session.build_options.as_ref(),
+        module,
+        Some(self.target_name),
+        self.args.module_hvigor_overrides.get(&module.name),
+        &self.args.hvigor_properties,
+      )?;
+      let native = arkdown_config::build_profile::EffectiveNativeBuildOption::from_build_option(
+        &resolved.config.product.build_option,
+      );
+      let Some(external) = native.external_native_options.as_ref() else {
+        continue;
+      };
+      let default_cmake = module
+        .src_path
+        .join("src")
+        .join("main")
+        .join("cpp")
+        .join("CMakeLists.txt");
+      let has_native_source =
+        external.path.as_ref().is_some_and(|path| path.is_file()) || default_cmake.is_file();
+      if !has_native_source {
+        continue;
+      }
+      dependencies.push(NativeCmakeLocalDependency::new(
+        module.src_path.clone(),
+        resolved.config.product.name.clone(),
+        resolved.target_name,
+        resolved.config.build_mode.as_str().to_string(),
+        module.module_type.clone(),
+        native.native_lib,
+      ));
+    }
+    Ok(dependencies)
+  }
+}
+
+/// Builds the exact dependency custom-type input list consumed by
+/// `ArkCompile.collectCustomTypes()`. Local source HARs use their effective
+/// target build option; packaged HARs use `metadata.customTypes`.
+struct DependencyCustomTypeInputBuilder<'a> {
+  dependencies: &'a DependencyGraphSnapshot,
+  config: &'a ArkdownConfig,
+  build_options: &'a BuildOptionProfileInventory,
+  target_name: &'a str,
+  module_overrides: &'a BTreeMap<String, serde_json::Value>,
+  properties: &'a HvigorRuntimeProperties,
+}
+
+impl<'a> DependencyCustomTypeInputBuilder<'a> {
+  fn new(
+    dependencies: &'a DependencyGraphSnapshot,
+    config: &'a ArkdownConfig,
+    build_options: &'a BuildOptionProfileInventory,
+    target_name: &'a str,
+    module_overrides: &'a BTreeMap<String, serde_json::Value>,
+    properties: &'a HvigorRuntimeProperties,
+  ) -> Self {
+    Self {
+      dependencies,
+      config,
+      build_options,
+      target_name,
+      module_overrides,
+      properties,
+    }
+  }
+
+  fn collect(&self) -> Result<Vec<DependencyCustomTypeInput>> {
+    let mut output = Vec::new();
+    let mut seen = BTreeSet::new();
+    for edge in &self.dependencies.edges {
+      let Some(node) = self.dependencies.nodes.get(&edge.package_name) else {
+        continue;
+      };
+      if !matches!(
+        node.node_type,
+        DependencyNodeType::SourceHar | DependencyNodeType::BytecodeHar
+      ) || !seen.insert(node.package_name.as_str())
+      {
+        continue;
+      }
+      let Some(package_root) = node.package_root.clone() else {
+        continue;
+      };
+      let local_module = self.config.modules.iter().find(|module| {
+        canonicalize_or_owned(&module.src_path) == canonicalize_or_owned(&package_root)
+      });
+      let configured_types = if let Some(module) = local_module {
+        ModuleBuildConfiguration::resolve_dependency(
+          self.config,
+          self.build_options,
+          module,
+          Some(self.target_name),
+          self.module_overrides.get(&module.name),
+          self.properties,
+        )?
+        .config
+        .product
+        .build_option
+        .ark_options
+        .as_ref()
+        .map(|options| options.types.clone())
+        .unwrap_or_default()
+      } else {
+        node
+          .package
+          .as_deref()
+          .and_then(|package| package.package_json.extra.get("metadata"))
+          .and_then(|metadata| metadata.get("customTypes"))
+          .and_then(serde_json::Value::as_array)
+          .map(|types| {
+            types
+              .iter()
+              .filter_map(serde_json::Value::as_str)
+              .map(str::to_string)
+              .collect()
+          })
+          .unwrap_or_default()
+      };
+      let mut declared_dependencies = BTreeSet::new();
+      if let Some(package) = node.package.as_deref() {
+        declared_dependencies.extend(package.package_json.dependencies.keys().cloned());
+        declared_dependencies.extend(package.package_json.dev_dependencies.keys().cloned());
+      }
+      output.push(DependencyCustomTypeInput {
+        package_name: node.package_name.clone(),
+        package_root,
+        configured_types,
+        declared_dependencies,
+      });
+    }
+    Ok(output)
+  }
+}
+
 /// Recursively copy a directory tree (hvigor `fs-extra.copy` semantics).
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
   for entry in walkdir::WalkDir::new(source) {
     let entry = entry.map_err(|error| anyhow::anyhow!("copy tree walk: {error}"))?;
-    let relative = entry.path().strip_prefix(source).map_err(|error| {
-      anyhow::anyhow!("copy tree strip prefix: {error}")
-    })?;
+    let relative = entry
+      .path()
+      .strip_prefix(source)
+      .map_err(|error| anyhow::anyhow!("copy tree strip prefix: {error}"))?;
     let target = destination.join(relative);
     if entry.file_type().is_dir() {
       std::fs::create_dir_all(&target)?;
@@ -3381,14 +4217,50 @@ impl BuildCoordinator {
   fn arkts_compile_task_name(
     output_target: &OutputTarget,
     module_type: &OhosModuleType,
+    target_name: &str,
   ) -> &'static str {
     if matches!(output_target, OutputTarget::Test) {
       "UnitTestArkTS"
+    } else if matches!(output_target, OutputTarget::Preview) {
+      "PreviewArkTS"
+    } else if target_name == "ohosTest" {
+      "OhosTestCompileArkTS"
     } else if matches!(module_type, OhosModuleType::Har) {
       "HarCompileArkTS"
     } else {
       "CompileArkTS"
     }
+  }
+
+  /// Select the concrete compiler task requested through Hvigor's public task
+  /// graph. `BuildArkTS`/`BuildJS` and `CompileJS` remain registered by the
+  /// 6.24.3 plugin even though current Stage projects normally reach
+  /// `CompileArkTS`. A direct invocation must therefore publish the selected
+  /// task's lifecycle boundary instead of silently running `CompileArkTS` and
+  /// leaving the requested root unfinished.
+  pub(super) fn selected_arkts_compile_task_name(
+    roots: &[NativeTaskRoot],
+    module_name: &str,
+    target_name: &str,
+    output_target: &OutputTarget,
+    module_type: &OhosModuleType,
+  ) -> &'static str {
+    roots
+      .iter()
+      .find_map(|root| {
+        (root.module_name == module_name && root.target_name.as_deref() == Some(target_name))
+          .then(|| match root.task_name.as_str() {
+            "BuildArkTS" => Some("BuildArkTS"),
+            "BuildJS" => Some("BuildJS"),
+            "CompileArkTS" => Some("CompileArkTS"),
+            "CompileJS" => Some("CompileJS"),
+            "HarBuildArkTS" => Some("HarBuildArkTS"),
+            "HarCompileArkTS" => Some("HarCompileArkTS"),
+            _ => None,
+          })
+          .flatten()
+      })
+      .unwrap_or_else(|| Self::arkts_compile_task_name(output_target, module_type, target_name))
   }
 
   /// hvigor `FastPackageHap` (`packOptions.fastBuildApp`): copy the compiled
@@ -3404,14 +4276,27 @@ impl BuildCoordinator {
       String,
       Arc<ArkdownConfig>,
     )],
+    enabled_modules: &[bool],
+    pack_info_plans: &[Vec<ModulePackInfoPlan>],
   ) -> Result<Vec<PathBuf>> {
     let mut artifact_paths = Vec::new();
-    for (module, _manifest, _loader_json, _resource_refs, module_target_name, module_config) in
-      loader_jsons
+    for (
+      (module, _manifest, _loader_json, _resource_refs, module_target_name, module_config),
+      enabled,
+      plans,
+    ) in loader_jsons
+      .iter()
+      .zip(enabled_modules)
+      .zip(pack_info_plans)
+      .map(|((module, enabled), plans)| (module, enabled, plans))
     {
-      let module_layout = ModuleBuildLayout::for_output_target(
+      if !*enabled {
+        continue;
+      }
+      let module_layout = ModuleBuildLayout::for_output_target_product(
         &module_config.output_target,
         &module.src_path,
+        &module_config.product.name,
         module_target_name,
       );
       let fast_app = module_layout
@@ -3449,12 +4334,24 @@ impl BuildCoordinator {
       if !use_normalized && pkg_sdk_info.is_file() {
         std::fs::copy(&pkg_sdk_info, fast_app.join("pkgSdkInfo.json"))?;
       }
-      // module.json with the owning bundle name
-      let package_module_json = module_layout.default_intermediate_dir("package").join("module.json");
-      if package_module_json.is_file() {
+      // module.json with the owning bundle name. Normal packaging extracts
+      // this intermediate from the archive, while FastPackage runs before an
+      // archive exists and therefore reads ProcessProfile output directly.
+      let package_module_json = module_layout
+        .default_intermediate_dir("package")
+        .join("module.json");
+      let module_json_source = if package_module_json.is_file() {
+        package_module_json
+      } else {
+        module_layout.merge_profile_module_json()
+      };
+      if module_json_source.is_file() {
         let mut document: serde_json::Value =
-          serde_json::from_slice(&std::fs::read(&package_module_json)?)?;
-        if let Some(app) = document.get_mut("app").and_then(serde_json::Value::as_object_mut) {
+          serde_json::from_slice(&std::fs::read(&module_json_source)?)?;
+        if let Some(app) = document
+          .get_mut("app")
+          .and_then(serde_json::Value::as_object_mut)
+        {
           app.insert(
             "bundleName".into(),
             module_config.product.bundle_name.clone().into(),
@@ -3462,27 +4359,338 @@ impl BuildCoordinator {
         }
         std::fs::write(fast_app.join("module.json"), serde_json::to_vec(&document)?)?;
       }
-      // pack.info with the owning bundle name
-      let pack_info = module_layout
-        .outputs_root()
-        .join(module_target_name)
-        .join("pack.info");
-      if pack_info.is_file() {
-        let mut document: serde_json::Value =
-          serde_json::from_slice(&std::fs::read(&pack_info)?)?;
-        if let Some(summary) = document.get_mut("summary").and_then(serde_json::Value::as_object_mut) {
-          if let Some(app) = summary.get_mut("app").and_then(serde_json::Value::as_object_mut) {
-            app.insert(
-              "bundleName".into(),
-              module_config.product.bundle_name.clone().into(),
-            );
-          }
-        }
-        std::fs::write(fast_app.join("pack.info"), serde_json::to_vec(&document)?)?;
+      // Stage-model fast APP packaging uses the first related entry exactly
+      // like `BasePackHapTask.copyIntermediates` (`allPackInfoPath[0]`).
+      let pack_info = plans
+        .first()
+        .map(|plan| plan.output_path.clone())
+        .unwrap_or_else(|| module_layout.output_pack_info());
+      if !pack_info.is_file() {
+        anyhow::bail!(
+          "FastPackage requires MakePackInfo output '{}'",
+          pack_info.display()
+        );
       }
+      std::fs::copy(pack_info, fast_app.join("pack.info"))?;
       artifact_paths.push(fast_app);
     }
     Ok(artifact_paths)
+  }
+
+  fn pack_info_input(
+    module: &ModuleConfig,
+    module_config: &ArkdownConfig,
+    session: &BuildSession,
+    target_name: &str,
+    module_json: &serde_json::Value,
+    resources_src_dirs: Vec<PathBuf>,
+    device_types: Vec<String>,
+  ) -> PackInfoInput {
+    let bundle_type = module_config
+      .product
+      .app_options
+      .bundle_type
+      .clone()
+      .unwrap_or_else(|| session.project.bundle_type.clone());
+    PackInfoInput {
+      module_name: module.name.clone(),
+      package_name: ArtifactOutputName::new(
+        module_config.product.artifact_name.as_deref(),
+        &module.name,
+        target_name,
+        "hap",
+      )
+      .pack_info(),
+      module_json: module_json.clone(),
+      // MakePackInfo reads form JSON from the source resource model; it runs
+      // before CompileResource and must not depend on restool output.
+      resources_src_dirs,
+      bundle_version_code: module_config
+        .product
+        .version_code
+        .unwrap_or(session.project.version_code),
+      bundle_version_name: module_config
+        .product
+        .version_name
+        .clone()
+        .unwrap_or_else(|| session.project.version_name.clone()),
+      bundle_build_version: module_config
+        .product
+        .build_version
+        .clone()
+        .or_else(|| session.project.build_version.clone()),
+      min_compatible_version_code: session.project.min_compatible_version_code,
+      bundle_type: bundle_type.clone(),
+      additional_modules: Vec::new(),
+      device_types,
+      package_device_types: Vec::new(),
+      installation_free: module_json
+        .pointer("/module/installationFree")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(bundle_type == "atomicService"),
+      delivery_with_install: module_json
+        .pointer("/module/deliveryWithInstall")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true),
+    }
+  }
+
+  fn target_device_types(
+    module_name: &str,
+    module_device_types: &[String],
+    target: &EffectiveTargetConfig,
+  ) -> Result<Vec<String>> {
+    if target.device_types.is_empty() {
+      return Ok(module_device_types.to_vec());
+    }
+    let invalid = target
+      .device_types
+      .iter()
+      .filter(|device_type| !module_device_types.contains(device_type))
+      .cloned()
+      .collect::<Vec<_>>();
+    if !invalid.is_empty() {
+      anyhow::bail!(
+        "INVALID_TARGET_DEVICETYPE: target '{}' of module '{}' contains deviceType {:?} not declared by module.json5 {:?}",
+        target.name,
+        module_name,
+        invalid,
+        module_device_types
+      );
+    }
+    Ok(target.device_types.clone())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn pack_info_plans(
+    config: &ArkdownConfig,
+    module: &ModuleConfig,
+    module_config: &ArkdownConfig,
+    session: &BuildSession,
+    args: &BuildArgs,
+    target_name: &str,
+    target: &EffectiveTargetConfig,
+    module_layout: &ModuleBuildLayout<'_>,
+  ) -> Result<Vec<ModulePackInfoPlan>> {
+    let module_context = session
+      .module_context(&module.name)
+      .ok_or_else(|| anyhow::anyhow!("missing build session module context for {}", module.name))?;
+    let mut declared_device_types = module_context
+      .module
+      .module_json
+      .as_ref()
+      .map(|module_json| module_json.module.device_types.clone())
+      .unwrap_or_default();
+    if declared_device_types.is_empty() {
+      declared_device_types.push("phone".to_string());
+    }
+    let current_device_types =
+      Self::target_device_types(&module.name, &declared_device_types, target)?;
+    let current_module_json = if target_name == "ohosTest" {
+      module_context
+        .module
+        .ohos_test_module_json_value
+        .as_deref()
+        .or(module_context.module.module_json_value.as_deref())
+    } else {
+      module_context.module.module_json_value.as_deref()
+    }
+    .cloned()
+    .ok_or_else(|| anyhow::anyhow!("missing module.json5 snapshot for {}", module.name))?;
+    let form_resources = PackInfoFormResourceResolver::new(session.project.as_ref());
+    let resources_src_dirs =
+      form_resources.resolve(&module.name, target_name, &current_module_json)?;
+    let mut base = Self::pack_info_input(
+      module,
+      module_config,
+      session,
+      target_name,
+      &current_module_json,
+      resources_src_dirs,
+      current_device_types.clone(),
+    );
+    if target_name == "ohosTest" {
+      let default_module_json = module_context
+        .module
+        .module_json_value
+        .as_deref()
+        .cloned()
+        .ok_or_else(|| {
+          anyhow::anyhow!("missing default module.json5 snapshot for {}", module.name)
+        })?;
+      base.additional_modules.push(PackInfoModuleInput {
+        module_name: module.name.clone(),
+        resources_src_dirs: form_resources.resolve(
+          &module.name,
+          "default",
+          &default_module_json,
+        )?,
+        module_json: default_module_json,
+        device_types: current_device_types.clone(),
+      });
+    }
+
+    let related_entries = if matches!(module.module_type, OhosModuleType::Feature) {
+      module_context
+        .module
+        .related_entry_modules
+        .as_deref()
+        .unwrap_or_default()
+    } else {
+      &[]
+    };
+    if related_entries.is_empty() {
+      return Ok(vec![ModulePackInfoPlan {
+        input: base,
+        output_path: module_layout.output_pack_info(),
+        related_entry: None,
+      }]);
+    }
+
+    let mut plans = Vec::with_capacity(related_entries.len());
+    for entry_name in related_entries {
+      let entry_module = config
+        .modules
+        .iter()
+        .find(|candidate| candidate.name == *entry_name)
+        .ok_or_else(|| {
+          anyhow::anyhow!(
+            "RELATED_ENTRY_MODULE_NOT_FOUND: feature '{}' references missing entry module '{}'",
+            module.name,
+            entry_name
+          )
+        })?;
+      if !matches!(entry_module.module_type, OhosModuleType::Entry) {
+        anyhow::bail!(
+          "INVALID_RELATED_ENTRY_MODULE_TYPE: feature '{}' references '{}' with module type '{}'",
+          module.name,
+          entry_name,
+          entry_module.module_type
+        );
+      }
+      let entry_context = session.module_context(entry_name).ok_or_else(|| {
+        anyhow::anyhow!("missing build session module context for related entry '{entry_name}'")
+      })?;
+      let entry_build = ModuleBuildConfiguration::resolve_dependency(
+        config,
+        session.build_options.as_ref(),
+        entry_module,
+        Some(target_name),
+        args.module_hvigor_overrides.get(entry_name),
+        &args.hvigor_properties,
+      )?;
+      let mut entry_declared_device_types = entry_context
+        .module
+        .module_json
+        .as_ref()
+        .map(|module_json| module_json.module.device_types.clone())
+        .unwrap_or_default();
+      if entry_declared_device_types.is_empty() {
+        entry_declared_device_types.push("phone".to_string());
+      }
+      let entry_device_types = Self::target_device_types(
+        entry_name,
+        &entry_declared_device_types,
+        &entry_build.target,
+      )?;
+      let current_device_type_set = current_device_types.iter().collect::<FxHashSet<_>>();
+      let shared_device_types = entry_device_types
+        .iter()
+        .filter(|device_type| current_device_type_set.contains(device_type))
+        .cloned()
+        .collect::<Vec<_>>();
+      if shared_device_types.is_empty() {
+        tracing::warn!(
+          feature = %module.name,
+          entry = %entry_name,
+          "The device types of the feature and related entry are different; Hvigor emits an invalid HAP with an empty related-entry deviceType"
+        );
+      }
+      let entry_source_value = if entry_build.target.name == "ohosTest" {
+        entry_context
+          .module
+          .ohos_test_module_json_value
+          .as_deref()
+          .or(entry_context.module.module_json_value.as_deref())
+      } else {
+        entry_context.module.module_json_value.as_deref()
+      }
+      .cloned()
+      .ok_or_else(|| {
+        anyhow::anyhow!("missing module.json5 snapshot for related entry '{entry_name}'")
+      })?;
+      let mut input = base.clone();
+      let related_archive_module = format!("{}-{}", module.name, entry_name);
+      input.package_name = ArtifactOutputName::new(
+        module_config.product.artifact_name.as_deref(),
+        &related_archive_module,
+        target_name,
+        "hap",
+      )
+      .pack_info();
+      input.additional_modules = vec![PackInfoModuleInput {
+        module_name: entry_name.clone(),
+        resources_src_dirs: form_resources.resolve(
+          entry_name,
+          &entry_build.target.name,
+          &entry_source_value,
+        )?,
+        module_json: entry_source_value,
+        device_types: shared_device_types.clone(),
+      }];
+      if target_name == "ohosTest" {
+        let default_module_json = module_context
+          .module
+          .module_json_value
+          .as_deref()
+          .cloned()
+          .ok_or_else(|| {
+            anyhow::anyhow!("missing default module.json5 snapshot for {}", module.name)
+          })?;
+        let default_entry_json = entry_context
+          .module
+          .module_json_value
+          .as_deref()
+          .cloned()
+          .ok_or_else(|| {
+            anyhow::anyhow!(
+              "missing default module.json5 snapshot for related entry '{entry_name}'"
+            )
+          })?;
+        input.additional_modules.extend([
+          PackInfoModuleInput {
+            module_name: module.name.clone(),
+            resources_src_dirs: form_resources.resolve(
+              &module.name,
+              "default",
+              &default_module_json,
+            )?,
+            module_json: default_module_json,
+            device_types: current_device_types.clone(),
+          },
+          PackInfoModuleInput {
+            module_name: entry_name.clone(),
+            resources_src_dirs: form_resources.resolve(
+              entry_name,
+              "default",
+              &default_entry_json,
+            )?,
+            module_json: default_entry_json,
+            device_types: shared_device_types,
+          },
+        ]);
+      }
+      input.package_device_types = entry_device_types;
+      plans.push(ModulePackInfoPlan {
+        input,
+        output_path: module_layout
+          .target_output_dir()
+          .join(entry_name)
+          .join("pack.info"),
+        related_entry: Some(entry_name.clone()),
+      });
+    }
+    Ok(plans)
   }
   /// `isFormWidgetModule`: an HSP whose `module.json5` declares
   /// `formExtensionModule` (hvigor `module-model-impl.ts`).
@@ -3561,6 +4769,13 @@ impl BuildCoordinator {
       targets = ?target_plan.target_names,
       "multi-target: executing the complete build pipeline once per target"
     );
+    let cycle_lifecycle = BuildTaskLifecycle::new(
+      self.task_observer.clone(),
+      self.args.native_task_roots.clone(),
+    );
+    if self.owns_task_cycle {
+      cycle_lifecycle.begin_cycle().await?;
+    }
     let mut artifact_paths = Vec::new();
     for target_name in target_plan.target_names {
       let mut args = self.args.clone();
@@ -3572,11 +4787,14 @@ impl BuildCoordinator {
         args,
         package_plugins: self.package_plugins.clone(),
         task_observer: self.task_observer.clone(),
-        owns_task_cycle: self.owns_task_cycle,
+        owns_task_cycle: false,
       }
       .execute_impl()
       .await?;
       artifact_paths.extend(output.artifact_paths);
+    }
+    if self.owns_task_cycle {
+      cycle_lifecycle.finish_cycle().await?;
     }
     Ok(BuildOutput { artifact_paths })
   }
@@ -3598,14 +4816,32 @@ impl BuildCoordinator {
       task_lifecycle.begin_cycle().await?;
     }
 
-    let watch_mode = args.watch || args.preview;
-    let is_incremental_watch = watch_mode || args.watch_invalidation.is_some();
+    let hot_reload_mode = HotReloadTaskPlan::requested(&args.native_task_roots);
+    let watch_mode =
+      args.watch || args.preview || (hot_reload_mode && args.watch_invalidation.is_none());
+    let collect_importers = args.watch || args.preview || hot_reload_mode;
+    let is_incremental_watch = collect_importers || args.watch_invalidation.is_some();
     let watch_changed_files = args
       .watch_invalidation
       .as_ref()
       .map(|batch| batch.changed_files.clone())
       .unwrap_or_default();
     let preview_mode = args.preview;
+    let preview_incremental_resources = matches!(config.output_target, OutputTarget::Preview)
+      && args.hvigor_properties.previewer_compile_res_incremental;
+    if preview_incremental_resources
+      && !session
+        .sdk
+        .tools()
+        .supports_preview_compile_resource_increment(
+          config.product.runtime_os.eq_ignore_ascii_case("HarmonyOS"),
+        )
+    {
+      anyhow::bail!(
+        "ARKDOWN_PREVIEW_INCREMENTAL_RESOURCE_SDK: compileResInc=true requires component API >= 9 and a toolchains component supporting incremental preview resources (SDK {})",
+        session.sdk.compile_sdk_version
+      );
+    }
     // Local unit-test builds default to code-coverage instrumentation:
     // hvigor `setTestDefaultParameters` injects `ohos-test-coverage=true`
     // for the `test` task; the CLI flag can still override it.
@@ -3626,6 +4862,19 @@ impl BuildCoordinator {
       .clone()
       .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
     let project_layout = ProjectBuildLayout::new(&project_root);
+    let quickfix_version_store =
+      if QuickFixTaskPlan::patch_artifacts_requested(&args.native_task_roots) {
+        Some(QuickFixVersionStore::from_runtime(
+          args.hvigor_cache_dir.as_deref(),
+        )?)
+      } else {
+        None
+      };
+    let quickfix_patch_version = quickfix_version_store
+      .as_ref()
+      .map(QuickFixVersionStore::current)
+      .transpose()?;
+    let mut quickfix_version_advanced = false;
 
     if let Some(ref named) = named_target {
       tracing::info!(
@@ -3640,17 +4889,21 @@ impl BuildCoordinator {
     let custom_cfg = session.custom_config.as_ref();
     let intermediate_writer = IntermediateArtifactWriter::new(&config.sdk_config.restool_path);
 
-    let build_modules =
-      ModuleSelectionPlanner::build_modules_for_target(config.as_ref(), args.module.as_deref())?;
+    let build_modules = ModuleSelectionPlanner::build_modules_for_target(
+      config.as_ref(),
+      args.module.as_deref(),
+      &args.native_task_roots,
+    )?;
     let build_module_configs = build_modules
       .iter()
       .map(|module| {
-        ModuleBuildConfiguration::resolve(
+        ModuleBuildConfiguration::resolve_build(
           config.as_ref(),
           session.build_options.as_ref(),
           module,
           named_target.as_deref(),
           args.module_hvigor_overrides.get(&module.name),
+          &args.hvigor_properties,
         )
       })
       .collect::<Result<Vec<_>>>()?;
@@ -3676,17 +4929,24 @@ impl BuildCoordinator {
         "coverage mode enabled — instrumenting executable statements before ABC compilation"
       );
     }
-    if args.ohos_debug_asan && args.ohos_enable_hwasan {
-      anyhow::bail!(
-        "ohos-debug-asan and ohos-enable-hwasan are mutually exclusive sanitizer modes"
-      );
-    }
-    if args.ohos_debug_asan {
-      tracing::info!("ohos-debug-asan enabled — module.json app.asanEnabled=true");
-    }
-    if args.ohos_enable_hwasan {
-      tracing::info!("ohos-enable-hwasan enabled — module.json app.hwasanEnabled=true");
-    }
+    let extra_sanitizer_flags = SanitizerProfileFlags::new(
+      args
+        .hvigor_properties
+        .asan_config
+        .unwrap_or(args.ohos_debug_asan),
+      args
+        .hvigor_properties
+        .tsan_config
+        .unwrap_or(args.ohos_enable_tsan),
+      args
+        .hvigor_properties
+        .hwasan_config
+        .unwrap_or(args.ohos_enable_hwasan),
+      args
+        .hvigor_properties
+        .ubsan_config
+        .unwrap_or(args.ohos_enable_ubsan),
+    );
     let native_sdk_toolchain = NativeSdkToolchain::new(
       session.sdk.sdk_root.clone(),
       session
@@ -3706,30 +4966,34 @@ impl BuildCoordinator {
         .tool_path(SdkToolKind::Binxo)
         .map(|tool| tool.path),
     );
-    let sanitizer_native_policy = match (args.ohos_debug_asan, args.ohos_enable_hwasan) {
-      (true, false) => Some(
-        NativeLibCollectionPolicy::asan()
-          .with_build_mode(args.mode.clone())
-          .with_sdk_toolchain(native_sdk_toolchain.clone()),
-      ),
-      (false, true) => Some(
-        NativeLibCollectionPolicy::hwasan(
-          session
-            .sdk
-            .tool_path(SdkToolKind::LlvmReadElf)
-            .map(|tool| tool.path),
-        )
-        .with_build_mode(args.mode.clone())
-        .with_sdk_toolchain(native_sdk_toolchain.clone()),
-      ),
-      _ => None,
-    };
+    let hwasan_config = args
+      .hvigor_properties
+      .hwasan_config
+      .or(args.ohos_enable_hwasan.then_some(true));
+    let binxo_config = args
+      .hvigor_properties
+      .binxo_config
+      .or(args.ohos_enable_binxo.then_some(true));
+    let sanitizer_native_policy = NativeLibCollectionPolicy::default()
+      .with_sanitizers(
+        extra_sanitizer_flags.native_sanitizers(),
+        extra_sanitizer_flags
+          .hwasan
+          .then(|| {
+            session
+              .sdk
+              .tool_path(SdkToolKind::LlvmReadElf)
+              .map(|tool| tool.path)
+          })
+          .flatten(),
+      )
+      .with_build_mode(args.mode.clone())
+      .with_sdk_toolchain(native_sdk_toolchain.clone())
+      .with_binxo_config(hwasan_config, binxo_config);
 
     // ── Step 2: Profile + Resource (per module) ───────────────────────
     progress.step(2, 6, "Processing profiles");
 
-    let sanitizer_profile_flags =
-      SanitizerProfileFlags::new(args.ohos_debug_asan, args.ohos_enable_hwasan);
     let permission_validator = arkdown_profile::PermissionValidator::new();
     let privacy_profile_processor = arkdown_profile::PrivacyProfileProcessor::new();
     let process_profile_processor = arkdown_profile::ProcessProfileProcessor::new();
@@ -3739,6 +5003,7 @@ impl BuildCoordinator {
     let distro_filter_processor = arkdown_profile::DistroFilterProcessor::new();
 
     let mut loader_jsons = Vec::new();
+    let mut module_pack_info_plans = Vec::new();
     let mut all_bc_har_deps: Vec<Vec<ByteCodeHarScanEntry>> = Vec::new();
     let mut privacy_profile_paths: Vec<Option<PathBuf>> = Vec::new();
 
@@ -3795,12 +5060,45 @@ impl BuildCoordinator {
       let module_target = resolved_module.target;
       let module_config = resolved_module.config;
       let module_build_option = &module_config.product.build_option;
-      let processor = ProfileProcessor::new(module_config.clone());
+      let sanitizer_profile_flags = extra_sanitizer_flags
+        .with_cmake_arguments(module_build_option.external_native_options.as_ref());
+      if module_build_option.external_native_options.is_some() {
+        if sanitizer_profile_flags.enabled_count() > 1 {
+          // BuildNativeWithCmake.checkExclusiveSan is advisory: hvigor only
+          // evaluates it for modules that own an external native build and
+          // still forwards every enabled sanitizer afterwards.
+          tracing::warn!(
+            module = %module.name,
+            "Sanitizers are mutually exclusive. Enable only one of ASan, TSan, HWASan, or UBSan when using CMake."
+          );
+        }
+        let compatible_api = parse_api_version(&module_config.product.compatible_sdk_version)
+          .unwrap_or(config.sdk_config.compile_api_version);
+        if sanitizer_profile_flags.asan && compatible_api <= 9 {
+          tracing::warn!("To use ASan, first upgrade the SDK to API version 10 or later.");
+        }
+        if (sanitizer_profile_flags.tsan
+          || sanitizer_profile_flags.hwasan
+          || sanitizer_profile_flags.ubsan)
+          && compatible_api <= 11
+        {
+          tracing::warn!(
+            "To use TSan, HWASan, or UBSan, first upgrade the SDK to API version 12 or later."
+          );
+        }
+      }
+      let processor = ProfileProcessor::new(module_config.clone())
+        .with_har_exclude_hsp_dependencies(args.hvigor_properties.har_exclude_hsp_dependencies)
+        .with_compile_lib_entry_file(args.hvigor_properties.compile_lib_entry_file);
       // Local unit-test builds (`--target test`) use the `.test` build root
       // (hvigor `setTestDefaultParameters` injects `buildRoot=.test`);
       // named targets (e.g. `ohosTest`) key intermediate paths by target.
-      let module_layout =
-        ModuleBuildLayout::for_output_target(&config.output_target, &module.src_path, &module_target_name);
+      let module_layout = ModuleBuildLayout::for_output_target_product(
+        &module_config.output_target,
+        &module.src_path,
+        &module_config.product.name,
+        &module_target_name,
+      );
       let module_context = session.module_context(&module.name).ok_or_else(|| {
         anyhow::anyhow!("missing build session module context for {}", module.name)
       })?;
@@ -3812,22 +5110,42 @@ impl BuildCoordinator {
           .with_native_variants(
             vec![config.product.name.clone()],
             vec![module_target_name.clone()],
-            match config.build_mode {
-              BuildMode::Debug => "debug",
-              BuildMode::Release => "release",
-            },
+            config.build_mode.as_str(),
           )
           .execute()
           .map_err(|error| anyhow::anyhow!("clean failed: {error}"))?;
         task_lifecycle.after(&module.name, None, "clean").await?;
       }
-      task_lifecycle
-        .marker(&module.name, Some(&module_target_name), "PreBuild")
-        .await?;
+      let pre_build_validator =
+        PreBuildValidator::new(config, session, &module, module_build_option);
+      if task_lifecycle
+        .before(&module.name, Some(&module_target_name), "PreBuild")
+        .await?
+      {
+        if !skip_profile_writes {
+          // `PreBuild.doTaskAction` owns schema, source, API, and structural
+          // validation. `PreCheckSyscap` is a separate dependent task in
+          // hvigor 6.24.3 and is deliberately not folded into this action.
+          pre_build_validator
+            .validate()
+            .map_err(|error| anyhow::anyhow!("pre-build validation failed: {error}"))?;
+        }
+        task_lifecycle
+          .after(&module.name, Some(&module_target_name), "PreBuild")
+          .await?;
+      }
       // hvigor `GenerateUnitTestTemplate` writes the three local unit-test
       // templates into `<module>/.test/testability/` (declared output). It
       // runs for the `test` command entry (`hvigorw test`).
-      if matches!(config.output_target, OutputTarget::Test) {
+      if matches!(config.output_target, OutputTarget::Test)
+        && task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "GenerateUnitTestTemplate",
+          )
+          .await?
+      {
         let _timer = BuildTimingProbe::module(&module.name, "generate_unit_test_template");
         if !module_layout.test_ability_ets().is_file() {
           let coverage = args.ohos_test_coverage.unwrap_or(true);
@@ -3843,6 +5161,7 @@ impl BuildCoordinator {
           let module_path = canonicalize_or_owned(&configured_module_path);
           super::unit_test::generate_unit_test_template(
             &module_path,
+            &module_config.product.name,
             &super::unit_test::UnitTestTemplateParams {
               bundle_name: &config.product.bundle_name,
               module_name: &module.name,
@@ -3852,11 +5171,18 @@ impl BuildCoordinator {
             },
           )
           .map_err(|error| {
-            anyhow::anyhow!("GenerateUnitTestTemplate failed for module '{}': {error}", module.name)
+            anyhow::anyhow!(
+              "GenerateUnitTestTemplate failed for module '{}': {error}",
+              module.name
+            )
           })?;
         }
         task_lifecycle
-          .after(&module.name, Some(&module_target_name), "GenerateUnitTestTemplate")
+          .after(
+            &module.name,
+            Some(&module_target_name),
+            "GenerateUnitTestTemplate",
+          )
           .await?;
       }
       // hvigor `GenerateOhosTestTemplate`: the `ohosTest` target build
@@ -3865,35 +5191,56 @@ impl BuildCoordinator {
       if module_target_name == "ohosTest"
         && module_layout.source().ohos_test_module_json5().is_file()
       {
-        let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
-        if !super::unit_test::has_ohos_test_template(&module.src_path) {
-          super::unit_test::generate_ohos_test_template(
-            &module.src_path,
-            config.sdk_config.compile_api_version,
-          )
-          .map_err(|error| {
+        let source_module_json = module_layout.source().ohos_test_module_json5();
+        let source_content = std::fs::read_to_string(&source_module_json)?;
+        let source_model =
+          json5::from_str::<arkdown_core::ModuleJson5>(&source_content).map_err(|error| {
             anyhow::anyhow!(
-              "GenerateOhosTestTemplate failed for module '{}': {error}",
-              module.name
+              "cannot parse ohosTest module.json5 '{}': {error}",
+              source_module_json.display()
             )
           })?;
+        let templates_after_migration = source_model
+          .module
+          .abilities
+          .iter()
+          .all(|ability| ability.src_entry.is_empty())
+          && !module_layout.source().ohos_test_runner_ets().is_file()
+          && !module_layout.source().ohos_test_runner_ts().is_file();
+        if templates_after_migration
+          && task_lifecycle
+            .before(
+              &module.name,
+              Some(&module_target_name),
+              "GenerateOhosTestTemplate",
+            )
+            .await?
+        {
+          let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
+          if !super::unit_test::has_ohos_test_template(
+            &module.src_path,
+            &module_config.product.name,
+          ) {
+            super::unit_test::generate_ohos_test_template(
+              &module.src_path,
+              &module_config.product.name,
+              config.sdk_config.compile_api_version,
+            )
+            .map_err(|error| {
+              anyhow::anyhow!(
+                "GenerateOhosTestTemplate failed for module '{}': {error}",
+                module.name
+              )
+            })?;
+          }
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "GenerateOhosTestTemplate",
+            )
+            .await?;
         }
-        task_lifecycle
-          .after(&module.name, Some(&module_target_name), "GenerateOhosTestTemplate")
-          .await?;
-      }
-      if !skip_profile_writes {
-        // hvigor `pre-build.ts` validation: schema checks against the SDK
-        // modulecheck schemas plus structural/path/API-version constraints.
-        let pre_build_validator = PreBuildValidator::new(
-          config,
-          session,
-          &module,
-          module_build_option,
-        );
-        pre_build_validator
-          .validate()
-          .map_err(|error| anyhow::anyhow!("pre-build validation failed: {error}"))?;
       }
       let module_info_task_name = if module.module_type == OhosModuleType::Har {
         "CreateHarModuleInfo"
@@ -3929,6 +5276,7 @@ impl BuildCoordinator {
           || (is_integrated_hsp && args.integrated_hsp_use_get_current_bundle_name);
         intermediate_writer.write_module_info(
           &module.src_path,
+          &module_config.product.name,
           &module_target_name,
           should_write_module_info,
         )?;
@@ -3940,45 +5288,184 @@ impl BuildCoordinator {
           )
           .await?;
       }
-      task_lifecycle
-        .marker(&module.name, Some(&module_target_name), "GenerateMetadata")
-        .await?;
-      task_lifecycle
-        .marker(&module.name, Some(&module_target_name), "ConfigureCmake")
-        .await?;
-      if task_lifecycle.has_root(&module.name, None, "compileNative") {
-        let native_build_option =
-          arkdown_config::build_profile::EffectiveNativeBuildOption::from_build_option(
-            module_build_option,
-          );
-        let self_package = module_context
-          .module
-          .package
-          .as_ref()
-          .map(|package| NativeLibPackageInfo::local(package.name.clone(), package.version.clone()))
-          .unwrap_or_else(|| NativeLibPackageInfo::local(module.name.clone(), String::new()));
-        let native_policy = sanitizer_native_policy
-          .clone()
-          .unwrap_or_else(|| {
-            NativeLibCollectionPolicy::default()
-              .with_build_mode(args.mode.clone())
-              .with_sdk_toolchain(native_sdk_toolchain.clone())
-          })
-          .with_external_native_options(native_build_option.external_native_options.clone())
-          .with_native_lib_option(native_build_option.native_lib.clone())
-          .with_self_package(self_package);
-        let native_collector = NativeLibCollector::new(
-          module,
-          &native_build_option.abi_filters,
-          module_context.deps.as_ref(),
+      let project_remote_hsp_exists = config.project_root.join("oh_modules").join(".hsp").is_dir();
+      let module_remote_hsp_exists = module.src_path.join("oh_modules").join(".hsp").is_dir();
+      if project_remote_hsp_exists
+        || task_lifecycle.has_root(
+          &module.name,
+          Some(&module_target_name),
+          "SignProjectRemoteHsp",
         )
-        .with_policy(native_policy);
-        let native_collector = if matches!(config.output_target, OutputTarget::Har) {
-          native_collector
-        } else {
-          native_collector
-            .excluding_dependency_roots(module_har_dedup_plan.duplicate_package_roots())
-        };
+      {
+        if task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "SignProjectRemoteHsp",
+          )
+          .await?
+        {
+          if args.enable_sign_task {
+            let signer = RemoteHspSigner::new(config.clone(), session.clone());
+            let module_name = module.name.clone();
+            tokio::task::spawn_blocking(move || {
+              signer.run_for_module(&module_name, RemoteHspSignScope::Project)
+            })
+            .await
+            .context("SignProjectRemoteHsp worker failed")??;
+          }
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "SignProjectRemoteHsp",
+            )
+            .await?;
+        }
+      }
+      if project_remote_hsp_exists
+        || module_remote_hsp_exists
+        || task_lifecycle.has_root(
+          &module.name,
+          Some(&module_target_name),
+          "SignModuleRemoteHsp",
+        )
+      {
+        if task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "SignModuleRemoteHsp",
+          )
+          .await?
+        {
+          if args.enable_sign_task {
+            let signer = RemoteHspSigner::new(config.clone(), session.clone());
+            let module_name = module.name.clone();
+            tokio::task::spawn_blocking(move || {
+              signer.run_for_module(&module_name, RemoteHspSignScope::Module)
+            })
+            .await
+            .context("SignModuleRemoteHsp worker failed")??;
+          }
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "SignModuleRemoteHsp",
+            )
+            .await?;
+        }
+      }
+      if task_lifecycle
+        .before(&module.name, Some(&module_target_name), "GenerateMetadata")
+        .await?
+      {
+        let related_entries = module_context
+          .module
+          .related_entry_modules
+          .as_deref()
+          .unwrap_or_default()
+          .iter()
+          .filter_map(|entry_name| {
+            let entry_module = config
+              .modules
+              .iter()
+              .find(|candidate| candidate.name == *entry_name)?;
+            let entry_context = session.module_context(entry_name)?;
+            let device_types = entry_context
+              .module
+              .module_json
+              .as_ref()
+              .map(|profile| profile.module.device_types.clone())
+              .unwrap_or_default();
+            let related_target = ModuleTargetSelection::resolve_build(
+              config,
+              session.build_options.as_ref(),
+              entry_module,
+              Some(&module_target_name),
+              &args.hvigor_properties,
+            )
+            .target;
+            Some(RelatedEntryMetadata {
+              module_name: entry_name.clone(),
+              device_types,
+              distro_filter: related_target.distribution_filter,
+            })
+          })
+          .collect();
+        let device_types = module_context
+          .module
+          .module_json
+          .as_ref()
+          .map(|profile| profile.module.device_types.as_slice())
+          .unwrap_or_default();
+        intermediate_writer.write_package_metadata(PackageMetadataInput {
+          project_root: &config.project_root,
+          module_root: &module.src_path,
+          output_target: &module_config.output_target,
+          product_name: &module_config.product.name,
+          target_name: &module_target_name,
+          module_name: &module.name,
+          module_type: &module.module_type,
+          artifact_name: module_config.product.artifact_name.as_deref(),
+          device_types,
+          is_signed: args.enable_sign_task && config.product.signing_config.is_some(),
+          related_entries,
+        })?;
+        task_lifecycle
+          .after(&module.name, Some(&module_target_name), "GenerateMetadata")
+          .await?;
+      }
+      let native_build_option =
+        arkdown_config::build_profile::EffectiveNativeBuildOption::from_build_option(
+          module_build_option,
+        );
+      let self_package = module_context
+        .module
+        .package
+        .as_ref()
+        .map(|package| NativeLibPackageInfo::local(package.name.clone(), package.version.clone()))
+        .unwrap_or_else(|| NativeLibPackageInfo::local(module.name.clone(), String::new()));
+      let cmake_local_dependencies = NativeCmakeLocalDependencyInventoryBuilder::new(
+        config,
+        session,
+        args,
+        &module_target_name,
+        module_context.deps.as_ref(),
+      )
+      .build()?;
+      let native_policy = sanitizer_native_policy
+        .clone()
+        .with_release_cmake_build_type(args.hvigor_properties.release_cmake_build_type.as_deref())
+        .with_external_native_options(native_build_option.external_native_options.clone())
+        .with_native_lib_option(native_build_option.native_lib.clone())
+        .with_self_package(self_package)
+        .with_cmake_local_dependencies(cmake_local_dependencies);
+      let native_collector = NativeLibCollector::new(
+        module,
+        &native_build_option.abi_filters,
+        module_context.deps.as_ref(),
+      )
+      .with_output_variant(&module_config.product.name, &module_target_name)
+      .with_policy(native_policy);
+      let native_collector = if matches!(config.output_target, OutputTarget::Har) {
+        native_collector
+      } else {
+        native_collector.excluding_dependency_roots(module_har_dedup_plan.duplicate_package_roots())
+      };
+      if task_lifecycle
+        .before(&module.name, Some(&module_target_name), "ConfigureCmake")
+        .await?
+      {
+        native_collector
+          .configure_cmake_dependencies()
+          .map_err(|error| anyhow::anyhow!("ConfigureCmake failed: {error}"))?;
+        task_lifecycle
+          .after(&module.name, Some(&module_target_name), "ConfigureCmake")
+          .await?;
+      }
+      if task_lifecycle.has_root(&module.name, None, "compileNative") {
         if task_lifecycle
           .before(
             &module.name,
@@ -4002,9 +5489,6 @@ impl BuildCoordinator {
           .marker(&module.name, None, "compileNative")
           .await?;
       }
-      task_lifecycle
-        .marker(&module.name, Some(&module_target_name), "MergeProfile")
-        .await?;
       let build_profile_task_name = if module.module_type == OhosModuleType::Har {
         "CreateHarBuildProfile"
       } else {
@@ -4080,9 +5564,17 @@ impl BuildCoordinator {
       task_lifecycle
         .marker(&module.name, None, "GenerateBuildProfile")
         .await?;
-      task_lifecycle
-        .marker(&module.name, Some(&module_target_name), "PreCheckSyscap")
-        .await?;
+      if task_lifecycle
+        .before(&module.name, Some(&module_target_name), "PreCheckSyscap")
+        .await?
+      {
+        pre_build_validator
+          .validate_pre_check_syscap()
+          .map_err(|error| anyhow::anyhow!("PreCheckSyscap failed: {error}"))?;
+        task_lifecycle
+          .after(&module.name, Some(&module_target_name), "PreCheckSyscap")
+          .await?;
+      }
 
       let module_json5_path = module_context
         .module
@@ -4094,22 +5586,27 @@ impl BuildCoordinator {
       // `MergeProfile` spreads `getOhosTestAbilityConfig()` underneath the
       // module document when the source module.json5 lacks `srcEntry`
       // abilities (templates-after-source-code-migration).
-      let module_json5 = if module_target_name == "ohosTest" {
+      let (module_json5, module_json_source_value) = if module_target_name == "ohosTest" {
         let ohos_test_json5 = module_layout.source().ohos_test_module_json5();
-        let content = std::fs::read_to_string(&ohos_test_json5).map_err(|error| {
-          anyhow::anyhow!(
-            "cannot read ohosTest module.json5 '{}': {error}",
-            ohos_test_json5.display()
-          )
-        })?;
-        let mut parsed: arkdown_core::ModuleJson5 = json5::from_str(&content).map_err(
-          |error| {
+        let raw_source = module_context
+          .module
+          .ohos_test_module_json_value
+          .as_deref()
+          .cloned()
+          .ok_or_else(|| {
             anyhow::anyhow!(
-              "cannot parse ohosTest module.json5 '{}': {error}",
+              "missing ohosTest module.json5 snapshot for '{}' at '{}'",
+              module.name,
               ohos_test_json5.display()
             )
-          },
-        )?;
+          })?;
+        let mut parsed: arkdown_core::ModuleJson5 = serde_json::from_value(raw_source.clone())
+          .map_err(|error| {
+            anyhow::anyhow!(
+              "cannot decode ohosTest module.json5 '{}': {error}",
+              ohos_test_json5.display()
+            )
+          })?;
         let template_after_migration = parsed
           .module
           .abilities
@@ -4138,20 +5635,11 @@ impl BuildCoordinator {
           // Parse the raw source document as a JSON value so missing fields
           // stay missing (serde `ModuleJson5Module` would serialize empty
           // arrays for absent abilities and overwrite the template).
-          let raw_module: serde_json::Value = json5::from_str(&content).map_err(|error| {
-            anyhow::anyhow!(
-              "cannot parse ohosTest module.json5 '{}': {error}",
-              ohos_test_json5.display()
-            )
-          })?;
           // hvigor `o.module = {...getOhosTestAbilityConfig(), ...o.module}`
           // merges at the module-document level: the source document wins on
           // conflicting keys, the template fills the rest.
-          let merged = match (base, raw_module) {
-            (
-              serde_json::Value::Object(mut base),
-              serde_json::Value::Object(src),
-            ) => {
+          let merged = match (base, raw_source) {
+            (serde_json::Value::Object(mut base), serde_json::Value::Object(src)) => {
               if let (
                 Some(serde_json::Value::Object(base_module)),
                 Some(serde_json::Value::Object(src_module)),
@@ -4165,17 +5653,28 @@ impl BuildCoordinator {
             }
             (_, src) => src,
           };
-          parsed = serde_json::from_value(merged)
+          parsed = serde_json::from_value(merged.clone())
             .map_err(|error| anyhow::anyhow!("merge ohosTest module config: {error}"))?;
+          (parsed, merged)
+        } else {
+          (parsed, raw_source)
         }
-        parsed
       } else {
-        module_context
+        let parsed = module_context
           .module
           .module_json
           .as_ref()
           .cloned()
-          .ok_or_else(|| anyhow::anyhow!("missing module.json5 snapshot for {}", module.name))?
+          .ok_or_else(|| anyhow::anyhow!("missing module.json5 snapshot for {}", module.name))?;
+        let raw = module_context
+          .module
+          .module_json_value
+          .as_deref()
+          .cloned()
+          .map(Ok)
+          .unwrap_or_else(|| serde_json::to_value(&parsed))
+          .map_err(|error| anyhow::anyhow!("encode module.json5 snapshot: {error}"))?;
+        (parsed, raw)
       };
       let profile_dependency_context = {
         let _timer = BuildTimingProbe::module(&module.name, "profile_dependency_context");
@@ -4217,15 +5716,54 @@ impl BuildCoordinator {
         );
       }
 
-      let manifest_device_types: Vec<String> = if module_json5.module.device_types.is_empty() {
+      let declared_device_types: Vec<String> = if module_json5.module.device_types.is_empty() {
         vec!["phone".to_string()]
       } else {
         module_json5.module.device_types.clone()
       };
+      let manifest_device_types =
+        Self::target_device_types(&module.name, &declared_device_types, &module_target)?;
 
       // ── Resource compilation ──────────────────────────────────────
       let res_out = module_layout.res_default_dir();
       let res_layout = ResourceOutputLayout::new(&res_out);
+      let har_dedup_enabled = module_build_option.deduplicate_har
+        && !matches!(
+          config.output_target,
+          OutputTarget::Preview | OutputTarget::Test
+        )
+        && args.hvigor_properties.with_deduplicate.unwrap_or(true);
+      if har_dedup_enabled
+        && task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "ProcessIdDefinedFile",
+          )
+          .await?
+      {
+        let configured = module_build_option
+          .res_options
+          .as_ref()
+          .and_then(|options| options.id_defined_file_path.as_deref())
+          .map(|configured| {
+            if configured.is_absolute() {
+              configured.to_path_buf()
+            } else {
+              config.project_root.join(configured)
+            }
+          });
+        IdDefinedFileProcessor::new(configured.as_deref(), &res_layout.id_defined_json())
+          .process()
+          .map_err(|error| anyhow::anyhow!("ProcessIdDefinedFile failed: {error}"))?;
+        task_lifecycle
+          .after(
+            &module.name,
+            Some(&module_target_name),
+            "ProcessIdDefinedFile",
+          )
+          .await?;
+      }
       let skip_res = args.skip_resource;
       if skip_res {
         tracing::debug!(
@@ -4469,6 +6007,22 @@ impl BuildCoordinator {
         } else {
           project_root.join("build-profile.json5")
         };
+        let dependency_custom_types = args
+          .hvigor_properties
+          .dependencies_types_enable
+          .then(|| {
+            DependencyCustomTypeInputBuilder::new(
+              module_context.deps.as_ref(),
+              config.as_ref(),
+              session.build_options.as_ref(),
+              &module_target_name,
+              &args.module_hvigor_overrides,
+              &args.hvigor_properties,
+            )
+            .collect()
+          })
+          .transpose()?
+          .unwrap_or_default();
         CustomTypeResolver::new(
           &module.name,
           &module.src_path,
@@ -4477,23 +6031,24 @@ impl BuildCoordinator {
           has_arkts_sources,
           module_context.deps.as_ref(),
         )
-        .resolve(configured_types)
+        .resolve_with_dependencies(configured_types, &dependency_custom_types)
         .map_err(|error| anyhow::anyhow!("custom types validation failed: {error}"))?
       };
 
-      let (manifest, mut loader_json) = {
-        let _timer = BuildTimingProbe::module(&module.name, "process_module");
-        if !task_lifecycle
-          .before(&module.name, Some(&module_target_name), "ProcessProfile")
+      // Hvigor writes MergeProfile and ProcessProfile at distinct task
+      // boundaries. Build the canonical profile once in memory, then emit
+      // only each task's declared artifacts before its lifecycle `after`.
+      let form_widget_abilities = merge_form_widget_abilities(config, &module_json5)?;
+      let merge_profile_enabled = if skip_profile_writes {
+        false
+      } else {
+        task_lifecycle
+          .before(&module.name, Some(&module_target_name), "MergeProfile")
           .await?
-        {
-          anyhow::bail!(
-            "ARKDOWN_DISABLED_REQUIRED_HVIGOR_TASK: {}:{}@ProcessProfile is required to construct the in-memory manifest",
-            module.name,
-            module_target_name
-          );
-        }
-        let output = processor
+      };
+      let (manifest, mut loader_json, processed_profile_value, pack_info_plans) = {
+        let _timer = BuildTimingProbe::module(&module.name, "process_module");
+        let (manifest, loader_json) = processor
           .process_module_with_dependency_context_and_target(
             module,
             &module_json5,
@@ -4501,10 +6056,94 @@ impl BuildCoordinator {
             &module_target_name,
           )
           .map_err(|e| anyhow::anyhow!("{}", e))?;
-        task_lifecycle
-          .after(&module.name, Some(&module_target_name), "ProcessProfile")
-          .await?;
-        output
+        let mut processed_profile_value = processor
+          .module_json_value_with_session_context(
+            &manifest,
+            None,
+            &profile_dependency_context,
+            Some(&module_json_source_value),
+            &module_target.source_abilities,
+          )
+          .map_err(|error| anyhow::anyhow!("construct module profile failed: {error}"))?;
+        sanitizer_profile_flags
+          .apply_to_value(&mut processed_profile_value)
+          .map_err(|error| anyhow::anyhow!("apply sanitizer profile flags failed: {error}"))?;
+        let pack_info_plans = Self::pack_info_plans(
+          config.as_ref(),
+          module,
+          module_config.as_ref(),
+          session.as_ref(),
+          args,
+          &module_target_name,
+          &module_target,
+          &module_layout,
+        )?;
+
+        if skip_profile_writes {
+          task_lifecycle
+            .up_to_date(&module.name, Some(&module_target_name), "MergeProfile")
+            .await?;
+        } else if merge_profile_enabled {
+          intermediate_writer.write_merge_profile_intermediate(
+            &module_layout,
+            &processed_profile_value,
+            module_json5.module.extension_abilities.len(),
+          )?;
+          task_lifecycle
+            .after(&module.name, Some(&module_target_name), "MergeProfile")
+            .await?;
+        }
+
+        if skip_profile_writes {
+          task_lifecycle
+            .up_to_date(&module.name, Some(&module_target_name), "MakePackInfo")
+            .await?;
+        } else if task_lifecycle
+          .before(&module.name, Some(&module_target_name), "MakePackInfo")
+          .await?
+        {
+          let packager = Packager::new(module_config.clone());
+          for plan in &pack_info_plans {
+            packager
+              .write_pack_info(&plan.input, &plan.output_path)
+              .map_err(|error| anyhow::anyhow!("MakePackInfo failed: {error}"))?;
+          }
+          task_lifecycle
+            .after(&module.name, Some(&module_target_name), "MakePackInfo")
+            .await?;
+        }
+
+        if skip_profile_writes {
+          task_lifecycle
+            .up_to_date(&module.name, Some(&module_target_name), "ProcessProfile")
+            .await?;
+        } else {
+          if !task_lifecycle
+            .before(&module.name, Some(&module_target_name), "ProcessProfile")
+            .await?
+          {
+            anyhow::bail!(
+              "ARKDOWN_DISABLED_REQUIRED_HVIGOR_TASK: {}:{}@ProcessProfile is required to construct the in-memory manifest",
+              module.name,
+              module_target_name
+            );
+          }
+          intermediate_writer.write_process_profile_intermediates(
+            &module_layout,
+            &processed_profile_value,
+            module_json5.module.extension_abilities.len(),
+            &form_widget_abilities,
+          )?;
+          task_lifecycle
+            .after(&module.name, Some(&module_target_name), "ProcessProfile")
+            .await?;
+        }
+        (
+          manifest,
+          loader_json,
+          processed_profile_value,
+          pack_info_plans,
+        )
       };
       if matches!(
         module_build_option.har_artifact_type,
@@ -4550,16 +6189,8 @@ impl BuildCoordinator {
       if !skip_profile_writes {
         let _timer = BuildTimingProbe::module(&module.name, "write_module_json_initial");
         processor
-          .write_module_json_with_dependency_context(
-            &manifest,
-            &module_json_out,
-            None,
-            &profile_dependency_context,
-          )
+          .write_module_json_value(&processed_profile_value, &module_json_out)
           .map_err(|e| anyhow::anyhow!("write module.json failed: {}", e))?;
-        sanitizer_profile_flags
-          .apply_to_module_json(&module_json_out)
-          .map_err(|e| anyhow::anyhow!("apply sanitizer profile flags failed: {}", e))?;
       }
 
       // `ProcessRouterMap` feeds BasePackHapTask. Source/bytecode HARs carry
@@ -4771,10 +6402,7 @@ impl BuildCoordinator {
                 module_root: &module.src_path,
                 product_name: &config.product.name,
                 target_name: Some(&module_target_name),
-                build_mode_name: Some(match config.build_mode {
-                  BuildMode::Debug => "debug",
-                  BuildMode::Release => "release",
-                }),
+                build_mode_name: Some(config.build_mode.as_str()),
                 compile_api_version: config.sdk_config.compile_api_version,
                 metadata: &module_json5.module.metadata,
                 output_profile_dir: &res_layout.profile_dir(),
@@ -4784,22 +6412,6 @@ impl BuildCoordinator {
             )
             .map_err(|e| anyhow::anyhow!("process distro filter profile failed: {}", e))?;
         }
-        {
-          let _timer = BuildTimingProbe::module(&module.name, "profile_intermediates_initial");
-          // hvigor `getTargetModuleOptObj` merges the form extension module's
-          // form abilities (name/type/metadata) into the form widget module's
-          // ark_module.json consumed by restool.
-          let form_widget_abilities = merge_form_widget_abilities(config, &module_json5)?;
-          intermediate_writer.write_profile_intermediates(
-            &module.src_path,
-            &config.output_target,
-            &module_target_name,
-            &module_json_out,
-            module_json5.module.extension_abilities.len(),
-            &form_widget_abilities,
-          )?;
-        }
-
         // hvigor `UnitTestProcessProfile` (runs before CompileResource so
         // restool annotates the injected TestAbility): when the generated
         // testability template exists (`<module>/.test/testability/TestAbility.ets`),
@@ -4815,14 +6427,13 @@ impl BuildCoordinator {
               process_profile_json.display()
             )
           })?;
-          let mut document: serde_json::Value = serde_json::from_str(&process_value).map_err(
-            |error| {
+          let mut document: serde_json::Value =
+            serde_json::from_str(&process_value).map_err(|error| {
               anyhow::anyhow!(
                 "UnitTestProcessProfile cannot parse processed profile '{}': {error}",
                 process_profile_json.display()
               )
-            },
-          )?;
+            })?;
           super::unit_test::inject_unit_test_ability(
             &mut document,
             module_json5.module.type_.as_str(),
@@ -4912,14 +6523,27 @@ impl BuildCoordinator {
         }
       }
 
+      let process_resource_task_name = if preview_incremental_resources {
+        "PreviewProcessResource"
+      } else {
+        "ProcessResource"
+      };
       let process_resource_enabled = if skip_res {
         task_lifecycle
-          .up_to_date(&module.name, Some(&module_target_name), "ProcessResource")
+          .up_to_date(
+            &module.name,
+            Some(&module_target_name),
+            process_resource_task_name,
+          )
           .await?;
         false
       } else {
         task_lifecycle
-          .before(&module.name, Some(&module_target_name), "ProcessResource")
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            process_resource_task_name,
+          )
           .await?
       };
       let (app_scope_res, res_dirs) = {
@@ -4942,12 +6566,13 @@ impl BuildCoordinator {
         for resource_module in
           ModuleSelectionPlanner::resource_modules_for_build(config.as_ref(), module)
         {
-          let resource_module_config = ModuleBuildConfiguration::resolve(
+          let resource_module_config = ModuleBuildConfiguration::resolve_dependency(
             config.as_ref(),
             session.build_options.as_ref(),
             resource_module,
-            named_target.as_deref(),
+            Some(&module_target_name),
             args.module_hvigor_overrides.get(&resource_module.name),
+            &args.hvigor_properties,
           )?;
           for module_res_dir in ResourceDirSelector::new(
             resource_module_config.config.as_ref(),
@@ -5033,7 +6658,11 @@ impl BuildCoordinator {
       }
       if process_resource_enabled {
         task_lifecycle
-          .after(&module.name, Some(&module_target_name), "ProcessResource")
+          .after(
+            &module.name,
+            Some(&module_target_name),
+            process_resource_task_name,
+          )
           .await?;
       }
 
@@ -5051,17 +6680,30 @@ impl BuildCoordinator {
           config.modules.iter().map(|m| m.name.clone()).collect()
         },
         device_types: manifest_device_types,
-        is_debug: matches!(config.build_mode, BuildMode::Debug),
+        is_debug: config.build_mode.is_debuggable(),
       };
 
+      let compile_resource_task_name = if preview_incremental_resources {
+        "PreviewCompileResource"
+      } else {
+        "CompileResource"
+      };
       let compile_resource_enabled = if skip_res || res_dirs.is_empty() {
         task_lifecycle
-          .up_to_date(&module.name, Some(&module_target_name), "CompileResource")
+          .up_to_date(
+            &module.name,
+            Some(&module_target_name),
+            compile_resource_task_name,
+          )
           .await?;
         false
       } else {
         task_lifecycle
-          .before(&module.name, Some(&module_target_name), "CompileResource")
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            compile_resource_task_name,
+          )
           .await?
       };
       if compile_resource_enabled {
@@ -5147,8 +6789,147 @@ impl BuildCoordinator {
       }
       if compile_resource_enabled {
         task_lifecycle
-          .after(&module.name, Some(&module_target_name), "CompileResource")
+          .after(
+            &module.name,
+            Some(&module_target_name),
+            compile_resource_task_name,
+          )
           .await?;
+      }
+
+      if matches!(module_config.output_target, OutputTarget::Har) {
+        let mut process_obfuscation = ModuleObfuscationContext::resolve(
+          module_config.as_ref(),
+          session,
+          &module,
+          module_build_option,
+        )?;
+        process_obfuscation.target_name = Some(module_target_name.clone());
+        if task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "ProcessObfuscationFiles",
+          )
+          .await?
+        {
+          process_obfuscation.process_consumer_rules(
+            &module_context,
+            &module_config.build_mode,
+            module_config.sdk_config.compile_api_version,
+            module_layout.obfuscation_export_rule_path(),
+          )?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "ProcessObfuscationFiles",
+            )
+            .await?;
+        }
+      }
+
+      if matches!(config.output_target, OutputTarget::Preview) {
+        let package_name = module_context
+          .module
+          .package
+          .as_ref()
+          .map(|package| package.name.as_str())
+          .filter(|name| !name.is_empty())
+          .unwrap_or(&module.name);
+        let preview = super::preview::PreviewAssetProcessor::new(
+          &project_root,
+          &module.src_path,
+          &module.name,
+          &module.module_type,
+          &module_config.product.name,
+          &module_target_name,
+          &manifest.compile_mode,
+          package_name,
+        );
+        if preview_incremental_resources
+          && task_lifecycle
+            .before(
+              &module.name,
+              Some(&module_target_name),
+              "CopyPreviewProfile",
+            )
+            .await?
+        {
+          preview.copy_profile_for_incremental_resource()?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "CopyPreviewProfile",
+            )
+            .await?;
+        }
+        task_lifecycle
+          .marker(
+            &module.name,
+            Some(&module_target_name),
+            "PreviewHookCompileResource",
+          )
+          .await?;
+        if task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "ReplacePreviewerPage",
+          )
+          .await?
+        {
+          preview.replace_page(
+            args.hvigor_properties.previewer_replace_page.as_deref(),
+            args.hvigor_properties.compile_hsp_dependencies_truthy,
+            args.hvigor_properties.main_module.as_deref(),
+          )?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "ReplacePreviewerPage",
+            )
+            .await?;
+        }
+        if preview_incremental_resources {
+          let current_module_resources =
+            ResourceDirSelector::new(module_config.as_ref(), module, &module_target)
+              .select()
+              .into_iter()
+              .filter(|path| path.is_dir())
+              .collect::<Vec<_>>();
+          let har_resources =
+            HarResourceDependencySelector::new(&module.src_path, module_context.deps.as_ref())
+              .select()
+              .into_iter()
+              .filter(|resource| {
+                !module_har_dedup_plan
+                  .duplicate_package_roots()
+                  .iter()
+                  .any(|root| resource.starts_with(root))
+              })
+              .collect::<Vec<_>>();
+          // CompileResourcesUtil.getRestoolModuleNames(): module directory
+          // name, manifest module name, then every project submodule name,
+          // deduplicated in first-seen order.
+          let mut compile_module_names = Vec::with_capacity(config.modules.len() + 2);
+          for name in std::iter::once(module.name.as_str())
+            .chain(std::iter::once(module_json5.module.name.as_str()))
+            .chain(config.modules.iter().map(|module| module.name.as_str()))
+          {
+            if !compile_module_names.iter().any(|current| current == name) {
+              compile_module_names.push(name.to_string());
+            }
+          }
+          preview.persist_incremental_resource_parameters(
+            app_scope_res.is_dir().then_some(app_scope_res.as_path()),
+            &current_module_resources,
+            &har_resources,
+            &compile_module_names,
+          )?;
+        }
       }
 
       let loader_json_out = module_layout.loader_json();
@@ -5252,6 +7033,46 @@ impl BuildCoordinator {
         }
       }
 
+      if matches!(config.output_target, OutputTarget::Preview) {
+        task_lifecycle
+          .marker(&module.name, None, "buildPreviewerResource")
+          .await?;
+        if task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "PreviewUpdateAssets",
+          )
+          .await?
+        {
+          let package_name = module_context
+            .module
+            .package
+            .as_ref()
+            .map(|package| package.name.as_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&module.name);
+          super::preview::PreviewAssetProcessor::new(
+            &project_root,
+            &module.src_path,
+            &module.name,
+            &module.module_type,
+            &module_config.product.name,
+            &module_target_name,
+            &manifest.compile_mode,
+            package_name,
+          )
+          .update_assets()?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "PreviewUpdateAssets",
+            )
+            .await?;
+        }
+      }
+
       // hvigor `ReplaceUnitTestIndexFile` (after CompileResource): rewrite
       // the res module.json pages and emit `main_pages.json` from the
       // `unit.test.replace.page` default.
@@ -5296,12 +7117,23 @@ impl BuildCoordinator {
         // The ohosTest loader names the test module (`entry_test`) and maps
         // it to the same source path (hvigor `modulePathMap`).
         loader_json.module_name = module_json5.module.name.clone();
-        let test_module_path = std::fs::canonicalize(&module.src_path)
-          .unwrap_or_else(|_| module.src_path.clone());
+        let test_module_path =
+          std::fs::canonicalize(&module.src_path).unwrap_or_else(|_| module.src_path.clone());
         loader_json.module_path_map.insert(
           module_json5.module.name.clone(),
           arkdown_path::ArtifactPathSerializer::path_to_slash_string(&test_module_path)?,
         );
+      }
+      if ReloadResourceTaskPlan::requested_for_module(&args.native_task_roots, &module.name) {
+        HotReloadProcessor::new(&module_layout, &project_root).validate_resource_model(
+          &loader_json.compile_mode,
+          config.sdk_config.compile_api_version,
+        )?;
+        // BuildHotReloadResource is targetless and completes only after its
+        // target-scoped GenerateLoaderJson and CompileResource dependencies.
+        task_lifecycle
+          .marker(&module.name, None, "buildHotReloadResource")
+          .await?;
       }
       loader_jsons.push((
         module.clone(),
@@ -5311,10 +7143,101 @@ impl BuildCoordinator {
         module_target_name,
         module_config,
       ));
+      module_pack_info_plans.push(pack_info_plans);
       all_bc_har_deps.push(bc_har_deps);
       privacy_profile_paths.push(privacy_profile_path);
     }
     progress.done();
+
+    // `LintArkTS` is not an alias for the normal CompileArkTS checker hook.
+    // Hvigor's HAR task invokes `etsStandaloneChecker` with exactly one
+    // package entry after PreBuild/ProcessProfile/CreateHarBuildProfile. Run
+    // that SDK-owned phase only when the task graph selected the linter root;
+    // completing the root then terminates the partial native build before
+    // bundling, just like the upstream task boundary.
+    let mut ark_linter_plans = Vec::new();
+    let mut ark_linter_tasks = Vec::new();
+    for (module, _manifest, loader_json, _resource_refs, module_target_name, module_config) in
+      &loader_jsons
+    {
+      if !task_lifecycle.has_root(&module.name, Some(module_target_name), "LintArkTS")
+        || !task_lifecycle
+          .before(&module.name, Some(module_target_name), "LintArkTS")
+          .await?
+      {
+        continue;
+      }
+      if !matches!(module.module_type, OhosModuleType::Har) {
+        anyhow::bail!(
+          "ARKDOWN_ARK_LINTER_MODULE_TYPE: LintArkTS is only available for HAR modules; '{}' is {:?}",
+          module.name,
+          module.module_type
+        );
+      }
+      let module_context = session.module_context(&module.name).ok_or_else(|| {
+        anyhow::anyhow!("missing build session module context for {}", module.name)
+      })?;
+      let module_layout = ModuleBuildLayout::for_output_target_product(
+        &config.output_target,
+        &module.src_path,
+        &config.product.name,
+        module_target_name,
+      );
+      let generated_profile_path = module_layout
+        .build_profile_for_module(&module.module_type, module_target_name)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+          anyhow::anyhow!(
+            "ArkLinter cannot derive generated profile directory for module '{}'",
+            module.name
+          )
+        })?;
+      let paths = SdkEtsCheckerPaths::build(
+        module_layout.res_profile_dir(),
+        module_layout.res_ark_module_json(),
+        module_layout.resource_table_txt(),
+        module_layout.res_resources_dir().join("rawfile"),
+        module_layout.source().ets(),
+        module_layout.source().src_main().join("supervisual"),
+        module_layout.loader_json(),
+        PathBuf::from(&loader_json.cache_path),
+        PathBuf::from(&loader_json.ace_module_build),
+        generated_profile_path,
+        module_layout.generated_resource_table_typescript(),
+      );
+      ark_linter_plans.push(
+        SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
+          config: module_config.as_ref(),
+          session: session.as_ref(),
+          module,
+          module_context: &module_context,
+          module_build_option: &module_config.product.build_option,
+          loader_json: None,
+          target_name: module_target_name,
+          node_executable: args.resolved_node_executable(),
+          paths,
+          entries: vec![ArkLinterEntryResolver::new(&module.src_path).resolve()?],
+          coverage_enabled: false,
+          coverage_path_filter: None,
+          coverage_mode: None,
+          debug_line: false,
+          byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
+          single_file_emit: false,
+          rollup_cache_use_source_hash: args.hvigor_properties.rollup_cache_use_source_hash,
+        })
+        .build()?,
+      );
+      ark_linter_tasks.push((module.name.clone(), module_target_name.clone()));
+    }
+    if !ark_linter_plans.is_empty() {
+      SdkSemanticCheckStage::new(ark_linter_plans).run()?;
+      for (module_name, target_name) in ark_linter_tasks {
+        task_lifecycle
+          .after(&module_name, Some(&target_name), "LintArkTS")
+          .await?;
+      }
+    }
 
     // Latest ets-loader registers `etsChecker` before `etsTransform` and runs
     // it from `buildStart`.  Profiles/loader entries are now complete, while
@@ -5333,9 +7256,10 @@ impl BuildCoordinator {
         let module_context = session.module_context(&module.name).ok_or_else(|| {
           anyhow::anyhow!("missing build session module context for {}", module.name)
         })?;
-        let module_layout = ModuleBuildLayout::for_output_target(
+        let module_layout = ModuleBuildLayout::for_output_target_product(
           &config.output_target,
           &module.src_path,
+          &config.product.name,
           module_target_name,
         );
         let generated_profile_path = module_layout
@@ -5379,6 +7303,10 @@ impl BuildCoordinator {
             coverage_mode: args.coverage_mode.as_deref(),
             debug_line: false,
             byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
+            single_file_emit: module_config.build_mode.is_debuggable()
+              && args.hvigor_properties.single_file_emit
+              && !coverage_mode,
+            rollup_cache_use_source_hash: args.hvigor_properties.rollup_cache_use_source_hash,
           })
           .build()?,
         );
@@ -5402,7 +7330,7 @@ impl BuildCoordinator {
       .iter()
       .map(|(module, _, _, _, module_target_name, module_config)| {
         ModuleObfuscationContext::resolve(
-          config.as_ref(),
+          module_config.as_ref(),
           session,
           module,
           &module_config.product.build_option,
@@ -5419,13 +7347,28 @@ impl BuildCoordinator {
     ) in loader_jsons.iter().zip(module_obfuscation_contexts.iter())
     {
       let module_build_option = &module_config.product.build_option;
-      let module_layout = ModuleBuildLayout::for_output_target(
-        &config.output_target,
+      let module_layout = ModuleBuildLayout::for_output_target_product(
+        &module_config.output_target,
         &module.src_path,
+        &module_config.product.name,
         module_target_name,
       );
-      let compile_task_name =
-        Self::arkts_compile_task_name(&config.output_target, &module.module_type);
+      let quickfix_task_plan = QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name);
+      let hot_reload_task_plan =
+        HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name);
+      let compile_task_name = if hot_reload_task_plan.is_some() {
+        "HotReloadArkTS"
+      } else if quickfix_task_plan.is_some() {
+        "ColdReloadArkTS"
+      } else {
+        Self::selected_arkts_compile_task_name(
+          &args.native_task_roots,
+          &module.name,
+          module_target_name,
+          &config.output_target,
+          &module.module_type,
+        )
+      };
       let module_package_plugins = package_plugins
         .iter()
         .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
@@ -5483,6 +7426,7 @@ impl BuildCoordinator {
         loader_json,
         module_obfuscation.is_enabled(&config.build_mode),
         module_target_name,
+        args.hvigor_properties.rollup_cache_use_source_hash,
       )
       .build()?;
       let task_inputs =
@@ -5524,12 +7468,24 @@ impl BuildCoordinator {
       let unit_test_coverage_cache_ready = !matches!(config.output_target, OutputTarget::Test)
         || !coverage_mode
         || module_layout.test_init_coverage_json().is_file();
-      let mut cache_hit = !disable_abc_cache
+      let aot_cache_ready = AotArtifactWriter::new(
+        &module.name,
+        loader_json.an_build_mode.as_deref(),
+        loader_json.an_build_out_put.as_deref(),
+        loader_json.ap_path.as_deref(),
+        &module_layout,
+        coverage_mode,
+      )
+      .cache_ready();
+      let mut cache_hit = quickfix_task_plan.is_none()
+        && hot_reload_task_plan.is_none()
+        && !disable_abc_cache
         && task_inputs.matches_cached(&cache_dir)
         && cached_abc.exists()
         && widget_cache_ready
         && declaration_cache_ready
-        && unit_test_coverage_cache_ready;
+        && unit_test_coverage_cache_ready
+        && aot_cache_ready;
       if cache_hit {
         // System-level check: compile-env + file changes + cache group changes.
         let system_request = ShouldInvalidCacheRequest {
@@ -5591,6 +7547,18 @@ impl BuildCoordinator {
         continue;
       }
       compile_task_active.push(true);
+
+      // SDK `watchChangedFiles.beforeBuild` writes this handoff before the
+      // Rollup transform starts. Preserve the raw event kinds: Hvigor treats
+      // updates as modified and create/delete events as removed.
+      if hot_reload_task_plan.is_some() {
+        if let Some(invalidation) = args.watch_invalidation.as_ref() {
+          HotReloadProcessor::new(&module_layout, &project_root).write_watch_changed_file_list(
+            loader_json.patch_config.as_ref(),
+            &invalidation.raw_events,
+          )?;
+        }
+      }
 
       // Clean stale bundled .js files from previous builds.
       if output_dir.exists() {
@@ -5802,12 +7770,14 @@ impl BuildCoordinator {
       // Local unit-test builds additionally compile the generated
       // testability templates and the `src/test` suite (hvigor
       // `UnitTestArkTS` inputs; `GenerateUnitTestTemplate` output).
-      let test_source_roots: Vec<PathBuf> = if matches!(config.output_target, OutputTarget::Test)
-      {
-        vec![module_layout.testability_dir(), module_layout.test_sources_dir()]
+      let test_source_roots: Vec<PathBuf> = if matches!(config.output_target, OutputTarget::Test) {
+        vec![
+          module_layout.testability_dir(),
+          module_layout.test_sources_dir(),
+        ]
       } else if module_target_name == "ohosTest" {
         vec![
-          super::unit_test::ohos_test_template_root(&module.src_path),
+          super::unit_test::ohos_test_template_root(&module.src_path, &module_config.product.name),
           module_layout.source().target_ets(&module_target_name),
         ]
       } else {
@@ -5867,6 +7837,9 @@ impl BuildCoordinator {
           .map(|options| options.tsc_config.target_es_version)
           .unwrap_or_default(),
         case_sensitive_check: module_build_option.strict_mode.case_sensitive_check,
+        no_external_import_by_path: module_build_option
+          .strict_mode
+          .is_no_external_import_by_path(),
         har_dedup: HarDedupFactoryMode::Disabled,
         disabled_plugins: custom_cfg.plugins.disabled.clone(),
         package_plugins: module_package_plugins.clone(),
@@ -5895,7 +7868,8 @@ impl BuildCoordinator {
           .ok()
           .and_then(|content| json5::from_str::<serde_json::Value>(&content).ok())
           .and_then(|raw| {
-            raw.get("name")
+            raw
+              .get("name")
               .and_then(|name| name.as_str())
               .map(str::to_string)
           }),
@@ -5929,19 +7903,35 @@ impl BuildCoordinator {
         format_args!("module={}", module.name),
       );
       if let Some(collect_factory_output) = collect_factory_output {
-        let collect_out = BundleStage::run(BundleStageInput {
-          config: config.clone(),
-          plugins: collect_factory_output.plugins,
-          ets_transform_plan: Some(collect_factory_output.ets_transform_plan),
-          plan: bundle_plan.clone(),
-        })
-        .await?;
-        let bytecode_module_ids = module_har_dedup_plan
-          .collect_bytecode_module_ids(collect_out.bundle_output.external_module_requests.iter());
-        module_har_dedup_plan.write_bytecode_module_ids(
-          &module_layout.bytecode_har_duplicate_files_info(),
-          &bytecode_module_ids,
-        )?;
+        let collect_enabled = task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "CollectDuplicateHarEntriesArkTS",
+          )
+          .await?;
+        if collect_enabled {
+          let collect_out = BundleStage::run(BundleStageInput {
+            config: config.clone(),
+            plugins: collect_factory_output.plugins,
+            ets_transform_plan: Some(collect_factory_output.ets_transform_plan),
+            plan: bundle_plan.clone(),
+          })
+          .await?;
+          let bytecode_module_ids = module_har_dedup_plan
+            .collect_bytecode_module_ids(collect_out.bundle_output.external_module_requests.iter());
+          module_har_dedup_plan.write_bytecode_module_ids(
+            &module_layout.bytecode_har_duplicate_files_info(),
+            &bytecode_module_ids,
+          )?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(&module_target_name),
+              "CollectDuplicateHarEntriesArkTS",
+            )
+            .await?;
+        }
       }
       let plugin_factory_output = PluginFactory::new(&bundle_plan, factory_input).build_output()?;
       let plugins = plugin_factory_output.plugins;
@@ -6059,6 +8049,7 @@ impl BuildCoordinator {
       if matches!(module.module_type, OhosModuleType::Shared) {
         HarDeclarationGenerator::new_hsp(
           &module.src_path,
+          &module_config.product.name,
           &module_layout.source().ets(),
           &module.name,
         )
@@ -6075,6 +8066,7 @@ impl BuildCoordinator {
         PluginCacheModuleInventory::from_module_sources(
           cache_dir.as_path(),
           &bundle_out.bundle_output.module_source_files,
+          args.hvigor_properties.rollup_cache_use_source_hash,
         )?
         .save(cache_dir.as_path())?;
       } else {
@@ -6089,10 +8081,7 @@ impl BuildCoordinator {
           let key_str = format!(
             "{}#{}#{:?}#{}#preloadSystemSo={}",
             config.sdk_config.compile_sdk_version,
-            match config.build_mode {
-              BuildMode::Debug => "debug",
-              BuildMode::Release => "release",
-            },
+            config.build_mode.as_str(),
             config.output_target,
             module_analyzer.as_str(),
             module_build_option.preload_system_so
@@ -6156,9 +8145,10 @@ impl BuildCoordinator {
       if bundle_out.bypasses_compilation() {
         continue;
       }
-      let module_layout = ModuleBuildLayout::for_output_target(
+      let module_layout = ModuleBuildLayout::for_output_target_product(
         &config.output_target,
         &module.src_path,
+        &config.product.name,
         module_target_name,
       );
       let module_src_main = PathBuf::from(&loader_json.module_root_path);
@@ -6196,7 +8186,7 @@ impl BuildCoordinator {
 
       // Hvigor enables collectImportersPlugin only for hot-reload builds.
       // Normal CompileArkTS builds must not emit importer_map intermediates.
-      if watch_mode {
+      if collect_importers {
         let mut importer_map: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let compiled_module_ids = bundle_out
           .bundle_output
@@ -6307,6 +8297,14 @@ impl BuildCoordinator {
       if bundle_out.bypasses_compilation() {
         continue;
       }
+      if QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name).is_some()
+        || HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name).is_some()
+      {
+        // HotReloadArkCompile and ColdReloadArkCompile remove
+        // `obfuscationOptions` before submitting the SDK worker. A reload
+        // patch must preserve the base build's record/symbol names.
+        continue;
+      }
       let Some(obf_config) = module_obfuscation.config.as_ref() else {
         continue;
       };
@@ -6357,18 +8355,6 @@ impl BuildCoordinator {
         }
       }
 
-      if matches!(config.build_mode, BuildMode::Release)
-        && (args.target == "har" || matches!(&config.output_target, OutputTarget::Har))
-        && !obf_config.consumer_rule_files.is_empty()
-      {
-        ConsumerObfuscationFileWriter::new(
-          obf_config.consumer_rule_files.clone(),
-          project_layout.obfuscation_txt(),
-        )
-        .with_dependency_rule_files(dependency_rule_files)
-        .write()
-        .map_err(|e| anyhow::anyhow!("Generate obfuscation.txt failed: {}", e))?;
-      }
       tracing::debug!(module = %module.name, "module obfuscation stage completed");
     }
 
@@ -6377,7 +8363,7 @@ impl BuildCoordinator {
       if matches!(config.output_target, OutputTarget::Test) {
         for (
           (
-            (module, _manifest, _loader_json, _resource_refs, _module_target_name, _module_config),
+            (module, _manifest, _loader_json, _resource_refs, _module_target_name, module_config),
             (bundle_out,),
           ),
           ets_transform_plan,
@@ -6399,6 +8385,7 @@ impl BuildCoordinator {
             &config.sdk_config,
             &config.project_root,
             &module.src_path,
+            &module_config.product.name,
             args.coverage_mode.as_deref(),
             &bundle_out.bundle_output.module_source_files,
             args.resolved_node_executable(),
@@ -6443,8 +8430,28 @@ impl BuildCoordinator {
       .zip(all_bc_har_deps.iter())
       .enumerate()
     {
-      let compile_task_name =
-        Self::arkts_compile_task_name(&config.output_target, &module.module_type);
+      let quickfix_task_plan = QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name);
+      let hot_reload_task_plan =
+        HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name);
+      let compile_task_name = if hot_reload_task_plan.is_some() {
+        "HotReloadArkTS"
+      } else if quickfix_task_plan.is_some() {
+        "ColdReloadArkTS"
+      } else {
+        Self::selected_arkts_compile_task_name(
+          &args.native_task_roots,
+          &module.name,
+          module_target_name,
+          &config.output_target,
+          &module.module_type,
+        )
+      };
+      let module_layout = ModuleBuildLayout::for_output_target_product(
+        &config.output_target,
+        &module.src_path,
+        &config.product.name,
+        module_target_name,
+      );
       let module_package_plugins = package_plugins
         .iter()
         .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
@@ -6481,7 +8488,23 @@ impl BuildCoordinator {
           .map_err(|error| anyhow::anyhow!(error))
         })
         .collect::<Result<Vec<_>>>()?;
-      let compile_context_info_path = if loader_json.use_normalized_ohm_url {
+      let hot_reload_compile_plan = if hot_reload_task_plan.is_some() {
+        let hot_reload = HotReloadProcessor::new(&module_layout, &project_root);
+        hot_reload.compile_plan(
+          loader_json.patch_config.as_ref(),
+          &loader_json.compile_mode,
+          config.sdk_config.compile_api_version,
+          args.watch_invalidation.is_some(),
+          &bundle_out.bundle_output.module_source_files,
+          &bundle_out.bundle_output.modules_abc_path,
+          bundle_out.bundle_output.source_maps_path.as_deref(),
+        )?
+      } else {
+        None
+      };
+      let compile_context_info_path = if loader_json.use_normalized_ohm_url
+        && (hot_reload_task_plan.is_none() || hot_reload_compile_plan.is_some())
+      {
         let module_context = session
           .module_context(&module.name)
           .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
@@ -6501,6 +8524,11 @@ impl BuildCoordinator {
           &config.product.bundle_name,
           matches!(module.module_type, OhosModuleType::Shared)
             && Self::module_json5_has_form_extension_module(&module.src_path),
+        )
+        .with_compile_entry_override(
+          hot_reload_compile_plan
+            .as_ref()
+            .and_then(|plan| plan.compile_entry_override.as_deref()),
         )
         .write(&path)
         .map_err(|e| anyhow::anyhow!("GenerateCompileContextInfo failed: {}", e))?;
@@ -6524,7 +8552,7 @@ impl BuildCoordinator {
       // only for non-debuggable builds without bytecode obfuscation, and
       // `--transform-lib` when `arkOptions.transformLib` is configured.
       let ark_options = &module_config.product.build_option.ark_options;
-      let branch_elimination = !matches!(config.build_mode, BuildMode::Debug)
+      let branch_elimination = config.build_mode.is_release()
         && pending_bytecode_obfuscations[bundle_index].is_none()
         && ark_options
           .as_ref()
@@ -6533,27 +8561,93 @@ impl BuildCoordinator {
       let transform_lib = ark_options
         .as_ref()
         .and_then(|options| options.transform_lib.clone());
-      let bytecode_result = BytecodeStage::run(BytecodeStageInput {
-        compiler: RolldownBytecodeCompiler::new(
-          abc_ts2abc_backend_inner,
-          config.sdk_config.es2abc_path.clone(),
-          Arc::clone(&session.sdk.es2abc_options),
-          compile_target.api_version(),
-          matches!(config.build_mode, BuildMode::Debug),
-        )
-        .with_target_api_sub_version(compile_target.api_sub_version())
-        .with_branch_elimination(branch_elimination)
-        .with_transform_lib(transform_lib.clone()),
-        module_source_files: bundle_out.bundle_output.module_source_files.clone(),
-        external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
-        npm_entries: bundle_out.bundle_output.npm_entries.clone(),
-        modules_abc_path: bundle_out.bundle_output.modules_abc_path.clone(),
-        cache_dir: bytecode_cache_dir,
-        cache_file: effective_cache_file,
-        abc_input_files: abc_input_files.clone(),
-        compile_context_info_path,
-        byte_code_har: loader_json.byte_code_har.unwrap_or(false),
-      });
+      let cold_reload_plan = if quickfix_task_plan.is_some() {
+        ColdReloadProcessor::new(&module_layout).compile_plan(
+          loader_json.patch_config.as_ref(),
+          &bundle_out.bundle_output.module_source_files,
+          bundle_out.bundle_output.source_maps_path.as_deref(),
+        )?
+      } else {
+        None
+      };
+      let bytecode_result = if let Some(reload_plan) = hot_reload_compile_plan.as_ref() {
+        let initial = reload_plan.phase == HotReloadCompilePhase::Initial;
+        BytecodeStage::run(BytecodeStageInput {
+          compiler: RolldownBytecodeCompiler::new(
+            abc_ts2abc_backend_inner,
+            config.sdk_config.es2abc_path.clone(),
+            Arc::clone(&session.sdk.es2abc_options),
+            compile_target.api_version(),
+            config.build_mode.is_debuggable(),
+          )
+          .with_target_api_sub_version(compile_target.api_sub_version())
+          .with_branch_elimination(false)
+          .with_transform_lib(transform_lib.clone())
+          .with_reload(Some(reload_plan.reload.clone())),
+          module_source_files: reload_plan.module_source_files.clone(),
+          external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
+          npm_entries: bundle_out.bundle_output.npm_entries.clone(),
+          modules_abc_path: reload_plan.modules_abc_path.clone(),
+          cache_dir: bytecode_cache_dir.clone(),
+          cache_file: effective_cache_file.clone(),
+          abc_input_files: if initial {
+            abc_input_files.clone()
+          } else {
+            Vec::new()
+          },
+          compile_context_info_path: compile_context_info_path.clone(),
+          byte_code_har: initial && loader_json.byte_code_har.unwrap_or(false),
+        })
+      } else if hot_reload_task_plan.is_some() {
+        Ok(())
+      } else if let Some(reload_plan) = cold_reload_plan.as_ref() {
+        BytecodeStage::run(BytecodeStageInput {
+          compiler: RolldownBytecodeCompiler::new(
+            abc_ts2abc_backend_inner,
+            config.sdk_config.es2abc_path.clone(),
+            Arc::clone(&session.sdk.es2abc_options),
+            compile_target.api_version(),
+            config.build_mode.is_debuggable(),
+          )
+          .with_target_api_sub_version(compile_target.api_sub_version())
+          .with_branch_elimination(false)
+          .with_transform_lib(transform_lib.clone())
+          .with_reload(Some(reload_plan.reload.clone())),
+          module_source_files: reload_plan.module_source_files.clone(),
+          external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
+          npm_entries: bundle_out.bundle_output.npm_entries.clone(),
+          modules_abc_path: reload_plan.modules_abc_path.clone(),
+          cache_dir: bytecode_cache_dir.clone(),
+          cache_file: effective_cache_file.clone(),
+          abc_input_files: Vec::new(),
+          compile_context_info_path: compile_context_info_path.clone(),
+          byte_code_har: false,
+        })
+      } else if quickfix_task_plan.is_some() {
+        Ok(())
+      } else {
+        BytecodeStage::run(BytecodeStageInput {
+          compiler: RolldownBytecodeCompiler::new(
+            abc_ts2abc_backend_inner,
+            config.sdk_config.es2abc_path.clone(),
+            Arc::clone(&session.sdk.es2abc_options),
+            compile_target.api_version(),
+            config.build_mode.is_debuggable(),
+          )
+          .with_target_api_sub_version(compile_target.api_sub_version())
+          .with_branch_elimination(branch_elimination)
+          .with_transform_lib(transform_lib.clone()),
+          module_source_files: bundle_out.bundle_output.module_source_files.clone(),
+          external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
+          npm_entries: bundle_out.bundle_output.npm_entries.clone(),
+          modules_abc_path: bundle_out.bundle_output.modules_abc_path.clone(),
+          cache_dir: bytecode_cache_dir,
+          cache_file: effective_cache_file,
+          abc_input_files: abc_input_files.clone(),
+          compile_context_info_path,
+          byte_code_har: loader_json.byte_code_har.unwrap_or(false),
+        })
+      };
       // On ABC compile failure, remove the task-inputs cache so the next build
       // is forced to recompile (mirrors hvigor's removeCompileFailedFilesFromCache).
       if bytecode_result.is_err() {
@@ -6574,17 +8668,48 @@ impl BuildCoordinator {
       );
       bytecode_result?;
 
-      task_lifecycle
-        .transform_abc(
+      if quickfix_task_plan.is_none() && hot_reload_task_plan.is_none() {
+        AotArtifactWriter::new(
           &module.name,
-          module_target_name,
-          &bundle_out.bundle_output.modules_abc_path,
-          module_obfuscation.is_enabled(&config.build_mode),
+          loader_json.an_build_mode.as_deref(),
+          loader_json.an_build_out_put.as_deref(),
+          loader_json.ap_path.as_deref(),
+          &module_layout,
+          coverage_mode,
         )
-        .await?;
+        .generate(&bundle_out.bundle_output.modules_abc_path)?;
 
-      if let Some(pending) = pending_bytecode_obfuscations[bundle_index].take() {
-        pending.run(&module.name)?;
+        task_lifecycle
+          .transform_abc(
+            &module.name,
+            module_target_name,
+            &bundle_out.bundle_output.modules_abc_path,
+            module_obfuscation.is_enabled(&config.build_mode),
+          )
+          .await?;
+
+        if let Some(pending) = pending_bytecode_obfuscations[bundle_index].take() {
+          pending.run(&module.name)?;
+        }
+      }
+
+      if hot_reload_task_plan.is_some() {
+        // HotReloadArkTS owns a persistent SDK watch worker. Its lifecycle
+        // remains open across incremental callbacks and closes only when the
+        // watcher terminates, so do not run normal post-ABC/AOT/package work.
+        continue;
+      }
+
+      if quickfix_task_plan.is_some() {
+        if compile_task_active[bundle_index] {
+          task_lifecycle
+            .after(&module.name, Some(module_target_name), compile_task_name)
+            .await?;
+        }
+        task_lifecycle
+          .up_to_date(&module.name, Some(module_target_name), "BuildJS")
+          .await?;
+        continue;
       }
 
       // ── P12: Widget compile pass ──────────────────────────────────
@@ -6610,9 +8735,11 @@ impl BuildCoordinator {
         // 6.24.3 `GenerateLoaderJson.doTaskAction()` writes the widget loader
         // JSON alongside the common one (`aceWidgetLoaderJson`) whenever the
         // module submits ArkTS widgets.
-        let widget_loader_path = ModuleBuildLayout::new(&module.src_path).widget_loader_json();
+        let widget_loader_path =
+          ModuleBuildLayout::for_product(&module.src_path, &module_config.product.name)
+            .widget_loader_json();
         let widget_loader_value = serde_json::to_value(&widget_loader_json)
-            .map_err(|error| anyhow::anyhow!("serialize widget_loader.json failed: {}", error))?;
+          .map_err(|error| anyhow::anyhow!("serialize widget_loader.json failed: {}", error))?;
         intermediate_writer
           .write_json_pretty(&widget_loader_path, &widget_loader_value)
           .map_err(|error| anyhow::anyhow!("write widget_loader.json failed: {}", error))?;
@@ -6652,7 +8779,7 @@ impl BuildCoordinator {
             config.sdk_config.es2abc_path.clone(),
             Arc::clone(&session.sdk.es2abc_options),
             compile_target.api_version(),
-            matches!(config.build_mode, BuildMode::Debug),
+            config.build_mode.is_debuggable(),
           )
           .with_target_api_sub_version(compile_target.api_sub_version())
           .with_branch_elimination(branch_elimination)
@@ -6724,6 +8851,7 @@ impl BuildCoordinator {
         loader_json,
         module_obfuscation.is_enabled(&config.build_mode),
         module_target_name,
+        args.hvigor_properties.rollup_cache_use_source_hash,
       )
       .build()?;
       let task_inputs =
@@ -6741,10 +8869,7 @@ impl BuildCoordinator {
         tracing::warn!(error = %e, "failed to save task inputs cache");
       }
 
-      let build_mode_str = match config.build_mode {
-        BuildMode::Debug => "debug",
-        BuildMode::Release => "release",
-      };
+      let build_mode_str = config.build_mode.as_str();
       let compile_info_path = cache_dir.join("compileInfo.json");
       let compile_info = serde_json::json!({ "buildMode": build_mode_str });
       if let Err(e) = fs_err::write(
@@ -6778,7 +8903,10 @@ impl BuildCoordinator {
       }
 
       if matches!(config.output_target, OutputTarget::Test) {
-        let artifacts = super::unit_test::UnitTestArtifactWriter::new(&module.src_path);
+        let artifacts = super::unit_test::UnitTestArtifactWriter::new(
+          &module.src_path,
+          &module_config.product.name,
+        );
         artifacts.stage_compiled_assets(
           &bundle_out.bundle_output.modules_abc_path,
           bundle_out.bundle_output.source_maps_path.as_deref(),
@@ -6800,11 +8928,85 @@ impl BuildCoordinator {
           .marker(&module.name, None, "UnitTestBuild")
           .await?;
       }
+      if matches!(config.output_target, OutputTarget::Preview) {
+        task_lifecycle
+          .marker(&module.name, None, "PreviewBuild")
+          .await?;
+      }
       task_lifecycle
         .up_to_date(&module.name, Some(module_target_name), "BuildJS")
         .await?;
     }
     progress.done();
+
+    if hot_reload_mode {
+      if args.watch_invalidation.is_some() {
+        // Incremental callbacks execute inside the lifetime of the initial
+        // HotReloadArkTS task and therefore never emit a second task cycle or
+        // enter packaging.
+        if self.owns_task_cycle {
+          task_lifecycle.finish_cycle().await?;
+        }
+        return Ok(BuildOutput {
+          artifact_paths: Vec::new(),
+        });
+      }
+
+      WatchStage::run(WatchStageInput::from_build(
+        config.clone(),
+        session.clone(),
+        args,
+        project_root.clone(),
+        abc_backend,
+        coverage_mode,
+        disable_abc_cache,
+        cli_cache_file.clone(),
+        package_plugins.clone(),
+        None,
+        false,
+        true,
+      ))
+      .await?;
+
+      for (
+        bundle_index,
+        (module, _manifest, _loader_json, _resource_refs, module_target_name, _module_config),
+      ) in loader_jsons.iter().enumerate()
+      {
+        let Some(plan) = HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name)
+        else {
+          continue;
+        };
+        if compile_task_active[bundle_index] {
+          task_lifecycle
+            .after(&module.name, Some(module_target_name), "HotReloadArkTS")
+            .await?;
+        }
+        if plan.boundary() == HotReloadTaskBoundary::Build {
+          task_lifecycle
+            .marker(&module.name, None, "HotReloadBuild")
+            .await?;
+        }
+      }
+      if self.owns_task_cycle {
+        task_lifecycle.finish_cycle().await?;
+      }
+      return Ok(BuildOutput {
+        artifact_paths: Vec::new(),
+      });
+    }
+
+    // PreviewBuild terminates at PreviewArkTS. Its outputs remain under the
+    // `.preview` build root for DevEco Previewer; it never enters the
+    // HAP/HSP/HAR package or signing graph.
+    if matches!(config.output_target, OutputTarget::Preview) {
+      if self.owns_task_cycle {
+        task_lifecycle.finish_cycle().await?;
+      }
+      return Ok(BuildOutput {
+        artifact_paths: Vec::new(),
+      });
+    }
 
     let bundle_package_outs: Vec<(BundlePackageOutput,)> = bundle_outs
       .into_iter()
@@ -6819,10 +9021,13 @@ impl BuildCoordinator {
     // pack graph.
     if matches!(config.output_target, OutputTarget::Test) {
       let coverage = args.ohos_test_coverage.unwrap_or(true);
-      for (module, _manifest, _loader_json, _resource_refs, module_target_name, _module_config) in
+      for (module, _manifest, _loader_json, _resource_refs, module_target_name, module_config) in
         loader_jsons.iter()
       {
-        let artifacts = super::unit_test::UnitTestArtifactWriter::new(&module.src_path);
+        let artifacts = super::unit_test::UnitTestArtifactWriter::new(
+          &module.src_path,
+          &module_config.product.name,
+        );
         if task_lifecycle.has_root(
           &module.name,
           Some(module_target_name),
@@ -6882,9 +9087,9 @@ impl BuildCoordinator {
             )
             .await?
         {
-          let module_context = session.module_context(&module.name).ok_or_else(|| {
-            anyhow::anyhow!("missing module compile context for {}", module.name)
-          })?;
+          let module_context = session
+            .module_context(&module.name)
+            .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
           super::unit_test::UnitTestExecutionPlan::from_build(
             &config.sdk_config,
             &config.product.runtime_os,
@@ -6897,11 +9102,11 @@ impl BuildCoordinator {
           )
           .and_then(|plan| plan.execute())
           .map_err(|error| {
-              anyhow::anyhow!(
-                "GenerateUnitTestResult failed for module '{}': {error}",
-                module.name
-              )
-            })?;
+            anyhow::anyhow!(
+              "GenerateUnitTestResult failed for module '{}': {error}",
+              module.name
+            )
+          })?;
           task_lifecycle
             .after(
               &module.name,
@@ -6910,11 +9115,14 @@ impl BuildCoordinator {
             )
             .await?;
         }
-        if args.native_task_roots.is_empty()
-          || task_lifecycle.has_root(&module.name, None, "test")
+        if args.native_task_roots.is_empty() || task_lifecycle.has_root(&module.name, None, "test")
         {
           task_lifecycle.marker(&module.name, None, "test").await?;
         }
+      }
+      progress.done();
+      if self.owns_task_cycle {
+        task_lifecycle.finish_cycle().await?;
       }
       return Ok(BuildOutput {
         artifact_paths: Vec::new(),
@@ -6924,7 +9132,113 @@ impl BuildCoordinator {
     // packaging and copy the compiled intermediates into
     // `intermediates/fastApp/<target>/` for IDE fast deployment.
     if args.fast_build_app {
-      return Self::run_fast_package(loader_jsons.as_slice()).map(|paths| BuildOutput {
+      let mut enabled_fast_packages = Vec::with_capacity(loader_jsons.len());
+      let mut fast_task_names = Vec::with_capacity(loader_jsons.len());
+      for (module, _, _, _, module_target_name, _) in &loader_jsons {
+        let fast_task_name = if matches!(module.module_type, OhosModuleType::Shared) {
+          "FastPackageHsp"
+        } else {
+          "FastPackageHap"
+        };
+        enabled_fast_packages.push(
+          task_lifecycle
+            .before(&module.name, Some(module_target_name), fast_task_name)
+            .await?,
+        );
+        fast_task_names.push(fast_task_name);
+      }
+      let paths = Self::run_fast_package(
+        loader_jsons.as_slice(),
+        &enabled_fast_packages,
+        &module_pack_info_plans,
+      )?;
+      for (
+        ((module, _, loader_json, _, module_target_name, module_config), (package_out,)),
+        (enabled, fast_task_name),
+      ) in loader_jsons
+        .iter()
+        .zip(bundle_package_outs.iter())
+        .zip(enabled_fast_packages.iter().zip(fast_task_names))
+      {
+        if *enabled {
+          task_lifecycle
+            .after(&module.name, Some(module_target_name), fast_task_name)
+            .await?;
+        }
+
+        let module_layout = ModuleBuildLayout::for_output_target_product(
+          &module_config.output_target,
+          &module.src_path,
+          &module_config.product.name,
+          module_target_name,
+        );
+        if task_lifecycle
+          .before(&module.name, Some(module_target_name), "PackingCheck")
+          .await?
+        {
+          PackingCheck::new(
+            module_config,
+            module,
+            loader_json,
+            module_layout.stripped_native_libs_dir(),
+            module_layout.res_default_dir(),
+          )
+          .validate()
+          .map_err(|error| anyhow::anyhow!("packing-check failed: {error}"))?;
+          task_lifecycle
+            .after(&module.name, Some(module_target_name), "PackingCheck")
+            .await?;
+        }
+
+        let source_map_output = args
+          .hvigor_properties
+          .source_map_output(&config.project_root, &module.name)
+          .unwrap_or_else(|| module_layout.output_mapping_source_maps());
+        intermediate_writer.publish_package_source_maps(
+          package_out.source_maps_path.as_deref(),
+          &source_map_output,
+        )?;
+        if task_lifecycle
+          .before(&module.name, Some(module_target_name), "CollectDebugSymbol")
+          .await?
+        {
+          let source_map_primary = package_out
+            .source_maps_path
+            .clone()
+            .unwrap_or_else(|| module_layout.loader_out_source_maps());
+          DebugSymbolCollector::new(
+            module.src_path.clone(),
+            module.name.clone(),
+            config.build_mode.clone(),
+            source_map_primary,
+            None,
+            PathBuf::from(&loader_json.cache_path)
+              .join("obfuscation")
+              .join("nameCache.json"),
+          )
+          .with_collection_override(args.collect_debug_symbol)
+          .with_output_variant(&config.product.name, module_target_name)
+          .collect()
+          .map_err(|error| anyhow::anyhow!("CollectDebugSymbol failed: {error}"))?;
+          task_lifecycle
+            .after(&module.name, Some(module_target_name), "CollectDebugSymbol")
+            .await?;
+        }
+
+        let assemble_task_name = if matches!(module.module_type, OhosModuleType::Shared) {
+          "assembleHsp"
+        } else {
+          "assembleHap"
+        };
+        task_lifecycle
+          .marker(&module.name, None, assemble_task_name)
+          .await?;
+      }
+      progress.done();
+      if self.owns_task_cycle {
+        task_lifecycle.finish_cycle().await?;
+      }
+      return Ok(BuildOutput {
         artifact_paths: paths,
       });
     }
@@ -6933,17 +9247,21 @@ impl BuildCoordinator {
     for (
       (
         (
-          (module, manifest, loader_json, _resource_refs, module_target_name, module_config),
-          (package_out,),
+          (
+            (module, manifest, loader_json, _resource_refs, module_target_name, module_config),
+            (package_out,),
+          ),
+          privacy_profile_path,
         ),
-        privacy_profile_path,
+        module_obfuscation,
       ),
-      module_obfuscation,
+      pack_info_plans,
     ) in loader_jsons
       .iter()
       .zip(bundle_package_outs.iter())
       .zip(privacy_profile_paths.iter())
       .zip(module_obfuscation_contexts.iter())
+      .zip(module_pack_info_plans.iter())
     {
       let module_build_option = &module_config.product.build_option;
       let packager = Packager::new(module_config.clone()).with_compress_level(
@@ -6952,23 +9270,17 @@ impl BuildCoordinator {
           .filter(|_| module_config.sdk_config.sdk_component_api_version >= 12)
           .unwrap_or(1),
       );
-      let module_layout = ModuleBuildLayout::for_output_target(
+      let module_layout = ModuleBuildLayout::for_output_target_product(
         &config.output_target,
         &module.src_path,
+        &config.product.name,
         module_target_name,
       );
+      let quickfix_task_plan = QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name);
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
-      if task_lifecycle
-        .before(&module.name, Some(module_target_name), "MakePackInfo")
-        .await?
-      {
-        task_lifecycle
-          .after(&module.name, Some(module_target_name), "MakePackInfo")
-          .await?;
-      }
       let resources_index = module_layout.res_resources_index();
       let modules_abc = package_out.modules_abc_path.clone();
-      let ext = match &config.output_target {
+      let ext = match &module_config.output_target {
         OutputTarget::Hsp => "hsp",
         OutputTarget::Har => "har",
         _ => "hap",
@@ -6978,15 +9290,10 @@ impl BuildCoordinator {
       let output_dir = if module_target_name == "default" {
         module_layout.outputs_default()
       } else {
-        module_layout
-          .outputs_root()
-          .join(&module_target_name)
+        module_layout.outputs_root().join(&module_target_name)
       };
 
-      let packaging_build_mode_name = match config.build_mode {
-        BuildMode::Debug => "debug",
-        BuildMode::Release => "release",
-      };
+      let packaging_build_mode_name = config.build_mode.as_str();
       let all_applicable = session.build_options.applicable_targets(
         &module.name,
         &config.product.name,
@@ -6997,6 +9304,11 @@ impl BuildCoordinator {
       std::fs::create_dir_all(&output_dir)?;
 
       for artifact_target_label in &target_labels {
+        let output_artifact_name = module_config
+          .product
+          .artifact_name
+          .as_deref()
+          .unwrap_or(&module.name);
         let interface_source_roots = all_applicable
           .iter()
           .find(|target| target.name == *artifact_target_label)
@@ -7004,14 +9316,30 @@ impl BuildCoordinator {
           .unwrap_or_default();
         let modules_abc = modules_abc.clone();
         let resources_index = resources_index.clone();
-        let output_name = ArtifactOutputName::new(&module.name, artifact_target_label, ext);
-        let unsigned_output = output_dir.join(output_name.unsigned());
-        let signed_output = output_dir.join(output_name.signed());
-        let output = if matches!(&config.output_target, OutputTarget::Har) {
-          output_dir.join(output_name.har())
-        } else {
-          unsigned_output.clone()
-        };
+        let output_name = ArtifactOutputName::new(
+          module_config.product.artifact_name.as_deref(),
+          &module.name,
+          artifact_target_label,
+          ext,
+        );
+        let package_artifacts = ModulePackageArtifact::for_module_target(
+          module,
+          module_config,
+          artifact_target_label,
+          ext,
+          &output_dir,
+          pack_info_plans,
+        );
+        let primary_output = package_artifacts
+          .first()
+          .map(|artifact| artifact.package_path.clone())
+          .ok_or_else(|| {
+            anyhow::anyhow!(
+              "MakePackInfo did not produce an artifact plan for '{}:{}'",
+              module.name,
+              artifact_target_label
+            )
+          })?;
         let syscap_tool = session
           .sdk
           .tool_path(SdkToolKind::SyscapTool)
@@ -7030,7 +9358,7 @@ impl BuildCoordinator {
             &session.sdk.sdk_root,
             &syscap_tool,
             module_layout.syscap_dir(),
-            matches!(config.output_target, OutputTarget::Har),
+            matches!(module_config.output_target, OutputTarget::Har),
           )
           .run()
           .map_err(|error| anyhow::anyhow!("SyscapTransform failed: {error}"))?;
@@ -7125,11 +9453,7 @@ impl BuildCoordinator {
           .unwrap_or_else(|| NativeLibPackageInfo::local(module.name.clone(), String::new()));
         let native_policy = sanitizer_native_policy
           .clone()
-          .unwrap_or_else(|| {
-            NativeLibCollectionPolicy::default()
-              .with_build_mode(args.mode.clone())
-              .with_sdk_toolchain(native_sdk_toolchain.clone())
-          })
+          .with_release_cmake_build_type(args.hvigor_properties.release_cmake_build_type.as_deref())
           .with_external_native_options(native_build_option.external_native_options.clone())
           .with_native_lib_option(native_build_option.native_lib.clone())
           .with_self_package(self_package);
@@ -7138,8 +9462,9 @@ impl BuildCoordinator {
           &native_build_option.abi_filters,
           module_context.deps.as_ref(),
         )
+        .with_output_variant(&module_config.product.name, artifact_target_label)
         .with_policy(native_policy);
-        let native_collector = if matches!(config.output_target, OutputTarget::Har) {
+        let native_collector = if matches!(module_config.output_target, OutputTarget::Har) {
           native_collector
         } else {
           native_collector
@@ -7177,9 +9502,9 @@ impl BuildCoordinator {
           )
           .await?
         {
-          native_collector
-            .build_native()
-            .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"))?;
+          task_lifecycle
+            .execute_ninja_build(&module.name, artifact_target_label, &native_collector)
+            .await?;
           task_lifecycle
             .after(
               &module.name,
@@ -7203,11 +9528,28 @@ impl BuildCoordinator {
         } else {
           Vec::new()
         };
-        // DoNativeBinxo: when OHOS_ENABLE_HWASAN + OHOS_ENABLE_BINXO are
-        // configured, binxo outputs replace the process-libs inputs for strip.
-        let binxo_libs = native_collector
-          .binxo_libs(&processed_native_libs)
-          .map_err(|error| anyhow::anyhow!("DoNativeBinxo failed: {error}"))?;
+        // NativeTaskInitializer makes DoNativeStrip depend on DoNativeBinxo
+        // whenever its BinXO-only predicate is enabled. Direct invocation of
+        // DoNativeBinxo reaches the same action even when the predicate is
+        // disabled, where BinxoValidationService reports the missing HWASan
+        // combination.
+        let run_binxo = native_collector.is_binxo_enabled()
+          || task_lifecycle.has_root(&module.name, Some(artifact_target_label), "DoNativeBinxo");
+        let binxo_libs = if run_binxo
+          && task_lifecycle
+            .before(&module.name, Some(artifact_target_label), "DoNativeBinxo")
+            .await?
+        {
+          let outputs = native_collector
+            .binxo_libs(&processed_native_libs)
+            .map_err(|error| anyhow::anyhow!("DoNativeBinxo failed: {error}"))?;
+          task_lifecycle
+            .after(&module.name, Some(artifact_target_label), "DoNativeBinxo")
+            .await?;
+          outputs
+        } else {
+          processed_native_libs
+        };
         let native_libs = if task_lifecycle
           .before(&module.name, Some(artifact_target_label), "DoNativeStrip")
           .await?
@@ -7222,6 +9564,111 @@ impl BuildCoordinator {
         } else {
           Vec::new()
         };
+        if let Some(quickfix_task_plan) = quickfix_task_plan {
+          if !quickfix_task_plan.needs_patch_artifacts() {
+            anyhow::bail!(
+              "ARKDOWN_QUICKFIX_LIFECYCLE: ColdReloadArkTS completed without reaching PrepareQuickfix"
+            );
+          }
+          let patch_version = quickfix_patch_version.context(
+            "ARKDOWN_QUICKFIX_PATCH_VERSION: PrepareQuickfix requires a project patch version",
+          )?;
+          let quickfix = QuickFixArtifactProcessor::new(QuickFixArtifactInput {
+            layout: &module_layout,
+            module_name: &module.name,
+            target_name: artifact_target_label,
+            bundle_name: &session.project.bundle_name,
+            version_code: session.project.version_code,
+            version_name: &session.project.version_name,
+            device_types: &manifest.device_types,
+            debug_symbol: native_build_option
+              .native_lib
+              .debug_symbol_configured
+              .then_some(&native_build_option.native_lib.debug_symbol),
+            patch_version,
+          });
+
+          if task_lifecycle
+            .before(&module.name, Some(artifact_target_label), "PrepareQuickfix")
+            .await?
+          {
+            quickfix
+              .prepare(loader_json.patch_config.as_ref())
+              .map_err(|error| anyhow::anyhow!("PrepareQuickfix failed: {error}"))?;
+            task_lifecycle
+              .after(&module.name, Some(artifact_target_label), "PrepareQuickfix")
+              .await?;
+          }
+
+          let package_tool = session
+            .sdk
+            .tool_path(SdkToolKind::PackageTool)
+            .map(|tool| tool.path)
+            .context(
+              "ARKDOWN_QUICKFIX_PACKAGE_TOOL: PackageHqf requires the SDK app_packing_tool",
+            )?;
+          let package_runner = AppPackageRunner::new(package_tool);
+          let unsigned_hqf = if task_lifecycle
+            .before(&module.name, Some(artifact_target_label), "PackageHqf")
+            .await?
+          {
+            let output = quickfix
+              .package(&package_runner)
+              .map_err(|error| anyhow::anyhow!("PackageHqf failed: {error}"))?;
+            task_lifecycle
+              .after(&module.name, Some(artifact_target_label), "PackageHqf")
+              .await?;
+            output
+          } else {
+            quickfix.unsigned_hqf()
+          };
+
+          let mut final_hqf = unsigned_hqf.clone();
+          if task_lifecycle
+            .before(&module.name, Some(artifact_target_label), "SignHqf")
+            .await?
+          {
+            if let Some(signing_config) = config.product.signing_config.as_ref() {
+              let signed_hqf = quickfix.signed_hqf();
+              if signed_hqf.is_file() {
+                fs_err::remove_file(&signed_hqf)?;
+              }
+              SignBackendRunner::new()
+                .sign_or_skip(&unsigned_hqf, &signed_hqf, Some(signing_config))
+                .map_err(|error| anyhow::anyhow!("SignHqf failed: {error}"))?;
+              quickfix
+                .update_signed_log()
+                .map_err(|error| anyhow::anyhow!("SignHqf log update failed: {error}"))?;
+              final_hqf = signed_hqf;
+            }
+            task_lifecycle
+              .after(&module.name, Some(artifact_target_label), "SignHqf")
+              .await?;
+          }
+
+          if quickfix_task_plan.boundary() == QuickFixTaskBoundary::Assemble
+            && task_lifecycle
+              .before(&module.name, None, "assembleDevHqf")
+              .await?
+          {
+            if !quickfix_version_advanced {
+              quickfix_version_store
+                .as_ref()
+                .context(
+                  "ARKDOWN_QUICKFIX_VERSION_STORE: assembleDevHqf requires the Hvigor cache",
+                )?
+                .advance_after_assemble(patch_version)?;
+              quickfix_version_advanced = true;
+            }
+            task_lifecycle
+              .after(&module.name, None, "assembleDevHqf")
+              .await?;
+          }
+          if final_hqf.is_file() {
+            output_paths.push(final_hqf);
+          }
+          continue;
+        }
         if task_lifecycle
           .before(&module.name, Some(artifact_target_label), "CacheNativeLibs")
           .await?
@@ -7244,12 +9691,36 @@ impl BuildCoordinator {
         );
         let interface_native_libs = native_libs.clone();
 
+        if artifact_target_label == "ohosTest"
+          && task_lifecycle
+            .before(
+              &module.name,
+              Some(artifact_target_label),
+              "OhosTestCopyMockConfigJson",
+            )
+            .await?
+        {
+          super::unit_test::UnitTestArtifactWriter::for_ohos_test(
+            &module.src_path,
+            &module_config.product.name,
+            artifact_target_label,
+          )
+          .copy_mock_config_json()?;
+          task_lifecycle
+            .after(
+              &module.name,
+              Some(artifact_target_label),
+              "OhosTestCopyMockConfigJson",
+            )
+            .await?;
+        }
+
         let res_module_json = module_layout.res_module_json();
         let package_module_json = module_layout.package_module_json();
         let preload_system_so_effective =
           PreloadSystemSoArtifactWriter::effective_path(&module_layout.preload_system_so_json())?
             .is_some();
-        let module_json = if matches!(config.output_target, OutputTarget::Har) {
+        let module_json = if matches!(module_config.output_target, OutputTarget::Har) {
           res_module_json.clone()
         } else if task_lifecycle
           .before(
@@ -7278,7 +9749,7 @@ impl BuildCoordinator {
           package_module_json
         };
 
-        if matches!(config.output_target, OutputTarget::Hap)
+        if matches!(module_config.output_target, OutputTarget::Hap)
           && task_lifecycle
             .before(
               &module.name,
@@ -7304,26 +9775,41 @@ impl BuildCoordinator {
             .await?;
         }
 
-        let package_task_name = match &config.output_target {
+        let package_task_name = match &module_config.output_target {
           OutputTarget::Har => "PackageHar",
           OutputTarget::Hsp => "PackageHsp",
           _ => "PackageHap",
         };
-        if matches!(config.output_target, OutputTarget::Har) {
-          for har_task_name in ["ProcessObfuscationFiles"] {
-            task_lifecycle
-              .marker(&module.name, Some(artifact_target_label), har_task_name)
-              .await?;
-          }
-        }
-        let package_enabled = task_lifecycle
-          .before(&module.name, Some(artifact_target_label), package_task_name)
-          .await?;
+        let mut package_task_started = false;
+        let package_enabled = if matches!(module_config.output_target, OutputTarget::Har) {
+          // HAR exposes ProcessPackageJson/ProcessOHPackageJson and
+          // ProcessHarArtifacts as independently executable task boundaries.
+          // PackageHar itself starts only after those dependencies complete.
+          true
+        } else {
+          let enabled = task_lifecycle
+            .before(&module.name, Some(artifact_target_label), package_task_name)
+            .await?;
+          package_task_started = enabled;
+          enabled
+        };
         let out = if package_enabled {
-          let out = match &config.output_target {
+          let out = match &module_config.output_target {
             OutputTarget::Har => {
-              let source_dir = module_layout.source().ets();
-              let oh_package_json = module_layout.oh_package_json5();
+              let source_dir = module_context
+                .module
+                .source_roots
+                .first()
+                .cloned()
+                .unwrap_or_else(|| module_layout.source().ets());
+              let package_manifest = module_context
+                .module
+                .package_path
+                .clone()
+                .unwrap_or_else(|| module_layout.oh_package_json5());
+              let is_ohpm_project = package_manifest
+                .file_name()
+                .is_some_and(|name| name == std::ffi::OsStr::new("oh-package.json5"));
               if !source_dir.is_dir() {
                 anyhow::bail!(
                   "HAR source directory does not exist for module '{}': {}",
@@ -7336,8 +9822,12 @@ impl BuildCoordinator {
               if !matches!(artifact_type, HarArtifactType::Original) {
                 let generated_module_info =
                   module_layout.generated_module_info(&module_target_name);
-                let declaration_generator =
-                  HarDeclarationGenerator::new_har(&module.src_path, &source_dir, &module.name);
+                let declaration_generator = HarDeclarationGenerator::new_har(
+                  &module.src_path,
+                  &module_config.product.name,
+                  &source_dir,
+                  &module.name,
+                );
                 let declaration_generator = if matches!(artifact_type, HarArtifactType::Bytecode) {
                   declaration_generator.with_generated_source(&generated_module_info)
                 } else {
@@ -7486,11 +9976,12 @@ impl BuildCoordinator {
                 .collect::<Vec<_>>();
               let mut bundled_resource_directories = Vec::new();
               if bundled_dependencies {
-                let effective_target = ModuleTargetSelection::resolve(
+                let effective_target = ModuleTargetSelection::resolve_build(
                   config.as_ref(),
                   session.build_options.as_ref(),
                   module,
                   Some(artifact_target_label),
+                  &args.hvigor_properties,
                 )
                 .target;
                 if effective_target.resource_directories.is_empty() {
@@ -7520,7 +10011,7 @@ impl BuildCoordinator {
                 let candidate = module_layout.loader_out_source_maps();
                 candidate.is_file().then_some(candidate)
               });
-              let consumer_rules_path = project_layout.obfuscation_txt();
+              let consumer_rules_path = module_layout.obfuscation_export_rule_path();
               let ignore_resource_patterns = config
                 .product
                 .build_option
@@ -7540,8 +10031,8 @@ impl BuildCoordinator {
                   let dir = module_layout.res_resource_str_dir();
                   dir.exists().then_some(dir)
                 },
-                oh_package_json: oh_package_json.clone(),
-                output_path: output.clone(),
+                oh_package_json: package_manifest.clone(),
+                output_path: primary_output.clone(),
                 declarations_dir: declarations_dir.exists().then_some(declarations_dir),
                 consumer_rules_path: consumer_rules_path.exists().then_some(consumer_rules_path),
               };
@@ -7584,15 +10075,25 @@ impl BuildCoordinator {
                 extra_importees: importee_metadata.extra_importees,
                 global_dependencies: importee_metadata.global_dependencies,
                 ignore_resource_patterns,
-                debug: matches!(config.build_mode, BuildMode::Debug),
+                debug: config.build_mode.is_debuggable(),
                 target_name: artifact_target_label.clone(),
                 package_cache_dir: Some(module_layout.package_har_cache_dir(artifact_target_label)),
+              };
+              let process_package_task = if is_ohpm_project {
+                "ProcessOHPackageJson"
+              } else {
+                "ProcessPackageJson"
+              };
+              let generated_package_manifest = if is_ohpm_project {
+                module_layout.generated_pm_oh_package(artifact_target_label)
+              } else {
+                module_layout.generated_pm_package_json(artifact_target_label)
               };
               if task_lifecycle
                 .before(
                   &module.name,
                   Some(artifact_target_label),
-                  "ProcessOHPackageJson",
+                  process_package_task,
                 )
                 .await?
               {
@@ -7600,28 +10101,54 @@ impl BuildCoordinator {
                   .process_har_package_json(
                     &har_pack_input,
                     &har_variant,
-                    &module_layout.generated_pm_oh_package(artifact_target_label),
+                    &generated_package_manifest,
                   )
-                  .map_err(|error| anyhow::anyhow!("ProcessOHPackageJson failed: {error}"))?;
+                  .map_err(|error| anyhow::anyhow!("{process_package_task} failed: {error}"))?;
                 task_lifecycle
                   .after(
                     &module.name,
                     Some(artifact_target_label),
-                    "ProcessOHPackageJson",
+                    process_package_task,
                   )
                   .await?;
               }
-              task_lifecycle
-                .marker(
+              let package_cache_dir = module_layout.package_har_cache_dir(artifact_target_label);
+              if task_lifecycle
+                .before(
                   &module.name,
                   Some(artifact_target_label),
                   "ProcessHarArtifacts",
                 )
-                .await?;
-              let packed = packager
-                .pack_har_variant(har_pack_input, har_variant)
-                .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
-              Some(packed)
+                .await?
+              {
+                packager
+                  .process_har_artifacts(&har_pack_input, &har_variant, &package_cache_dir)
+                  .map_err(|error| anyhow::anyhow!("ProcessHarArtifacts failed: {error}"))?;
+                task_lifecycle
+                  .after(
+                    &module.name,
+                    Some(artifact_target_label),
+                    "ProcessHarArtifacts",
+                  )
+                  .await?;
+              }
+              if task_lifecycle
+                .before(&module.name, Some(artifact_target_label), "PackageHar")
+                .await?
+              {
+                package_task_started = true;
+                let npm_executable = (!is_ohpm_project).then(|| args.resolved_npm_executable());
+                let packed = packager
+                  .pack_har_artifacts(
+                    &har_pack_input,
+                    &package_cache_dir,
+                    npm_executable.as_deref(),
+                  )
+                  .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
+                vec![packed]
+              } else {
+                Vec::new()
+              }
             }
             _ => {
               if module_json.exists() && modules_abc.exists() {
@@ -7645,14 +10172,6 @@ impl BuildCoordinator {
                   } else {
                     raw_source_maps_path.clone()
                   };
-                  let abilities: Vec<PackAbility> = manifest
-                    .abilities
-                    .iter()
-                    .map(|a| PackAbility {
-                      name: a.name.clone(),
-                      label: a.label.clone(),
-                    })
-                    .collect();
                   let delivery_with_install = module_context
                     .module
                     .module_json
@@ -7675,41 +10194,52 @@ impl BuildCoordinator {
                       source_maps_path.is_some()
                     ),
                   );
-                  let pack_input = PackInput {
-                    module_name: module.name.clone(),
-                    abc_path: modules_abc,
-                    resources_index,
-                    module_json,
-                    pack_info_module_json: Some(module_layout.merge_profile_module_json()),
-                    native_libs,
-                    compress_native_libs,
-                    output_path: output.clone(),
-                    resources_src_dir: Some(module_layout.res_resources_dir()),
-                    bundle_version_code,
-                    bundle_version_name,
-                    bundle_build_version,
-                    bundle_type: bundle_type.clone(),
-                    source_maps_path,
-                    pkg_context_info_path: loader_json
-                      .use_normalized_ohm_url
-                      .then(|| module_layout.pkg_context_info_json()),
-                    pkg_sdk_info_path,
-                    abilities,
-                    integrated_hsps,
-                    device_types: manifest.device_types.clone(),
-                    installation_free: bundle_type == "atomicService",
-                    delivery_with_install,
-                    privacy_profile_path: privacy_profile_path.clone(),
-                    syscap_path,
-                  };
-                  let packed = if matches!(config.output_target, OutputTarget::Hsp) {
-                    packager.pack_hsp(pack_input)
-                  } else {
-                    packager.pack_hap(pack_input)
+                  let mut packed_outputs = Vec::with_capacity(package_artifacts.len());
+                  for artifact in &package_artifacts {
+                    let pack_input = PackInput {
+                      module_name: module.name.clone(),
+                      target_name: artifact_target_label.clone(),
+                      abc_path: modules_abc.clone(),
+                      resources_index: resources_index.clone(),
+                      module_json: module_json.clone(),
+                      pack_info_module_json: Some(module_layout.merge_profile_module_json()),
+                      pack_info_path: Some(artifact.pack_info_path.clone()),
+                      native_libs: native_libs.clone(),
+                      compress_native_libs,
+                      output_path: artifact.package_path.clone(),
+                      resources_src_dir: Some(module_layout.res_resources_dir()),
+                      bundle_version_code,
+                      bundle_version_name: bundle_version_name.clone(),
+                      bundle_build_version: bundle_build_version.clone(),
+                      bundle_type: bundle_type.clone(),
+                      source_maps_path: source_maps_path.clone(),
+                      aot_mode: loader_json.an_build_mode.clone(),
+                      pkg_context_info_path: loader_json
+                        .use_normalized_ohm_url
+                        .then(|| module_layout.pkg_context_info_json()),
+                      pkg_sdk_info_path: pkg_sdk_info_path.clone(),
+                      integrated_hsps: integrated_hsps.clone(),
+                      device_types: manifest.device_types.clone(),
+                      installation_free: bundle_type == "atomicService",
+                      delivery_with_install,
+                      privacy_profile_path: privacy_profile_path.clone(),
+                      syscap_path: syscap_path.clone(),
+                    };
+                    let packed = if matches!(module_config.output_target, OutputTarget::Hsp) {
+                      packager.pack_hsp(pack_input)
+                    } else {
+                      packager.pack_hap(pack_input)
+                    }
+                    .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
+                    tracing::info!(
+                      module = %module.name,
+                      output = %packed.display(),
+                      "hap packed"
+                    );
+                    packed_outputs.push(packed);
                   }
-                  .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
 
-                  if matches!(config.output_target, OutputTarget::Hsp) {
+                  if matches!(module_config.output_target, OutputTarget::Hsp) {
                     let prepare_shared_har = task_lifecycle
                       .before(
                         &module.name,
@@ -7743,11 +10273,14 @@ impl BuildCoordinator {
                     }
                     let resource_table_path = module_layout.resource_table_txt();
                     let resource_str_dir = module_layout.res_resource_str_dir();
-                    let obfuscation_rules_path = project_layout.obfuscation_txt();
+                    let obfuscation_rules_path = module_layout.obfuscation_export_rule_path();
                     let interface_input = HspInterfaceHarInput {
                       module_name: module.name.clone(),
                       module_root: module.src_path.clone(),
                       target_name: artifact_target_label.clone(),
+                      // Hvigor PrepareSharedHarRes always reads the module's
+                      // OHPM manifest and writes `oh-package.json5`; it does
+                      // not switch this interface-HAR boundary to package.json.
                       oh_package_json: module_layout.oh_package_json5(),
                       processed_module_json: module_layout.process_profile_module_json(),
                       declarations_dir: module_layout.declarations_dir(),
@@ -7782,7 +10315,7 @@ impl BuildCoordinator {
                       source_roots: interface_source_roots,
                       dependencies: interface_dependencies,
                       dynamic_dependencies: interface_dynamic_dependencies,
-                      debug: matches!(config.build_mode, BuildMode::Debug),
+                      debug: config.build_mode.is_debuggable(),
                       obfuscated: module_obfuscation.is_enabled(&config.build_mode),
                     };
                     if prepare_shared_har {
@@ -7817,31 +10350,33 @@ impl BuildCoordinator {
                   tracing::info!(
                     module = %module.name,
                     elapsed_ms = pack_hap_start.elapsed().as_millis(),
-                    output = %packed.display(),
-                    "hap packed"
+                    artifact_count = packed_outputs.len(),
+                    "hap packaging completed"
                   );
                   #[cfg(feature = "memory-diagnostics")]
                   arkdown::memory_diagnostics::dump_with(
                     "build:after-pack-hap",
-                    format_args!("module={} output={}", module.name, packed.display()),
+                    format_args!("module={} artifacts={}", module.name, packed_outputs.len()),
                   );
-                  Some(packed)
+                  packed_outputs
                 }
               } else {
-                None
+                Vec::new()
               }
             }
           };
-          task_lifecycle
-            .after(&module.name, Some(artifact_target_label), package_task_name)
-            .await?;
+          if package_task_started {
+            task_lifecycle
+              .after(&module.name, Some(artifact_target_label), package_task_name)
+              .await?;
+          }
           out
         } else {
-          None
+          Vec::new()
         };
 
-        if let Some(path) = out {
-          let packing_check_task = if matches!(config.output_target, OutputTarget::Har) {
+        if !out.is_empty() {
+          let packing_check_task = if matches!(module_config.output_target, OutputTarget::Har) {
             "PackingCheckHar"
           } else {
             "PackingCheck"
@@ -7860,7 +10395,8 @@ impl BuildCoordinator {
               config,
               module,
               loader_json,
-              module_layout.intermediates().join("stripped_native_libs"),
+              module_layout.stripped_native_libs_dir(),
+              module_layout.res_default_dir(),
             );
             packing_check
               .validate()
@@ -7873,9 +10409,17 @@ impl BuildCoordinator {
               )
               .await?;
           }
-          let is_package_signed = !matches!(config.output_target, OutputTarget::Har)
-            && config.product.signing_config.is_some();
-          let sign_task_name = match config.output_target {
+          let package_sign_har = if matches!(module_config.output_target, OutputTarget::Har) {
+            PackageSignHarPlan::resolve(args, config, loader_json, session.as_ref())
+          } else {
+            None
+          };
+          let is_package_signed = if matches!(module_config.output_target, OutputTarget::Har) {
+            package_sign_har.is_some()
+          } else {
+            args.enable_sign_task && config.product.signing_config.is_some()
+          };
+          let sign_task_name = match &module_config.output_target {
             OutputTarget::Har => "PackageSignHar",
             OutputTarget::Hsp => "SignHsp",
             _ => "SignHap",
@@ -7883,76 +10427,110 @@ impl BuildCoordinator {
           let sign_enabled = task_lifecycle
             .before(&module.name, Some(artifact_target_label), sign_task_name)
             .await?;
-          let final_path = if sign_enabled && is_package_signed {
-            let sign_backend = SignBackendRunner::new();
+          // Hvigor SignHap/SignHsp/SignApp remove stale signed outputs even
+          // when `enableSignTask=false`, while keeping the task in the graph.
+          if sign_enabled
+            && (!matches!(module_config.output_target, OutputTarget::Har) || is_package_signed)
+          {
+            for artifact in &package_artifacts {
+              if artifact.signed_path.is_file() {
+                fs_err::remove_file(&artifact.signed_path)?;
+              }
+            }
+          }
+          let final_paths = if sign_enabled && is_package_signed {
             let sign_start = Instant::now();
             #[cfg(feature = "memory-diagnostics")]
             arkdown::memory_diagnostics::dump_with(
               "build:before-sign",
-              format_args!("module={} input={}", module.name, path.display()),
+              format_args!("module={} artifacts={}", module.name, out.len()),
             );
-            sign_backend
-              .sign_or_skip(
-                &path,
-                &signed_output,
-                config.product.signing_config.as_ref(),
-              )
-              .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
+            let signed_paths = if let Some(package_sign_har) = package_sign_har.as_ref() {
+              let signed_path = &package_artifacts[0].signed_path;
+              let signing_root = module_layout.package_sign_har_cache_dir(artifact_target_label);
+              packager
+                .stage_har_signing_directory(
+                  &module_layout.package_har_cache_dir(artifact_target_label),
+                  &signing_root,
+                )
+                .map_err(|error| anyhow::anyhow!("PackageSignHar staging failed: {error}"))?;
+              HarSignBackendRunner::new()
+                .sign_directory(
+                  &signing_root,
+                  &package_sign_har.sdk_sign_tool,
+                  config
+                    .product
+                    .signing_config
+                    .as_ref()
+                    .context("PackageSignHar lost its resolved signing configuration")?,
+                )
+                .map_err(|error| anyhow::anyhow!("PackageSignHar failed: {error}"))?;
+              packager
+                .pack_signed_har_directory(&signing_root, signed_path)
+                .map_err(|error| anyhow::anyhow!("PackageSignHar repack failed: {error}"))?;
+              vec![signed_path.clone()]
+            } else {
+              let mut signed_paths = Vec::with_capacity(out.len());
+              for (path, artifact) in out.iter().zip(&package_artifacts) {
+                SignBackendRunner::new()
+                  .sign_or_skip(
+                    path,
+                    &artifact.signed_path,
+                    config.product.signing_config.as_ref(),
+                  )
+                  .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
+                signed_paths.push(artifact.signed_path.clone());
+              }
+              signed_paths
+            };
             tracing::info!(
               module = %module.name,
               elapsed_ms = sign_start.elapsed().as_millis(),
-              output = %signed_output.display(),
-              "artifact signed"
+              artifact_count = signed_paths.len(),
+              "artifacts signed"
             );
             #[cfg(feature = "memory-diagnostics")]
             arkdown::memory_diagnostics::dump_with(
               "build:after-sign",
-              format_args!("module={} output={}", module.name, signed_output.display()),
+              format_args!("module={} artifacts={}", module.name, out.len()),
             );
-            signed_output.clone()
+            signed_paths
           } else {
-            tracing::info!(
-              module = %module.name,
-              output = %path.display(),
-              "artifact remains unsigned"
-            );
-            path.clone()
+            for path in &out {
+              tracing::info!(
+                module = %module.name,
+                output = %path.display(),
+                "artifact remains unsigned"
+              );
+            }
+            out.clone()
           };
           if sign_enabled {
             task_lifecycle
               .after(&module.name, Some(artifact_target_label), sign_task_name)
               .await?;
           }
-          if !matches!(config.output_target, OutputTarget::Har) {
+          if !matches!(module_config.output_target, OutputTarget::Har) {
             let package_metadata_start = Instant::now();
             let package_module_json = module_layout.package_module_json();
-            intermediate_writer.extract_zip_entry(&path, "module.json", &package_module_json)?;
+            intermediate_writer.extract_zip_entry(&out[0], "module.json", &package_module_json)?;
             intermediate_writer.rewrite_package_intermediate_module_json(&package_module_json)?;
-            let artifact_name = final_path
-              .file_name()
-              .and_then(|name| name.to_str())
-              .context("package output artifact name is not valid UTF-8")?;
-            intermediate_writer.write_package_metadata(
-              &module.src_path,
-              &config.output_target,
-              artifact_name,
-              &manifest.device_types,
-              is_package_signed,
-            )?;
-            intermediate_writer.extract_zip_entry(
-              &path,
-              "pack.info",
-              &module_layout.output_pack_info(),
-            )?;
+            for (path, artifact) in out.iter().zip(&package_artifacts) {
+              intermediate_writer.extract_zip_entry(path, "pack.info", &artifact.pack_info_path)?;
+            }
             tracing::info!(
               module = %module.name,
               elapsed_ms = package_metadata_start.elapsed().as_millis(),
               "package intermediate metadata written"
             );
           }
+          let source_map_output = args
+            .hvigor_properties
+            .source_map_output(&config.project_root, &module.name)
+            .unwrap_or_else(|| module_layout.output_mapping_source_maps());
           intermediate_writer.publish_package_source_maps(
             package_out.source_maps_path.as_deref(),
-            &module_layout.output_mapping_source_maps(),
+            &source_map_output,
           )?;
           if task_lifecycle
             .before(
@@ -7988,7 +10566,7 @@ impl BuildCoordinator {
               )
               .await?;
           }
-          if matches!(config.output_target, OutputTarget::Hsp) {
+          if matches!(module_config.output_target, OutputTarget::Hsp) {
             let shared_tgz_output = output_dir.join(output_name.shared_tgz());
             if module_build_option.generate_shared_tgz.is_some() && shared_tgz_output.is_file() {
               std::fs::remove_file(&shared_tgz_output)?;
@@ -8007,7 +10585,7 @@ impl BuildCoordinator {
               if should_generate_shared_tgz {
                 packager
                   .pack_hsp_tgz(HspTgzInput {
-                    hsp_path: path.clone(),
+                    hsp_path: out[0].clone(),
                     interface_har_path: output_dir.join(format!("{}.har", module.name)),
                     output_path: shared_tgz_output,
                   })
@@ -8022,9 +10600,75 @@ impl BuildCoordinator {
                 .await?;
             }
           }
-          output_paths.push(final_path);
+          output_paths.extend(final_paths.iter().cloned());
 
-          let assemble_task_name = match config.output_target {
+          if artifact_target_label == "default" && TargetBuildExecutionPlan::is_device_test(args) {
+            let target_package_path = final_paths.first().ok_or_else(|| {
+              anyhow::anyhow!(
+                "device test target '{}:{}' produced no package",
+                module.name,
+                artifact_target_label
+              )
+            })?;
+            task_lifecycle
+              .marker(
+                &module.name,
+                Some(artifact_target_label),
+                "BeforeGenerateDeviceCoverage",
+              )
+              .await?;
+            if task_lifecycle
+              .before(
+                &module.name,
+                Some(artifact_target_label),
+                "GenerateDeviceCoverage",
+              )
+              .await?
+            {
+              let bundle_type = module_config
+                .product
+                .app_options
+                .bundle_type
+                .as_deref()
+                .unwrap_or(&session.project.bundle_type);
+              super::device_test::DeviceTestExecutionPlan::from_build(
+                super::device_test::DeviceTestExecutionInput {
+                  sdk_config: &module_config.sdk_config,
+                  sdk_root: &session.sdk.sdk_root,
+                  project_path: &config.project_root,
+                  module,
+                  artifact_name: output_artifact_name,
+                  product_name: &module_config.product.name,
+                  bundle_name: &module_config.product.bundle_name,
+                  bundle_type,
+                  target_package_path,
+                  dependencies: module_context.deps.as_ref(),
+                  coverage: args.ohos_test_coverage.unwrap_or(true),
+                  scope: args.scope.as_deref().unwrap_or(""),
+                  node_executable: args.resolved_node_executable(),
+                },
+              )
+              .and_then(|plan| plan.execute())
+              .map_err(|error| {
+                anyhow::anyhow!(
+                  "GenerateDeviceCoverage failed for module '{}': {error}",
+                  module.name
+                )
+              })?;
+              task_lifecycle
+                .after(
+                  &module.name,
+                  Some(artifact_target_label),
+                  "GenerateDeviceCoverage",
+                )
+                .await?;
+            }
+            task_lifecycle
+              .marker(&module.name, None, "onDeviceTest")
+              .await?;
+          }
+
+          let assemble_task_name = match &module_config.output_target {
             OutputTarget::Har => "assembleHar",
             OutputTarget::Hsp => "assembleHsp",
             _ => "assembleHap",
@@ -8064,42 +10708,20 @@ impl BuildCoordinator {
 
     // ── Watch mode ────────────────────────────────────────────────────
     if watch_mode {
-      WatchStage::run(WatchStageInput {
-        config: config.clone(),
-        session: session.clone(),
-        target: args.target.clone(),
-        mode: args.mode.clone(),
-        module_filter: args.module.clone(),
-        product_filter: args.product.clone(),
-        project_root: project_root.clone(),
+      WatchStage::run(WatchStageInput::from_build(
+        config.clone(),
+        session.clone(),
+        args,
+        project_root.clone(),
         abc_backend,
-        build_target_name: args.build_target_name.clone(),
-        build_version: args.build_version.clone(),
-        coverage: coverage_mode,
-        ohos_debug_asan: args.ohos_debug_asan,
-        ohos_enable_hwasan: args.ohos_enable_hwasan,
+        coverage_mode,
         disable_abc_cache,
-        cache_file: cli_cache_file.clone(),
-        checker: args.checker.clone(),
-        module_analyzer: args.module_analyzer,
-        cache: args.cache,
-        package_plugins: package_plugins.clone(),
-        project_hvigor_overrides: args.project_hvigor_overrides.clone(),
-        module_hvigor_overrides: args.module_hvigor_overrides.clone(),
-        node_executable: args.node_executable.clone(),
-        runtime_context_overrides: args.runtime_context_overrides.clone(),
-        custom_task_input_paths: args.custom_task_input_paths.clone(),
-        pack_compress_level: args.pack_compress_level,
-        align_device_types: args.align_device_types.clone(),
-        collect_debug_symbol: args.collect_debug_symbol,
-        ui_transform_optimization: args.ui_transform_optimization,
-        integrated_hsp_use_get_current_bundle_name: args.integrated_hsp_use_get_current_bundle_name,
-        byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
-        keep_dependency: args.keep_dependency,
-        parameter_file_override: args.parameter_file_override.clone(),
-        task_observer: self.task_observer.clone(),
+        cli_cache_file.clone(),
+        package_plugins.clone(),
+        self.task_observer.clone(),
         preview_mode,
-      })
+        false,
+      ))
       .await?;
     }
 
@@ -8624,15 +11246,53 @@ impl<'a> CompiledResourceKey<'a> {
   }
 }
 
+/// Exact `PackageSignHar.taskShouldDo()` gate from hvigor 6.1.1.280.
+///
+/// Unlike HAP/HSP signing, this task deliberately ignores
+/// `enableSignTask`; it is controlled by `ohos.sign.har` and only exists for
+/// daemon OHPM HarmonyOS builds on API 12 or newer.
+struct PackageSignHarPlan {
+  sdk_sign_tool: PathBuf,
+}
+
+impl PackageSignHarPlan {
+  fn resolve(
+    args: &BuildArgs,
+    config: &ArkdownConfig,
+    loader_json: &LoaderJson,
+    session: &BuildSession,
+  ) -> Option<Self> {
+    if !args.hvigor_properties.daemon
+      || !args.hvigor_properties.sign_har
+      || loader_json.package_manager_type != "ohpm"
+      || config.product.signing_config.is_none()
+      || config.sdk_config.compile_api_version < 12
+      || parse_api_version(&config.product.compatible_sdk_version).unwrap_or_default() < 12
+      || !config.product.runtime_os.eq_ignore_ascii_case("HarmonyOS")
+    {
+      return None;
+    }
+    let sdk_sign_tool = session.sdk.tool_path(SdkToolKind::SdkSignToolFull)?.path;
+    sdk_sign_tool.is_file().then_some(Self { sdk_sign_tool })
+  }
+}
+
 struct ArtifactOutputName<'a> {
+  artifact_name: Option<&'a str>,
   module_name: &'a str,
   target_label: &'a str,
   extension: &'a str,
 }
 
 impl<'a> ArtifactOutputName<'a> {
-  fn new(module_name: &'a str, target_label: &'a str, extension: &'a str) -> Self {
+  fn new(
+    artifact_name: Option<&'a str>,
+    module_name: &'a str,
+    target_label: &'a str,
+    extension: &'a str,
+  ) -> Self {
     Self {
+      artifact_name,
       module_name,
       target_label,
       extension,
@@ -8640,6 +11300,9 @@ impl<'a> ArtifactOutputName<'a> {
   }
 
   fn unsigned(&self) -> String {
+    if let Some(artifact_name) = self.artifact_name {
+      return CoordinatorText::from_parts([artifact_name, "-unsigned.", self.extension]);
+    }
     CoordinatorText::from_parts([
       self.module_name,
       "-",
@@ -8650,6 +11313,9 @@ impl<'a> ArtifactOutputName<'a> {
   }
 
   fn signed(&self) -> String {
+    if let Some(artifact_name) = self.artifact_name {
+      return CoordinatorText::from_parts([artifact_name, ".", self.extension]);
+    }
     CoordinatorText::from_parts([
       self.module_name,
       "-",
@@ -8659,12 +11325,34 @@ impl<'a> ArtifactOutputName<'a> {
     ])
   }
 
+  fn signed_har(&self) -> String {
+    CoordinatorText::from_parts([
+      self.artifact_name.unwrap_or(self.module_name),
+      "-signed.",
+      self.extension,
+    ])
+  }
+
   fn har(&self) -> String {
-    CoordinatorText::from_parts([self.module_name, ".", self.extension])
+    CoordinatorText::from_parts([
+      self.artifact_name.unwrap_or(self.module_name),
+      ".",
+      self.extension,
+    ])
   }
 
   fn shared_tgz(&self) -> String {
+    if let Some(artifact_name) = self.artifact_name {
+      return CoordinatorText::from_parts([artifact_name, ".tgz"]);
+    }
     CoordinatorText::from_parts([self.module_name, "-", self.target_label, ".tgz"])
+  }
+
+  fn pack_info(&self) -> String {
+    self.artifact_name.map_or_else(
+      || CoordinatorText::from_parts([self.module_name, "-", self.target_label]),
+      str::to_string,
+    )
   }
 }
 

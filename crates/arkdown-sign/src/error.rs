@@ -12,6 +12,13 @@ pub enum SignError {
         source: std::io::Error,
     },
 
+    #[error("external signing tool '{tool}' failed ({status}): {detail}")]
+    ExternalTool {
+        tool: PathBuf,
+        status: String,
+        detail: String,
+    },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
