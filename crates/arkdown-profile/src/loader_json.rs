@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{
-    ArkdownConfig, ArkdownError, BuildMode, HapManifest, ModuleConfig, ModuleJson5, OhosModuleType,
+    ArkdownConfig, ArkdownError, HapManifest, ModuleConfig, ModuleJson5, OhosModuleType,
     OutputTarget, PkgBriefInfo,
 };
 use arkdown_path::{
@@ -21,6 +21,26 @@ use crate::bytecode_har::{
     LoaderByteCodeHarFields,
 };
 use crate::form_profile::{FormProfileProcessor, ModuleFormProfileInput};
+
+/// Exact `GenerateLoaderJson.isFullCompilationEnabled()` policy from Hvigor
+/// 6.24.2/DevEco 6.1.1.280.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LoaderCompilationPolicy {
+    compile_lib_entry_file: Option<bool>,
+}
+
+impl LoaderCompilationPolicy {
+    pub(crate) fn from_hvigor_property(compile_lib_entry_file: Option<bool>) -> Self {
+        Self {
+            compile_lib_entry_file,
+        }
+    }
+
+    fn is_full_compilation_enabled(self, is_form_widget_module: bool) -> bool {
+        (!is_form_widget_module || self.compile_lib_entry_file.is_some())
+            && self.compile_lib_entry_file != Some(true)
+    }
+}
 use crate::layout::ProfileModuleLayout;
 use crate::pkg_context_info::{
     PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
@@ -337,20 +357,25 @@ impl AotLoaderFields {
 
         let module_root = PathBuf::from(to_absolute_path_string(&module_cfg.src_path));
         let aot_layout = if matches!(config.output_target, OutputTarget::Test) {
-            ProfileModuleLayout::for_test(&module_root)
+            ProfileModuleLayout::for_test_product(&module_root, &config.product.name)
+        } else if matches!(config.output_target, OutputTarget::Preview) {
+            ProfileModuleLayout::for_preview_product(
+                &module_root,
+                &config.product.name,
+                target_name,
+            )
         } else if target_name != "default" {
-            ProfileModuleLayout::for_target(&module_root, target_name)
+            ProfileModuleLayout::for_target_product(&module_root, &config.product.name, target_name)
         } else {
-            ProfileModuleLayout::new(&module_root)
+            ProfileModuleLayout::for_product(&module_root, &config.product.name)
         };
-        let an_build_out_put =
-            normalize_path_string(&aot_layout.aot_loader_output_dir());
+        let an_build_out_put = normalize_path_string(&aot_layout.aot_loader_output_dir());
 
         let should_write_ap_path =
             ((api_version == 9 && an_build_mode == "partial") || api_version >= 10) && ap_exists;
         if should_write_ap_path {
             let ap_path = ap_path.expect("ap_exists implies ap_path");
-            Self::copy_ap_file(module_cfg, &ap_path);
+            Self::copy_ap_file(module_cfg, &aot_layout, &ap_path);
             return Self {
                 an_build_out_put: Some(an_build_out_put),
                 an_build_mode: Some(an_build_mode),
@@ -422,8 +447,8 @@ impl AotLoaderFields {
             .then(|| ProfileModuleLayout::new(&module_cfg.src_path).modules_ap())
     }
 
-    fn copy_ap_file(module_cfg: &ModuleConfig, source: &Path) {
-        let dest_dir = ProfileModuleLayout::new(&module_cfg.src_path).ap_intermediate_dir();
+    fn copy_ap_file(module_cfg: &ModuleConfig, layout: &ProfileModuleLayout<'_>, source: &Path) {
+        let dest_dir = layout.ap_intermediate_dir();
         std::fs::create_dir_all(&dest_dir).unwrap_or_else(|error| {
             panic!(
                 "failed to create hvigor AOT intermediates directory {}: {error}",
@@ -773,9 +798,7 @@ impl LoaderJson {
         // `src/ohosTest` pages (`$profile:test_pages` lives in the template
         // tree, not `src/main/resources`). Preview keeps the normal pages.
         if let Some(pages_ref) = &manifest.pages {
-            if !matches!(config.output_target, OutputTarget::Test)
-                && target_name != "ohosTest"
-            {
+            if !matches!(config.output_target, OutputTarget::Test) && target_name != "ohosTest" {
                 runtime_entry_sources
                     .extend(Self::read_main_page_entries(module_layout, pages_ref)?);
             }
@@ -857,7 +880,14 @@ impl LoaderJson {
                 &config.project_root,
             )
         };
-        Self::try_generate_with_dependency_graph(config, module_cfg, manifest, &dep_graph, target_name)
+        Self::try_generate_with_dependency_graph(
+            config,
+            module_cfg,
+            manifest,
+            &dep_graph,
+            target_name,
+            LoaderCompilationPolicy::default(),
+        )
     }
 
     pub(crate) fn try_generate_with_dependency_graph(
@@ -866,15 +896,26 @@ impl LoaderJson {
         manifest: &HapManifest,
         dep_graph: &crate::dependency_graph::LocalDependencyGraph,
         target_name: &str,
+        compilation_policy: LoaderCompilationPolicy,
     ) -> Result<Self, ArkdownError> {
         // Local unit-test builds root at `<module>/.test` (hvigor
         // `buildRoot=.test`), which moves cache/assets/loader paths below it.
         let module_layout = if matches!(config.output_target, OutputTarget::Test) {
-            ProfileModuleLayout::for_test(&module_cfg.src_path)
+            ProfileModuleLayout::for_test_product(&module_cfg.src_path, &config.product.name)
+        } else if matches!(config.output_target, OutputTarget::Preview) {
+            ProfileModuleLayout::for_preview_product(
+                &module_cfg.src_path,
+                &config.product.name,
+                target_name,
+            )
         } else if target_name != "default" {
-            ProfileModuleLayout::for_target(&module_cfg.src_path, target_name)
+            ProfileModuleLayout::for_target_product(
+                &module_cfg.src_path,
+                &config.product.name,
+                target_name,
+            )
         } else {
-            ProfileModuleLayout::new(&module_cfg.src_path)
+            ProfileModuleLayout::for_product(&module_cfg.src_path, &config.product.name)
         };
         let runtime_entry_sources = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "runtime_entry_sources");
@@ -927,9 +968,10 @@ impl LoaderJson {
                     compile_entry.push(to_absolute_path_string(&entry));
                 }
             }
-            for source in runtime_entry_sources.iter().filter(|source| {
-                !Path::new(source).has_root() && !source.starts_with("./ets/")
-            }) {
+            for source in runtime_entry_sources
+                .iter()
+                .filter(|source| !Path::new(source).has_root() && !source.starts_with("./ets/"))
+            {
                 compile_entry.push(source.clone());
             }
         } else {
@@ -1091,14 +1133,24 @@ impl LoaderJson {
             .ok()
             .and_then(|content| json5::from_str::<ModuleJson5>(&content).ok())
             .is_some_and(|json| json.module.form_extension_module.is_some());
-        let mut serialized_compile_entry = if matches!(config.output_target, OutputTarget::Hsp)
-            && matches!(module_cfg.module_type, OhosModuleType::Shared)
-            && !is_form_widget_module
-        {
+        let full_compilation =
+            compilation_policy.is_full_compilation_enabled(is_form_widget_module);
+        let collect_own_ets = target_name != "ohosTest"
+            && full_compilation
+            && matches!(
+                module_cfg.module_type,
+                OhosModuleType::Shared | OhosModuleType::Har
+            );
+        let mut serialized_compile_entry = if collect_own_ets {
             Self::collect_code_files(&ets_root)
         } else {
             Vec::new()
         };
+        // Dependency ETS folders are not unconditional full-compilation
+        // inputs. GenerateLoaderJson.collectDepEtsFolderFilesEntry() is called
+        // only from processHarDynamicImport() for a selected runtimeOnly HAR;
+        // RuntimeOnlyCollector::collect_package_source_files() below owns that
+        // filtered path, including remote-HAR exclusion.
         serialized_compile_entry.extend({
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "insight_intent_compile_entries");
             Self::collect_insight_intent_src_entries(module_cfg)
@@ -1247,10 +1299,7 @@ impl LoaderJson {
         let project_root = to_absolute_path_string(&config.project_root);
         let src_main = to_absolute_path_string(&module_layout.src_main());
 
-        let build_mode_str = match config.build_mode {
-            BuildMode::Debug => "debug".to_string(),
-            BuildMode::Release => "release".to_string(),
-        };
+        let build_mode_str = config.build_mode.as_str().to_string();
 
         let compile_mode = match manifest.compile_mode {
             arkdown_core::CompileMode::EsModule => "esmodule",
@@ -1351,7 +1400,7 @@ impl LoaderJson {
         };
         let build_config_path = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "loader_build_config_path");
-            Self::loader_build_config_path(module_cfg)
+            Self::loader_build_config_path(config, module_cfg, target_name)
         };
         let build_config = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "loader_build_config_read");
@@ -1368,8 +1417,9 @@ impl LoaderJson {
             // hvigor GenerateLoaderJson:
             // `(isPreview || isLocalTest()) && (c.buildConfigPath =
             // relative(modulePath, buildConfigPath))`.
-            // Preview: `build/default/config/buildConfig.json`; local test:
-            // `getTestBuildConfigPath()` = `<module>/.test/config/buildConfig.json`.
+            // The active ModulePathInfo build root is `build`, `.preview`, or
+            // `.test`; `getBuildConfigPath()` always appends
+            // `config/buildConfig.json` directly to that root.
             OutputTarget::Test => Some(".test/config/buildConfig.json".to_string()),
             OutputTarget::Preview => build_config_path
                 .strip_prefix(&module_cfg.src_path)
@@ -1386,6 +1436,8 @@ impl LoaderJson {
         // identities, so the task name must match hvigor exactly.
         let compile_task_name = if matches!(config.output_target, OutputTarget::Test) {
             "UnitTestArkTS"
+        } else if matches!(config.output_target, OutputTarget::Preview) {
+            "PreviewArkTS"
         } else if matches!(config.output_target, OutputTarget::Har) {
             "HarCompileArkTS"
         } else {
@@ -2083,8 +2135,28 @@ impl LoaderJson {
             .and_then(|content| json5::from_str::<DependencyModuleJson>(&content).ok())
     }
 
-    fn loader_build_config_path(module_cfg: &ModuleConfig) -> PathBuf {
-        let candidates = ProfileModuleLayout::new(&module_cfg.src_path).build_config_candidates();
+    fn loader_build_config_path(
+        config: &ArkdownConfig,
+        module_cfg: &ModuleConfig,
+        target_name: &str,
+    ) -> PathBuf {
+        let layout = match config.output_target {
+            OutputTarget::Preview => ProfileModuleLayout::for_preview_product(
+                &module_cfg.src_path,
+                &config.product.name,
+                target_name,
+            ),
+            OutputTarget::Test => {
+                ProfileModuleLayout::for_test_product(&module_cfg.src_path, &config.product.name)
+            }
+            _ if target_name != "default" => ProfileModuleLayout::for_target_product(
+                &module_cfg.src_path,
+                &config.product.name,
+                target_name,
+            ),
+            _ => ProfileModuleLayout::for_product(&module_cfg.src_path, &config.product.name),
+        };
+        let candidates = layout.build_config_candidates();
         candidates
             .iter()
             .find(|path| path.is_file())
@@ -2711,10 +2783,7 @@ impl LoaderJson {
         // hvigor adds `src/<target>` as an additional `sourceRoot` in
         // `pkgNameToPkgBriefInfo` when the effective target is not `default`.
         // This allows the compiler to resolve target-specific source files.
-        let build_mode_name = match config.build_mode {
-            arkdown_core::BuildMode::Debug => "debug",
-            arkdown_core::BuildMode::Release => "release",
-        };
+        let build_mode_name = config.build_mode.as_str();
         let target_ets_src = Self::detect_target_specific_ets_src(
             &module_cfg.src_path,
             &config.project_root,

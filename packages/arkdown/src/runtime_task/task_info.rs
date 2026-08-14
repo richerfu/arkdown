@@ -55,6 +55,7 @@ impl HvigorTaskInfoCatalog {
     kind: RuntimeTaskNodeKind,
     target_name: &str,
     sync_version_changed: bool,
+    enable_har_deduplicate: bool,
   ) -> Vec<String> {
     let mut names = Vec::with_capacity(90);
     names.extend(
@@ -70,7 +71,7 @@ impl HvigorTaskInfoCatalog {
           target_name,
           &["PackingCheck", "PackageHap", "SignHap"],
         );
-        Self::extend_target_names(&mut names, target_name, COMPILE_AND_TAIL_TASK_NAMES);
+        Self::extend_common_target_tail(&mut names, target_name, 0, enable_har_deduplicate);
       }
       RuntimeTaskNodeKind::Hsp => {
         Self::extend_target_names(&mut names, target_name, COMMON_TARGET_PREFIX);
@@ -88,11 +89,18 @@ impl HvigorTaskInfoCatalog {
             "PackageHap",
           ],
         );
-        Self::extend_target_names(&mut names, target_name, COMPILE_AND_TAIL_TASK_NAMES);
+        if enable_har_deduplicate {
+          Self::extend_target_names(
+            &mut names,
+            target_name,
+            &["CollectDuplicateHarEntriesArkTS"],
+          );
+        }
+        Self::extend_common_target_tail(&mut names, target_name, 0, enable_har_deduplicate);
       }
       RuntimeTaskNodeKind::Har => {
         Self::extend_target_names(&mut names, target_name, HAR_TARGET_PREFIX);
-        Self::extend_target_names(&mut names, target_name, &COMPILE_AND_TAIL_TASK_NAMES[6..]);
+        Self::extend_common_target_tail(&mut names, target_name, 6, enable_har_deduplicate);
       }
       RuntimeTaskNodeKind::App => {}
     }
@@ -183,6 +191,23 @@ impl HvigorTaskInfoCatalog {
         .iter()
         .map(|task_name| format!("{target_name}@{task_name}")),
     );
+  }
+
+  fn extend_common_target_tail(
+    output: &mut Vec<String>,
+    target_name: &str,
+    start_index: usize,
+    enable_har_deduplicate: bool,
+  ) {
+    for task_name in &COMPILE_AND_TAIL_TASK_NAMES[start_index..] {
+      output.push(format!("{target_name}@{task_name}"));
+      // ResourceTaskInitializer registers ProcessIdDefinedFile immediately
+      // after its three ordinary resource task creators, and only when
+      // TargetTaskService.shouldEnableHarDeduplicate() is true.
+      if enable_har_deduplicate && *task_name == "PreviewProcessResource" {
+        output.push(format!("{target_name}@ProcessIdDefinedFile"));
+      }
+    }
   }
 }
 
@@ -490,9 +515,19 @@ impl HvigorTaskMetadata {
         "Build the HAP package in the stage model.",
         "hvigor-ohos-plugin",
       )),
+      "FastPackageHap" => Some(Self::new(
+        "Package",
+        "Fast build the HAP package in the stage model.",
+        "hvigor-ohos-plugin",
+      )),
       "PackageHsp" => Some(Self::new(
         "Package",
         "Build the HSP package in the stage model.",
+        "hvigor-ohos-plugin",
+      )),
+      "FastPackageHsp" => Some(Self::new(
+        "Package",
+        "Fast Build the HSP package in the stage model.",
         "hvigor-ohos-plugin",
       )),
       "SignHap" => Some(Self::new(
@@ -775,6 +810,16 @@ impl HvigorTaskMetadata {
       "ProcessCompiledResources" => Some(Self::new(
         "Resources",
         "Process compiled resources in stage model.",
+        "hvigor-ohos-plugin",
+      )),
+      "ProcessIdDefinedFile" => Some(Self::new(
+        "Resources",
+        "Process id config file in stage model.",
+        "hvigor-ohos-plugin",
+      )),
+      "CollectDuplicateHarEntriesArkTS" => Some(Self::new(
+        "ArkTS",
+        "Compile ArkTS components during har deduplicate in the stage model.",
         "hvigor-ohos-plugin",
       )),
       "CollectDebugSymbol" => Some(Self::new(

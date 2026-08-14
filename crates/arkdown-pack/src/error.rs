@@ -22,12 +22,30 @@ pub enum PackError {
     InvalidAppPlan(String),
     #[error("Duplicate APP artifact output name: {0}")]
     DuplicateAppArtifactName(String),
+    #[error("npm HAR packaging launcher does not exist: {0}")]
+    MissingNpmLauncher(String),
+    #[error("npm HAR packaging failed with status {status:?}; stdout: {stdout}; stderr: {stderr}")]
+    NpmPackFailed {
+        status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    #[error("npm HAR packaging returned an invalid archive name: {0}")]
+    InvalidNpmPackOutput(String),
     #[error("Invalid remote HSP layout at {path}: {message}")]
     InvalidRemoteHsp { path: String, message: String },
     #[error(
         "SDK APP packing tool failed with status {status:?}; stdout: {stdout}; stderr: {stderr}"
     )]
     AppPackingToolFailed {
+        status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    #[error(
+        "SDK HQF packing tool failed with status {status:?}; stdout: {stdout}; stderr: {stderr}"
+    )]
+    HqfPackingToolFailed {
         status: Option<i32>,
         stdout: String,
         stderr: String,

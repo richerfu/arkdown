@@ -15,6 +15,13 @@ pub enum ConfigError {
     #[error("Schema validate failed in {file}: {message}")]
     ValidationError { file: PathBuf, message: String },
 
+    #[error("Unsupported build feature '{feature}' in {file}: {message}")]
+    UnsupportedFeature {
+        feature: &'static str,
+        file: PathBuf,
+        message: String,
+    },
+
     #[error("SDK not found. Set OHOS_SDK_HOME or install DevEco Studio.")]
     SdkNotFound,
 

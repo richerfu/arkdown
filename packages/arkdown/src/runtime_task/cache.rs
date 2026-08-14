@@ -345,6 +345,7 @@ mod tests {
       task_name: "fixture".to_string(),
       built_in: false,
       project_task: false,
+      lazy: false,
       enabled: true,
       track_state: true,
       refresh_declarations: false,

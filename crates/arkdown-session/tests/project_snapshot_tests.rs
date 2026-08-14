@@ -1,6 +1,6 @@
 use arkdown_core::{
-    AppOptionOverride, ArkdownConfig, BuildMode, BuildOption, HarArtifactType, NativeLibOption,
-    OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
+    AppOptionOverride, ArkdownConfig, BuildMode, BuildOption, HarArtifactType, ModuleConfig,
+    NativeLibOption, OhosModuleType, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
 };
 use arkdown_session::ProjectSnapshot;
 
@@ -22,6 +22,7 @@ fn config(project_root: &std::path::Path, build_version: Option<&str>) -> Arkdow
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,
+                    no_external_import_by_path: None,
                     duplicate_dependency_check: false,
                 },
                 ark_options: None,
@@ -31,7 +32,7 @@ fn config(project_root: &std::path::Path, build_version: Option<&str>) -> Arkdow
                 preload_so: Vec::new(),
                 deduplicate_har: false,
                 enable_source_code_check: true,
-            app_with_signed_pkg: false,
+                app_with_signed_pkg: false,
                 generate_shared_tgz: None,
                 customized_har_base_package: None,
                 remove_permissions: Vec::new(),
@@ -73,7 +74,8 @@ fn project_snapshot_matches_hvigor_build_version_product_then_app_precedence() {
                 bundleName: "com.example.app",
                 versionCode: 1000000,
                 versionName: "1.0.0",
-                buildVersion: "app-build"
+                buildVersion: "app-build",
+                minCompatibleVersionCode: 42
             }
         }"#,
     )
@@ -82,6 +84,7 @@ fn project_snapshot_matches_hvigor_build_version_product_then_app_precedence() {
     let app_fallback =
         ProjectSnapshot::from_config(&config(temp.path(), None)).expect("snapshot from app value");
     assert_eq!(app_fallback.build_version.as_deref(), Some("app-build"));
+    assert_eq!(app_fallback.min_compatible_version_code, Some(42));
 
     let product_override =
         ProjectSnapshot::from_config(&config(temp.path(), Some("product-build")))
@@ -120,4 +123,76 @@ fn project_parameter_file_matches_latest_hvigor_missing_file_and_cli_override_pr
         Some("params.json5".into()),
     )
     .expect("CLI parameterFile overrides the project declaration");
+}
+
+#[test]
+fn api8_project_uses_package_json_and_node_modules_for_dependency_snapshots() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    let dependency_root = temp.path().join("node_modules").join("legacy-har");
+    std::fs::create_dir_all(module_root.join("src/main/ets")).expect("module source");
+    std::fs::create_dir_all(dependency_root.join("src/main")).expect("dependency profile root");
+    std::fs::write(
+        temp.path().join("package.json"),
+        r#"{
+            "name": "legacy-project",
+            "parameterFile": "missing-npm-parameter-file.json5"
+        }"#,
+    )
+    .expect("project package.json");
+    std::fs::write(
+        module_root.join("package.json"),
+        r#"{
+            "name": "entry",
+            "dependencies": { "legacy-har": "1.0.0" }
+        }"#,
+    )
+    .expect("module package.json");
+    std::fs::write(
+        dependency_root.join("package.json"),
+        r#"{
+            "name": "legacy-har",
+            "version": "1.0.0",
+            "ohos": {}
+        }"#,
+    )
+    .expect("dependency package.json");
+    std::fs::write(
+        dependency_root.join("src/main/module.json5"),
+        r#"{ module: { name: "legacy-har", type: "har" } }"#,
+    )
+    .expect("dependency module profile");
+
+    let mut project_config = config(temp.path(), None);
+    project_config.sdk_config.compile_api_version = 8;
+    project_config.modules.push(ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root.clone(),
+        module_type: OhosModuleType::Entry,
+    });
+
+    let snapshot = ProjectSnapshot::from_config(&project_config)
+        .expect("npm projects do not initialize OHPM parameter files");
+    let module = snapshot.modules.get("entry").expect("entry snapshot");
+    assert_eq!(
+        module.package_path.as_deref(),
+        Some(module_root.join("package.json").as_path())
+    );
+    let graph = snapshot
+        .dependency_graph("entry")
+        .expect("dependency graph");
+    let dependency = graph.nodes.get("legacy-har").expect("npm HAR dependency");
+    assert!(graph
+        .har_nodes()
+        .any(|node| node.package_name == "legacy-har"));
+    assert_eq!(
+        dependency.package_root.as_deref(),
+        Some(
+            dependency_root
+                .canonicalize()
+                .expect("canonical dependency")
+                .as_path()
+        )
+    );
+    assert!(graph.dependency_parameters.source_path.is_none());
 }

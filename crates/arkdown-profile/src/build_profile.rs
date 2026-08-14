@@ -112,14 +112,11 @@ impl BuildProfileWriter {
     }
 
     fn build_mode_name(&self, input: &BuildProfileInput<'_>) -> &'static str {
-        match input.build_mode {
-            BuildMode::Debug => "debug",
-            BuildMode::Release => "release",
-        }
+        input.build_mode.as_str()
     }
 
     fn debug(&self, input: &BuildProfileInput<'_>) -> bool {
-        matches!(input.build_mode, BuildMode::Debug)
+        input.build_mode.is_debuggable()
     }
 
     fn validate_field(

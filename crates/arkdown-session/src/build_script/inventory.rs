@@ -216,6 +216,7 @@ mod tests {
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: true,
+                        no_external_import_by_path: None,
                         duplicate_dependency_check: false,
                     },
                     ark_options: None,
@@ -225,7 +226,7 @@ mod tests {
                     preload_so: Vec::new(),
                     deduplicate_har: false,
                     enable_source_code_check: true,
-            app_with_signed_pkg: false,
+                    app_with_signed_pkg: false,
                     generate_shared_tgz: None,
                     customized_har_base_package: None,
                     remove_permissions: Vec::new(),

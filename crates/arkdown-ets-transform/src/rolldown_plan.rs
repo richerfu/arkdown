@@ -116,7 +116,10 @@ impl RolldownEtsTransformPlan {
     }
 
     /// Set `arkOptions.expandImportPath` (SDK `import_path_expand.js`).
-    pub fn with_expand_import_path(mut self, expand: Option<arkdown_core::ExpandImportPath>) -> Self {
+    pub fn with_expand_import_path(
+        mut self,
+        expand: Option<arkdown_core::ExpandImportPath>,
+    ) -> Self {
         self.expand_import_path = expand;
         self
     }
@@ -2448,10 +2451,7 @@ struct PrivacyPageComponent {
         let project_root = PathBuf::from("virtual").join("project");
         let module_root = project_root.join("entry");
         let source_root = module_root.join("src").join("main").join("ets");
-        let mock_source = module_root
-            .join("src")
-            .join("mock")
-            .join("ServiceMock.ets");
+        let mock_source = module_root.join("src").join("mock").join("ServiceMock.ets");
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
             "entry",

@@ -31,6 +31,11 @@ fn runtime_model_reads_project_and_module_json5_once_in_rust() {
     )
     .expect("write project package");
     std::fs::write(
+        project_root.join("package.json"),
+        r#"{ "name": "project-npm-package" }"#,
+    )
+    .expect("write project npm package");
+    std::fs::write(
         project_root.join("AppScope/app.json5"),
         r#"{ app: { bundleName: 'com.example.native-model' } }"#,
     )
@@ -64,6 +69,11 @@ fn runtime_model_reads_project_and_module_json5_once_in_rust() {
         r#"{ name: 'entry-package' }"#,
     )
     .expect("write module package");
+    std::fs::write(
+        module_root.join("package.json"),
+        r#"{ "name": "entry-npm-package" }"#,
+    )
+    .expect("write module npm package");
 
     let snapshot = BuildScriptRuntimeModelLoader::new(BuildScriptRuntimeModelRequest {
         project_root: project_root.clone(),
@@ -86,6 +96,9 @@ fn runtime_model_reads_project_and_module_json5_once_in_rust() {
         "hvigorconfig.ts"
     );
     assert_eq!(snapshot.project_package["name"], "project-package");
+    assert_eq!(snapshot.project_npm_package["name"], "project-npm-package");
+    assert!(snapshot.project_oh_package_exists);
+    assert!(snapshot.project_npm_package_exists);
     assert_eq!(
         snapshot.app_json.as_ref().expect("app model")["app"]["bundleName"],
         "com.example.native-model"
@@ -120,6 +133,7 @@ fn runtime_model_reads_project_and_module_json5_once_in_rust() {
         "entry"
     );
     assert_eq!(module.package["name"], "entry-package");
+    assert_eq!(module.npm_package["name"], "entry-npm-package");
 }
 
 #[test]

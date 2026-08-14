@@ -1174,11 +1174,7 @@ mod tests {
         let importer = source_root.join("ets/EntryAbility.ets");
         let generated_profile = generated_profile_root.join("BuildProfile.ets");
         fs::write(&importer, "import BuildProfile from 'BuildProfile';").unwrap();
-        fs::write(
-            &generated_profile,
-            "export default class BuildProfile {}",
-        )
-        .unwrap();
+        fs::write(&generated_profile, "export default class BuildProfile {}").unwrap();
 
         let resolver = OhosResolver::new(ResolverConfig {
             project_root: dir.path().to_path_buf(),

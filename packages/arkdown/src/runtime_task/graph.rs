@@ -303,6 +303,7 @@ mod tests {
       task_name: path.rsplit(':').next().unwrap().to_string(),
       built_in,
       project_task: false,
+      lazy: false,
       enabled: true,
       track_state: true,
       refresh_declarations: false,

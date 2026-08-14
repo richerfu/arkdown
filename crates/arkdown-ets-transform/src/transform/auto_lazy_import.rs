@@ -119,10 +119,12 @@ fn lazy_import<'a>(
         return None;
     }
     let specifiers = import.specifiers.as_ref()?;
-    if specifiers
-        .iter()
-        .any(|specifier| matches!(specifier, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)))
-    {
+    if specifiers.iter().any(|specifier| {
+        matches!(
+            specifier,
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)
+        )
+    }) {
         return None;
     }
 
@@ -144,15 +146,17 @@ fn lazy_import<'a>(
         return None;
     }
 
-    Some(ast.alloc_lazy_import_declaration(
-        import.span,
-        Some(kept),
-        import.source.clone_in(ast.allocator),
-        import
-            .with_clause
-            .as_ref()
-            .map(|with_clause| with_clause.clone_in(ast.allocator)),
-    ))
+    Some(
+        ast.alloc_lazy_import_declaration(
+            import.span,
+            Some(kept),
+            import.source.clone_in(ast.allocator),
+            import
+                .with_clause
+                .as_ref()
+                .map(|with_clause| with_clause.clone_in(ast.allocator)),
+        ),
+    )
 }
 
 /// `meta.isReferencedAliasDeclaration` equivalent: the binding symbol has at
@@ -201,8 +205,14 @@ mod tests {
     fn value_imports_become_lazy() {
         let source = "import { foo } from \"@ohos/pkg\";\nimport def from \"./local\";\nconsole.log(foo, def);";
         let out = transform(source, &options(true));
-        assert!(out.contains("import lazy { foo } from \"@ohos/pkg\";"), "got: {out}");
-        assert!(out.contains("import lazy def from \"./local\";"), "got: {out}");
+        assert!(
+            out.contains("import lazy { foo } from \"@ohos/pkg\";"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("import lazy def from \"./local\";"),
+            "got: {out}"
+        );
     }
 
     #[test]

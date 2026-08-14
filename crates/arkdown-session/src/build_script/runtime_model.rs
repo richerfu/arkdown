@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 
 use arkdown_config::{BuildScriptSchemaDiagnostic, BuildScriptSchemaValidator};
+use arkdown_core::ModuleId;
 use arkdown_path::lexical_normalize;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -78,6 +80,9 @@ pub struct BuildScriptRuntimeModelSnapshot {
     pub build_config_file: Option<PathBuf>,
     pub project_profile: serde_json::Value,
     pub project_package: serde_json::Value,
+    pub project_npm_package: serde_json::Value,
+    pub project_oh_package_exists: bool,
+    pub project_npm_package_exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_json: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +104,7 @@ pub struct BuildScriptModuleModelSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_json: Option<serde_json::Value>,
     pub package: serde_json::Value,
+    pub npm_package: serde_json::Value,
 }
 
 /// Loads one project-wide build-script model snapshot.
@@ -135,7 +141,13 @@ impl BuildScriptRuntimeModelLoader {
         let project_profile = reader.read_or_empty(&project_profile_path)?;
         BuildScriptSchemaValidator::new(&project_profile_path)
             .validate_project_profile(&project_profile)?;
-        let project_package = reader.read_or_empty(&project_root.join("oh-package.json5"))?;
+        let project_package = reader.read_optional(&project_root.join("oh-package.json5"))?;
+        let project_oh_package_exists = project_package.is_some();
+        let project_package = project_package.unwrap_or_else(RuntimeModelReader::empty_object);
+        let project_npm_package = reader.read_optional(&project_root.join("package.json"))?;
+        let project_npm_package_exists = project_npm_package.is_some();
+        let project_npm_package =
+            project_npm_package.unwrap_or_else(RuntimeModelReader::empty_object);
         let app_json = reader.read_optional(&project_root.join("AppScope").join("app.json5"))?;
         let project_hvigor_config_path = project_root.join("hvigor").join("hvigor-config.json5");
         let project_hvigor_config = reader.read_or_empty(&project_hvigor_config_path)?;
@@ -151,16 +163,25 @@ impl BuildScriptRuntimeModelLoader {
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut modules = Vec::with_capacity(descriptors.len());
-        for descriptor in descriptors {
-            modules.push(
-                BuildScriptModuleModelLoader::new(BuildScriptModuleModelRequest {
-                    project_root: project_root.clone(),
-                    descriptor,
-                })
-                .load()?,
-            );
-        }
+        let mut module_results = descriptors
+            .into_par_iter()
+            .enumerate()
+            .map(|(index, descriptor)| {
+                (
+                    ModuleId::new(index),
+                    BuildScriptModuleModelLoader::new(BuildScriptModuleModelRequest {
+                        project_root: project_root.clone(),
+                        descriptor,
+                    })
+                    .load(),
+                )
+            })
+            .collect::<Vec<_>>();
+        module_results.sort_by_key(|(module_id, _)| module_id.index());
+        let modules = module_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect::<Result<Vec<_>, _>>()?;
         let fallback_module_roots = if modules.is_empty() {
             BuildScriptFileInventory::fallback_module_roots(&project_root)?
         } else {
@@ -174,6 +195,9 @@ impl BuildScriptRuntimeModelLoader {
             build_config_file,
             project_profile,
             project_package,
+            project_npm_package,
+            project_oh_package_exists,
+            project_npm_package_exists,
             app_json,
             project_hvigor_config_path,
             project_hvigor_config,
@@ -264,6 +288,7 @@ impl BuildScriptModuleModelLoader {
             module_json: reader
                 .read_optional(&root.join("src").join("main").join("module.json5"))?,
             package: reader.read_or_empty(&root.join("oh-package.json5"))?,
+            npm_package: reader.read_or_empty(&root.join("package.json"))?,
         })
     }
 }
@@ -335,6 +360,10 @@ impl BuildScriptFileInventory {
 struct RuntimeModelReader;
 
 impl RuntimeModelReader {
+    fn empty_object() -> serde_json::Value {
+        serde_json::Value::Object(serde_json::Map::new())
+    }
+
     fn read_optional(
         &self,
         path: &Path,
@@ -359,9 +388,7 @@ impl RuntimeModelReader {
         &self,
         path: &Path,
     ) -> Result<serde_json::Value, BuildScriptRuntimeModelError> {
-        Ok(self
-            .read_optional(path)?
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())))
+        Ok(self.read_optional(path)?.unwrap_or_else(Self::empty_object))
     }
 }
 

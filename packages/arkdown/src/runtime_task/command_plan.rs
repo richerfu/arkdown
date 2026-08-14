@@ -3,9 +3,9 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::catalog::RuntimeTaskNodeKind;
+use super::catalog::{RuntimeTaskCatalogRequest, RuntimeTaskNodeKind};
 use super::graph::{RuntimeTaskGraph, RuntimeTaskGraphError, RuntimeTaskId};
-use super::model::RuntimeTaskDescriptor;
+use super::model::{RuntimeTaskDescriptor, RuntimeTaskModelBuilder};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +25,11 @@ struct RuntimeCommandPlanRequest {
   build_target_name: Option<String>,
   #[serde(default)]
   nodes: Vec<RuntimeCommandNode>,
+  #[serde(default)]
+  catalogs: Vec<RuntimeTaskCatalogRequest>,
+  #[serde(default)]
+  removed_task_paths: Vec<String>,
+  #[serde(default)]
   tasks: Vec<RuntimeTaskDescriptor>,
 }
 
@@ -60,11 +65,15 @@ enum RuntimeCommandKind {
   Prune,
   Clean,
   Sync,
+  BuildInfo,
+  CollectCoverage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum RuntimeNativeOutputTarget {
+  Hap,
+  Preview,
   Test,
 }
 
@@ -310,7 +319,12 @@ pub(crate) struct RuntimeCommandPlanner {
 impl RuntimeCommandPlanner {
   pub fn response_json(request_json: &str) -> anyhow::Result<String> {
     let mut request: RuntimeCommandPlanRequest = serde_json::from_str(request_json)?;
-    let descriptors = std::mem::take(&mut request.tasks);
+    let descriptors = RuntimeTaskModelBuilder::new(
+      std::mem::take(&mut request.catalogs),
+      std::mem::take(&mut request.tasks),
+      std::mem::take(&mut request.removed_task_paths),
+    )
+    .build()?;
     let response = match RuntimeTaskGraph::new(descriptors) {
       Ok(graph) => {
         let custom_sync_task_paths = request
@@ -585,6 +599,8 @@ impl RuntimeCommandPlanner {
       "prune" => return Ok(RuntimeCommandKind::Prune),
       "clean" => return Ok(RuntimeCommandKind::Clean),
       "init" => return Ok(RuntimeCommandKind::Sync),
+      "buildInfo" => return Ok(RuntimeCommandKind::BuildInfo),
+      "collectCoverage" => return Ok(RuntimeCommandKind::CollectCoverage),
       _ => {}
     }
 
@@ -657,6 +673,7 @@ impl RuntimeCommandPlanner {
           .task_name
           .split_once('@')
           .map_or(task.task_name.as_str(), |(_, action)| action),
+        target,
       );
       let is_app_assembly = target == RuntimeTaskNodeKind::App && task.project_task;
       let selected_target = self
@@ -776,6 +793,27 @@ impl RuntimeCommandPlanner {
     matches!(
       action_name,
       "test"
+        | "genOnDeviceTestHap"
+        | "assembleDevHqf"
+        | "ColdReloadArkTS"
+        | "PrepareQuickfix"
+        | "PackageHqf"
+        | "SignHqf"
+        | "HotReloadBuild"
+        | "buildHotReloadResource"
+        | "HotReloadArkTS"
+        | "PreviewBuild"
+        | "PreviewArkTS"
+        | "PreviewUpdateAssets"
+        | "buildPreviewerResource"
+        | "ReplacePreviewerPage"
+        | "PreviewHookCompileResource"
+        | "PreviewCompileResource"
+        | "PreviewProcessResource"
+        | "CopyPreviewProfile"
+        | "onDeviceTest"
+        | "GenerateDeviceCoverage"
+        | "BeforeGenerateDeviceCoverage"
         | "UnitTestBuild"
         | "GenerateUnitTestResult"
         | "UnitTestArkTS"
@@ -783,6 +821,12 @@ impl RuntimeCommandPlanner {
         | "ReplaceSourceMapInCoverageMode"
         | "BuildUnitTestHook"
         | "GenerateUnitTestTemplate"
+        | "GenerateOhosTestTemplate"
+        | "OhosTestCompileArkTS"
+        | "OhosTestCompileJS"
+        | "OhosTestBuildArkTS"
+        | "OhosTestBuildJS"
+        | "OhosTestCopyMockConfigJson"
         | "UnitTestProcessProfile"
         | "ReplaceUnitTestIndexFile"
         | "PreBuild"
@@ -806,21 +850,35 @@ impl RuntimeCommandPlanner {
         | "ProcessResource"
         | "CompileResource"
         | "GenerateLoaderJson"
+        | "BuildArkTS"
         | "BuildJS"
         | "CompileArkTS"
+        | "CompileJS"
         | "HarCompileArkTS"
+        | "HarBuildArkTS"
+        | "ProcessObfuscationFiles"
+        | "ProcessOHPackageJson"
+        | "ProcessPackageJson"
+        | "ProcessHarArtifacts"
         | "SyscapTransform"
         | "MakePackInfo"
         | "ProcessIntegratedHsp"
+        | "SignProjectRemoteHsp"
+        | "SignModuleRemoteHsp"
         | "BuildNativeWithCmake"
         | "BuildNativeWithNinja"
         | "ProcessLibs"
+        | "DoNativeBinxo"
         | "DoNativeStrip"
         | "CacheNativeLibs"
         | "GeneratePkgModuleJson"
         | "ProcessCompiledResources"
+        | "ProcessIdDefinedFile"
+        | "CollectDuplicateHarEntriesArkTS"
         | "PrepareSharedHarResource"
         | "PackageSharedHar"
+        | "FastPackageHap"
+        | "FastPackageHsp"
         | "PackageHap"
         | "PackageHsp"
         | "PackageHar"
@@ -830,6 +888,7 @@ impl RuntimeCommandPlanner {
         | "SignHsp"
         | "PackageSignHar"
         | "PackageSharedTgz"
+        | "LintArkTS"
         | "CollectDebugSymbol"
         | "PreBuildApp"
         | "DuplicateDependencyCheck"
@@ -842,7 +901,33 @@ impl RuntimeCommandPlanner {
     )
   }
 
-  fn native_output_target(action_name: &str) -> Option<RuntimeNativeOutputTarget> {
+  fn native_output_target(
+    action_name: &str,
+    node_kind: RuntimeTaskNodeKind,
+  ) -> Option<RuntimeNativeOutputTarget> {
+    // HSP/HAR plugins intentionally register PackageHap/SignHap plus the
+    // targetless genOnDeviceTestHap hook. Their actions construct a HAP even
+    // though the owning node normally produces HSP/HAR artifacts
+    // (`TaskInitializer::{hspTasksInitialize,harTasksInitialize}`).
+    if node_kind != RuntimeTaskNodeKind::Hap
+      && matches!(action_name, "genOnDeviceTestHap" | "PackageHap" | "SignHap")
+    {
+      return Some(RuntimeNativeOutputTarget::Hap);
+    }
+    if matches!(
+      action_name,
+      "PreviewBuild"
+        | "PreviewArkTS"
+        | "PreviewUpdateAssets"
+        | "buildPreviewerResource"
+        | "ReplacePreviewerPage"
+        | "PreviewHookCompileResource"
+        | "PreviewCompileResource"
+        | "PreviewProcessResource"
+        | "CopyPreviewProfile"
+    ) {
+      return Some(RuntimeNativeOutputTarget::Preview);
+    }
     matches!(
       action_name,
       "test"

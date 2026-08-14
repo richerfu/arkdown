@@ -1455,7 +1455,10 @@ fn collect_build(
         None,
         "module.json",
         Some("module.json"),
-        &["intermediates/process_profile/ohosTest", "intermediates/res/ohosTest"],
+        &[
+          "intermediates/process_profile/ohosTest",
+          "intermediates/res/ohosTest",
+        ],
         false,
       )?;
       collect_named_artifact(
@@ -1558,18 +1561,12 @@ fn collect_build(
   // `modules.abc` debug-info line numbers differ by the empty-function-body
   // formatting. Compare only the deterministic artifacts for `test` and
   // `ohosTest`.
-  let build_files = if matches!(
-    artifact_type,
-    ArtifactType::Test | ArtifactType::OhosTest
-  ) {
+  let build_files = if matches!(artifact_type, ArtifactType::Test | ArtifactType::OhosTest) {
     BTreeMap::new()
   } else {
     collect_build_default_files(root)?
   };
-  let loader_out_js = if matches!(
-    artifact_type,
-    ArtifactType::Test | ArtifactType::OhosTest
-  ) {
+  let loader_out_js = if matches!(artifact_type, ArtifactType::Test | ArtifactType::OhosTest) {
     BTreeMap::new()
   } else {
     collect_loader_out_js(root)?

@@ -10,6 +10,71 @@ use arkdown::plugins::factory::PackagePlugin;
 use arkdown_watcher::WatchInvalidationBatch;
 use clap::{Args, ValueEnum};
 
+/// Properties read directly by hvigor-ohos-plugin from the global Hvigor
+/// parameter map. They cross the JS/native boundary as one typed value so a
+/// supported property cannot be silently dropped by native orchestration.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HvigorRuntimeProperties {
+  pub daemon: bool,
+  pub align_target: Option<String>,
+  pub source_map_dir: Option<PathBuf>,
+  pub har_exclude_hsp_dependencies: bool,
+  pub dependencies_types_enable: bool,
+  pub single_file_emit: bool,
+  pub rollup_cache_use_source_hash: bool,
+  pub process_lib_optimization: bool,
+  pub compile_lib_entry_file: Option<bool>,
+  pub release_cmake_build_type: Option<String>,
+  pub fallback_targets: Vec<String>,
+  pub obfuscation_rules_optimization: bool,
+  pub sign_har: bool,
+  pub with_deduplicate: Option<bool>,
+  pub previewer_replace_page: Option<String>,
+  pub previewer_compile_res_incremental: bool,
+  /// Exact string comparison used by `PreviewerArkCompile.getWorkerType`.
+  /// Only the literal extra parameter `compileHspDependencies=true` enables
+  /// normal-worker dependency compilation.
+  pub compile_hsp_dependencies: bool,
+  /// JavaScript truthiness used independently by
+  /// `ReplacePreviewerPage.processPreviewProfile`. Hvigor deliberately treats
+  /// a non-empty value such as `"false"` as truthy at this boundary.
+  pub compile_hsp_dependencies_truthy: bool,
+  pub main_module: Option<String>,
+  pub page_type: Option<String>,
+  /// Exact extra-config predicates consumed by AbstractMergeProfile and
+  /// BuildNativeWithCmake.
+  pub asan_config: Option<bool>,
+  pub tsan_config: Option<bool>,
+  pub ubsan_config: Option<bool>,
+  /// Truthy `ohos-enable-hwasan` extra-config override interpreted with
+  /// hvigor's exact string comparison (`value === "true"`). `None` means the
+  /// option was absent or empty and BinXO validation must fall back to CMake
+  /// arguments.
+  pub hwasan_config: Option<bool>,
+  /// Truthy `ohos-enable-binxo` extra-config override interpreted with
+  /// hvigor's exact string comparison. `None` preserves the CMake fallback.
+  pub binxo_config: Option<bool>,
+}
+
+impl HvigorRuntimeProperties {
+  pub fn source_map_output(
+    &self,
+    project_root: &std::path::Path,
+    module_name: &str,
+  ) -> Option<PathBuf> {
+    let configured = self.source_map_dir.as_ref()?;
+    let root = if configured.is_absolute() {
+      configured.clone()
+    } else {
+      project_root.join("hvigor").join(configured)
+    };
+    Some(arkdown_path::lexical_normalize(
+      &root.join(module_name).join("sourceMaps.map"),
+    ))
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum AbcBackendChoice {
   Auto,
@@ -57,7 +122,7 @@ pub struct NativeTaskRoot {
 
 #[derive(Args, Clone, Default)]
 pub struct BuildArgs {
-  /// Build target: hap, hsp, har, app, test
+  /// Build target: hap, hsp, har, app, preview, test
   ///
   /// `test` mirrors hvigor's `hvigorw test` task: local unit-test build root
   /// (`.test/`), GenerateUnitTestTemplate, TestAbility injection, and test
@@ -93,7 +158,11 @@ pub struct BuildArgs {
   /// (hvigor `FastPackageHap`).
   #[arg(long = "fast-build-app", default_value = "false")]
   pub fast_build_app: bool,
-  /// Build mode: debug, release
+  /// Hvigor `enableSignTask`; false keeps signing tasks in the graph but makes
+  /// their actions no-op and leaves unsigned package outputs selected.
+  #[arg(long = "enable-sign-task", default_value = "true")]
+  pub enable_sign_task: bool,
+  /// Build mode: debug, release, test
   #[arg(long, default_value = "debug")]
   pub mode: String,
   /// Scope to a specific module
@@ -124,8 +193,8 @@ pub struct BuildArgs {
   /// Watch mode: rebuild on source file changes (M1 — SPEC-023)
   #[arg(long, default_value = "false")]
   pub watch: bool,
-  /// Coverage instrumentation mode: prepare build for code-coverage collection (F20)
-  /// Enables build infrastructure for coverage but does not yet inject Istanbul counters.
+  /// Coverage instrumentation mode: inject the Hvigor-compatible BJC coverage runtime
+  /// and counters used by `collectCoverage` (F20).
   #[arg(long, default_value = "false")]
   pub coverage: bool,
   /// Enable AddressSanitizer for the generated package.
@@ -138,6 +207,19 @@ pub struct BuildArgs {
   /// Mirrors hvigor extra config `ohos-enable-hwasan=true`.
   #[arg(long = "ohos-enable-hwasan", default_value = "false")]
   pub ohos_enable_hwasan: bool,
+  /// Enable ThreadSanitizer (`ohos-enable-tsan=true`).
+  #[arg(long = "ohos-enable-tsan", default_value = "false")]
+  pub ohos_enable_tsan: bool,
+  /// Enable UndefinedBehaviorSanitizer (`ohos-enable-ubsan=true`).
+  #[arg(long = "ohos-enable-ubsan", default_value = "false")]
+  pub ohos_enable_ubsan: bool,
+  /// Enable the HMS BinXO native post-processor.
+  ///
+  /// Mirrors hvigor extra config `ohos-enable-binxo=true`. BinXO also
+  /// requires HWASan; requesting BinXO without HWASan reaches
+  /// `DoNativeBinxo` and fails with the same validation boundary as hvigor.
+  #[arg(long = "ohos-enable-binxo", default_value = "false")]
+  pub ohos_enable_binxo: bool,
   /// Preview mode: watch resource directories and trigger resource recompilation (M3).
   /// Implies --watch; focuses change detection on src/main/resources/ for faster
   /// resource-only rebuilds during DevEco IDE preview sessions.
@@ -254,6 +336,10 @@ pub struct BuildArgs {
   #[clap(skip = true)]
   pub keep_dependency: bool,
 
+  /// Remaining typed OHOS plugin properties supplied by the JS runtime.
+  #[clap(skip)]
+  pub hvigor_properties: HvigorRuntimeProperties,
+
   /// Hvigor CLI `parameterFile` extra-parameter override.
   #[clap(skip)]
   pub parameter_file_override: Option<PathBuf>,
@@ -261,6 +347,11 @@ pub struct BuildArgs {
   /// Node executable supplied by the same-process JavaScript runtime.
   #[clap(skip)]
   pub node_executable: Option<PathBuf>,
+
+  /// Project-scoped Hvigor cache directory resolved by `PathUtil` in the JS
+  /// runtime. Direct CLI builds derive `<project>/.hvigor` at the use site.
+  #[clap(skip)]
+  pub hvigor_cache_dir: Option<PathBuf>,
 
   /// Explicit partial hvigor roots selected by the Node task graph.
   #[clap(skip)]
@@ -370,12 +461,8 @@ impl BuildCommand {
     // `assembleApp` routes to the project-level coordinator; every other
     // target runs the module coordinator.
     if args.target == "app" {
-      let mut coordinator = super::app_coordinator::AppBuildCoordinator::new(
-        session,
-        config,
-        args,
-      )
-      .with_package_plugins(package_plugins);
+      let mut coordinator = super::app_coordinator::AppBuildCoordinator::new(session, config, args)
+        .with_package_plugins(package_plugins);
       if let Some(task_observer) = task_observer {
         coordinator = coordinator.with_task_observer(task_observer);
       }
@@ -408,11 +495,30 @@ impl BuildArgs {
     PathBuf::from(arkdown_path::HostPlatform::CURRENT.executable_name("node"))
   }
 
+  /// Resolve the npm launcher exactly where hvigor's `NpmCommandBuilder`
+  /// looks for it: beside the Node executable that owns the current build.
+  /// Windows Node installations expose `npm.cmd`; Unix installations expose
+  /// `npm`. No host installation directory is assumed.
+  pub(crate) fn resolved_npm_executable(&self) -> PathBuf {
+    let node = self.resolved_node_executable();
+    let npm = arkdown_path::HostPlatform::CURRENT.command_shim_name("npm");
+    match node
+      .parent()
+      .filter(|parent| !parent.as_os_str().is_empty())
+    {
+      Some(parent) => parent.join(npm),
+      None => PathBuf::from(npm),
+    }
+  }
+
   pub(crate) fn build_mode(&self) -> Result<arkdown_core::BuildMode> {
     match self.mode.as_str() {
       "debug" => Ok(arkdown_core::BuildMode::Debug),
       "release" => Ok(arkdown_core::BuildMode::Release),
-      mode => anyhow::bail!("unsupported build mode '{mode}'; expected 'debug' or 'release'"),
+      "test" => Ok(arkdown_core::BuildMode::Test),
+      mode => {
+        anyhow::bail!("unsupported build mode '{mode}'; expected 'debug', 'release', or 'test'")
+      }
     }
   }
 
@@ -424,12 +530,13 @@ impl BuildArgs {
       // APP is a project-level aggregate (`assembleApp`); the module-level
       // output target is neutral.
       "app" => Ok(arkdown_core::OutputTarget::Hap),
+      "preview" => Ok(arkdown_core::OutputTarget::Preview),
       // Local unit test build (`hvigorw test`): `.test` build root, test
       // template generation, TestAbility injection, no HAP packaging.
       "test" => Ok(arkdown_core::OutputTarget::Test),
       target => {
         anyhow::bail!(
-          "unsupported build target '{target}'; expected 'hap', 'hsp', 'har', 'app', or 'test'"
+          "unsupported build target '{target}'; expected 'hap', 'hsp', 'har', 'app', 'preview', or 'test'"
         )
       }
     }

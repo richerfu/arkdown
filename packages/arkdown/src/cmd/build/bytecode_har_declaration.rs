@@ -242,7 +242,8 @@ impl<'a> ByteCodeHarDeclarationCollector<'a> {
       src_entry_absolute_path: Option<PathBuf>,
     }
 
-    let path = ModuleBuildLayout::new(&self.module.src_path).startup_config_temp_json();
+    let path = ModuleBuildLayout::for_product(&self.module.src_path, &self.config.product.name)
+      .startup_config_temp_json();
     let Some(config) = self.read_json5::<StartupConfig>(&path) else {
       return Ok(());
     };

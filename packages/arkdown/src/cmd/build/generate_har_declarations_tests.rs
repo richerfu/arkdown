@@ -19,7 +19,7 @@ fn source_har_declarations_preserve_public_signatures_and_tree() {
   )
   .expect("write ArkTS source");
 
-  HarDeclarationGenerator::new_har(temp.path(), &source_dir, "library")
+  HarDeclarationGenerator::new_har(temp.path(), "default", &source_dir, "library")
     .generate()
     .expect("generate declarations");
 
@@ -52,7 +52,7 @@ fn invalid_source_har_declaration_input_fails_the_build() {
   std::fs::write(source_dir.join("Invalid.ets"), "export interface {")
     .expect("write invalid source");
 
-  let error = HarDeclarationGenerator::new_har(temp.path(), &source_dir, "library")
+  let error = HarDeclarationGenerator::new_har(temp.path(), "default", &source_dir, "library")
     .generate()
     .expect_err("invalid source must fail declaration generation")
     .to_string();
@@ -73,7 +73,7 @@ fn hsp_declarations_preserve_module_source_tree_for_package_shared_har() {
   )
   .expect("write source");
 
-  HarDeclarationGenerator::new_hsp(temp.path(), &source_dir, "shared")
+  HarDeclarationGenerator::new_hsp(temp.path(), "default", &source_dir, "shared")
     .generate()
     .expect("generate declarations");
 
@@ -122,7 +122,7 @@ fn bytecode_har_declarations_match_sdk_generated_entries_and_printer() {
   )
   .expect("write generated ModuleInfo");
 
-  HarDeclarationGenerator::new_har(temp.path(), &source_dir, "entry")
+  HarDeclarationGenerator::new_har(temp.path(), "default", &source_dir, "entry")
     .with_generated_source(&module_info)
     .generate()
     .expect("generate ByteCode HAR declarations");

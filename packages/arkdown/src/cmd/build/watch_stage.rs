@@ -54,6 +54,9 @@ pub(super) struct WatchStageInput {
   pub(super) coverage: bool,
   pub(super) ohos_debug_asan: bool,
   pub(super) ohos_enable_hwasan: bool,
+  pub(super) ohos_enable_tsan: bool,
+  pub(super) ohos_enable_ubsan: bool,
+  pub(super) ohos_enable_binxo: bool,
   pub(super) disable_abc_cache: bool,
   pub(super) cache_file: Option<PathBuf>,
   pub(super) checker: Option<String>,
@@ -67,15 +70,83 @@ pub(super) struct WatchStageInput {
   pub(super) custom_task_input_paths: Vec<PathBuf>,
   pub(super) pack_compress_level: Option<u32>,
   pub(super) align_device_types: Vec<String>,
+  pub(super) enable_sign_task: bool,
   pub(super) collect_debug_symbol: Option<bool>,
   pub(super) ui_transform_optimization: bool,
   pub(super) integrated_hsp_use_get_current_bundle_name: bool,
   pub(super) byte_code_har_integrated_optimization: bool,
   pub(super) keep_dependency: bool,
+  pub(super) hvigor_properties: super::args::HvigorRuntimeProperties,
   pub(super) parameter_file_override: Option<PathBuf>,
   pub(super) task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
+  pub(super) hvigor_cache_dir: Option<PathBuf>,
+  pub(super) native_task_roots: Vec<super::args::NativeTaskRoot>,
   /// When `true`, only `src/main/resources/` directories are watched.
   pub(super) preview_mode: bool,
+  /// Persistent Hvigor HotReloadArkTS worker semantics.
+  pub(super) hot_reload_mode: bool,
+}
+
+impl WatchStageInput {
+  pub(super) fn from_build(
+    config: Arc<ArkdownConfig>,
+    session: Arc<BuildSession>,
+    args: &BuildArgs,
+    project_root: PathBuf,
+    abc_backend: AbcBackendChoice,
+    coverage: bool,
+    disable_abc_cache: bool,
+    cache_file: Option<PathBuf>,
+    package_plugins: Vec<PackagePlugin>,
+    task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
+    preview_mode: bool,
+    hot_reload_mode: bool,
+  ) -> Self {
+    Self {
+      config,
+      session,
+      target: args.target.clone(),
+      mode: args.mode.clone(),
+      module_filter: args.module.clone(),
+      product_filter: args.product.clone(),
+      project_root,
+      abc_backend,
+      build_target_name: args.build_target_name.clone(),
+      build_version: args.build_version.clone(),
+      coverage,
+      ohos_debug_asan: args.ohos_debug_asan,
+      ohos_enable_hwasan: args.ohos_enable_hwasan,
+      ohos_enable_tsan: args.ohos_enable_tsan,
+      ohos_enable_ubsan: args.ohos_enable_ubsan,
+      ohos_enable_binxo: args.ohos_enable_binxo,
+      disable_abc_cache,
+      cache_file,
+      checker: args.checker.clone(),
+      module_analyzer: args.module_analyzer,
+      cache: args.cache,
+      package_plugins,
+      project_hvigor_overrides: args.project_hvigor_overrides.clone(),
+      module_hvigor_overrides: args.module_hvigor_overrides.clone(),
+      node_executable: args.node_executable.clone(),
+      runtime_context_overrides: args.runtime_context_overrides.clone(),
+      custom_task_input_paths: args.custom_task_input_paths.clone(),
+      pack_compress_level: args.pack_compress_level,
+      align_device_types: args.align_device_types.clone(),
+      enable_sign_task: args.enable_sign_task,
+      collect_debug_symbol: args.collect_debug_symbol,
+      ui_transform_optimization: args.ui_transform_optimization,
+      integrated_hsp_use_get_current_bundle_name: args.integrated_hsp_use_get_current_bundle_name,
+      byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
+      keep_dependency: args.keep_dependency,
+      hvigor_properties: args.hvigor_properties.clone(),
+      parameter_file_override: args.parameter_file_override.clone(),
+      task_observer,
+      hvigor_cache_dir: args.hvigor_cache_dir.clone(),
+      native_task_roots: args.native_task_roots.clone(),
+      preview_mode,
+      hot_reload_mode,
+    }
+  }
 }
 
 /// Watch stage coordinator.
@@ -101,6 +172,9 @@ impl WatchStage {
     let coverage = input.coverage;
     let ohos_debug_asan = input.ohos_debug_asan;
     let ohos_enable_hwasan = input.ohos_enable_hwasan;
+    let ohos_enable_tsan = input.ohos_enable_tsan;
+    let ohos_enable_ubsan = input.ohos_enable_ubsan;
+    let ohos_enable_binxo = input.ohos_enable_binxo;
     let disable_abc_cache = input.disable_abc_cache;
     let cache_file = input.cache_file;
     let checker = input.checker;
@@ -114,17 +188,26 @@ impl WatchStage {
     let custom_task_input_paths = input.custom_task_input_paths;
     let pack_compress_level = input.pack_compress_level;
     let align_device_types = input.align_device_types;
+    let enable_sign_task = input.enable_sign_task;
     let collect_debug_symbol = input.collect_debug_symbol;
     let ui_transform_optimization = input.ui_transform_optimization;
     let integrated_hsp_use_get_current_bundle_name =
       input.integrated_hsp_use_get_current_bundle_name;
     let byte_code_har_integrated_optimization = input.byte_code_har_integrated_optimization;
     let keep_dependency = input.keep_dependency;
+    let hvigor_properties = input.hvigor_properties;
     let parameter_file_override = input.parameter_file_override;
     let task_observer = input.task_observer;
+    let hvigor_cache_dir = input.hvigor_cache_dir;
+    let native_task_roots = input.native_task_roots;
+    let hot_reload_mode = input.hot_reload_mode;
 
-    let watch_plan =
-      WatchSessionPlan::from_session(&session, preview_mode, &custom_task_input_paths);
+    let watch_plan = WatchSessionPlan::from_session(
+      &session,
+      preview_mode,
+      hot_reload_mode,
+      &custom_task_input_paths,
+    );
     let fingerprint_baseline = watch_plan.input.fingerprint_baseline.clone();
     let custom_input_files = watch_plan.custom_input_files;
     let custom_input_dirs = watch_plan.custom_input_dirs;
@@ -133,6 +216,8 @@ impl WatchStage {
     tracing::info!("watching for changes");
     if preview_mode {
       tracing::info!("preview watch enabled for resource-only recompilation");
+    } else if hot_reload_mode {
+      tracing::info!("Hvigor HotReloadArkTS persistent worker enabled");
     }
 
     let rt = tokio::runtime::Handle::current();
@@ -172,7 +257,8 @@ impl WatchStage {
           }
         }
 
-        if matches!(change_kind, WatchChangeKind::Hot)
+        if !hot_reload_mode
+          && matches!(change_kind, WatchChangeKind::Hot)
           && !importer_maps.entries.is_empty()
           && affected_chunks.is_empty()
         {
@@ -196,7 +282,9 @@ impl WatchStage {
                   })?,
           });
           for module in &config_for_watch.modules {
-            let out_dir = ModuleBuildLayout::new(&module.src_path).outputs_root();
+            let out_dir =
+              ModuleBuildLayout::for_product(&module.src_path, &config_for_watch.product.name)
+                .outputs_root();
             let _ = std::fs::create_dir_all(&out_dir);
             let _ = std::fs::write(
               out_dir.join("preview_changes.json"),
@@ -205,13 +293,17 @@ impl WatchStage {
           }
         }
 
-        let mode_label = match change_kind {
-          WatchChangeKind::Hot => "hot rebuild (bundle-only)",
-          WatchChangeKind::Cold => {
-            if preview_mode {
-              "resource reload"
-            } else {
-              "full rebuild"
+        let mode_label = if hot_reload_mode {
+          "hot reload patch"
+        } else {
+          match change_kind {
+            WatchChangeKind::Hot => "hot rebuild (bundle-only)",
+            WatchChangeKind::Cold => {
+              if preview_mode {
+                "resource reload"
+              } else {
+                "full rebuild"
+              }
             }
           }
         };
@@ -228,7 +320,7 @@ impl WatchStage {
 
         // For hot changes, skip resource and profile stages to only
         // rerun the bundle → bytecode → package pipeline.
-        let is_hot = matches!(change_kind, WatchChangeKind::Hot);
+        let is_hot = hot_reload_mode || matches!(change_kind, WatchChangeKind::Hot);
         let rebuild_args = BuildArgs {
           target: target.clone(),
           mode: mode.clone(),
@@ -245,8 +337,12 @@ impl WatchStage {
           coverage_mode: None,
           unit_test_replace_page: None,
           fast_build_app: false,
+          enable_sign_task,
           ohos_debug_asan,
           ohos_enable_hwasan,
+          ohos_enable_tsan,
+          ohos_enable_ubsan,
+          ohos_enable_binxo,
           preview: false,
           disable_abc_cache,
           cache_file: cache_file.clone(),
@@ -268,14 +364,18 @@ impl WatchStage {
           integrated_hsp_use_get_current_bundle_name,
           byte_code_har_integrated_optimization,
           keep_dependency,
+          hvigor_properties: hvigor_properties.clone(),
           parameter_file_override: parameter_file_override.clone(),
           node_executable: node_executable.clone(),
-          native_task_roots: Vec::new(),
+          hvigor_cache_dir: hvigor_cache_dir.clone(),
+          native_task_roots: native_task_roots.clone(),
         };
         let mut command =
           BuildCommand::new(rebuild_args).with_package_plugins(package_plugins.clone());
-        if let Some(observer) = task_observer.clone() {
-          command = command.with_task_observer(observer);
+        if !hot_reload_mode {
+          if let Some(observer) = task_observer.clone() {
+            command = command.with_task_observer(observer);
+          }
         }
         if let Err(e) = rt.block_on(command.execute()) {
           tracing::error!(error = %format!("{e:#}"), "watch rebuild failed");
@@ -299,6 +399,7 @@ impl WatchSessionPlan {
   fn from_session(
     session: &BuildSession,
     preview_mode: bool,
+    hot_reload_mode: bool,
     custom_task_input_paths: &[PathBuf],
   ) -> Self {
     let mut watch_dirs = FxHashSet::default();
@@ -306,10 +407,14 @@ impl WatchSessionPlan {
     let mut custom_input_files = FxHashSet::default();
     let mut custom_input_dirs = FxHashSet::default();
     for plan in session.watch_inputs.iter() {
-      watch_dirs.extend(plan.resource_roots.iter().cloned());
-      if !preview_mode {
+      if preview_mode {
+        watch_dirs.extend(plan.resource_roots.iter().cloned());
+      } else {
         watch_dirs.extend(plan.source_roots.iter().cloned());
-        watch_files.extend(plan.config_files.iter().cloned());
+        if !hot_reload_mode {
+          watch_dirs.extend(plan.resource_roots.iter().cloned());
+          watch_files.extend(plan.config_files.iter().cloned());
+        }
       }
     }
     for input in custom_task_input_paths {
@@ -357,7 +462,8 @@ impl WatchImporterMapInventory {
       .modules
       .iter()
       .filter_map(|module| {
-        let path = ModuleBuildLayout::new(&module.src_path).importer_map_json();
+        let path = ModuleBuildLayout::for_product(&module.src_path, &config.product.name)
+          .importer_map_json();
         std::fs::read_to_string(path)
           .ok()
           .and_then(|content| serde_json::from_str::<FxHashMap<String, Vec<String>>>(&content).ok())

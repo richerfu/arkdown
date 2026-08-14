@@ -72,6 +72,7 @@ impl PluginCacheModule {
 #[serde(rename_all = "camelCase")]
 pub struct PluginCacheModuleInventory {
     version: u32,
+    use_source_hash: bool,
     modules: Vec<PluginCacheModuleRecord>,
 }
 
@@ -84,11 +85,12 @@ pub struct PluginCacheModuleRecord {
 
 impl PluginCacheModuleInventory {
     const FILE_NAME: &'static str = "plugin_module_cache.json";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
 
     pub fn from_module_sources(
         cache_dir: &Path,
         module_sources: &[HvigorModuleSourceFile],
+        use_source_hash: bool,
     ) -> anyhow::Result<Self> {
         let mut modules = module_sources
             .iter()
@@ -110,6 +112,7 @@ impl PluginCacheModuleInventory {
         modules.dedup_by(|left, right| left.id == right.id);
         Ok(Self {
             version: Self::VERSION,
+            use_source_hash,
             modules,
         })
     }
@@ -154,12 +157,24 @@ impl PluginCacheModuleInventory {
     pub fn modules(&self) -> &[PluginCacheModuleRecord] {
         &self.modules
     }
+
+    pub fn read_module(
+        &self,
+        record: &PluginCacheModuleRecord,
+        cache_dir: &Path,
+    ) -> anyhow::Result<PluginCacheModule> {
+        record.read(cache_dir, self.use_source_hash)
+    }
 }
 
 impl PluginCacheModuleRecord {
-    pub fn read(&self, cache_dir: &Path) -> anyhow::Result<PluginCacheModule> {
+    fn read(&self, cache_dir: &Path, use_source_hash: bool) -> anyhow::Result<PluginCacheModule> {
         let relative = RelPath::parse(PathBuf::from(&self.source_path))?;
-        let code = fs_err::read_to_string(cache_dir.join(relative.as_path()))?;
+        let code = if use_source_hash {
+            String::new()
+        } else {
+            fs_err::read_to_string(cache_dir.join(relative.as_path()))?
+        };
         Ok(PluginCacheModule {
             id: self.id.clone(),
             code,
@@ -473,6 +488,7 @@ mod tests {
         PluginCacheModuleInventory::from_module_sources(
             &cache_dir,
             &[module_source("/entry/Index.ets", source_path)],
+            false,
         )
         .expect("inventory")
         .save(&cache_dir)
@@ -481,8 +497,8 @@ mod tests {
         let loaded = PluginCacheModuleInventory::load(&cache_dir)
             .expect("load inventory")
             .expect("inventory exists");
-        let module = loaded.modules()[0]
-            .read(&cache_dir)
+        let module = loaded
+            .read_module(&loaded.modules()[0], &cache_dir)
             .expect("read cached module");
         assert_eq!(module.id, "/entry/Index.ets");
         assert_eq!(module.code, "export const cached = true;");
@@ -496,9 +512,30 @@ mod tests {
         let error = PluginCacheModuleInventory::from_module_sources(
             &cache_dir,
             &[module_source("outside", outside)],
+            false,
         )
         .expect_err("outside source must fail");
         assert!(error.to_string().contains("outside cache root"));
+    }
+
+    #[test]
+    fn source_hash_inventory_hides_cached_code_like_huawei_rollup() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cache_dir = tmp.path().join("cache");
+        let source_path = cache_dir.join("entry/Index.js");
+        fs_err::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs_err::write(&source_path, "export const cached = true;").unwrap();
+
+        let inventory = PluginCacheModuleInventory::from_module_sources(
+            &cache_dir,
+            &[module_source("/entry/Index.ets", source_path)],
+            true,
+        )
+        .unwrap();
+        let module = inventory
+            .read_module(&inventory.modules()[0], &cache_dir)
+            .unwrap();
+        assert!(module.code.is_empty());
     }
 
     #[test]

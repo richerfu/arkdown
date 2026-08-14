@@ -186,6 +186,12 @@ pub struct InvalidationEvent {
 pub struct WatchInvalidationBatch {
     /// Classified invalidation events.
     pub events: Vec<InvalidationEvent>,
+    /// Actionable raw watcher events, preserving event kind and arrival order.
+    ///
+    /// Hvigor's `watchChangedFiles` Rollup plugin distinguishes `update` from
+    /// `create`/`delete`, so `changed_files` alone is not sufficient for its
+    /// hot-reload handoff.
+    pub raw_events: Vec<WatchEvent>,
     /// Deduplicated changed files passed to cache/plugin invalidation.
     pub changed_files: Vec<PathBuf>,
 }
@@ -197,17 +203,20 @@ impl WatchInvalidationBatch {
         fingerprint_baseline: &HashMap<PathBuf, u64>,
     ) -> Self {
         let mut invalidations = Vec::new();
+        let mut raw_events = Vec::new();
         let mut changed_files = BTreeSet::new();
         for event in events {
             if let Some(invalidation) =
                 InvalidationEvent::from_watch_event(event, fingerprint_baseline)
             {
                 changed_files.insert(event.path.clone());
+                raw_events.push(event.clone());
                 invalidations.push(invalidation);
             }
         }
         Self {
             events: invalidations,
+            raw_events,
             changed_files: changed_files.into_iter().collect(),
         }
     }
@@ -226,6 +235,7 @@ impl WatchInvalidationBatch {
     ) -> Self {
         let matcher = CustomTaskInputMatcher::new(custom_input_files, custom_input_dirs);
         let mut invalidations = Vec::new();
+        let mut raw_events = Vec::new();
         let mut changed_files = BTreeSet::new();
         for event in events {
             let invalidation = if matcher.matches(&event.path) {
@@ -239,11 +249,13 @@ impl WatchInvalidationBatch {
             };
             if let Some(invalidation) = invalidation {
                 changed_files.insert(event.path.clone());
+                raw_events.push(event.clone());
                 invalidations.push(invalidation);
             }
         }
         Self {
             events: invalidations,
+            raw_events,
             changed_files: changed_files.into_iter().collect(),
         }
     }

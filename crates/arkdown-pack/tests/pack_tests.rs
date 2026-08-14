@@ -10,10 +10,11 @@ use arkdown_core::{
 };
 use arkdown_pack::{
     normalize_integrated_hsps, AppArchiveUnpacker, AppArtifactInput, AppArtifactStager,
-    AppNormalizePlan, AppPackagePlan, AppPackageRunner, BundledHarResourceInput,
-    HarBundledDependencyInput, HarPackInput, HarPackageParameterInput, HarVariantInput,
-    HspInterfaceHarInput, HspTgzInput, IntegratedHspEntry, PackError, PackInput, Packager,
-    ProjectPackInfoBuilder, RemoteHspCollector, RemoteHspDependencyScope,
+    AppModulePackageKind, AppNormalizePlan, AppPackageMode, AppPackagePlan, AppPackageRunner,
+    BundledHarResourceInput, HarBundledDependencyInput, HarPackInput, HarPackageParameterInput,
+    HarVariantInput, HqfPackagePlan, HspInterfaceHarInput, HspTgzInput, IntegratedHspEntry,
+    PackError, PackInfoInput, PackInfoModuleInput, PackInput, Packager, ProjectPackInfoBuilder,
+    RemoteHspCollector, RemoteHspDependencyScope,
 };
 use arkdown_path::{ArtifactPath, HostPlatform};
 use flate2::write::DeflateEncoder;
@@ -42,7 +43,7 @@ fn make_config() -> Arc<ArkdownConfig> {
                 preload_so: vec![],
                 deduplicate_har: false,
                 enable_source_code_check: true,
-            app_with_signed_pkg: false,
+                app_with_signed_pkg: false,
                 generate_shared_tgz: None,
                 customized_har_base_package: None,
                 remove_permissions: vec![],
@@ -56,6 +57,7 @@ fn make_config() -> Arc<ArkdownConfig> {
                 strict_mode: StrictModeConfig {
                     case_sensitive_check: false,
                     use_normalized_ohm_url: true,
+                    no_external_import_by_path: None,
                     duplicate_dependency_check: false,
                 },
                 ark_options: None,
@@ -138,6 +140,39 @@ fn read_har_entry_names(path: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn package_sign_har_staging_and_repack_keep_one_package_prefix() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let package_cache = tmp.path().join("default@PackageHar");
+    fs::create_dir_all(package_cache.join("libs")).unwrap();
+    fs::create_dir_all(package_cache.join("src/main")).unwrap();
+    fs::write(package_cache.join("oh-package.json5"), "{name:'library'}").unwrap();
+    fs::write(package_cache.join("src/main/module.json"), "{}").unwrap();
+
+    let signing_root = tmp.path().join("default@PackageSignHar");
+    let output = tmp.path().join("library-signed.har");
+    let packager = Packager::new(make_config());
+    packager
+        .stage_har_signing_directory(&package_cache, &signing_root)
+        .expect("stage PackageSignHar input");
+    assert!(signing_root.join("package/libs").is_dir());
+    assert!(signing_root.join("package/oh-package.json5").is_file());
+
+    fs::create_dir_all(signing_root.join("package/META-INF")).unwrap();
+    fs::write(signing_root.join("package/META-INF/SIGNATURE"), "signed").unwrap();
+    packager
+        .pack_signed_har_directory(&signing_root, &output)
+        .expect("repack signed HAR");
+
+    let names = read_har_entry_names(&output);
+    assert!(names
+        .iter()
+        .any(|path| path == "package/META-INF/SIGNATURE"));
+    assert!(!names
+        .iter()
+        .any(|path| path.starts_with("package/package/")));
+}
+
 fn minimal_pack_input(
     abc: std::path::PathBuf,
     res: std::path::PathBuf,
@@ -146,10 +181,12 @@ fn minimal_pack_input(
 ) -> PackInput {
     PackInput {
         module_name: "entry".into(),
+        target_name: "default".into(),
         abc_path: abc,
         resources_index: res,
         module_json: modj,
         pack_info_module_json: None,
+        pack_info_path: None,
         native_libs: vec![],
         compress_native_libs: false,
         output_path: out,
@@ -159,9 +196,9 @@ fn minimal_pack_input(
         bundle_build_version: None,
         bundle_type: "app".to_string(),
         source_maps_path: None,
+        aot_mode: None,
         pkg_context_info_path: None,
         pkg_sdk_info_path: None,
-        abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
         syscap_path: None,
@@ -259,6 +296,131 @@ fn test_pack_info_matches_hvigor_optional_build_version_contract() {
             .get("build")
             .is_none(),
         "hvigor omits summary.app.version.build when buildVersion is undefined"
+    );
+}
+
+#[test]
+fn test_pack_info_uses_target_artifact_target_sdk_and_min_compatible_version() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    fs::write(
+        &modj,
+        r#"{
+          "app": { "minCompatibleVersionCode": 42 },
+          "module": { "name": "entry", "type": "entry" }
+        }"#,
+    )
+    .unwrap();
+    let out = tmp.path().join("custom.hap");
+    let mut config = (*make_config()).clone();
+    config.product.artifact_name = Some("consumer-facing".to_string());
+    config.product.target_sdk_version = Some("5.0.5(17)".to_string());
+    let mut input = minimal_pack_input(abc, res, modj, out.clone());
+    input.target_name = "phone".to_string();
+
+    Packager::new(Arc::new(config))
+        .pack_hap(input)
+        .expect("pack custom target HAP");
+
+    let file = fs::File::open(out).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut entry = archive.by_name("pack.info").unwrap();
+    let mut content = String::new();
+    entry.read_to_string(&mut content).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(value["packages"][0]["name"], "consumer-facing");
+    assert_eq!(value["summary"]["modules"][0]["apiVersion"]["target"], 17);
+    assert_eq!(
+        value["summary"]["app"]["version"]["minCompatibleVersionCode"],
+        42
+    );
+}
+
+#[test]
+fn make_pack_info_preserves_raw_related_modules_and_hvigor_device_type_contract() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let output = tmp
+        .path()
+        .join("build")
+        .join("outputs")
+        .join("default")
+        .join("entry")
+        .join("pack.info");
+    let input = PackInfoInput {
+        module_name: "feature".to_string(),
+        package_name: "feature-entry-default".to_string(),
+        module_json: serde_json::json!({
+            "module": {
+                "name": "feature",
+                "type": "feature",
+                "deliveryWithInstall": false,
+                "abilities": [{
+                    "name": "FeatureAbility",
+                    "label": "$string:feature_label",
+                    "visible": false
+                }]
+            }
+        }),
+        resources_src_dirs: vec![tmp
+            .path()
+            .join("feature")
+            .join("src")
+            .join("main")
+            .join("resources")],
+        bundle_version_code: 1,
+        bundle_version_name: "1.0.0".to_string(),
+        bundle_build_version: None,
+        min_compatible_version_code: Some(42),
+        bundle_type: "app".to_string(),
+        additional_modules: vec![PackInfoModuleInput {
+            module_name: "entry".to_string(),
+            module_json: serde_json::json!({
+                "module": {
+                    "name": "entry",
+                    "type": "entry",
+                    "deliveryWithInstall": true,
+                    "abilities": []
+                }
+            }),
+            resources_src_dirs: vec![tmp
+                .path()
+                .join("entry")
+                .join("src")
+                .join("main")
+                .join("resources")],
+            device_types: vec!["phone".to_string()],
+        }],
+        device_types: vec!["phone".to_string()],
+        package_device_types: vec!["phone".to_string(), "tablet".to_string()],
+        installation_free: false,
+        delivery_with_install: false,
+    };
+
+    Packager::new(make_config())
+        .write_pack_info(&input, &output)
+        .expect("write related-entry pack.info");
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output).expect("read pack.info"))
+            .expect("parse pack.info");
+
+    assert_eq!(value["packages"][0]["name"], "feature-entry-default");
+    assert_eq!(
+        value["packages"][0]["deviceType"],
+        serde_json::json!(["phone", "tablet"])
+    );
+    assert_eq!(value["summary"]["modules"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        value["summary"]["modules"][0]["abilities"][0]["visible"], false,
+        "MakePackInfo must project unmodelled fields from the raw module snapshot"
+    );
+    assert_eq!(
+        value["summary"]["modules"][1]["deviceType"],
+        serde_json::json!(["phone"]),
+        "related module summaries use the feature/entry device-type intersection"
+    );
+    assert_eq!(
+        value["summary"]["app"]["version"]["minCompatibleVersionCode"],
+        42
     );
 }
 
@@ -811,14 +973,26 @@ fn test_hap_contains_profile_guided_ap_from_hvigor_intermediate() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let module_root = tmp.path().join("entry");
     fs::create_dir_all(&module_root).expect("create module root");
-    let (abc, res, modj) = write_minimal_inputs(&module_root);
+    let (_unused_abc, res, modj) = write_minimal_inputs(&module_root);
+    let abc = module_root
+        .join("build")
+        .join("default")
+        .join("intermediates")
+        .join("loader_out")
+        .join("default")
+        .join("ets")
+        .join("modules.abc");
+    fs::create_dir_all(abc.parent().expect("ABC parent")).expect("create loader output");
+    fs::write(&abc, b"PAND\x00\x00\x00\x00").expect("write ABC");
     let ap_dir = module_root.join("build/default/intermediates/ap");
     fs::create_dir_all(&ap_dir).expect("create ap dir");
     fs::write(ap_dir.join("entry.ap"), b"profile guided data").expect("write ap");
     let out = module_root.join("build/default/outputs/default/entry-default-unsigned.hap");
 
+    let mut input = minimal_pack_input(abc, res, modj, out.clone());
+    input.aot_mode = Some("partial".to_string());
     Packager::new(make_config())
-        .pack_hap(minimal_pack_input(abc, res, modj, out.clone()))
+        .pack_hap(input)
         .expect("pack_hap must succeed");
 
     let file = fs::File::open(&out).expect("open HAP");
@@ -827,6 +1001,45 @@ fn test_hap_contains_profile_guided_ap_from_hvigor_intermediate() {
     let mut contents = Vec::new();
     entry.read_to_end(&mut contents).expect("read embedded ap");
     assert_eq!(contents, b"profile guided data");
+}
+
+#[test]
+fn test_hap_contains_aot_outputs_from_loader_intermediate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_root = tmp.path().join("entry");
+    fs::create_dir_all(&module_root).expect("create module root");
+    let (_unused_abc, res, modj) = write_minimal_inputs(&module_root);
+    let loader_target = module_root
+        .join("build")
+        .join("default")
+        .join("intermediates")
+        .join("loader_out")
+        .join("default");
+    let abc = loader_target.join("ets").join("modules.abc");
+    let an_dir = loader_target.join("an").join("arm64-v8a");
+    fs::create_dir_all(abc.parent().expect("ABC parent")).expect("create loader output");
+    fs::create_dir_all(&an_dir).expect("create AOT output");
+    fs::write(&abc, b"PAND\x00\x00\x00\x00").expect("write ABC");
+    fs::write(an_dir.join("entry.an"), []).expect("write AN");
+    fs::write(an_dir.join("entry.ai"), []).expect("write AI");
+    let out = module_root
+        .join("build")
+        .join("default")
+        .join("outputs")
+        .join("default")
+        .join("entry-default-unsigned.hap");
+
+    let mut input = minimal_pack_input(abc, res, modj, out.clone());
+    input.aot_mode = Some("partial".to_string());
+    Packager::new(make_config())
+        .pack_hap(input)
+        .expect("pack_hap must succeed");
+
+    let file = fs::File::open(out).expect("open HAP");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names = archive.file_names().collect::<Vec<_>>();
+    assert!(names.contains(&"an/arm64-v8a/entry.an"));
+    assert!(names.contains(&"an/arm64-v8a/entry.ai"));
 }
 
 #[test]
@@ -873,10 +1086,12 @@ fn test_hap_resource_files_copied_from_processed_dir() {
     Packager::new(make_config())
         .pack_hap(PackInput {
             module_name: "entry".into(),
+            target_name: "default".into(),
             abc_path: abc,
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
+            pack_info_path: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -886,9 +1101,9 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
+            aot_mode: None,
             pkg_context_info_path: None,
             pkg_sdk_info_path: None,
-            abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
             syscap_path: None,
@@ -940,10 +1155,12 @@ fn test_missing_abc_returns_missing_input_error() {
 
     let result = Packager::new(make_config()).pack_hap(PackInput {
         module_name: "entry".into(),
+        target_name: "default".into(),
         abc_path: tmp.path().join("missing.abc"), // does not exist
         resources_index: res,
         module_json: modj,
         pack_info_module_json: None,
+        pack_info_path: None,
         native_libs: vec![],
         compress_native_libs: false,
         output_path: tmp.path().join("out.hap"),
@@ -953,9 +1170,9 @@ fn test_missing_abc_returns_missing_input_error() {
         bundle_build_version: None,
         bundle_type: "app".to_string(),
         source_maps_path: None,
+        aot_mode: None,
         pkg_context_info_path: None,
         pkg_sdk_info_path: None,
-        abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
         syscap_path: None,
@@ -975,10 +1192,12 @@ fn test_missing_module_json_returns_missing_input_error() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let result = Packager::new(make_config()).pack_hap(PackInput {
         module_name: "entry".into(),
+        target_name: "default".into(),
         abc_path: tmp.path().join("m.abc"),
         resources_index: tmp.path().join("m.index"),
         module_json: tmp.path().join("m.json"), // does not exist
         pack_info_module_json: None,
+        pack_info_path: None,
         native_libs: vec![],
         compress_native_libs: false,
         output_path: tmp.path().join("out.hap"),
@@ -988,9 +1207,9 @@ fn test_missing_module_json_returns_missing_input_error() {
         bundle_build_version: None,
         bundle_type: "app".to_string(),
         source_maps_path: None,
+        aot_mode: None,
         pkg_context_info_path: None,
         pkg_sdk_info_path: None,
-        abilities: vec![],
         integrated_hsps: vec![],
         privacy_profile_path: None,
         syscap_path: None,
@@ -1017,10 +1236,12 @@ fn test_hsp_output_is_valid_zip() {
     Packager::new(make_config())
         .pack_hsp(PackInput {
             module_name: "shared".into(),
+            target_name: "default".into(),
             abc_path: abc,
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
+            pack_info_path: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -1030,9 +1251,9 @@ fn test_hsp_output_is_valid_zip() {
             bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
+            aot_mode: None,
             pkg_context_info_path: None,
             pkg_sdk_info_path: None,
-            abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
             syscap_path: None,
@@ -1056,10 +1277,12 @@ fn test_hsp_pack_info_keeps_app_bundle_type_and_uses_shared_module_type() {
     Packager::new(make_config())
         .pack_hsp(PackInput {
             module_name: "shared".into(),
+            target_name: "default".into(),
             abc_path: abc,
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
+            pack_info_path: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -1069,9 +1292,9 @@ fn test_hsp_pack_info_keeps_app_bundle_type_and_uses_shared_module_type() {
             bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
+            aot_mode: None,
             pkg_context_info_path: None,
             pkg_sdk_info_path: None,
-            abilities: vec![],
             integrated_hsps: vec![],
             privacy_profile_path: None,
             syscap_path: None,
@@ -1481,10 +1704,12 @@ fn test_pack_hap_embeds_integrated_hsp() {
     Packager::new(make_config())
         .pack_hap(PackInput {
             module_name: "entry".into(),
+            target_name: "default".into(),
             abc_path: abc,
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
+            pack_info_path: None,
             native_libs: vec![],
             compress_native_libs: false,
             output_path: out.clone(),
@@ -1494,9 +1719,9 @@ fn test_pack_hap_embeds_integrated_hsp() {
             bundle_build_version: None,
             bundle_type: "app".to_string(),
             source_maps_path: None,
+            aot_mode: None,
             pkg_context_info_path: None,
             pkg_sdk_info_path: None,
-            abilities: vec![],
             integrated_hsps: vec![integrated_entry],
             privacy_profile_path: None,
             syscap_path: None,
@@ -1882,6 +2107,123 @@ fn process_oh_package_json_matches_latest_hvigor_bytecode_har_output() {
             "\"artifactType\":\"obfuscation\",\"metadata\":{\"byteCodeHar\":true}}\n"
         )
     );
+}
+
+#[test]
+fn npm_har_keeps_package_json_and_nests_compiled_artifact_type_under_ohos() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let module_root = tmp.path().join("legacy-har");
+    let source_dir = module_root.join("src/main/ets");
+    let resources_dir = module_root.join("src/main/resources");
+    let compiled_output_dir = module_root.join("build/default/intermediates/loader_out/default");
+    let package_cache_dir = module_root.join("build/default/cache/default/default@PackageHar");
+    fs::create_dir_all(&source_dir).expect("source directory");
+    fs::create_dir_all(&resources_dir).expect("resources directory");
+    fs::create_dir_all(&compiled_output_dir).expect("compiled output directory");
+    fs::write(source_dir.join("Index.ets"), "export const value = 1").expect("source");
+    let manifest_path = module_root.join("package.json");
+    fs::write(
+        &manifest_path,
+        r#"{
+            "name": "legacy-har",
+            "version": "1.0.0",
+            "main": "src/main/ets/Index.ets",
+            "ohos": {}
+        }"#,
+    )
+    .expect("package.json");
+    let variant = HarVariantInput {
+        artifact_type: HarArtifactType::Obfuscation,
+        module_root: module_root.clone(),
+        compiled_output_dir,
+        processed_module_json: None,
+        resource_table_path: None,
+        native_libs: Vec::new(),
+        native_header_dirs: Vec::new(),
+        preload_system_so_json: None,
+        source_maps_path: None,
+        build_profile_path: None,
+        declaration_entries: Vec::new(),
+        package_parameters: HarPackageParameterInput::default(),
+        worker_entries: vec!["src/main/ets/workers/Worker.ets".into()],
+        runtime_only: None,
+        resource_directories: vec!["src/main/resources".into()],
+        bundled_dependency_rewrite: None,
+        dependency_pkg_version: IndexMap::new(),
+        bundled_dependencies: false,
+        bundled_resources: Vec::new(),
+        bundled_resource_directories: Vec::new(),
+        compiled_package_names: Vec::new(),
+        extra_importees: Vec::new(),
+        global_dependencies: Vec::new(),
+        ignore_resource_patterns: Vec::new(),
+        debug: false,
+        target_name: "default".into(),
+        package_cache_dir: None,
+    };
+    let input = HarPackInput {
+        module_name: "legacy-har".into(),
+        source_dir,
+        resources_dir,
+        resource_str_dir: None,
+        oh_package_json: manifest_path,
+        output_path: module_root.join("build/default/outputs/default/legacy-har.tgz"),
+        declarations_dir: None,
+        consumer_rules_path: None,
+    };
+    let generated_manifest = module_root.join("build/default/generated/pm/default/package.json");
+    let packager = Packager::new(make_config());
+    packager
+        .process_har_package_json(&input, &variant, &generated_manifest)
+        .expect("ProcessPackageJson");
+    let generated: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(generated_manifest).expect("generated package"))
+            .expect("generated JSON");
+    assert_eq!(
+        generated.pointer("/ohos/artifactType"),
+        Some(&serde_json::json!("obfuscation"))
+    );
+    assert!(generated.get("artifactType").is_none());
+    assert!(generated.pointer("/metadata/workers").is_none());
+    assert!(generated.pointer("/metadata/resource").is_none());
+
+    packager
+        .process_har_artifacts(&input, &variant, &package_cache_dir)
+        .expect("ProcessHarArtifacts");
+    assert!(package_cache_dir.join("package.json").is_file());
+    assert!(!package_cache_dir.join("oh-package.json5").exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime_bin = tmp.path().join("runtime/bin");
+        fs::create_dir_all(&runtime_bin).expect("runtime bin");
+        let npm = runtime_bin.join("npm");
+        fs::write(
+            &npm,
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                ": > legacy-har-1.0.0.tgz\n",
+                "printf '%s\\n' legacy-har-1.0.0.tgz\n",
+            ),
+        )
+        .expect("fake npm launcher");
+        let mut permissions = fs::metadata(&npm).expect("npm metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&npm, permissions).expect("npm executable permission");
+
+        let packed = packager
+            .pack_har_artifacts(&input, &package_cache_dir, Some(&npm))
+            .expect("npm PackageHar");
+        assert_eq!(
+            packed.file_name().and_then(|name| name.to_str()),
+            Some("legacy-har-1.0.0.tgz")
+        );
+        assert!(packed.is_file());
+        assert!(!input.output_path.exists());
+    }
 }
 
 #[test]
@@ -2324,6 +2666,73 @@ fn app_artifact_stager_uses_hvigor_app_directory_and_unsigned_name_rule() {
 }
 
 #[test]
+fn fast_app_directory_is_merged_staged_and_passed_with_fast_app_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp
+        .path()
+        .join("entry/build/default/intermediates/fastApp/default");
+    let destination = tmp
+        .path()
+        .join("entry/build/default/outputs/default/app/entry");
+    fs::create_dir_all(source.join("ets")).unwrap();
+    fs::write(source.join("ets/modules.abc"), b"abc").unwrap();
+    fs::write(
+        source.join("module.json"),
+        r#"{"module":{"name":"entry","type":"entry"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("pack.info"),
+        r#"{"summary":{"app":{"bundleName":"com.example.app","bundleType":"app","version":{"code":1,"name":"1.0.0"}},"modules":[{"deviceType":["phone"],"distro":{"moduleType":"entry","moduleName":"entry"}}]},"packages":[{"deviceType":["phone"],"moduleType":"entry","name":"entry"}]}"#,
+    )
+    .unwrap();
+    let artifacts = vec![AppArtifactInput::local_fast_directory(
+        source,
+        "entry",
+        AppModulePackageKind::Hap,
+        destination.clone(),
+    )];
+    let project_pack_info = tmp.path().join("build/outputs/default/pack.info");
+
+    ProjectPackInfoBuilder::new(&artifacts)
+        .write(&project_pack_info)
+        .unwrap();
+    let staged = AppArtifactStager::new(&artifacts).stage().unwrap();
+
+    assert_eq!(staged.hap_paths, vec![destination.clone()]);
+    assert_eq!(
+        fs::read(destination.join("ets/modules.abc")).unwrap(),
+        b"abc"
+    );
+
+    let tool = tmp.path().join("app_packing_tool.jar");
+    fs::write(&tool, b"tool").unwrap();
+    let mut plan = AppPackagePlan::new(
+        project_pack_info,
+        staged.hap_paths,
+        staged.hsp_paths,
+        tmp.path().join("project-default-unsigned.app"),
+    );
+    plan.mode = AppPackageMode::FastApp;
+    let command = AppPackageRunner::for_host(
+        tool,
+        std::ffi::OsString::from("java.exe"),
+        HostPlatform::Windows,
+    )
+    .pack_command(&plan)
+    .unwrap();
+    let args = command
+        .args()
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(args.windows(2).any(|pair| pair == ["--mode", "fastApp"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| { pair[0] == "--hap-path" && pair[1] == destination.to_string_lossy() }));
+}
+
+#[test]
 fn app_packing_command_matches_latest_hvigor_on_windows() {
     let tmp = tempfile::tempdir().unwrap();
     let tool = tmp.path().join("app_packing_tool.jar");
@@ -2377,6 +2786,65 @@ fn app_packing_command_matches_latest_hvigor_on_windows() {
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--pac-json-path", pac.to_str().unwrap()]));
+}
+
+#[test]
+fn hqf_packing_command_matches_cold_reload_on_windows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tool = tmp.path().join("app_packing_tool.jar");
+    let patch = tmp.path().join("patch");
+    let json = patch.join("patch.json");
+    let libs = patch.join("libs");
+    let ets = patch.join("ets");
+    let resources = patch.join("resources");
+    fs::create_dir_all(&libs).unwrap();
+    fs::create_dir_all(&ets).unwrap();
+    fs::create_dir_all(&resources).unwrap();
+    fs::write(&tool, b"tool").unwrap();
+    fs::write(&json, b"{}").unwrap();
+    let output = tmp.path().join("entry-default-unsigned.hqf");
+    let plan = HqfPackagePlan {
+        patch_json_path: json.clone(),
+        native_libs_path: libs.clone(),
+        ets_path: ets.clone(),
+        resources_path: resources.clone(),
+        output_path: output.clone(),
+    };
+    let command = AppPackageRunner::for_host(
+        tool.clone(),
+        std::ffi::OsString::from("java.exe"),
+        HostPlatform::Windows,
+    )
+    .hqf_command(&plan)
+    .unwrap();
+    let args = command
+        .args()
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(command.program(), std::ffi::OsStr::new("java.exe"));
+    assert_eq!(
+        args,
+        vec![
+            "-jar".to_string(),
+            tool.to_string_lossy().into_owned(),
+            "--mode".to_string(),
+            "hqf".to_string(),
+            "--json-path".to_string(),
+            json.to_string_lossy().into_owned(),
+            "--lib-path".to_string(),
+            libs.to_string_lossy().into_owned(),
+            "--ets-path".to_string(),
+            ets.to_string_lossy().into_owned(),
+            "--resources-path".to_string(),
+            resources.to_string_lossy().into_owned(),
+            "--out-path".to_string(),
+            output.to_string_lossy().into_owned(),
+            "--force".to_string(),
+            "true".to_string(),
+        ]
+    );
 }
 
 #[test]

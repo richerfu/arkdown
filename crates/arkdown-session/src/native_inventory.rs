@@ -274,11 +274,14 @@ mod tests {
             src_main: PathBuf::from(root).join("src/main"),
             module_json_path: None,
             module_json: None,
+            module_json_value: None,
+            ohos_test_module_json_value: None,
             module_type: crate::module::snapshot::OhosModuleType::Entry,
             package_path: None,
             package: None,
             source_roots: vec![],
             resource_roots: vec![],
+            related_entry_modules: None,
         }
     }
 

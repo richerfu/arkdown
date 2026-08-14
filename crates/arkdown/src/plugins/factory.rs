@@ -151,6 +151,8 @@ pub struct PluginFactoryInput {
     pub tsc_target: ArkTscTarget,
     /// Whether import path casing must match the filesystem exactly.
     pub case_sensitive_check: bool,
+    /// Effective `strictMode.noExternalImportByPath` diagnostic severity.
+    pub no_external_import_by_path: bool,
     /// Explicit phase for hvigor-compatible HSP HAR deduplication.
     pub har_dedup: HarDedupFactoryMode,
     /// Built-in plugin names to disable for this build.
@@ -202,6 +204,7 @@ impl PluginFactoryInput {
             checker_mode: CheckerMode::Oxc,
             tsc_target: ArkTscTarget::default(),
             case_sensitive_check: false,
+            no_external_import_by_path: plan.use_normalized_ohm_url,
             har_dedup: HarDedupFactoryMode::Disabled,
             disabled_plugins: vec![],
             package_plugins: vec![],
@@ -700,16 +703,16 @@ impl<'a> PluginFactory<'a> {
         ));
 
         // ── 4. ImportCheckPlugin (hvigor: sensitiveCheck) ────────────────────
-        let import_check_plugin: SharedPluginable =
-            Arc::new(ImportCheckPlugin::with_allowed_package_roots(
-                // `import-check-plugin.ts::getBelongModulePath` compares
-                // resolved files with `allModulePaths`, whose entries are
-                // OHOS package roots. `loader.json#moduleRootPath` is only the
-                // active `src/main` source root and would incorrectly reject
-                // sibling target source sets such as `src/ohosTest`.
-                package_module_root.clone(),
-                self.input.allowed_package_roots,
-            ));
+        let import_check_plugin: SharedPluginable = Arc::new(ImportCheckPlugin::with_policy(
+            // `import-check-plugin.ts::getBelongModulePath` compares
+            // resolved files with `allModulePaths`, whose entries are
+            // OHOS package roots. `loader.json#moduleRootPath` is only the
+            // active `src/main` source root and would incorrectly reject
+            // sibling target source sets such as `src/ohosTest`.
+            package_module_root.clone(),
+            self.input.allowed_package_roots,
+            self.input.no_external_import_by_path,
+        ));
 
         // ── 5. Json5Plugin (hvigor: json) ────────────────────────────────────
         let json5_plugin: SharedPluginable = Arc::new(Json5Plugin);

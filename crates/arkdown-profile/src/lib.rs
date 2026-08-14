@@ -50,7 +50,9 @@ pub use bytecode_har::{
     ByteCodeHarDependencyRoot, ByteCodeHarMetadataWriter, ByteCodeHarScanEntry,
     CompatibleSdkVersionValue, DynamicImportLibEntry, HostModuleInfo, LoaderByteCodeHarFields,
 };
-pub use custom_types::{CustomTypeError, CustomTypeInventory, CustomTypeResolver};
+pub use custom_types::{
+    CustomTypeError, CustomTypeInventory, CustomTypeResolver, DependencyCustomTypeInput,
+};
 pub use form_profile::{
     FormProfileEntry, FormProfileInput, FormProfileProcessor, FormSourceEntry,
     ModuleFormProfileInput,
@@ -109,6 +111,8 @@ use module_json_writer::ModuleJsonWriter;
 /// reused across multiple modules without cloning.
 pub struct ProfileProcessor {
     config: Arc<ArkdownConfig>,
+    har_exclude_hsp_dependencies: bool,
+    compile_lib_entry_file: Option<bool>,
 }
 
 pub struct ProfileDependencyContext {
@@ -475,7 +479,26 @@ impl Drop for ProfileTimingProbe<'_> {
 impl ProfileProcessor {
     /// Create a new processor for the given project configuration.
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
-        ProfileProcessor { config }
+        ProfileProcessor {
+            config,
+            har_exclude_hsp_dependencies: false,
+            compile_lib_entry_file: None,
+        }
+    }
+
+    pub fn with_har_exclude_hsp_dependencies(mut self, enabled: bool) -> Self {
+        self.har_exclude_hsp_dependencies = enabled;
+        self
+    }
+
+    /// Apply Hvigor's `ohos.compile.lib.entryfile` global property.
+    ///
+    /// `GenerateLoaderJson.isFullCompilationEnabled()` distinguishes an
+    /// absent property from an explicit `false` for Form modules, so this is
+    /// intentionally an `Option<bool>` rather than a flattened boolean.
+    pub fn with_compile_lib_entry_file(mut self, value: Option<bool>) -> Self {
+        self.compile_lib_entry_file = value;
+        self
     }
 
     pub fn dependency_context(&self, module_cfg: &ModuleConfig) -> ProfileDependencyContext {
@@ -550,7 +573,11 @@ impl ProfileProcessor {
         // `ProcessProfile` replaces source `module.dependencies` with the HSP
         // set returned by `mergeHspLibs()`. The dependency session is the
         // authoritative source for installed HSP module identity.
-        manifest.dependencies = dependency_context.hsp_dependencies().to_vec();
+        if !(matches!(manifest.module_type, arkdown_core::OhosModuleType::Har)
+            && self.har_exclude_hsp_dependencies)
+        {
+            manifest.dependencies = dependency_context.hsp_dependencies().to_vec();
+        }
 
         // Auto-derive HSP dependencies from workspace modules.
         //
@@ -596,6 +623,9 @@ impl ProfileProcessor {
                 &manifest,
                 dependency_context.graph(),
                 target_name,
+                loader_json::LoaderCompilationPolicy::from_hvigor_property(
+                    self.compile_lib_entry_file,
+                ),
             )?
         };
         Ok((manifest, loader))
@@ -650,6 +680,64 @@ impl ProfileProcessor {
             dependency_context.graph(),
             dependency_context.dependency_profile_roots(),
         )
+    }
+
+    /// Build the processed module profile in memory without materializing a
+    /// later-stage resource artifact.
+    ///
+    /// Hvigor's `MergeProfile` and `ProcessProfile` own different output
+    /// files. Returning the structured value lets the coordinator emit each
+    /// task's declared output before its lifecycle `after` callback while
+    /// reusing the same canonical field ordering as the final module JSON.
+    pub fn module_json_value_with_dependency_context(
+        &self,
+        manifest: &HapManifest,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+        dependency_context: &ProfileDependencyContext,
+    ) -> Result<serde_json::Value, ArkdownError> {
+        ModuleJsonWriter::build_with_dependency_graph(
+            manifest,
+            &self.config,
+            resource_ids,
+            dependency_context.graph(),
+            dependency_context.dependency_profile_roots(),
+        )
+    }
+
+    /// Build the processed module profile from the immutable session value and
+    /// effective target selected by the coordinator.
+    ///
+    /// This is the JS-context parity path: it preserves fields changed through
+    /// `setModuleJsonOpt` and target abilities changed by build scripts without
+    /// re-reading stale source files after the build session has started.
+    pub fn module_json_value_with_session_context(
+        &self,
+        manifest: &HapManifest,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+        dependency_context: &ProfileDependencyContext,
+        raw_module_json: Option<&serde_json::Value>,
+        target_abilities: &[arkdown_config::build_profile::RawTargetAbility],
+    ) -> Result<serde_json::Value, ArkdownError> {
+        ModuleJsonWriter::build_with_dependency_graph_and_module_context(
+            manifest,
+            &self.config,
+            resource_ids,
+            dependency_context.graph(),
+            dependency_context.dependency_profile_roots(),
+            raw_module_json,
+            target_abilities,
+        )
+    }
+
+    /// Serialize a value returned by
+    /// [`Self::module_json_value_with_dependency_context`] with Hvigor's
+    /// tab-indented profile formatting and canonical key order.
+    pub fn write_module_json_value(
+        &self,
+        value: &serde_json::Value,
+        output_path: &Path,
+    ) -> Result<(), ArkdownError> {
+        ModuleJsonWriter::write_value(value, output_path)
     }
 
     /// Annotate an existing processed `module.json` with resource IDs from
@@ -752,6 +840,7 @@ mod tests {
                     strict_mode: StrictModeConfig {
                         case_sensitive_check: false,
                         use_normalized_ohm_url: false,
+                        no_external_import_by_path: None,
                         duplicate_dependency_check: false,
                     },
                     ark_options: None,

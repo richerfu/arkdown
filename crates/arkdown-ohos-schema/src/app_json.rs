@@ -33,7 +33,7 @@ pub struct RawAppJson5App {
     pub build_version: Option<String>,
     /// Minimum compatible SDK version.
     #[serde(default)]
-    pub min_compatible_version_code: u64,
+    pub min_compatible_version_code: Option<u64>,
     /// Whether the app is a system app.
     #[serde(default)]
     pub bundle_type: Option<String>,

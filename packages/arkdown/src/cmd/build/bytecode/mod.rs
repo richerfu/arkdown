@@ -43,6 +43,7 @@ pub(crate) use compiler::{
 
 // SDK driver output
 pub(crate) use driver::Ts2abcOutput;
+pub(crate) use plan::{Ts2abcReloadMode, Ts2abcReloadPlan};
 
 // Plan and manifest helpers are consumed inside this module; keep them private
 // to avoid recreating the old standalone crate boundary.

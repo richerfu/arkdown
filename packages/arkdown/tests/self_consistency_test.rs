@@ -198,8 +198,12 @@ impl SelfConsistencyOracle {
         coverage_mode: None,
         unit_test_replace_page: None,
         fast_build_app: false,
+        enable_sign_task: false,
         ohos_debug_asan: false,
         ohos_enable_hwasan: false,
+        ohos_enable_tsan: false,
+        ohos_enable_ubsan: false,
+        ohos_enable_binxo: false,
         preview: false,
         disable_abc_cache,
         cache_file: None,
@@ -224,7 +228,9 @@ impl SelfConsistencyOracle {
         parameter_file_override: None,
         build_version: None,
         node_executable: None,
+        hvigor_cache_dir: None,
         native_task_roots: Vec::new(),
+        hvigor_properties: Default::default(),
       })
       .execute(),
     )

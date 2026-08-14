@@ -8,8 +8,8 @@
 //! ### Import mode (always available)
 //!
 //! Collects pre-built shared libraries from the paths that DevEco / hvigor produces:
-//! - `build/default/intermediates/cmake/default/obj/<abi>/` — CMake output
-//! - `build/default/intermediates/cj/extend_libs/default/<abi>/` — Cangjie output
+//! - `build/<product>/intermediates/cmake/<target>/obj/<abi>/` — CMake output
+//! - `build/<product>/intermediates/cj/extend_libs/<target>/<abi>/` — Cangjie output
 //! - `libs/<abi>/` — module-local prebuilt native libraries
 //!
 //! This mode is used when the native code has already been compiled by a
@@ -24,7 +24,7 @@
 //!
 //! hvigor's native build task sequence:
 //! 1. `cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/ohos.toolchain.cmake`
-//! 2. `cmake --build . --target <target> -- -j<cores>`
+//! 2. `ninja -C <build-dir> <target...>`
 //!
 //! We replicate this sequence using `std::process::Command`.  The NDK
 //! toolchain file path is derived from `$OHOS_NDK_HOME` or `$OHOS_SDK_HOME`.
@@ -41,7 +41,7 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -57,7 +57,7 @@ use arkdown_session::dependency_graph::snapshot::{
   DependencyGraphSnapshot, DependencyNodeSnapshot,
 };
 use rustc_hash::FxHashSet;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The set of ABI directories that hvigor's native pipeline produces under
@@ -81,76 +81,153 @@ pub struct NativeBuildOutput {
 pub struct NativeBuildConfig {
   /// Module root directory.
   pub module_root: PathBuf,
+  /// Selected product segment used by hvigor's `ModulePathInfoIml`.
+  pub product_name: String,
+  /// Selected target segment used by native intermediate directories.
+  pub target_name: String,
   /// ABI filters (from `buildOption.externalNativeOptions.abiFilters`).
   pub abi_filters: Vec<String>,
   /// Whether to attempt an actual CMake build.
   pub enable_cmake_build: bool,
   /// Effective `externalNativeOptions` after product/build-mode/target merge.
   pub external_native_options: Option<ExternalNativeOptions>,
-  /// Sanitizer mode to pass into CMake. Mirrors hvigor extra native args.
-  pub sanitizer: NativeBuildSanitizer,
+  /// Sanitizer flags to pass into CMake. Hvigor warns when several are
+  /// enabled but still forwards every selected flag.
+  pub sanitizers: NativeBuildSanitizers,
   /// Build mode passed to CMake. Mirrors hvigor `targetService.getBuildMode()`.
   pub build_mode: String,
   /// SDK native toolchain paths resolved from the active build session.
   pub sdk_toolchain: NativeSdkToolchain,
   /// `buildOption.nativeLib.collectAllLibs`.
   pub collect_all_libs: bool,
+  /// Validated `ohos.defaults.release.cmakebuildtype` value.
+  release_cmake_build_type: NativeReleaseCmakeBuildType,
 }
 
-/// Native sanitizer mode requested by hvigor-compatible extra config.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum NativeBuildSanitizer {
+enum NativeReleaseCmakeBuildType {
   #[default]
-  None,
-  Asan,
-  Hwasan,
+  Release,
+  Debug,
+  RelWithDebInfo,
 }
 
-impl NativeBuildSanitizer {
-  fn cmake_arg_for_abi(self, abi: &str) -> Option<&'static str> {
-    match self {
-      Self::None => None,
-      Self::Asan => Some("-DOHOS_ENABLE_ASAN=ON"),
-      Self::Hwasan if abi == "arm64-v8a" => Some("-DOHOS_ENABLE_HWASAN=ON"),
-      Self::Hwasan => None,
+impl NativeReleaseCmakeBuildType {
+  fn from_hvigor_property(value: Option<&str>) -> Self {
+    match value {
+      Some("Release") | None => Self::Release,
+      Some("Debug") => Self::Debug,
+      Some("RelWithDebInfo") => Self::RelWithDebInfo,
+      Some(value) => {
+        tracing::warn!(
+          value,
+          "invalid release CMake build type; expected Release, Debug, or RelWithDebInfo"
+        );
+        Self::Release
+      }
     }
+  }
+
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Release => "Release",
+      Self::Debug => "Debug",
+      Self::RelWithDebInfo => "RelWithDebInfo",
+    }
+  }
+}
+
+/// Native sanitizer flags requested by hvigor-compatible extra config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeBuildSanitizers {
+  asan: bool,
+  tsan: bool,
+  hwasan: bool,
+  ubsan: bool,
+}
+
+impl NativeBuildSanitizers {
+  pub fn new(asan: bool, tsan: bool, hwasan: bool, ubsan: bool) -> Self {
+    Self {
+      asan,
+      tsan,
+      hwasan,
+      ubsan,
+    }
+  }
+
+  fn cmake_args_for_abi(self, abi: &str) -> impl Iterator<Item = &'static str> {
+    [
+      self.asan.then_some("-DOHOS_ENABLE_ASAN=ON"),
+      self.tsan.then_some("-DOHOS_ENABLE_TSAN=ON"),
+      (self.hwasan && abi == "arm64-v8a").then_some("-DOHOS_ENABLE_HWASAN=ON"),
+      self.ubsan.then_some("-DOHOS_ENABLE_UBSAN=ON"),
+    ]
+    .into_iter()
+    .flatten()
+  }
+
+  fn hwasan(self) -> bool {
+    self.hwasan
   }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct NativeLibCollectionPolicy {
-  sanitizer: NativeBuildSanitizer,
+  sanitizers: NativeBuildSanitizers,
+  hwasan_config: Option<bool>,
+  binxo_config: Option<bool>,
   read_elf: Option<PathBuf>,
   build_mode: String,
   sdk_toolchain: NativeSdkToolchain,
   native_lib: NativeLibOption,
   external_native_options: Option<ExternalNativeOptions>,
   self_package: Option<NativeLibPackageInfo>,
+  cmake_local_dependencies: Vec<NativeCmakeLocalDependency>,
+  release_cmake_build_type: NativeReleaseCmakeBuildType,
 }
 
 impl NativeLibCollectionPolicy {
   pub fn asan() -> Self {
     Self {
-      sanitizer: NativeBuildSanitizer::Asan,
+      sanitizers: NativeBuildSanitizers::new(true, false, false, false),
+      hwasan_config: None,
+      binxo_config: None,
       read_elf: None,
       build_mode: String::new(),
       sdk_toolchain: NativeSdkToolchain::default(),
       native_lib: NativeLibOption::default(),
       external_native_options: None,
       self_package: None,
+      cmake_local_dependencies: Vec::new(),
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     }
   }
 
   pub fn hwasan(read_elf: Option<PathBuf>) -> Self {
     Self {
-      sanitizer: NativeBuildSanitizer::Hwasan,
+      sanitizers: NativeBuildSanitizers::new(false, false, true, false),
+      hwasan_config: None,
+      binxo_config: None,
       read_elf,
       build_mode: String::new(),
       sdk_toolchain: NativeSdkToolchain::default(),
       native_lib: NativeLibOption::default(),
       external_native_options: None,
       self_package: None,
+      cmake_local_dependencies: Vec::new(),
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     }
+  }
+
+  pub fn with_sanitizers(
+    mut self,
+    sanitizers: NativeBuildSanitizers,
+    read_elf: Option<PathBuf>,
+  ) -> Self {
+    self.sanitizers = sanitizers;
+    self.read_elf = read_elf;
+    self
   }
 
   pub fn with_build_mode(mut self, build_mode: String) -> Self {
@@ -173,8 +250,35 @@ impl NativeLibCollectionPolicy {
     self
   }
 
+  /// Apply the two extra-config values consumed by
+  /// `BinxoValidationService`. `None` means hvigor falls back to the effective
+  /// CMake arguments; `Some(false)` is an explicit, truthy non-`"true"`
+  /// override and therefore disables that side of the validation.
+  pub fn with_binxo_config(
+    mut self,
+    hwasan_config: Option<bool>,
+    binxo_config: Option<bool>,
+  ) -> Self {
+    self.hwasan_config = hwasan_config;
+    self.binxo_config = binxo_config;
+    self
+  }
+
   pub fn with_self_package(mut self, package: NativeLibPackageInfo) -> Self {
     self.self_package = Some(package);
+    self
+  }
+
+  pub(crate) fn with_cmake_local_dependencies(
+    mut self,
+    dependencies: Vec<NativeCmakeLocalDependency>,
+  ) -> Self {
+    self.cmake_local_dependencies = dependencies;
+    self
+  }
+
+  pub fn with_release_cmake_build_type(mut self, value: Option<&str>) -> Self {
+    self.release_cmake_build_type = NativeReleaseCmakeBuildType::from_hvigor_property(value);
     self
   }
 
@@ -183,7 +287,7 @@ impl NativeLibCollectionPolicy {
   }
 
   fn validate_packaged_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<()> {
-    if self.sanitizer != NativeBuildSanitizer::Hwasan {
+    if !self.sanitizers.hwasan() {
       return Ok(());
     }
     let read_elf = self
@@ -199,6 +303,41 @@ pub struct NativeLibPackageInfo {
   name: String,
   version: String,
   is_local: bool,
+}
+
+/// Resolved local-module state consumed by `ConfigureCmake`.
+///
+/// Hvigor reads this from each dependency target service. Arkdown resolves it
+/// once from the build-session target model and passes the immutable result to
+/// the native domain owner, avoiding module build-profile rereads.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeCmakeLocalDependency {
+  package_root: PathBuf,
+  product_name: String,
+  target_name: String,
+  build_mode: String,
+  module_type: OhosModuleType,
+  native_lib: NativeLibOption,
+}
+
+impl NativeCmakeLocalDependency {
+  pub(crate) fn new(
+    package_root: PathBuf,
+    product_name: String,
+    target_name: String,
+    build_mode: String,
+    module_type: OhosModuleType,
+    native_lib: NativeLibOption,
+  ) -> Self {
+    Self {
+      package_root: canonicalize_or_owned(&package_root),
+      product_name,
+      target_name,
+      build_mode,
+      module_type,
+      native_lib,
+    }
+  }
 }
 
 impl NativeLibPackageInfo {
@@ -330,6 +469,114 @@ struct ResolvedNativeSdkToolchain<'a> {
   toolchain_file: &'a Path,
 }
 
+/// One Rust-owned native command with an optional argument tail that Hvigor
+/// appends after its JavaScript `CommandBuilderModifier` has run.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeCommandPlan {
+  module_root: PathBuf,
+  abi: String,
+  program: OsString,
+  arguments: Vec<OsString>,
+  trailing_arguments: Vec<OsString>,
+  current_dir: PathBuf,
+}
+
+impl NativeCommandPlan {
+  fn ninja(
+    module_root: &Path,
+    abi: &str,
+    executable: &Path,
+    build_dir: PathBuf,
+    targets: impl IntoIterator<Item = String>,
+  ) -> Self {
+    Self {
+      module_root: module_root.to_path_buf(),
+      abi: abi.to_string(),
+      program: executable.as_os_str().to_os_string(),
+      arguments: vec![OsString::from("-C"), build_dir.as_os_str().to_os_string()],
+      trailing_arguments: targets.into_iter().map(OsString::from).collect(),
+      current_dir: build_dir,
+    }
+  }
+
+  pub(crate) fn abi(&self) -> &str {
+    &self.abi
+  }
+
+  /// Convert the modifier-visible base command into the same `string[]`
+  /// contract exposed by hvigor. Non-UTF host paths continue to work when no
+  /// JavaScript modifier is registered; they are rejected only at this API
+  /// boundary because JavaScript cannot preserve their bytes.
+  pub(crate) fn modifier_command(&self) -> NativeBuildResult<Vec<String>> {
+    std::iter::once(self.program.as_os_str())
+      .chain(self.arguments.iter().map(OsString::as_os_str))
+      .map(|argument| {
+        argument
+          .to_str()
+          .map(str::to_string)
+          .ok_or_else(|| NativeBuildError::CmakeFailed {
+            module_root: self.module_root.clone(),
+            message: format!(
+              "Ninja CommandBuilderModifier requires UTF-8 command arguments for ABI {}",
+              self.abi
+            ),
+          })
+      })
+      .collect()
+  }
+
+  pub(crate) fn with_modifier_command(mut self, command: Vec<String>) -> NativeBuildResult<Self> {
+    let mut command = command.into_iter();
+    let program = command
+      .next()
+      .filter(|program| !program.is_empty())
+      .ok_or_else(|| NativeBuildError::CmakeFailed {
+        module_root: self.module_root.clone(),
+        message: format!(
+          "Ninja CommandBuilderModifier returned an empty command for ABI {}",
+          self.abi
+        ),
+      })?;
+    self.program = OsString::from(program);
+    self.arguments = command.map(OsString::from).collect();
+    Ok(self)
+  }
+
+  pub(crate) fn execute(self) -> NativeBuildResult<()> {
+    let mut command = self.command();
+    tracing::info!(
+        abi = %self.abi,
+        cmd = ?command,
+        "native: running Ninja build"
+    );
+    let status = command
+      .status()
+      .map_err(|error| NativeBuildError::CmakeFailed {
+        module_root: self.module_root.clone(),
+        message: format!("failed to run Ninja build: {error}"),
+      })?;
+    if !status.success() {
+      return Err(NativeBuildError::CmakeFailed {
+        module_root: self.module_root,
+        message: format!(
+          "Ninja build for ABI {} exited with status {status}",
+          self.abi
+        ),
+      });
+    }
+    Ok(())
+  }
+
+  fn command(&self) -> Command {
+    let mut command = Command::new(&self.program);
+    command
+      .args(&self.arguments)
+      .args(&self.trailing_arguments)
+      .current_dir(&self.current_dir);
+    command
+  }
+}
+
 /// Exact DevEco Studio 6.1.1.280 `native-binxo.ts` command contract.
 struct NativeBinxoCommand<'a> {
   executable: &'a Path,
@@ -378,6 +625,9 @@ pub enum NativeBuildError {
   HwasanDisabled {
     libs: Vec<InvalidSanitizerNativeLib>,
   },
+  BinxoRequiresHwasan {
+    profile: PathBuf,
+  },
   NativeLibRelativePath {
     path: PathBuf,
     message: String,
@@ -405,6 +655,13 @@ pub enum NativeBuildError {
   CleanFailed {
     path: PathBuf,
     message: String,
+  },
+  ConfigureCmakeFailed {
+    path: PathBuf,
+    message: String,
+  },
+  UnknownCpuAbi {
+    abi: String,
   },
 }
 
@@ -444,6 +701,11 @@ impl fmt::Display for NativeBuildError {
                     "rebuild these native libraries with -DOHOS_ENABLE_HWASAN=ON or disable ohos-enable-hwasan"
                 )
       }
+      Self::BinxoRequiresHwasan { profile } => write!(
+        f,
+        "DO_BINXO_MUST_OPEN_HWASAN: enable both ohos-enable-hwasan and ohos-enable-binxo in '{}'",
+        profile.display()
+      ),
       Self::NativeLibRelativePath { path, message } => write!(
         f,
         "failed to compute hvigor native library relativePath for '{}': {}",
@@ -490,6 +752,13 @@ impl fmt::Display for NativeBuildError {
         path.display(),
         message
       ),
+      Self::ConfigureCmakeFailed { path, message } => write!(
+        f,
+        "failed to generate ConfigureCmake output '{}': {}",
+        path.display(),
+        message
+      ),
+      Self::UnknownCpuAbi { abi } => write!(f, "UNKNOWN_CPU_ABI: '{abi}'"),
     }
   }
 }
@@ -836,11 +1105,21 @@ impl<'a> NativeHwasanValidator<'a> {
 
 struct NativeModuleLayout<'a> {
   module_root: &'a Path,
+  product_name: &'a str,
+  target_name: &'a str,
 }
 
 impl<'a> NativeModuleLayout<'a> {
   fn new(module_root: &'a Path) -> Self {
-    Self { module_root }
+    Self::for_variant(module_root, "default", "default")
+  }
+
+  fn for_variant(module_root: &'a Path, product_name: &'a str, target_name: &'a str) -> Self {
+    Self {
+      module_root,
+      product_name,
+      target_name,
+    }
   }
 
   fn cpp_source_dir(&self) -> PathBuf {
@@ -856,7 +1135,7 @@ impl<'a> NativeModuleLayout<'a> {
   }
 
   fn build_default(&self) -> PathBuf {
-    self.module_root.join("build").join("default")
+    self.module_root.join("build").join(self.product_name)
   }
 
   fn cmake_intermediate_dir(&self) -> PathBuf {
@@ -864,7 +1143,23 @@ impl<'a> NativeModuleLayout<'a> {
       .build_default()
       .join("intermediates")
       .join("cmake")
-      .join("default")
+      .join(self.target_name)
+  }
+
+  /// `ModulePathInfoIml.getNinjaWorkDir()`.
+  fn ninja_work_dir(&self, build_mode: &str) -> PathBuf {
+    self
+      .module_root
+      .join(".cxx")
+      .join(self.product_name)
+      .join(self.target_name)
+      .join(build_mode)
+  }
+
+  /// Root generated by `ConfigureCmake` and passed to CMake as
+  /// `CMAKE_FIND_ROOT_PATH`.
+  fn cmake_dependency_root(&self, build_mode: &str) -> PathBuf {
+    self.ninja_work_dir(build_mode).join("hvigor")
   }
 
   fn cmake_obj_dir(&self) -> PathBuf {
@@ -876,7 +1171,7 @@ impl<'a> NativeModuleLayout<'a> {
       .build_default()
       .join("intermediates")
       .join("stripped_native_libs")
-      .join("default")
+      .join(self.target_name)
   }
 
   fn process_libs_dir(&self) -> PathBuf {
@@ -884,7 +1179,7 @@ impl<'a> NativeModuleLayout<'a> {
       .build_default()
       .join("intermediates")
       .join("libs")
-      .join("default")
+      .join(self.target_name)
   }
 
   fn native_lib_cache_file(&self) -> PathBuf {
@@ -892,7 +1187,7 @@ impl<'a> NativeModuleLayout<'a> {
       .build_default()
       .join("intermediates")
       .join("patch")
-      .join("default")
+      .join(self.target_name)
       .join("base_native_libs.json")
   }
 
@@ -901,7 +1196,7 @@ impl<'a> NativeModuleLayout<'a> {
       .build_default()
       .join("intermediates")
       .join("binxo")
-      .join("default")
+      .join(self.target_name)
   }
 
   fn binxo_native_lib_cache_file(&self) -> PathBuf {
@@ -909,8 +1204,17 @@ impl<'a> NativeModuleLayout<'a> {
       .build_default()
       .join("intermediates")
       .join("patch")
-      .join("default")
+      .join(self.target_name)
       .join("binxo_native_libs.json")
+  }
+
+  fn patch_last_libs_file(&self) -> PathBuf {
+    self
+      .build_default()
+      .join("intermediates")
+      .join("patch")
+      .join(self.target_name)
+      .join("libs.json")
   }
 
   fn cangjie_intermediate_dir(&self) -> PathBuf {
@@ -919,7 +1223,7 @@ impl<'a> NativeModuleLayout<'a> {
       .join("intermediates")
       .join("cj")
       .join("extend_libs")
-      .join("default")
+      .join(self.target_name)
   }
 
   fn so_search_roots(&self) -> Vec<PathBuf> {
@@ -1021,10 +1325,7 @@ impl DebugSymbolCollector {
       .join("outputs")
       .join(&self.target_name)
       .join("symbol")
-      .join(match self.build_mode {
-        BuildMode::Debug => "debug",
-        BuildMode::Release => "release",
-      });
+      .join(self.build_mode.as_str());
     std::fs::create_dir_all(&destination).map_err(|error| {
       NativeBuildError::DebugSymbolCollectionFailed {
         path: destination.clone(),
@@ -1079,7 +1380,9 @@ impl DebugSymbolCollector {
   }
 
   fn link_native_lib_directories(&self, destination: &Path) -> NativeBuildResult<Vec<PathBuf>> {
-    let process_libs = NativeModuleLayout::new(&self.module_root).process_libs_dir();
+    let process_libs =
+      NativeModuleLayout::for_variant(&self.module_root, &self.product_name, &self.target_name)
+        .process_libs_dir();
     if !process_libs.is_dir() {
       return Ok(Vec::new());
     }
@@ -1260,10 +1563,7 @@ impl ProjectDebugSymbolCollector {
   }
 
   fn mode_name(&self) -> &'static str {
-    match self.build_mode {
-      BuildMode::Debug => "debug",
-      BuildMode::Release => "release",
-    }
+    self.build_mode.as_str()
   }
 
   fn build_zip(&self, destination: &Path) -> NativeBuildResult<PathBuf> {
@@ -1462,10 +1762,572 @@ impl<'a> NativeAbiFilters<'a> {
   }
 }
 
+/// Domain owner for Hvigor 6.24.3 `ConfigureCmake`.
+///
+/// It converts native OHPM/npm dependencies into CMake config packages under
+/// `<module>/.cxx/<product>/<target>/<mode>/hvigor/<abi>` and writes the
+/// per-ABI `summary.cmake` included by `BuildNativeWithCmake`.
+struct NativeCmakeDependencyConfigurator<'a> {
+  module: &'a ModuleConfig,
+  abi_filters: &'a [String],
+  deps: &'a DependencyGraphSnapshot,
+  product_name: &'a str,
+  target_name: &'a str,
+  build_mode: &'a str,
+  local_dependencies: &'a [NativeCmakeLocalDependency],
+}
+
+impl<'a> NativeCmakeDependencyConfigurator<'a> {
+  fn new(
+    module: &'a ModuleConfig,
+    abi_filters: &'a [String],
+    deps: &'a DependencyGraphSnapshot,
+    product_name: &'a str,
+    target_name: &'a str,
+    build_mode: &'a str,
+    local_dependencies: &'a [NativeCmakeLocalDependency],
+  ) -> Self {
+    Self {
+      module,
+      abi_filters,
+      deps,
+      product_name,
+      target_name,
+      build_mode,
+      local_dependencies,
+    }
+  }
+
+  fn write(&self) -> NativeBuildResult<()> {
+    let mode = if self.build_mode.is_empty() {
+      "debug"
+    } else {
+      self.build_mode
+    };
+    let layout =
+      NativeModuleLayout::for_variant(&self.module.src_path, self.product_name, self.target_name);
+    let cmake_root = layout.cmake_dependency_root(mode);
+    let packages = self.packages();
+    for abi in NativeAbiFilters::new(self.abi_filters).build_abis() {
+      let cpu_type = Self::cpu_type(&abi)?;
+      let abi_root = cmake_root.join(&abi);
+      let mut summary_entries = Vec::with_capacity(packages.len());
+      for package in &packages {
+        let cmake_file = abi_root
+          .join("lib")
+          .join(cpu_type)
+          .join("cmake")
+          .join(&package.name)
+          .join(format!("{}Config.cmake", package.name));
+        let libraries = package.libraries_for_abi(&abi)?;
+        let content = package.cmake_content(&libraries)?;
+        Self::write_if_changed(&cmake_file, content.as_bytes())?;
+        let cmake_file =
+          ArtifactPathSerializer::path_to_slash_string(&cmake_file).map_err(|error| {
+            NativeBuildError::ConfigureCmakeFailed {
+              path: cmake_file.clone(),
+              message: error.to_string(),
+            }
+          })?;
+        summary_entries.push(format!(
+          "if(EXISTS {cmake_file}){eol}    find_package({package_name} REQUIRED CONFIG){eol}endif(){eol}",
+          eol = Self::eol(),
+          package_name = package.name,
+        ));
+      }
+      let summary = summary_entries.join(Self::eol());
+      Self::write_if_changed(&abi_root.join("summary.cmake"), summary.as_bytes())?;
+    }
+    Ok(())
+  }
+
+  fn packages(&self) -> Vec<NativeCmakePackage> {
+    let mut packages = Vec::new();
+    let mut seen = FxHashSet::default();
+    for node in self.ordered_nodes() {
+      let Some(root) = node.package_root.as_deref() else {
+        continue;
+      };
+      let canonical_root = canonicalize_or_owned(root);
+      if !seen.insert(canonical_root.clone()) {
+        continue;
+      }
+      let local = self
+        .local_dependencies
+        .iter()
+        .find(|dependency| dependency.package_root == canonical_root);
+      if local.is_none() && !Self::remote_has_native_inputs(root) {
+        continue;
+      }
+      packages.push(NativeCmakePackage::new(node, canonical_root, local));
+    }
+    packages
+  }
+
+  fn ordered_nodes(&self) -> Vec<&DependencyNodeSnapshot> {
+    let mut nodes = Vec::new();
+    let mut seen = FxHashSet::default();
+    for edge in &self.deps.edges {
+      let node = self.deps.nodes.get(&edge.package_name).or_else(|| {
+        self.deps.nodes.values().find(|node| {
+          node.package_root.as_deref().is_some_and(|root| {
+            canonicalize_or_owned(root) == canonicalize_or_owned(&edge.package_root)
+          })
+        })
+      });
+      if let Some(node) = node {
+        if seen.insert(node.package_name.as_str()) {
+          nodes.push(node);
+        }
+      }
+    }
+    for node in self.deps.nodes.values() {
+      if seen.insert(node.package_name.as_str()) {
+        nodes.push(node);
+      }
+    }
+    nodes
+  }
+
+  fn remote_has_native_inputs(root: &Path) -> bool {
+    let libs = root.join(HVIGOR_LIBS_DIR);
+    let include = root.join("include");
+    include.exists()
+      || libs
+        .read_dir()
+        .ok()
+        .is_some_and(|mut entries| entries.next().is_some())
+  }
+
+  fn cpu_type(abi: &str) -> NativeBuildResult<&'static str> {
+    match abi {
+      "arm64-v8a" => Ok("aarch64-linux-ohos"),
+      "armeabi-v7a" => Ok("arm-linux-ohos"),
+      "x86_64" => Ok("x86_64-linux-ohos"),
+      _ => Err(NativeBuildError::UnknownCpuAbi {
+        abi: abi.to_string(),
+      }),
+    }
+  }
+
+  fn write_if_changed(path: &Path, content: &[u8]) -> NativeBuildResult<()> {
+    if std::fs::read(path).is_ok_and(|current| current == content) {
+      return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).map_err(|error| NativeBuildError::ConfigureCmakeFailed {
+        path: parent.to_path_buf(),
+        message: error.to_string(),
+      })?;
+    }
+    std::fs::write(path, content).map_err(|error| NativeBuildError::ConfigureCmakeFailed {
+      path: path.to_path_buf(),
+      message: error.to_string(),
+    })
+  }
+
+  const fn eol() -> &'static str {
+    if cfg!(windows) {
+      "\r\n"
+    } else {
+      "\n"
+    }
+  }
+}
+
+struct NativeCmakePackage {
+  name: String,
+  root: PathBuf,
+  header_paths: Vec<PathBuf>,
+  local: Option<NativeCmakeLocalDependency>,
+  match_rule: Option<NativeLibPackageSelection>,
+  link_libraries: BTreeMap<String, Vec<String>>,
+}
+
+impl NativeCmakePackage {
+  fn new(
+    node: &DependencyNodeSnapshot,
+    root: PathBuf,
+    local: Option<&NativeCmakeLocalDependency>,
+  ) -> Self {
+    let canonical_name = node.package_name.clone();
+    let name = canonical_name
+      .strip_prefix('@')
+      .and_then(|name| name.split_once('/').map(|(_, package)| package))
+      .unwrap_or(&canonical_name)
+      .to_string();
+    let version = node
+      .package
+      .as_ref()
+      .map(|package| package.version.clone())
+      .or_else(|| node.version_spec.clone())
+      .unwrap_or_default();
+    let header_paths = local.map_or_else(
+      || vec![root.join("include")],
+      |dependency| {
+        if dependency.native_lib.header_paths.is_empty() {
+          vec![root.join("include")]
+        } else {
+          dependency
+            .native_lib
+            .header_paths
+            .iter()
+            .map(|path| {
+              if path.is_absolute() {
+                path.clone()
+              } else {
+                root.join(path)
+              }
+            })
+            .collect()
+        }
+      },
+    );
+    let match_rule = local.and_then(|dependency| {
+      dependency
+        .native_lib
+        .filter
+        .select
+        .iter()
+        .find(|selection| {
+          selection.package == canonical_name
+            && selection.version.as_deref() == Some(version.as_str())
+        })
+        .cloned()
+    });
+    let link_libraries = local.map_or_else(
+      || Self::remote_link_libraries(node),
+      |dependency| {
+        dependency
+          .native_lib
+          .libraries_info
+          .iter()
+          .filter(|library| !library.name.is_empty() && !library.link_libraries.is_empty())
+          .map(|library| (library.name.clone(), library.link_libraries.clone()))
+          .collect()
+      },
+    );
+    Self {
+      name,
+      root,
+      header_paths,
+      local: local.cloned(),
+      match_rule,
+      link_libraries,
+    }
+  }
+
+  fn libraries_for_abi(&self, abi: &str) -> NativeBuildResult<Vec<NativeCmakeLibrary>> {
+    let mut libraries = if let Some(local) = self.local.as_ref() {
+      NativeCmakeCodeModelReader::new(local, abi).libraries()?
+    } else {
+      self.remote_libraries(abi)
+    };
+    libraries.retain(|library| library.name_on_disk != "libc++_shared.so");
+    libraries.sort_by(|left, right| left.path.cmp(&right.path));
+    libraries.dedup_by(|left, right| left.path == right.path);
+    Ok(libraries)
+  }
+
+  fn remote_libraries(&self, abi: &str) -> Vec<NativeCmakeLibrary> {
+    let abi_root = self.root.join(HVIGOR_LIBS_DIR).join(abi);
+    if !abi_root.is_dir() {
+      return Vec::new();
+    }
+    walkdir::WalkDir::new(&abi_root)
+      .into_iter()
+      .filter_map(Result::ok)
+      .filter(|entry| entry.file_type().is_file())
+      .filter(|entry| HvigorNativeLibraryPattern::matches_path_under(&abi_root, entry.path()))
+      .filter_map(|entry| NativeCmakeLibrary::from_path(entry.into_path()))
+      .collect()
+  }
+
+  fn cmake_content(&self, libraries: &[NativeCmakeLibrary]) -> NativeBuildResult<String> {
+    let includes = self
+      .header_paths
+      .iter()
+      .filter(|path| {
+        path.is_dir()
+          && path
+            .read_dir()
+            .ok()
+            .is_some_and(|mut entries| entries.next().is_some())
+      })
+      .map(|path| {
+        ArtifactPathSerializer::path_to_slash_string(path).map_err(|error| {
+          NativeBuildError::ConfigureCmakeFailed {
+            path: path.clone(),
+            message: error.to_string(),
+          }
+        })
+      })
+      .collect::<NativeBuildResult<Vec<_>>>()?;
+    let mut entries = Vec::with_capacity(libraries.len());
+    for library in libraries {
+      if self
+        .match_rule
+        .as_ref()
+        .is_some_and(|rule| Self::is_excluded(rule, library))
+      {
+        entries.push(NativeCmakeDependencyConfigurator::eol().to_string());
+        continue;
+      }
+      let mut content = String::new();
+      let target = format!("{}::{}", self.name, library.target_name);
+      content.push_str("if(NOT TARGET ");
+      content.push_str(&target);
+      content.push(')');
+      content.push_str(NativeCmakeDependencyConfigurator::eol());
+      content.push_str("    add_library(");
+      content.push_str(&target);
+      content.push(' ');
+      content.push_str(if library.is_static {
+        "STATIC"
+      } else {
+        "SHARED"
+      });
+      content.push_str(" IMPORTED)");
+      content.push_str(NativeCmakeDependencyConfigurator::eol());
+      content.push_str("    set_target_properties(");
+      content.push_str(&target);
+      content.push_str(" PROPERTIES");
+      content.push_str(NativeCmakeDependencyConfigurator::eol());
+      if !includes.is_empty() {
+        content.push_str("        INTERFACE_INCLUDE_DIRECTORIES \"");
+        content.push_str(&includes.join(";"));
+        content.push('"');
+        content.push_str(NativeCmakeDependencyConfigurator::eol());
+      }
+      let location =
+        ArtifactPathSerializer::path_to_slash_string(&library.path).map_err(|error| {
+          NativeBuildError::ConfigureCmakeFailed {
+            path: library.path.clone(),
+            message: error.to_string(),
+          }
+        })?;
+      content.push_str("        IMPORTED_LOCATION \"");
+      content.push_str(&location);
+      content.push('"');
+      content.push_str(NativeCmakeDependencyConfigurator::eol());
+      if let Some(link_libraries) = self.link_libraries.get(&library.name_on_disk) {
+        content.push_str("        INTERFACE_LINK_LIBRARIES \"");
+        content.push_str(&link_libraries.join(";"));
+        content.push('"');
+        content.push_str(NativeCmakeDependencyConfigurator::eol());
+      }
+      content.push(')');
+      content.push_str(NativeCmakeDependencyConfigurator::eol());
+      content.push_str("endif()");
+      content.push_str(NativeCmakeDependencyConfigurator::eol());
+      entries.push(content);
+    }
+    Ok(entries.join(NativeCmakeDependencyConfigurator::eol()))
+  }
+
+  fn is_excluded(rule: &NativeLibPackageSelection, library: &NativeCmakeLibrary) -> bool {
+    rule
+      .exclude
+      .as_ref()
+      .is_some_and(|exclude| exclude.iter().any(|name| name == &library.name_on_disk))
+      || rule.exclude_pattern.as_ref().is_some_and(|patterns| {
+        patterns.iter().any(|pattern| {
+          HvigorNativeLibraryPattern::matches_filter_pattern(&library.path, pattern, true)
+        })
+      })
+  }
+
+  fn remote_link_libraries(node: &DependencyNodeSnapshot) -> BTreeMap<String, Vec<String>> {
+    node
+      .package
+      .as_deref()
+      .and_then(|package| package.package_json.extra.get("nativeComponents"))
+      .and_then(serde_json::Value::as_array)
+      .into_iter()
+      .flatten()
+      .filter_map(|component| {
+        let name = component.get("name")?.as_str()?.to_string();
+        let libraries = component
+          .get("linkLibraries")?
+          .as_array()?
+          .iter()
+          .filter_map(serde_json::Value::as_str)
+          .map(str::to_string)
+          .collect::<Vec<_>>();
+        (!libraries.is_empty()).then_some((name, libraries))
+      })
+      .collect()
+  }
+}
+
+struct NativeCmakeCodeModelReader<'a> {
+  dependency: &'a NativeCmakeLocalDependency,
+  abi: &'a str,
+}
+
+impl<'a> NativeCmakeCodeModelReader<'a> {
+  fn new(dependency: &'a NativeCmakeLocalDependency, abi: &'a str) -> Self {
+    Self { dependency, abi }
+  }
+
+  fn libraries(&self) -> NativeBuildResult<Vec<NativeCmakeLibrary>> {
+    let work_dir = NativeModuleLayout::for_variant(
+      &self.dependency.package_root,
+      &self.dependency.product_name,
+      &self.dependency.target_name,
+    )
+    .ninja_work_dir(&self.dependency.build_mode)
+    .join(self.abi);
+    let reply = work_dir.join(".cmake").join("api").join("v1").join("reply");
+    if !reply.is_dir() {
+      tracing::warn!(
+        path = %reply.display(),
+        "ConfigureCmake did not find a local dependency CMake code model"
+      );
+      return Ok(Vec::new());
+    }
+    let mut target_files = std::fs::read_dir(&reply)
+      .map_err(|error| NativeBuildError::ConfigureCmakeFailed {
+        path: reply.clone(),
+        message: error.to_string(),
+      })?
+      .filter_map(Result::ok)
+      .map(|entry| entry.path())
+      .filter(|path| {
+        path
+          .file_name()
+          .and_then(OsStr::to_str)
+          .is_some_and(|name| name.starts_with("target-") && name.ends_with(".json"))
+      })
+      .collect::<Vec<_>>();
+    target_files.sort();
+    let mut libraries = Vec::new();
+    for target_file in target_files {
+      let bytes =
+        std::fs::read(&target_file).map_err(|error| NativeBuildError::ConfigureCmakeFailed {
+          path: target_file.clone(),
+          message: error.to_string(),
+        })?;
+      let target: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| NativeBuildError::ConfigureCmakeFailed {
+          path: target_file.clone(),
+          message: error.to_string(),
+        })?;
+      if !matches!(
+        target.get("type").and_then(serde_json::Value::as_str),
+        Some("STATIC_LIBRARY" | "SHARED_LIBRARY")
+      ) {
+        continue;
+      }
+      for artifact in target
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+      {
+        let Some(path) = artifact.get("path").and_then(serde_json::Value::as_str) else {
+          continue;
+        };
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+          path
+        } else {
+          work_dir.join(path)
+        };
+        if let Some(library) = NativeCmakeLibrary::from_path(path) {
+          libraries.push(library);
+        }
+      }
+      if matches!(self.dependency.module_type, OhosModuleType::Shared) {
+        self.collect_hsp_runtime_files(&target, &work_dir, &mut libraries);
+      }
+    }
+    Ok(libraries)
+  }
+
+  fn collect_hsp_runtime_files(
+    &self,
+    target: &serde_json::Value,
+    work_dir: &Path,
+    libraries: &mut Vec<NativeCmakeLibrary>,
+  ) {
+    let sysroot = target
+      .pointer("/link/sysroot/path")
+      .and_then(serde_json::Value::as_str)
+      .map(PathBuf::from);
+    for fragment in target
+      .pointer("/link/commandFragments")
+      .and_then(serde_json::Value::as_array)
+      .into_iter()
+      .flatten()
+      .filter(|fragment| {
+        fragment.get("role").and_then(serde_json::Value::as_str) == Some("libraries")
+      })
+      .filter_map(|fragment| fragment.get("fragment").and_then(serde_json::Value::as_str))
+    {
+      if fragment.starts_with('-') || fragment.ends_with(".a") {
+        continue;
+      }
+      let fragment_path = PathBuf::from(fragment);
+      let path = if fragment_path.is_absolute() {
+        fragment_path
+      } else {
+        work_dir.join(fragment_path)
+      };
+      if sysroot
+        .as_ref()
+        .is_some_and(|sysroot| path.starts_with(sysroot))
+      {
+        continue;
+      }
+      if let Some(library) = NativeCmakeLibrary::from_path(path) {
+        libraries.push(library);
+      }
+    }
+  }
+}
+
+struct NativeCmakeLibrary {
+  name_on_disk: String,
+  target_name: String,
+  path: PathBuf,
+  is_static: bool,
+}
+
+impl NativeCmakeLibrary {
+  fn from_path(path: PathBuf) -> Option<Self> {
+    let name_on_disk = path.file_name()?.to_str()?.to_string();
+    let extension_index = name_on_disk
+      .rfind(".so")
+      .or_else(|| name_on_disk.rfind(".a"));
+    let prefix = usize::from(name_on_disk.to_ascii_lowercase().starts_with("lib")) * 3;
+    let target_name = extension_index.map_or_else(
+      || name_on_disk.get(prefix..).unwrap_or_default().to_string(),
+      |index| {
+        name_on_disk
+          .get(prefix..index)
+          .unwrap_or_default()
+          .to_string()
+      },
+    );
+    if target_name.is_empty() {
+      return None;
+    }
+    Some(Self {
+      is_static: name_on_disk.contains(".a"),
+      name_on_disk,
+      target_name,
+      path,
+    })
+  }
+}
+
 pub struct NativeLibCollector<'a> {
   module: &'a ModuleConfig,
   abi_filters: &'a [String],
   deps: &'a DependencyGraphSnapshot,
+  product_name: String,
+  target_name: String,
   policy: NativeLibCollectionPolicy,
   excluded_dependency_roots: FxHashSet<PathBuf>,
 }
@@ -1480,9 +2342,21 @@ impl<'a> NativeLibCollector<'a> {
       module,
       abi_filters,
       deps,
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
       policy: NativeLibCollectionPolicy::default(),
       excluded_dependency_roots: FxHashSet::default(),
     }
+  }
+
+  pub fn with_output_variant(
+    mut self,
+    product_name: impl Into<String>,
+    target_name: impl Into<String>,
+  ) -> Self {
+    self.product_name = product_name.into();
+    self.target_name = target_name.into();
+    self
   }
 
   pub fn with_policy(mut self, policy: NativeLibCollectionPolicy) -> Self {
@@ -1499,13 +2373,36 @@ impl<'a> NativeLibCollector<'a> {
   }
 
   pub fn collect(&self) -> NativeBuildResult<Vec<PathBuf>> {
+    self.configure_cmake_dependencies()?;
     self.configure_native()?;
     self.build_native()?;
     let processed = self.process_libs()?;
-    let stripped = self.strip_libs(&processed)?;
+    let strip_inputs = if self.is_binxo_enabled() {
+      self.binxo_libs(&processed)?
+    } else {
+      processed
+    };
+    let stripped = self.strip_libs(&strip_inputs)?;
     self.cache_libs()?;
     self.validate_libs(&stripped)?;
     Ok(stripped)
+  }
+
+  pub(crate) fn configure_cmake_dependencies(&self) -> NativeBuildResult<()> {
+    let native_config = self.native_build_config();
+    if !native_config.should_run_native_tasks() {
+      return Ok(());
+    }
+    NativeCmakeDependencyConfigurator::new(
+      self.module,
+      self.abi_filters,
+      self.deps,
+      &self.product_name,
+      &self.target_name,
+      &self.policy.build_mode,
+      &self.policy.cmake_local_dependencies,
+    )
+    .write()
   }
 
   pub(crate) fn configure_native(&self) -> NativeBuildResult<()> {
@@ -1516,11 +2413,22 @@ impl<'a> NativeLibCollector<'a> {
     self.native_build_config().build()
   }
 
+  pub(crate) fn native_build_commands(&self) -> NativeBuildResult<Vec<NativeCommandPlan>> {
+    self.native_build_config().ninja_command_plans()
+  }
+
+  pub(crate) fn report_native_build_success(&self) {
+    tracing::info!(
+        module = %self.module.src_path.display(),
+        "native: CMake/Ninja build succeeded"
+    );
+  }
+
   pub(crate) fn process_libs(&self) -> NativeBuildResult<Vec<PathBuf>> {
     let mut candidates = Vec::new();
     let mut seen = FxHashSet::default();
 
-    if NativeModuleLayout::new(&self.module.src_path).has_native_code() {
+    if self.layout().has_native_code() {
       tracing::debug!(module = %self.module.src_path.display(), "native: scanning for pre-built .so files");
     }
     let native_out = self.native_build_config().scan()?;
@@ -1556,7 +2464,12 @@ impl<'a> NativeLibCollector<'a> {
     let result_libs =
       NativeLibSelectionResolver::new(&self.module.name, &self.policy.native_lib.filter)
         .resolve(candidates)?;
-    NativeProcessLibWriter::new(&self.module.src_path).materialize(&result_libs)
+    NativeProcessLibWriter::for_variant(
+      &self.module.src_path,
+      &self.product_name,
+      &self.target_name,
+    )
+    .materialize(&result_libs)
   }
 
   /// `DoNativeBinxo`: run the SDK binxo tool over process-libs outputs when
@@ -1566,7 +2479,9 @@ impl<'a> NativeLibCollector<'a> {
   /// inputs reuse the previous output (cache keyed on the binxo cache file).
   pub(crate) fn binxo_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
     if !self.is_binxo_valid() {
-      return Ok(libs.to_vec());
+      return Err(NativeBuildError::BinxoRequiresHwasan {
+        profile: self.module.src_path.join("build-profile.json5"),
+      });
     }
     let exclude: Vec<&str> = self
       .policy
@@ -1575,15 +2490,7 @@ impl<'a> NativeLibCollector<'a> {
       .iter()
       .map(String::as_str)
       .collect();
-    let output_root = NativeModuleLayout::new(&self.module.src_path).binxo_libs_dir();
-    if output_root.exists() {
-      std::fs::remove_dir_all(&output_root).map_err(|error| {
-        NativeBuildError::NativePostProcessFailed {
-          path: output_root.clone(),
-          message: error.to_string(),
-        }
-      })?;
-    }
+    let output_root = self.layout().binxo_libs_dir();
     std::fs::create_dir_all(&output_root).map_err(|error| {
       NativeBuildError::NativePostProcessFailed {
         path: output_root.clone(),
@@ -1599,7 +2506,13 @@ impl<'a> NativeLibCollector<'a> {
         "HMS native BinXO executable is unavailable; falling back to plain copies"
       );
     }
+    let cache = self.read_binxo_cache()?;
+    let cached_symbol_matches = cache.binxo_symbol.as_ref().is_some_and(|symbol| {
+      symbol.enable_asan_binxo
+        && symbol.exclude_so_from_binxo == self.policy.native_lib.exclude_so_from_binxo
+    });
     let mut outputs = Vec::with_capacity(libs.len());
+    let mut expected = FxHashSet::default();
     for source in libs {
       let relative = Self::native_lib_identity(source);
       if relative.is_empty() {
@@ -1609,6 +2522,7 @@ impl<'a> NativeLibCollector<'a> {
         });
       }
       let destination = output_root.join(&relative);
+      expected.insert(destination.clone());
       if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
           NativeBuildError::NativePostProcessFailed {
@@ -1617,7 +2531,13 @@ impl<'a> NativeLibCollector<'a> {
           }
         })?;
       }
-      let excluded = exclude.iter().any(|pattern| relative.contains(pattern));
+      let excluded = exclude.iter().any(|pattern| {
+        HvigorNativeLibraryPattern::matches_filter_pattern(
+          Path::new(relative.as_str()),
+          pattern,
+          false,
+        )
+      });
       if excluded || available_binxo_tool.is_none() {
         // `copySoFile`: excluded (or unsupported) libraries are linked.
         std::fs::copy(&source, &destination).map_err(|error| {
@@ -1627,6 +2547,16 @@ impl<'a> NativeLibCollector<'a> {
           }
         })?;
       } else {
+        let source_key = source.to_string_lossy();
+        let destination_key = destination.to_string_lossy();
+        let cache_hit = cached_symbol_matches
+          && cache.libs.get(source_key.as_ref()) == Some(&Self::native_file_hash(source)?)
+          && cache.binxo.get(destination_key.as_ref())
+            == Some(&Self::native_file_hash(&destination).unwrap_or_default());
+        if cache_hit {
+          outputs.push(destination);
+          continue;
+        }
         let binxo_tool = available_binxo_tool.expect("BinXO availability checked above");
         let output = NativeBinxoCommand::new(binxo_tool, source, &destination)
           .execute()
@@ -1650,28 +2580,94 @@ impl<'a> NativeLibCollector<'a> {
       }
       outputs.push(destination);
     }
+    self.remove_stale_native_outputs(&output_root, &expected)?;
+    outputs.sort();
     Ok(outputs)
   }
 
-  fn is_binxo_valid(&self) -> bool {
-    let arguments = self
+  fn read_binxo_cache(&self) -> NativeBuildResult<NativeBinxoCacheSnapshot> {
+    let layout = self.layout();
+    let cache_file = if layout.patch_last_libs_file().is_file() {
+      layout.patch_last_libs_file()
+    } else {
+      layout.binxo_native_lib_cache_file()
+    };
+    if !cache_file.is_file() {
+      return Ok(NativeBinxoCacheSnapshot::default());
+    }
+    let bytes =
+      std::fs::read(&cache_file).map_err(|error| NativeBuildError::NativePostProcessFailed {
+        path: cache_file.clone(),
+        message: error.to_string(),
+      })?;
+    serde_json::from_slice(&bytes).map_err(|error| NativeBuildError::NativePostProcessFailed {
+      path: cache_file,
+      message: error.to_string(),
+    })
+  }
+
+  fn native_file_hash(path: &Path) -> NativeBuildResult<String> {
+    NativeLibCacheWriter::file_hash(path)
+  }
+
+  fn remove_stale_native_outputs(
+    &self,
+    output_root: &Path,
+    expected: &FxHashSet<PathBuf>,
+  ) -> NativeBuildResult<()> {
+    if !output_root.is_dir() {
+      return Ok(());
+    }
+    let mut stale_files = walkdir::WalkDir::new(output_root)
+      .contents_first(true)
+      .into_iter()
+      .filter_map(Result::ok)
+      .map(|entry| entry.into_path())
+      .filter(|path| path.is_file() && !expected.contains(path))
+      .collect::<Vec<_>>();
+    stale_files.sort();
+    for stale in stale_files {
+      std::fs::remove_file(&stale).map_err(|error| NativeBuildError::NativePostProcessFailed {
+        path: stale,
+        message: error.to_string(),
+      })?;
+    }
+    Ok(())
+  }
+
+  pub(crate) fn is_binxo_enabled(&self) -> bool {
+    self
       .policy
-      .external_native_options
-      .as_ref()
-      .map(|options| options.arguments.as_slice())
-      .unwrap_or_default();
-    let hwasan = arguments
-      .iter()
-      .any(|argument| argument == "-DOHOS_ENABLE_HWASAN=ON");
-    let binxo = arguments
-      .iter()
-      .any(|argument| argument == "-DOHOS_ENABLE_BINXO=ON");
+      .binxo_config
+      .unwrap_or_else(|| self.has_cmake_argument("-DOHOS_ENABLE_BINXO=ON"))
+  }
+
+  pub(crate) fn is_binxo_valid(&self) -> bool {
+    let hwasan = self
+      .policy
+      .hwasan_config
+      .unwrap_or_else(|| self.has_cmake_argument("-DOHOS_ENABLE_HWASAN=ON"));
+    let binxo = self.is_binxo_enabled();
     hwasan && binxo
   }
 
+  fn has_cmake_argument(&self, expected: &str) -> bool {
+    self
+      .policy
+      .external_native_options
+      .as_ref()
+      .into_iter()
+      .flat_map(|options| options.arguments.iter())
+      .flat_map(|argument| argument.trim().split(' '))
+      .filter(|argument| argument.starts_with('-'))
+      .any(|argument| argument == expected)
+  }
+
   pub(crate) fn strip_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
-    NativeStripProcessor::new(
+    NativeStripProcessor::for_variant(
       &self.module.src_path,
+      &self.product_name,
+      &self.target_name,
       self.policy.sdk_toolchain.llvm_strip_path(),
       &self.policy.native_lib,
     )
@@ -1679,7 +2675,14 @@ impl<'a> NativeLibCollector<'a> {
   }
 
   pub(crate) fn cache_libs(&self) -> NativeBuildResult<()> {
-    NativeLibCacheWriter::new(&self.module.src_path, &self.policy.native_lib).write()
+    NativeLibCacheWriter::for_variant(
+      &self.module.src_path,
+      &self.product_name,
+      &self.target_name,
+      &self.policy.native_lib,
+      self.is_binxo_valid(),
+    )
+    .write()
   }
 
   pub(crate) fn validate_libs(&self, libs: &[PathBuf]) -> NativeBuildResult<()> {
@@ -1689,14 +2692,21 @@ impl<'a> NativeLibCollector<'a> {
   fn native_build_config(&self) -> NativeBuildConfig {
     NativeBuildConfig {
       module_root: self.module.src_path.clone(),
+      product_name: self.product_name.clone(),
+      target_name: self.target_name.clone(),
       abi_filters: self.abi_filters.to_vec(),
       enable_cmake_build: self.policy.enable_cmake_build(),
       external_native_options: self.policy.external_native_options.clone(),
-      sanitizer: self.policy.sanitizer,
+      sanitizers: self.policy.sanitizers,
       build_mode: self.policy.build_mode.clone(),
       sdk_toolchain: self.policy.sdk_toolchain.clone(),
       collect_all_libs: self.policy.native_lib.collect_all_libs,
+      release_cmake_build_type: self.policy.release_cmake_build_type,
     }
+  }
+
+  fn layout(&self) -> NativeModuleLayout<'_> {
+    NativeModuleLayout::for_variant(&self.module.src_path, &self.product_name, &self.target_name)
   }
 
   fn self_package_info(&self) -> NativeLibPackageInfo {
@@ -1874,16 +2884,22 @@ impl<'a> NativeLibCollector<'a> {
 /// files are hard-linked into `intermediates/libs/default`; copying is used
 /// only when the source and build directories are on different filesystems.
 struct NativeProcessLibWriter<'a> {
-  module_root: &'a Path,
+  layout: NativeModuleLayout<'a>,
 }
 
 impl<'a> NativeProcessLibWriter<'a> {
   fn new(module_root: &'a Path) -> Self {
-    Self { module_root }
+    Self::for_variant(module_root, "default", "default")
+  }
+
+  fn for_variant(module_root: &'a Path, product_name: &'a str, target_name: &'a str) -> Self {
+    Self {
+      layout: NativeModuleLayout::for_variant(module_root, product_name, target_name),
+    }
   }
 
   fn materialize(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
-    let output_root = NativeModuleLayout::new(self.module_root).process_libs_dir();
+    let output_root = self.layout.process_libs_dir();
     if output_root.exists() {
       std::fs::remove_dir_all(&output_root).map_err(|error| {
         NativeBuildError::NativePostProcessFailed {
@@ -1958,47 +2974,82 @@ struct NativeBinxoSymbol<'a> {
   exclude_so_from_binxo: &'a [String],
 }
 
-/// Mirrors hvigor `CacheNativeLibs` and `LibsFileCacheUtil`. Hashes are
-/// SHA-256 over the decimal string `size + mtimeMs`, not file contents.
+#[derive(Debug, Default, Deserialize)]
+struct NativeBinxoCacheSnapshot {
+  #[serde(default)]
+  libs: BTreeMap<String, String>,
+  #[serde(default)]
+  binxo: BTreeMap<String, String>,
+  #[serde(rename = "binxoSymbol", default)]
+  binxo_symbol: Option<NativeBinxoSymbolSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeBinxoSymbolSnapshot {
+  #[serde(rename = "enableAsanBinxo", default)]
+  enable_asan_binxo: bool,
+  #[serde(rename = "excludeSoFromBinxo", default)]
+  exclude_so_from_binxo: Vec<String>,
+}
+
+/// Mirrors hvigor `CacheNativeLibs` and `LibsFileCacheUtil`.
+///
+/// This cache deliberately does not use `FileUtil.pipelineAsync` or
+/// `ohos.processLib.optimization`; those belong to ProcessLibs task-input
+/// fingerprinting. Native strip/binxo caches always hash the JavaScript
+/// numeric sum `size + mtime.getTime()`.
 struct NativeLibCacheWriter<'a> {
-  module_root: &'a Path,
+  layout: NativeModuleLayout<'a>,
   option: &'a NativeLibOption,
+  binxo_valid: bool,
 }
 
 impl<'a> NativeLibCacheWriter<'a> {
-  fn new(module_root: &'a Path, option: &'a NativeLibOption) -> Self {
+  fn new(module_root: &'a Path, option: &'a NativeLibOption, binxo_valid: bool) -> Self {
+    Self::for_variant(module_root, "default", "default", option, binxo_valid)
+  }
+
+  fn for_variant(
+    module_root: &'a Path,
+    product_name: &'a str,
+    target_name: &'a str,
+    option: &'a NativeLibOption,
+    binxo_valid: bool,
+  ) -> Self {
     Self {
-      module_root,
+      layout: NativeModuleLayout::for_variant(module_root, product_name, target_name),
       option,
+      binxo_valid,
     }
   }
 
   fn write(&self) -> NativeBuildResult<()> {
-    let layout = NativeModuleLayout::new(self.module_root);
     // CacheNativeLibs reads each directory once and reuses the process-libs
     // inventory for both cache artifacts. Keep that ownership shape here.
-    let libs = self.hash_directory(&layout.process_libs_dir())?;
-    let stripped = self.hash_directory(&layout.stripped_libs_dir())?;
-    let binxo = self.hash_directory(&layout.binxo_libs_dir())?;
+    let process_libs = self.hash_directory(&self.layout.process_libs_dir())?;
+    let stripped = self.hash_directory(&self.layout.stripped_libs_dir())?;
+    let binxo = self.hash_directory(&self.layout.binxo_libs_dir())?;
+    let strip_inputs = if self.binxo_valid {
+      &binxo
+    } else {
+      &process_libs
+    };
     let cache = NativeLibCache {
-      libs: &libs,
+      libs: strip_inputs,
       stripped: &stripped,
       debug_symbol: self.explicit_debug_symbol(),
     };
-    self.write_json(&layout.native_lib_cache_file(), &cache)?;
+    self.write_json(&self.layout.native_lib_cache_file(), &cache)?;
 
     let binxo_cache = NativeBinxoCache {
-      libs: &libs,
+      libs: &process_libs,
       binxo: &binxo,
       binxo_symbol: NativeBinxoSymbol {
-        // Arkdown does not expose hvigor's independent OHOS_ENABLE_BINXO
-        // switch yet. Its supported native modes therefore own the observed
-        // disabled-binxo cache contract rather than inferring it from HWASAN.
-        enable_asan_binxo: false,
+        enable_asan_binxo: self.binxo_valid,
         exclude_so_from_binxo: &self.option.exclude_so_from_binxo,
       },
     };
-    self.write_json(&layout.binxo_native_lib_cache_file(), &binxo_cache)
+    self.write_json(&self.layout.binxo_native_lib_cache_file(), &binxo_cache)
   }
 
   fn write_json<T: Serialize>(&self, cache_file: &Path, cache: &T) -> NativeBuildResult<()> {
@@ -2022,8 +3073,10 @@ impl<'a> NativeLibCacheWriter<'a> {
   }
 
   fn explicit_debug_symbol(&self) -> Option<&arkdown_core::NativeDebugSymbolOption> {
-    let debug_symbol = &self.option.debug_symbol;
-    (!debug_symbol.strip || !debug_symbol.exclude.is_empty()).then_some(debug_symbol)
+    self
+      .option
+      .debug_symbol_configured
+      .then_some(&self.option.debug_symbol)
   }
 
   fn hash_directory(&self, root: &Path) -> NativeBuildResult<BTreeMap<String, String>> {
@@ -2040,31 +3093,31 @@ impl<'a> NativeLibCacheWriter<'a> {
 
     let mut hashes = BTreeMap::new();
     for path in files {
-      let metadata =
-        std::fs::metadata(&path).map_err(|error| NativeBuildError::NativePostProcessFailed {
-          path: path.clone(),
-          message: error.to_string(),
-        })?;
-      let modified =
-        metadata
-          .modified()
-          .map_err(|error| NativeBuildError::NativePostProcessFailed {
-            path: path.clone(),
-            message: error.to_string(),
-          })?;
-      let modified_ms = modified
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| NativeBuildError::NativePostProcessFailed {
-          path: path.clone(),
-          message: error.to_string(),
-        })?
-        .as_millis();
-      let fingerprint = (u128::from(metadata.len()) + modified_ms).to_string();
-      let hash = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
-      let absolute = arkdown_path::canonicalize_or_owned(&path);
-      hashes.insert(absolute.to_string_lossy().into_owned(), hash);
+      hashes.insert(path.to_string_lossy().into_owned(), Self::file_hash(&path)?);
     }
     Ok(hashes)
+  }
+
+  fn file_hash(path: &Path) -> NativeBuildResult<String> {
+    let metadata =
+      std::fs::metadata(path).map_err(|error| NativeBuildError::NativePostProcessFailed {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+      })?;
+    let modified_ms = metadata
+      .modified()
+      .and_then(|modified| {
+        modified
+          .duration_since(UNIX_EPOCH)
+          .map_err(std::io::Error::other)
+      })
+      .map_err(|error| NativeBuildError::NativePostProcessFailed {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+      })?
+      .as_millis();
+    let fingerprint = (u128::from(metadata.len()) + modified_ms).to_string();
+    Ok(format!("{:x}", Sha256::digest(fingerprint.as_bytes())))
   }
 }
 
@@ -2080,22 +3133,32 @@ struct NativeDependencyLibDir {
 /// files are copied and all others are stripped; with `strip: false`, the
 /// matching files are stripped and all others are copied.
 struct NativeStripProcessor<'a> {
-  module_root: &'a Path,
+  layout: NativeModuleLayout<'a>,
   llvm_strip: Option<PathBuf>,
   option: &'a NativeLibOption,
 }
 
 impl<'a> NativeStripProcessor<'a> {
   fn new(module_root: &'a Path, llvm_strip: Option<PathBuf>, option: &'a NativeLibOption) -> Self {
+    Self::for_variant(module_root, "default", "default", llvm_strip, option)
+  }
+
+  fn for_variant(
+    module_root: &'a Path,
+    product_name: &'a str,
+    target_name: &'a str,
+    llvm_strip: Option<PathBuf>,
+    option: &'a NativeLibOption,
+  ) -> Self {
     Self {
-      module_root,
+      layout: NativeModuleLayout::for_variant(module_root, product_name, target_name),
       llvm_strip,
       option,
     }
   }
 
   fn process(&self, libs: &[PathBuf]) -> NativeBuildResult<Vec<PathBuf>> {
-    let output_root = NativeModuleLayout::new(self.module_root).stripped_libs_dir();
+    let output_root = self.layout.stripped_libs_dir();
     std::fs::create_dir_all(&output_root).map_err(|error| {
       NativeBuildError::NativePostProcessFailed {
         path: output_root.clone(),
@@ -2680,7 +3743,7 @@ impl NativeBuildConfig {
   /// Execute the latest-hvigor `BuildNativeWithCmake` action: validate and
   /// generate the ABI-specific CMake/Ninja build trees without compiling.
   pub fn configure(&self) -> NativeBuildResult<()> {
-    if !self.enable_cmake_build {
+    if !self.should_run_native_tasks() {
       return Ok(());
     }
     self.validate_cmake_script()?;
@@ -2695,16 +3758,13 @@ impl NativeBuildConfig {
   /// Execute the latest-hvigor `BuildNativeWithNinja` action for every
   /// effective ABI. Configuration is intentionally not repeated here.
   pub fn build(&self) -> NativeBuildResult<()> {
-    if !self.enable_cmake_build {
+    let commands = self.ninja_command_plans()?;
+    if commands.is_empty() {
       return Ok(());
     }
-    self.validate_cmake_script()?;
-    self
-      .run_ninja_build()
-      .map_err(|message| NativeBuildError::CmakeFailed {
-        module_root: self.module_root.clone(),
-        message,
-      })?;
+    for command in commands {
+      command.execute()?;
+    }
     tracing::info!(
         module = %self.module_root.display(),
         "native: CMake/Ninja build succeeded"
@@ -2786,78 +3846,37 @@ impl NativeBuildConfig {
 
   /// Directories to scan for pre-built `.so` files, in priority order.
   fn so_search_roots(&self) -> Vec<PathBuf> {
-    NativeModuleLayout::new(&self.module_root).so_search_roots()
+    self.layout().so_search_roots()
   }
 
   fn run_cmake_configure(&self) -> Result<(), String> {
     let toolchain = self.sdk_toolchain.require()?;
-    let layout = NativeModuleLayout::new(&self.module_root);
+    let layout = self.layout();
     let cmake_lists = self.cmake_lists_path();
     let source_dir = cmake_lists
       .parent()
       .ok_or_else(|| format!("CMake script has no parent: {}", cmake_lists.display()))?;
     for abi in NativeAbiFilters::new(&self.abi_filters).build_abis() {
-      let build_dir = layout.cmake_intermediate_dir().join(&abi);
+      let build_dir = layout
+        .ninja_work_dir(self.effective_build_mode())
+        .join(&abi);
       let output_dir = layout.cmake_obj_dir().join(&abi);
+      let cmake_find_root = layout
+        .cmake_dependency_root(self.effective_build_mode())
+        .join(&abi);
       std::fs::create_dir_all(&build_dir)
         .map_err(|e| format!("cannot create CMake build dir: {e}"))?;
       std::fs::create_dir_all(&output_dir)
         .map_err(|e| format!("cannot create CMake output dir: {e}"))?;
-
-      let mut configure_cmd = std::process::Command::new(toolchain.cmake);
-      configure_cmd
-        .arg(format!("-H{}", source_dir.display()))
-        .arg(format!("-B{}", build_dir.display()))
-        .arg(format!("-DOHOS_ARCH={abi}"))
-        .arg(format!(
-          "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}",
-          output_dir.display()
-        ))
-        .arg(format!("-DCMAKE_BUILD_TYPE={}", self.cmake_build_type()))
-        .arg(format!(
-          "-DOHOS_SDK_NATIVE={}",
-          toolchain.native_dir.display()
-        ))
-        .arg("-DCMAKE_SYSTEM_NAME=OHOS")
-        .arg(format!("-DCMAKE_OHOS_ARCH_ABI={abi}"))
-        .arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
-        .arg(format!(
-          "-DCMAKE_TOOLCHAIN_FILE={}",
-          toolchain.toolchain_file.display()
-        ))
-        .arg("-GNinja")
-        .arg(format!(
-          "-DCMAKE_MAKE_PROGRAM={}",
-          toolchain.ninja.display()
-        ))
-        .arg("--no-warn-unused-cli");
-      if let Some(arg) = self.sanitizer.cmake_arg_for_abi(&abi) {
-        configure_cmd.arg(arg);
-      }
-      if let Some(options) = self.external_native_options.as_ref() {
-        if let Some(c_flags) = options
-          .c_flags
-          .as_deref()
-          .filter(|flags| !flags.trim().is_empty())
-        {
-          configure_cmd.arg(format!("-DCMAKE_C_FLAGS={c_flags}"));
-        }
-        if let Some(cpp_flags) = options
-          .cpp_flags
-          .as_deref()
-          .filter(|flags| !flags.trim().is_empty())
-        {
-          configure_cmd.arg(format!("-DCMAKE_CXX_FLAGS={cpp_flags}"));
-        }
-        for argument in &options.arguments {
-          for argument in argument
-            .split_whitespace()
-            .filter(|argument| argument.starts_with('-'))
-          {
-            configure_cmd.arg(argument);
-          }
-        }
-      }
+      self.create_cmake_file_api_queries(&build_dir)?;
+      let mut configure_cmd = self.cmake_configure_command(
+        &toolchain,
+        &abi,
+        source_dir,
+        &build_dir,
+        &output_dir,
+        &cmake_find_root,
+      );
 
       tracing::info!(
           abi = %abi,
@@ -2878,50 +3897,226 @@ impl NativeBuildConfig {
     Ok(())
   }
 
-  fn run_ninja_build(&self) -> Result<(), String> {
-    let toolchain = self.sdk_toolchain.require()?;
-    let layout = NativeModuleLayout::new(&self.module_root);
-    for abi in NativeAbiFilters::new(&self.abi_filters).build_abis() {
-      let build_dir = layout.cmake_intermediate_dir().join(&abi);
-      let mut build_cmd = std::process::Command::new(toolchain.cmake);
-      build_cmd.arg("--build").arg(&build_dir);
-      if let Some(options) = self.external_native_options.as_ref() {
-        if !options.targets.is_empty() {
-          build_cmd.arg("--target").args(&options.targets);
-        }
+  fn ninja_command_plans(&self) -> NativeBuildResult<Vec<NativeCommandPlan>> {
+    if !self.should_run_native_tasks() {
+      return Ok(Vec::new());
+    }
+    self.validate_cmake_script()?;
+    let toolchain =
+      self
+        .sdk_toolchain
+        .require()
+        .map_err(|message| NativeBuildError::CmakeFailed {
+          module_root: self.module_root.clone(),
+          message,
+        })?;
+    Ok(
+      NativeAbiFilters::new(&self.abi_filters)
+        .build_abis()
+        .into_iter()
+        .map(|abi| self.ninja_command_plan(&toolchain, &abi))
+        .collect(),
+    )
+  }
+
+  /// Build the exact command emitted by hvigor 6.1.1.280
+  /// `BuildNativeWithCmake.buildCommand` after `CmakeUtil.mergeCommandLine`.
+  fn cmake_configure_command(
+    &self,
+    toolchain: &ResolvedNativeSdkToolchain<'_>,
+    abi: &str,
+    source_dir: &Path,
+    build_dir: &Path,
+    output_dir: &Path,
+    cmake_find_root: &Path,
+  ) -> Command {
+    let mut defaults = vec![
+      self.prefixed_path_argument("-H", source_dir),
+      self.prefixed_path_argument("-B", build_dir),
+      OsString::from(format!("-DOHOS_ARCH={abi}")),
+      self.prefixed_path_argument("-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=", output_dir),
+      OsString::from(format!("-DCMAKE_BUILD_TYPE={}", self.cmake_build_type())),
+      self.prefixed_path_argument("-DOHOS_SDK_NATIVE=", toolchain.native_dir),
+      OsString::from("-DCMAKE_SYSTEM_NAME=OHOS"),
+      OsString::from(format!("-DCMAKE_OHOS_ARCH_ABI={abi}")),
+      OsString::from("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"),
+      self.prefixed_path_argument("-DCMAKE_TOOLCHAIN_FILE=", toolchain.toolchain_file),
+      OsString::from("-GNinja"),
+      self.prefixed_path_argument("-DCMAKE_MAKE_PROGRAM=", toolchain.ninja),
+    ];
+    if cmake_find_root.exists() {
+      defaults.push(self.prefixed_path_argument("-DCMAKE_FIND_ROOT_PATH=", cmake_find_root));
+    }
+    let package_summary = cmake_find_root.join("summary.cmake");
+    if package_summary.exists() {
+      defaults.push(self.prefixed_path_argument("-DPACKAGE_FIND_FILE=", &package_summary));
+    }
+    defaults.push(OsString::from("--no-warn-unused-cli"));
+    if let Some(options) = self.external_native_options.as_ref() {
+      if let Some(c_flags) = options
+        .c_flags
+        .as_deref()
+        .filter(|flags| !flags.trim().is_empty())
+      {
+        defaults.push(OsString::from(format!("-DCMAKE_C_FLAGS={c_flags}")));
       }
-      build_cmd.arg("--").arg(format!(
-        "-j{}",
-        std::thread::available_parallelism()
-          .map(|n| n.get())
-          .unwrap_or(4)
-      ));
-
-      tracing::info!(
-          abi = %abi,
-          cmd = ?build_cmd,
-          "native: running CMake build"
-      );
-
-      let build_status = build_cmd
-        .status()
-        .map_err(|e| format!("failed to run cmake build: {e}"))?;
-
-      if !build_status.success() {
-        return Err(format!(
-          "cmake build for ABI {abi} exited with status {build_status}"
-        ));
+      if let Some(cpp_flags) = options
+        .cpp_flags
+        .as_deref()
+        .filter(|flags| !flags.trim().is_empty())
+      {
+        defaults.push(OsString::from(format!("-DCMAKE_CXX_FLAGS={cpp_flags}")));
       }
     }
-    Ok(())
+
+    let custom = self.custom_cmake_arguments(abi);
+    let mut command = Command::new(toolchain.cmake);
+    command
+      .args(self.merged_cmake_arguments(defaults, custom))
+      .current_dir(build_dir);
+    command
+  }
+
+  /// Build the base Ninja command wrapped by hvigor's
+  /// `CommandBuilderModifier`, before native targets are appended.
+  fn ninja_command(&self, toolchain: &ResolvedNativeSdkToolchain<'_>, abi: &str) -> Command {
+    self.ninja_command_plan(toolchain, abi).command()
+  }
+
+  fn ninja_command_plan(
+    &self,
+    toolchain: &ResolvedNativeSdkToolchain<'_>,
+    abi: &str,
+  ) -> NativeCommandPlan {
+    let build_dir = self
+      .layout()
+      .ninja_work_dir(self.effective_build_mode())
+      .join(abi);
+    NativeCommandPlan::ninja(
+      &self.module_root,
+      abi,
+      toolchain.ninja,
+      build_dir,
+      self
+        .external_native_options
+        .iter()
+        .flat_map(|options| options.targets.iter().cloned()),
+    )
+  }
+
+  /// Hvigor treats arguments from `externalNativeOptions.arguments` and
+  /// sanitizer switches as native overrides, in that order.
+  fn custom_cmake_arguments(&self, abi: &str) -> Vec<OsString> {
+    let configured = self
+      .external_native_options
+      .iter()
+      .flat_map(|options| options.arguments.iter())
+      .flat_map(|argument| argument.trim().split(' '))
+      .filter(|argument| argument.starts_with('-'))
+      .map(OsString::from);
+    configured
+      .chain(self.sanitizers.cmake_args_for_abi(abi).map(OsString::from))
+      .collect()
+  }
+
+  /// Mirrors hvigor `CmakeUtil.mergeCommandLine`: native arguments are parsed
+  /// first, the first value for a flag key wins, and remaining defaults retain
+  /// insertion order.
+  fn merged_cmake_arguments(
+    &self,
+    defaults: Vec<OsString>,
+    custom: Vec<OsString>,
+  ) -> Vec<OsString> {
+    let mut identities = FxHashSet::default();
+    let mut merged = Vec::with_capacity(defaults.len() + custom.len());
+    for argument in custom.into_iter().chain(defaults) {
+      let Some((identity, normalized)) = self.normalized_cmake_argument(&argument) else {
+        continue;
+      };
+      if identities.insert(identity) {
+        merged.push(normalized);
+      }
+    }
+    merged
+  }
+
+  fn normalized_cmake_argument(&self, argument: &OsStr) -> Option<(String, OsString)> {
+    let Some(argument) = argument.to_str() else {
+      let identity = self.cmake_argument_identity(&argument.to_string_lossy())?;
+      return Some((identity, argument.to_os_string()));
+    };
+    let argument = argument.trim();
+    let identity = self.cmake_argument_identity(argument)?;
+    let mut chars = argument.chars();
+    let prefix = [chars.next()?, chars.next()?]
+      .into_iter()
+      .collect::<String>();
+    let remainder = chars.as_str();
+    let normalized = if let Some((key, value)) = remainder.split_once('=') {
+      format!("{prefix}{}={}", key.trim(), value.trim())
+    } else {
+      format!("{prefix}{remainder}")
+    };
+    Some((identity, OsString::from(normalized)))
+  }
+
+  fn cmake_argument_identity(&self, argument: &str) -> Option<String> {
+    let argument = argument.trim();
+    if !argument.starts_with('-') {
+      return None;
+    }
+    let mut chars = argument.chars();
+    let first = chars.next()?;
+    let second = chars.next()?;
+    let key = chars
+      .as_str()
+      .split_once('=')
+      .map_or(chars.as_str(), |(key, _)| key);
+    Some(format!("{first}{second}{}", key.trim()))
+  }
+
+  fn prefixed_path_argument(&self, prefix: &str, path: &Path) -> OsString {
+    let mut argument = OsString::from(prefix);
+    argument.push(path.as_os_str());
+    argument
   }
 
   fn cmake_build_type(&self) -> &'static str {
     match self.build_mode.as_str() {
       "debug" | "Debug" => "Debug",
-      "release" | "Release" => "Release",
+      "release" | "Release" => self.release_cmake_build_type.as_str(),
       _ => "Debug",
     }
+  }
+
+  fn effective_build_mode(&self) -> &str {
+    if self.build_mode.is_empty() {
+      "debug"
+    } else {
+      &self.build_mode
+    }
+  }
+
+  fn should_run_native_tasks(&self) -> bool {
+    self.enable_cmake_build
+      && (self
+        .external_native_options
+        .as_ref()
+        .is_some_and(|options| options.path.is_some())
+        || self.layout().cmake_lists().is_file())
+  }
+
+  fn create_cmake_file_api_queries(&self, build_dir: &Path) -> Result<(), String> {
+    let query_root = build_dir
+      .join(".cmake")
+      .join("api")
+      .join("v1")
+      .join("query");
+    for query in ["codemodel-v2", "cmakeFiles-v1", "cache-v2"] {
+      std::fs::create_dir_all(query_root.join(query))
+        .map_err(|error| format!("cannot create CMake file API query '{query}': {error}"))?;
+    }
+    Ok(())
   }
 
   fn cmake_lists_path(&self) -> PathBuf {
@@ -2929,7 +4124,11 @@ impl NativeBuildConfig {
       .external_native_options
       .as_ref()
       .and_then(|options| options.path.clone())
-      .unwrap_or_else(|| NativeModuleLayout::new(&self.module_root).cmake_lists())
+      .unwrap_or_else(|| self.layout().cmake_lists())
+  }
+
+  fn layout(&self) -> NativeModuleLayout<'_> {
+    NativeModuleLayout::for_variant(&self.module_root, &self.product_name, &self.target_name)
   }
 }
 
@@ -2961,6 +4160,200 @@ mod tests {
         is_transitive: false,
         direct_deps: Vec::new(),
       },
+    );
+  }
+
+  #[test]
+  fn hvigor_cmake_command_applies_native_overrides_before_defaults() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let build_dir = module_root.join(".cxx/default/default/debug/arm64-v8a");
+    let output_dir = module_root.join("build/default/intermediates/cmake/default/obj/arm64-v8a");
+    let find_root = module_root.join(".cxx/default/default/debug/hvigor/arm64-v8a");
+    fs::create_dir_all(&build_dir).unwrap();
+    fs::create_dir_all(&find_root).unwrap();
+    fs::write(find_root.join("summary.cmake"), b"").unwrap();
+
+    let cmake = tmp.path().join("sdk/native/build-tools/cmake/bin/cmake");
+    let ninja = tmp.path().join("sdk/native/build-tools/cmake/bin/ninja");
+    let native_dir = tmp.path().join("sdk/native");
+    let toolchain_file = native_dir.join("build/cmake/ohos.toolchain.cmake");
+    let toolchain = ResolvedNativeSdkToolchain {
+      cmake: &cmake,
+      ninja: &ninja,
+      native_dir: &native_dir,
+      toolchain_file: &toolchain_file,
+    };
+    let config = NativeBuildConfig {
+      module_root,
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
+      abi_filters: vec!["arm64-v8a".to_string()],
+      enable_cmake_build: true,
+      external_native_options: Some(ExternalNativeOptions {
+        arguments: vec![
+          "-DCMAKE_BUILD_TYPE=Custom -DFIRST=value".to_string(),
+          "-DFIRST=ignored".to_string(),
+        ],
+        c_flags: Some("-fvisibility=hidden".to_string()),
+        ..Default::default()
+      }),
+      sanitizers: NativeBuildSanitizers::new(true, false, false, false),
+      build_mode: "debug".to_string(),
+      sdk_toolchain: NativeSdkToolchain::default(),
+      collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
+    };
+
+    let command = config.cmake_configure_command(
+      &toolchain,
+      "arm64-v8a",
+      &config.module_root.join("src/main/cpp"),
+      &build_dir,
+      &output_dir,
+      &find_root,
+    );
+    let arguments = command
+      .get_args()
+      .map(|argument| argument.to_string_lossy().into_owned())
+      .collect::<Vec<_>>();
+
+    assert_eq!(command.get_program(), cmake.as_os_str());
+    assert_eq!(command.get_current_dir(), Some(build_dir.as_path()));
+    assert_eq!(
+      &arguments[..3],
+      [
+        "-DCMAKE_BUILD_TYPE=Custom",
+        "-DFIRST=value",
+        "-DOHOS_ENABLE_ASAN=ON",
+      ]
+    );
+    assert_eq!(
+      arguments
+        .iter()
+        .filter(|argument| argument.starts_with("-DCMAKE_BUILD_TYPE="))
+        .count(),
+      1
+    );
+    assert!(arguments
+      .iter()
+      .any(|argument| argument.starts_with("-DPACKAGE_FIND_FILE=")));
+    assert!(!arguments
+      .iter()
+      .any(|argument| argument.starts_with("-DOHOS_PACKAGE_FIND_SCRIPT=")));
+    assert!(arguments.contains(&"-DCMAKE_C_FLAGS=-fvisibility=hidden".to_string()));
+  }
+
+  #[test]
+  fn hvigor_ninja_command_uses_sdk_executable_without_implicit_parallel_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let cmake = tmp.path().join("sdk/native/build-tools/cmake/bin/cmake");
+    let ninja = tmp.path().join("sdk/native/build-tools/cmake/bin/ninja");
+    let native_dir = tmp.path().join("sdk/native");
+    let toolchain_file = native_dir.join("build/cmake/ohos.toolchain.cmake");
+    let toolchain = ResolvedNativeSdkToolchain {
+      cmake: &cmake,
+      ninja: &ninja,
+      native_dir: &native_dir,
+      toolchain_file: &toolchain_file,
+    };
+    let config = NativeBuildConfig {
+      module_root: module_root.clone(),
+      product_name: "paid".to_string(),
+      target_name: "phone".to_string(),
+      abi_filters: vec!["arm64-v8a".to_string()],
+      enable_cmake_build: true,
+      external_native_options: Some(ExternalNativeOptions {
+        targets: vec!["entry".to_string(), "helper".to_string()],
+        ..Default::default()
+      }),
+      sanitizers: NativeBuildSanitizers::default(),
+      build_mode: "release".to_string(),
+      sdk_toolchain: NativeSdkToolchain::default(),
+      collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
+    };
+
+    let command = config.ninja_command(&toolchain, "arm64-v8a");
+    let build_dir = module_root.join(".cxx/paid/phone/release/arm64-v8a");
+    let arguments = command.get_args().collect::<Vec<_>>();
+
+    assert_eq!(command.get_program(), ninja.as_os_str());
+    assert_eq!(command.get_current_dir(), Some(build_dir.as_path()));
+    assert_eq!(
+      arguments,
+      [
+        OsStr::new("-C"),
+        build_dir.as_os_str(),
+        OsStr::new("entry"),
+        OsStr::new("helper"),
+      ]
+    );
+    assert!(!arguments
+      .iter()
+      .any(|argument| argument.to_string_lossy().starts_with("-j")));
+  }
+
+  #[test]
+  fn hvigor_ninja_modifier_wraps_base_command_before_targets_are_appended() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let cmake = tmp.path().join("sdk/native/build-tools/cmake/bin/cmake");
+    let ninja = tmp.path().join("sdk/native/build-tools/cmake/bin/ninja");
+    let native_dir = tmp.path().join("sdk/native");
+    let toolchain_file = native_dir.join("build/cmake/ohos.toolchain.cmake");
+    let toolchain = ResolvedNativeSdkToolchain {
+      cmake: &cmake,
+      ninja: &ninja,
+      native_dir: &native_dir,
+      toolchain_file: &toolchain_file,
+    };
+    let config = NativeBuildConfig {
+      module_root: module_root.clone(),
+      product_name: "paid".to_string(),
+      target_name: "phone".to_string(),
+      abi_filters: vec!["arm64-v8a".to_string()],
+      enable_cmake_build: true,
+      external_native_options: Some(ExternalNativeOptions {
+        targets: vec!["entry".to_string(), "helper".to_string()],
+        ..Default::default()
+      }),
+      sanitizers: NativeBuildSanitizers::default(),
+      build_mode: "release".to_string(),
+      sdk_toolchain: NativeSdkToolchain::default(),
+      collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
+    };
+    let build_dir = module_root.join(".cxx/paid/phone/release/arm64-v8a");
+    let plan = config.ninja_command_plan(&toolchain, "arm64-v8a");
+
+    assert_eq!(
+      plan.modifier_command().unwrap(),
+      [
+        ninja.to_string_lossy().into_owned(),
+        "-C".to_string(),
+        build_dir.to_string_lossy().into_owned(),
+      ]
+    );
+
+    let modified = plan
+      .with_modifier_command(vec![
+        "native-command-wrapper".to_string(),
+        "--profile".to_string(),
+      ])
+      .unwrap();
+    let command = modified.command();
+
+    assert_eq!(command.get_program(), OsStr::new("native-command-wrapper"));
+    assert_eq!(command.get_current_dir(), Some(build_dir.as_path()));
+    assert_eq!(
+      command.get_args().collect::<Vec<_>>(),
+      [
+        OsStr::new("--profile"),
+        OsStr::new("entry"),
+        OsStr::new("helper"),
+      ]
     );
   }
 
@@ -3175,6 +4568,238 @@ mod tests {
   }
 
   #[test]
+  fn native_intermediates_follow_selected_product_and_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = NativeModuleLayout::for_variant(tmp.path(), "paid", "release");
+
+    assert_eq!(
+      layout.cmake_obj_dir(),
+      tmp
+        .path()
+        .join("build")
+        .join("paid")
+        .join("intermediates")
+        .join("cmake")
+        .join("release")
+        .join("obj")
+    );
+    assert_eq!(
+      layout.stripped_libs_dir(),
+      tmp
+        .path()
+        .join("build")
+        .join("paid")
+        .join("intermediates")
+        .join("stripped_native_libs")
+        .join("release")
+    );
+    assert_eq!(
+      layout.native_lib_cache_file(),
+      tmp
+        .path()
+        .join("build")
+        .join("paid")
+        .join("intermediates")
+        .join("patch")
+        .join("release")
+        .join("base_native_libs.json")
+    );
+  }
+
+  #[test]
+  fn configure_cmake_materializes_remote_package_configs_in_hvigor_work_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let cpp_dir = module_root.join("src").join("main").join("cpp");
+    fs::create_dir_all(&cpp_dir).unwrap();
+    fs::write(cpp_dir.join("CMakeLists.txt"), "project(entry)").unwrap();
+
+    let dependency_root = tmp.path().join("oh_modules").join("@scope").join("native");
+    let dependency_lib = dependency_root
+      .join("libs")
+      .join("arm64-v8a")
+      .join("libnative.so");
+    let dependency_header = dependency_root.join("include").join("native.h");
+    fs::create_dir_all(dependency_lib.parent().unwrap()).unwrap();
+    fs::create_dir_all(dependency_header.parent().unwrap()).unwrap();
+    fs::write(&dependency_lib, b"ELF").unwrap();
+    fs::write(dependency_header, b"#pragma once").unwrap();
+
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root.clone(),
+      module_type: OhosModuleType::Entry,
+    };
+    let mut dependencies = DependencyGraphSnapshot::default();
+    add_dependency_node(
+      &mut dependencies,
+      "@scope/native",
+      "@scope/native",
+      "1.2.3",
+      dependency_root.clone(),
+    );
+    let policy = NativeLibCollectionPolicy::default()
+      .with_build_mode("release".to_string())
+      .with_external_native_options(Some(ExternalNativeOptions::default()));
+
+    NativeLibCollector::new(&module, &["arm64-v8a".to_string()], &dependencies)
+      .with_output_variant("paid", "phone")
+      .with_policy(policy)
+      .configure_cmake_dependencies()
+      .expect("ConfigureCmake must materialize remote package metadata");
+
+    let abi_root = module_root
+      .join(".cxx")
+      .join("paid")
+      .join("phone")
+      .join("release")
+      .join("hvigor")
+      .join("arm64-v8a");
+    let config_path = abi_root
+      .join("lib")
+      .join("aarch64-linux-ohos")
+      .join("cmake")
+      .join("native")
+      .join("nativeConfig.cmake");
+    let config = fs::read_to_string(&config_path).unwrap();
+    let serialized_lib =
+      ArtifactPathSerializer::path_to_slash_string(&canonicalize_or_owned(&dependency_lib))
+        .unwrap();
+    assert!(config.contains("add_library(native::native SHARED IMPORTED)"));
+    assert!(config.contains(&format!("IMPORTED_LOCATION \"{serialized_lib}\"")));
+    assert!(config.contains("INTERFACE_INCLUDE_DIRECTORIES"));
+
+    let serialized_config = ArtifactPathSerializer::path_to_slash_string(&config_path).unwrap();
+    assert_eq!(
+      fs::read_to_string(abi_root.join("summary.cmake")).unwrap(),
+      format!(
+        "if(EXISTS {serialized_config}){eol}    find_package(native REQUIRED CONFIG){eol}endif(){eol}",
+        eol = NativeCmakeDependencyConfigurator::eol(),
+      )
+    );
+  }
+
+  #[test]
+  fn configure_cmake_reads_local_code_model_headers_and_link_interface() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let cpp_dir = module_root.join("src").join("main").join("cpp");
+    fs::create_dir_all(&cpp_dir).unwrap();
+    fs::write(cpp_dir.join("CMakeLists.txt"), "project(entry)").unwrap();
+
+    let dependency_root = tmp.path().join("native_module");
+    let header = dependency_root.join("public").join("native.h");
+    fs::create_dir_all(header.parent().unwrap()).unwrap();
+    fs::write(header, b"#pragma once").unwrap();
+    let dependency_work_dir = dependency_root
+      .join(".cxx")
+      .join("paid")
+      .join("phone")
+      .join("release")
+      .join("arm64-v8a");
+    let reply_dir = dependency_work_dir
+      .join(".cmake")
+      .join("api")
+      .join("v1")
+      .join("reply");
+    fs::create_dir_all(&reply_dir).unwrap();
+    let dependency_lib = dependency_work_dir.join("out").join("libnative.so");
+    fs::write(
+      reply_dir.join("target-native.json"),
+      serde_json::to_vec(&serde_json::json!({
+        "type": "SHARED_LIBRARY",
+        "artifacts": [{ "path": dependency_lib }]
+      }))
+      .unwrap(),
+    )
+    .unwrap();
+
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root.clone(),
+      module_type: OhosModuleType::Entry,
+    };
+    let mut dependencies = DependencyGraphSnapshot::default();
+    add_dependency_node(
+      &mut dependencies,
+      "native_module",
+      "native_module",
+      "1.0.0",
+      dependency_root.clone(),
+    );
+    let native_lib = NativeLibOption {
+      header_paths: vec![PathBuf::from("public")],
+      libraries_info: vec![arkdown_core::NativeLibraryInfo {
+        name: "libnative.so".to_string(),
+        link_libraries: vec!["hilog_ndk.z".to_string()],
+      }],
+      ..Default::default()
+    };
+    let local_dependency = NativeCmakeLocalDependency::new(
+      dependency_root,
+      "paid".to_string(),
+      "phone".to_string(),
+      "release".to_string(),
+      OhosModuleType::Har,
+      native_lib,
+    );
+    let policy = NativeLibCollectionPolicy::default()
+      .with_build_mode("release".to_string())
+      .with_external_native_options(Some(ExternalNativeOptions::default()))
+      .with_cmake_local_dependencies(vec![local_dependency]);
+
+    NativeLibCollector::new(&module, &["arm64-v8a".to_string()], &dependencies)
+      .with_output_variant("paid", "phone")
+      .with_policy(policy)
+      .configure_cmake_dependencies()
+      .expect("ConfigureCmake must resolve local CMake code-model outputs");
+
+    let config_path = module_root
+      .join(".cxx")
+      .join("paid")
+      .join("phone")
+      .join("release")
+      .join("hvigor")
+      .join("arm64-v8a")
+      .join("lib")
+      .join("aarch64-linux-ohos")
+      .join("cmake")
+      .join("native_module")
+      .join("native_moduleConfig.cmake");
+    let config = fs::read_to_string(config_path).unwrap();
+    assert!(config.contains("add_library(native_module::native SHARED IMPORTED)"));
+    assert!(config.contains("INTERFACE_LINK_LIBRARIES \"hilog_ndk.z\""));
+    assert!(config.contains("public"));
+  }
+
+  #[test]
+  fn configure_cmake_rejects_unknown_cpu_abi_like_hvigor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let cpp_dir = module_root.join("src").join("main").join("cpp");
+    fs::create_dir_all(&cpp_dir).unwrap();
+    fs::write(cpp_dir.join("CMakeLists.txt"), "project(entry)").unwrap();
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root,
+      module_type: OhosModuleType::Entry,
+    };
+    let dependencies = DependencyGraphSnapshot::default();
+    let policy = NativeLibCollectionPolicy::default()
+      .with_external_native_options(Some(ExternalNativeOptions::default()));
+
+    let error = NativeLibCollector::new(&module, &["mips64".to_string()], &dependencies)
+      .with_policy(policy)
+      .configure_cmake_dependencies()
+      .expect_err("unknown ABI must not silently fall back to arm64-v8a");
+
+    assert!(matches!(
+      error,
+      NativeBuildError::UnknownCpuAbi { ref abi } if abi == "mips64"
+    ));
+  }
+
+  #[test]
   fn test_native_import_collects_prebuilt_sos() {
     let tmp = tempfile::tempdir().unwrap();
     let libs_dir = tmp.path().join("libs/arm64-v8a");
@@ -3183,13 +4808,16 @@ mod tests {
 
     let cfg = NativeBuildConfig {
       module_root: tmp.path().to_path_buf(),
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
       external_native_options: None,
-      sanitizer: NativeBuildSanitizer::None,
+      sanitizers: NativeBuildSanitizers::default(),
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
       collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
     let out = cfg.run().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 1);
@@ -3206,13 +4834,16 @@ mod tests {
 
     let cfg = NativeBuildConfig {
       module_root: tmp.path().to_path_buf(),
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
       external_native_options: None,
-      sanitizer: NativeBuildSanitizer::None,
+      sanitizers: NativeBuildSanitizers::default(),
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
       collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
     let out = cfg.run().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 1);
@@ -3236,13 +4867,16 @@ mod tests {
 
     let cfg = NativeBuildConfig {
       module_root: tmp.path().to_path_buf(),
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
       external_native_options: None,
-      sanitizer: NativeBuildSanitizer::None,
+      sanitizers: NativeBuildSanitizers::default(),
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
       collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
     let out = cfg.run().expect("native scan");
     let names = out
@@ -3263,13 +4897,16 @@ mod tests {
 
     let cfg = NativeBuildConfig {
       module_root: tmp.path().to_path_buf(),
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
       external_native_options: None,
-      sanitizer: NativeBuildSanitizer::None,
+      sanitizers: NativeBuildSanitizers::default(),
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
       collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
     let out = cfg.run().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 1);
@@ -3285,13 +4922,16 @@ mod tests {
 
     let cfg = NativeBuildConfig {
       module_root: tmp.path().to_path_buf(),
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
       abi_filters: vec!["arm64-v8a".to_string()],
       enable_cmake_build: false,
       external_native_options: None,
-      sanitizer: NativeBuildSanitizer::None,
+      sanitizers: NativeBuildSanitizers::default(),
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
       collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
     let out = cfg.run().expect("native scan");
     assert!(out.libs_by_abi.is_empty());
@@ -3300,24 +4940,47 @@ mod tests {
   #[test]
   fn test_asan_cmake_arg_applies_to_all_abis() {
     assert_eq!(
-      NativeBuildSanitizer::Asan.cmake_arg_for_abi("arm64-v8a"),
-      Some("-DOHOS_ENABLE_ASAN=ON")
+      NativeBuildSanitizers::new(true, false, false, false)
+        .cmake_args_for_abi("arm64-v8a")
+        .collect::<Vec<_>>(),
+      ["-DOHOS_ENABLE_ASAN=ON"]
     );
     assert_eq!(
-      NativeBuildSanitizer::Asan.cmake_arg_for_abi("x86_64"),
-      Some("-DOHOS_ENABLE_ASAN=ON")
+      NativeBuildSanitizers::new(true, false, false, false)
+        .cmake_args_for_abi("x86_64")
+        .collect::<Vec<_>>(),
+      ["-DOHOS_ENABLE_ASAN=ON"]
     );
   }
 
   #[test]
   fn test_hwasan_cmake_arg_only_applies_to_arm64() {
     assert_eq!(
-      NativeBuildSanitizer::Hwasan.cmake_arg_for_abi("arm64-v8a"),
-      Some("-DOHOS_ENABLE_HWASAN=ON")
+      NativeBuildSanitizers::new(false, false, true, false)
+        .cmake_args_for_abi("arm64-v8a")
+        .collect::<Vec<_>>(),
+      ["-DOHOS_ENABLE_HWASAN=ON"]
     );
     assert_eq!(
-      NativeBuildSanitizer::Hwasan.cmake_arg_for_abi("x86_64"),
-      None
+      NativeBuildSanitizers::new(false, false, true, false)
+        .cmake_args_for_abi("x86_64")
+        .collect::<Vec<_>>(),
+      Vec::<&str>::new()
+    );
+  }
+
+  #[test]
+  fn test_hvigor_forwards_every_enabled_sanitizer_flag() {
+    assert_eq!(
+      NativeBuildSanitizers::new(true, true, true, true)
+        .cmake_args_for_abi("arm64-v8a")
+        .collect::<Vec<_>>(),
+      [
+        "-DOHOS_ENABLE_ASAN=ON",
+        "-DOHOS_ENABLE_TSAN=ON",
+        "-DOHOS_ENABLE_HWASAN=ON",
+        "-DOHOS_ENABLE_UBSAN=ON",
+      ]
     );
   }
 
@@ -3340,6 +5003,101 @@ mod tests {
         OsStr::new("output/libentry.so"),
       ]
     );
+  }
+
+  #[test]
+  fn binxo_validation_uses_truthy_extra_config_before_cmake_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: tmp.path().join("entry"),
+      module_type: arkdown_core::OhosModuleType::Entry,
+    };
+    let deps = DependencyGraphSnapshot::default();
+    let cmake = Some(ExternalNativeOptions {
+      arguments: vec![
+        "-DOHOS_ENABLE_HWASAN=ON".to_string(),
+        "-DOHOS_ENABLE_BINXO=ON".to_string(),
+      ],
+      ..Default::default()
+    });
+
+    let fallback = NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default().with_external_native_options(cmake.clone()),
+    );
+    assert!(fallback.is_binxo_enabled());
+    assert!(fallback.is_binxo_valid());
+
+    let disabled = NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default()
+        .with_external_native_options(cmake)
+        .with_binxo_config(Some(false), Some(true)),
+    );
+    assert!(disabled.is_binxo_enabled());
+    assert!(!disabled.is_binxo_valid());
+    assert!(matches!(
+      disabled.binxo_libs(&[]),
+      Err(NativeBuildError::BinxoRequiresHwasan { .. })
+    ));
+  }
+
+  #[test]
+  fn binxo_reuses_hvigor_file_cache_without_reexecuting_the_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root.clone(),
+      module_type: arkdown_core::OhosModuleType::Entry,
+    };
+    let deps = DependencyGraphSnapshot::default();
+    let layout = NativeModuleLayout::new(&module_root);
+    let source = layout.process_libs_dir().join("arm64-v8a/libentry.so");
+    let destination = layout.binxo_libs_dir().join("arm64-v8a/libentry.so");
+    for path in [&source, &destination] {
+      fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    fs::write(&source, b"source").unwrap();
+    fs::write(&destination, b"cached-binxo").unwrap();
+    let libs = BTreeMap::from([(
+      source.to_string_lossy().into_owned(),
+      NativeLibCacheWriter::file_hash(&source).unwrap(),
+    )]);
+    let binxo = BTreeMap::from([(
+      destination.to_string_lossy().into_owned(),
+      NativeLibCacheWriter::file_hash(&destination).unwrap(),
+    )]);
+    let cache = NativeBinxoCache {
+      libs: &libs,
+      binxo: &binxo,
+      binxo_symbol: NativeBinxoSymbol {
+        enable_asan_binxo: true,
+        exclude_so_from_binxo: &[],
+      },
+    };
+    fs::create_dir_all(layout.binxo_native_lib_cache_file().parent().unwrap()).unwrap();
+    fs::write(
+      layout.binxo_native_lib_cache_file(),
+      serde_json::to_vec(&cache).unwrap(),
+    )
+    .unwrap();
+
+    let policy = NativeLibCollectionPolicy::default()
+      .with_external_native_options(Some(ExternalNativeOptions {
+        arguments: vec!["-DOHOS_ENABLE_HWASAN=ON -DOHOS_ENABLE_BINXO=ON".to_string()],
+        ..Default::default()
+      }))
+      .with_sdk_toolchain(NativeSdkToolchain {
+        binxo: Some(std::env::current_exe().unwrap()),
+        ..Default::default()
+      });
+    let outputs = NativeLibCollector::new(&module, &[], &deps)
+      .with_policy(policy)
+      .binxo_libs(std::slice::from_ref(&source))
+      .unwrap();
+
+    assert_eq!(outputs, [destination.clone()]);
+    assert_eq!(fs::read(destination).unwrap(), b"cached-binxo");
   }
 
   #[test]
@@ -3395,13 +5153,16 @@ mod tests {
 
     let cfg = NativeBuildConfig {
       module_root: tmp.path().to_path_buf(),
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
       abi_filters: vec![],
       enable_cmake_build: false,
       external_native_options: None,
-      sanitizer: NativeBuildSanitizer::None,
+      sanitizers: NativeBuildSanitizers::default(),
       build_mode: "debug".to_string(),
       sdk_toolchain: NativeSdkToolchain::default(),
       collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
     let out = cfg.run().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 2);
@@ -3474,7 +5235,7 @@ mod tests {
     let tmp = tempfile::tempdir().unwrap();
     let option = NativeLibOption::default();
 
-    NativeLibCacheWriter::new(tmp.path(), &option)
+    NativeLibCacheWriter::new(tmp.path(), &option, false)
       .write()
       .expect("write empty native caches");
 
@@ -3486,6 +5247,86 @@ mod tests {
     assert_eq!(
       fs::read_to_string(layout.binxo_native_lib_cache_file()).unwrap(),
       r#"{"libs":{},"binxo":{},"binxoSymbol":{"enableAsanBinxo":false,"excludeSoFromBinxo":[]}}"#
+    );
+  }
+
+  #[test]
+  fn native_cache_uses_libs_file_cache_numeric_size_plus_mtime_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("libs");
+    fs::create_dir_all(&root).unwrap();
+    let library = root.join("libnative.so");
+    fs::write(&library, b"ELF native").unwrap();
+    let option = NativeLibOption::default();
+
+    let hashes = NativeLibCacheWriter::new(tmp.path(), &option, false)
+      .hash_directory(&root)
+      .unwrap();
+    let metadata = fs::metadata(&library).unwrap();
+    let modified_ms = metadata
+      .modified()
+      .unwrap()
+      .duration_since(UNIX_EPOCH)
+      .unwrap()
+      .as_millis();
+    let fingerprint = (u128::from(metadata.len()) + modified_ms).to_string();
+    let expected_hash = format!("{:x}", Sha256::digest(fingerprint.as_bytes()));
+    assert_eq!(
+      hashes.get(&library.to_string_lossy().into_owned()),
+      Some(&expected_hash)
+    );
+  }
+
+  #[test]
+  fn native_cache_uses_binxo_as_strip_input_only_when_binxo_is_valid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = NativeModuleLayout::new(tmp.path());
+    let process = layout.process_libs_dir().join("arm64-v8a/libnative.so");
+    let binxo = layout.binxo_libs_dir().join("arm64-v8a/libnative.so");
+    let stripped = layout.stripped_libs_dir().join("arm64-v8a/libnative.so");
+    for (path, bytes) in [
+      (&process, b"process".as_slice()),
+      (&binxo, b"binxo".as_slice()),
+      (&stripped, b"stripped".as_slice()),
+    ] {
+      fs::create_dir_all(path.parent().unwrap()).unwrap();
+      fs::write(path, bytes).unwrap();
+    }
+    let option = NativeLibOption::default();
+
+    NativeLibCacheWriter::new(tmp.path(), &option, true)
+      .write()
+      .unwrap();
+    let strip_cache: serde_json::Value =
+      serde_json::from_slice(&fs::read(layout.native_lib_cache_file()).unwrap()).unwrap();
+    let binxo_cache: serde_json::Value =
+      serde_json::from_slice(&fs::read(layout.binxo_native_lib_cache_file()).unwrap()).unwrap();
+
+    assert!(strip_cache["libs"]
+      .get(binxo.to_string_lossy().as_ref())
+      .is_some());
+    assert!(strip_cache["libs"]
+      .get(process.to_string_lossy().as_ref())
+      .is_none());
+    assert!(binxo_cache["libs"]
+      .get(process.to_string_lossy().as_ref())
+      .is_some());
+    assert_eq!(binxo_cache["binxoSymbol"]["enableAsanBinxo"], true);
+  }
+
+  #[test]
+  fn release_cmake_build_type_accepts_only_hvigor_values() {
+    assert_eq!(
+      NativeReleaseCmakeBuildType::from_hvigor_property(Some("Debug")).as_str(),
+      "Debug"
+    );
+    assert_eq!(
+      NativeReleaseCmakeBuildType::from_hvigor_property(Some("RelWithDebInfo")).as_str(),
+      "RelWithDebInfo"
+    );
+    assert_eq!(
+      NativeReleaseCmakeBuildType::from_hvigor_property(Some("MinSizeRel")).as_str(),
+      "Release"
     );
   }
 

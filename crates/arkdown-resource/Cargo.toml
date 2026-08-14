@@ -8,6 +8,7 @@ rustc-hash = { workspace = true }
 arkdown-path = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+json5 = { workspace = true }
 thiserror = { workspace = true }
 fs-err = { workspace = true }
 

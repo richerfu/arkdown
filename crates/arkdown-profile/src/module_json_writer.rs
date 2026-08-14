@@ -10,7 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use arkdown_config::build_profile::{parse_api_version, RawBuildProfile};
+use arkdown_config::build_profile::{parse_api_version, RawBuildProfile, RawTargetAbility};
 use arkdown_core::{ArkdownConfig, ArkdownError, HapManifest, OhosModuleType};
 use arkdown_path::{lexical_normalize, ArtifactPath, ArtifactPathSerializer, OhmUrl};
 use indexmap::IndexMap;
@@ -65,14 +65,16 @@ impl ModuleJsonWriter {
         output_path: &Path,
         resource_ids: Option<&FxHashMap<String, u32>>,
     ) -> Result<(), ArkdownError> {
-        Self::write_with_optional_dependency_graph(
+        let value = Self::build_with_optional_dependency_graph(
             manifest,
             config,
-            output_path,
             resource_ids,
             None,
             None,
-        )
+            None,
+            None,
+        )?;
+        Self::write_value(&value, output_path)
     }
 
     pub(crate) fn write_with_dependency_graph(
@@ -83,24 +85,65 @@ impl ModuleJsonWriter {
         dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
         dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<(), ArkdownError> {
-        Self::write_with_optional_dependency_graph(
+        let value = Self::build_with_optional_dependency_graph(
             manifest,
             config,
-            output_path,
             resource_ids,
             Some(dependency_graph),
             dependency_profile_roots,
+            None,
+            None,
+        )?;
+        Self::write_value(&value, output_path)
+    }
+
+    pub(crate) fn build_with_dependency_graph(
+        manifest: &HapManifest,
+        config: &ArkdownConfig,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+        dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
+        dependency_profile_roots: Option<&[PathBuf]>,
+    ) -> Result<serde_json::Value, ArkdownError> {
+        Self::build_with_optional_dependency_graph(
+            manifest,
+            config,
+            resource_ids,
+            Some(dependency_graph),
+            dependency_profile_roots,
+            None,
+            None,
         )
     }
 
-    fn write_with_optional_dependency_graph(
+    pub(crate) fn build_with_dependency_graph_and_module_context(
         manifest: &HapManifest,
         config: &ArkdownConfig,
-        output_path: &Path,
+        resource_ids: Option<&FxHashMap<String, u32>>,
+        dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
+        dependency_profile_roots: Option<&[PathBuf]>,
+        raw_module_json: Option<&serde_json::Value>,
+        target_abilities: &[RawTargetAbility],
+    ) -> Result<serde_json::Value, ArkdownError> {
+        Self::build_with_optional_dependency_graph(
+            manifest,
+            config,
+            resource_ids,
+            Some(dependency_graph),
+            dependency_profile_roots,
+            raw_module_json,
+            Some(target_abilities),
+        )
+    }
+
+    fn build_with_optional_dependency_graph(
+        manifest: &HapManifest,
+        config: &ArkdownConfig,
         resource_ids: Option<&FxHashMap<String, u32>>,
         dependency_graph: Option<&crate::dependency_graph::LocalDependencyGraph>,
         dependency_profile_roots: Option<&[PathBuf]>,
-    ) -> Result<(), ArkdownError> {
+        raw_module_json: Option<&serde_json::Value>,
+        target_abilities: Option<&[RawTargetAbility]>,
+    ) -> Result<serde_json::Value, ArkdownError> {
         let app_json5_fields = Self::read_app_json5_fields(config)?;
         let project_multi_projects = Self::read_project_multi_projects(config);
         let min_numeric_api =
@@ -113,7 +156,7 @@ impl ModuleJsonWriter {
                 .unwrap_or(&config.sdk_config.compile_sdk_version),
             config.sdk_config.compile_api_version,
         );
-        let is_debug = matches!(config.build_mode, arkdown_core::BuildMode::Debug);
+        let is_debug = config.build_mode.is_debuggable();
 
         // Derive packageName from oh-package.json5#name for this module.
         // Falls back to module_name if the file is absent or unparseable.
@@ -129,8 +172,24 @@ impl ModuleJsonWriter {
 
         // Read raw module.json5 for preserve-and-mutate: unknown fields from the
         // source are appended verbatim after all known fields are emitted.
-        let raw_module5 = Self::read_raw_module5(manifest, config);
-        let target_ability_overrides = Self::read_target_ability_overrides(manifest, config);
+        let raw_module5 = raw_module_json
+            .and_then(|value| value.get("module"))
+            .cloned()
+            .or_else(|| Self::read_raw_module5(manifest, config));
+        let target_ability_overrides = target_abilities.map_or_else(
+            || Self::read_target_ability_overrides(manifest, config),
+            |abilities| {
+                abilities
+                    .iter()
+                    .map(|ability| TargetAbilityOverride {
+                        name: ability.name.clone(),
+                        icon: ability.icon.clone(),
+                        label: ability.label.clone(),
+                        launch_type: ability.launch_type.clone(),
+                    })
+                    .collect()
+            },
+        );
         let dependency_profile_merge = Self::read_dependency_profile_merge(
             manifest,
             config,
@@ -183,13 +242,20 @@ impl ModuleJsonWriter {
         combined.insert("app".into(), serde_json::Value::Object(app_section));
         combined.insert("module".into(), module_section);
 
+        Ok(serde_json::Value::Object(combined))
+    }
+
+    pub(crate) fn write_value(
+        value: &serde_json::Value,
+        output_path: &Path,
+    ) -> Result<(), ArkdownError> {
         if let Some(parent) = output_path.parent() {
             fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Io(e.into()))?;
         }
         let mut json = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(b"\t");
         let mut serializer = serde_json::Serializer::with_formatter(&mut json, formatter);
-        serde::Serialize::serialize(&serde_json::Value::Object(combined), &mut serializer)
+        serde::Serialize::serialize(value, &mut serializer)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
         fs_err::write(output_path, &json).map_err(|e| ArkdownError::Io(e.into()))?;
 
@@ -1545,10 +1611,7 @@ impl ModuleJsonWriter {
         else {
             return Vec::new();
         };
-        let build_mode_name = match config.build_mode {
-            arkdown_core::BuildMode::Debug => "debug",
-            arkdown_core::BuildMode::Release => "release",
-        };
+        let build_mode_name = config.build_mode.as_str();
         // Use centralised target selection so all pipeline stages apply the
         // same priority: explicit buildModeSet targets take precedence over
         // catch-all "default" targets.

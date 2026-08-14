@@ -318,6 +318,7 @@ fn test_loader_json_golden_minimal_hap() {
         strict_mode: StrictModeConfig {
           case_sensitive_check: false,
           use_normalized_ohm_url: false,
+          no_external_import_by_path: None,
           duplicate_dependency_check: false,
         },
         ark_options: None,
@@ -328,7 +329,7 @@ fn test_loader_json_golden_minimal_hap() {
         preload_so: vec![],
         deduplicate_har: false,
         enable_source_code_check: true,
-            app_with_signed_pkg: false,
+        app_with_signed_pkg: false,
         customized_har_base_package: None,
         remove_permissions: vec![],
         aot_compile_mode: None,

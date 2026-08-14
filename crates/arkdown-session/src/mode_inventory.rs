@@ -287,6 +287,7 @@ mod tests {
             version_code: 1,
             version_name: "1.0.0".to_string(),
             build_version: None,
+            min_compatible_version_code: None,
             bundle_type: "app".to_string(),
             product_name: "default".to_string(),
             module_order: vec![],

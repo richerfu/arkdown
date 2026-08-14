@@ -29,17 +29,24 @@ impl<'a> ProfileProjectLayout<'a> {
 
 pub(crate) struct ProfileModuleLayout<'a> {
     module_root: &'a Path,
-    /// Build root directory name (`build` or `.test` for local unit tests).
+    /// Build root directory name (`build`, `.preview`, or `.test`).
     build_root: &'a str,
+    /// Product directory selected by the project model.
+    product_name: &'a str,
     /// Target name segment (`generated/r/<target>/ResourceTable.ts`).
     target_name: &'a str,
 }
 
 impl<'a> ProfileModuleLayout<'a> {
     pub(crate) fn new(module_root: &'a Path) -> Self {
+        Self::for_product(module_root, "default")
+    }
+
+    pub(crate) fn for_product(module_root: &'a Path, product_name: &'a str) -> Self {
         Self {
             module_root,
             build_root: "build",
+            product_name,
             target_name: "default",
         }
     }
@@ -47,9 +54,18 @@ impl<'a> ProfileModuleLayout<'a> {
     /// Layout for a named target (e.g. `ohosTest`), keying the generated
     /// resource table path like hvigor (`generated/r/ohosTest/...`).
     pub(crate) fn for_target(module_root: &'a Path, target_name: &'a str) -> Self {
+        Self::for_target_product(module_root, "default", target_name)
+    }
+
+    pub(crate) fn for_target_product(
+        module_root: &'a Path,
+        product_name: &'a str,
+        target_name: &'a str,
+    ) -> Self {
         Self {
             module_root,
             build_root: "build",
+            product_name,
             target_name,
         }
     }
@@ -57,10 +73,33 @@ impl<'a> ProfileModuleLayout<'a> {
     /// Local unit-test layout rooted at `<module>/.test` (hvigor
     /// `buildRoot=.test` injected for the `test` task).
     pub(crate) fn for_test(module_root: &'a Path) -> Self {
+        Self::for_test_product(module_root, "default")
+    }
+
+    pub(crate) fn for_test_product(module_root: &'a Path, product_name: &'a str) -> Self {
         Self {
             module_root,
             build_root: ".test",
+            product_name,
             target_name: "default",
+        }
+    }
+
+    /// Previewer layout rooted at `<module>/.preview`.
+    pub(crate) fn for_preview(module_root: &'a Path, target_name: &'a str) -> Self {
+        Self::for_preview_product(module_root, "default", target_name)
+    }
+
+    pub(crate) fn for_preview_product(
+        module_root: &'a Path,
+        product_name: &'a str,
+        target_name: &'a str,
+    ) -> Self {
+        Self {
+            module_root,
+            build_root: ".preview",
+            product_name,
+            target_name,
         }
     }
 
@@ -135,7 +174,7 @@ impl<'a> ProfileModuleLayout<'a> {
     pub(crate) fn ohos_test_template_ets_root(&self) -> PathBuf {
         self.module_root
             .join(".test")
-            .join("default")
+            .join(self.product_name)
             .join("intermediates")
             .join("src")
             .join("ohosTest")
@@ -197,7 +236,13 @@ impl<'a> ProfileModuleLayout<'a> {
     }
 
     pub(crate) fn build_default(&self) -> PathBuf {
-        self.module_root.join(self.build_root).join("default")
+        self.module_root
+            .join(self.build_root)
+            .join(self.product_name)
+    }
+
+    pub(crate) fn build_root(&self) -> PathBuf {
+        self.module_root.join(self.build_root)
     }
 
     pub(crate) fn default_intermediates(&self) -> PathBuf {
@@ -205,7 +250,9 @@ impl<'a> ProfileModuleLayout<'a> {
     }
 
     pub(crate) fn default_intermediate_dir(&self, stage: &str) -> PathBuf {
-        self.default_intermediates().join(stage).join(self.target_name)
+        self.default_intermediates()
+            .join(stage)
+            .join(self.target_name)
     }
 
     pub(crate) fn default_intermediate_file(&self, stage: &str, file_name: &str) -> PathBuf {
@@ -269,7 +316,7 @@ impl<'a> ProfileModuleLayout<'a> {
 
     pub(crate) fn build_config_candidates(&self) -> [PathBuf; 4] {
         [
-            self.build_default().join("config").join("buildConfig.json"),
+            self.build_root().join("config").join("buildConfig.json"),
             self.default_intermediate_file("build_config", "buildConfig.json"),
             self.default_intermediate_file("build_config", "build-config.json"),
             self.default_intermediate_file("build_config", "build_config.json"),

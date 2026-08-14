@@ -208,14 +208,10 @@ impl Bundler {
         // an absolute path.  The entry paths built above are already absolute.
         let cwd = Self::canonical_project_root(&plan.input.project_root);
 
-        // hvigor still sets Rollup `treeshake: buildMode === "release"` in
-        // arkts-pack.ts, but ESMODULE builds also set `disableGenerateBundle`.
-        // The module-source handoff comes from Rollup's module graph/cache, not
-        // generated chunks, so Rollup has not rewritten the transformed source
-        // before collecting `resolvedIds`.  Rolldown runs OXC DCE before its AST
-        // scanner when treeshake is enabled; that can fold a local string into
-        // `import("pkg")` and create a module request Rollup never reports.
-        let treeshake_enabled = Self::module_source_scan_treeshake_enabled();
+        // Hvigor 6.24.3 `arkts-pack.ts#generateConfig` uses
+        // `treeshake: buildMode === RELEASE`. Keep the decision on BundlePlan
+        // so the project override and the build-mode default cannot diverge.
+        let treeshake_enabled = plan.treeshake_enabled();
         let treeshake = TreeshakeOptions::Boolean(treeshake_enabled);
 
         // manualChunks for supportChunks=true: mirrors hvigor's arkts-pack.js logic.
@@ -557,10 +553,6 @@ impl Bundler {
         fingerprints.sort_by(|left, right| left.key.cmp(&right.key));
         fingerprints.dedup_by(|left, right| left.key == right.key);
         fingerprints
-    }
-
-    fn module_source_scan_treeshake_enabled() -> bool {
-        false
     }
 
     fn module_source_ids(
@@ -1498,12 +1490,13 @@ impl<'a> HvigorModuleSourceWriter<'a> {
 
         let user_content = fs_err::read_to_string(config_path)
             .map_err(|error| ArkdownError::Bundler(error.to_string()))?;
-        let user_document = json5::from_str::<serde_json::Value>(&user_content).map_err(|error| {
-            ArkdownError::Bundler(format!(
-                "invalid mock config '{}': {error}",
-                config_path.display()
-            ))
-        })?;
+        let user_document =
+            json5::from_str::<serde_json::Value>(&user_content).map_err(|error| {
+                ArkdownError::Bundler(format!(
+                    "invalid mock config '{}': {error}",
+                    config_path.display()
+                ))
+            })?;
         let user_entries = user_document.as_object().ok_or_else(|| {
             ArkdownError::Bundler(format!(
                 "mock config '{}' must contain a JSON object",
@@ -1579,19 +1572,16 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             let (imports, _) = self.imports_for_module(&module_id, module_records)?;
             let canonical_module_id = arkdown_path::canonicalize_or_owned(Path::new(&module_id));
             let is_mock_source = mock_module_ids.contains(&canonical_module_id);
-            let requests =
-                HvigorModuleRequestSpecifiers::new(source.code.as_ref(), &module_id)
-                    .collect_literals();
+            let requests = HvigorModuleRequestSpecifiers::new(source.code.as_ref(), &module_id)
+                .collect_literals();
             for request in requests {
                 let Some(ohm_url) = imports.get(&request.specifier) else {
                     continue;
                 };
-                let configured = configured_sources
-                    .get(&request.specifier)
-                    .or_else(|| {
-                        self.local_mock_config_key(&module_id, &request.specifier, options)
-                            .and_then(|key| configured_sources.get(&key))
-                    });
+                let configured = configured_sources.get(&request.specifier).or_else(|| {
+                    self.local_mock_config_key(&module_id, &request.specifier, options)
+                        .and_then(|key| configured_sources.get(&key))
+                });
                 if let Some(configured) = configured {
                     let mock_module_id = configured.module_id.to_string_lossy();
                     let mock_ohm_url = self
@@ -1602,9 +1592,9 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                                 configured.source
                             ))
                         })?;
-                    transformed_entries.entry(ohm_url.clone()).or_insert_with(|| {
-                        serde_json::json!({ "source": mock_ohm_url })
-                    });
+                    transformed_entries
+                        .entry(ohm_url.clone())
+                        .or_insert_with(|| serde_json::json!({ "source": mock_ohm_url }));
                 }
                 if is_mock_source
                     && !request.is_dynamic
@@ -1630,11 +1620,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         Ok(rewrites)
     }
 
-    fn mock_dependency_module_id(
-        &self,
-        key: &str,
-        options: &BundleMockConfig,
-    ) -> Option<PathBuf> {
+    fn mock_dependency_module_id(&self, key: &str, options: &BundleMockConfig) -> Option<PathBuf> {
         let mut components = key.split(['/', '\\']);
         let first = components.next()?;
         if first.starts_with('.') {
@@ -1672,14 +1658,8 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         Some(ArtifactPathSerializer::rel_to_slash(relative))
     }
 
-    fn remove_mock_config_cache(
-        &self,
-        options: &BundleMockConfig,
-    ) -> Result<(), ArkdownError> {
-        for path in [
-            &options.transformed_cache_path,
-            &options.user_cache_path,
-        ] {
+    fn remove_mock_config_cache(&self, options: &BundleMockConfig) -> Result<(), ArkdownError> {
+        for path in [&options.transformed_cache_path, &options.user_cache_path] {
             match fs_err::remove_file(path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -2247,10 +2227,9 @@ impl HvigorModuleRequestRewritePlan {
             if transformed.specifier == rewritten.specifier {
                 continue;
             }
-            if let Some(previous) = imports.insert(
-                transformed.specifier.clone(),
-                rewritten.specifier.clone(),
-            ) {
+            if let Some(previous) =
+                imports.insert(transformed.specifier.clone(), rewritten.specifier.clone())
+            {
                 if previous != rewritten.specifier {
                     return Err(ArkdownError::Bundler(format!(
                         "module request '{}' in '{module_id}' resolved to both '{}' and '{}'",
@@ -3160,9 +3139,8 @@ impl HvigorModulePathMap {
                 // `entry_test`; hvigor `getBelongModuleInfo` keys by the
                 // modulePathMap entry).
                 let belongs_to_current = source.module_name == entry_module_name
-                    || Self::canonical_root(Path::new(module_id)).starts_with(
-                        &self.current_module_root,
-                    );
+                    || Self::canonical_root(Path::new(module_id))
+                        .starts_with(&self.current_module_root);
                 let module_segment = if belongs_to_current {
                     entry_module_name.to_string()
                 } else {
@@ -7161,12 +7139,7 @@ export default class EntryAbility extends UIAbility {}"#;
                 code: fs_err::read_to_string(&mock_source).unwrap().into(),
             },
         );
-        record_resolved_import(
-            &mut state,
-            &main_id,
-            "../service/Service",
-            &service_id,
-        );
+        record_resolved_import(&mut state, &main_id, "../service/Service", &service_id);
         record_resolved_import(
             &mut state,
             &mock_id,
@@ -7185,14 +7158,8 @@ export default class EntryAbility extends UIAbility {}"#;
                 ("service-lib".to_string(), dependency_root.clone()),
             ],
         );
-        let runtime_packages = runtime_packages(&[(
-            "entry",
-            "entry",
-            "com.example",
-            "entry",
-            "1.0.0",
-            false,
-        )]);
+        let runtime_packages =
+            runtime_packages(&[("entry", "entry", "com.example", "entry", "1.0.0", false)]);
         let cache_root = project_root.join("cache");
         let transformed_output_path = project_root.join("intermediates").join("mock-config.json");
         let mock_options = BundleMockConfig {
@@ -7227,11 +7194,19 @@ export default class EntryAbility extends UIAbility {}"#;
         .unwrap();
 
         let main_output = fs_err::read_to_string(
-            &files.iter().find(|file| file.module_id == main_id).unwrap().path,
+            &files
+                .iter()
+                .find(|file| file.module_id == main_id)
+                .unwrap()
+                .path,
         )
         .unwrap();
         let mock_output = fs_err::read_to_string(
-            &files.iter().find(|file| file.module_id == mock_id).unwrap().path,
+            &files
+                .iter()
+                .find(|file| file.module_id == mock_id)
+                .unwrap()
+                .path,
         )
         .unwrap();
         assert!(!main_output.contains(".origin"), "{main_output}");
@@ -7565,9 +7540,7 @@ export class APDIDNetworkUtil {
                     typescript: Some(TypeScriptOptions::default()),
                     ..Default::default()
                 }),
-                treeshake: TreeshakeOptions::Boolean(
-                    Bundler::module_source_scan_treeshake_enabled(),
-                ),
+                treeshake: TreeshakeOptions::Boolean(false),
                 ..Default::default()
             },
             Vec::new(),

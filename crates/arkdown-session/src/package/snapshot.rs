@@ -23,7 +23,7 @@ pub enum PackageSnapshotError {
     Parse { path: PathBuf, message: String },
 }
 
-/// Parsed package metadata from `oh-package.json5`.
+/// Parsed package metadata from the project-selected OHPM or npm manifest.
 #[derive(Debug, Clone)]
 pub struct PackageSnapshot {
     /// Package name from `oh-package.json5`.
@@ -46,17 +46,27 @@ impl PackageSnapshot {
     /// Load from a directory that contains `oh-package.json5`.
     pub fn from_root(root: &std::path::Path) -> Result<Option<Self>, PackageSnapshotError> {
         let path = root.join("oh-package.json5");
+        Self::from_manifest(root, &path)
+    }
+
+    /// Load the manifest selected by hvigor's project-wide
+    /// `CoreProjectModelImpl.isOhpmProject()` decision. Stage projects use one
+    /// package manager consistently across the project and every module.
+    pub fn from_manifest(
+        root: &std::path::Path,
+        path: &Path,
+    ) -> Result<Option<Self>, PackageSnapshotError> {
         if !path.is_file() {
             return Ok(None);
         }
         let content =
             std::fs::read_to_string(&path).map_err(|source| PackageSnapshotError::Io {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 source,
             })?;
         let pkg: RawOhPackage =
             json5::from_str(&content).map_err(|error| PackageSnapshotError::Parse {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 message: error.to_string(),
             })?;
         Ok(Some(Self::from_parsed(root, pkg)?))
@@ -68,10 +78,17 @@ impl PackageSnapshot {
         root: &Path,
         value: &serde_json::Value,
     ) -> Result<Self, PackageSnapshotError> {
-        let path = root.join("oh-package.json5");
+        Self::from_runtime_manifest_value(root, &root.join("oh-package.json5"), value)
+    }
+
+    pub fn from_runtime_manifest_value(
+        root: &Path,
+        path: &Path,
+        value: &serde_json::Value,
+    ) -> Result<Self, PackageSnapshotError> {
         let package =
             serde_json::from_value(value.clone()).map_err(|error| PackageSnapshotError::Parse {
-                path,
+                path: path.to_path_buf(),
                 message: error.to_string(),
             })?;
         Self::from_parsed(root, package)

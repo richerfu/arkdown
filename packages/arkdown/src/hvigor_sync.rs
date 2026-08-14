@@ -103,6 +103,17 @@ impl HvigorCustomTaskInfo {
   }
 }
 
+impl HvigorSyncTargetRequest {
+  fn enable_har_deduplicate(&self) -> bool {
+    self
+      .build_option
+      .get("packOptions")
+      .and_then(|options| options.get("deduplicateHar"))
+      .and_then(Value::as_bool)
+      .unwrap_or(false)
+  }
+}
+
 /// Rust owner for hvigor cache layout, SDK inventory, and version invalidation.
 pub struct HvigorCacheState {
   request: HvigorCacheStateRequest,
@@ -910,10 +921,15 @@ impl HvigorSyncModelWriter {
       .selected_targets
       .first()
       .map_or("default", |target| target.name.as_str());
+    let enable_har_deduplicate = module
+      .selected_targets
+      .first()
+      .is_some_and(HvigorSyncTargetRequest::enable_har_deduplicate);
     let names = HvigorTaskInfoCatalog::module_task_names(
       module.kind,
       target_name,
       self.request.sync_version_changed,
+      enable_har_deduplicate,
     );
     let mut details = names
       .iter()

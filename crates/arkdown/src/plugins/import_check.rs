@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use arkdown_path::lexical_normalize;
-use rolldown_common::{ModuleInfo, NormalModule};
+use rolldown_common::{LogWithoutPlugin, ModuleInfo, NormalModule};
 use rolldown_plugin::{HookBuildEndArgs, HookNoopReturn, HookUsage, Plugin, PluginContext};
 
 /// Collects cross-boundary import violations found during the bundle.
@@ -37,13 +37,16 @@ pub struct ImportViolation {
 /// outside the current module's source tree without going through
 /// `oh_modules/` — the import is recorded as a violation.
 ///
-/// At `build_end` all accumulated violations are emitted as a single
-/// aggregated error so that the user sees all problems at once.
+/// At `build_end` all accumulated violations are emitted together. Hvigor
+/// warns by default and upgrades them to a build error when effective
+/// `strictMode.noExternalImportByPath` is true.
 pub struct ImportCheckPlugin {
     /// Absolute module root for the OHOS module being bundled.
     module_root: PathBuf,
     /// Resolved package roots that are legal import targets for this module.
     allowed_package_roots: Vec<PathBuf>,
+    /// Effective hvigor `strictMode.noExternalImportByPath` policy.
+    no_external_import_by_path: bool,
     /// Collected violations, shared across hook invocations.
     violations: Arc<Mutex<Violations>>,
 }
@@ -53,6 +56,10 @@ impl std::fmt::Debug for ImportCheckPlugin {
         f.debug_struct("ImportCheckPlugin")
             .field("module_root", &self.module_root)
             .field("allowed_package_roots", &self.allowed_package_roots)
+            .field(
+                "no_external_import_by_path",
+                &self.no_external_import_by_path,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -69,6 +76,15 @@ impl ImportCheckPlugin {
         module_root: PathBuf,
         allowed_package_roots: Vec<PathBuf>,
     ) -> Self {
+        Self::with_policy(module_root, allowed_package_roots, false)
+    }
+
+    /// Create the plugin with hvigor's effective strict-mode severity.
+    pub fn with_policy(
+        module_root: PathBuf,
+        allowed_package_roots: Vec<PathBuf>,
+        no_external_import_by_path: bool,
+    ) -> Self {
         Self {
             module_root: lexical_normalize(&module_root),
             allowed_package_roots: allowed_package_roots
@@ -76,6 +92,7 @@ impl ImportCheckPlugin {
                 .filter(|root| !root.as_os_str().is_empty())
                 .map(|root| lexical_normalize(&root))
                 .collect(),
+            no_external_import_by_path,
             violations: Arc::new(Mutex::new(Violations::default())),
         }
     }
@@ -190,18 +207,21 @@ impl Plugin for ImportCheckPlugin {
 
     fn build_end(
         &self,
-        _ctx: &PluginContext,
+        ctx: &PluginContext,
         _args: Option<&HookBuildEndArgs<'_>>,
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
         let violations = Arc::clone(&self.violations);
+        let no_external_import_by_path = self.no_external_import_by_path;
+        let ctx = ctx.clone();
         async move {
-            let entries = violations
-                .lock()
-                .map_err(|e| {
-                    anyhow::anyhow!("import-check: failed to lock violations at build_end: {e}")
-                })?
-                .entries
-                .clone();
+            let entries = std::mem::take(
+                &mut violations
+                    .lock()
+                    .map_err(|e| {
+                        anyhow::anyhow!("import-check: failed to lock violations at build_end: {e}")
+                    })?
+                    .entries,
+            );
             if entries.is_empty() {
                 return Ok(());
             }
@@ -215,7 +235,17 @@ impl Plugin for ImportCheckPlugin {
                 entries.len(),
                 details
             );
-            Err(anyhow::anyhow!("{}", msg))
+            if no_external_import_by_path {
+                Err(anyhow::anyhow!("{}", msg))
+            } else {
+                ctx.warn(LogWithoutPlugin {
+                    message: msg,
+                    code: Some("IMPORT_OUTSIDE_FILE_USING_RELATIVE_PATH".to_string()),
+                    ids: Some(entries.into_iter().map(|entry| entry.importer).collect()),
+                    ..Default::default()
+                });
+                Ok(())
+            }
         }
     }
 }

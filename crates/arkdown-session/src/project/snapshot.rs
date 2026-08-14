@@ -55,6 +55,11 @@ pub struct ProjectSnapshot {
     pub version_name: String,
     /// Effective build version using hvigor's invocation → product → app precedence.
     pub build_version: Option<String>,
+    /// Minimum compatible version code from `AppScope/app.json5`.
+    ///
+    /// Hvigor's `MakePackInfo` reads this field directly from the app resource
+    /// model; product and module profiles do not provide a fallback.
+    pub min_compatible_version_code: Option<u64>,
     /// Bundle type from `AppScope/app.json5`.
     pub bundle_type: String,
     /// Selected product name.
@@ -89,6 +94,7 @@ impl ProjectSnapshot {
             app_version_code,
             app_version_name,
             app_build_version,
+            app_min_compatible_version_code,
             app_bundle_type,
         ) = if let Some(value) = runtime_overrides
             .as_ref()
@@ -104,6 +110,7 @@ impl ProjectSnapshot {
                 app.app.version_code,
                 app.app.version_name,
                 app.app.build_version,
+                app.app.min_compatible_version_code,
                 app.app.bundle_type.unwrap_or_else(|| "app".to_string()),
             )
         } else if app_json_path.is_file() {
@@ -118,10 +125,18 @@ impl ProjectSnapshot {
                 app.app.version_code,
                 app.app.version_name,
                 app.app.build_version,
+                app.app.min_compatible_version_code,
                 app.app.bundle_type.unwrap_or_else(|| "app".to_string()),
             )
         } else {
-            (String::new(), 0, String::new(), None, "app".to_string())
+            (
+                String::new(),
+                0,
+                String::new(),
+                None,
+                None,
+                "app".to_string(),
+            )
         };
         // Hvigor MergeProfile.getMergedAppOptObj applies product/build-script
         // values after AppScope/app.json5. `load_config` has already folded
@@ -145,15 +160,27 @@ impl ProjectSnapshot {
             .clone()
             .unwrap_or(app_bundle_type);
 
+        // `CoreProjectModelImpl.isOhpmProject()` is project-wide: API 9+ uses
+        // OHPM when the root oh-package exists or the legacy package.json is
+        // absent; otherwise every module is loaded through npm metadata.
+        let use_ohpm = config.sdk_config.compile_api_version >= 9
+            && (root.join("oh-package.json5").is_file() || !root.join("package.json").is_file());
+        let package_file_name = if use_ohpm {
+            "oh-package.json5"
+        } else {
+            "package.json"
+        };
+
         let mut module_order = Vec::with_capacity(config.modules.len());
         let mut modules = IndexMap::with_capacity(config.modules.len());
         for module in &config.modules {
-            let snap = ModuleSnapshot::from_root_with_runtime_override(
+            let snap = ModuleSnapshot::from_root_with_runtime_override_and_package_manifest(
                 &module.src_path,
                 &module.name,
                 runtime_overrides
                     .as_ref()
                     .and_then(|overrides| overrides.module_for_root(&module.src_path)),
+                &module.src_path.join(package_file_name),
             )?;
             module_order.push(module.name.clone());
             modules.insert(module.name.clone(), Arc::new(snap));
@@ -163,15 +190,23 @@ impl ProjectSnapshot {
             .as_ref()
             .and_then(|overrides| overrides.project.package.as_ref())
         {
-            Some(Arc::new(PackageSnapshot::from_runtime_value(root, value)?))
+            Some(Arc::new(PackageSnapshot::from_runtime_manifest_value(
+                root,
+                &root.join(package_file_name),
+                value,
+            )?))
         } else {
-            PackageSnapshot::from_root(root)?.map(Arc::new)
+            PackageSnapshot::from_manifest(root, &root.join(package_file_name))?.map(Arc::new)
         };
-        let dependency_parameters = DependencyParameterSnapshot::from_project(
-            root,
-            root_package.as_deref(),
-            parameter_file_override.as_deref(),
-        )?;
+        let dependency_parameters = if use_ohpm {
+            DependencyParameterSnapshot::from_project(
+                root,
+                root_package.as_deref(),
+                parameter_file_override.as_deref(),
+            )?
+        } else {
+            DependencyParameterSnapshot::default()
+        };
 
         let mut dependency_inventory = DependencySnapshotInventory::default();
         dependency_inventory.insert_package(root, root_package.clone());
@@ -196,6 +231,7 @@ impl ProjectSnapshot {
                         builder = builder.with_runtime_overrides(Arc::clone(runtime_overrides));
                     }
                     builder
+                        .with_package_manager(use_ohpm)
                         .with_dependency_parameters(dependency_parameters.clone())
                         .build_with_inventory(&mut dependency_inventory)
                 }),
@@ -208,6 +244,7 @@ impl ProjectSnapshot {
             version_code,
             version_name,
             build_version,
+            min_compatible_version_code: app_min_compatible_version_code,
             bundle_type,
             product_name: config.product.name.clone(),
             module_order,

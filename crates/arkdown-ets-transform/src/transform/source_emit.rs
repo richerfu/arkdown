@@ -9,11 +9,11 @@ use std::collections::{HashMap, VecDeque};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, BindingIdentifier, Comment,
-    ArkUIComponentExpression, BinaryExpression, Expression, ExpressionStatement, IdentifierName,
-    IdentifierReference, IfStatement, ImportDeclaration, MethodDefinition,
-    MethodDefinitionKind, NumericLiteral, ObjectExpression, ObjectPropertyKind, Program,
-    PropertyDefinition, PropertyKey, StringLiteral, TSType, ThisExpression,
+    ArkUIComponentExpression, ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression,
+    BinaryExpression, BindingIdentifier, Comment, Expression, ExpressionStatement, IdentifierName,
+    IdentifierReference, IfStatement, ImportDeclaration, MethodDefinition, MethodDefinitionKind,
+    NumericLiteral, ObjectExpression, ObjectPropertyKind, Program, PropertyDefinition, PropertyKey,
+    StringLiteral, TSType, ThisExpression,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
@@ -46,9 +46,8 @@ impl HvigorTypescriptPrinter {
         numeric_literals.visit_program(program);
         let mut string_literals = StringLiteralInventory::new(program.source_text);
         string_literals.visit_program(program);
-        let mut original_boundaries = TypeScriptSourceBoundaryInventory::with_source_text(
-            program.source_text,
-        );
+        let mut original_boundaries =
+            TypeScriptSourceBoundaryInventory::with_source_text(program.source_text);
         original_boundaries.visit_program(program);
         let source_comments = if options.comments == CommentOptions::disabled() {
             TypeScriptSourceCommentSnapshot::default()
@@ -173,7 +172,10 @@ enum TypeScriptSourceBoundaryKind {
     NumericLiteral(u64),
     This,
     Type,
-    Method { name: String, constructor: bool },
+    Method {
+        name: String,
+        constructor: bool,
+    },
     Property(String),
     Operator(String),
     /// ArkUI component block closure: source components (`Column() { ... }`)
@@ -302,9 +304,7 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     /// LIFO because pop order mirrors the reverse of the source nesting).
     fn visit_expression_statement(&mut self, stmt: &ExpressionStatement<'a>) {
         if let Expression::CallExpression(call) = &stmt.expression {
-            if let Expression::StaticMemberExpression(member) = call.callee.without_parentheses() {
-
-            }
+            if let Expression::StaticMemberExpression(member) = call.callee.without_parentheses() {}
         }
         if let Expression::CallExpression(call) = &stmt.expression {
             if let Expression::StaticMemberExpression(member) = call.callee.without_parentheses() {
