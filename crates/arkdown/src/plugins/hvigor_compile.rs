@@ -10,6 +10,33 @@
 use oxc_index::{Idx, IndexVec};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
+use std::path::PathBuf;
+
+/// Module-scoped `this.share.projectConfig` snapshot supplied to JavaScript
+/// compile plugins. Rust owns the build model and passes this typed snapshot
+/// once before Rolldown starts; the JavaScript bridge only preserves object
+/// identity while user hooks execute.
+#[derive(Debug, Clone)]
+pub struct HvigorCompilePluginShare {
+    pub project_config: HvigorCompilePluginProjectConfig,
+}
+
+/// Latest-hvigor project configuration fields observed by compile plugins.
+/// Filesystem paths remain `PathBuf` until the N-API display boundary.
+#[derive(Debug, Clone)]
+pub struct HvigorCompilePluginProjectConfig {
+    pub bundle_name: String,
+    pub build_mode: String,
+    pub target: String,
+    pub use_normalized_ohm_url: bool,
+    pub compile_sdk_version: String,
+    pub compatible_sdk_version: String,
+    pub package_manager_type: String,
+    pub is_byte_code_har_optimize: bool,
+    pub module_name: Option<String>,
+    pub module_path: Option<PathBuf>,
+    pub project_top_dir: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct HvigorCompilePluginId(u32);

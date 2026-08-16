@@ -843,6 +843,32 @@ impl SdkConfig {
         self.pac_schema_path()
     }
 
+    /// Return the modulecheck schema selected by hvigor for the runtime OS.
+    ///
+    /// `HosSdkInfo` takes `app.json`, `module.json`, and `systemTheme.json`
+    /// from the sibling HMS toolchains component. Other modulecheck schemas
+    /// remain owned by the selected OpenHarmony component. OpenHarmony builds
+    /// always use the selected component directly.
+    pub fn modulecheck_schema_path_for_runtime(
+        &self,
+        runtime_os: &str,
+        file_name: &str,
+    ) -> Option<std::path::PathBuf> {
+        let component_root = self.component_root()?;
+        let schema_component = if runtime_os.eq_ignore_ascii_case("HarmonyOS")
+            && matches!(file_name, "app.json" | "module.json" | "systemTheme.json")
+        {
+            component_root.parent()?.join("hms")
+        } else {
+            component_root.to_path_buf()
+        };
+        let path = schema_component
+            .join("toolchains")
+            .join("modulecheck")
+            .join(file_name);
+        path.is_file().then_some(path)
+    }
+
     /// SDK permission oracle used by hvigor for requestPermissions checks.
     ///
     /// The previewer component stores SDK `definePermissions` in

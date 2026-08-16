@@ -19,11 +19,53 @@ impl Progress {
 
   pub fn step(&self, n: u32, total: u32, label: &str) {
     self.step_start.set(Instant::now());
-    tracing::info!(step = n, total, label, "build step started");
+    match crate::runtime_observe::RuntimeObservability::global() {
+      Some(observability) => {
+        let build_id = observability.build_id();
+        tracing::info!(
+          target: "arkdown_napi::cmd::build::coordinator",
+          build_id = %build_id,
+          step = n,
+          total,
+          label,
+          source = "rust_stage",
+          "build step started"
+        );
+      }
+      None => {
+        tracing::info!(
+          target: "arkdown_napi::cmd::build::coordinator",
+          step = n,
+          total,
+          label,
+          source = "rust_stage",
+          "build step started"
+        );
+      }
+    }
   }
 
   pub fn done(&self) {
     let ms = self.step_start.get().elapsed().as_millis();
-    tracing::info!(elapsed_ms = ms, "build step completed");
+    match crate::runtime_observe::RuntimeObservability::global() {
+      Some(observability) => {
+        let build_id = observability.build_id();
+        tracing::info!(
+          target: "arkdown_napi::cmd::build::coordinator",
+          build_id = %build_id,
+          elapsed_ms = ms,
+          source = "rust_stage",
+          "build step completed"
+        );
+      }
+      None => {
+        tracing::info!(
+          target: "arkdown_napi::cmd::build::coordinator",
+          elapsed_ms = ms,
+          source = "rust_stage",
+          "build step completed"
+        );
+      }
+    }
   }
 }

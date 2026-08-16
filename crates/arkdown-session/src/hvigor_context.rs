@@ -6,7 +6,7 @@
 //! - `GlobalProjectDataService.initAllModuleNameHash`
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_config::RuntimeContextOverrides;
@@ -14,6 +14,7 @@ use arkdown_path::canonicalize_or_owned;
 use indexmap::IndexMap;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -36,6 +37,8 @@ pub enum HvigorContextInspectError {
     Parse { path: PathBuf, message: String },
     #[error("project path has no file name: {0}")]
     ProjectName(PathBuf),
+    #[error("hvigor context snapshot does not contain module: {0}")]
+    ModuleNotFound(PathBuf),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +68,575 @@ pub struct OhpmDependencyInfo {
     pub remote_hsp_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signed_remote_hsp_path: Option<PathBuf>,
+}
+
+/// Stable diagnostic returned when an OHOS plugin context rejects an
+/// in-memory model mutation. The codes and validation order follow the
+/// corresponding latest-hvigor loaders rather than Node/V8 coercion rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(rename_all = "camelCase")]
+#[error("{message}")]
+pub struct HvigorContextMutationDiagnostic {
+    pub code: String,
+    pub message: String,
+}
+
+/// A module package model captured when the JavaScript plugin facade is
+/// created. The session owns subsequent package mutations and only returns
+/// immutable snapshots to V8.
+#[derive(Debug, Clone)]
+pub struct HvigorContextModuleState {
+    pub root: PathBuf,
+    pub package: Value,
+}
+
+/// Result of an accepted context mutation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HvigorContextMutation {
+    pub value: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_product_name: Option<String>,
+}
+
+/// Dynamic build-directory inputs read from Hvigor's parameter object.
+///
+/// These values are supplied for each path projection because custom plugins
+/// can call `Parameter.setProperty()` while their hvigorfiles are evaluated.
+#[derive(Debug, Clone, Default)]
+pub struct HvigorContextPathOptions {
+    pub build_cache_dir: Option<String>,
+    pub build_dir: Option<String>,
+    pub preview_mode: bool,
+    pub local_test: bool,
+    pub ohos_test: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HvigorProjectContextPaths {
+    pub build_root_path: PathBuf,
+    pub build_product_output_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HvigorModuleTargetContextPaths {
+    pub build_product_root_path: PathBuf,
+    pub module_build_path: PathBuf,
+    pub build_target_output_path: PathBuf,
+    pub intermediates_res_path: PathBuf,
+    pub module_build_cache_path: PathBuf,
+}
+
+/// Rust owner for mutable state exposed through `OhosProjectContextImpl` and
+/// `OhosModuleContextImpl`.
+///
+/// JavaScript still supplies the method-shaped public facade required by
+/// arbitrary Hvigor plugins. Model validation, package mutation, canonical
+/// module lookup, dependency snapshot caching, and path projection remain in
+/// this session.
+pub struct HvigorContextSession {
+    project_root: PathBuf,
+    product_name: String,
+    product_is_explicit: bool,
+    project_profile: Value,
+    project_package: Value,
+    module_roots: BTreeMap<PathBuf, PathBuf>,
+    module_packages: BTreeMap<PathBuf, Value>,
+    runtime_overrides: RuntimeContextOverrides,
+    snapshot: Option<HvigorContextSnapshot>,
+}
+
+impl HvigorContextSession {
+    pub fn new(
+        project_root: impl Into<PathBuf>,
+        product_name: impl Into<String>,
+        product_is_explicit: bool,
+        project_profile: Value,
+        project_package: Value,
+        modules: Vec<HvigorContextModuleState>,
+    ) -> Self {
+        // Public Hvigor path getters preserve the spelling supplied by the
+        // project model (for example `/var` on macOS). Canonicalization is
+        // restricted to map identity and dependency inspection below.
+        let project_root = arkdown_path::lexical_normalize(&project_root.into());
+        let mut module_roots = BTreeMap::new();
+        let mut module_packages = BTreeMap::new();
+        for module in modules {
+            let public_root = arkdown_path::lexical_normalize(&module.root);
+            let identity = canonicalize_or_owned(&public_root);
+            module_roots.insert(identity.clone(), public_root);
+            module_packages.insert(identity, module.package);
+        }
+        Self {
+            project_root,
+            product_name: product_name.into(),
+            product_is_explicit,
+            project_profile,
+            project_package,
+            module_roots,
+            module_packages,
+            runtime_overrides: RuntimeContextOverrides::default(),
+            snapshot: None,
+        }
+    }
+
+    pub fn runtime_overrides(&self) -> Option<RuntimeContextOverrides> {
+        (!self.runtime_overrides.is_empty()).then(|| self.runtime_overrides.clone())
+    }
+
+    pub fn register_module(&mut self, root: impl Into<PathBuf>, package: Value) {
+        let public_root = arkdown_path::lexical_normalize(&root.into());
+        let identity = canonicalize_or_owned(&public_root);
+        self.module_roots.insert(identity.clone(), public_root);
+        self.module_packages.insert(identity, package);
+        self.invalidate_snapshot();
+    }
+
+    pub fn set_project_build_profile(
+        &mut self,
+        profile: Value,
+    ) -> Result<HvigorContextMutation, HvigorContextMutationDiagnostic> {
+        self.validate_project_products(&profile)?;
+        self.project_profile = profile.clone();
+        self.runtime_overrides.project.build_profile = Some(profile.clone());
+        if !self.product_is_explicit {
+            self.product_name = Self::products(&profile)
+                .and_then(|products| products.first())
+                .and_then(|product| product.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+                .to_string();
+        }
+        self.invalidate_snapshot();
+        Ok(HvigorContextMutation {
+            value: profile,
+            selected_product_name: Some(self.product_name.clone()),
+        })
+    }
+
+    pub fn set_project_app_json(&mut self, app_json: Value) -> HvigorContextMutation {
+        self.runtime_overrides.project.app_json = Some(app_json.clone());
+        self.invalidate_snapshot();
+        HvigorContextMutation {
+            value: app_json,
+            selected_product_name: None,
+        }
+    }
+
+    pub fn set_module_build_profile(
+        &mut self,
+        root: &Path,
+        profile: Value,
+    ) -> HvigorContextMutation {
+        self.module_overrides_mut(root).build_profile = Some(profile.clone());
+        self.invalidate_snapshot();
+        HvigorContextMutation {
+            value: profile,
+            selected_product_name: None,
+        }
+    }
+
+    pub fn set_module_json(&mut self, root: &Path, module_json: Value) -> HvigorContextMutation {
+        self.module_overrides_mut(root).module_json = Some(module_json.clone());
+        self.invalidate_snapshot();
+        HvigorContextMutation {
+            value: module_json,
+            selected_product_name: None,
+        }
+    }
+
+    pub fn project_package_field(&self, field: &str) -> Option<Value> {
+        self.project_package.get(field).cloned()
+    }
+
+    pub fn module_package_field(&self, root: &Path, field: &str) -> Option<Value> {
+        self.module_package(root)?.get(field).cloned()
+    }
+
+    pub fn set_project_package_field(
+        &mut self,
+        field: &str,
+        value: Value,
+    ) -> Result<HvigorContextMutation, HvigorContextMutationDiagnostic> {
+        Self::validate_package_field(field, &value)?;
+        Self::replace_object_field(&mut self.project_package, field, value)?;
+        let package = self.project_package.clone();
+        self.runtime_overrides.project.package = Some(package.clone());
+        self.invalidate_snapshot();
+        Ok(HvigorContextMutation {
+            value: package,
+            selected_product_name: None,
+        })
+    }
+
+    pub fn set_module_package_field(
+        &mut self,
+        root: &Path,
+        field: &str,
+        value: Value,
+    ) -> Result<HvigorContextMutation, HvigorContextMutationDiagnostic> {
+        Self::validate_package_field(field, &value)?;
+        let root = canonicalize_or_owned(root);
+        let package = self
+            .module_packages
+            .entry(root.clone())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        Self::replace_object_field(package, field, value)?;
+        let package = package.clone();
+        self.module_overrides_mut(&root).package = Some(package.clone());
+        self.invalidate_snapshot();
+        Ok(HvigorContextMutation {
+            value: package,
+            selected_product_name: None,
+        })
+    }
+
+    pub fn set_module_version(
+        &mut self,
+        root: &Path,
+        version: Value,
+    ) -> Result<HvigorContextMutation, HvigorContextMutationDiagnostic> {
+        if !version.is_string() {
+            return Err(Self::diagnostic(
+                "VERSION_IS_NOT_A_STRING",
+                format!("version is not a string: {}", Self::display_value(&version)),
+            ));
+        }
+        self.set_module_package_field(root, "version", version)
+    }
+
+    pub fn dependency_context(
+        &mut self,
+        root: Option<&Path>,
+    ) -> Result<HvigorDependencyContextSnapshot, HvigorContextInspectError> {
+        let snapshot = self.snapshot()?;
+        match root {
+            None => Ok(snapshot.project.clone()),
+            Some(root) => {
+                let normalized = canonicalize_or_owned(root);
+                snapshot
+                    .modules
+                    .iter()
+                    .find_map(|(candidate, context)| {
+                        (canonicalize_or_owned(candidate) == normalized).then(|| context.clone())
+                    })
+                    .ok_or_else(|| HvigorContextInspectError::ModuleNotFound(root.to_path_buf()))
+            }
+        }
+    }
+
+    pub fn all_module_name_hash(&mut self) -> Result<String, HvigorContextInspectError> {
+        Ok(self.snapshot()?.all_module_name_hash.clone())
+    }
+
+    pub fn project_paths(
+        &self,
+        options: &HvigorContextPathOptions,
+    ) -> Result<HvigorProjectContextPaths, HvigorContextInspectError> {
+        HvigorContextPathPlanner::new(&self.project_root, options).project_paths(&self.product_name)
+    }
+
+    pub fn module_target_paths(
+        &self,
+        module_root: &Path,
+        target_name: &str,
+        options: &HvigorContextPathOptions,
+    ) -> Result<HvigorModuleTargetContextPaths, HvigorContextInspectError> {
+        HvigorContextPathPlanner::new(&self.project_root, options).module_target_paths(
+            module_root,
+            &self.product_name,
+            target_name,
+        )
+    }
+
+    fn snapshot(&mut self) -> Result<&HvigorContextSnapshot, HvigorContextInspectError> {
+        if self.snapshot.is_none() {
+            self.snapshot = Some(
+                HvigorContextInspector::new(
+                    &self.project_root,
+                    &self.product_name,
+                    Arc::new(self.runtime_overrides.clone()),
+                )
+                .inspect()?,
+            );
+        }
+        Ok(self.snapshot.as_ref().expect("snapshot initialized above"))
+    }
+
+    fn validate_project_products(
+        &self,
+        next: &Value,
+    ) -> Result<(), HvigorContextMutationDiagnostic> {
+        let Some(current_products) = Self::products(&self.project_profile) else {
+            return Err(Self::diagnostic(
+                "CAN_NOT_ADD_OR_DELETE_PRODUCTS",
+                "Products cannot be added to or removed from build-profile.json5 through OhosProjectContext.",
+            ));
+        };
+        let Some(next_products) = Self::products(next) else {
+            return Err(Self::diagnostic(
+                "CAN_NOT_ADD_OR_DELETE_PRODUCTS",
+                "Products cannot be added to or removed from build-profile.json5 through OhosProjectContext.",
+            ));
+        };
+        if current_products.len() != next_products.len() {
+            return Err(Self::diagnostic(
+                "CAN_NOT_ADD_OR_DELETE_PRODUCTS",
+                "Products cannot be added to or removed from build-profile.json5 through OhosProjectContext.",
+            ));
+        }
+        for current in current_products {
+            let name = current.get("name").and_then(Value::as_str);
+            let candidate = next_products
+                .iter()
+                .find(|product| product.get("name").and_then(Value::as_str) == name);
+            if candidate.is_none_or(|product| product.get("runtimeOS") != current.get("runtimeOS"))
+            {
+                return Err(Self::diagnostic(
+                    "CAN_NOT_CHANGE_NAME_OR_RUNTIME_PRODUCTS",
+                    format!(
+                        "The product name or runtimeOS cannot be changed: {}.",
+                        serde_json::to_string(&name).unwrap_or_else(|_| "null".to_string())
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn products(profile: &Value) -> Option<&Vec<Value>> {
+        profile.pointer("/app/products").and_then(Value::as_array)
+    }
+
+    fn validate_package_field(
+        field: &str,
+        value: &Value,
+    ) -> Result<(), HvigorContextMutationDiagnostic> {
+        if matches!(
+            field,
+            "dependencies" | "devDependencies" | "dynamicDependencies" | "overrides"
+        ) {
+            let values: Box<dyn Iterator<Item = &Value> + '_> = match value {
+                Value::Object(values) => Box::new(values.values()),
+                Value::Array(values) => Box::new(values.iter()),
+                _ => Box::new(std::iter::empty()),
+            };
+            if let Some(version) = values.into_iter().find(|version| !version.is_string()) {
+                return Err(Self::diagnostic(
+                    "DEPENDENCY_VERSION_IS_NOT_A_STRING",
+                    format!(
+                        "dependency version is not a string: {}",
+                        Self::display_value(version)
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_object_field(
+        object: &mut Value,
+        field: &str,
+        value: Value,
+    ) -> Result<(), HvigorContextMutationDiagnostic> {
+        let Some(object) = object.as_object_mut() else {
+            return Err(Self::diagnostic(
+                "INVALID_OH_PACKAGE_MODEL",
+                "oh-package.json5 runtime model must be an object",
+            ));
+        };
+        object.insert(field.to_string(), value);
+        Ok(())
+    }
+
+    fn module_package(&self, root: &Path) -> Option<&Value> {
+        let normalized = canonicalize_or_owned(root);
+        self.module_packages.get(&normalized)
+    }
+
+    fn module_overrides_mut(
+        &mut self,
+        root: &Path,
+    ) -> &mut arkdown_config::RuntimeModuleContextOverrides {
+        let identity = canonicalize_or_owned(root);
+        let public_root = self
+            .module_roots
+            .get(&identity)
+            .cloned()
+            .unwrap_or_else(|| arkdown_path::lexical_normalize(root));
+        self.runtime_overrides
+            .modules
+            .entry(public_root)
+            .or_default()
+    }
+
+    fn invalidate_snapshot(&mut self) {
+        self.snapshot = None;
+    }
+
+    fn diagnostic(code: &str, message: impl Into<String>) -> HvigorContextMutationDiagnostic {
+        HvigorContextMutationDiagnostic {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+
+    fn display_value(value: &Value) -> String {
+        match value {
+            Value::String(value) => value.clone(),
+            _ => value.to_string(),
+        }
+    }
+}
+
+struct HvigorContextPathPlanner<'a> {
+    project_root: &'a Path,
+    options: &'a HvigorContextPathOptions,
+}
+
+impl<'a> HvigorContextPathPlanner<'a> {
+    fn new(project_root: &'a Path, options: &'a HvigorContextPathOptions) -> Self {
+        Self {
+            project_root,
+            options,
+        }
+    }
+
+    fn project_paths(
+        &self,
+        product_name: &str,
+    ) -> Result<HvigorProjectContextPaths, HvigorContextInspectError> {
+        let project_name = self.project_name()?;
+        let parent = self.build_cache_parent(self.project_root, Path::new(&project_name), false);
+        let build_root_path = arkdown_path::lexical_normalize(&parent.join("build"));
+        let build_product_output_path = build_root_path.join("outputs").join(product_name);
+        Ok(HvigorProjectContextPaths {
+            build_root_path,
+            build_product_output_path,
+        })
+    }
+
+    fn module_target_paths(
+        &self,
+        module_root: &Path,
+        product_name: &str,
+        target_name: &str,
+    ) -> Result<HvigorModuleTargetContextPaths, HvigorContextInspectError> {
+        let module_root = arkdown_path::lexical_normalize(module_root);
+        let relative_root =
+            PathBuf::from(self.project_name()?).join(self.relative_module_path(&module_root));
+        let cache_parent = self.build_cache_parent(&module_root, &relative_root, true);
+        let output_parent = self.build_cache_parent(&module_root, &relative_root, false);
+        let module_build_path = arkdown_path::lexical_normalize(&cache_parent.join("build"));
+        let module_product_path = module_build_path.join(product_name);
+        let build_target_output_path = arkdown_path::lexical_normalize(
+            &output_parent
+                .join("build")
+                .join(product_name)
+                .join("outputs")
+                .join(target_name),
+        );
+        Ok(HvigorModuleTargetContextPaths {
+            // `path.resolve(cacheParent, absoluteModuleRoot)` in
+            // OhosModuleContextImpl always selects the absolute module root.
+            build_product_root_path: module_root,
+            module_build_path,
+            build_target_output_path,
+            intermediates_res_path: module_product_path
+                .join("intermediates")
+                .join("res")
+                .join(target_name),
+            module_build_cache_path: module_product_path.join("cache").join(target_name),
+        })
+    }
+
+    fn build_cache_parent(
+        &self,
+        local_root: &Path,
+        relative_root: &Path,
+        support_build_cache_dir: bool,
+    ) -> PathBuf {
+        let Some(configured) = self.configured_build_directory(support_build_cache_dir) else {
+            return local_root.to_path_buf();
+        };
+        if !configured.is_absolute() {
+            return local_root.to_path_buf();
+        }
+        let configured = if configured.exists() {
+            canonicalize_or_owned(&configured)
+        } else {
+            arkdown_path::lexical_normalize(&configured)
+        };
+        arkdown_path::lexical_normalize(&configured.join(relative_root))
+    }
+
+    fn configured_build_directory(&self, support_build_cache_dir: bool) -> Option<PathBuf> {
+        let mut configured = self.options.build_cache_dir.as_deref();
+        if configured.is_none() || support_build_cache_dir {
+            configured = configured.or(self.options.build_dir.as_deref());
+            if configured.is_some()
+                && !self.options.preview_mode
+                && !self.options.local_test
+                && !self.options.ohos_test
+            {
+                return configured.map(Self::unquote_path).map(PathBuf::from);
+            }
+        }
+        None
+    }
+
+    fn project_name(&self) -> Result<String, HvigorContextInspectError> {
+        self.project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| HvigorContextInspectError::ProjectName(self.project_root.to_path_buf()))
+    }
+
+    fn relative_module_path(&self, module_root: &Path) -> PathBuf {
+        if let Ok(relative) = module_root.strip_prefix(self.project_root) {
+            return relative.to_path_buf();
+        }
+        let base = self.project_root.components().collect::<Vec<_>>();
+        let target = module_root.components().collect::<Vec<_>>();
+        let common = base
+            .iter()
+            .zip(&target)
+            .take_while(|(left, right)| left == right)
+            .count();
+        if common == 0
+            || matches!(base.first(), Some(Component::Prefix(_))) && base.first() != target.first()
+        {
+            let separator = std::path::MAIN_SEPARATOR;
+            let sanitized = module_root
+                .to_string_lossy()
+                .replace(':', &separator.to_string());
+            return PathBuf::from(sanitized.trim_start_matches(['/', '\\']));
+        }
+        let mut relative = PathBuf::new();
+        for component in &base[common..] {
+            if matches!(component, Component::Normal(_)) {
+                relative.push("..");
+            }
+        }
+        for component in &target[common..] {
+            relative.push(component.as_os_str());
+        }
+        relative
+    }
+
+    fn unquote_path(value: &str) -> &str {
+        value
+            .strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+            .or_else(|| {
+                value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+            })
+            .unwrap_or(value)
+    }
 }
 
 /// Inspects context data synchronously because hvigor's public getters are

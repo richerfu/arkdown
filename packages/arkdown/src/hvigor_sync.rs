@@ -122,8 +122,8 @@ pub struct HvigorCacheState {
 }
 
 impl HvigorCacheState {
-  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
-    let request = serde_json::from_str(request_json)
+  pub fn from_value(request_value: Value) -> anyhow::Result<Self> {
+    let request = serde_json::from_value(request_value)
       .map_err(|error| anyhow::anyhow!("ARKDOWN_INVALID_HVIGOR_CACHE_REQUEST: {error}"))?;
     Self::new(request)
   }
@@ -435,8 +435,8 @@ pub struct HvigorSyncModelWriter {
 }
 
 impl HvigorSyncModelWriter {
-  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
-    let request = serde_json::from_str(request_json)
+  pub fn from_value(request_value: Value) -> anyhow::Result<Self> {
+    let request = serde_json::from_value(request_value)
       .map_err(|error| anyhow::anyhow!("ARKDOWN_INVALID_HVIGOR_SYNC_REQUEST: {error}"))?;
     Self::new(request)
   }

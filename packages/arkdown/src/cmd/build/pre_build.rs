@@ -75,14 +75,10 @@ impl<'a> PreBuildValidator<'a> {
   }
 
   fn sdk_schema(&self, file_name: &str) -> Option<PathBuf> {
-    let path = self
-      .session
-      .sdk
-      .sdk_root
-      .join("toolchains")
-      .join("modulecheck")
-      .join(file_name);
-    path.is_file().then_some(path)
+    self
+      .config
+      .sdk_config
+      .modulecheck_schema_path_for_runtime(&self.config.product.runtime_os, file_name)
   }
 
   /// `pre-build.ts::targetESVerisonValidate`: tscConfig.targetESVersion is

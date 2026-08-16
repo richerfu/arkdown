@@ -14,40 +14,47 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
   const nativeBinding = {
     async build(config, _plugins, runtimeTasks) {
       calls.push(config)
-      assert.equal(typeof runtimeTasks.tasksJson, 'string')
-      assert.equal(typeof runtimeTasks.selectionJson, 'string')
-      assert.equal(typeof runtimeTasks.invoke, 'function')
+      assert.ok(Array.isArray(runtimeTasks.tasks))
+      assert.equal(typeof runtimeTasks.selection, 'object')
+      assert.equal(typeof runtimeTasks.dispatchTask, 'function')
+      assert.equal(typeof runtimeTasks.transformAbc, 'function')
+      assert.equal(typeof runtimeTasks.modifyNativeCommand, 'function')
       return { artifacts: ['entry.hap'], elapsedMs: 1 }
     },
     collectBuildScriptPluginPaths: actualNativeBinding.collectBuildScriptPluginPaths,
-    inspectHvigorContext() {
-      return '{}'
+    RuntimeBuildScriptSession: actualNativeBinding.RuntimeBuildScriptSession,
+    beginRuntimeInvocation() {
+      return 'fixture-invocation'
     },
-    discoverBuildScriptFiles: actualNativeBinding.discoverBuildScriptFiles,
+    finishRuntimeInvocation() {},
+    installRuntimeObservability() {},
+    inspectRuntimeTaskDeclarations: actualNativeBinding.inspectRuntimeTaskDeclarations,
+    inspectRuntimeTaskModel: actualNativeBinding.inspectRuntimeTaskModel,
+    inspectRuntimeTaskState: actualNativeBinding.inspectRuntimeTaskState,
+    finishRuntimeObservability() {},
+    persistRuntimeReport() {},
+    persistRuntimeDetails() {},
+    runtimeObservabilityIsEnabled() {
+      return false
+    },
+    emitRuntimeLog() {},
+    executeRuntimeCommandPlan: actualNativeBinding.executeRuntimeCommandPlan,
     compileHvigorScript: actualNativeBinding.compileHvigorScript,
     compileHvigorScriptSync: actualNativeBinding.compileHvigorScriptSync,
-    hvigorSyncVersionChanged: actualNativeBinding.hvigorSyncVersionChanged,
     hvigorProjectCacheHash: actualNativeBinding.hvigorProjectCacheHash,
     planHvigorCompilePlugins: actualNativeBinding.planHvigorCompilePlugins,
     planRolldownPackagePlugins: actualNativeBinding.planRolldownPackagePlugins,
-    loadBuildScriptModuleModel: actualNativeBinding.loadBuildScriptModuleModel,
-    loadBuildScriptRuntimeModel: actualNativeBinding.loadBuildScriptRuntimeModel,
     parseHvigorJsonText: actualNativeBinding.parseHvigorJsonText,
     mergeHvigorConfig: actualNativeBinding.mergeHvigorConfig,
-    planBuildScriptRuntime: actualNativeBinding.planBuildScriptRuntime,
-    prepareHvigorPluginWorkspace: actualNativeBinding.prepareHvigorPluginWorkspace,
-    prepareNativeBuildConfig: actualNativeBinding.prepareNativeBuildConfig,
-    runHvigorClean: actualNativeBinding.runHvigorClean,
     runHvigorBuildInfo: actualNativeBinding.runHvigorBuildInfo,
     runHvigorPrune: actualNativeBinding.runHvigorPrune,
-    runtimeCommandPlan: actualNativeBinding.runtimeCommandPlan,
+    RuntimeFileSnapshot: actualNativeBinding.RuntimeFileSnapshot,
+    RuntimeTaskCacheSession: actualNativeBinding.RuntimeTaskCacheSession,
+    RuntimeTaskSnapshot: actualNativeBinding.RuntimeTaskSnapshot,
     runtimeTaskCatalog: actualNativeBinding.runtimeTaskCatalog,
     runtimeTaskReport: actualNativeBinding.runtimeTaskReport,
     resolveBuildScriptPluginPath: actualNativeBinding.resolveBuildScriptPluginPath,
-    validateBuildScriptBuildOption: actualNativeBinding.validateBuildScriptBuildOption,
     validateHvigorCompilePlugins: actualNativeBinding.validateHvigorCompilePlugins,
-    writeHvigorBuildMeta: actualNativeBinding.writeHvigorBuildMeta,
-    writeHvigorSyncModel: actualNativeBinding.writeHvigorSyncModel,
   }
   require.cache[indexPath] = {
     id: indexPath,

@@ -79,8 +79,8 @@ pub(crate) struct RuntimeTaskReportRenderer {
 }
 
 impl RuntimeTaskReportRenderer {
-  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
-    let request: RuntimeTaskReportRequest = serde_json::from_str(request_json)?;
+  pub fn from_value(request_value: serde_json::Value) -> anyhow::Result<Self> {
+    let request: RuntimeTaskReportRequest = serde_json::from_value(request_value)?;
     let tasks = request.tasks.iter().cloned().collect();
     Ok(Self { request, tasks })
   }

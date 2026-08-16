@@ -19,7 +19,6 @@ const {
   normalizeSortedPluginList,
   applyFunctionOrder,
   parseShouldInvalidCacheRequest,
-  parsePluginContext,
   buildPluginContext,
   requireDefaultExport,
   hvigorProjectHash,
@@ -27,8 +26,29 @@ const {
 
 const nativeRuntime = { runRuntimeTasks }
 
-function createTestHvigorCommand(nativeBuild, inspectHvigorContext) {
-  return createHvigorCommand(nativeBuild, inspectHvigorContext, nativeRuntime)
+function dispatchPluginHook(plugin, hookName, request = {}) {
+  const dispatched = plugin.__arkdownDispatchPluginHook({ hookName, ...request })
+  const resultField =
+    hookName === 'resolveId' || hookName === 'resolveDynamicImport'
+      ? 'resolveId'
+      : hookName === 'load'
+        ? 'load'
+        : hookName === 'transform'
+          ? 'transform'
+          : hookName === 'shouldInvalidCache'
+            ? 'shouldInvalidCache'
+            : undefined
+  if (resultField === undefined) return dispatched
+  const unwrap = (envelope) => envelope[resultField]
+  return dispatched && typeof dispatched.then === 'function' ? Promise.resolve(dispatched).then(unwrap) : unwrap(dispatched)
+}
+
+function seedPluginContext(plugin, share) {
+  return dispatchPluginHook(plugin, 'seedContext', { share })
+}
+
+function createTestHvigorCommand(nativeBuild) {
+  return createHvigorCommand(nativeBuild, nativeRuntime)
 }
 
 function tempProject() {
@@ -59,6 +79,10 @@ function copyFixture(name) {
   })
   return target
 }
+
+test('runtime reports the same Hvigor parity version as Rust cache and sync metadata', () => {
+  assert.equal(HVIGOR_PARITY_VERSION, '6.24.3')
+})
 
 test('hvigor project cache hash matches latest 32-character cache layout', () => {
   const root = path.resolve('fixtures', 'cache-project')
@@ -119,10 +143,7 @@ test('hvigor config dependencies are installed before package-backed plugins are
     const workspace = path.join(hvigorHome, 'project_caches', hvigorProjectHash(root), 'workspace')
     const workspaceManifest = path.join(workspace, 'package.json')
     const manifest = JSON.parse(fs.readFileSync(workspaceManifest, 'utf8'))
-    assert.equal(
-      manifest.dependencies['fixture-hvigor-workspace-plugin'],
-      path.join(hvigorDir, 'fixture-plugin'),
-    )
+    assert.equal(manifest.dependencies['fixture-hvigor-workspace-plugin'], path.join(hvigorDir, 'fixture-plugin'))
     assert.ok(
       fs.existsSync(path.join(workspace, 'node_modules', 'fixture-hvigor-workspace-plugin', 'dist', 'plugin.cjs')),
     )
@@ -412,27 +433,16 @@ test('OHOS context build paths follow InjectUtil build-cache and build-dir branc
     product: 'default',
     extParams: { 'build-cache-dir': `"${cliBuildRoot}"` },
   })
-  const cliModuleBuild = path.join(
-    fs.realpathSync.native(cliBuildRoot),
-    projectName,
-    'entry',
-    'build',
-  )
+  const cliModuleBuild = path.join(fs.realpathSync.native(cliBuildRoot), projectName, 'entry', 'build')
 
   // hvigor-ohos-plugin 6.24.3 ProjectPathInfoIml/ModulePathInfoIml pass
   // supportBuildCacheDir=false for public output paths, but not for cache and
   // intermediate paths. An explicit build-cache-dir therefore cannot relocate
   // final outputs.
   assert.equal(cli.projectContext.getBuildRootPath(), path.join(project, 'build'))
-  assert.equal(
-    cli.projectContext.getBuildProductOutputPath(),
-    path.join(project, 'build', 'outputs', 'default'),
-  )
+  assert.equal(cli.projectContext.getBuildProductOutputPath(), path.join(project, 'build', 'outputs', 'default'))
   assert.equal(cli.moduleContext.getBuildProductRootPath(), moduleRoot)
-  assert.equal(
-    cli.target.getBuildTargetOutputPath(),
-    path.join(moduleRoot, 'build', 'default', 'outputs', 'default'),
-  )
+  assert.equal(cli.target.getBuildTargetOutputPath(), path.join(moduleRoot, 'build', 'default', 'outputs', 'default'))
   assert.equal(cli.target.getModulePathDetails().getModuleBuildPath(), cliModuleBuild)
   assert.equal(
     cli.target.getModulePathDetails().getIntermediatesRes(),
@@ -614,7 +624,7 @@ module.exports = { plugins: [] }
       sourcePluginId: 'fixture.lazy',
     },
   ])
-  const lazyOverlay = JSON.parse(loader.hvigorHost.createNativeTaskBridge().tasksJson).find(
+  const lazyOverlay = loader.hvigorHost.createNativeTaskBridge().tasks.find(
     (task) => task.taskName === 'lazyCustom',
   )
   assert.equal(lazyOverlay.lazy, true)
@@ -870,7 +880,10 @@ test('latest hvigor cache, DAG, metrics, trace, and system-plugin exports retain
   duration.setLog(undefined, hvigor.MetricLogType.INFO)
   const report = hvigor.MetricService.getInstance().queryReport()
   assert.equal(report.getName(), 'events')
-  assert.equal(report.getValue().some((event) => event.getId() === duration.getId()), true)
+  assert.equal(
+    report.getValue().some((event) => event.getId() === duration.getId()),
+    true,
+  )
   assert.equal(duration.additional.moduleName, 'entry')
   assert.equal(duration.additional.targetName, 'default')
 
@@ -882,9 +895,7 @@ test('latest hvigor cache, DAG, metrics, trace, and system-plugin exports retain
   trace.flush()
   assert.equal(callbackCalled, true)
   assert.deepEqual(
-    JSON.parse(
-      fs.readFileSync(path.join(root, '.hvigor', 'outputs', 'logs', 'details', 'details.json'), 'utf8'),
-    ),
+    JSON.parse(fs.readFileSync(path.join(root, '.hvigor', 'outputs', 'logs', 'details', 'details.json'), 'utf8')),
     { 'entry.compile': { result: 'success' } },
   )
   assert.equal(hvigor.TraceManager.transformKey('entry.compile'), 'entry_compile')
@@ -1020,9 +1031,9 @@ test('latest hvigor logging, config, global parameter, extension, and iconv APIs
     assert.equal(hvigor.LogLevelMap.get('info'), hvigor.levels.INFO)
     assert.equal(hvigor.getConfiguration().categories.default.level, 'debug')
     assert.equal(
-      hvigor.getConfiguration().appenders['debug-log-file'].filename.endsWith(
-        path.join('.hvigor', 'outputs', 'build-logs', 'build.log'),
-      ),
+      hvigor
+        .getConfiguration()
+        .appenders['debug-log-file'].filename.endsWith(path.join('.hvigor', 'outputs', 'build-logs', 'build.log')),
       true,
     )
 
@@ -1072,7 +1083,10 @@ test('latest hvigor logging, config, global parameter, extension, and iconv APIs
     const writer = hvigor.LocalFileWriter.getInstance()
     writer.withSpace(2)
     writer.write(outputFile, { map: new Map([['key', 1]]), values: [1, 2] })
-    assert.equal(fs.readFileSync(outputFile, 'utf8'), '{\n  "map": {\n    "key": 1\n  },\n  "values": [\n    1,\n    2\n  ]\n}')
+    assert.equal(
+      fs.readFileSync(outputFile, 'utf8'),
+      '{\n  "map": {\n    "key": 1\n  },\n  "values": [\n    1,\n    2\n  ]\n}',
+    )
 
     assert.equal(hvigor.iconv.encodingExists('utf-8'), true)
     assert.equal(hvigor.iconv.encodingExists('gbk'), true)
@@ -1090,7 +1104,6 @@ test('latest hvigor logging, config, global parameter, extension, and iconv APIs
     hvigor.TrackAPI({}, 'trackedMethod', descriptor)
     assert.equal(descriptor.value(2), 3)
     assert.deepEqual(tracked, [2])
-    assert.equal(host._usedHvigorApis.has('trackedMethod'), true)
 
     const extensionFile = path.join(root, 'extension.fixturets')
     fs.writeFileSync(extensionFile, `export = { value: 42 }\n`)
@@ -1118,7 +1131,6 @@ test('latest hvigor logging, config, global parameter, extension, and iconv APIs
     else process.env.config = previousConfig
   }
 })
-
 
 test('decorated IncrementalExecTask matches latest beforeAlways, hook order, and up-to-date behavior', async () => {
   const root = tempProject()
@@ -1198,7 +1210,7 @@ test('hvigor command runner maps assembleHap to the selected native module targe
   const calls = []
   const run = createTestHvigorCommand(async (config, _plugins, runtimeTasks) => {
     calls.push(config)
-    assert.equal(typeof runtimeTasks.invoke, 'function')
+    assert.equal(typeof runtimeTasks.dispatchTask, 'function')
     return { artifacts: ['entry.hap'], elapsedMs: 1 }
   })
 
@@ -1227,7 +1239,7 @@ test('hvigor command runner maps test to the local unit-test native target', asy
   const calls = []
   const run = createTestHvigorCommand(async (config, _plugins, runtimeTasks) => {
     calls.push(config)
-    assert.equal(typeof runtimeTasks.invoke, 'function')
+    assert.equal(typeof runtimeTasks.dispatchTask, 'function')
     return { artifacts: [], elapsedMs: 1 }
   })
 
@@ -1251,7 +1263,7 @@ test('module GenerateBuildProfile maps to its unqualified native cutoff boundary
   const calls = []
   const run = createTestHvigorCommand(async (config, _plugins, runtimeTasks) => {
     calls.push(config)
-    assert.equal(typeof runtimeTasks.invoke, 'function')
+    assert.equal(typeof runtimeTasks.dispatchTask, 'function')
     return { artifacts: [] }
   })
 
@@ -1273,7 +1285,7 @@ test('module compileNative maps to its targetless native cutoff boundary', async
   const calls = []
   const run = createTestHvigorCommand(async (config, _plugins, runtimeTasks) => {
     calls.push(config)
-    assert.equal(typeof runtimeTasks.invoke, 'function')
+    assert.equal(typeof runtimeTasks.dispatchTask, 'function')
     return { artifacts: [] }
   })
 
@@ -1293,7 +1305,7 @@ test('hvigor command runner maps project assembleApp to one native project reque
   const calls = []
   const run = createTestHvigorCommand(async (config, _plugins, runtimeTasks) => {
     calls.push(config)
-    assert.equal(typeof runtimeTasks.invoke, 'function')
+    assert.equal(typeof runtimeTasks.dispatchTask, 'function')
     return { artifacts: ['application.app'], elapsedMs: 1 }
   })
 
@@ -1547,11 +1559,10 @@ test('preview compileHspDependencies preserves Hvigor literal and truthy predica
   assert.equal(trueText.compileHspDependenciesTruthy, true)
 })
 
-test('BinXO extra config preserves Hvigor truthy override and CMake fallback predicates', () => {
+test('BinXO extra config preserves Hvigor truthy native-property override', () => {
   const enabled = new HvigorRuntimeHost(tempProject(), {
     prop: ['ohos-enable-hwasan=true', 'ohos-enable-binxo=true'],
   })
-  assert.equal(enabled.binxoEnabled({ externalNativeOptions: {} }), true)
   assert.deepEqual(enabled.runtimeProperties({}), {
     daemon: false,
     harExcludeHspDependencies: false,
@@ -1572,34 +1583,15 @@ test('BinXO extra config preserves Hvigor truthy override and CMake fallback pre
   const explicitFalse = new HvigorRuntimeHost(tempProject(), {
     prop: ['ohos-enable-binxo=false'],
   })
-  assert.equal(
-    explicitFalse.binxoEnabled({
-      externalNativeOptions: { arguments: '-DOTHER=ON -DOHOS_ENABLE_BINXO=ON' },
-    }),
-    false,
-  )
   assert.equal(explicitFalse.runtimeProperties({}).binxoConfig, false)
 
   const fallback = new HvigorRuntimeHost(tempProject(), {})
-  assert.equal(
-    fallback.binxoEnabled({
-      externalNativeOptions: {
-        arguments: ['-DOTHER=ON', '-DOHOS_ENABLE_BINXO=ON -DVALUE=1'],
-      },
-    }),
-    true,
-  )
   assert.equal(fallback.runtimeProperties({}).binxoConfig, undefined)
 })
 
 test('sanitizer extra config uses Hvigor exact true predicates', () => {
   const host = new HvigorRuntimeHost(tempProject(), {
-    prop: [
-      'ohos-debug-asan=true',
-      'ohos-enable-tsan=true',
-      'ohos-enable-hwasan=false',
-      'ohos-enable-ubsan=true',
-    ],
+    prop: ['ohos-debug-asan=true', 'ohos-enable-tsan=true', 'ohos-enable-hwasan=false', 'ohos-enable-ubsan=true'],
   })
   const properties = host.runtimeProperties({})
   assert.equal(properties.asanConfig, true)
@@ -1609,12 +1601,7 @@ test('sanitizer extra config uses Hvigor exact true predicates', () => {
 
   const native = new RuntimePluginLoader({
     project: host.projectRoot,
-    prop: [
-      'ohos-debug-asan=true',
-      'ohos-enable-tsan=true',
-      'ohos-enable-hwasan=false',
-      'ohos-enable-ubsan=true',
-    ],
+    prop: ['ohos-debug-asan=true', 'ohos-enable-tsan=true', 'ohos-enable-hwasan=false', 'ohos-enable-ubsan=true'],
   }).toNativeBuildConfig()
   assert.equal(native.ohosDebugAsan, true)
   assert.equal(native.ohosEnableTsan, true)
@@ -1879,8 +1866,8 @@ test('shouldInvalidCache receives structured request objects', () => {
   })
 
   assert.equal(
-    plugin.shouldInvalidCache(
-      JSON.stringify({
+    dispatchPluginHook(plugin, 'shouldInvalidCache', {
+      cacheRequest: {
         id: 'entry',
         meta: {
           moduleName: 'entry',
@@ -1890,21 +1877,17 @@ test('shouldInvalidCache receives structured request objects', () => {
         changedFiles: ['entry/src/main/ets/pages/Index.ets'],
         isWatch: true,
         cacheHit: true,
-      }),
-    ),
+      },
+    }),
     true,
   )
   assert.deepEqual(parseShouldInvalidCacheRequest('not-json'), { cacheHit: true })
 
-  const nativeAst = JSON.parse(
-    parsePluginAst(
-      'const n = 123n; const r = /ab+/gi;',
-      JSON.stringify({ sourceType: 'module', ecmaVersion: 'latest' }),
-    ),
-  ).ast
-  const cacheRequest = parseShouldInvalidCacheRequest(
-    JSON.stringify({ id: 'entry', code: 'cached code', __arkdownOxcAst: nativeAst }),
-  )
+  const nativeAst = parsePluginAst('const n = 123n; const r = /ab+/gi;', {
+    sourceType: 'module',
+    ecmaVersion: 'latest',
+  }).ast
+  const cacheRequest = parseShouldInvalidCacheRequest({ id: 'entry', code: 'cached code', __arkdownOxcAst: nativeAst })
   assert.equal(cacheRequest.ast.type, 'Program')
   assert.equal(typeof cacheRequest.ast.body[0].declarations[0].init.value, 'bigint')
   assert.equal(cacheRequest.ast.body[1].declarations[0].init.value instanceof RegExp, true)
@@ -2166,8 +2149,7 @@ test('latest hvigor Rust planner preserves callback and duplicate diagnostics', 
   )
   assert.throws(
     () => new HvigorCompilePluginPlanner({ target: 'hap' }).apply(duplicated),
-    (error) =>
-      error.code === 'DUPLICATED_PLUGIN_NAME_IN_ROLLUP' && error.pluginName === 'same-scope',
+    (error) => error.code === 'DUPLICATED_PLUGIN_NAME_IN_ROLLUP' && error.pluginName === 'same-scope',
   )
 })
 
@@ -2186,8 +2168,8 @@ test('latest hvigor compile buildStart receives no argument and a seeded share c
     '/tmp/build-start.ts',
   )
   const share = { projectConfig: { bundleName: 'com.example.strict' } }
-  plugin.__arkdownSeedHvigorContext(JSON.stringify({ share }))
-  plugin.buildStart('')
+  seedPluginContext(plugin, share)
+  dispatchPluginHook(plugin, 'buildStart', { buildStartOptions: {} })
 
   assert.equal(receivedArgumentCount, 0)
   assert.equal(receivedShare.projectConfig.bundleName, 'com.example.strict')
@@ -2220,10 +2202,10 @@ test('latest hvigor strict lifecycle wrappers discard async return values', () =
     '/tmp/strict-async-return.ts',
   )
 
-  assert.equal(plugin.buildStart(''), undefined)
-  assert.equal(plugin.moduleParsed(JSON.stringify({ id: '/entry.ets' })), undefined)
-  assert.equal(plugin.beforeBuildEnd('{}'), pending)
-  assert.equal(plugin.buildEnd('{}'), undefined)
+  assert.deepEqual(dispatchPluginHook(plugin, 'buildStart', { buildStartOptions: {} }), {})
+  assert.deepEqual(dispatchPluginHook(plugin, 'moduleParsed', { moduleInfo: { id: '/entry.ets' } }), {})
+  assert.equal(typeof dispatchPluginHook(plugin, 'beforeBuildEnd').then, 'function')
+  assert.deepEqual(dispatchPluginHook(plugin, 'buildEnd', { buildEndContext: { errors: [] } }), {})
   assert.deepEqual(calls, ['buildStart', 'moduleParsed', 'beforeBuildEnd', 'buildEnd'])
 })
 
@@ -2239,8 +2221,11 @@ test('explicit Rolldown plugin lifecycle preserves async return values', () => {
     },
   })
 
-  assert.equal(plugin.buildStart('{}'), pending)
-  assert.equal(plugin.buildEnd('{}'), pending)
+  assert.equal(typeof dispatchPluginHook(plugin, 'buildStart', { buildStartOptions: {} }).then, 'function')
+  assert.equal(
+    typeof dispatchPluginHook(plugin, 'buildEnd', { buildEndContext: { errors: [] } }).then,
+    'function',
+  )
 })
 
 test('explicit plugin API does not create a parallel shouldTransformCachedModule runner', () => {
@@ -2435,9 +2420,7 @@ test('hvigor 6.24.3 binds named hapTasks exports into the native assembly graph'
 
   loader.hvigorHost.prepareDirectBuildCycle()
   const bridge = loader.hvigorHost.createNativeTaskBridge()
-  const selection = JSON.parse(bridge.selectionJson)
-  const tasks = JSON.parse(bridge.tasksJson)
-  const catalogs = JSON.parse(bridge.catalogsJson)
+  const { selection, tasks, catalogs } = bridge
   assert.deepEqual(selection.expectedRootPaths, ['entry:assembleHap'])
   assert.equal(catalogs.find((catalog) => catalog.nodeName === 'entry').kind, 'hap')
   assert.equal(
@@ -2445,7 +2428,10 @@ test('hvigor 6.24.3 binds named hapTasks exports into the native assembly graph'
     false,
     'unrealized built-ins must be expanded from the compact Rust catalog instead of crossing N-API',
   )
-  assert.equal(tasks.some((task) => task.path === 'entry:assembleHap'), true)
+  assert.equal(
+    tasks.some((task) => task.path === 'entry:assembleHap'),
+    true,
+  )
 })
 
 test('hvigor 6.24.3 TypeScript custom plugins bind context before apply and forward OHOS effects', async () => {
@@ -2652,35 +2638,17 @@ export default { system: hapTasks, plugins: [plugin] }
 `,
   )
 
-  const inspectCalls = []
-  const inspect = (config) => {
-    inspectCalls.push(config)
-    return JSON.stringify({
-      allModuleNameHash: 'fixture-hash',
-      project: {
-        ohpmDependencyInfo: { projectDep: { name: 'projectDep' } },
-        remoteHspDependencyInfo: { remoteProject: { name: 'remoteProject' } },
-        signedRemoteHspDependencyInfo: { remoteProject: { name: 'remoteProjectSigned' } },
-      },
-      modules: {
-        [entry]: {
-          ohpmDependencyInfo: { moduleDep: { name: 'moduleDep' } },
-          remoteHspDependencyInfo: { remoteModule: { name: 'remoteModule' } },
-          signedRemoteHspDependencyInfo: { remoteModule: { name: 'remoteModuleSigned' } },
-        },
-      },
-    })
-  }
-  const loader = new RuntimePluginLoader({ project: root, product: 'default' }, inspect)
+  const loader = new RuntimePluginLoader({ project: root, product: 'default' })
   await loader.load()
 
   const recorded = JSON.parse(fs.readFileSync(marker, 'utf8'))
-  assert.equal(recorded.project.hash, 'fixture-hash')
-  assert.equal(recorded.project.dependency.projectDep.name, 'projectDep')
-  assert.equal(recorded.project.signed.remoteProject.name, 'remoteProjectSigned')
-  assert.equal(recorded.module.dependency.moduleDep.name, 'moduleDep')
-  assert.equal(recorded.module.remote.remoteModule.name, 'remoteModule')
-  assert.equal(inspectCalls.length, 2, 'module mutations invalidate the project context snapshot')
+  assert.match(recorded.project.hash, /^[0-9a-f]{64}$/)
+  assert.deepEqual(recorded.project.dependency, {})
+  assert.deepEqual(recorded.project.remote, {})
+  assert.deepEqual(recorded.project.signed, {})
+  assert.deepEqual(recorded.module.dependency, {})
+  assert.deepEqual(recorded.module.remote, {})
+  assert.deepEqual(recorded.module.signed, {})
 
   const nativeConfig = loader.toNativeBuildConfig()
   const overrides = JSON.parse(nativeConfig.runtimeContextOverridesJson)
@@ -2711,7 +2679,10 @@ export default { system: hapTasks, plugins: [plugin] }
   const dependencyMap = JSON.parse(fs.readFileSync(path.join(dependencyMapRoot, 'dependencyMap.json5'), 'utf8'))
   assert.equal(dependencyMap.rootDependency, './oh-package.json5')
   assert.equal(dependencyMap.dependencyMap.entry, './entry/oh-package.json5')
-  assert.deepEqual(dependencyMap.modules.map(({ name }) => name), ['entry'])
+  assert.deepEqual(
+    dependencyMap.modules.map(({ name }) => name),
+    ['entry'],
+  )
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dependencyMapRoot, 'entry', 'oh-package.json5'), 'utf8')), {
     name: 'entry',
     version: '8.0.0',
@@ -2870,10 +2841,7 @@ test('npm project task catalog resolves local HSP and HAR targets across module 
       JSON.stringify({
         name,
         ohos: {},
-        dependencies:
-          name === 'entry'
-            ? { shared: 'file:../shared', library: 'file:../library' }
-            : {},
+        dependencies: name === 'entry' ? { shared: 'file:../shared', library: 'file:../library' } : {},
       }),
     )
   }
@@ -2922,16 +2890,8 @@ export default { system: harTasks, plugins: [] }
   await loader.load()
   assert.equal(loader.hvigorHost._isOhpmProject(), false)
   assert.deepEqual(JSON.parse(fs.readFileSync(entryResult, 'utf8')), {
-    merge: [
-      'entry:default@PreBuild',
-      'shared:default@MergeProfile',
-      'library:default@MergeProfile',
-    ],
-    profile: [
-      'entry:default@PreBuild',
-      'shared:default@CreateBuildProfile',
-      'library:default@CreateHarBuildProfile',
-    ],
+    merge: ['entry:default@PreBuild', 'shared:default@MergeProfile', 'library:default@MergeProfile'],
+    profile: ['entry:default@PreBuild', 'shared:default@CreateBuildProfile', 'library:default@CreateHarBuildProfile'],
     compile: [
       'entry:default@GenerateLoaderJson',
       'entry:default@CompileResource',
@@ -3264,6 +3224,7 @@ test('createBuild forwards native BuildConfig fields and strips runtime plugin p
   await build(config)
 
   assert.equal(capturedConfig.runtimeNodeExecutable, process.execPath)
+  assert.equal(capturedConfig.runtimeContextOverridesJson, undefined)
 
   for (const [key, value] of Object.entries(config)) {
     if (key === 'compilePluginPath' || key === 'hvigorPluginFile') {
@@ -3391,18 +3352,6 @@ module.exports = {
 // Plugin context binding — hvigor doWrapper / getCompilePluginContext
 // ---------------------------------------------------------------------------
 
-test('parsePluginContext returns empty object for empty string', () => {
-  assert.deepEqual(parsePluginContext(''), {})
-  assert.deepEqual(parsePluginContext(null), {})
-  assert.deepEqual(parsePluginContext(undefined), {})
-})
-
-test('parsePluginContext returns parsed object for valid JSON', () => {
-  const share = { bundleName: 'com.example.app', buildMode: 'debug' }
-  const result = parsePluginContext(JSON.stringify({ share }))
-  assert.deepEqual(result.share, share)
-})
-
 test('buildPluginContext exposes getModuleIds from hookCtx.moduleIds', () => {
   const ctx = buildPluginContext({ moduleIds: ['entry/index', 'lib/util'] })
   assert.deepEqual(Array.from(ctx.getModuleIds()), ['entry/index', 'lib/util'])
@@ -3501,11 +3450,11 @@ test('internal context seed supplies share data without adding a lifecycle hook'
     },
   })[0]
 
-  plugin.__arkdownSeedHvigorContext(JSON.stringify({ share }))
-  plugin.buildStart('')
+  seedPluginContext(plugin, share)
+  dispatchPluginHook(plugin, 'buildStart', { buildStartOptions: {} })
 
   assert.equal(captured.buildStart.bundleName, share.bundleName)
-  assert.equal(Object.keys(plugin).includes('__arkdownSeedHvigorContext'), false)
+  assert.equal(Object.keys(plugin).includes('__arkdownDispatchPluginHook'), false)
 })
 
 test('share context is bound for resolveId load transform and cache hooks', () => {
@@ -3527,11 +3476,11 @@ test('share context is bound for resolveId load transform and cache hooks', () =
       return false
     },
   })[0]
-  plugin.__arkdownSeedHvigorContext(JSON.stringify({ share }))
-  plugin.resolveId('dep', '/entry.ets')
-  plugin.load('/entry.ets')
-  plugin.transform('export {}', '/entry.ets')
-  plugin.shouldInvalidCache('{}')
+  seedPluginContext(plugin, share)
+  dispatchPluginHook(plugin, 'resolveId', { id: 'dep', importer: '/entry.ets', resolveOptions: {} })
+  dispatchPluginHook(plugin, 'load', { id: '/entry.ets' })
+  dispatchPluginHook(plugin, 'transform', { code: 'export {}', id: '/entry.ets' })
+  dispatchPluginHook(plugin, 'shouldInvalidCache', { cacheRequest: {} })
   assert.equal(captured.length, 4)
   for (const contextShare of captured) {
     assert.equal(contextShare.projectConfig.bundleName, 'com.example.hooks')
@@ -3597,14 +3546,24 @@ test('every Rolldown-owned hook delegates to the live native plugin context', ()
     },
   })
 
-  plugin.buildStart(nativeContext, '{}')
-  plugin.resolveId(nativeContext, 'dep', '/entry.ets', { attributes: {}, isEntry: false })
-  plugin.resolveDynamicImport(nativeContext, 'lazy', '/entry.ets', { attributes: {}, isEntry: false })
-  plugin.load(nativeContext, '/entry.ets')
-  plugin.transform(nativeContext, 'export {}', '/entry.ets')
-  plugin.moduleParsed(nativeContext, JSON.stringify(moduleInfo))
-  plugin.beforeBuildEnd(nativeContext, '{}')
-  plugin.buildEnd(nativeContext, '{}')
+  dispatchPluginHook(plugin, 'buildStart', { context: nativeContext, buildStartOptions: {} })
+  dispatchPluginHook(plugin, 'resolveId', {
+    context: nativeContext,
+    id: 'dep',
+    importer: '/entry.ets',
+    resolveOptions: { attributes: {}, isEntry: false },
+  })
+  dispatchPluginHook(plugin, 'resolveDynamicImport', {
+    context: nativeContext,
+    id: 'lazy',
+    importer: '/entry.ets',
+    resolveOptions: { attributes: {}, isEntry: false },
+  })
+  dispatchPluginHook(plugin, 'load', { context: nativeContext, id: '/entry.ets' })
+  dispatchPluginHook(plugin, 'transform', { context: nativeContext, code: 'export {}', id: '/entry.ets' })
+  dispatchPluginHook(plugin, 'moduleParsed', { context: nativeContext, moduleInfo })
+  dispatchPluginHook(plugin, 'beforeBuildEnd', { context: nativeContext })
+  dispatchPluginHook(plugin, 'buildEnd', { context: nativeContext, buildEndContext: { errors: [] } })
 
   assert.deepEqual(
     observed.map(({ hook }) => hook),
@@ -3643,7 +3602,14 @@ test('resolveId preserves hvigor options and structured hook results', () => {
     },
   })
   const options = { attributes: { type: 'json' }, isEntry: false }
-  assert.equal(plugin.resolveId('@virtual/entry', '/entry.ets', options), expected)
+  assert.equal(
+    dispatchPluginHook(plugin, 'resolveId', {
+      id: '@virtual/entry',
+      importer: '/entry.ets',
+      resolveOptions: options,
+    }),
+    expected,
+  )
   assert.equal(receivedOptions, options)
 })
 
@@ -3667,8 +3633,38 @@ test('load and transform preserve SourceDescription object results', () => {
       return transformResult
     },
   })
-  assert.equal(plugin.load('/entry.ets'), loadResult)
-  assert.equal(plugin.transform('source', '/entry.ets'), transformResult)
+  assert.equal(dispatchPluginHook(plugin, 'load', { id: '/entry.ets' }), loadResult)
+  assert.equal(dispatchPluginHook(plugin, 'transform', { code: 'source', id: '/entry.ets' }), transformResult)
+})
+
+test('nullish plugin results omit typed dispatcher fields at the NAPI boundary', () => {
+  const [plugin] = normalizePluginList({
+    name: 'nullish-hook-results',
+    resolveId() {
+      return null
+    },
+    load() {
+      return undefined
+    },
+    transform() {
+      return null
+    },
+  })
+
+  assert.deepEqual(
+    plugin.__arkdownDispatchPluginHook({
+      hookName: 'resolveId',
+      id: 'dep',
+      importer: '/entry.ets',
+      resolveOptions: {},
+    }),
+    {},
+  )
+  assert.deepEqual(plugin.__arkdownDispatchPluginHook({ hookName: 'load', id: '/entry.ets' }), {})
+  assert.deepEqual(
+    plugin.__arkdownDispatchPluginHook({ hookName: 'transform', code: 'source', id: '/entry.ets' }),
+    {},
+  )
 })
 
 test('moduleParsed receives structured ModuleInfo and bound graph lookup', () => {
@@ -3681,14 +3677,14 @@ test('moduleParsed receives structured ModuleInfo and bound graph lookup', () =>
       lookedUp = this.getModuleInfo(info.id)
     },
   })[0]
-  plugin.moduleParsed(
-    JSON.stringify({
+  dispatchPluginHook(plugin, 'moduleParsed', {
+    moduleInfo: {
       id: '/entry.ets',
       importedIds: ['/dep.ets'],
       dynamicallyImportedIds: ['/lazy.ets'],
       isEntry: true,
-    }),
-  )
+    },
+  })
   assert.equal(received.id, '/entry.ets')
   assert.deepEqual(lookedUp.importedIds, ['/dep.ets'])
   assert.deepEqual(lookedUp.dynamicallyImportedIds, ['/lazy.ets'])
@@ -3703,7 +3699,15 @@ test('resolveDynamicImport is recognized as a Rolldown hook', () => {
     },
   })
   assert.equal(plugin.name, 'dynimport-test')
-  assert.equal(typeof plugin.resolveDynamicImport, 'function')
+  assert.deepEqual(plugin.__arkdownPluginHooks, ['resolveDynamicImport'])
+  assert.equal(
+    dispatchPluginHook(plugin, 'resolveDynamicImport', {
+      id: '@my-virtual-module',
+      importer: '/entry.ets',
+      resolveOptions: {},
+    }),
+    '/resolved',
+  )
 })
 
 test('explicit plugin API ignores non-Rolldown cleanUp instead of running a second lifecycle', () => {

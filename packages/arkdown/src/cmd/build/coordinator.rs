@@ -85,6 +85,9 @@ use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
 };
+use arkdown::plugins::hvigor_compile::{
+  HvigorCompilePluginProjectConfig, HvigorCompilePluginShare,
+};
 use arkdown::{
   BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo, PluginCacheModuleInventory,
   ShouldInvalidCacheRequest, SourceMapPolicy,
@@ -3358,45 +3361,45 @@ fn build_cache_group_snapshots(
   ]
 }
 
-// ---------------------------------------------------------------------------
-// Share context serialization
-// ---------------------------------------------------------------------------
+struct HvigorCompilePluginShareBuilder<'a> {
+  config: &'a ArkdownConfig,
+  args: &'a BuildArgs,
+  module: Option<&'a ModuleConfig>,
+}
 
-/// Build the JSON share context passed to JS plugin lifecycle hooks.
-///
-/// Returns `{ share: { bundleName, buildMode, target, moduleName? } }` —
-/// the subset of hvigor's `projectConfig` that is available at the
-/// coordinator level.
-///
-/// Plugins can access this as `this.share` inside `beforeBuild`,
-/// `afterBuildStart`, `buildStart`, etc., matching hvigor's
-/// `getCompilePluginContext(this).share` shape.
-fn build_share_context_json(
-  config: &ArkdownConfig,
-  args: &BuildArgs,
-  module: Option<&ModuleConfig>,
-) -> String {
-  let build_mode = config.build_mode.as_str();
-  let target = args.target.as_str();
-  serde_json::json!({
-      "share": {
-          "projectConfig": {
-              "bundleName": config.product.bundle_name,
-              "buildMode": build_mode,
-              "target": target,
-              "useNormalizedOHMUrl":
-                  config.product.build_option.strict_mode.use_normalized_ohm_url,
-              "compileSdkVersion": config.sdk_config.compile_sdk_version,
-              "compatibleSdkVersion": config.product.compatible_sdk_version,
-              "packageManagerType": "ohpm",
-              "isByteCodeHarOptimize": args.byte_code_har_integrated_optimization,
-              "moduleName": module.map(|module| module.name.as_str()),
-              "modulePath": module.map(|module| module.src_path.as_path()),
-              "projectTopDir": args.project.as_deref(),
-          }
-      }
-  })
-  .to_string()
+impl<'a> HvigorCompilePluginShareBuilder<'a> {
+  fn new(config: &'a ArkdownConfig, args: &'a BuildArgs, module: Option<&'a ModuleConfig>) -> Self {
+    Self {
+      config,
+      args,
+      module,
+    }
+  }
+
+  /// Build the module-scoped `this.share` snapshot used by latest-hvigor
+  /// compile plugins. Paths remain typed until the N-API display boundary.
+  fn build(self) -> HvigorCompilePluginShare {
+    HvigorCompilePluginShare {
+      project_config: HvigorCompilePluginProjectConfig {
+        bundle_name: self.config.product.bundle_name.clone(),
+        build_mode: self.config.build_mode.as_str().to_string(),
+        target: self.args.target.as_str().to_string(),
+        use_normalized_ohm_url: self
+          .config
+          .product
+          .build_option
+          .strict_mode
+          .use_normalized_ohm_url,
+        compile_sdk_version: self.config.sdk_config.compile_sdk_version.clone(),
+        compatible_sdk_version: self.config.product.compatible_sdk_version.clone(),
+        package_manager_type: "ohpm".to_string(),
+        is_byte_code_har_optimize: self.args.byte_code_har_integrated_optimization,
+        module_name: self.module.map(|module| module.name.clone()),
+        module_path: self.module.map(|module| module.src_path.clone()),
+        project_top_dir: self.args.project.clone(),
+      },
+    }
+  }
 }
 
 struct PluginCacheInvalidationRunner<'a> {
@@ -7377,9 +7380,10 @@ impl BuildCoordinator {
       // `this.share.projectConfig` is module-specific in latest hvigor. Seed
       // only the plugins participating in this module before cache hooks or
       // Rolldown hooks execute.
-      let share_ctx_json = build_share_context_json(module_config.as_ref(), args, Some(module));
+      let share =
+        HvigorCompilePluginShareBuilder::new(module_config.as_ref(), args, Some(module)).build();
       for plugin in &module_package_plugins {
-        plugin.seed_hvigor_context(&share_ctx_json).await?;
+        plugin.seed_hvigor_context(&share).await?;
       }
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
       let cache_dir = PathBuf::from(&loader_json.cache_path);

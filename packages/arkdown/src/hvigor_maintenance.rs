@@ -121,24 +121,29 @@ pub(crate) struct HvigorPruneRunner {
 }
 
 impl HvigorPruneRunner {
-  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
+  pub fn from_value(request_value: Value) -> anyhow::Result<Self> {
     Ok(Self {
-      request: serde_json::from_str(request_json)?,
+      request: serde_json::from_value(request_value)?,
     })
   }
 
-  pub async fn response_json(self) -> anyhow::Result<String> {
-    let response = match tokio::task::spawn_blocking(move || self.execute()).await? {
-      Ok(output) => HvigorMaintenanceResponse {
-        output: Some(output),
-        error: None,
+  pub async fn response_value(self) -> anyhow::Result<Value> {
+    serde_json::to_value(self.response().await?).map_err(Into::into)
+  }
+
+  async fn response(self) -> anyhow::Result<HvigorMaintenanceResponse> {
+    Ok(
+      match tokio::task::spawn_blocking(move || self.execute()).await? {
+        Ok(output) => HvigorMaintenanceResponse {
+          output: Some(output),
+          error: None,
+        },
+        Err(error) => HvigorMaintenanceResponse {
+          output: None,
+          error: Some(error.diagnostic()),
+        },
       },
-      Err(error) => HvigorMaintenanceResponse {
-        output: None,
-        error: Some(error.diagnostic()),
-      },
-    };
-    serde_json::to_string(&response).map_err(Into::into)
+    )
   }
 
   fn execute(&self) -> Result<Vec<String>, HvigorMaintenanceError> {
@@ -302,24 +307,29 @@ pub(crate) struct HvigorCleanRunner {
 }
 
 impl HvigorCleanRunner {
-  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
+  pub fn from_value(request_value: Value) -> anyhow::Result<Self> {
     Ok(Self {
-      request: serde_json::from_str(request_json)?,
+      request: serde_json::from_value(request_value)?,
     })
   }
 
-  pub async fn response_json(self) -> anyhow::Result<String> {
-    let response = match tokio::task::spawn_blocking(move || self.execute()).await? {
-      Ok(output) => HvigorMaintenanceResponse {
-        output: Some(output),
-        error: None,
+  pub async fn response_value(self) -> anyhow::Result<Value> {
+    serde_json::to_value(self.response().await?).map_err(Into::into)
+  }
+
+  async fn response(self) -> anyhow::Result<HvigorMaintenanceResponse> {
+    Ok(
+      match tokio::task::spawn_blocking(move || self.execute()).await? {
+        Ok(output) => HvigorMaintenanceResponse {
+          output: Some(output),
+          error: None,
+        },
+        Err(error) => HvigorMaintenanceResponse {
+          output: None,
+          error: Some(error.diagnostic()),
+        },
       },
-      Err(error) => HvigorMaintenanceResponse {
-        output: None,
-        error: Some(error.diagnostic()),
-      },
-    };
-    serde_json::to_string(&response).map_err(Into::into)
+    )
   }
 
   fn execute(&self) -> Result<Vec<String>, HvigorMaintenanceError> {

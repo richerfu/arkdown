@@ -144,6 +144,17 @@ impl PluginAstParseResult {
         .map_err(Into::into)
     }
 
+    /// Move the parser result across a typed N-API boundary without first
+    /// encoding the complete ESTree as JSON text. The value still contains
+    /// OXC's literal-fix envelope so the JavaScript bridge can restore
+    /// `BigInt` and `RegExp` values while avoiding stringify/parse work.
+    pub fn into_bridge_value(self) -> Result<Value, PluginAstParseError> {
+        let mut payload = Map::with_capacity(2);
+        payload.insert("ast".to_string(), self.ast);
+        payload.insert("comments".to_string(), serde_json::to_value(self.comments)?);
+        Ok(Value::Object(payload))
+    }
+
     pub(crate) fn into_ast(self) -> Value {
         self.ast
     }
