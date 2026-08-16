@@ -4,7 +4,7 @@ struct RuntimeTaskReportFixture;
 
 impl RuntimeTaskReportFixture {
   fn render(request: serde_json::Value) -> String {
-    RuntimeTaskReportRenderer::from_json(&request.to_string())
+    RuntimeTaskReportRenderer::from_value(request)
       .unwrap()
       .render()
       .unwrap()

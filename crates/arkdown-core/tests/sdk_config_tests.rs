@@ -99,6 +99,46 @@ fn local_test_components_are_derived_from_the_selected_sdk_layout() {
 }
 
 #[test]
+fn harmonyos_modulecheck_uses_hms_schema_owners_like_hvigor() {
+    let temp = tempfile::tempdir().expect("temporary SDK layout");
+    let sdk_default = temp.path().join("sdk").join("default");
+    let ohos_component = sdk_default.join("openharmony");
+    let loader = ohos_component
+        .join("ets")
+        .join("build-tools")
+        .join("ets-loader");
+    let ohos_schemas = ohos_component.join("toolchains").join("modulecheck");
+    let hms_schemas = sdk_default
+        .join("hms")
+        .join("toolchains")
+        .join("modulecheck");
+    for schema_root in [&ohos_schemas, &hms_schemas] {
+        fs::create_dir_all(schema_root).expect("modulecheck schema directory");
+        for file_name in ["app.json", "module.json", "systemTheme.json", "pages.json"] {
+            fs::write(schema_root.join(file_name), b"{}").expect("modulecheck schema");
+        }
+    }
+
+    let config = sdk_config(loader);
+    for file_name in ["app.json", "module.json", "systemTheme.json"] {
+        assert_eq!(
+            config.modulecheck_schema_path_for_runtime("HarmonyOS", file_name),
+            Some(hms_schemas.join(file_name)),
+            "HosSdkInfo overrides {file_name} with the HMS toolchains component"
+        );
+        assert_eq!(
+            config.modulecheck_schema_path_for_runtime("OpenHarmony", file_name),
+            Some(ohos_schemas.join(file_name))
+        );
+    }
+    assert_eq!(
+        config.modulecheck_schema_path_for_runtime("HarmonyOS", "pages.json"),
+        Some(ohos_schemas.join("pages.json")),
+        "HosSdkInfo inherits page schema lookup from CommonSdkInfo"
+    );
+}
+
+#[test]
 fn local_test_coverage_supports_the_standalone_command_line_layout() {
     let temp = tempfile::tempdir().expect("temporary command-line tools layout");
     let distribution = temp.path().join("command-line-tools");

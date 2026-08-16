@@ -61,7 +61,7 @@ use crate::plugins::ets_transform::{
     RolldownEtsTransformPlan, TransformEntrySourceId, TransformSourceSnapshot,
 };
 use crate::plugins::har_dedup::HarDedupPlugin;
-use crate::plugins::hvigor_compile::HvigorNativePluginSlot;
+use crate::plugins::hvigor_compile::{HvigorCompilePluginShare, HvigorNativePluginSlot};
 use crate::plugins::import_check::ImportCheckPlugin;
 use crate::plugins::json5::Json5Plugin;
 use crate::plugins::minify::MinifyPlugin;
@@ -368,11 +368,14 @@ impl PackagePlugin {
     /// This is initialization data, not a second lifecycle hook runner. Every
     /// supported hook still executes through Rolldown except the two explicit
     /// gaps in [`HvigorPluginGapHooks`].
-    pub async fn seed_hvigor_context(&self, share_json: &str) -> anyhow::Result<()> {
+    pub async fn seed_hvigor_context(
+        &self,
+        share: &HvigorCompilePluginShare,
+    ) -> anyhow::Result<()> {
         let Some(gap_hooks) = &self.gap_hooks else {
             return Ok(());
         };
-        gap_hooks.seed_hvigor_context(share_json).await
+        gap_hooks.seed_hvigor_context(share).await
     }
 }
 
@@ -386,7 +389,7 @@ impl PackagePlugin {
 /// object before Rolldown starts and is not user-visible lifecycle behavior.
 #[async_trait::async_trait]
 pub trait HvigorPluginGapHooks: Send + Sync {
-    async fn seed_hvigor_context(&self, _share_json: &str) -> anyhow::Result<()> {
+    async fn seed_hvigor_context(&self, _share: &HvigorCompilePluginShare) -> anyhow::Result<()> {
         Ok(())
     }
 

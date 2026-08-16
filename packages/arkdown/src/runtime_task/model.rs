@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::catalog::{RuntimeTaskCatalog, RuntimeTaskCatalogRequest};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskDescriptor {
   pub path: String,
@@ -31,9 +31,9 @@ pub struct RuntimeTaskDescriptor {
   #[serde(default)]
   pub input_properties: Vec<RuntimeTaskProperty>,
   #[serde(default)]
-  pub input_files: Vec<String>,
+  pub input_files: Vec<RuntimeTaskFileDeclaration>,
   #[serde(default)]
-  pub output_files: Vec<String>,
+  pub output_files: Vec<RuntimeTaskFileDeclaration>,
 }
 
 impl RuntimeTaskDescriptor {
@@ -41,6 +41,30 @@ impl RuntimeTaskDescriptor {
     !self.input_properties.is_empty()
       || !self.input_files.is_empty()
       || !self.output_files.is_empty()
+  }
+
+  pub(crate) fn normalize_declared_paths(&mut self, project_root: &Path, case_insensitive: bool) {
+    Self::normalize_path_list(&mut self.input_files, project_root, case_insensitive);
+    Self::normalize_path_list(&mut self.output_files, project_root, case_insensitive);
+  }
+
+  fn normalize_path_list(
+    paths: &mut Vec<RuntimeTaskFileDeclaration>,
+    project_root: &Path,
+    case_insensitive: bool,
+  ) {
+    let mut normalized = BTreeMap::new();
+    for mut declaration in std::mem::take(paths) {
+      declaration.normalize_against(project_root);
+      let value = declaration.path().to_string();
+      normalized
+        .entry(RuntimeTaskSelection::path_identity(
+          &value,
+          case_insensitive,
+        ))
+        .or_insert(declaration);
+    }
+    *paths = normalized.into_values().collect();
   }
 }
 
@@ -54,20 +78,6 @@ pub struct RuntimeTaskModelBuilder {
 }
 
 impl RuntimeTaskModelBuilder {
-  pub fn from_json_parts(
-    catalogs_json: &str,
-    overlays_json: &str,
-    removed_task_paths_json: &str,
-  ) -> anyhow::Result<Self> {
-    Ok(Self {
-      catalogs: serde_json::from_str(catalogs_json)?,
-      overlays: serde_json::from_str(overlays_json)?,
-      removed_task_paths: serde_json::from_str::<Vec<String>>(removed_task_paths_json)?
-        .into_iter()
-        .collect(),
-    })
-  }
-
   pub fn new(
     catalogs: Vec<RuntimeTaskCatalogRequest>,
     overlays: Vec<RuntimeTaskDescriptor>,
@@ -142,11 +152,72 @@ impl RuntimeTaskModelBuilder {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskProperty {
   pub name: String,
-  pub value: String,
+  pub value: serde_json::Value,
   pub value_type: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RuntimeTaskFileDeclaration {
+  Path(String),
+  Config(RuntimeTaskFileConfig),
+}
+
+impl RuntimeTaskFileDeclaration {
+  pub fn path(&self) -> &str {
+    match self {
+      Self::Path(path) => path,
+      Self::Config(config) => &config.path,
+    }
+  }
+
+  pub(crate) fn normalize_against(&mut self, project_root: &Path) {
+    let path = Path::new(self.path());
+    let normalized = if path.is_absolute() {
+      arkdown_path::lexical_normalize(path)
+    } else {
+      arkdown_path::lexical_normalize(&project_root.join(path))
+    };
+    self.set_path(normalized.to_string_lossy().into_owned());
+  }
+
+  fn set_path(&mut self, path: String) {
+    match self {
+      Self::Path(value) => *value = path,
+      Self::Config(config) => config.path = path,
+    }
+  }
+
+  pub fn filter(&self) -> Option<&RuntimeTaskFileFilter> {
+    match self {
+      Self::Path(_) => None,
+      Self::Config(config) => config.test.as_ref(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTaskFileConfig {
+  pub path: String,
+  #[serde(default)]
+  pub is_directory: Option<bool>,
+  #[serde(default)]
+  pub test: Option<RuntimeTaskFileFilter>,
+  #[serde(default)]
+  pub depth: Option<u32>,
+  #[serde(default)]
+  pub file_snap_shot_hash_value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskFileFilter {
+  pub source: String,
+  #[serde(default)]
+  pub flags: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskSelection {
   pub project_root: PathBuf,
@@ -170,8 +241,7 @@ impl RuntimeTaskSelection {
 
   pub fn normalize_declared_paths(&self, tasks: &mut [RuntimeTaskDescriptor]) {
     for task in tasks {
-      self.normalize_path_list(&mut task.input_files, cfg!(windows));
-      self.normalize_path_list(&mut task.output_files, cfg!(windows));
+      task.normalize_declared_paths(&self.project_root, cfg!(windows));
     }
   }
 
@@ -179,28 +249,13 @@ impl RuntimeTaskSelection {
     let mut paths = BTreeMap::new();
     for task in tasks.iter().filter(|task| !task.built_in) {
       for input in &task.input_files {
-        let identity = Self::path_identity(input, cfg!(windows));
-        paths.entry(identity).or_insert_with(|| input.clone());
+        let identity = Self::path_identity(input.path(), cfg!(windows));
+        paths
+          .entry(identity)
+          .or_insert_with(|| input.path().to_string());
       }
     }
     paths.into_values().collect()
-  }
-
-  fn normalize_path_list(&self, paths: &mut Vec<String>, case_insensitive: bool) {
-    let mut normalized = BTreeMap::new();
-    for declared_path in std::mem::take(paths) {
-      let path = Path::new(&declared_path);
-      let absolute = if path.is_absolute() {
-        arkdown_path::lexical_normalize(path)
-      } else {
-        arkdown_path::lexical_normalize(&self.project_root.join(path))
-      };
-      let value = absolute.to_string_lossy().into_owned();
-      normalized
-        .entry(Self::path_identity(&value, case_insensitive))
-        .or_insert(value);
-    }
-    *paths = normalized.into_values().collect();
   }
 
   fn path_identity(path: &str, case_insensitive: bool) -> String {
@@ -212,20 +267,7 @@ impl RuntimeTaskSelection {
   }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeTaskOperation {
-  pub phase: RuntimeTaskOperationPhase,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub task_path: Option<String>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub error: Option<String>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub native_event_json: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy)]
 pub enum RuntimeTaskOperationPhase {
   BeforeAlways,
   Realize,
@@ -234,8 +276,6 @@ pub enum RuntimeTaskOperationPhase {
   Run,
   AfterRun,
   Failed,
-  TransformAbc,
-  ModifyNativeCommand,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -250,9 +290,8 @@ pub struct RuntimeTaskCallbackResult {
   pub has_task_should_do: Option<bool>,
   pub task_should_do: Option<bool>,
   pub input_properties: Option<Vec<RuntimeTaskProperty>>,
-  pub input_files: Option<Vec<String>>,
-  pub output_files: Option<Vec<String>>,
-  pub command: Option<Vec<String>>,
+  pub input_files: Option<Vec<RuntimeTaskFileDeclaration>>,
+  pub output_files: Option<Vec<RuntimeTaskFileDeclaration>>,
   #[serde(default)]
   pub output: Vec<String>,
 }
@@ -280,7 +319,10 @@ mod tests {
       dependencies: Vec::new(),
       user_dependencies: Vec::new(),
       input_properties: Vec::new(),
-      input_files,
+      input_files: input_files
+        .into_iter()
+        .map(RuntimeTaskFileDeclaration::Path)
+        .collect(),
       output_files: Vec::new(),
     }
   }
@@ -311,22 +353,30 @@ mod tests {
     ];
 
     for task in &mut tasks {
-      selection.normalize_path_list(&mut task.input_files, true);
+      task.normalize_declared_paths(&selection.project_root, true);
     }
 
     assert_eq!(tasks[0].input_files.len(), 2);
     assert_eq!(
       tasks[0].input_files,
       vec![
-        root
-          .path()
-          .join("assets/icon.png")
-          .to_string_lossy()
-          .into_owned(),
-        root.path().join("Input.ts").to_string_lossy().into_owned(),
+        RuntimeTaskFileDeclaration::Path(
+          root
+            .path()
+            .join("assets/icon.png")
+            .to_string_lossy()
+            .into_owned(),
+        ),
+        RuntimeTaskFileDeclaration::Path(
+          root.path().join("Input.ts").to_string_lossy().into_owned(),
+        ),
       ]
     );
-    let mut expected_inputs = tasks[0].input_files.clone();
+    let mut expected_inputs = tasks[0]
+      .input_files
+      .iter()
+      .map(|declaration| declaration.path().to_string())
+      .collect::<Vec<_>>();
     expected_inputs.sort_by_key(|path| RuntimeTaskSelection::path_identity(path, cfg!(windows)));
     assert_eq!(selection.declared_input_paths(&tasks), expected_inputs);
   }

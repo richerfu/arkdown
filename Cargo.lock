@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "arkdown-napi"
-version = "0.0.1-beta.6"
+version = "0.0.1-beta.7"
 dependencies = [
  "anyhow",
  "arkdown",
@@ -320,6 +320,7 @@ dependencies = [
  "oxc_span 0.140.0",
  "oxc_syntax 0.140.0",
  "rayon",
+ "regex",
  "rolldown_common",
  "rolldown_plugin",
  "rolldown_sourcemap",
@@ -2620,6 +2621,8 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

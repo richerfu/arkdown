@@ -82,14 +82,14 @@ pub struct HvigorBuildInfoRunner {
 }
 
 impl HvigorBuildInfoRunner {
-  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
+  pub fn from_value(request_value: Value) -> anyhow::Result<Self> {
     Ok(Self {
-      request: serde_json::from_str(request_json)?,
+      request: serde_json::from_value(request_value)?,
     })
   }
 
-  pub fn response_json(&self) -> anyhow::Result<String> {
-    serde_json::to_string(&HvigorBuildInfoResponse {
+  pub fn response_value(&self) -> anyhow::Result<Value> {
+    serde_json::to_value(HvigorBuildInfoResponse {
       output: self.output()?,
     })
     .map_err(Into::into)

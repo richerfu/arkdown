@@ -139,17 +139,22 @@ struct HvigorCompilePluginPlanResponse {
 }
 
 pub(crate) struct HvigorCompilePluginNapiPlanner<'env> {
+  env: Env,
   planner: HvigorCompilePluginPlanner,
   descriptors: Vec<HvigorCompilePluginDescriptor>,
+  plugins: Vec<Object<'env>>,
   callback_bridge: OrderCallbackBridge<'env>,
   input_error: Option<HvigorCompilePluginDiagnostic>,
 }
 
 impl<'env> HvigorCompilePluginNapiPlanner<'env> {
-  pub(crate) fn from_js(env: Env, config_json: &str, plugins: Array<'env>) -> napi::Result<Self> {
-    let config: HvigorCompilePluginPlanConfig = serde_json::from_str(config_json)
-      .map_err(|error| napi::Error::from_reason(format!("parse compile plugin plan: {error}")))?;
+  pub(crate) fn from_js(
+    env: Env,
+    config: HvigorCompilePluginPlanConfig,
+    plugins: Array<'env>,
+  ) -> napi::Result<Self> {
     let mut descriptors = Vec::with_capacity(plugins.len() as usize);
+    let mut plugin_objects = Vec::with_capacity(plugins.len() as usize);
     let mut callbacks = Vec::with_capacity(plugins.len() as usize);
     let mut input_error = None;
 
@@ -174,26 +179,66 @@ impl<'env> HvigorCompilePluginNapiPlanner<'env> {
         order,
       });
       callbacks.push(callback);
+      plugin_objects.push(plugin);
     }
 
     Ok(Self {
+      env,
       planner: HvigorCompilePluginPlanner::new(config),
       descriptors,
+      plugins: plugin_objects,
       callback_bridge: OrderCallbackBridge::new(env, callbacks),
       input_error,
     })
   }
 
-  pub(crate) fn plan_json(self) -> napi::Result<String> {
+  pub(crate) fn plan_value(mut self) -> napi::Result<serde_json::Value> {
     if let Some(diagnostic) = self.input_error {
       return Self::serialize_response(Err(diagnostic));
     }
 
-    let callback_bridge = self.callback_bridge;
-    let result = self.planner.plan(self.descriptors, |plugin, names| {
-      callback_bridge.invoke(plugin.source_index, names)
+    let descriptors = std::mem::take(&mut self.descriptors);
+    let result = self.planner.plan(descriptors, |plugin, names| {
+      self.callback_bridge.invoke(plugin.source_index, names)
     });
+    if let Ok(placements) = &result {
+      self.apply_placements(placements)?;
+    }
     Self::serialize_response(result)
+  }
+
+  fn apply_placements(&mut self, placements: &[HvigorCompilePluginPlacement]) -> napi::Result<()> {
+    let attributes = PropertyAttributes::Configurable | PropertyAttributes::Enumerable;
+    for placement in placements {
+      let plugin = self
+        .plugins
+        .get_mut(placement.source_index)
+        .ok_or_else(|| {
+          napi::Error::from_reason(format!(
+            "compile plugin placement references missing index {}",
+            placement.source_index
+          ))
+        })?;
+      plugin.define_properties(&[
+        Property::new()
+          .with_utf8_name("__arkdownOrderIndex")?
+          .with_napi_value(
+            &self.env,
+            u32::try_from(placement.order_index)
+              .map_err(|_| napi::Error::from_reason("compile plugin order index exceeds u32"))?,
+          )?
+          .with_property_attributes(attributes),
+        Property::new()
+          .with_utf8_name("__arkdownOrderAnchorRank")?
+          .with_napi_value(&self.env, u32::from(placement.anchor_rank))?
+          .with_property_attributes(attributes),
+        Property::new()
+          .with_utf8_name("__arkdownOrderAnchorSequence")?
+          .with_napi_value(&self.env, placement.anchor_sequence)?
+          .with_property_attributes(attributes),
+      ])?;
+    }
+    Ok(())
   }
 
   fn read_order(
@@ -282,7 +327,7 @@ impl<'env> HvigorCompilePluginNapiPlanner<'env> {
 
   fn serialize_response(
     result: std::result::Result<Vec<HvigorCompilePluginPlacement>, HvigorCompilePluginDiagnostic>,
-  ) -> napi::Result<String> {
+  ) -> napi::Result<serde_json::Value> {
     let response = match result {
       Ok(placements) => HvigorCompilePluginPlanResponse {
         placements: placements
@@ -296,7 +341,7 @@ impl<'env> HvigorCompilePluginNapiPlanner<'env> {
         error: Some(diagnostic.into()),
       },
     };
-    serde_json::to_string(&response)
+    serde_json::to_value(response)
       .map_err(|error| napi::Error::from_reason(format!("serialize compile plugin plan: {error}")))
   }
 }
@@ -332,6 +377,7 @@ struct RolldownPackagePluginPlanResponse {
 
 pub(crate) struct RolldownPackagePluginNapiPlanner<'env> {
   descriptors: Vec<RolldownPackagePluginDescriptor>,
+  plugins: Vec<Object<'env>>,
   callback_bridge: OrderCallbackBridge<'env>,
   validation: HvigorPluginValidationOutcome,
 }
@@ -339,6 +385,7 @@ pub(crate) struct RolldownPackagePluginNapiPlanner<'env> {
 impl<'env> RolldownPackagePluginNapiPlanner<'env> {
   pub(crate) fn from_js(env: Env, plugins: Array<'env>) -> napi::Result<Self> {
     let mut descriptors = Vec::with_capacity(plugins.len() as usize);
+    let mut plugin_objects = Vec::with_capacity(plugins.len() as usize);
     let mut callbacks = Vec::with_capacity(plugins.len() as usize);
     let mut validation = HvigorPluginValidationOutcome::default();
     for plugin_index in 0..plugins.len() {
@@ -367,32 +414,48 @@ impl<'env> RolldownPackagePluginNapiPlanner<'env> {
         has_order_callback: callback.is_some(),
       });
       callbacks.push(callback);
+      plugin_objects.push(plugin);
     }
     Ok(Self {
       descriptors,
+      plugins: plugin_objects,
       callback_bridge: OrderCallbackBridge::new(env, callbacks),
       validation,
     })
   }
 
-  pub(crate) fn plan_json(self) -> napi::Result<String> {
+  pub(crate) fn plan_value(mut self) -> napi::Result<serde_json::Value> {
     if let Some(diagnostic) = self.validation.error {
       return Self::serialize_response(Vec::new(), self.validation.warnings, Some(diagnostic));
     }
-    let callback_bridge = self.callback_bridge;
-    let result = RolldownPackagePluginPlanner::plan(self.descriptors, |plugin, names| {
-      callback_bridge.invoke(plugin.source_index, names)
+    let descriptors = std::mem::take(&mut self.descriptors);
+    let result = RolldownPackagePluginPlanner::plan(descriptors, |plugin, names| {
+      self.callback_bridge.invoke(plugin.source_index, names)
     });
     let (placements, error) = match result {
       Ok(placements) => (
         placements
           .into_iter()
-          .map(TryInto::try_into)
+          .map(RolldownPackagePluginPlacementResponse::try_from)
           .collect::<napi::Result<Vec<_>>>()?,
         None,
       ),
       Err(diagnostic) => (Vec::new(), Some(diagnostic)),
     };
+    for placement in &placements {
+      if placement.callback_resolved {
+        self
+          .plugins
+          .get_mut(placement.plugin_index as usize)
+          .ok_or_else(|| {
+            napi::Error::from_reason(format!(
+              "package plugin placement references missing index {}",
+              placement.plugin_index
+            ))
+          })?
+          .delete_named_property("order")?;
+      }
+    }
     Self::serialize_response(placements, self.validation.warnings, error)
   }
 
@@ -400,13 +463,13 @@ impl<'env> RolldownPackagePluginNapiPlanner<'env> {
     placements: Vec<RolldownPackagePluginPlacementResponse>,
     warnings: Vec<HvigorCompilePluginDiagnostic>,
     error: Option<HvigorCompilePluginDiagnostic>,
-  ) -> napi::Result<String> {
+  ) -> napi::Result<serde_json::Value> {
     let response = RolldownPackagePluginPlanResponse {
       placements,
       warnings: warnings.into_iter().map(Into::into).collect(),
       error: error.map(Into::into),
     };
-    serde_json::to_string(&response)
+    serde_json::to_value(response)
       .map_err(|error| napi::Error::from_reason(format!("serialize package plugin plan: {error}")))
   }
 }
@@ -423,7 +486,10 @@ struct HvigorPluginValidationResponse {
 pub(crate) struct HvigorPluginNapiValidator;
 
 impl HvigorPluginNapiValidator {
-  pub(crate) fn validate_compile(plugins: Array<'_>, source_file: String) -> napi::Result<String> {
+  pub(crate) fn validate_compile(
+    plugins: Array<'_>,
+    source_file: String,
+  ) -> napi::Result<serde_json::Value> {
     let mut validation = HvigorPluginValidationOutcome::default();
     for plugin_index in 0..plugins.len() {
       let plugin = plugins.get::<Unknown<'_>>(plugin_index)?.ok_or_else(|| {
@@ -441,7 +507,7 @@ impl HvigorPluginNapiValidator {
         break;
       }
     }
-    serde_json::to_string(&HvigorPluginValidationResponse {
+    serde_json::to_value(HvigorPluginValidationResponse {
       warnings: validation.warnings.into_iter().map(Into::into).collect(),
       error: validation.error.map(Into::into),
     })

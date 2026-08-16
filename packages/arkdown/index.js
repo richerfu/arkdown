@@ -77,8 +77,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-android-arm64')
         const bindingPackageVersion = require('@ohos-rs/arkdown-android-arm64/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -93,8 +93,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-android-arm-eabi')
         const bindingPackageVersion = require('@ohos-rs/arkdown-android-arm-eabi/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -114,8 +114,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-win32-x64-gnu')
         const bindingPackageVersion = require('@ohos-rs/arkdown-win32-x64-gnu/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -130,8 +130,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-win32-x64-msvc')
         const bindingPackageVersion = require('@ohos-rs/arkdown-win32-x64-msvc/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -147,8 +147,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-win32-ia32-msvc')
         const bindingPackageVersion = require('@ohos-rs/arkdown-win32-ia32-msvc/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -163,8 +163,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-win32-arm64-msvc')
         const bindingPackageVersion = require('@ohos-rs/arkdown-win32-arm64-msvc/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -182,8 +182,8 @@ function requireNative() {
     try {
       const binding = require('@ohos-rs/arkdown-darwin-universal')
       const bindingPackageVersion = require('@ohos-rs/arkdown-darwin-universal/package.json').version
-      if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-        throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+      if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+        throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
       }
       return binding
     } catch (e) {
@@ -198,8 +198,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-darwin-x64')
         const bindingPackageVersion = require('@ohos-rs/arkdown-darwin-x64/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -214,8 +214,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-darwin-arm64')
         const bindingPackageVersion = require('@ohos-rs/arkdown-darwin-arm64/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -234,8 +234,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-freebsd-x64')
         const bindingPackageVersion = require('@ohos-rs/arkdown-freebsd-x64/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -250,8 +250,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-freebsd-arm64')
         const bindingPackageVersion = require('@ohos-rs/arkdown-freebsd-arm64/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -271,8 +271,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-x64-musl')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-x64-musl/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -287,8 +287,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-x64-gnu')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-x64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -305,8 +305,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-arm64-musl')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-arm64-musl/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -321,8 +321,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-arm64-gnu')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-arm64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -339,8 +339,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-arm-musleabihf')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-arm-musleabihf/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -355,8 +355,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-arm-gnueabihf')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-arm-gnueabihf/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -373,8 +373,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-loong64-musl')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-loong64-musl/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -389,8 +389,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-loong64-gnu')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-loong64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -407,8 +407,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-riscv64-musl')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-riscv64-musl/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -423,8 +423,8 @@ function requireNative() {
         try {
           const binding = require('@ohos-rs/arkdown-linux-riscv64-gnu')
           const bindingPackageVersion = require('@ohos-rs/arkdown-linux-riscv64-gnu/package.json').version
-          if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -440,8 +440,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-linux-ppc64-gnu')
         const bindingPackageVersion = require('@ohos-rs/arkdown-linux-ppc64-gnu/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -456,8 +456,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-linux-s390x-gnu')
         const bindingPackageVersion = require('@ohos-rs/arkdown-linux-s390x-gnu/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -476,8 +476,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-openharmony-arm64')
         const bindingPackageVersion = require('@ohos-rs/arkdown-openharmony-arm64/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -492,8 +492,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-openharmony-x64')
         const bindingPackageVersion = require('@ohos-rs/arkdown-openharmony-x64/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -508,8 +508,8 @@ function requireNative() {
       try {
         const binding = require('@ohos-rs/arkdown-openharmony-arm')
         const bindingPackageVersion = require('@ohos-rs/arkdown-openharmony-arm/package.json').version
-        if (bindingPackageVersion !== '0.0.1-beta.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.0.1-beta.7' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.0.1-beta.7 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -587,37 +587,43 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.ArkdownRolldownPluginContext = nativeBinding.ArkdownRolldownPluginContext
+module.exports.RuntimeBuildScriptSession = nativeBinding.RuntimeBuildScriptSession
+module.exports.RuntimeFileCompareResult = nativeBinding.RuntimeFileCompareResult
+module.exports.RuntimeFileSnapshot = nativeBinding.RuntimeFileSnapshot
+module.exports.RuntimeFileSnapshotIterator = nativeBinding.RuntimeFileSnapshotIterator
+module.exports.RuntimeProcessMonitor = nativeBinding.RuntimeProcessMonitor
+module.exports.RuntimeTaskCacheSession = nativeBinding.RuntimeTaskCacheSession
+module.exports.RuntimeTaskSnapshot = nativeBinding.RuntimeTaskSnapshot
+module.exports.RuntimeTaskValueEntry = nativeBinding.RuntimeTaskValueEntry
+module.exports.beginRuntimeInvocation = nativeBinding.beginRuntimeInvocation
 module.exports.build = nativeBinding.build
 module.exports.collectBuildScriptPluginPaths = nativeBinding.collectBuildScriptPluginPaths
 module.exports.compileHvigorScript = nativeBinding.compileHvigorScript
 module.exports.compileHvigorScriptSync = nativeBinding.compileHvigorScriptSync
-module.exports.discoverBuildScriptFiles = nativeBinding.discoverBuildScriptFiles
+module.exports.emitRuntimeLog = nativeBinding.emitRuntimeLog
+module.exports.executeRuntimeCommandPlan = nativeBinding.executeRuntimeCommandPlan
+module.exports.finishRuntimeInvocation = nativeBinding.finishRuntimeInvocation
+module.exports.finishRuntimeObservability = nativeBinding.finishRuntimeObservability
 module.exports.hvigorProjectCacheHash = nativeBinding.hvigorProjectCacheHash
-module.exports.hvigorSyncVersionChanged = nativeBinding.hvigorSyncVersionChanged
-module.exports.inspectHvigorContext = nativeBinding.inspectHvigorContext
-module.exports.inspectHvigorSdkDetails = nativeBinding.inspectHvigorSdkDetails
 module.exports.inspectRemoteHspObjects = nativeBinding.inspectRemoteHspObjects
-module.exports.loadBuildScriptModuleModel = nativeBinding.loadBuildScriptModuleModel
-module.exports.loadBuildScriptRuntimeModel = nativeBinding.loadBuildScriptRuntimeModel
+module.exports.inspectRuntimeTaskDeclarations = nativeBinding.inspectRuntimeTaskDeclarations
+module.exports.inspectRuntimeTaskModel = nativeBinding.inspectRuntimeTaskModel
+module.exports.inspectRuntimeTaskState = nativeBinding.inspectRuntimeTaskState
+module.exports.installRuntimeObservability = nativeBinding.installRuntimeObservability
 module.exports.mergeHvigorConfig = nativeBinding.mergeHvigorConfig
 module.exports.parseArkdownBuildCliArgs = nativeBinding.parseArkdownBuildCliArgs
 module.exports.parseHvigorCliArgs = nativeBinding.parseHvigorCliArgs
 module.exports.parseHvigorJsonText = nativeBinding.parseHvigorJsonText
 module.exports.parsePluginAst = nativeBinding.parsePluginAst
-module.exports.planBuildScriptRuntime = nativeBinding.planBuildScriptRuntime
+module.exports.persistRuntimeDetails = nativeBinding.persistRuntimeDetails
+module.exports.persistRuntimeReport = nativeBinding.persistRuntimeReport
 module.exports.planHvigorCompilePlugins = nativeBinding.planHvigorCompilePlugins
 module.exports.planRolldownPackagePlugins = nativeBinding.planRolldownPackagePlugins
-module.exports.prepareHvigorPluginWorkspace = nativeBinding.prepareHvigorPluginWorkspace
-module.exports.prepareNativeBuildConfig = nativeBinding.prepareNativeBuildConfig
 module.exports.resolveBuildScriptPluginPath = nativeBinding.resolveBuildScriptPluginPath
 module.exports.runHvigorBuildInfo = nativeBinding.runHvigorBuildInfo
-module.exports.runHvigorClean = nativeBinding.runHvigorClean
 module.exports.runHvigorPrune = nativeBinding.runHvigorPrune
 module.exports.runRuntimeTasks = nativeBinding.runRuntimeTasks
-module.exports.runtimeCommandPlan = nativeBinding.runtimeCommandPlan
+module.exports.runtimeObservabilityIsEnabled = nativeBinding.runtimeObservabilityIsEnabled
 module.exports.runtimeTaskCatalog = nativeBinding.runtimeTaskCatalog
 module.exports.runtimeTaskReport = nativeBinding.runtimeTaskReport
-module.exports.validateBuildScriptBuildOption = nativeBinding.validateBuildScriptBuildOption
 module.exports.validateHvigorCompilePlugins = nativeBinding.validateHvigorCompilePlugins
-module.exports.writeHvigorBuildMeta = nativeBinding.writeHvigorBuildMeta
-module.exports.writeHvigorSyncModel = nativeBinding.writeHvigorSyncModel

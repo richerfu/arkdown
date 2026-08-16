@@ -38,14 +38,15 @@ pub struct PluginCacheModule {
 }
 
 impl PluginCacheModule {
-    /// Serialize the exact object passed to latest-hvigor
+    /// Construct the exact object passed to latest-hvigor
     /// `shouldInvalidCache({ ast, code, id })` hooks.
     ///
     /// The AST envelope remains private transport metadata until the thin
-    /// JavaScript bridge revives JSON-inexpressible literal values. A parser
+    /// JavaScript bridge revives JSON-inexpressible literal values. This is a
+    /// structured N-API value rather than serialized JSON text. A parser
     /// rejection leaves `ast` absent, matching hvigor's optional AST contract
     /// for transformed ArkTS syntax.
-    pub fn hook_request_json(&self) -> anyhow::Result<String> {
+    pub fn hook_request_value(&self) -> serde_json::Value {
         let mut request = serde_json::Map::from_iter([
             (
                 "code".to_string(),
@@ -58,7 +59,7 @@ impl PluginCacheModule {
         {
             request.insert("__arkdownOxcAst".to_string(), parsed.into_ast());
         }
-        serde_json::to_string(&request).map_err(Into::into)
+        serde_json::Value::Object(request)
     }
 }
 

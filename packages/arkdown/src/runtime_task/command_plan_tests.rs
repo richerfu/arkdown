@@ -33,8 +33,7 @@ fn task(
 }
 
 fn plan(request: Value) -> Value {
-  let response = RuntimeCommandPlanner::response_json(&request.to_string()).unwrap();
-  serde_json::from_str(&response).unwrap()
+  RuntimeCommandPlanner::response_value(request).unwrap()
 }
 
 #[test]
@@ -64,7 +63,8 @@ fn selects_module_target_and_groups_assembly_in_rust() {
     result["plan"]["tasks"],
     json!([{
       "taskPath": "entry:assembleHap",
-      "commandKind": "assembly"
+      "commandKind": "assembly",
+      "executionLane": "native"
     }])
   );
   assert_eq!(result["plan"]["selectedNodeNames"], json!(["entry"]));
@@ -119,10 +119,11 @@ fn adds_custom_task_native_dependencies_and_cutoff_roots() {
   assert_eq!(
     result["plan"]["tasks"],
     json!([
-      { "taskPath": "entry:publish", "commandKind": "custom" },
+      { "taskPath": "entry:publish", "commandKind": "custom", "executionLane": "custom" },
       {
         "taskPath": "entry:default@CompileArkTS",
         "commandKind": "native",
+        "executionLane": "native",
         "dependencyOnly": true
       }
     ])
@@ -185,7 +186,8 @@ fn maps_hvigor_test_to_the_local_test_output_target() {
     result["plan"]["tasks"],
     json!([{
       "taskPath": "entry:test",
-      "commandKind": "native"
+      "commandKind": "native",
+      "executionLane": "native"
     }])
   );
   assert_eq!(
@@ -306,7 +308,8 @@ fn maps_assemble_dev_hqf_to_the_native_quickfix_lifecycle() {
     result["plan"]["tasks"],
     json!([{
       "taskPath": "entry:assembleDevHqf",
-      "commandKind": "native"
+      "commandKind": "native",
+      "executionLane": "native"
     }])
   );
   assert_eq!(
@@ -413,12 +416,12 @@ fn accepts_every_registered_latest_hvigor_builtin_command_boundary() {
 
   for catalog_request in catalogs {
     let project_task = catalog_request["projectTask"].as_bool().unwrap_or(false);
-    let kind = catalog_request["kind"].as_str().unwrap();
-    let node_name = catalog_request["nodeName"].as_str().unwrap();
-    let entries_json = RuntimeTaskCatalog::from_json(&catalog_request.to_string())
-      .and_then(RuntimeTaskCatalog::entries_json)
+    let kind = catalog_request["kind"].as_str().unwrap().to_string();
+    let node_name = catalog_request["nodeName"].as_str().unwrap().to_string();
+    let entries = RuntimeTaskCatalog::from_value(catalog_request)
+      .and_then(RuntimeTaskCatalog::entries_value)
       .expect("latest Hvigor catalog");
-    let entries = serde_json::from_str::<Vec<Value>>(&entries_json).expect("catalog JSON");
+    let entries = serde_json::from_value::<Vec<Value>>(entries).expect("catalog records");
 
     for entry in entries {
       let task_name = entry["name"].as_str().expect("catalog task name");
@@ -434,15 +437,15 @@ fn accepts_every_registered_latest_hvigor_builtin_command_boundary() {
         "moduleSelections": if project_task {
           json!([])
         } else {
-          json!([{ "moduleName": node_name, "targetName": "default" }])
+          json!([{ "moduleName": &node_name, "targetName": "default" }])
         },
         "nodes": [{
-          "name": node_name,
-          "kind": kind,
+          "name": &node_name,
+          "kind": &kind,
           "projectTask": project_task,
           "childNames": if project_task { json!(["entry", "shared"]) } else { json!([]) }
         }],
-        "tasks": [task(&task_path, node_name, task_name, true, project_task, &[])]
+        "tasks": [task(&task_path, &node_name, task_name, true, project_task, &[])]
       });
       let result = plan(request);
       assert_eq!(
@@ -530,11 +533,11 @@ fn preserves_latest_hvigor_first_sync_order() {
   assert_eq!(
     result["plan"]["tasks"],
     json!([
-      { "taskPath": "entry:clean", "commandKind": "clean" },
-      { "taskPath": ":clean", "commandKind": "clean" },
-      { "taskPath": "entry:init", "commandKind": "sync" },
-      { "taskPath": "entry:pluginSync", "commandKind": "custom" },
-      { "taskPath": ":init", "commandKind": "sync" }
+      { "taskPath": "entry:clean", "commandKind": "clean", "executionLane": "standalone" },
+      { "taskPath": ":clean", "commandKind": "clean", "executionLane": "standalone" },
+      { "taskPath": "entry:init", "commandKind": "sync", "executionLane": "standalone" },
+      { "taskPath": "entry:pluginSync", "commandKind": "custom", "executionLane": "syncCustom" },
+      { "taskPath": ":init", "commandKind": "sync", "executionLane": "standalone" }
     ])
   );
   assert_eq!(

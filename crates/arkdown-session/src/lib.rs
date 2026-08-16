@@ -74,8 +74,13 @@ pub use build_script::{
     BuildScriptFingerprint, BuildScriptKind, BuildScriptModuleModelLoader,
     BuildScriptModuleModelRequest, BuildScriptOverrideError, BuildScriptOverrideInventory,
     BuildScriptParser, BuildScriptProjectCacheIdentity, BuildScriptProjectCacheIdentityError,
-    BuildScriptRuntimeModelError, BuildScriptRuntimeModelLoader, BuildScriptRuntimeModelRequest,
-    BuildScriptRuntimeModelSnapshot, BuildScriptSnapshot, ParseBuildScriptError,
+    BuildScriptRuntimeCleanSnapshot, BuildScriptRuntimeCommandSnapshot,
+    BuildScriptRuntimeExecutionSnapshotError, BuildScriptRuntimeModelError,
+    BuildScriptRuntimeModelLoader, BuildScriptRuntimeModelRequest, BuildScriptRuntimeModelSnapshot,
+    BuildScriptRuntimePathPlan, BuildScriptRuntimePlanUpdate, BuildScriptRuntimeSdkConfig,
+    BuildScriptRuntimeSdkDetails, BuildScriptRuntimeSession, BuildScriptRuntimeSyncModule,
+    BuildScriptRuntimeSyncSnapshot, BuildScriptRuntimeSyncSnapshotError,
+    BuildScriptRuntimeSyncTarget, BuildScriptSnapshot, ParseBuildScriptError,
 };
 
 // builder
@@ -152,8 +157,10 @@ pub use dependency_views::{
     NativeSoDependencyView, RemoteHspDependencyView,
 };
 pub use hvigor_context::{
-    HvigorContextInspectError, HvigorContextInspector, HvigorContextSnapshot,
-    HvigorDependencyContextSnapshot, OhpmDependencyInfo,
+    HvigorContextInspectError, HvigorContextInspector, HvigorContextModuleState,
+    HvigorContextMutation, HvigorContextMutationDiagnostic, HvigorContextPathOptions,
+    HvigorContextSession, HvigorContextSnapshot, HvigorDependencyContextSnapshot,
+    HvigorModuleTargetContextPaths, HvigorProjectContextPaths, OhpmDependencyInfo,
 };
 
 pub use remote_hsp::{

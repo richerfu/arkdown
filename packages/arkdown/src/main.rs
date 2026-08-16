@@ -15,7 +15,6 @@
 //! | Manual debugging | Supported |
 
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 
 use arkdown_napi::cmd;
 
@@ -54,7 +53,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-  init_tracing();
+  if let Err(error) = arkdown_napi::RuntimeObservability::install_cli() {
+    eprintln!("failed to install arkdown tracing: {error}");
+  }
   #[cfg(feature = "dhat-heap")]
   let dhat_profiler = start_dhat_heap_profiler();
   #[cfg(feature = "memory-diagnostics")]
@@ -79,20 +80,6 @@ async fn main() {
     drop(dhat_profiler);
     std::process::exit(1);
   }
-}
-
-fn init_tracing() {
-  let filter = EnvFilter::try_from_env("ARKDOWN_LOG")
-    .or_else(|_| EnvFilter::try_from_default_env())
-    .unwrap_or_else(|_| EnvFilter::new("info"));
-
-  let _ = tracing_subscriber::fmt()
-    .with_env_filter(filter)
-    .with_level(false)
-    .with_target(false)
-    .without_time()
-    .with_writer(std::io::stderr)
-    .try_init();
 }
 
 #[cfg(feature = "dhat-heap")]

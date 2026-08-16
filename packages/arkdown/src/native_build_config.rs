@@ -1,10 +1,23 @@
 use std::path::PathBuf;
 
+use arkdown_config::HvigorRuntimePropertyPlan;
 use arkdown_path::lexical_normalize;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use serde_json::Value;
+
+use arkdown_session::BuildScriptRuntimePathPlan;
 
 #[napi(object)]
+pub struct RuntimeNativeBuildState {
+  pub properties: Value,
+  pub ext_params: Value,
+  pub core_start_params: Value,
+  pub default_cache: bool,
+  pub mode: String,
+  pub fast_build_app: bool,
+}
+
 pub struct RuntimeBuildConfigOverlay {
   pub default_cache: Option<bool>,
   pub mode: Option<String>,
@@ -28,6 +41,101 @@ pub struct RuntimeBuildConfigOverlay {
   pub parameter_file_override: Option<String>,
   pub hvigor_runtime_properties_json: Option<String>,
   pub hvigor_cache_dir: Option<String>,
+}
+
+impl RuntimeBuildConfigOverlay {
+  pub fn from_runtime(
+    state: &RuntimeNativeBuildState,
+    property_plan: HvigorRuntimePropertyPlan,
+    path_plan: BuildScriptRuntimePathPlan,
+    project_hvigor_overrides: &Value,
+    module_hvigor_overrides: &Value,
+    runtime_context_overrides: Option<&Value>,
+  ) -> napi::Result<Self> {
+    let runtime_properties = property_plan.runtime_properties;
+    let native_properties = property_plan.native_properties;
+    Ok(Self {
+      default_cache: Some(state.default_cache),
+      mode: Some(state.mode.clone()),
+      enable_sign_task: Some(native_properties.enable_sign_task),
+      fast_build_app: Some(state.fast_build_app),
+      ohos_debug_asan: Self::optional_bool(&runtime_properties, "asanConfig"),
+      ohos_enable_hwasan: Self::optional_bool(&runtime_properties, "hwasanConfig"),
+      ohos_enable_tsan: Self::optional_bool(&runtime_properties, "tsanConfig"),
+      ohos_enable_ubsan: Self::optional_bool(&runtime_properties, "ubsanConfig"),
+      ohos_enable_binxo: Self::optional_bool(&runtime_properties, "binxoConfig"),
+      project_hvigor_overrides_json: Self::serialize_nonempty(
+        project_hvigor_overrides,
+        "project hvigor overrides",
+      )?,
+      module_hvigor_overrides_json: Self::serialize_nonempty(
+        module_hvigor_overrides,
+        "module hvigor overrides",
+      )?,
+      runtime_context_overrides_json: runtime_context_overrides
+        .filter(|value| !value.is_null())
+        .map(|value| Self::serialize(value, "runtime context overrides"))
+        .transpose()?,
+      pack_compress_level: native_properties.pack_compress_level,
+      align_device_types: Self::string_array(native_properties.align_device_types)?,
+      collect_debug_symbol: native_properties.collect_debug_symbol,
+      ui_transform_optimization: Some(native_properties.ui_transform_optimization),
+      integrated_hsp_use_get_current_bundle_name: Some(
+        native_properties.integrated_hsp_use_get_current_bundle_name,
+      ),
+      byte_code_har_integrated_optimization: Some(
+        native_properties.byte_code_har_integrated_optimization,
+      ),
+      keep_dependency: Some(native_properties.keep_dependency),
+      parameter_file_override: path_plan.parameter_file_override,
+      hvigor_runtime_properties_json: Some(Self::serialize(
+        &Value::Object(runtime_properties),
+        "hvigor runtime properties",
+      )?),
+      hvigor_cache_dir: Some(path_plan.hvigor_cache_dir.to_string_lossy().into_owned()),
+    })
+  }
+
+  fn optional_bool(values: &serde_json::Map<String, Value>, key: &str) -> Option<bool> {
+    values.get(key).and_then(Value::as_bool)
+  }
+
+  fn string_array(value: Value) -> napi::Result<Option<Vec<String>>> {
+    let Some(values) = value.as_array() else {
+      return Ok(None);
+    };
+    if values.is_empty() {
+      return Ok(None);
+    }
+    values
+      .iter()
+      .map(|value| {
+        value.as_str().map(str::to_string).ok_or_else(|| {
+          Error::new(
+            Status::InvalidArg,
+            "ohos.align.deviceTypes must contain only strings".to_string(),
+          )
+        })
+      })
+      .collect::<napi::Result<Vec<_>>>()
+      .map(Some)
+  }
+
+  fn serialize_nonempty(value: &Value, label: &str) -> napi::Result<Option<String>> {
+    match value.as_object() {
+      Some(entries) if entries.is_empty() => Ok(None),
+      _ => Self::serialize(value, label).map(Some),
+    }
+  }
+
+  fn serialize(value: &Value, label: &str) -> napi::Result<String> {
+    serde_json::to_string(value).map_err(|error| {
+      Error::new(
+        Status::InvalidArg,
+        format!("failed to serialize {label}: {error}"),
+      )
+    })
+  }
 }
 
 /// V8 bridge for the Rust-owned native build request boundary. Arbitrary

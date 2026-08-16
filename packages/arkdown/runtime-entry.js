@@ -8,10 +8,6 @@ module.exports = nativeBinding
 const nativeRuntime = {
   runRuntimeTasks: nativeBinding.runRuntimeTasks,
 }
-module.exports.build = createBuild(nativeBuild, nativeBinding.inspectHvigorContext)
-module.exports.runHvigorCommand = createHvigorCommand(
-  nativeBuild,
-  nativeBinding.inspectHvigorContext,
-  nativeRuntime,
-)
+module.exports.build = createBuild(nativeBuild)
+module.exports.runHvigorCommand = createHvigorCommand(nativeBuild, nativeRuntime)
 module.exports.hvigorVersion = HVIGOR_PARITY_VERSION

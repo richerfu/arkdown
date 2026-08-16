@@ -15,6 +15,12 @@ use crate::error::ConfigError;
 pub struct SdkSelection {
     pub target_api_version: Option<u32>,
     pub compile_sdk_version: Option<String>,
+    /// SDK root recorded by the latest successful hvigor configuration.
+    ///
+    /// This is an observed project input (`.hvigor/cache/project-config.json`
+    /// `sdkPath`), not an installation-path guess. Missing or stale paths fall
+    /// back to the normal environment lookup.
+    pub preferred_sdk_root: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +173,7 @@ pub fn sdk_config_from_root(sdk_root: &Path, target_api_version: Option<u32>) ->
         &SdkSelection {
             target_api_version,
             compile_sdk_version: None,
+            preferred_sdk_root: None,
         },
     )
 }
@@ -210,17 +217,25 @@ pub fn discover_sdk(target_api_version: Option<u32>) -> Result<SdkConfig, Config
     discover_sdk_with_selection(SdkSelection {
         target_api_version,
         compile_sdk_version: None,
+        preferred_sdk_root: None,
     })
 }
 
 /// Discover the configured SDK and apply metadata overrides.
 ///
-/// Hvigor cache values influence generated profile metadata and target API,
-/// not the SDK component path. Tool paths continue to come from normal SDK
-/// discovery (`DEVECO_SDK_HOME`, `OHOS_BASE_SDK_HOME`, `OHOS_SDK_HOME`, etc.).
+/// An existing SDK root recorded by hvigor is the most precise evidence for
+/// the component that produced the project's cache. If that path is absent or
+/// no longer contains an SDK component, tool paths fall back to normal hvigor
+/// environment discovery (`DEVECO_SDK_HOME`, `OHOS_BASE_SDK_HOME`, etc.).
 pub fn discover_sdk_with_selection(selection: SdkSelection) -> Result<SdkConfig, ConfigError> {
-    let sdk_root = SdkLocator::from_process()
-        .find_sdk_root()
+    let sdk_root = selection
+        .preferred_sdk_root
+        .as_ref()
+        .filter(|candidate| {
+            looks_like_openharmony_base(&openharmony_base_from_root(candidate.as_path()))
+        })
+        .cloned()
+        .or_else(|| SdkLocator::from_process().find_sdk_root())
         .ok_or(ConfigError::SdkNotFound)?;
     Ok(sdk_config_from_root_with_selection(&sdk_root, &selection))
 }
@@ -660,6 +675,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sdk_discovery_prefers_hvigor_project_cache_root() {
+        let root = temp_root("hvigor-project-cache-sdk-root");
+        let ets_dir = root.join("default").join("openharmony").join("ets");
+        fs::create_dir_all(&ets_dir).expect("create sdk metadata dir");
+        fs::write(
+            ets_dir.join("oh-uni-package.json"),
+            r#"{"apiVersion":"24","version":"6.1.1.125","releaseType":"Release"}"#,
+        )
+        .expect("write sdk metadata");
+
+        let cfg = discover_sdk_with_selection(SdkSelection {
+            target_api_version: Some(24),
+            compile_sdk_version: Some("6.1.1.125".to_string()),
+            preferred_sdk_root: Some(root.clone()),
+        })
+        .expect("discover SDK from hvigor project cache root");
+
+        assert_eq!(cfg.sdk_component_api_version, 24);
+        assert_eq!(cfg.compile_sdk_version, "6.1.1.125");
+        assert!(cfg
+            .ets_loader_path
+            .starts_with(root.join("default").join("openharmony")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_sdk_config_from_root_applies_hvigor_metadata_without_switching_component() {
         let root = temp_root("sdk-metadata-overlay");
         let default_ets = root.join("default").join("openharmony").join("ets");
@@ -682,6 +724,7 @@ mod tests {
             &SdkSelection {
                 target_api_version: Some(20),
                 compile_sdk_version: Some("6.0.0.47".to_string()),
+                preferred_sdk_root: None,
             },
         );
 

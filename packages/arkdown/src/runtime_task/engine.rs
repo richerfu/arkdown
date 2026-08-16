@@ -6,16 +6,24 @@ use rustc_hash::FxHashSet;
 use super::cache::{RuntimeTaskCache, RuntimeTaskCacheError};
 use super::graph::{RuntimeTaskGraph, RuntimeTaskGraphError, RuntimeTaskId};
 use super::model::{
-  RuntimeTaskCallbackResult, RuntimeTaskDescriptor, RuntimeTaskOperation,
-  RuntimeTaskOperationPhase, RuntimeTaskSelection,
+  RuntimeTaskCallbackResult, RuntimeTaskDescriptor, RuntimeTaskOperationPhase, RuntimeTaskSelection,
 };
 
 #[async_trait]
 pub trait RuntimeTaskCallback: Send {
-  async fn invoke(
+  async fn invoke_task(
     &mut self,
-    operation: RuntimeTaskOperation,
+    task_path: &str,
+    phase: RuntimeTaskOperationPhase,
+    error: Option<String>,
   ) -> anyhow::Result<RuntimeTaskCallbackResult>;
+
+  async fn transform_abc(&mut self, event: serde_json::Value) -> anyhow::Result<()>;
+
+  async fn modify_native_command(
+    &mut self,
+    event: serde_json::Value,
+  ) -> anyhow::Result<Vec<String>>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,19 +179,12 @@ impl RuntimeTaskEngine {
 
   pub async fn transform_abc(
     &mut self,
-    native_event_json: String,
+    native_event: serde_json::Value,
   ) -> Result<(), RuntimeTaskEngineError> {
-    let operation = RuntimeTaskOperation {
-      phase: RuntimeTaskOperationPhase::TransformAbc,
-      task_path: None,
-      error: None,
-      native_event_json: Some(native_event_json),
-    };
     self
       .callback
-      .invoke(operation)
+      .transform_abc(native_event)
       .await
-      .map(|_| ())
       .map_err(|source| RuntimeTaskEngineError::Callback {
         phase: "transformAbc",
         task: "<native-abc>".to_string(),
@@ -193,30 +194,16 @@ impl RuntimeTaskEngine {
 
   pub async fn modify_native_command(
     &mut self,
-    native_event_json: String,
+    native_event: serde_json::Value,
   ) -> Result<Vec<String>, RuntimeTaskEngineError> {
-    let operation = RuntimeTaskOperation {
-      phase: RuntimeTaskOperationPhase::ModifyNativeCommand,
-      task_path: None,
-      error: None,
-      native_event_json: Some(native_event_json),
-    };
-    let result =
-      self
-        .callback
-        .invoke(operation)
-        .await
-        .map_err(|source| RuntimeTaskEngineError::Callback {
-          phase: "modifyNativeCommand",
-          task: "<native-command>".to_string(),
-          source,
-        })?;
-    result
-      .command
-      .ok_or_else(|| RuntimeTaskEngineError::Callback {
+    self
+      .callback
+      .modify_native_command(native_event)
+      .await
+      .map_err(|source| RuntimeTaskEngineError::Callback {
         phase: "modifyNativeCommand",
         task: "<native-command>".to_string(),
-        source: anyhow::anyhow!("JavaScript command modifier returned no command array"),
+        source,
       })
   }
 
@@ -386,9 +373,11 @@ impl RuntimeTaskEngine {
     }
     let task = self.graph.task(id).descriptor.clone();
     if self.cache.is_up_to_date(&task)? {
+      Self::emit_runtime_task_boundary(&task.path, true);
       self.task_should_record(id).await?;
       return Ok(());
     }
+    Self::emit_runtime_task_boundary(&task.path, false);
     self.execute_custom_callbacks(id).await?;
     if self.task_should_record(id).await? {
       self
@@ -396,6 +385,19 @@ impl RuntimeTaskEngine {
         .record_successful(&self.graph.task(id).descriptor);
     }
     Ok(())
+  }
+
+  fn emit_runtime_task_boundary(task_path: &str, skipped: bool) {
+    if let Some(observability) = crate::runtime_observe::RuntimeObservability::global() {
+      let build_id = observability.build_id();
+      tracing::info!(
+        target: "arkdown_napi::runtime_task",
+        task_path,
+        skipped,
+        build_id = %build_id,
+        "runtime task boundary"
+      );
+    }
   }
 
   async fn execute_custom_callbacks(
@@ -440,12 +442,7 @@ impl RuntimeTaskEngine {
     let phase_name = Self::phase_name(phase);
     self
       .callback
-      .invoke(RuntimeTaskOperation {
-        phase,
-        task_path: Some(task_path.clone()),
-        error: None,
-        native_event_json: None,
-      })
+      .invoke_task(&task_path, phase, None)
       .await
       .map_err(|source| RuntimeTaskEngineError::Callback {
         phase: phase_name,
@@ -462,12 +459,7 @@ impl RuntimeTaskEngine {
     let task_path = self.graph.task(id).descriptor.path.clone();
     self
       .callback
-      .invoke(RuntimeTaskOperation {
-        phase: RuntimeTaskOperationPhase::Failed,
-        task_path: Some(task_path.clone()),
-        error: Some(error),
-        native_event_json: None,
-      })
+      .invoke_task(&task_path, RuntimeTaskOperationPhase::Failed, Some(error))
       .await
       .map(|_| ())
       .map_err(|source| RuntimeTaskEngineError::Callback {
@@ -508,7 +500,7 @@ impl RuntimeTaskEngine {
     ))
   }
 
-  const fn phase_name(phase: RuntimeTaskOperationPhase) -> &'static str {
+  pub(super) const fn phase_name(phase: RuntimeTaskOperationPhase) -> &'static str {
     match phase {
       RuntimeTaskOperationPhase::BeforeAlways => "beforeAlways",
       RuntimeTaskOperationPhase::Realize => "realize",
@@ -517,8 +509,6 @@ impl RuntimeTaskEngine {
       RuntimeTaskOperationPhase::Run => "run",
       RuntimeTaskOperationPhase::AfterRun => "afterRun",
       RuntimeTaskOperationPhase::Failed => "failed",
-      RuntimeTaskOperationPhase::TransformAbc => "transformAbc",
-      RuntimeTaskOperationPhase::ModifyNativeCommand => "modifyNativeCommand",
     }
   }
 }
@@ -542,19 +532,19 @@ mod tests {
 
   #[async_trait]
   impl RuntimeTaskCallback for RecordingCallback {
-    async fn invoke(
+    async fn invoke_task(
       &mut self,
-      operation: RuntimeTaskOperation,
+      task_path: &str,
+      phase: RuntimeTaskOperationPhase,
+      _error: Option<String>,
     ) -> anyhow::Result<RuntimeTaskCallbackResult> {
-      let phase = operation.phase;
-      let task_path = operation.task_path.unwrap_or_default();
       self.operations.lock().unwrap().push(format!(
         "{}:{}",
         RuntimeTaskEngine::phase_name(phase),
         task_path
       ));
       if matches!(phase, RuntimeTaskOperationPhase::Run)
-        && self.fail_run_for.as_deref() == Some(task_path.as_str())
+        && self.fail_run_for.as_deref() == Some(task_path)
       {
         anyhow::bail!("fixture run failed");
       }
@@ -570,7 +560,7 @@ mod tests {
         output: if matches!(phase, RuntimeTaskOperationPhase::Run) {
           self
             .command_output
-            .get(&task_path)
+            .get(task_path)
             .cloned()
             .unwrap_or_default()
         } else {
@@ -578,6 +568,17 @@ mod tests {
         },
         ..RuntimeTaskCallbackResult::default()
       })
+    }
+
+    async fn transform_abc(&mut self, _event: serde_json::Value) -> anyhow::Result<()> {
+      Ok(())
+    }
+
+    async fn modify_native_command(
+      &mut self,
+      event: serde_json::Value,
+    ) -> anyhow::Result<Vec<String>> {
+      serde_json::from_value(event).map_err(Into::into)
     }
   }
 
@@ -700,8 +701,12 @@ mod tests {
     let mut incremental = task("entry:incremental", false, &[]);
     incremental.track_state = true;
     incremental.has_task_should_do = true;
-    incremental.input_files = vec![input.to_string_lossy().into_owned()];
-    incremental.output_files = vec![output.to_string_lossy().into_owned()];
+    incremental.input_files = vec![super::super::model::RuntimeTaskFileDeclaration::Path(
+      input.to_string_lossy().into_owned(),
+    )];
+    incremental.output_files = vec![super::super::model::RuntimeTaskFileDeclaration::Path(
+      output.to_string_lossy().into_owned(),
+    )];
     let mut engine = RuntimeTaskEngine::new(
       vec![incremental],
       selection(root.path(), "entry:incremental", true),

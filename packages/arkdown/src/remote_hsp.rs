@@ -5,9 +5,9 @@ use arkdown_session::{RemoteHspObjectInventory, RemoteHspObjectRequest};
 pub(crate) struct RemoteHspNapiAdapter;
 
 impl RemoteHspNapiAdapter {
-  pub(crate) fn inspect(request_json: &str) -> Result<String> {
+  pub(crate) fn inspect(request_value: serde_json::Value) -> Result<serde_json::Value> {
     let request =
-      serde_json::from_str::<RemoteHspObjectRequest>(request_json).map_err(|error| {
+      serde_json::from_value::<RemoteHspObjectRequest>(request_value).map_err(|error| {
         Error::new(
           Status::InvalidArg,
           format!("ARKDOWN_INVALID_REMOTE_HSP_REQUEST: {error}"),
@@ -24,7 +24,7 @@ impl RemoteHspNapiAdapter {
         }
       }),
     };
-    serde_json::to_string(&response).map_err(|error| {
+    serde_json::to_value(&response).map_err(|error| {
       Error::new(
         Status::GenericFailure,
         format!("ARKDOWN_REMOTE_HSP_RESPONSE_SERIALIZE_FAILED: {error}"),

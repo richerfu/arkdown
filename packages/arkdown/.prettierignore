@@ -6,3 +6,6 @@ arkdown.wasi.cjs
 wasi-worker-browser.mjs
 wasi-worker.mjs
 .yarnrc.yml
+
+# runtime.js is the size-gated V8 ABI façade; expanding it would hide boundary growth.
+runtime.js

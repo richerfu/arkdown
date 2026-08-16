@@ -12,7 +12,164 @@ export declare class ArkdownRolldownPluginContext {
   getModuleInfo(id: string): HvigorModuleInfo | null
   getFileName(referenceId: string): string
   /** OXC-backed equivalent of Rollup's synchronous `PluginContext.parse`. */
-  parse(source: string, optionsJson?: string | undefined | null): string
+  parse(source: string, options?: JsPluginAstParseOptions | undefined | null): any
+}
+
+/**
+ * Rust-owned build-script model and plan session. JavaScript keeps only the
+ * official Hvigor node identities and forwards their live state after plugin
+ * callbacks mutate it.
+ */
+export declare class RuntimeBuildScriptSession {
+  constructor(projectRoot: string, hvigorUserHome: string | undefined | null, config: object, commandEntryTasks: Array<string>)
+  projectModel(): any
+  moduleDescriptors(): Array<any>
+  moduleDescriptor(root: string): any | null
+  loadModuleDescriptor(descriptor: any): any
+  replaceModuleDescriptors(descriptors: Array<any>): Array<any>
+  get usesOhpm(): boolean
+  effectiveCompileApiVersion(): number
+  selectedProduct(): any
+  selectedProductBundleName(): string | null
+  setProjectBuildProfile(profile: any): any
+  setProjectAppJson(appJson: any): any
+  setModuleBuildProfile(root: string, profile: any): any
+  setModuleJson(root: string, moduleJson: any): any
+  projectPackageField(field: string): any | null
+  modulePackageField(root: string, field: string): any | null
+  setProjectPackageField(field: string, value: any): any
+  setModulePackageField(root: string, field: string, value: any): any
+  setModuleVersion(root: string, version: any): any
+  dependencyContext(root?: string | undefined | null): any
+  allModuleNameHash(): any
+  projectPaths(options: RuntimeOhosContextPathOptions): any
+  moduleTargetPaths(root: string, targetName: string, options: RuntimeOhosContextPathOptions): any
+  prepareRuntimeTaskCycle(rootPaths: Array<string>, executionNodeNames: Array<string>): void
+  prepareCommandTaskCycle(executionNodeNames: Array<string>, commandRootPaths: Array<string>, requiredBoundaryPaths: Array<string>): void
+  prepareDirectTaskCycle(taskModel: any): Array<string>
+  runtimeTaskSelection(validateBoundaries: boolean): any
+  clearRuntimeTaskSelection(): void
+  parameterPlan(): any
+  discoverBuildScriptFiles(roots: Array<string>): any
+  captureHvigorOverrides(root: string, overrides: any | undefined | null, effectsBuildOption: any | undefined | null, sourceFile: string): any
+  runtimePropertyPlan(properties: any, extParams: any, coreStartParams: any): any
+  runtimePathPlan(properties: any, extParams: any): any
+  prepareNativeBuildConfig(config: object, state: RuntimeNativeBuildState, processExecutable: string): object
+  prepareHvigorPluginWorkspace(homeDir: string, processExecutable: string, nodeVersion: string): Promise<any>
+  prepareOhpmDependencyWorkspace(state: RuntimeOhpmDependencyState): Promise<any>
+  hvigorSyncVersionChanged(properties: any, extParams: any): boolean
+  writeHvigorBuildMeta(properties: any, extParams: any): Promise<void>
+  writeHvigorSyncModel(state: RuntimeHvigorSyncState, extParams: any): Promise<void>
+  runtimeCommandPlan(state: RuntimeCommandPlanState): any
+  runHvigorClean(nodeRoot: string, projectTask: boolean): Promise<any>
+  setModuleOverride(root: string, value?: any | undefined | null): void
+  upsertModule(node: object): void
+  invalidate(): void
+  plan(update: RuntimeBuildScriptPlanUpdate): any
+  modulePlan(root: string): any | null
+  sdkDetails(): any
+}
+
+export declare class RuntimeFileCompareResult {
+  get snapshot(): RuntimeFileSnapshot
+  get changed(): boolean
+}
+
+/**
+ * Native view for the snapshot values returned by Hvigor's public
+ * `TaskProxy` API. Filesystem traversal, Hvigor-compatible hashing, and
+ * serialization stay in the Rust cache owner; JavaScript only installs the
+ * standard iterator symbol that Node-API cannot name directly.
+ */
+export declare class RuntimeFileSnapshot {
+  get name(): string
+  get path(): string
+  get type(): string
+  get isSymbolicLink(): boolean
+  get fileMetaData(): RuntimeFileMetadata | null
+  get children(): Array<RuntimeFileSnapshot> | null
+  get hashValue(): string
+  isHashEquals(other: RuntimeFileSnapshot): boolean
+  equals(other: RuntimeFileSnapshot): boolean
+  accept(visitor: object): number
+  toJsonString(): string
+  walk(): IterableIterator<RuntimeFileSnapshot>
+}
+
+/**
+ * This type extends JavaScript's `Iterator`, and so has the iterator helper
+ * methods. It may extend the upcoming TypeScript `Iterator` class in the future.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator#iterator_helper_methods
+ * @see https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-6.html#iterator-helper-methods
+ */
+export declare class RuntimeFileSnapshotIterator {
+
+}
+
+/**
+ * Rust-owned equivalent of Hvigor 6.24.x `ReportServiceImpl` process
+ * monitoring. JavaScript supplies only the live V8 memory snapshot because
+ * those counters are not available from the Rust process APIs.
+ */
+export declare class RuntimeProcessMonitor {
+  constructor(sampler: () => MaybeAsyncJsReturn<JsProcessMemoryUsage>, pid: number)
+  start(): void
+  stop(): string | null
+}
+
+/**
+ * Stateful NAPI owner for the public Hvigor `TaskProxy` compatibility API.
+ *
+ * Hvigor keeps one project cache service for a command. Keeping the same
+ * lifecycle in Rust avoids re-reading and re-deserializing the cache for every
+ * `preExecute`, input comparison, and snapshot lookup while leaving V8 only
+ * responsible for invoking arbitrary task callbacks.
+ */
+export declare class RuntimeTaskCacheSession {
+  constructor(projectRoot: string, cacheEnabled: boolean)
+  createSnapshot(request: RuntimeTaskSnapshotRequest): RuntimeTaskSnapshot
+  check(snapshot: RuntimeTaskSnapshot): boolean
+  recordSnapshot(taskSnapshot: RuntimeTaskSnapshot): RuntimeTaskSnapshot
+  inputValueChanged(snapshot: RuntimeTaskSnapshot, inputKey: string): boolean
+  fileCompare(snapshot: RuntimeTaskSnapshot, declaration: RuntimeTaskFileDeclarationInput): RuntimeFileCompareResult
+  getTask(taskPath: string, nodeName: string, taskName: string, projectTask: boolean): RuntimeTaskSnapshot | null
+  getFile(declaration: RuntimeTaskFileDeclarationInput): RuntimeFileSnapshot | null
+  storeFile(declaration: RuntimeTaskFileDeclarationInput, snapshot: RuntimeFileSnapshot): void
+  buildInfo(): string
+}
+
+/**
+ * Native snapshot model behind the public Hvigor `TaskProxy` result. The
+ * class keeps comparison, hashing, success state, and serialization out of
+ * `runtime.js` while retaining a JavaScript object with the official methods.
+ */
+export declare class RuntimeTaskSnapshot {
+  getKey(): string
+  compareTo(other: RuntimeTaskSnapshot): boolean
+  getModuleName(): string
+  getTaskName(): string
+  getProjectName(): string
+  isSuccessful(): boolean
+  setExecutedSuccessful(): void
+  addInput(name: string, value: unknown): void
+  getInputs(): Array<RuntimeTaskValueEntry>
+  getExecutionId(): string
+  compareInputs(other: RuntimeTaskSnapshot): boolean
+  compareInputFiles(other: RuntimeTaskSnapshot): boolean
+  compareOutputFiles(other: RuntimeTaskSnapshot): boolean
+  getInputFiles(): Map<string, object>
+  getOutputFiles(): Map<string, object>
+  updateFilesOptions(cacheService: object): void
+  updateCacheFilesOptions(cacheService: object): void
+  stringify(): string
+}
+
+export declare class RuntimeTaskValueEntry {
+  getName(): string
+  getValue(): unknown
+  getValueType(): string
+  getHash(): string
 }
 
 /**
@@ -28,38 +185,23 @@ export interface ArkdownPlugin {
   name?: string
   order?: 'first' | 'last' | ((nameToIndex: Record<string, number>) => number)
   buildStart?: (this: HvigorPluginContext) => void | Promise<void>
-  resolveId?: (
-    id: string,
-    importer?: string | null,
-    options?: JsResolveIdOptions,
-  ) =>
-    | string
-    | JsResolveIdOutput
-    | false
-    | null
-    | undefined
-    | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveId?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
   load?: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>
-  transform?: (
-    code: string,
-    id: string,
-  ) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
+  transform?: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
   moduleParsed?: (moduleInfo: HvigorModuleInfo) => void | Promise<void>
-  resolveDynamicImport?: (
-    id: string,
-    importer?: string | null,
-    options?: JsResolveIdOptions,
-  ) =>
-    | string
-    | JsResolveIdOutput
-    | false
-    | null
-    | undefined
-    | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveDynamicImport?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
   beforeBuildEnd?: (this: HvigorPluginContext, input?: unknown) => unknown
   buildEnd?: (this: HvigorPluginContext, error?: Error) => void | Promise<void>
   shouldInvalidCache?: (request: PluginCacheRequest) => boolean | Promise<boolean>
 }
+
+/**
+ * Acquire the process-wide JavaScript Hvigor runtime. Module loader patches,
+ * log4js singletons, and latest-Hvigor globals cannot safely represent two
+ * builds concurrently in one Node process, so overlapping invocations are
+ * rejected explicitly instead of corrupting either build.
+ */
+export declare function beginRuntimeInvocation(projectRoot: string): string
 
 /**
  * Build an OHOS project from Node.js.
@@ -93,14 +235,7 @@ export interface ArkdownPlugin {
  * Plugins are wrapped synchronously before spawning the async build task,
  * so non-Send JS values (Env, Array) don't cross the tokio task boundary.
  */
-export declare function build(
-  config: BuildConfig,
-  plugins?: Array<ArkdownPlugin> | undefined | null,
-  runtimeTasks?:
-    | { tasksJson: string; selectionJson: string; invoke: (operationJson: string) => string | Promise<string> }
-    | undefined
-    | null,
-): Promise<BuildResult>
+export declare function build(config: BuildConfig, plugins?: Array<ArkdownPlugin> | undefined | null, runtimeTasks?: { tasks: Array<Record<string, unknown>>; catalogs: Array<Record<string, unknown>>; removedTaskPaths: string[]; selection: Record<string, unknown>; dispatchTask: (request: { taskPath: string; phase: string; error?: string }) => Record<string, unknown> | Promise<Record<string, unknown>>; commandModifierTypes: number[]; transformAbc: (event: unknown) => void | Promise<void>; modifyNativeCommand: (event: unknown) => string[] | Promise<string[]> } | undefined | null): Promise<BuildResult>
 
 export interface BuildConfig {
   project?: string
@@ -138,11 +273,7 @@ export interface BuildResult {
 }
 
 /** Collect and resolve plugin paths from a callback-produced hvigorfile value. */
-export declare function collectBuildScriptPluginPaths(
-  value: unknown,
-  baseDir: string,
-  includeCompilePluginFile?: boolean | undefined | null,
-): string
+export declare function collectBuildScriptPluginPaths(value: unknown, baseDir: string, includeCompilePluginFile?: boolean | undefined | null): any
 
 /**
  * Compile one hvigor TypeScript configuration module through Rust OXC and
@@ -157,17 +288,21 @@ export declare function compileHvigorScript(file: string, sourceMap?: boolean | 
  */
 export declare function compileHvigorScriptSync(file: string, sourceMap?: boolean | undefined | null): string
 
-/**
- * Select one hvigorfile per root using the latest installed hvigor suffix
- * precedence without repeating filesystem probes in JavaScript.
- */
-export declare function discoverBuildScriptFiles(requestJson: string): string
+export declare function emitRuntimeLog(record: RuntimeLogRecord): void
 
-/** Internal input used by synchronous OHOS context getters in `runtime.js`. */
-export interface HvigorContextInspectConfig {
-  project: string
-  product?: string
-}
+/**
+ * Execute a Rust-planned Hvigor command while keeping live task/plugin
+ * objects behind three narrow JavaScript callbacks.
+ */
+export declare function executeRuntimeCommandPlan(plan: any, callbacks: object): Promise<{ artifacts: string[]; output: string[] }>
+
+/**
+ * Release the process-wide JavaScript Hvigor runtime acquired by
+ * `beginRuntimeInvocation`.
+ */
+export declare function finishRuntimeInvocation(token: string): void
+
+export declare function finishRuntimeObservability(): void
 
 /** Dependency info returned by `this.getModuleInfo(id)` inside plugin hooks. */
 export interface HvigorModuleInfo {
@@ -223,6 +358,9 @@ export interface HvigorProjectConfig {
   compatibleSdkVersion?: string
   packageManagerType?: string
   isByteCodeHarOptimize?: boolean
+  moduleName?: string
+  modulePath?: string
+  projectTopDir?: string
 }
 
 /** Compile plugin share object available as `this.share`. */
@@ -231,27 +369,46 @@ export interface HvigorShareContext {
 }
 
 /**
- * Compare latest-hvigor and SDK cache metadata without routing filesystem
- * behavior through the JavaScript plugin layer.
- */
-export declare function hvigorSyncVersionChanged(requestJson: string): boolean
-
-/**
- * Inspect the Rust-owned dependency and module-name projections exposed by
- * `OhosProjectContext` and `OhosModuleContext`.
- */
-export declare function inspectHvigorContext(config: HvigorContextInspectConfig): string
-
-/** Resolve plugin-facing SDK details once in the Rust session inventory. */
-export declare function inspectHvigorSdkDetails(requestJson: string): string
-
-/**
  * Inspect `oh_modules/.hsp` using the official module-first,
  * highest-version selection contract.
  */
-export declare function inspectRemoteHspObjects(requestJson: string): string
+export declare function inspectRemoteHspObjects(request: any): any
 
-export type JsHookSideEffects = boolean | string
+/** Refresh only incremental declarations after `beforeAlwaysAction()`. */
+export declare function inspectRuntimeTaskDeclarations(coreTask: object, taskContext: object, classIncrementalTask: boolean): any
+
+/**
+ * Project the live Hvigor nodes, task catalogs, removed paths, and task graph
+ * descriptors in one native traversal.
+ */
+export declare function inspectRuntimeTaskModel(nodes: unknown[], includeCatalog: boolean): any
+
+/** Refresh live task state after lazy realization. */
+export declare function inspectRuntimeTaskState(coreTask: object, taskContext: object, classIncrementalTask: boolean): any
+
+export declare function installRuntimeObservability(options: ObservabilityInstallOptions): string
+
+export interface JsBuildEndContext {
+  errors: Array<JsPluginError>
+}
+
+export interface JsBuildStartOptions {
+  input: string | string[] | Record<string, string>
+  cwd: string
+  platform: string
+  shimMissingExports: boolean
+  context: string
+}
+
+export type JsHookSideEffects =
+  boolean | string
+
+export interface JsHvigorCompilePluginPlanConfig {
+  compileMode?: string
+  preview?: boolean
+  target?: string
+  mode?: string
+}
 
 export interface JsJsonSourceMap {
   file?: string
@@ -271,7 +428,60 @@ export interface JsLoadOutput {
   moduleType?: string
 }
 
-export type JsResolvedExternal = boolean | string
+export interface JsPluginAstParseOptions {
+  sourceType?: string
+  ranges?: boolean
+  locations?: boolean
+  sourceFile?: string
+  directSourceFile?: string
+  allowReturnOutsideFunction?: boolean
+  preserveParens?: boolean
+  captureComments?: boolean
+  ecmaVersion?: string | number
+  allowAwaitOutsideFunction?: boolean
+  allowSuperOutsideMethod?: boolean
+  allowHashBang?: boolean
+  hasOnToken?: boolean
+  hasProgram?: boolean
+}
+
+export interface JsPluginDispatchRequest {
+  hookName: string
+  context?: ArkdownRolldownPluginContext
+  buildStartOptions?: JsBuildStartOptions
+  id?: string
+  importer?: string
+  resolveOptions?: JsResolveIdOptions
+  code?: string
+  moduleInfo?: HvigorModuleInfo
+  buildEndContext?: JsBuildEndContext
+  cacheRequest?: any
+  share?: HvigorShareContext
+}
+
+export interface JsPluginDispatchResult {
+  resolveId?: string | JsResolveIdOutput | boolean
+  load?: string | JsLoadOutput
+  transform?: string | JsTransformOutput
+  shouldInvalidCache?: boolean
+}
+
+export interface JsPluginError {
+  message: string
+  id?: string
+  plugin?: string
+}
+
+export interface JsProcessMemoryUsage {
+  rss: number
+  heapTotal: number
+  heapUsed: number
+  external: number
+  arrayBuffers: number
+}
+
+export type JsResolvedExternal =
+  boolean | string
 
 export interface JsResolveIdOptions {
   attributes: Record<string, string>
@@ -286,7 +496,23 @@ export interface JsResolveIdOutput {
   packageJsonPath?: string
 }
 
-export type JsSourceMap = string | JsJsonSourceMap
+export interface JsRuntimeTaskCallbackResult {
+  enabled?: boolean
+  trackState?: boolean
+  refreshDeclarations?: boolean
+  hasBeforeRun?: boolean
+  hasAfterRun?: boolean
+  hasFailed?: boolean
+  hasTaskShouldDo?: boolean
+  taskShouldDo?: boolean
+  inputProperties?: Array<Record<string, unknown>> | undefined
+  inputFiles?: Array<string | Record<string, unknown>> | undefined
+  outputFiles?: Array<string | Record<string, unknown>> | undefined
+  output?: Array<string>
+}
+
+export type JsSourceMap =
+  string | JsJsonSourceMap
 
 export interface JsTransformOutput {
   code?: string
@@ -295,20 +521,19 @@ export interface JsTransformOutput {
   moduleType?: string
 }
 
-/** Load one module added dynamically by `hvigorconfig.ts::includeNode`. */
-export declare function loadBuildScriptModuleModel(requestJson: string): string
-
-/**
- * Load the immutable project and module model files once in Rust. JavaScript
- * consumes the resulting snapshot only to construct plugin-facing facades.
- */
-export declare function loadBuildScriptRuntimeModel(requestJson: string): string
-
 /**
  * Deep-merge callback-produced hvigor configuration in Rust without
  * serializing live JavaScript functions or object identities.
  */
 export declare function mergeHvigorConfig(base: unknown, overlay: unknown): unknown
+
+export interface ObservabilityInstallOptions {
+  mode: string
+  cacheDir: string
+  buildId: string
+  logLevel: string
+  consoleOwner: string
+}
 
 /** Parse Arkdown's direct `build` command arguments in Rust. */
 export declare function parseArkdownBuildCliArgs(args: Array<string>): string
@@ -326,16 +551,16 @@ export declare function parseHvigorCliArgs(args: Array<string>): string
 export declare function parseHvigorJsonText(source: string, locations?: boolean | undefined | null): string
 
 /**
+ * Compare latest-hvigor and SDK cache metadata without routing filesystem
+ * behavior through the JavaScript plugin layer.
  * Parse JavaScript for plugin glue that is not currently inside a live
  * Rolldown callback (for example direct context construction in a hvigorfile).
  */
-export declare function parsePluginAst(source: string, optionsJson?: string | undefined | null): string
+export declare function parsePluginAst(source: string, options?: JsPluginAstParseOptions | undefined | null): any
 
-/**
- * Resolve target selection, effective build options, and compile-plugin
- * records in Rust after JavaScript configuration callbacks have completed.
- */
-export declare function planBuildScriptRuntime(requestJson: string): string
+export declare function persistRuntimeDetails(detailsJson: string): string
+
+export declare function persistRuntimeReport(reportJson: string, analyzeHtml: boolean): string
 
 /**
  * Resolve latest-hvigor compile-plugin order against the native Rolldown
@@ -343,14 +568,14 @@ export declare function planBuildScriptRuntime(requestJson: string): string
  * thread; all grouping, built-in inventory, validation, and slot reduction
  * remain in Rust.
  */
-export declare function planHvigorCompilePlugins(configJson: string, plugins: unknown[]): string
+export declare function planHvigorCompilePlugins(config: JsHvigorCompilePluginPlanConfig, plugins: unknown[]): any
 
 /**
  * Resolve the function-valued order extension for explicit package plugins.
  * String-valued first/last orders stay on the plugin for Rolldown's Rust
  * factory; only callback execution crosses into JavaScript.
  */
-export declare function planRolldownPackagePlugins(plugins: unknown[]): string
+export declare function planRolldownPackagePlugins(plugins: unknown[]): any
 
 /** Latest-hvigor cache invalidation input. */
 export interface PluginCacheRequest {
@@ -359,23 +584,6 @@ export interface PluginCacheRequest {
   id: string
 }
 
-/**
- * Prepare the per-project hvigor dependency workspace before evaluating any
- * configuration plugin. Package installation and cache validation stay on
- * the Rust startup boundary; JavaScript receives only the resolved workspace.
- */
-export declare function prepareHvigorPluginWorkspace(requestJson: string): Promise<string>
-
-/**
- * Normalize the public/runtime build request in Rust while preserving live
- * JavaScript extension values that the plugin glue may still reference.
- */
-export declare function prepareNativeBuildConfig(
-  config: object,
-  overlay: RuntimeBuildConfigOverlay | undefined | null,
-  processExecutable: string,
-): object
-
 /** Resolve one configured plugin path with latest-hvigor extension order. */
 export declare function resolveBuildScriptPluginPath(candidate: string, baseDir: string): string | null
 
@@ -383,81 +591,131 @@ export declare function resolveBuildScriptPluginPath(candidate: string, baseDir:
  * Render Hvigor's built-in `buildInfo` task from the immutable Rust profile
  * inventory. JavaScript remains responsible only for task hook dispatch.
  */
-export declare function runHvigorBuildInfo(requestJson: string): string
-
-/** Execute latest-hvigor project/module clean behavior in Rust. */
-export declare function runHvigorClean(requestJson: string): Promise<string>
+export declare function runHvigorBuildInfo(request: any): any
 
 /** Execute latest-hvigor cache and pnpm store pruning in Rust. */
-export declare function runHvigorPrune(requestJson: string): Promise<string>
+export declare function runHvigorPrune(request: any): Promise<Record<string, unknown>>
 
 /**
  * Execute custom hvigor command roots through the Rust-owned task graph.
  * JavaScript remains only the callback host for user-authored task actions.
  */
-export declare function runRuntimeTasks(runtimeTasks: {
-  tasksJson: string
-  selectionJson: string
-  invoke: (operationJson: string) => string | Promise<string>
-}): Promise<Array<string>>
+export declare function runRuntimeTasks(runtimeTasks: { tasks: Array<Record<string, unknown>>; catalogs: Array<Record<string, unknown>>; removedTaskPaths: string[]; selection: Record<string, unknown>; dispatchTask: (request: { taskPath: string; phase: string; error?: string }) => Record<string, unknown> | Promise<Record<string, unknown>>; commandModifierTypes: number[]; transformAbc: (event: unknown) => void | Promise<void>; modifyNativeCommand: (event: unknown) => string[] | Promise<string[]> }): Promise<Array<string>>
 
-export interface RuntimeBuildConfigOverlay {
-  defaultCache?: boolean
-  mode?: string
-  enableSignTask?: boolean
-  fastBuildApp?: boolean
-  ohosDebugAsan?: boolean
-  ohosEnableHwasan?: boolean
-  ohosEnableTsan?: boolean
-  ohosEnableUbsan?: boolean
-  ohosEnableBinxo?: boolean
-  projectHvigorOverridesJson?: string
-  moduleHvigorOverridesJson?: string
-  runtimeContextOverridesJson?: string
-  packCompressLevel?: number
-  alignDeviceTypes?: Array<string>
-  collectDebugSymbol?: boolean
-  uiTransformOptimization?: boolean
-  integratedHspUseGetCurrentBundleName?: boolean
-  byteCodeHarIntegratedOptimization?: boolean
-  keepDependency?: boolean
-  parameterFileOverride?: string
-  hvigorRuntimePropertiesJson?: string
-  hvigorCacheDir?: string
+export interface RuntimeBuildScriptPlanUpdate {
+  productName: string
+  buildModeName: string
+  moduleSelection?: string
+  properties: any
+  extParams: any
+  daemon: boolean
+  syncVersionChanged: boolean
 }
 
-/**
- * Resolve latest-hvigor command modes, task roots, custom-task native
- * dependencies, and native build request groups in the Rust task graph.
- */
-export declare function runtimeCommandPlan(requestJson: string): string
+export interface RuntimeCommandPlanState {
+  executionMode?: string
+  sync: boolean
+  taskNames: Array<string>
+  taskModel: any
+}
+
+export interface RuntimeFileMetadata {
+  size: number
+  lastModifiedTime: number
+}
+
+export interface RuntimeHvigorSyncState {
+  configBuildVersion?: any
+  selectedNodeNames?: Array<string>
+  projectCustomTasks: any
+  moduleCustomTasks: any
+  customModels: any
+  customModelTaskInfo: any
+}
+
+export interface RuntimeLogRecord {
+  level: string
+  category: string
+  message: string
+  durationId?: string
+  taskPath?: string
+  eventId?: string
+  source: string
+}
+
+export interface RuntimeNativeBuildState {
+  properties: any
+  extParams: any
+  coreStartParams: any
+  defaultCache: boolean
+  mode: string
+  fastBuildApp: boolean
+}
+
+export declare function runtimeObservabilityIsEnabled(level: string, target: string): boolean
+
+export interface RuntimeOhosContextPathOptions {
+  buildCacheDir?: string
+  buildDir?: string
+  previewMode: boolean
+  localTest: boolean
+  ohosTest: boolean
+}
+
+export interface RuntimeOhpmDependencyState {
+  properties: any
+  extParams: any
+  projectPackage: any
+  modules: any
+  packageModelUpdated: boolean
+  executable?: string
+}
 
 /**
  * Return the latest-hvigor built-in task catalog from the Rust-owned graph
  * metadata. JavaScript wraps these records only to expose lazy plugin APIs.
  */
-export declare function runtimeTaskCatalog(requestJson: string): string
+export declare function runtimeTaskCatalog(request: any): any
+
+export interface RuntimeTaskFileDeclarationInput {
+  path: string
+  isDirectory?: boolean
+  test?: RuntimeTaskFileFilterInput
+  depth?: number
+  fileSnapShotHashValue?: string
+}
+
+export interface RuntimeTaskFileFilterInput {
+  source: string
+  flags?: string
+}
+
+export interface RuntimeTaskPropertyInput {
+  name: string
+  value: string
+  valueType: string
+}
 
 /**
  * Render latest-hvigor `tasks` and `taskTree` reports from the Rust-owned
  * task inventory. JavaScript only supplies plugin-authored task metadata.
  */
-export declare function runtimeTaskReport(requestJson: string): string
+export declare function runtimeTaskReport(request: any): string
 
-/**
- * Validate callback-produced build options with the same Rust schema owner
- * used for project and module profile snapshots.
- */
-export declare function validateBuildScriptBuildOption(requestJson: string): string
+export interface RuntimeTaskSnapshotRequest {
+  path: string
+  projectName: string
+  nodeName: string
+  taskName: string
+  projectTask: boolean
+  trackState: boolean
+  inputProperties: Array<RuntimeTaskPropertyInput>
+  inputFiles: Array<RuntimeTaskFileDeclarationInput>
+  outputFiles: Array<RuntimeTaskFileDeclarationInput>
+}
 
 /**
  * Validate raw compile-plugin exports before JavaScript wraps their function
  * identities into Rolldown hook adapters.
  */
-export declare function validateHvigorCompilePlugins(plugins: unknown[], pluginFile: string): string
-
-/** Persist the metadata used by latest-hvigor's version-change clean edge. */
-export declare function writeHvigorBuildMeta(requestJson: string): Promise<void>
-
-/** Generate and write the latest IDE tooling model entirely in Rust. */
-export declare function writeHvigorSyncModel(requestJson: string): Promise<void>
+export declare function validateHvigorCompilePlugins(plugins: unknown[], pluginFile: string): any

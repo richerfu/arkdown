@@ -425,14 +425,18 @@ pub(crate) struct HvigorPluginWorkspaceRunner {
 }
 
 impl HvigorPluginWorkspaceRunner {
-  pub(crate) fn from_json(request_json: &str) -> anyhow::Result<Self> {
+  pub(crate) fn from_value(request_value: Value) -> anyhow::Result<Self> {
     Ok(Self {
-      request: serde_json::from_str(request_json)?,
+      request: serde_json::from_value(request_value)?,
     })
   }
 
-  pub(crate) async fn response_json(self) -> anyhow::Result<String> {
-    let response = tokio::task::spawn_blocking(move || match self.execute() {
+  pub(crate) async fn response_value(self) -> anyhow::Result<Value> {
+    serde_json::to_value(self.response().await?).map_err(Into::into)
+  }
+
+  async fn response(self) -> anyhow::Result<HvigorPluginWorkspaceResponse> {
+    tokio::task::spawn_blocking(move || match self.execute() {
       Ok((plan, installed)) => HvigorPluginWorkspaceResponse {
         workspace: Some(plan.workspace.clone()),
         node_modules: Some(plan.node_modules()),
@@ -448,8 +452,8 @@ impl HvigorPluginWorkspaceRunner {
         error: Some(error.diagnostic()),
       },
     })
-    .await?;
-    serde_json::to_string(&response).map_err(Into::into)
+    .await
+    .map_err(Into::into)
   }
 
   fn execute(self) -> Result<(HvigorPluginWorkspacePlan, bool), HvigorPluginWorkspaceError> {

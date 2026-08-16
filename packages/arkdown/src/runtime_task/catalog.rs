@@ -156,8 +156,8 @@ pub struct RuntimeTaskCatalog {
 }
 
 impl RuntimeTaskCatalog {
-  pub fn from_json(request_json: &str) -> anyhow::Result<Self> {
-    let request = serde_json::from_str(request_json)?;
+  pub fn from_value(request_value: serde_json::Value) -> anyhow::Result<Self> {
+    let request = serde_json::from_value(request_value)?;
     Ok(Self::new(request))
   }
 
@@ -190,8 +190,8 @@ impl RuntimeTaskCatalog {
       .collect()
   }
 
-  pub fn entries_json(self) -> anyhow::Result<String> {
-    serde_json::to_string(&self.entries()?).map_err(Into::into)
+  pub fn entries_value(self) -> anyhow::Result<serde_json::Value> {
+    serde_json::to_value(self.entries()?).map_err(Into::into)
   }
 }
 
@@ -1283,8 +1283,10 @@ mod tests {
   use super::*;
 
   fn entries(request: serde_json::Value) -> Vec<RuntimeTaskCatalogEntry> {
-    let catalog = RuntimeTaskCatalog::from_json(&request.to_string()).unwrap();
-    serde_json::from_str(&catalog.entries_json().unwrap()).unwrap()
+    RuntimeTaskCatalog::from_value(request)
+      .unwrap()
+      .entries()
+      .unwrap()
   }
 
   #[test]

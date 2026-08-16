@@ -23,6 +23,7 @@ pub mod effects;
 pub mod inventory;
 pub mod parse;
 pub mod runtime_model;
+pub mod runtime_session;
 pub mod snapshot;
 
 // Narrow re-exports for callers that only need the primary types.
@@ -34,5 +35,12 @@ pub use runtime_model::{
     BuildScriptFileInventory, BuildScriptFileInventoryRequest, BuildScriptModuleModelLoader,
     BuildScriptModuleModelRequest, BuildScriptRuntimeModelError, BuildScriptRuntimeModelLoader,
     BuildScriptRuntimeModelRequest, BuildScriptRuntimeModelSnapshot,
+};
+pub use runtime_session::{
+    BuildScriptRuntimeCleanSnapshot, BuildScriptRuntimeCommandSnapshot,
+    BuildScriptRuntimeExecutionSnapshotError, BuildScriptRuntimePathPlan,
+    BuildScriptRuntimePlanUpdate, BuildScriptRuntimeSdkConfig, BuildScriptRuntimeSdkDetails,
+    BuildScriptRuntimeSession, BuildScriptRuntimeSyncModule, BuildScriptRuntimeSyncSnapshot,
+    BuildScriptRuntimeSyncSnapshotError, BuildScriptRuntimeSyncTarget,
 };
 pub use snapshot::{BuildScriptFingerprint, BuildScriptKind, BuildScriptSnapshot};

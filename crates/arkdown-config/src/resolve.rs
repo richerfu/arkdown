@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use arkdown_core::{
     AppOptionOverride, ArkdownConfig, BuildMode, ModuleConfig, OhosModuleType, OutputTarget,
@@ -254,6 +254,9 @@ impl<'a> ArkdownConfigLoader<'a> {
             compile_sdk_version: hvigor_sdk_cache
                 .as_ref()
                 .and_then(|cache| cache.toolchains_version.clone()),
+            preferred_sdk_root: hvigor_sdk_cache
+                .as_ref()
+                .and_then(|cache| cache.preferred_sdk_root.clone()),
         })?;
 
         // -----------------------------------------------------------------------
@@ -285,6 +288,7 @@ pub fn load_config(
 struct HvigorSdkCache {
     compile_api_version: Option<u32>,
     toolchains_version: Option<String>,
+    preferred_sdk_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -296,18 +300,64 @@ struct RawHvigorCacheMeta {
     compile_sdk_version: Option<String>,
 }
 
+/// SDK selection materialized by hvigor's ArkTS task configuration.
+///
+/// `sdkPath` is the SDK distribution root while `etsLoaderPath` identifies
+/// the exact OpenHarmony component. Both are emitted with host-native path
+/// syntax, so arkdown keeps them as `PathBuf` and never rewrites separators.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHvigorProjectConfig {
+    #[serde(default)]
+    sdk_path: Option<PathBuf>,
+    #[serde(default)]
+    ets_loader_path: Option<PathBuf>,
+}
+
+impl RawHvigorProjectConfig {
+    fn existing_sdk_root(self, project_root: &Path) -> Option<PathBuf> {
+        self.sdk_path
+            .and_then(|path| Self::existing_path(project_root, path))
+            .or_else(|| {
+                self.ets_loader_path
+                    .and_then(|path| Self::existing_path(project_root, path))
+                    .and_then(|loader| {
+                        loader
+                            .ancestors()
+                            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "ets"))
+                            .and_then(Path::parent)
+                            .map(Path::to_path_buf)
+                    })
+            })
+    }
+
+    fn existing_path(project_root: &Path, path: PathBuf) -> Option<PathBuf> {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            project_root.join(path)
+        };
+        path.is_dir().then_some(path)
+    }
+}
+
 impl HvigorSdkCache {
     fn load(project_root: &Path) -> Option<Self> {
-        let path = project_root.join(".hvigor").join("cache").join("meta.json");
-        let contents = fs_err::read_to_string(path).ok()?;
+        let cache_dir = project_root.join(".hvigor").join("cache");
+        let contents = fs_err::read_to_string(cache_dir.join("meta.json")).ok()?;
         let raw = serde_json::from_str::<RawHvigorCacheMeta>(&contents).ok()?;
         let compile_api_version = raw
             .compile_sdk_version
             .as_deref()
             .and_then(parse_api_version);
+        let preferred_sdk_root = fs_err::read_to_string(cache_dir.join("project-config.json"))
+            .ok()
+            .and_then(|contents| serde_json::from_str::<RawHvigorProjectConfig>(&contents).ok())
+            .and_then(|config| config.existing_sdk_root(project_root));
         Some(Self {
             compile_api_version,
             toolchains_version: raw.tool_chains_version.filter(|value| !value.is_empty()),
+            preferred_sdk_root,
         })
     }
 }
@@ -347,11 +397,22 @@ mod tests {
             r#"{"toolChainsVersion":"6.0.0.47","compileSdkVersion":"6.0.0(20)"}"#,
         )
         .expect("write hvigor cache meta");
+        let sdk_root = tmp.join("selected-sdk");
+        std::fs::create_dir_all(&sdk_root).expect("create selected SDK root");
+        std::fs::write(
+            cache_dir.join("project-config.json"),
+            serde_json::json!({ "sdkPath": sdk_root }).to_string(),
+        )
+        .expect("write hvigor project config");
 
         let cache = HvigorSdkCache::load(&tmp).expect("load hvigor sdk cache");
 
         assert_eq!(cache.compile_api_version, Some(20));
         assert_eq!(cache.toolchains_version.as_deref(), Some("6.0.0.47"));
+        assert_eq!(
+            cache.preferred_sdk_root.as_deref(),
+            Some(sdk_root.as_path())
+        );
 
         let _ = std::fs::remove_dir_all(tmp);
     }

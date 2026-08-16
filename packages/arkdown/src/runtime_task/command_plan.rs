@@ -69,6 +69,15 @@ enum RuntimeCommandKind {
   CollectCoverage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RuntimeCommandExecutionLane {
+  Native,
+  Standalone,
+  SyncCustom,
+  Custom,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum RuntimeNativeOutputTarget {
@@ -82,6 +91,7 @@ enum RuntimeNativeOutputTarget {
 struct RuntimeCommandTask {
   task_path: String,
   command_kind: RuntimeCommandKind,
+  execution_lane: RuntimeCommandExecutionLane,
   #[serde(skip_serializing_if = "Option::is_none")]
   dependency_only: Option<bool>,
 }
@@ -317,8 +327,14 @@ pub(crate) struct RuntimeCommandPlanner {
 }
 
 impl RuntimeCommandPlanner {
-  pub fn response_json(request_json: &str) -> anyhow::Result<String> {
-    let mut request: RuntimeCommandPlanRequest = serde_json::from_str(request_json)?;
+  pub fn response_value(request_value: Value) -> anyhow::Result<Value> {
+    let request = serde_json::from_value(request_value)?;
+    serde_json::to_value(Self::response(request)?).map_err(Into::into)
+  }
+
+  fn response(
+    mut request: RuntimeCommandPlanRequest,
+  ) -> anyhow::Result<RuntimeCommandPlanEnvelope> {
     let descriptors = RuntimeTaskModelBuilder::new(
       std::mem::take(&mut request.catalogs),
       std::mem::take(&mut request.tasks),
@@ -353,7 +369,7 @@ impl RuntimeCommandPlanner {
         error: Some(RuntimeCommandPlanError::Graph(error).diagnostic()),
       },
     };
-    serde_json::to_string(&response).map_err(Into::into)
+    Ok(response)
   }
 
   fn plan(&mut self) -> Result<RuntimeCommandPlan, RuntimeCommandPlanError> {
@@ -457,10 +473,26 @@ impl RuntimeCommandPlanner {
       .collect();
     let tasks = tasks
       .into_iter()
-      .map(|task| RuntimeCommandTask {
-        task_path: self.graph.task(task.id).descriptor.path.clone(),
-        command_kind: task.command_kind,
-        dependency_only: task.dependency_only.then_some(true),
+      .map(|task| {
+        let descriptor = &self.graph.task(task.id).descriptor;
+        let execution_lane = if matches!(
+          task.command_kind,
+          RuntimeCommandKind::Assembly | RuntimeCommandKind::Native
+        ) {
+          RuntimeCommandExecutionLane::Native
+        } else if descriptor.built_in {
+          RuntimeCommandExecutionLane::Standalone
+        } else if self.custom_sync_task_paths.contains(&descriptor.path) {
+          RuntimeCommandExecutionLane::SyncCustom
+        } else {
+          RuntimeCommandExecutionLane::Custom
+        };
+        RuntimeCommandTask {
+          task_path: descriptor.path.clone(),
+          command_kind: task.command_kind,
+          execution_lane,
+          dependency_only: task.dependency_only.then_some(true),
+        }
       })
       .collect();
     Ok(RuntimeCommandPlan {

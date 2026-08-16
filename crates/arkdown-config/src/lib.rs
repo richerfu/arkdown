@@ -9,6 +9,7 @@ pub mod build_script_schema;
 pub mod custom_config;
 pub mod error;
 pub mod hvigor_overrides;
+pub mod hvigor_runtime;
 pub mod module_json;
 pub mod oh_package;
 pub mod resolve;
@@ -30,5 +31,10 @@ pub use hvigor_overrides::{
     HvigorAppOptionOverride, HvigorSigningConfigOverride, HvigorSigningMaterialOverride,
     ModuleHvigorOverrides, ProjectHvigorOverrides, RuntimeContextOverrides,
     RuntimeModuleContextOverrides, RuntimeProjectContextOverrides,
+};
+pub use hvigor_runtime::{
+    HvigorNativePropertyPlan, HvigorRuntimeParameterPlan, HvigorRuntimeParameterPlanRequest,
+    HvigorRuntimeParameterPlanner, HvigorRuntimePropertyDiagnostic, HvigorRuntimePropertyPlan,
+    HvigorRuntimePropertyPlanRequest, HvigorRuntimePropertyPlanner,
 };
 pub use resolve::{load_config, ArkdownConfigLoader};
