@@ -17,9 +17,13 @@
 //! | `har_dedup` | HAR deduplication for HSP builds (was `arkdown-plugin-har-dedup`) |
 //! | `ets_transform` | ArkTS transform replacing SDK JS plugins (was `arkdown-plugin-ets-transform`) |
 //! | `api_transform` | Latest SDK `apiTransform` source-map boundary after ETS emit |
-//! | `wrapper_chunk` | Wrapper chunk emission for globalThis module registry |
 //! | `import_check` | Import validity / cross-module import guard |
-//! | `minify` | Minification pass (release builds) |
+//!
+//! Removed adapters: `wrapper_chunk` and `minify` (deleted 2026-08-17). Their
+//! only hook (`render_chunk`) is unreachable on the production path —
+//! `Bundler::bundle()` uses `scan_module_sources()` and never renders chunks.
+//! ESMODULE release minification/obfuscation is owned by the obfuscation stage
+//! (ArkGuard). Their `HvigorNativePluginSlot` ranks remain as JS-plugin anchors.
 
 pub mod api_transform;
 #[cfg(test)]
@@ -35,7 +39,5 @@ pub mod hvigor_compile;
 mod hvigor_compile_tests;
 pub mod import_check;
 pub mod json5;
-pub mod minify;
 pub mod module_meta;
 pub mod ohos_resolve;
-pub mod wrapper_chunk;
