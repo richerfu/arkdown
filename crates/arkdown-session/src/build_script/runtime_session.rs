@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use arkdown_config::{
-    BuildScriptModuleSelection, BuildScriptRuntimeModulePlan, BuildScriptRuntimeModulePlanRequest,
-    BuildScriptRuntimePlan, BuildScriptRuntimePlanDiagnostic, BuildScriptRuntimePlanRequest,
-    BuildScriptRuntimePlanner, HvigorRuntimeParameterPlan, HvigorRuntimeParameterPlanRequest,
-    HvigorRuntimeParameterPlanner, HvigorRuntimePropertyDiagnostic, HvigorRuntimePropertyPlan,
-    HvigorRuntimePropertyPlanRequest, HvigorRuntimePropertyPlanner,
+    BuildScriptCompilePluginRecord, BuildScriptModuleSelection, BuildScriptRuntimeModulePlan,
+    BuildScriptRuntimeModulePlanRequest, BuildScriptRuntimePlan, BuildScriptRuntimePlanDiagnostic,
+    BuildScriptRuntimePlanRequest, BuildScriptRuntimePlanner, BuildScriptTaskCatalogPlan,
+    HvigorRuntimeParameterPlan, HvigorRuntimeParameterPlanRequest, HvigorRuntimeParameterPlanner,
+    HvigorRuntimePropertyDiagnostic, HvigorRuntimePropertyPlan, HvigorRuntimePropertyPlanRequest,
+    HvigorRuntimePropertyPlanner,
 };
 use arkdown_path::{canonicalize_or_owned, lexical_normalize};
 use serde::Serialize;
@@ -149,6 +150,54 @@ pub enum BuildScriptRuntimeSyncSnapshotError {
     TargetNameMissing { name: String, target: Value },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildScriptCompilePluginPathError {
+    Empty,
+    NotFound { path: PathBuf },
+    InvalidExtension { path: PathBuf },
+}
+
+impl BuildScriptCompilePluginPathError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Empty => "EMPTY_COMPILE_PLUGIN_PATH",
+            Self::NotFound { .. } => "PLUGIN_PATH_NOT_FOUND",
+            Self::InvalidExtension { .. } => "PLUGIN_FILE_MUST_END_WITH_TS",
+        }
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Empty => None,
+            Self::NotFound { path } | Self::InvalidExtension { path } => Some(path),
+        }
+    }
+}
+
+impl std::fmt::Display for BuildScriptCompilePluginPathError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("compile plugin path must not be empty"),
+            Self::NotFound { path } => {
+                write!(
+                    formatter,
+                    "compile plugin path does not exist: {}",
+                    path.display()
+                )
+            }
+            Self::InvalidExtension { path } => {
+                write!(
+                    formatter,
+                    "compile plugin file must end with .ts: {}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BuildScriptCompilePluginPathError {}
+
 impl std::fmt::Display for BuildScriptRuntimeSyncSnapshotError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -210,6 +259,7 @@ pub struct BuildScriptRuntimeSession {
     context: HvigorContextSession,
     plan: Option<BuildScriptRuntimePlan>,
     sdk_details: Option<BuildScriptRuntimeSdkDetails>,
+    package_model_updated: bool,
 }
 
 impl BuildScriptRuntimeSession {
@@ -273,6 +323,7 @@ impl BuildScriptRuntimeSession {
             context,
             plan: None,
             sdk_details: None,
+            package_model_updated: false,
         }
     }
 
@@ -300,8 +351,61 @@ impl BuildScriptRuntimeSession {
             .unwrap_or("hap")
     }
 
+    pub fn compile_plugin_path(
+        &self,
+        module_root: &Path,
+        plugin_path: &str,
+    ) -> Result<PathBuf, BuildScriptCompilePluginPathError> {
+        if plugin_path.is_empty() {
+            return Err(BuildScriptCompilePluginPathError::Empty);
+        }
+        let configured = PathBuf::from(plugin_path);
+        let configured = if configured.is_absolute() {
+            configured
+        } else {
+            module_root.join(configured)
+        };
+        let resolved = lexical_normalize(&configured);
+        if !resolved.exists() {
+            return Err(BuildScriptCompilePluginPathError::NotFound { path: resolved });
+        }
+        if !resolved.to_string_lossy().ends_with(".ts") {
+            return Err(BuildScriptCompilePluginPathError::InvalidExtension { path: resolved });
+        }
+        Ok(resolved)
+    }
+
     pub fn command_is_clean_only(&self) -> bool {
         self.request.command_entry_tasks.as_slice() == ["clean"]
+    }
+
+    pub fn fast_build_app(&self) -> Result<bool, BuildScriptRuntimeExecutionSnapshotError> {
+        let plan = self.plan.as_ref().ok_or(
+            BuildScriptRuntimeExecutionSnapshotError::PlanUnavailable {
+                operation: "native build configuration",
+            },
+        )?;
+        Ok(plan
+            .task_catalogs
+            .iter()
+            .find(|catalog| catalog.project_task)
+            .is_some_and(|catalog| catalog.fast_build_app))
+    }
+
+    pub fn task_catalog(
+        &self,
+        node_name: &str,
+        project_task: bool,
+    ) -> Option<&BuildScriptTaskCatalogPlan> {
+        self.plan
+            .as_ref()?
+            .task_catalogs
+            .iter()
+            .find(|catalog| catalog.project_task == project_task && catalog.node_name == node_name)
+    }
+
+    pub fn compile_plugin_records(&self) -> Option<&[BuildScriptCompilePluginRecord]> {
+        Some(&self.plan.as_ref()?.compile_plugin_records)
     }
 
     pub fn explicitly_configured_compile_api_version(&self) -> Option<u32> {
@@ -310,6 +414,49 @@ impl BuildScriptRuntimeSession {
 
     pub fn selected_product(&self) -> Value {
         self.request.selected_product_value()
+    }
+
+    pub fn project_build_profile(&self) -> Value {
+        self.model.project_profile.clone()
+    }
+
+    pub fn project_app_json(&self) -> Value {
+        self.model.app_json.clone().unwrap_or(Value::Null)
+    }
+
+    pub fn project_package(&self) -> Value {
+        self.context.project_package().clone()
+    }
+
+    pub fn module_build_profile(&self, root: &Path) -> Option<Value> {
+        self.module_descriptor(root)
+            .and_then(|descriptor| descriptor.get("moduleProfile").cloned())
+    }
+
+    pub fn module_json(&self, root: &Path) -> Option<Value> {
+        self.module_descriptor(root)
+            .and_then(|descriptor| descriptor.get("moduleJson").cloned())
+    }
+
+    pub fn ohpm_module_packages(&self) -> Vec<Value> {
+        self.descriptor_order
+            .iter()
+            .filter_map(|key| self.descriptors.get(key))
+            .filter_map(|descriptor| {
+                let name = descriptor.get("name")?.clone();
+                let root = descriptor.get("root")?.clone();
+                let root_path = root.as_str().map(PathBuf::from)?;
+                let package = self
+                    .context
+                    .module_package_snapshot(&root_path)
+                    .unwrap_or(Value::Null);
+                Some(serde_json::json!({ "name": name, "root": root, "package": package }))
+            })
+            .collect()
+    }
+
+    pub fn package_model_updated(&self) -> bool {
+        self.package_model_updated
     }
 
     pub fn command_snapshot(
@@ -598,7 +745,9 @@ impl BuildScriptRuntimeSession {
         field: &str,
         value: Value,
     ) -> Result<HvigorContextMutation, HvigorContextMutationDiagnostic> {
-        self.context.set_project_package_field(field, value)
+        let mutation = self.context.set_project_package_field(field, value)?;
+        self.package_model_updated = true;
+        Ok(mutation)
     }
 
     pub fn set_context_module_package_field(
@@ -609,6 +758,7 @@ impl BuildScriptRuntimeSession {
     ) -> Result<HvigorContextMutation, HvigorContextMutationDiagnostic> {
         let mutation = self.context.set_module_package_field(root, field, value)?;
         self.update_module_package(root, &mutation.value);
+        self.package_model_updated = true;
         Ok(mutation)
     }
 
@@ -619,6 +769,7 @@ impl BuildScriptRuntimeSession {
     ) -> Result<HvigorContextMutation, HvigorContextMutationDiagnostic> {
         let mutation = self.context.set_module_version(root, version)?;
         self.update_module_package(root, &mutation.value);
+        self.package_model_updated = true;
         Ok(mutation)
     }
 

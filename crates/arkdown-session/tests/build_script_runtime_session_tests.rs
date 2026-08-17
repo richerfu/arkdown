@@ -214,6 +214,40 @@ fn runtime_session_replans_live_module_overrides_without_returning_ownership_to_
     );
     assert_eq!(command.build_target_name.as_deref(), Some("default"));
 
+    let compile_plugin = module_root.join("compile-plugin.ts");
+    std::fs::write(&compile_plugin, "export default { name: 'fixture' }")
+        .expect("write compile plugin");
+    assert_eq!(
+        session
+            .compile_plugin_path(&module_root, "./compile-plugin.ts")
+            .expect("resolve relative compile plugin"),
+        compile_plugin
+    );
+    assert_eq!(
+        session
+            .compile_plugin_path(&module_root, "")
+            .expect_err("empty compile plugin path")
+            .code(),
+        "EMPTY_COMPILE_PLUGIN_PATH"
+    );
+    assert_eq!(
+        session
+            .compile_plugin_path(&module_root, "missing.ts")
+            .expect_err("missing compile plugin")
+            .code(),
+        "PLUGIN_PATH_NOT_FOUND"
+    );
+    let javascript_plugin = module_root.join("compile-plugin.js");
+    std::fs::write(&javascript_plugin, "module.exports = {}")
+        .expect("write invalid compile plugin extension");
+    assert_eq!(
+        session
+            .compile_plugin_path(&module_root, "compile-plugin.js")
+            .expect_err("invalid compile plugin extension")
+            .code(),
+        "PLUGIN_FILE_MUST_END_WITH_TS"
+    );
+
     let clean = session
         .clean_snapshot(&module_root, false)
         .expect("clean input is projected by the runtime session");

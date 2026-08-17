@@ -47,8 +47,11 @@ test('runtime observability NAPI exports match the generated camelCase names', (
   assert.equal(typeof native.RuntimeTaskCacheSession, 'function')
   assert.equal(typeof native.RuntimeFileSnapshot, 'function')
   assert.equal(typeof native.RuntimeTaskSnapshot, 'function')
-  assert.equal(typeof native.beginRuntimeInvocation, 'function')
-  assert.equal(typeof native.finishRuntimeInvocation, 'function')
+  assert.equal(native.beginRuntimeInvocation, undefined)
+  assert.equal(native.finishRuntimeInvocation, undefined)
+  const session = new native.RuntimeBuildScriptSession(tempProject(), undefined, {}, [])
+  assert.equal(typeof session.beginInvocation, 'function')
+  assert.equal(typeof session.finishInvocation, 'function')
 })
 
 test('Rust process monitor owns Hvigor sampling state and report persistence', async () => {
@@ -93,12 +96,14 @@ test('Rust process monitor owns Hvigor sampling state and report persistence', a
 test('process-wide Hvigor JavaScript runtime rejects overlapping builds and releases deterministically', () => {
   const firstRoot = tempProject()
   const secondRoot = tempProject()
-  const token = native.beginRuntimeInvocation(firstRoot)
-  assert.throws(() => native.beginRuntimeInvocation(secondRoot), /ARKDOWN_CONCURRENT_RUNTIME_INVOCATION/)
-  assert.throws(() => native.finishRuntimeInvocation('wrong-token'), /TOKEN_MISMATCH/)
-  native.finishRuntimeInvocation(token)
-  const nextToken = native.beginRuntimeInvocation(secondRoot)
-  native.finishRuntimeInvocation(nextToken)
+  const first = new native.RuntimeBuildScriptSession(firstRoot, undefined, {}, [])
+  const second = new native.RuntimeBuildScriptSession(secondRoot, undefined, {}, [])
+  const token = first.beginInvocation()
+  assert.throws(() => second.beginInvocation(), /ARKDOWN_CONCURRENT_RUNTIME_INVOCATION/)
+  assert.throws(() => first.finishInvocation('wrong-token'), /TOKEN_MISMATCH/)
+  first.finishInvocation(token)
+  const nextToken = second.beginInvocation()
+  second.finishInvocation(nextToken)
 })
 
 test('report and trace details persistence use the Rust observability owner', () => {

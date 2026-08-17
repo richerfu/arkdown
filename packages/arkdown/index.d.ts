@@ -21,6 +21,8 @@ export declare class ArkdownRolldownPluginContext {
  * callbacks mutate it.
  */
 export declare class RuntimeBuildScriptSession {
+  beginInvocation(): string
+  finishInvocation(token: string): void
   constructor(projectRoot: string, hvigorUserHome: string | undefined | null, config: object, commandEntryTasks: Array<string>)
   projectModel(): any
   moduleDescriptors(): Array<any>
@@ -31,6 +33,10 @@ export declare class RuntimeBuildScriptSession {
   effectiveCompileApiVersion(): number
   selectedProduct(): any
   selectedProductBundleName(): string | null
+  readOhosContext(request: RuntimeOhosContextReadRequest): any
+  resolveCompilePluginPath(root: string, pluginPath: string): any
+  ohosContextMethods(project: boolean): any
+  writeOhosContext(request: RuntimeOhosContextWriteRequest): any
   setProjectBuildProfile(profile: any): any
   setProjectAppJson(appJson: any): any
   setModuleBuildProfile(root: string, profile: any): any
@@ -51,8 +57,12 @@ export declare class RuntimeBuildScriptSession {
   clearRuntimeTaskSelection(): void
   parameterPlan(): any
   discoverBuildScriptFiles(roots: Array<string>): any
+  collectPluginPaths(value: unknown, baseDir: string, includeCompilePluginFile?: boolean | undefined | null): any
+  resolvePluginPath(candidate: string, baseDir: string): string | null
+  inspectRemoteHspObjects(moduleRoot: string, projectRoot: string): any
   captureHvigorOverrides(root: string, overrides: any | undefined | null, effectsBuildOption: any | undefined | null, sourceFile: string): any
   runtimePropertyPlan(properties: any, extParams: any, coreStartParams: any): any
+  compilePluginRecords(): any
   runtimePathPlan(properties: any, extParams: any): any
   prepareNativeBuildConfig(config: object, state: RuntimeNativeBuildState, processExecutable: string): object
   prepareHvigorPluginWorkspace(homeDir: string, processExecutable: string, nodeVersion: string): Promise<any>
@@ -61,7 +71,22 @@ export declare class RuntimeBuildScriptSession {
   writeHvigorBuildMeta(properties: any, extParams: any): Promise<void>
   writeHvigorSyncModel(state: RuntimeHvigorSyncState, extParams: any): Promise<void>
   runtimeCommandPlan(state: RuntimeCommandPlanState): any
+  executeCommandPlan(plan: any, callbacks: object): Promise<{ artifacts: string[]; output: string[] }>
+  runtimeTaskCatalog(nodeName: string, projectTask: boolean): any
+  runtimeTaskCatalogRequest(nodeName: string, projectTask: boolean): any
+  inspectRuntimeTaskModel(nodes: unknown[], includeCatalog: boolean): any
+  invalidateRuntimeTaskModel(): void
+  inspectRuntimeTaskState(coreTask: object, taskContext: object, classIncrementalTask: boolean): any
+  inspectRuntimeTaskDeclarations(coreTask: object, taskContext: object, classIncrementalTask: boolean): any
   runHvigorClean(nodeRoot: string, projectTask: boolean): Promise<any>
+  runHvigorPrune(hvigorUserHome?: string | undefined | null): Promise<any>
+  /**
+   * Execute the non-build part of a built-in Hvigor command task. The live
+   * task callback still crosses JavaScript so plugin hooks retain identity,
+   * but command selection, report rendering, maintenance, and build-info
+   * behavior have a single Rust owner.
+   */
+  runStandaloneCommand(state: RuntimeStandaloneCommandState): Promise<any>
   setModuleOverride(root: string, value?: any | undefined | null): void
   upsertModule(node: object): void
   invalidate(): void
@@ -196,14 +221,6 @@ export interface ArkdownPlugin {
 }
 
 /**
- * Acquire the process-wide JavaScript Hvigor runtime. Module loader patches,
- * log4js singletons, and latest-Hvigor globals cannot safely represent two
- * builds concurrently in one Node process, so overlapping invocations are
- * rejected explicitly instead of corrupting either build.
- */
-export declare function beginRuntimeInvocation(projectRoot: string): string
-
-/**
  * Build an OHOS project from Node.js.
  *
  * Accepts a `BuildConfig` and an optional array of Rolldown-compatible
@@ -272,9 +289,6 @@ export interface BuildResult {
   elapsedMs: number
 }
 
-/** Collect and resolve plugin paths from a callback-produced hvigorfile value. */
-export declare function collectBuildScriptPluginPaths(value: unknown, baseDir: string, includeCompilePluginFile?: boolean | undefined | null): any
-
 /**
  * Compile one hvigor TypeScript configuration module through Rust OXC and
  * Rolldown. JavaScript receives only the CommonJS text that it must execute
@@ -289,18 +303,6 @@ export declare function compileHvigorScript(file: string, sourceMap?: boolean | 
 export declare function compileHvigorScriptSync(file: string, sourceMap?: boolean | undefined | null): string
 
 export declare function emitRuntimeLog(record: RuntimeLogRecord): void
-
-/**
- * Execute a Rust-planned Hvigor command while keeping live task/plugin
- * objects behind three narrow JavaScript callbacks.
- */
-export declare function executeRuntimeCommandPlan(plan: any, callbacks: object): Promise<{ artifacts: string[]; output: string[] }>
-
-/**
- * Release the process-wide JavaScript Hvigor runtime acquired by
- * `beginRuntimeInvocation`.
- */
-export declare function finishRuntimeInvocation(token: string): void
 
 export declare function finishRuntimeObservability(): void
 
@@ -367,24 +369,6 @@ export interface HvigorProjectConfig {
 export interface HvigorShareContext {
   projectConfig?: HvigorProjectConfig
 }
-
-/**
- * Inspect `oh_modules/.hsp` using the official module-first,
- * highest-version selection contract.
- */
-export declare function inspectRemoteHspObjects(request: any): any
-
-/** Refresh only incremental declarations after `beforeAlwaysAction()`. */
-export declare function inspectRuntimeTaskDeclarations(coreTask: object, taskContext: object, classIncrementalTask: boolean): any
-
-/**
- * Project the live Hvigor nodes, task catalogs, removed paths, and task graph
- * descriptors in one native traversal.
- */
-export declare function inspectRuntimeTaskModel(nodes: unknown[], includeCatalog: boolean): any
-
-/** Refresh live task state after lazy realization. */
-export declare function inspectRuntimeTaskState(coreTask: object, taskContext: object, classIncrementalTask: boolean): any
 
 export declare function installRuntimeObservability(options: ObservabilityInstallOptions): string
 
@@ -584,18 +568,6 @@ export interface PluginCacheRequest {
   id: string
 }
 
-/** Resolve one configured plugin path with latest-hvigor extension order. */
-export declare function resolveBuildScriptPluginPath(candidate: string, baseDir: string): string | null
-
-/**
- * Render Hvigor's built-in `buildInfo` task from the immutable Rust profile
- * inventory. JavaScript remains responsible only for task hook dispatch.
- */
-export declare function runHvigorBuildInfo(request: any): any
-
-/** Execute latest-hvigor cache and pnpm store pruning in Rust. */
-export declare function runHvigorPrune(request: any): Promise<Record<string, unknown>>
-
 /**
  * Execute custom hvigor command roots through the Rust-owned task graph.
  * JavaScript remains only the callback host for user-authored task actions.
@@ -649,7 +621,6 @@ export interface RuntimeNativeBuildState {
   coreStartParams: any
   defaultCache: boolean
   mode: string
-  fastBuildApp: boolean
 }
 
 export declare function runtimeObservabilityIsEnabled(level: string, target: string): boolean
@@ -662,20 +633,38 @@ export interface RuntimeOhosContextPathOptions {
   ohosTest: boolean
 }
 
+export interface RuntimeOhosContextReadRequest {
+  operation: string
+  root?: string
+  argument?: any
+  buildMode: string
+  debugLine: boolean
+  pathOptions: RuntimeOhosContextPathOptions
+}
+
+export interface RuntimeOhosContextWriteRequest {
+  operation: string
+  root?: string
+  value: any
+}
+
 export interface RuntimeOhpmDependencyState {
   properties: any
   extParams: any
-  projectPackage: any
-  modules: any
-  packageModelUpdated: boolean
   executable?: string
 }
 
-/**
- * Return the latest-hvigor built-in task catalog from the Rust-owned graph
- * metadata. JavaScript wraps these records only to expose lazy plugin APIs.
- */
-export declare function runtimeTaskCatalog(request: any): any
+export interface RuntimeStandaloneCommandState {
+  commandKind: string
+  nodeRoot: string
+  nodeName: string
+  projectTask: boolean
+  nodeKind?: any
+  tasks: any
+  module?: any
+  json: boolean
+  resolve: boolean
+}
 
 export interface RuntimeTaskFileDeclarationInput {
   path: string
@@ -695,12 +684,6 @@ export interface RuntimeTaskPropertyInput {
   value: string
   valueType: string
 }
-
-/**
- * Render latest-hvigor `tasks` and `taskTree` reports from the Rust-owned
- * task inventory. JavaScript only supplies plugin-authored task metadata.
- */
-export declare function runtimeTaskReport(request: any): string
 
 export interface RuntimeTaskSnapshotRequest {
   path: string

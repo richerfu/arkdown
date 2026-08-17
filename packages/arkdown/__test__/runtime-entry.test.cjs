@@ -21,16 +21,8 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
       assert.equal(typeof runtimeTasks.modifyNativeCommand, 'function')
       return { artifacts: ['entry.hap'], elapsedMs: 1 }
     },
-    collectBuildScriptPluginPaths: actualNativeBinding.collectBuildScriptPluginPaths,
     RuntimeBuildScriptSession: actualNativeBinding.RuntimeBuildScriptSession,
-    beginRuntimeInvocation() {
-      return 'fixture-invocation'
-    },
-    finishRuntimeInvocation() {},
     installRuntimeObservability() {},
-    inspectRuntimeTaskDeclarations: actualNativeBinding.inspectRuntimeTaskDeclarations,
-    inspectRuntimeTaskModel: actualNativeBinding.inspectRuntimeTaskModel,
-    inspectRuntimeTaskState: actualNativeBinding.inspectRuntimeTaskState,
     finishRuntimeObservability() {},
     persistRuntimeReport() {},
     persistRuntimeDetails() {},
@@ -38,7 +30,6 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
       return false
     },
     emitRuntimeLog() {},
-    executeRuntimeCommandPlan: actualNativeBinding.executeRuntimeCommandPlan,
     compileHvigorScript: actualNativeBinding.compileHvigorScript,
     compileHvigorScriptSync: actualNativeBinding.compileHvigorScriptSync,
     hvigorProjectCacheHash: actualNativeBinding.hvigorProjectCacheHash,
@@ -46,14 +37,9 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
     planRolldownPackagePlugins: actualNativeBinding.planRolldownPackagePlugins,
     parseHvigorJsonText: actualNativeBinding.parseHvigorJsonText,
     mergeHvigorConfig: actualNativeBinding.mergeHvigorConfig,
-    runHvigorBuildInfo: actualNativeBinding.runHvigorBuildInfo,
-    runHvigorPrune: actualNativeBinding.runHvigorPrune,
     RuntimeFileSnapshot: actualNativeBinding.RuntimeFileSnapshot,
     RuntimeTaskCacheSession: actualNativeBinding.RuntimeTaskCacheSession,
     RuntimeTaskSnapshot: actualNativeBinding.RuntimeTaskSnapshot,
-    runtimeTaskCatalog: actualNativeBinding.runtimeTaskCatalog,
-    runtimeTaskReport: actualNativeBinding.runtimeTaskReport,
-    resolveBuildScriptPluginPath: actualNativeBinding.resolveBuildScriptPluginPath,
     validateHvigorCompilePlugins: actualNativeBinding.validateHvigorCompilePlugins,
   }
   require.cache[indexPath] = {

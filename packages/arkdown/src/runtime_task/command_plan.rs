@@ -510,7 +510,7 @@ impl RuntimeCommandPlanner {
   }
 
   fn selected_node_indexes(&self) -> Result<Vec<usize>, RuntimeCommandPlanError> {
-    match self.request.execution_mode.as_deref() {
+    match self.effective_execution_mode() {
       None | Some("module") | Some("project") => {}
       Some(execution_mode) => {
         return Err(RuntimeCommandPlanError::UnknownExecutionMode(
@@ -549,7 +549,7 @@ impl RuntimeCommandPlanner {
       selected
     };
 
-    Ok(match self.request.execution_mode.as_deref() {
+    Ok(match self.effective_execution_mode() {
       Some("module") => selected_modules,
       Some("project") => project_index.into_iter().collect(),
       None => selected_modules.into_iter().chain(project_index).collect(),
@@ -558,6 +558,17 @@ impl RuntimeCommandPlanner {
           execution_mode.to_string(),
         ));
       }
+    })
+  }
+
+  fn effective_execution_mode(&self) -> Option<&str> {
+    self.request.execution_mode.as_deref().or_else(|| {
+      self
+        .request
+        .task_names
+        .iter()
+        .any(|task| task == "test" || task == "onDeviceTest")
+        .then_some("module")
     })
   }
 

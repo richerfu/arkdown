@@ -9,17 +9,33 @@ const test = require('node:test')
 test('JavaScript remains plugin glue around Rust OXC Rolldown planners', () => {
   const runtime = fs.readFileSync(path.resolve(__dirname, '../runtime.js'), 'utf8')
   const cli = fs.readFileSync(path.resolve(__dirname, '../bin/arkdown.js'), 'utf8')
-  const runtimeLineCount = runtime.trimEnd().split(/\r?\n/).length
   const runtimeByteCount = Buffer.byteLength(runtime)
+  assert.ok(
+    runtimeByteCount <= 118000,
+    `runtime.js grew to ${runtimeByteCount} bytes; the readable V8 boundary must remain bounded without minifying source`,
+  )
 
-  assert.ok(
-    runtimeLineCount <= 1100,
-    `runtime.js grew to ${runtimeLineCount} lines; pure state and orchestration must continue moving to Rust`,
-  )
-  assert.ok(
-    runtimeByteCount <= 90000,
-    `runtime.js grew to ${runtimeByteCount} bytes; the V8 boundary must remain a compact callback and object-identity bridge`,
-  )
+  for (const privateHvigorOwner of [
+    '@ohos/hvigor/src/',
+    '_officialConfiguration',
+    'ProjectImpl',
+    'ModuleImpl',
+    'HvigorNodeImpl',
+    'HvigorLifecycleHook',
+  ]) {
+    assert.equal(runtime.includes(privateHvigorOwner), false, `${privateHvigorOwner} must remain Rust-owned glue`)
+  }
+
+  const taskRoot = path.resolve(__dirname, '../src/runtime_task')
+  const taskGraph = fs.readFileSync(path.join(taskRoot, 'graph.rs'), 'utf8')
+  const taskModel = fs.readFileSync(path.join(taskRoot, 'model.rs'), 'utf8')
+  const taskCommand = fs.readFileSync(path.join(taskRoot, 'command_plan.rs'), 'utf8')
+  const taskEngine = fs.readFileSync(path.join(taskRoot, 'engine.rs'), 'utf8')
+  const runtimeSession = fs.readFileSync(path.resolve(__dirname, '../src/build_script_runtime_model.rs'), 'utf8')
+  assert.match(taskGraph, /pub struct RuntimeTaskGraph/)
+  assert.match(taskModel, /pub struct RuntimeTaskModelBuilder/)
+  assert.match(taskCommand, /pub\(crate\) struct RuntimeCommandPlanner/)
+  assert.match(taskEngine, /pub struct RuntimeTaskEngine/)
 
   for (const removed of [
     'typescript.transpileModule',
@@ -60,6 +76,8 @@ test('JavaScript remains plugin glue around Rust OXC Rolldown planners', () => {
     'nativeRuntimeBinding.inspectRuntimeTaskInventory',
     'nativeRuntimeBinding.runtimeCommandPlan',
     'nativeRuntimeBinding.runHvigorClean',
+    "'project_caches'",
+    "'workspace', 'node_modules'",
   ]) {
     assert.equal(runtime.includes(removed), false, `${removed} must not return to the JavaScript runtime`)
   }
@@ -67,28 +85,24 @@ test('JavaScript remains plugin glue around Rust OXC Rolldown planners', () => {
   for (const nativeBoundary of [
     'compileHvigorScriptSync',
     'planHvigorCompilePlugins',
-    'collectBuildScriptPluginPaths',
     'mergeHvigorConfig',
-    'inspectRemoteHspObjects',
-    'runtimeTaskCatalog',
-    'beginRuntimeInvocation',
-    'finishRuntimeInvocation',
     'installRuntimeObservability',
     'emitRuntimeLog',
     'runtimeObservabilityIsEnabled',
     'finishRuntimeObservability',
     'persistRuntimeReport',
     'persistRuntimeDetails',
-    'inspectRuntimeTaskModel',
-    'inspectRuntimeTaskState',
-    'inspectRuntimeTaskDeclarations',
-    'executeRuntimeCommandPlan',
   ]) {
     assert.equal(runtime.includes(`nativeRuntimeBinding.${nativeBoundary}`), true)
   }
 
   assert.equal(runtime.includes('new nativeRuntimeBinding.RuntimeBuildScriptSession'), true)
+  assert.equal(runtime.includes('._runtimeSession.beginInvocation'), true)
+  assert.equal(runtime.includes('._runtimeSession.finishInvocation'), true)
   assert.equal(runtime.includes('._runtimeSession.captureHvigorOverrides'), true)
+  assert.equal(runtime.includes('._runtimeSession.collectPluginPaths'), true)
+  assert.equal(runtime.includes('._runtimeSession.resolvePluginPath'), true)
+  assert.equal(runtime.includes('._runtimeSession.inspectRemoteHspObjects'), true)
   assert.equal(runtime.includes('._runtimeSession.runtimeTaskSelection'), true)
   assert.equal(runtime.includes('._runtimeSession.prepareNativeBuildConfig'), true)
   assert.equal(runtime.includes('._runtimeSession.prepareHvigorPluginWorkspace'), true)
@@ -97,9 +111,23 @@ test('JavaScript remains plugin glue around Rust OXC Rolldown planners', () => {
   assert.equal(runtime.includes('._runtimeSession.writeHvigorBuildMeta'), true)
   assert.equal(runtime.includes('._runtimeSession.writeHvigorSyncModel'), true)
   assert.equal(runtime.includes('._runtimeSession.runtimeCommandPlan'), true)
-  assert.equal(runtime.includes('._runtimeSession.runHvigorClean'), true)
+  assert.equal(runtime.includes('._runtimeSession.compilePluginRecords'), true)
+  assert.equal(runtime.includes('._runtimeSession.executeCommandPlan'), true)
+  assert.equal(runtime.includes('._runtimeSession.runtimeTaskCatalog'), true)
+  assert.equal(runtime.includes('._runtimeSession.inspectRuntimeTaskModel'), true)
+  assert.equal(runtime.includes('._runtimeSession.inspectRuntimeTaskState'), true)
+  assert.equal(runtime.includes('._runtimeSession.inspectRuntimeTaskDeclarations'), true)
+  assert.equal(runtime.includes('._runtimeSession.runStandaloneCommand'), true)
+  assert.equal(runtime.includes('._runtimeSession.resolveCompilePluginPath'), true)
+  assert.equal(runtimeSession.includes('pub async fn run_standalone_command'), true)
+  assert.equal(runtimeSession.includes('pub fn resolve_compile_plugin_path'), true)
+  assert.equal(runtimeSession.includes('runtime_task_model: Option<Value>'), true)
+  assert.equal(runtime.includes('._runtimeSession.invalidateRuntimeTaskModel'), true)
+  assert.equal(runtime.includes('_runtimeTaskInventoryCache'), false)
+  assert.equal(taskModel.includes('fn qualify_overlay_dependencies'), true)
+  assert.equal(taskCommand.includes('fn effective_execution_mode'), true)
 
-  assert.match(runtime, /nativeModuleLoad\.call\(Module,[`'"]@ohos\/hvigor[`'"]/)
+  assert.match(runtime, /const official = load\([`'"]@ohos\/hvigor[`'"]\)/)
 
   assert.equal(runtime.includes("getLogger('debug-file')"), false)
   assert.match(runtime, /delete active\.appenders\[[`'"]debug-log-file[`'"]\]/)

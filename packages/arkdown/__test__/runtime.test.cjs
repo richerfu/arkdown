@@ -40,7 +40,9 @@ function dispatchPluginHook(plugin, hookName, request = {}) {
             : undefined
   if (resultField === undefined) return dispatched
   const unwrap = (envelope) => envelope[resultField]
-  return dispatched && typeof dispatched.then === 'function' ? Promise.resolve(dispatched).then(unwrap) : unwrap(dispatched)
+  return dispatched && typeof dispatched.then === 'function'
+    ? Promise.resolve(dispatched).then(unwrap)
+    : unwrap(dispatched)
 }
 
 function seedPluginContext(plugin, share) {
@@ -589,6 +591,7 @@ export default {
 test('core TaskCreation remains lazy across the JS-to-Rust task model boundary', async () => {
   const root = tempProject()
   const realized = path.join(root, 'lazy-provider.txt')
+  const deleteResults = path.join(root, 'lazy-delete-results.json')
   fs.writeFileSync(
     path.join(root, 'hvigorfile.js'),
     `
@@ -609,6 +612,10 @@ node.getTaskContainer().registerTask({
     return node.task(() => {}, { name: 'lazyCustom' })
   },
 })
+fs.writeFileSync(${JSON.stringify(deleteResults)}, JSON.stringify({
+  missing: node.getTaskContainer().deleteTask('missing'),
+  unrealized: node.getTaskContainer().deleteTask('lazyCustom'),
+}))
 module.exports = { plugins: [] }
 `,
   )
@@ -616,7 +623,8 @@ module.exports = { plugins: [] }
   const loader = new RuntimePluginLoader({ project: root, executionMode: 'project' })
   await loader.load()
   assert.equal(fs.existsSync(realized), false)
-  assert.deepEqual(loader.hvigorHost._syncCustomTasks(loader.hvigorHost._nodesByName.get(path.basename(root))), [
+  assert.deepEqual(JSON.parse(fs.readFileSync(deleteResults, 'utf8')), { missing: true, unrealized: false })
+  assert.deepEqual(loader.hvigorHost._runtimeTaskInventory(false).projectCustomTasks, [
     {
       taskName: 'lazyCustom',
       group: 'Customize',
@@ -624,9 +632,7 @@ module.exports = { plugins: [] }
       sourcePluginId: 'fixture.lazy',
     },
   ])
-  const lazyOverlay = loader.hvigorHost.createNativeTaskBridge().tasks.find(
-    (task) => task.taskName === 'lazyCustom',
-  )
+  const lazyOverlay = loader.hvigorHost.createNativeTaskBridge().tasks.find((task) => task.taskName === 'lazyCustom')
   assert.equal(lazyOverlay.lazy, true)
 
   loader.hvigorHost._commandEntryTasks = ['lazyCustom']
@@ -1118,7 +1124,7 @@ test('latest hvigor logging, config, global parameter, extension, and iconv APIs
     assert.equal(hvigor.doCompilePluginTypeCheck(validPlugin), undefined)
     assert.throws(
       () => hvigor.doCompilePluginTypeCheck(invalidPlugin),
-      (error) => error.code === 'TYPE_ERRORS' && error.diagnostics.some((diagnostic) => diagnostic.code === 2322),
+      (error) => error.code === 'TYPE_ERRORS' && error.cause?.name === 'AdaptorError',
     )
 
     const globalParam = hvigor.GlobalParam.getInstance()
@@ -1623,7 +1629,6 @@ test('test commands inject Hvigor defaults without overriding explicit CLI prope
     isLocalTest: 'true',
     'unit.test.replace.page': '../../../.test/testability/pages/Index',
   })
-  assert.equal(localTest._effectiveExecutionMode(), 'module')
   assert.equal(localTest._effectiveBuildMode(), 'debug')
 
   const deviceTest = new HvigorRuntimeHost(tempProject(), {
@@ -1636,7 +1641,6 @@ test('test commands inject Hvigor defaults without overriding explicit CLI prope
     isOhosTest: 'true',
     'ohos-test-coverage': 'true',
   })
-  assert.equal(deviceTest._effectiveExecutionMode(), 'module')
   assert.equal(deviceTest._effectiveBuildMode(), 'test')
 })
 
@@ -2222,10 +2226,7 @@ test('explicit Rolldown plugin lifecycle preserves async return values', () => {
   })
 
   assert.equal(typeof dispatchPluginHook(plugin, 'buildStart', { buildStartOptions: {} }).then, 'function')
-  assert.equal(
-    typeof dispatchPluginHook(plugin, 'buildEnd', { buildEndContext: { errors: [] } }).then,
-    'function',
-  )
+  assert.equal(typeof dispatchPluginHook(plugin, 'buildEnd', { buildEndContext: { errors: [] } }).then, 'function')
 })
 
 test('explicit plugin API does not create a parallel shouldTransformCachedModule runner', () => {
@@ -3169,7 +3170,7 @@ export default { system: hapTasks, plugins: [loader] }
     async () => new RuntimePluginLoader({ project: invalidRoot }).load(),
     (error) => {
       const cause = compilePluginError(error)
-      return cause.code === 'TYPE_ERRORS' && cause.diagnostics.some((diagnostic) => diagnostic.code === 2322)
+      return cause.code === 'TYPE_ERRORS' && cause.cause?.name === 'AdaptorError'
     },
   )
 })
@@ -3661,10 +3662,7 @@ test('nullish plugin results omit typed dispatcher fields at the NAPI boundary',
     {},
   )
   assert.deepEqual(plugin.__arkdownDispatchPluginHook({ hookName: 'load', id: '/entry.ets' }), {})
-  assert.deepEqual(
-    plugin.__arkdownDispatchPluginHook({ hookName: 'transform', code: 'source', id: '/entry.ets' }),
-    {},
-  )
+  assert.deepEqual(plugin.__arkdownDispatchPluginHook({ hookName: 'transform', code: 'source', id: '/entry.ets' }), {})
 })
 
 test('moduleParsed receives structured ModuleInfo and bound graph lookup', () => {

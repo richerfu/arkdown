@@ -29,6 +29,8 @@ struct RuntimeBuildScriptProjectView<'a> {
   project_profile: &'a Value,
   project_package: &'a Value,
   project_npm_package: &'a Value,
+  project_hvigor_config: &'a Value,
+  user_hvigor_config: &'a Value,
   #[serde(skip_serializing_if = "Option::is_none")]
   app_json: &'a Option<Value>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,15 +59,13 @@ pub struct RuntimeBuildScriptSession {
   hvigor_user_home: Option<PathBuf>,
   compile_sdk_version: Option<String>,
   task_selection: RuntimeTaskSelectionState,
+  runtime_task_model: Option<Value>,
 }
 
 #[napi(object)]
 pub struct RuntimeOhpmDependencyState {
   pub properties: Value,
   pub ext_params: Value,
-  pub project_package: Value,
-  pub modules: Value,
-  pub package_model_updated: bool,
   pub executable: Option<String>,
 }
 
@@ -88,12 +88,165 @@ pub struct RuntimeCommandPlanState {
 }
 
 #[napi(object)]
+pub struct RuntimeStandaloneCommandState {
+  pub command_kind: String,
+  pub node_root: String,
+  pub node_name: String,
+  pub project_task: bool,
+  pub node_kind: Option<Value>,
+  pub tasks: Value,
+  pub module: Option<Value>,
+  pub json: bool,
+  pub resolve: bool,
+}
+
+#[napi(object)]
 pub struct RuntimeOhosContextPathOptions {
   pub build_cache_dir: Option<String>,
   pub build_dir: Option<String>,
   pub preview_mode: bool,
   pub local_test: bool,
   pub ohos_test: bool,
+}
+
+#[napi(object)]
+pub struct RuntimeOhosContextReadRequest {
+  pub operation: String,
+  pub root: Option<String>,
+  pub argument: Option<Value>,
+  pub build_mode: String,
+  pub debug_line: bool,
+  pub path_options: RuntimeOhosContextPathOptions,
+}
+
+#[napi(object)]
+pub struct RuntimeOhosContextWriteRequest {
+  pub operation: String,
+  pub root: Option<String>,
+  pub value: Value,
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeOhosContextReadOperation {
+  ProjectName,
+  ProjectPath,
+  BuildRootPath,
+  BuildProductOutputPath,
+  BuildMode,
+  BuildProfile,
+  CurrentProduct,
+  AppJson,
+  SdkDetails,
+  DebugLine,
+  FastBuildApp,
+  AppWithSignedPkg,
+  DependencyInfo,
+  RemoteHspDependencyInfo,
+  AllModuleNameHash,
+  Dependencies,
+  DevDependencies,
+  DynamicDependencies,
+  Overrides,
+  ModuleName,
+  ModulePath,
+  ModuleType,
+  BuildProductRootPath,
+  Targets,
+  TargetArtifactNames,
+  TargetArtifactName,
+  ModuleJson,
+  Version,
+}
+
+impl RuntimeOhosContextReadOperation {
+  fn parse(value: &str) -> Result<Self> {
+    match value {
+      "getProjectName" => Ok(Self::ProjectName),
+      "getProjectPath" => Ok(Self::ProjectPath),
+      "getBuildRootPath" => Ok(Self::BuildRootPath),
+      "getBuildProductOutputPath" => Ok(Self::BuildProductOutputPath),
+      "getBuildMode" => Ok(Self::BuildMode),
+      "getBuildProfileOpt" => Ok(Self::BuildProfile),
+      "getCurrentProduct" => Ok(Self::CurrentProduct),
+      "getAppJsonOpt" => Ok(Self::AppJson),
+      "getSdkDetails" => Ok(Self::SdkDetails),
+      "isDebugLineEnable" => Ok(Self::DebugLine),
+      "getFastBuildApp" => Ok(Self::FastBuildApp),
+      "getAppWithSignedPkg" => Ok(Self::AppWithSignedPkg),
+      "getOhpmDependencyInfo" => Ok(Self::DependencyInfo),
+      "getOhpmRemoteHspDependencyInfo" => Ok(Self::RemoteHspDependencyInfo),
+      "getAllModuleNameHash" => Ok(Self::AllModuleNameHash),
+      "getDependenciesOpt" => Ok(Self::Dependencies),
+      "getDevDependenciesOpt" => Ok(Self::DevDependencies),
+      "getDynamicDependenciesOpt" => Ok(Self::DynamicDependencies),
+      "getOverrides" => Ok(Self::Overrides),
+      "getModuleName" => Ok(Self::ModuleName),
+      "getModulePath" => Ok(Self::ModulePath),
+      "getModuleType" => Ok(Self::ModuleType),
+      "getBuildProductRootPath" => Ok(Self::BuildProductRootPath),
+      "targets" => Ok(Self::Targets),
+      "getTargetArtifactNames" => Ok(Self::TargetArtifactNames),
+      "getTargetArtifactName" => Ok(Self::TargetArtifactName),
+      "getModuleJsonOpt" => Ok(Self::ModuleJson),
+      "getVersion" => Ok(Self::Version),
+      _ => Err(Error::new(
+        Status::InvalidArg,
+        format!("unknown OHOS context read operation {value:?}"),
+      )),
+    }
+  }
+
+  const fn package_field(self) -> Option<&'static str> {
+    match self {
+      Self::Dependencies => Some("dependencies"),
+      Self::DevDependencies => Some("devDependencies"),
+      Self::DynamicDependencies => Some("dynamicDependencies"),
+      Self::Overrides => Some("overrides"),
+      Self::Version => Some("version"),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeOhosContextWriteOperation {
+  BuildProfile,
+  AppJson,
+  Dependencies,
+  DevDependencies,
+  DynamicDependencies,
+  Overrides,
+  ModuleJson,
+  Version,
+}
+
+impl RuntimeOhosContextWriteOperation {
+  fn parse(value: &str) -> Result<Self> {
+    match value {
+      "setBuildProfileOpt" => Ok(Self::BuildProfile),
+      "setAppJsonOpt" => Ok(Self::AppJson),
+      "setDependenciesOpt" => Ok(Self::Dependencies),
+      "setDevDependenciesOpt" => Ok(Self::DevDependencies),
+      "setDynamicDependenciesOpt" => Ok(Self::DynamicDependencies),
+      "setOverrides" => Ok(Self::Overrides),
+      "setModuleJsonOpt" => Ok(Self::ModuleJson),
+      "setVersion" => Ok(Self::Version),
+      _ => Err(Error::new(
+        Status::InvalidArg,
+        format!("unknown OHOS context write operation {value:?}"),
+      )),
+    }
+  }
+
+  const fn package_field(self) -> Option<&'static str> {
+    match self {
+      Self::Dependencies => Some("dependencies"),
+      Self::DevDependencies => Some("devDependencies"),
+      Self::DynamicDependencies => Some("dynamicDependencies"),
+      Self::Overrides => Some("overrides"),
+      _ => None,
+    }
+  }
 }
 
 impl From<RuntimeOhosContextPathOptions> for HvigorContextPathOptions {
@@ -108,8 +261,346 @@ impl From<RuntimeOhosContextPathOptions> for HvigorContextPathOptions {
   }
 }
 
+struct RuntimeOhosContextNapiAdapter<'a> {
+  runtime: &'a mut RuntimeBuildScriptSession,
+  root: Option<PathBuf>,
+  argument: Option<Value>,
+  build_mode: String,
+  debug_line: bool,
+  path_options: HvigorContextPathOptions,
+}
+
+impl<'a> RuntimeOhosContextNapiAdapter<'a> {
+  fn new(
+    runtime: &'a mut RuntimeBuildScriptSession,
+    request: RuntimeOhosContextReadRequest,
+  ) -> Self {
+    Self {
+      runtime,
+      root: request.root.map(PathBuf::from),
+      argument: request.argument,
+      build_mode: request.build_mode,
+      debug_line: request.debug_line,
+      path_options: request.path_options.into(),
+    }
+  }
+
+  fn read(&mut self, operation: RuntimeOhosContextReadOperation) -> Result<Value> {
+    if let Some(field) = operation.package_field() {
+      return Ok(self.package_field(field).unwrap_or(Value::Null));
+    }
+    match operation {
+      RuntimeOhosContextReadOperation::ProjectName => Ok(Value::String(self.project_name()?)),
+      RuntimeOhosContextReadOperation::ProjectPath => {
+        self.path_value(self.runtime.session.project_model().project_root.clone())
+      }
+      RuntimeOhosContextReadOperation::BuildRootPath => self.project_paths_value("buildRootPath"),
+      RuntimeOhosContextReadOperation::BuildProductOutputPath => {
+        self.project_paths_value("buildProductOutputPath")
+      }
+      RuntimeOhosContextReadOperation::BuildMode => Ok(Value::String(self.build_mode.clone())),
+      RuntimeOhosContextReadOperation::BuildProfile => Ok(self.build_profile()),
+      RuntimeOhosContextReadOperation::CurrentProduct => self.current_product(),
+      RuntimeOhosContextReadOperation::AppJson => Ok(self.runtime.session.project_app_json()),
+      RuntimeOhosContextReadOperation::SdkDetails => self.sdk_details(),
+      RuntimeOhosContextReadOperation::DebugLine => Ok(Value::Bool(self.debug_line)),
+      RuntimeOhosContextReadOperation::FastBuildApp => Ok(Value::Bool(
+        self
+          .runtime
+          .session
+          .project_build_profile()
+          .pointer("/app/buildOption/packOptions/fastBuildApp")
+          .and_then(Value::as_bool)
+          .unwrap_or(false),
+      )),
+      RuntimeOhosContextReadOperation::AppWithSignedPkg => Ok(Value::Bool(
+        self
+          .runtime
+          .session
+          .project_build_profile()
+          .pointer("/app/buildOption/packOptions/appWithSignedPkg")
+          .and_then(Value::as_bool)
+          .unwrap_or(false),
+      )),
+      RuntimeOhosContextReadOperation::DependencyInfo => {
+        self.dependency_value("ohpmDependencyInfo")
+      }
+      RuntimeOhosContextReadOperation::RemoteHspDependencyInfo => {
+        let field = if self.argument.as_ref().and_then(Value::as_bool) == Some(true) {
+          "signedRemoteHspDependencyInfo"
+        } else {
+          "remoteHspDependencyInfo"
+        };
+        self.dependency_value(field)
+      }
+      RuntimeOhosContextReadOperation::AllModuleNameHash => self
+        .runtime
+        .session
+        .all_module_name_hash()
+        .map(Value::String)
+        .map_err(Self::context_error),
+      RuntimeOhosContextReadOperation::ModuleName => Ok(Value::String(self.module_name()?)),
+      RuntimeOhosContextReadOperation::ModulePath
+      | RuntimeOhosContextReadOperation::BuildProductRootPath => {
+        self.path_value(self.module_root()?.to_path_buf())
+      }
+      RuntimeOhosContextReadOperation::ModuleType => Ok(Value::String(self.module_type()?)),
+      RuntimeOhosContextReadOperation::Targets => self.targets(),
+      RuntimeOhosContextReadOperation::TargetArtifactNames => self.target_artifact_names(),
+      RuntimeOhosContextReadOperation::TargetArtifactName => self.target_artifact_name(),
+      RuntimeOhosContextReadOperation::ModuleJson => Ok(
+        self
+          .runtime
+          .session
+          .module_json(self.module_root()?)
+          .unwrap_or(Value::Null),
+      ),
+      RuntimeOhosContextReadOperation::Dependencies
+      | RuntimeOhosContextReadOperation::DevDependencies
+      | RuntimeOhosContextReadOperation::DynamicDependencies
+      | RuntimeOhosContextReadOperation::Overrides
+      | RuntimeOhosContextReadOperation::Version => unreachable!("package fields handled above"),
+    }
+  }
+
+  fn project_name(&self) -> Result<String> {
+    self
+      .runtime
+      .session
+      .project_model()
+      .project_root
+      .file_name()
+      .and_then(|name| name.to_str())
+      .map(str::to_string)
+      .ok_or_else(|| Error::new(Status::InvalidArg, "project root has no UTF-8 file name"))
+  }
+
+  fn module_root(&self) -> Result<&PathBuf> {
+    self.root.as_ref().ok_or_else(|| {
+      Error::new(
+        Status::InvalidArg,
+        "module OHOS context operation requires a module root",
+      )
+    })
+  }
+
+  fn module_descriptor(&self) -> Result<Value> {
+    let root = self.module_root()?;
+    self.runtime.session.module_descriptor(root).ok_or_else(|| {
+      Error::new(
+        Status::InvalidArg,
+        format!(
+          "runtime session has no module descriptor for {}",
+          root.display()
+        ),
+      )
+    })
+  }
+
+  fn module_name(&self) -> Result<String> {
+    self
+      .module_descriptor()?
+      .get("name")
+      .and_then(Value::as_str)
+      .map(str::to_string)
+      .ok_or_else(|| Error::new(Status::InvalidArg, "module descriptor has no name"))
+  }
+
+  fn module_type(&self) -> Result<String> {
+    let kind = self
+      .module_descriptor()?
+      .get("kind")
+      .and_then(Value::as_str)
+      .unwrap_or_default()
+      .to_string();
+    Ok(match kind.as_str() {
+      "hap" => "entry".to_string(),
+      "har" => "har".to_string(),
+      "hsp" => "shared".to_string(),
+      _ => kind,
+    })
+  }
+
+  fn build_profile(&self) -> Value {
+    self.root.as_ref().map_or_else(
+      || self.runtime.session.project_build_profile(),
+      |root| {
+        self
+          .runtime
+          .session
+          .module_build_profile(root)
+          .unwrap_or(Value::Null)
+      },
+    )
+  }
+
+  fn package_field(&self, field: &str) -> Option<Value> {
+    self.root.as_ref().map_or_else(
+      || self.runtime.session.project_package_field(field),
+      |root| self.runtime.session.module_package_field(root, field),
+    )
+  }
+
+  fn project_paths_value(&self, field: &str) -> Result<Value> {
+    let paths = self
+      .runtime
+      .session
+      .project_context_paths(&self.path_options)
+      .map_err(Self::context_error)?;
+    let value = serde_json::to_value(paths)
+      .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
+    Ok(value.get(field).cloned().unwrap_or(Value::Null))
+  }
+
+  fn current_product(&self) -> Result<Value> {
+    let product = self.runtime.session.selected_product();
+    Ok(serde_json::json!({
+      "__arkdownFacade": "product",
+      "productName": product.get("name").cloned().unwrap_or(Value::Null),
+      "bundleType": product.get("bundleType").cloned().unwrap_or(Value::String("app".to_string())),
+      "bundleName": self.runtime.session.selected_product_bundle_name(),
+      "outputArtifactName": product.pointer("/output/artifactName").cloned().unwrap_or(Value::Null),
+    }))
+  }
+
+  fn sdk_details(&mut self) -> Result<Value> {
+    let details = self
+      .runtime
+      .session
+      .sdk_details(&self.runtime.sdk_config)
+      .map_err(BuildScriptRuntimeModelNapiAdapter::sdk_error)?;
+    Ok(serde_json::json!({
+      "__arkdownFacade": "sdkDetails",
+      "isOhos": details.is_ohos,
+      "sdkDir": details.sdk_dir,
+      "sdkVersion": details.sdk_version,
+      "etsComponentVersion": details.ets_component_version,
+      "etsComponentReleaseType": details.ets_component_release_type,
+    }))
+  }
+
+  fn dependency_value(&mut self, field: &str) -> Result<Value> {
+    let context = self
+      .runtime
+      .session
+      .dependency_context(self.root.as_deref())
+      .map_err(Self::context_error)?;
+    let value = serde_json::to_value(context)
+      .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
+    Ok(value.get(field).cloned().unwrap_or(Value::Null))
+  }
+
+  fn targets(&self) -> Result<Value> {
+    let root = self.module_root()?;
+    let plan = self.runtime.session.module_plan(root).ok_or_else(|| {
+      Error::new(
+        Status::InvalidArg,
+        format!(
+          "runtime plan has no module target plan for {}",
+          root.display()
+        ),
+      )
+    })?;
+    let product = self.runtime.session.selected_product();
+    let bundle_name = self.runtime.session.selected_product_bundle_name();
+    let mut targets = Vec::with_capacity(plan.selected_targets.len());
+    for target in &plan.selected_targets {
+      let name = target
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new(Status::InvalidArg, "selected module target has no name"))?;
+      let build_option = plan
+        .build_options
+        .get(name)
+        .or_else(|| plan.build_options.get("default"))
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+      let paths = self
+        .runtime
+        .session
+        .module_target_context_paths(root, name, &self.path_options)
+        .map_err(Self::context_error)?;
+      targets.push(serde_json::json!({
+        "__arkdownFacade": "target",
+        "targetName": name,
+        "product": {
+          "__arkdownFacade": "product",
+          "productName": product.get("name").cloned().unwrap_or(Value::Null),
+          "bundleType": product.get("bundleType").cloned().unwrap_or(Value::String("app".to_string())),
+          "bundleName": bundle_name,
+          "outputArtifactName": product.pointer("/output/artifactName").cloned().unwrap_or(Value::Null),
+        },
+        "buildOption": build_option,
+        "paths": paths,
+      }));
+    }
+    Ok(Value::Array(targets))
+  }
+
+  fn target_artifact_names(&self) -> Result<Value> {
+    let plan = self
+      .runtime
+      .session
+      .module_plan(self.module_root()?)
+      .ok_or_else(|| Error::new(Status::InvalidArg, "runtime plan has no module target plan"))?;
+    Ok(Value::Array(
+      plan
+        .selected_targets
+        .iter()
+        .filter_map(|target| {
+          Some(Value::Array(vec![
+            target.get("name")?.clone(),
+            target.pointer("/output/artifactName")?.clone(),
+          ]))
+        })
+        .collect(),
+    ))
+  }
+
+  fn target_artifact_name(&self) -> Result<Value> {
+    let target_name = self.argument.as_ref().and_then(Value::as_str);
+    let plan = self
+      .runtime
+      .session
+      .module_plan(self.module_root()?)
+      .ok_or_else(|| Error::new(Status::InvalidArg, "runtime plan has no module target plan"))?;
+    Ok(
+      plan
+        .selected_targets
+        .iter()
+        .find(|target| target.get("name").and_then(Value::as_str) == target_name)
+        .and_then(|target| target.pointer("/output/artifactName"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    )
+  }
+
+  fn path_value(&self, path: PathBuf) -> Result<Value> {
+    serde_json::to_value(path)
+      .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))
+  }
+
+  fn context_error(error: impl std::fmt::Display) -> Error {
+    Error::new(Status::GenericFailure, error.to_string())
+  }
+}
+
 #[napi]
 impl RuntimeBuildScriptSession {
+  #[napi]
+  pub fn begin_invocation(&self) -> Result<String> {
+    crate::runtime_invocation::RuntimeInvocationLease::acquire(
+      &self.session.project_model().project_root,
+    )
+    .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))
+  }
+
+  #[napi]
+  pub fn finish_invocation(&self, token: String) -> Result<()> {
+    crate::runtime_invocation::RuntimeInvocationLease::release(&token)
+      .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))
+  }
+
   #[napi(constructor)]
   pub fn new(
     project_root: String,
@@ -210,6 +701,7 @@ impl RuntimeBuildScriptSession {
       hvigor_user_home,
       compile_sdk_version: compile_sdk_version_text,
       task_selection,
+      runtime_task_model: None,
     })
   }
 
@@ -222,6 +714,8 @@ impl RuntimeBuildScriptSession {
         project_profile: &model.project_profile,
         project_package: &model.project_package,
         project_npm_package: &model.project_npm_package,
+        project_hvigor_config: &model.project_hvigor_config,
+        user_hvigor_config: &model.user_hvigor_config,
         app_json: &model.app_json,
         build_config_file: &model.build_config_file,
         fallback_module_roots: &model.fallback_module_roots,
@@ -276,6 +770,120 @@ impl RuntimeBuildScriptSession {
   #[napi]
   pub fn selected_product_bundle_name(&self) -> Option<String> {
     self.session.selected_product_bundle_name()
+  }
+
+  #[napi]
+  pub fn read_ohos_context(&mut self, request: RuntimeOhosContextReadRequest) -> Result<Value> {
+    let operation = RuntimeOhosContextReadOperation::parse(&request.operation)?;
+    RuntimeOhosContextNapiAdapter::new(self, request).read(operation)
+  }
+
+  #[napi]
+  pub fn resolve_compile_plugin_path(&self, root: String, plugin_path: String) -> Value {
+    match self
+      .session
+      .compile_plugin_path(PathBuf::from(root).as_path(), &plugin_path)
+    {
+      Ok(path) => serde_json::json!({ "path": path }),
+      Err(error) => serde_json::json!({
+        "diagnostic": {
+          "code": error.code(),
+          "message": error.to_string(),
+          "pluginPath": error.path(),
+        }
+      }),
+    }
+  }
+
+  #[napi]
+  pub fn ohos_context_methods(&self, project: bool) -> Value {
+    let package_methods = [
+      ["getDependenciesOpt", "setDependenciesOpt"],
+      ["getDevDependenciesOpt", "setDevDependenciesOpt"],
+      ["getDynamicDependenciesOpt", "setDynamicDependenciesOpt"],
+    ];
+    if project {
+      serde_json::json!({
+        "reads": [
+          "getProjectName", "getProjectPath", "getBuildRootPath", "getBuildProductOutputPath",
+          "getBuildMode", "getBuildProfileOpt", "getCurrentProduct", "getAppJsonOpt",
+          "getSdkDetails", "isDebugLineEnable", "getFastBuildApp", "getAppWithSignedPkg",
+          "getOhpmDependencyInfo", "getOhpmRemoteHspDependencyInfo", "getAllModuleNameHash",
+          "getOverrides",
+        ],
+        "writes": ["setBuildProfileOpt", "setAppJsonOpt", "setOverrides"],
+        "packageMethods": package_methods,
+      })
+    } else {
+      serde_json::json!({
+        "reads": [
+          "getModuleName", "getModulePath", "getModuleType", "getBuildProductRootPath",
+          "getBuildMode", "getTargetArtifactName", "getBuildProfileOpt", "getModuleJsonOpt",
+          "getVersion", "getOhpmDependencyInfo", "getOhpmRemoteHspDependencyInfo",
+        ],
+        "writes": ["setBuildProfileOpt", "setModuleJsonOpt", "setVersion"],
+        "packageMethods": package_methods,
+      })
+    }
+  }
+
+  #[napi]
+  pub fn write_ohos_context(&mut self, request: RuntimeOhosContextWriteRequest) -> Result<Value> {
+    let operation = RuntimeOhosContextWriteOperation::parse(&request.operation)?;
+    let root = request.root.map(PathBuf::from);
+    if let Some(field) = operation.package_field() {
+      let mutation = if let Some(root) = root.as_ref() {
+        self
+          .session
+          .set_context_module_package_field(root, field, request.value)
+      } else {
+        self
+          .session
+          .set_context_project_package_field(field, request.value)
+      };
+      return Self::context_mutation(mutation);
+    }
+    match operation {
+      RuntimeOhosContextWriteOperation::BuildProfile => {
+        if let Some(root) = root.as_ref() {
+          Self::accepted_context_mutation(
+            self
+              .session
+              .set_context_module_build_profile(root, request.value),
+          )
+        } else {
+          Self::context_mutation(
+            self
+              .session
+              .set_context_project_build_profile(request.value),
+          )
+        }
+      }
+      RuntimeOhosContextWriteOperation::AppJson => {
+        Self::accepted_context_mutation(self.session.set_context_project_app_json(request.value))
+      }
+      RuntimeOhosContextWriteOperation::ModuleJson => {
+        let root = root.as_ref().ok_or_else(|| {
+          Error::new(
+            Status::InvalidArg,
+            "setModuleJsonOpt requires a module root",
+          )
+        })?;
+        Self::accepted_context_mutation(self.session.set_context_module_json(root, request.value))
+      }
+      RuntimeOhosContextWriteOperation::Version => {
+        let root = root
+          .as_ref()
+          .ok_or_else(|| Error::new(Status::InvalidArg, "setVersion requires a module root"))?;
+        Self::context_mutation(self.session.set_context_module_version(root, request.value))
+      }
+      RuntimeOhosContextWriteOperation::Dependencies
+      | RuntimeOhosContextWriteOperation::DevDependencies
+      | RuntimeOhosContextWriteOperation::DynamicDependencies
+      | RuntimeOhosContextWriteOperation::Overrides => {
+        unreachable!("package fields handled above")
+      }
+    }
   }
 
   #[napi]
@@ -498,6 +1106,37 @@ impl RuntimeBuildScriptSession {
   }
 
   #[napi]
+  pub fn collect_plugin_paths(
+    &self,
+    value: Unknown<'_>,
+    base_dir: String,
+    include_compile_plugin_file: Option<bool>,
+  ) -> Result<Value> {
+    BuildScriptPluginPathNapiAdapter::collect(
+      value,
+      base_dir,
+      include_compile_plugin_file.unwrap_or(true),
+    )
+  }
+
+  #[napi]
+  pub fn resolve_plugin_path(&self, candidate: String, base_dir: String) -> Option<String> {
+    BuildScriptPluginPathNapiAdapter::resolve(candidate, base_dir)
+  }
+
+  #[napi]
+  pub fn inspect_remote_hsp_objects(
+    &self,
+    module_root: String,
+    project_root: String,
+  ) -> Result<Value> {
+    crate::remote_hsp::RemoteHspNapiAdapter::inspect(serde_json::json!({
+      "moduleRoot": module_root,
+      "projectRoot": project_root,
+    }))
+  }
+
+  #[napi]
   pub fn capture_hvigor_overrides(
     &mut self,
     root: String,
@@ -576,6 +1215,18 @@ impl RuntimeBuildScriptSession {
   }
 
   #[napi]
+  pub fn compile_plugin_records(&self) -> Result<Value> {
+    let records = self.session.compile_plugin_records().ok_or_else(|| {
+      Error::new(
+        Status::InvalidArg,
+        "ARKDOWN_BUILD_SCRIPT_RUNTIME_PLAN_UNAVAILABLE: runtime plan must be prepared before compile plugin projection"
+          .to_string(),
+      )
+    })?;
+    BuildScriptRuntimeModelNapiAdapter::encode(&records, "compile plugin records")
+  }
+
+  #[napi]
   pub fn runtime_path_plan(&self, properties: Value, ext_params: Value) -> Result<Value> {
     let properties = Self::object_map(properties, "properties")?;
     let ext_params = Self::object_map(ext_params, "extParams")?;
@@ -635,6 +1286,12 @@ impl RuntimeBuildScriptSession {
       .transpose()?;
     let overlay = RuntimeBuildConfigOverlay::from_runtime(
       &state,
+      self.session.fast_build_app().map_err(|error| {
+        Error::new(
+          Status::InvalidArg,
+          format!("failed to project native build configuration: {error}"),
+        )
+      })?,
       property_plan,
       path_plan,
       self.session.project_hvigor_overrides(),
@@ -698,17 +1355,18 @@ impl RuntimeBuildScriptSession {
     let properties = Self::object_map(state.properties, "properties")?;
     let ext_params = Self::object_map(state.ext_params, "extParams")?;
     let path_plan = self.session.runtime_path_plan(&properties, &ext_params);
+    let project_package = self.session.project_package();
     let request = serde_json::json!({
       "enabled": self.session.uses_ohpm(),
       "cleanOnly": self.session.command_is_clean_only(),
       "projectRoot": self.session.project_model().project_root,
       "cacheDir": path_plan.hvigor_cache_dir,
       "targetName": self.session.build_target_name().unwrap_or_default(),
-      "projectProperties": state.project_package.get("properties").cloned().unwrap_or(Value::Null),
-      "projectPackage": state.project_package,
+      "projectProperties": project_package.get("properties").cloned().unwrap_or(Value::Null),
+      "projectPackage": project_package,
       "parameterFileOverride": ext_params.get("parameterFile").and_then(Value::as_str),
-      "modules": state.modules,
-      "packageModelUpdated": state.package_model_updated,
+      "modules": self.session.ohpm_module_packages(),
+      "packageModelUpdated": self.session.package_model_updated(),
       "enforce": ext_params.get("enforce-ohpm").and_then(Value::as_str) == Some("true"),
       "executable": state.executable,
     });
@@ -895,6 +1553,114 @@ impl RuntimeBuildScriptSession {
       })
   }
 
+  #[napi(ts_return_type = "Promise<{ artifacts: string[]; output: string[] }>")]
+  pub fn execute_command_plan<'env>(
+    &self,
+    env: Env,
+    plan: Value,
+    callbacks: Object<'env>,
+  ) -> Result<Object<'env>> {
+    crate::runtime_invocation::execute_runtime_command_plan(env, plan, callbacks)
+  }
+
+  #[napi]
+  pub fn runtime_task_catalog(&self, node_name: String, project_task: bool) -> Result<Value> {
+    let request = self.runtime_task_catalog_request(node_name, project_task)?;
+    crate::runtime_task::RuntimeTaskCatalog::from_value(request)
+      .and_then(crate::runtime_task::RuntimeTaskCatalog::entries_value)
+      .map_err(|error| {
+        Error::new(
+          Status::InvalidArg,
+          format!("invalid runtime task catalog request: {error:#}"),
+        )
+      })
+  }
+
+  #[napi]
+  pub fn runtime_task_catalog_request(
+    &self,
+    node_name: String,
+    project_task: bool,
+  ) -> Result<Value> {
+    let request = self
+      .session
+      .task_catalog(&node_name, project_task)
+      .ok_or_else(|| {
+        Error::new(
+          Status::InvalidArg,
+          format!(
+            "ARKDOWN_RUNTIME_TASK_CATALOG_NOT_FOUND: runtime plan has no task catalog for {node_name}"
+          ),
+        )
+      })?;
+    serde_json::to_value(request).map_err(|error| {
+      Error::new(
+        Status::GenericFailure,
+        format!("failed to serialize runtime task catalog request: {error}"),
+      )
+    })
+  }
+
+  #[napi]
+  pub fn inspect_runtime_task_model<'env>(
+    &mut self,
+    env: Env,
+    nodes: Array<'env>,
+    include_catalog: bool,
+  ) -> Result<Value> {
+    if !include_catalog {
+      if let Some(model) = &self.runtime_task_model {
+        return Ok(model.clone());
+      }
+    }
+    let model =
+      crate::runtime_task::RuntimeTaskInventoryNapiInspector::new(env, nodes, include_catalog)
+        .inspect_model()?;
+    if !include_catalog {
+      self.runtime_task_model = Some(model.clone());
+    }
+    Ok(model)
+  }
+
+  #[napi]
+  pub fn invalidate_runtime_task_model(&mut self) {
+    self.runtime_task_model = None;
+  }
+
+  #[napi]
+  pub fn inspect_runtime_task_state<'env>(
+    &self,
+    env: Env,
+    core_task: Object<'env>,
+    task_context: Object<'env>,
+    class_incremental_task: bool,
+  ) -> Result<Value> {
+    crate::runtime_task::RuntimeTaskNapiInspector::new(
+      env,
+      core_task,
+      task_context,
+      class_incremental_task,
+    )
+    .state()
+  }
+
+  #[napi]
+  pub fn inspect_runtime_task_declarations<'env>(
+    &self,
+    env: Env,
+    core_task: Object<'env>,
+    task_context: Object<'env>,
+    class_incremental_task: bool,
+  ) -> Result<Value> {
+    crate::runtime_task::RuntimeTaskNapiInspector::new(
+      env,
+      core_task,
+      task_context,
+      class_incremental_task,
+    )
+    .declarations()
+  }
+
   #[napi]
   pub async fn run_hvigor_clean(&self, node_root: String, project_task: bool) -> Result<Value> {
     let snapshot = self
@@ -935,6 +1701,95 @@ impl RuntimeBuildScriptSession {
   }
 
   #[napi]
+  pub async fn run_hvigor_prune(&self, hvigor_user_home: Option<String>) -> Result<Value> {
+    let hvigor_user_home = hvigor_user_home
+      .map(PathBuf::from)
+      .or_else(|| self.hvigor_user_home.clone())
+      .ok_or_else(|| {
+        Error::new(
+          Status::InvalidArg,
+          "HVIGOR_USER_HOME must be available before prune".to_string(),
+        )
+      })?;
+    crate::hvigor_maintenance::HvigorPruneRunner::from_value(serde_json::json!({
+      "hvigorUserHome": hvigor_user_home,
+    }))
+    .map_err(|error| {
+      Error::new(
+        Status::InvalidArg,
+        format!("invalid hvigor prune request: {error:#}"),
+      )
+    })?
+    .response_value()
+    .await
+    .map_err(|error| Error::new(Status::GenericFailure, format!("{error:#}")))
+  }
+
+  /// Execute the non-build part of a built-in Hvigor command task. The live
+  /// task callback still crosses JavaScript so plugin hooks retain identity,
+  /// but command selection, report rendering, maintenance, and build-info
+  /// behavior have a single Rust owner.
+  #[napi]
+  pub async fn run_standalone_command(
+    &self,
+    state: RuntimeStandaloneCommandState,
+  ) -> Result<Value> {
+    match state.command_kind.as_str() {
+      "tasks" | "taskTree" => {
+        let request = serde_json::json!({
+          "nodeName": state.node_name,
+          "projectTask": state.project_task,
+          "kind": state.node_kind,
+          "reportKind": state.command_kind,
+          "tasks": state.tasks,
+        });
+        let output = crate::runtime_task::RuntimeTaskReportRenderer::from_value(request)
+          .and_then(|renderer| renderer.render())
+          .map(|report| vec![report])
+          .map_err(|error| {
+            Error::new(
+              Status::InvalidArg,
+              format!("invalid runtime task report: {error:#}"),
+            )
+          })?;
+        Ok(serde_json::json!({ "output": output }))
+      }
+      "clean" => {
+        self
+          .run_hvigor_clean(state.node_root, state.project_task)
+          .await
+      }
+      "prune" => self.run_hvigor_prune(None).await,
+      "sync" => Ok(serde_json::json!({ "output": [] })),
+      "buildInfo" => {
+        let module = state
+          .module
+          .and_then(|value| value.as_str().map(str::to_owned));
+        crate::cmd::build_info::HvigorBuildInfoRunner::from_value(serde_json::json!({
+          "projectRoot": self.session.project_model().project_root,
+          "nodeName": state.node_name,
+          "projectTask": state.project_task,
+          "module": module,
+          "json": state.json,
+          "resolve": state.resolve,
+        }))
+        .and_then(|runner| runner.response_value())
+        .map_err(|error| {
+          Error::new(
+            Status::GenericFailure,
+            format!("buildInfo failed: {error:#}"),
+          )
+        })
+      }
+      "collectCoverage" => Ok(serde_json::json!({ "externalAction": "collectCoverage" })),
+      command_kind => Err(Error::new(
+        Status::InvalidArg,
+        format!("INVALID_ARKDOWN_COMMAND_TASK: unknown standalone command kind {command_kind:?}"),
+      )),
+    }
+  }
+
+  #[napi]
   pub fn set_module_override(&mut self, root: String, value: Option<Value>) {
     self
       .session
@@ -971,6 +1826,7 @@ impl RuntimeBuildScriptSession {
   #[napi]
   pub fn invalidate(&mut self) {
     self.session.invalidate();
+    self.runtime_task_model = None;
   }
 
   #[napi]
@@ -988,7 +1844,7 @@ impl RuntimeBuildScriptSession {
       start_params,
       sync_version_changed: update.sync_version_changed,
     }) {
-      Ok(plan) => serde_json::json!({ "plan": plan }),
+      Ok(_) => serde_json::json!({ "prepared": true }),
       Err(diagnostic) => serde_json::json!({ "diagnostic": diagnostic }),
     };
     Ok(outcome)
