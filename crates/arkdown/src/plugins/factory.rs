@@ -17,11 +17,12 @@
 //! | 3 | `resolve` | `OhosResolvePlugin` | yes |
 //! | 4 | `sensitiveCheck` | `ImportCheckPlugin` | yes |
 //! | 5 | `json` | `Json5Plugin` | yes |
-//! | 6 | `wrapperChunk` | `WrapperChunkPlugin` | yes (no-op when `support_chunks = false`) |
+//! | 6 | `wrapperChunk` | — (deleted; slot kept as JS-plugin anchor) | n/a |
 //! | 7 | `sdkPlugins` (etsTransform) | `EtsTransformPlugin` | yes |
 //! | 8 | `apiTransform` | `ApiTransformPlugin` | yes |
 //! | 9 | `HarDedup` (HSP) | `HarDedupPlugin` | HSP builds only |
-//! | 10 | SDK `terser` (release) | `MinifyPlugin` | release only |
+//! | 10 | SDK `terser` (release) | — (deleted; release minification is the | n/a |
+//! |   |  | obfuscation stage / ArkGuard, not a render hook) |  |
 //!
 //! hvigor entries without a Rust equivalent (`commonPlugin`, `invalidCachePlugin`,
 //! `routerMap` planning, `newOhmUrl` absorbed by resolve, `commonjs` Rolldown built-in,
@@ -64,10 +65,8 @@ use crate::plugins::har_dedup::HarDedupPlugin;
 use crate::plugins::hvigor_compile::{HvigorCompilePluginShare, HvigorNativePluginSlot};
 use crate::plugins::import_check::ImportCheckPlugin;
 use crate::plugins::json5::Json5Plugin;
-use crate::plugins::minify::MinifyPlugin;
 use crate::plugins::module_meta::ModuleMetaPlugin;
 use crate::plugins::ohos_resolve::OhosResolvePlugin;
-use crate::plugins::wrapper_chunk::WrapperChunkPlugin;
 use crate::PluginCacheModule;
 
 /// Placement of a latest-hvigor compile plugin in the Rolldown plugin list.
@@ -720,9 +719,10 @@ impl<'a> PluginFactory<'a> {
         // ── 5. Json5Plugin (hvigor: json) ────────────────────────────────────
         let json5_plugin: SharedPluginable = Arc::new(Json5Plugin);
 
-        // ── 6. WrapperChunkPlugin (hvigor: wrapperChunk) ─────────────────────
-        let wrapper_chunk_plugin: SharedPluginable =
-            Arc::new(WrapperChunkPlugin::new(self.plan.input.support_chunks));
+        // ── 6. wrapperChunk ─────────────────────────────────────────────────
+        // No native adapter: `render_chunk` is unreachable on the scan-only
+        // production path. `HvigorNativePluginSlot::WrapperChunk` remains a
+        // valid anchor rank for package-supplied JS plugins.
 
         // ── 7. EtsTransformPlugin (hvigor: sdkPlugins / etsTransform) ────────
         //
@@ -780,7 +780,6 @@ impl<'a> PluginFactory<'a> {
             PluginFactoryEntry::native(ohos_resolve_plugin, HvigorNativePluginSlot::OhosResolve),
             PluginFactoryEntry::native(import_check_plugin, HvigorNativePluginSlot::ImportCheck),
             PluginFactoryEntry::native(json5_plugin, HvigorNativePluginSlot::Json),
-            PluginFactoryEntry::native(wrapper_chunk_plugin, HvigorNativePluginSlot::WrapperChunk),
         ];
 
         // HarDedup is an optional phase between wrapperChunk and the SDK
@@ -812,15 +811,11 @@ impl<'a> PluginFactory<'a> {
             PluginFactoryEntry::native(api_transform_plugin, HvigorNativePluginSlot::ApiTransform),
         ]);
 
-        // ── 10. MinifyPlugin (hvigor SDK: terser, release only) ───────────────
-        let is_release = !self.plan.is_debug();
-        if is_release {
-            let minify_plugin: SharedPluginable = Arc::new(MinifyPlugin::for_mode(true));
-            native_plugins.push(PluginFactoryEntry::native(
-                minify_plugin,
-                HvigorNativePluginSlot::Minify,
-            ));
-        }
+        // ── 10. SDK terser (release) ────────────────────────────────────────
+        // No native adapter: JSBUNDLE-only minifier (CLAUDE.md rule 14), and
+        // `render_chunk` is unreachable on the scan-only production path.
+        // ESMODULE release minification/obfuscation is the obfuscation stage
+        // (ArkGuard). `HvigorNativePluginSlot::Minify` stays an anchor rank.
 
         let disabled_plugins = self
             .input
@@ -1153,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn end_anchor_stays_after_the_optional_release_minifier() {
+    fn end_anchor_stays_last_in_both_build_modes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().to_path_buf();
         for mode in [BuildMode::Debug, BuildMode::Release] {
@@ -1175,15 +1170,11 @@ mod tests {
                 .map(|plugin| plugin.call_name().to_string())
                 .collect::<Vec<_>>();
             assert_eq!(names.last().map(String::as_str), Some("pipeline-end"));
-            if plan.build_mode == BuildMode::Release {
-                let minify = names
-                    .iter()
-                    .position(|name| name == "minify")
-                    .expect("release minifier");
-                assert_eq!(minify + 1, names.len() - 1);
-            } else {
-                assert!(!names.iter().any(|name| name == "minify"));
-            }
+            // The minify and wrapperChunk native adapters were deleted
+            // (render_chunk is unreachable on the scan-only path); no built-in
+            // plugin may carry those call names in either mode.
+            assert!(!names.iter().any(|name| name == "minify"));
+            assert!(!names.iter().any(|name| name == "wrapperChunk"));
         }
     }
 

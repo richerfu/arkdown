@@ -122,10 +122,16 @@ pub enum HvigorNativePluginSlot {
     OhosResolve = 2,
     ImportCheck = 3,
     Json = 4,
+    /// Anchor-only slot: the native `wrapperChunk` adapter was deleted
+    /// (`render_chunk` is unreachable on the scan-only production path).
+    /// The rank stays so package-supplied JS plugins keep a stable anchor.
     WrapperChunk = 5,
     HarDedup = 6,
     EtsTransform = 7,
     ApiTransform = 8,
+    /// Anchor-only slot: the native `minify` adapter was deleted (JSBUNDLE-only
+    /// per CLAUDE.md rule 14; ESMODULE release minification is the
+    /// obfuscation stage / ArkGuard). The rank stays as a JS-plugin anchor.
     Minify = 9,
 }
 
