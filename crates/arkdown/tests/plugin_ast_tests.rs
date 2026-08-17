@@ -140,15 +140,11 @@ fn plugin_ast_matches_rollup_script_return_policy() {
 
 #[test]
 fn plugin_cache_request_carries_rust_owned_ast_transport() {
-    let request: Value = serde_json::from_str(
-        &PluginCacheModule {
-            id: "/entry.js".to_string(),
-            code: "export const answer = 42".to_string(),
-        }
-        .hook_request_json()
-        .expect("cache hook request should serialize"),
-    )
-    .expect("cache hook request should be JSON");
+    let request: Value = PluginCacheModule {
+        id: "/entry.js".to_string(),
+        code: "export const answer = 42".to_string(),
+    }
+    .hook_request_value();
 
     assert_eq!(request["id"], "/entry.js");
     assert_eq!(request["code"], "export const answer = 42");
