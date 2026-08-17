@@ -43,7 +43,8 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
     let mut descriptors = Vec::new();
     let mut command_nodes = Vec::new();
     let mut catalogs = Vec::new();
-    let mut removed_task_paths = Vec::new();
+    let mut project_custom_tasks = Vec::new();
+    let mut module_custom_tasks = Map::new();
     for node_index in 0..self.nodes.len() {
       let node = self.nodes.get::<Object<'env>>(node_index)?.ok_or_else(|| {
         napi::Error::from_reason(format!("Hvigor runtime node {node_index} is not an object"))
@@ -55,6 +56,7 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
       let core = Self::required_property::<Object<'env>>(&node, "coreWrapper")?;
       let task_values = Self::required_method(&core, "getAllTasks")?;
       let task_values = self.array_from(task_values)?;
+      let mut custom_tasks = Vec::new();
       let mut custom_sync_task_paths = Vec::new();
       let mut realized_task_names = HashSet::with_capacity(task_values.len() as usize);
       let mut realization_order = 0;
@@ -71,7 +73,7 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
         let task_context = core_task
           .get::<Object<'env>>("taskContext")?
           .unwrap_or_else(|| core_task.clone());
-        let catalog_definition = Self::catalog_definition(&catalog, task_name)?;
+        let catalog_definition = Self::catalog_definition(&catalog, task_name.clone())?;
         let explicitly_built_in = core_task
           .get::<Value>("__arkdownBuiltInDefinition")?
           .is_some_and(|value| !value.is_null());
@@ -85,21 +87,28 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
         let class_incremental_task = Self::has_function(&core_task, "declareInputs")?
           && Self::has_function(&core_task, "declareInputFiles")?
           && Self::has_function(&core_task, "declareOutputFiles")?;
-        descriptors.push(
-          RuntimeTaskNapiInspector::new(self.env, core_task, task_context, class_incremental_task)
-            .descriptor(
-              task_path,
-              node_name.clone(),
-              built_in,
-              project_task,
-              catalog_definition,
-              definition.as_ref().is_some_and(|value| {
-                Self::has_values(value, "dependencies")
-                  || Self::has_values(value, "postDependencies")
-              }),
-              realization_order,
-            )?,
-        );
+        let inspector =
+          RuntimeTaskNapiInspector::new(self.env, core_task, task_context, class_incremental_task);
+        let descriptor = inspector.descriptor(
+          task_path,
+          node_name.clone(),
+          built_in,
+          project_task,
+          catalog_definition,
+          definition.as_ref().is_some_and(|value| {
+            Self::has_values(value, "dependencies") || Self::has_values(value, "postDependencies")
+          }),
+          realization_order,
+        )?;
+        if !built_in {
+          custom_tasks.push(json!({
+            "taskName": task_name,
+            "group": descriptor.get("group").cloned().unwrap_or(Value::String("Customize".to_string())),
+            "description": descriptor.get("description").cloned().unwrap_or(Value::String(String::new())),
+            "sourcePluginId": inspector.optional_string_method("getSourcePluginId")?.unwrap_or_default(),
+          }));
+        }
+        descriptors.push(descriptor);
         realization_order += 1;
       }
 
@@ -128,20 +137,32 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
             creation.get::<Value>("dependsDefinedByUser")?,
           ))
           .collect::<Vec<_>>();
-        descriptors.push(
-          RuntimeLazyTaskDescriptorPlanner::from_value(json!({
-            "nodeName": node_name,
+        let group = details
+          .get::<String>("group")?
+          .unwrap_or_else(|| "Customize".to_string());
+        let description = details.get::<String>("description")?.unwrap_or_default();
+        let source_plugin_id = details.get::<String>("sourcePluginId")?.unwrap_or_default();
+        let descriptor = RuntimeLazyTaskDescriptorPlanner::from_value(json!({
+          "nodeName": node_name,
+          "taskName": task_name,
+          "builtIn": definition.is_some(),
+          "projectTask": project_task,
+          "group": group,
+          "description": description,
+          "catalogOrder": definition.as_ref().and_then(|value| value.get("catalogOrder")),
+          "realizationOrder": realization_order,
+          "dependencies": dependencies,
+        }))?
+        .plan();
+        if definition.is_none() {
+          custom_tasks.push(json!({
             "taskName": task_name,
-            "builtIn": definition.is_some(),
-            "projectTask": project_task,
-            "group": details.get::<String>("group")?,
-            "description": details.get::<String>("description")?.unwrap_or_default(),
-            "catalogOrder": definition.as_ref().and_then(|value| value.get("catalogOrder")),
-            "realizationOrder": realization_order,
-            "dependencies": dependencies,
-          }))?
-          .plan(),
-        );
+            "group": group,
+            "description": description,
+            "sourcePluginId": source_plugin_id,
+          }));
+        }
+        descriptors.push(descriptor);
         realization_order += 1;
       }
 
@@ -174,20 +195,10 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
         "childNames": children,
         "customSyncTaskPaths": custom_sync_task_paths,
       }));
-
-      let deleted = Self::required_property::<Object<'env>>(&node, "deletedCatalogTasks")?;
-      let deleted_values = self.array_from(Self::required_method(&deleted, "values")?)?;
-      for index in 0..deleted_values.len() {
-        let task_name = deleted_values.get::<String>(index)?.ok_or_else(|| {
-          napi::Error::from_reason(format!(
-            "Hvigor runtime node {node_name} deleted task {index} is not a string"
-          ))
-        })?;
-        removed_task_paths.push(if project_task {
-          format!(":{task_name}")
-        } else {
-          format!("{node_name}:{task_name}")
-        });
+      if project_task {
+        project_custom_tasks = custom_tasks;
+      } else {
+        module_custom_tasks.insert(node_name, Value::Array(custom_tasks));
       }
     }
     descriptors.sort_by(|left, right| {
@@ -196,12 +207,13 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
         .and_then(Value::as_str)
         .cmp(&right.get("path").and_then(Value::as_str))
     });
-    removed_task_paths.sort();
     Ok(json!({
       "nodes": command_nodes,
       "catalogs": catalogs,
-      "removedTaskPaths": removed_task_paths,
+      "removedTaskPaths": [],
       "tasks": descriptors,
+      "projectCustomTasks": project_custom_tasks,
+      "moduleCustomTasks": module_custom_tasks,
     }))
   }
 

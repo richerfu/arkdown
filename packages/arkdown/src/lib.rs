@@ -74,24 +74,6 @@ use arkdown::plugins::hvigor_compile::{
 };
 use arkdown::PluginCacheModule;
 
-/// Acquire the process-wide JavaScript Hvigor runtime. Module loader patches,
-/// log4js singletons, and latest-Hvigor globals cannot safely represent two
-/// builds concurrently in one Node process, so overlapping invocations are
-/// rejected explicitly instead of corrupting either build.
-#[napi]
-pub fn begin_runtime_invocation(project_root: String) -> napi::Result<String> {
-  runtime_invocation::RuntimeInvocationLease::acquire(PathBuf::from(project_root).as_path())
-    .map_err(|error| napi::Error::from_reason(error.to_string()))
-}
-
-/// Release the process-wide JavaScript Hvigor runtime acquired by
-/// `beginRuntimeInvocation`.
-#[napi]
-pub fn finish_runtime_invocation(token: String) -> napi::Result<()> {
-  runtime_invocation::RuntimeInvocationLease::release(&token)
-    .map_err(|error| napi::Error::from_reason(error.to_string()))
-}
-
 /// Parse the latest-hvigor command surface in Rust. JavaScript only revives
 /// the typed plan and dispatches the requested runtime operation.
 #[napi]
@@ -129,33 +111,6 @@ pub fn hvigor_project_cache_hash(project_root: String) -> napi::Result<String> {
   arkdown_session::BuildScriptProjectCacheIdentity::new(project_root)
     .map(|identity| identity.hash())
     .map_err(|error| napi::Error::from_reason(error.to_string()))
-}
-
-/// Inspect `oh_modules/.hsp` using the official module-first,
-/// highest-version selection contract.
-#[napi]
-pub fn inspect_remote_hsp_objects(request: serde_json::Value) -> napi::Result<serde_json::Value> {
-  remote_hsp::RemoteHspNapiAdapter::inspect(request)
-}
-
-/// Collect and resolve plugin paths from a callback-produced hvigorfile value.
-#[napi]
-pub fn collect_build_script_plugin_paths(
-  value: Unknown<'_>,
-  base_dir: String,
-  include_compile_plugin_file: Option<bool>,
-) -> napi::Result<serde_json::Value> {
-  build_script_runtime_model::BuildScriptPluginPathNapiAdapter::collect(
-    value,
-    base_dir,
-    include_compile_plugin_file.unwrap_or(true),
-  )
-}
-
-/// Resolve one configured plugin path with latest-hvigor extension order.
-#[napi]
-pub fn resolve_build_script_plugin_path(candidate: String, base_dir: String) -> Option<String> {
-  build_script_runtime_model::BuildScriptPluginPathNapiAdapter::resolve(candidate, base_dir)
 }
 
 /// Parse hvigor's JSON5-shaped public utility values through Rust/OXC. The
@@ -1550,101 +1505,6 @@ pub fn run_runtime_tasks<'a>(
     async move {
       seed
         .execute()
-        .await
-        .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
-    },
-    |env_raw, result| unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env_raw, result) },
-  )?;
-  unsafe { Object::from_napi_value(env.raw(), raw_promise) }
-}
-
-/// Return the latest-hvigor built-in task catalog from the Rust-owned graph
-/// metadata. JavaScript wraps these records only to expose lazy plugin APIs.
-#[napi]
-pub fn runtime_task_catalog(request: serde_json::Value) -> napi::Result<serde_json::Value> {
-  crate::runtime_task::RuntimeTaskCatalog::from_value(request)
-    .and_then(crate::runtime_task::RuntimeTaskCatalog::entries_value)
-    .map_err(|error| {
-      napi::Error::from_reason(format!("invalid runtime task catalog request: {error:#}"))
-    })
-}
-
-/// Project the live Hvigor nodes, task catalogs, removed paths, and task graph
-/// descriptors in one native traversal.
-#[napi]
-pub fn inspect_runtime_task_model<'env>(
-  env: Env,
-  nodes: Array<'env>,
-  include_catalog: bool,
-) -> napi::Result<serde_json::Value> {
-  crate::runtime_task::RuntimeTaskInventoryNapiInspector::new(env, nodes, include_catalog)
-    .inspect_model()
-}
-
-/// Refresh live task state after lazy realization.
-#[napi]
-pub fn inspect_runtime_task_state<'env>(
-  env: Env,
-  core_task: Object<'env>,
-  task_context: Object<'env>,
-  class_incremental_task: bool,
-) -> napi::Result<serde_json::Value> {
-  crate::runtime_task::RuntimeTaskNapiInspector::new(
-    env,
-    core_task,
-    task_context,
-    class_incremental_task,
-  )
-  .state()
-}
-
-/// Refresh only incremental declarations after `beforeAlwaysAction()`.
-#[napi]
-pub fn inspect_runtime_task_declarations<'env>(
-  env: Env,
-  core_task: Object<'env>,
-  task_context: Object<'env>,
-  class_incremental_task: bool,
-) -> napi::Result<serde_json::Value> {
-  crate::runtime_task::RuntimeTaskNapiInspector::new(
-    env,
-    core_task,
-    task_context,
-    class_incremental_task,
-  )
-  .declarations()
-}
-
-/// Render latest-hvigor `tasks` and `taskTree` reports from the Rust-owned
-/// task inventory. JavaScript only supplies plugin-authored task metadata.
-#[napi]
-pub fn runtime_task_report(request: serde_json::Value) -> napi::Result<String> {
-  crate::runtime_task::RuntimeTaskReportRenderer::from_value(request)
-    .and_then(|renderer| renderer.render())
-    .map_err(|error| napi::Error::from_reason(format!("invalid runtime task report: {error:#}")))
-}
-
-/// Render Hvigor's built-in `buildInfo` task from the immutable Rust profile
-/// inventory. JavaScript remains responsible only for task hook dispatch.
-#[napi]
-pub fn run_hvigor_build_info(request: serde_json::Value) -> napi::Result<serde_json::Value> {
-  crate::cmd::build_info::HvigorBuildInfoRunner::from_value(request)
-    .and_then(|runner| runner.response_value())
-    .map_err(|error| napi::Error::from_reason(format!("buildInfo failed: {error:#}")))
-}
-
-/// Execute latest-hvigor cache and pnpm store pruning in Rust.
-#[napi(ts_return_type = "Promise<Record<string, unknown>>")]
-pub fn run_hvigor_prune<'a>(env: Env, request: serde_json::Value) -> napi::Result<Object<'a>> {
-  let runner =
-    crate::hvigor_maintenance::HvigorPruneRunner::from_value(request).map_err(|error| {
-      napi::Error::from_reason(format!("invalid hvigor prune request: {error:#}"))
-    })?;
-  let raw_promise = napi::bindgen_prelude::execute_tokio_future(
-    env.raw(),
-    async move {
-      runner
-        .response_value()
         .await
         .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
     },

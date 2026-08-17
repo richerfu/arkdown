@@ -70,17 +70,18 @@ pub use artifacts::layout::ArtifactLayout;
 
 // build_script
 pub use build_script::{
-    BuildScriptEffect, BuildScriptFileInventory, BuildScriptFileInventoryRequest,
-    BuildScriptFingerprint, BuildScriptKind, BuildScriptModuleModelLoader,
-    BuildScriptModuleModelRequest, BuildScriptOverrideError, BuildScriptOverrideInventory,
-    BuildScriptParser, BuildScriptProjectCacheIdentity, BuildScriptProjectCacheIdentityError,
-    BuildScriptRuntimeCleanSnapshot, BuildScriptRuntimeCommandSnapshot,
-    BuildScriptRuntimeExecutionSnapshotError, BuildScriptRuntimeModelError,
-    BuildScriptRuntimeModelLoader, BuildScriptRuntimeModelRequest, BuildScriptRuntimeModelSnapshot,
-    BuildScriptRuntimePathPlan, BuildScriptRuntimePlanUpdate, BuildScriptRuntimeSdkConfig,
-    BuildScriptRuntimeSdkDetails, BuildScriptRuntimeSession, BuildScriptRuntimeSyncModule,
-    BuildScriptRuntimeSyncSnapshot, BuildScriptRuntimeSyncSnapshotError,
-    BuildScriptRuntimeSyncTarget, BuildScriptSnapshot, ParseBuildScriptError,
+    BuildScriptCompilePluginPathError, BuildScriptEffect, BuildScriptFileInventory,
+    BuildScriptFileInventoryRequest, BuildScriptFingerprint, BuildScriptKind,
+    BuildScriptModuleModelLoader, BuildScriptModuleModelRequest, BuildScriptOverrideError,
+    BuildScriptOverrideInventory, BuildScriptParser, BuildScriptProjectCacheIdentity,
+    BuildScriptProjectCacheIdentityError, BuildScriptRuntimeCleanSnapshot,
+    BuildScriptRuntimeCommandSnapshot, BuildScriptRuntimeExecutionSnapshotError,
+    BuildScriptRuntimeModelError, BuildScriptRuntimeModelLoader, BuildScriptRuntimeModelRequest,
+    BuildScriptRuntimeModelSnapshot, BuildScriptRuntimePathPlan, BuildScriptRuntimePlanUpdate,
+    BuildScriptRuntimeSdkConfig, BuildScriptRuntimeSdkDetails, BuildScriptRuntimeSession,
+    BuildScriptRuntimeSyncModule, BuildScriptRuntimeSyncSnapshot,
+    BuildScriptRuntimeSyncSnapshotError, BuildScriptRuntimeSyncTarget, BuildScriptSnapshot,
+    ParseBuildScriptError,
 };
 
 // builder

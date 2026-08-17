@@ -131,10 +131,11 @@ impl RuntimeTaskModelBuilder {
       }
     }
 
-    for overlay in self.overlays {
+    for mut overlay in self.overlays {
       if self.removed_task_paths.contains(&overlay.path) {
         continue;
       }
+      Self::qualify_overlay_dependencies(&mut overlay);
       if overlay.built_in {
         if let Some(index) = built_in_indexes.get(&overlay.path).copied() {
           descriptors[index] = overlay;
@@ -145,6 +146,23 @@ impl RuntimeTaskModelBuilder {
     }
     descriptors.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(descriptors)
+  }
+
+  fn qualify_overlay_dependencies(overlay: &mut RuntimeTaskDescriptor) {
+    for dependency in overlay
+      .dependencies
+      .iter_mut()
+      .chain(overlay.user_dependencies.iter_mut())
+    {
+      if dependency.contains(':') {
+        continue;
+      }
+      *dependency = if overlay.project_task {
+        format!(":{dependency}")
+      } else {
+        format!("{}:{dependency}", overlay.node_name)
+      };
+    }
   }
 }
 

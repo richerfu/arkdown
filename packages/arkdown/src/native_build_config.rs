@@ -15,7 +15,6 @@ pub struct RuntimeNativeBuildState {
   pub core_start_params: Value,
   pub default_cache: bool,
   pub mode: String,
-  pub fast_build_app: bool,
 }
 
 pub struct RuntimeBuildConfigOverlay {
@@ -46,6 +45,7 @@ pub struct RuntimeBuildConfigOverlay {
 impl RuntimeBuildConfigOverlay {
   pub fn from_runtime(
     state: &RuntimeNativeBuildState,
+    fast_build_app: bool,
     property_plan: HvigorRuntimePropertyPlan,
     path_plan: BuildScriptRuntimePathPlan,
     project_hvigor_overrides: &Value,
@@ -58,7 +58,7 @@ impl RuntimeBuildConfigOverlay {
       default_cache: Some(state.default_cache),
       mode: Some(state.mode.clone()),
       enable_sign_task: Some(native_properties.enable_sign_task),
-      fast_build_app: Some(state.fast_build_app),
+      fast_build_app: Some(fast_build_app),
       ohos_debug_asan: Self::optional_bool(&runtime_properties, "asanConfig"),
       ohos_enable_hwasan: Self::optional_bool(&runtime_properties, "hwasanConfig"),
       ohos_enable_tsan: Self::optional_bool(&runtime_properties, "tsanConfig"),

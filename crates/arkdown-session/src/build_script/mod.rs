@@ -37,10 +37,11 @@ pub use runtime_model::{
     BuildScriptRuntimeModelRequest, BuildScriptRuntimeModelSnapshot,
 };
 pub use runtime_session::{
-    BuildScriptRuntimeCleanSnapshot, BuildScriptRuntimeCommandSnapshot,
-    BuildScriptRuntimeExecutionSnapshotError, BuildScriptRuntimePathPlan,
-    BuildScriptRuntimePlanUpdate, BuildScriptRuntimeSdkConfig, BuildScriptRuntimeSdkDetails,
-    BuildScriptRuntimeSession, BuildScriptRuntimeSyncModule, BuildScriptRuntimeSyncSnapshot,
-    BuildScriptRuntimeSyncSnapshotError, BuildScriptRuntimeSyncTarget,
+    BuildScriptCompilePluginPathError, BuildScriptRuntimeCleanSnapshot,
+    BuildScriptRuntimeCommandSnapshot, BuildScriptRuntimeExecutionSnapshotError,
+    BuildScriptRuntimePathPlan, BuildScriptRuntimePlanUpdate, BuildScriptRuntimeSdkConfig,
+    BuildScriptRuntimeSdkDetails, BuildScriptRuntimeSession, BuildScriptRuntimeSyncModule,
+    BuildScriptRuntimeSyncSnapshot, BuildScriptRuntimeSyncSnapshotError,
+    BuildScriptRuntimeSyncTarget,
 };
 pub use snapshot::{BuildScriptFingerprint, BuildScriptKind, BuildScriptSnapshot};

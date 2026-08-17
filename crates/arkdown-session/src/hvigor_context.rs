@@ -186,6 +186,14 @@ impl HvigorContextSession {
         (!self.runtime_overrides.is_empty()).then(|| self.runtime_overrides.clone())
     }
 
+    pub fn project_package(&self) -> &Value {
+        &self.project_package
+    }
+
+    pub fn module_package_snapshot(&self, root: &Path) -> Option<Value> {
+        self.module_package(root).cloned()
+    }
+
     pub fn register_module(&mut self, root: impl Into<PathBuf>, package: Value) {
         let public_root = arkdown_path::lexical_normalize(&root.into());
         let identity = canonicalize_or_owned(&public_root);

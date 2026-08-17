@@ -19,7 +19,7 @@ pub use build_script_plugin::BuildScriptPluginPathResolver;
 pub use build_script_runtime::{
     BuildScriptCompilePluginRecord, BuildScriptModuleSelection, BuildScriptRuntimeModulePlan,
     BuildScriptRuntimeModulePlanRequest, BuildScriptRuntimePlan, BuildScriptRuntimePlanDiagnostic,
-    BuildScriptRuntimePlanRequest, BuildScriptRuntimePlanner,
+    BuildScriptRuntimePlanRequest, BuildScriptRuntimePlanner, BuildScriptTaskCatalogPlan,
 };
 pub use build_script_schema::{
     BuildScriptBuildOptionValidationRequest, BuildScriptSchemaDiagnostic,

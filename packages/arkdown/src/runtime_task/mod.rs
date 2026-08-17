@@ -8,6 +8,8 @@ mod engine;
 mod graph;
 mod inspect;
 mod model;
+#[cfg(test)]
+mod model_tests;
 mod report;
 #[cfg(test)]
 mod report_tests;

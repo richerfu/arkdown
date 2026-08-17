@@ -149,7 +149,6 @@ fn adds_custom_task_native_dependencies_and_cutoff_roots() {
 fn maps_hvigor_test_to_the_local_test_output_target() {
   let result = plan(json!({
     "projectName": "demo",
-    "executionMode": "module",
     "taskNames": ["test"],
     "moduleSelections": [{ "moduleName": "entry" }],
     "buildTargetName": "default",

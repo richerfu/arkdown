@@ -5,7 +5,6 @@ use std::sync::Mutex;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeCallContext;
-use napi_derive::napi;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 
@@ -253,8 +252,7 @@ impl RuntimeCommandExecutionCoordinator {
 
 /// Execute a Rust-planned Hvigor command while keeping live task/plugin
 /// objects behind three narrow JavaScript callbacks.
-#[napi(ts_return_type = "Promise<{ artifacts: string[]; output: string[] }>")]
-pub fn execute_runtime_command_plan<'env>(
+pub(crate) fn execute_runtime_command_plan<'env>(
   env: Env,
   plan: serde_json::Value,
   callbacks: Object<'env>,
