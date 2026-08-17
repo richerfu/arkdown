@@ -53,7 +53,7 @@ domain plans. The bundler must validate the plan before invoking Rolldown.
 | `check-duplicate-filenames-plugin.ts` | `arkdown::plugins::duplicate_check` |
 | `router-map-plugin.ts` | `arkdown::plugins::ets_transform` consuming `arkdown-profile` router inventory |
 | `use-new-ohm-url-plugin.ts` | `arkdown::plugins::ohos_resolve` and `OhmUrl` serializer |
-| `wrapper-chunk-plugin.ts` | `arkdown::plugins::wrapper_chunk` render-chunk adapter with OXC parse/codegen or span patches |
+| `wrapper-chunk-plugin.ts` | deleted 2026-08-17: `render_chunk` unreachable on the scan-only production path; slot kept as JS-plugin anchor |
 | `invalid-cache-plugin.ts` | `arkdown-cache` input fingerprint set consumed by `arkdown` |
 | `collect-importers-plugin.ts` | `arkdown` bundle fact collection keyed by module/source IDs |
 | `copy-plugin.ts`, `delete-plugin.ts` | resource/package artifact planners, not bundler hot path |

@@ -116,7 +116,7 @@ preserving the custom plugin's relative slot.
 | `commonjs` | Rolldown parser/linker behavior where applicable |
 | `gcPlugin` | Rust ownership; no forced Node GC stage |
 | `json` | `plugins::json5` |
-| `wrapperChunkPlugin` | `plugins::wrapper_chunk` |
+| `wrapperChunkPlugin` | deleted — `render_chunk` unreachable on the scan-only path; `HvigorNativePluginSlot::WrapperChunk` kept only as a JS-plugin anchor |
 | `waitAsyncPlugin` | Rust async/Rolldown hook futures |
 | `collectImportersPlugin` | Rolldown module graph facts |
 | `hspCollectHarFiles` | `plugins::har_dedup` (HSP collect/real passes) |

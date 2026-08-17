@@ -412,8 +412,10 @@ crates/arkdown/src/
 - `plugins/har_dedup.rs`: HAR/HSP dedup facts.
 - `plugins/ets_transform.rs`: transform adapter backed by
   `arkdown-ets-transform`.
-- `plugins/wrapper_chunk.rs`: migrated `wrapper-chunk-plugin` behavior using
-  OXC parse/codegen or deterministic span patches.
+- `plugins/wrapper_chunk.rs`: deleted 2026-08-17 — `render_chunk` is
+  unreachable on the scan-only production path (`Bundler::bundle()` uses
+  `scan_module_sources()`); the `HvigorNativePluginSlot::WrapperChunk` rank
+  is kept as a JS-plugin anchor.
 - `plugins/import_check.rs`: import diagnostics that are naturally hook-bound.
 - `plugins/minify.rs`: OXC/Rolldown minifier policy.
 

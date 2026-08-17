@@ -43,6 +43,11 @@ not a forced IIFE wrapper.
 
 ### With `supportChunks` Enabled
 
+> Status: the `wrapperChunkPlugin` Rust adapter has been **deleted**. Its only
+> hook (`render_chunk`) is unreachable on the production path — `Bundler::bundle()`
+> uses `scan_module_sources()` and never renders chunks; the section below is
+> retained as legacy-format background only.
+
 When `supportChunks` is true (enabled via `projectConfig.supportChunks`), the `wrapperChunkPlugin` also processes cross-chunk imports and exports.
 
 **Producing chunk** (exporting module):
