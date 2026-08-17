@@ -68,7 +68,9 @@ use rolldown_plugin::{
   PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 
-use arkdown::plugins::factory::{HvigorPluginGapHooks, HvigorPluginOrder, PackagePlugin};
+use arkdown::plugins::factory::{
+  HvigorHookFuture, HvigorPluginGapHooks, HvigorPluginOrder, PackagePlugin,
+};
 use arkdown::plugins::hvigor_compile::{
   HvigorCompilePluginPlanConfig, HvigorCompilePluginShare, HvigorNativePluginSlot,
 };
@@ -935,51 +937,65 @@ impl Plugin for JsPlugin {
   }
 }
 
-#[async_trait::async_trait]
 impl HvigorPluginGapHooks for JsPlugin {
-  async fn seed_hvigor_context(&self, share: &HvigorCompilePluginShare) -> anyhow::Result<()> {
-    let mut request = JsPluginDispatchRequest::new("seedContext", None);
-    request.share = Some(HvigorShareContext::from(share));
-    self
-      .dispatch_fn
-      .await_call(request)
-      .await
-      .map_err(|error| anyhow::anyhow!("seed hvigor compile context JS error: {error}"))?;
-    Ok(())
+  fn seed_hvigor_context<'a>(
+    &'a self,
+    share: &'a HvigorCompilePluginShare,
+  ) -> HvigorHookFuture<'a, anyhow::Result<()>> {
+    Box::pin(async move {
+      let mut request = JsPluginDispatchRequest::new("seedContext", None);
+      request.share = Some(HvigorShareContext::from(share));
+      self
+        .dispatch_fn
+        .await_call(request)
+        .await
+        .map_err(|error| anyhow::anyhow!("seed hvigor compile context JS error: {error}"))?;
+      Ok(())
+    })
   }
 
-  async fn should_invalid_cache(&self, module: &PluginCacheModule) -> anyhow::Result<bool> {
-    if !self.has_hook("shouldInvalidCache") {
-      return Ok(false);
-    }
-    // @ohos/hvigor-arkts-compose 6.24.3 ShouldInvalidCacheOptions is exactly
-    // `{ ast?: AcornNode, code: string, id: string }`. OXC constructs the AST
-    // here in Rust; JavaScript only revives JSON-inexpressible literal values.
-    let mut request = JsPluginDispatchRequest::new("shouldInvalidCache", None);
-    request.cache_request = Some(module.hook_request_value());
-    self
-      .dispatch_fn
-      .await_call(request)
-      .await
-      .map(|result| result.should_invalid_cache.unwrap_or(false))
-      .map_err(|error| anyhow::anyhow!("shouldInvalidCache JS error: {error}"))
+  fn should_invalid_cache<'a>(
+    &'a self,
+    module: &'a PluginCacheModule,
+  ) -> HvigorHookFuture<'a, anyhow::Result<bool>> {
+    Box::pin(async move {
+      if !self.has_hook("shouldInvalidCache") {
+        return Ok(false);
+      }
+      // @ohos/hvigor-arkts-compose 6.24.3 ShouldInvalidCacheOptions is exactly
+      // `{ ast?: AcornNode, code: string, id: string }`. OXC constructs the AST
+      // here in Rust; JavaScript only revives JSON-inexpressible literal values.
+      let mut request = JsPluginDispatchRequest::new("shouldInvalidCache", None);
+      request.cache_request = Some(module.hook_request_value());
+      self
+        .dispatch_fn
+        .await_call(request)
+        .await
+        .map(|result| result.should_invalid_cache.unwrap_or(false))
+        .map_err(|error| anyhow::anyhow!("shouldInvalidCache JS error: {error}"))
+    })
   }
 
   fn has_should_invalid_cache(&self) -> bool {
     self.has_hook("shouldInvalidCache")
   }
 
-  async fn before_build_end_with_context(&self, context: PluginContext) -> anyhow::Result<()> {
-    if !self.has_hook("beforeBuildEnd") {
-      return Ok(());
-    }
-    let request = JsPluginDispatchRequest::new("beforeBuildEnd", Some(context.into()));
-    self
-      .dispatch_fn
-      .await_call(request)
-      .await
-      .map_err(|error| anyhow::anyhow!("beforeBuildEnd JS error: {error}"))?;
-    Ok(())
+  fn before_build_end_with_context(
+    &self,
+    context: PluginContext,
+  ) -> HvigorHookFuture<'_, anyhow::Result<()>> {
+    Box::pin(async {
+      if !self.has_hook("beforeBuildEnd") {
+        return Ok(());
+      }
+      let request = JsPluginDispatchRequest::new("beforeBuildEnd", Some(context.into()));
+      self
+        .dispatch_fn
+        .await_call(request)
+        .await
+        .map_err(|error| anyhow::anyhow!("beforeBuildEnd JS error: {error}"))?;
+      Ok(())
+    })
   }
 
   fn has_before_build_end(&self) -> bool {
@@ -1459,10 +1475,10 @@ pub fn build<'a>(
     async move {
       let start = std::time::Instant::now();
       let task_observer = match runtime_task_seed {
-        Some(seed) => Some(
+        Some(seed) => {
           crate::runtime_task::RuntimeTaskActorObserver::spawn(seed)
-            .map_err(|error| napi::Error::from_reason(format!("{error:#}")))?,
-        ),
+            .map_err(|error| napi::Error::from_reason(format!("{error:#}")))?
+        }
         None => None,
       };
       let artifacts = run_build(

@@ -38,7 +38,9 @@
 //! Replaces `packages/arkdown/src/cmd/build/plugin_factory.rs`. The CLI shim
 //! delegates to this factory once the migration is complete.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -386,14 +388,27 @@ impl PackagePlugin {
 /// compile-plugin hooks that Rolldown lacks: `shouldInvalidCache` and
 /// `beforeBuildEnd`. `seed_hvigor_context` supplies the latest-hvigor `share`
 /// object before Rolldown starts and is not user-visible lifecycle behavior.
-#[async_trait::async_trait]
+/// Future returned by [`HvigorPluginGapHooks`] async methods.
+///
+/// Boxed by hand — matching rolldown's internal `Pluginable` trait — because
+/// this trait is consumed as a trait object (`Arc<dyn HvigorPluginGapHooks>`)
+/// and RPITIT methods are not dyn-compatible. Implementors wrap their bodies
+/// in `Box::pin(async { .. })`.
+pub type HvigorHookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 pub trait HvigorPluginGapHooks: Send + Sync {
-    async fn seed_hvigor_context(&self, _share: &HvigorCompilePluginShare) -> anyhow::Result<()> {
-        Ok(())
+    fn seed_hvigor_context<'a>(
+        &'a self,
+        _share: &'a HvigorCompilePluginShare,
+    ) -> HvigorHookFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 
-    async fn should_invalid_cache(&self, _module: &PluginCacheModule) -> anyhow::Result<bool> {
-        Ok(false)
+    fn should_invalid_cache<'a>(
+        &'a self,
+        _module: &'a PluginCacheModule,
+    ) -> HvigorHookFuture<'a, anyhow::Result<bool>> {
+        Box::pin(async { Ok(false) })
     }
 
     fn has_should_invalid_cache(&self) -> bool {
@@ -401,8 +416,11 @@ pub trait HvigorPluginGapHooks: Send + Sync {
     }
 
     /// `beforeBuildEnd` with Rolldown's live post-scan plugin context.
-    async fn before_build_end_with_context(&self, _context: PluginContext) -> anyhow::Result<()> {
-        Ok(())
+    fn before_build_end_with_context(
+        &self,
+        _context: PluginContext,
+    ) -> HvigorHookFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 
     fn has_before_build_end(&self) -> bool {
@@ -933,7 +951,6 @@ mod tests {
 
     struct EmptyGapHooks;
 
-    #[async_trait::async_trait]
     impl HvigorPluginGapHooks for EmptyGapHooks {
         fn has_before_build_end(&self) -> bool {
             true

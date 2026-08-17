@@ -1463,6 +1463,9 @@ class HvigorRuntimeHost {
       commandModifierTypes: Array.from(this._commandBuilderModifiers)
         .filter(([, modifier]) => modifier)
         .map(([builderType]) => builderType),
+      hasAbcTransformConsumers: Array.from(this._nodesByFile.values()).some(
+        (node) => node.transformAbcActions && node.transformAbcActions.size > 0,
+      ),
       transformAbc: async (event) => {
         await this._runTransformAbcEvent(event)
       },
