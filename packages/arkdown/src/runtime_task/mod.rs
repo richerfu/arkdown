@@ -1,4 +1,6 @@
 mod bridge;
+#[cfg(test)]
+mod bridge_tests;
 mod cache;
 mod catalog;
 mod command_plan;

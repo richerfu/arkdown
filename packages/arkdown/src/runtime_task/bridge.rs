@@ -82,6 +82,7 @@ pub struct RuntimeTaskBridgeSeed {
   transform_abc: TransformAbcTsfn,
   modify_native_command: ModifyNativeCommandTsfn,
   command_modifier_types: FxHashSet<u8>,
+  has_abc_transform_consumers: bool,
 }
 
 impl RuntimeTaskBridgeSeed {
@@ -99,6 +100,9 @@ impl RuntimeTaskBridgeSeed {
       .into_iter()
       .filter_map(|value| u8::try_from(value).ok())
       .collect();
+    let has_abc_transform_consumers = object
+      .get::<bool>("hasAbcTransformConsumers")?
+      .unwrap_or(false);
     let mut tasks = RuntimeTaskModelBuilder::new(catalogs, overlays, removed_task_paths)
       .build()
       .map_err(|error| napi::Error::from_reason(format!("invalid runtime task model: {error}")))?;
@@ -110,7 +114,24 @@ impl RuntimeTaskBridgeSeed {
       transform_abc,
       modify_native_command,
       command_modifier_types,
+      has_abc_transform_consumers,
     })
+  }
+
+  /// Whether this build actually needs the custom-task engine.
+  ///
+  /// The engine exists only to dispatch hvigorfile.ts custom tasks and plugin
+  /// callbacks at native lifecycle boundaries (CLAUDE.md rule 12 narrow
+  /// exemption). When every declared task is built-in, no native command
+  /// builder is active, and no `transformAbc` consumer is registered, the
+  /// observer is dead weight — every task boundary would cross the mpsc actor
+  /// channel only to look up graph membership and do nothing.
+  pub fn has_runtime_work(&self) -> bool {
+    needs_runtime_work(
+      &self.tasks,
+      &self.command_modifier_types,
+      self.has_abc_transform_consumers,
+    )
   }
 
   fn required_property<T: DeserializeOwned>(object: &Object<'_>, key: &str) -> napi::Result<T> {
@@ -259,6 +280,19 @@ impl RuntimeTaskCallback for NapiRuntimeTaskCallback {
   }
 }
 
+/// Pure decision input of [`RuntimeTaskBridgeSeed::has_runtime_work`]: the
+/// custom-task engine is needed only when a non-built-in task exists, a native
+/// command builder is active, or a `transformAbc` consumer is registered.
+pub(crate) fn needs_runtime_work(
+  tasks: &[RuntimeTaskDescriptor],
+  command_modifier_types: &FxHashSet<u8>,
+  has_abc_transform_consumers: bool,
+) -> bool {
+  tasks.iter().any(|task| !task.built_in)
+    || !command_modifier_types.is_empty()
+    || has_abc_transform_consumers
+}
+
 enum RuntimeTaskCommand {
   Begin(oneshot::Sender<anyhow::Result<bool>>),
   Finish(oneshot::Sender<anyhow::Result<bool>>),
@@ -281,15 +315,24 @@ pub struct RuntimeTaskActorObserver {
 }
 
 impl RuntimeTaskActorObserver {
-  pub fn spawn(seed: RuntimeTaskBridgeSeed) -> anyhow::Result<Arc<dyn BuildTaskObserver>> {
+  /// Spawn the observer actor, or `None` when the build registers no custom
+  /// tasks, no active command modifiers, and no `transformAbc` consumers.
+  /// Returning `None` keeps the coordinator on its observer-free fast path
+  /// (see CLAUDE.md rule 12 narrow exemption).
+  pub fn spawn(
+    seed: RuntimeTaskBridgeSeed,
+  ) -> anyhow::Result<Option<Arc<dyn BuildTaskObserver>>> {
+    if !seed.has_runtime_work() {
+      return Ok(None);
+    }
     let command_modifier_types = seed.command_modifier_types.clone();
     let engine = seed.into_engine()?;
     let (sender, receiver) = mpsc::channel(8);
     tokio::spawn(RuntimeTaskActor { engine, receiver }.run());
-    Ok(Arc::new(Self {
+    Ok(Some(Arc::new(Self {
       sender,
       command_modifier_types,
-    }))
+    })))
   }
 
   async fn request(
