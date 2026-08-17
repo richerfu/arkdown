@@ -319,9 +319,7 @@ impl RuntimeTaskActorObserver {
   /// tasks, no active command modifiers, and no `transformAbc` consumers.
   /// Returning `None` keeps the coordinator on its observer-free fast path
   /// (see CLAUDE.md rule 12 narrow exemption).
-  pub fn spawn(
-    seed: RuntimeTaskBridgeSeed,
-  ) -> anyhow::Result<Option<Arc<dyn BuildTaskObserver>>> {
+  pub fn spawn(seed: RuntimeTaskBridgeSeed) -> anyhow::Result<Option<Arc<dyn BuildTaskObserver>>> {
     if !seed.has_runtime_work() {
       return Ok(None);
     }

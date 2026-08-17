@@ -57,3 +57,30 @@ parity tests.
    the initial path may call the SDK-native tool directly. Rust ports remain
    optional acceleration/parity projects, not blockers for replacing hvigor's
    JS/TS and Rollup bottlenecks.
+
+---
+
+## JS Layer Inventory (target: JS only for plugin system + external exposure)
+
+The stated goal is that the JavaScript layer keeps only what is necessary to
+host the hvigor plugin system and the externally-exposed API surface. Current
+state (audited 2026-08-17):
+
+**Necessary JS (retained):**
+- `runtime.js` callback facade — hosts `hvigorfile.ts` plugin objects, dispatches
+  `HvigorPlugin` lifecycle callbacks, and binds the `@ohos/hvigor` public utility
+  surface (log4js, TraceManager, WorkerPool, task classes) that plugin code
+  expects to exist. All typed planning (task catalog, module descriptors,
+  parameter/property/command/path plans, schema validation) is Rust-owned
+  (`arkdown-session`/`arkdown-config`); JS owns only the live plugin object
+  lifecycle.
+- Entry/CLI/worker V8 host files required to boot the N-API bridge.
+
+**Known gaps (on the production critical path, awaiting a Rust port):**
+- `ets_checker_bridge.cjs` — SDK etsChecker semantic check, runs in every build.
+- `arkguard_bridge.cjs` — ArkGuard source obfuscation, release builds.
+- `bytecode_arkguard_bridge.cjs` — BytecodeObfuscator, release builds.
+
+These bridges exist solely because the corresponding SDK JS tooling has not been
+ported to Rust; they are not part of the plugin system or the external API
+surface and should shrink to zero as Rust implementations land.

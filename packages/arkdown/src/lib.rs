@@ -1475,10 +1475,8 @@ pub fn build<'a>(
     async move {
       let start = std::time::Instant::now();
       let task_observer = match runtime_task_seed {
-        Some(seed) => {
-          crate::runtime_task::RuntimeTaskActorObserver::spawn(seed)
-            .map_err(|error| napi::Error::from_reason(format!("{error:#}")))?
-        }
+        Some(seed) => crate::runtime_task::RuntimeTaskActorObserver::spawn(seed)
+          .map_err(|error| napi::Error::from_reason(format!("{error:#}")))?,
         None => None,
       };
       let artifacts = run_build(

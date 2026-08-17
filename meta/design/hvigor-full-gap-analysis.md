@@ -586,3 +586,24 @@ HmosWorld source-printer/DebugInfo goldens and larger dependency/ByteCode cache
 graphs documented in H9, H10, H11, and J3. Items marked ✅ mean the declared
 scope has an implementation and observed parity evidence; they do not erase
 those named large-project validation boundaries.
+
+---
+
+## Change Log
+
+- **2026-08-17** — Architecture alignment cleanup (no parity status changes):
+  - Deleted the dead `WrapperChunkPlugin` and `MinifyPlugin` Rust adapters
+    (`crates/arkdown/src/plugins/wrapper_chunk.rs`, `plugins/minify.rs`). Their
+    only hook (`render_chunk`) is unreachable on the production path —
+    `Bundler::bundle()` uses `scan_module_sources()` and never renders chunks;
+    the generate()-only path (hvigorfile.ts compilation) uses no PluginFactory
+    plugins. ESMODULE release minification/obfuscation remains owned by the
+    obfuscation stage (I1–I5) via ArkGuard. `HvigorNativePluginSlot::WrapperChunk`
+    and `::Minify` slot ranks are retained as JS-plugin anchors only.
+  - `packages/arkdown/src/runtime_task/` documented as the explicit narrow
+    exemption to CLAUDE.md Rule 12 (hvigorfile.ts custom-task dispatch only);
+    engine spawn is skipped when a build registers no custom tasks and no
+    ABC-transform callbacks.
+  - `crates/arkdown/src/bundler.rs` split into a `bundler/` module directory
+    following rolldown code organization (`types/` one-type-per-file, per-concern
+    modules, tests relocated out of production source).

@@ -165,7 +165,17 @@ with typed diagnostics and focused coverage.
 orchestration through `BuildCoordinator`. Do not introduce a full `BuildStageGraph`,
 dynamic task API, string task dependencies, or user task runtime. Rolldown owns module
 graph, plugin lifecycle, chunk graph, render hooks, and generate-bundle behavior
-inside `Bundler::bundle_with_plan`.
+inside `Bundler::bundle`.
+
+**Narrow exemption — `packages/arkdown/src/runtime_task/`.** This module is the
+explicit, sole exception: it exists only for `hvigorfile.ts` custom-task compatibility.
+It dispatches user JavaScript task callbacks (`beforeRun`/`run`/`afterRun`/`failed`,
+`transformAbc`, `modifyNativeCommand`) at native lifecycle boundaries owned by
+`BuildCoordinator`. It must never replace `BuildCoordinator` for native stage
+orchestration, never execute native build behavior itself, and never grow beyond
+custom-task dispatch. When a build registers no custom tasks and no ABC-transform
+callbacks, the engine must not be spawned (`RuntimeTaskActorObserver::spawn()` returns
+`None`); the coordinator then uses the observer-free fast path.
 
 **13. Rollup plugins migrate to Rolldown adapters.** Hook behavior from hvigor's
 Rollup plugins belongs in `crates/arkdown/src/plugins/*`. Non-hook behavior belongs in
