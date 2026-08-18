@@ -23,7 +23,12 @@ export declare class ArkdownRolldownPluginContext {
 export declare class RuntimeBuildScriptSession {
   beginInvocation(): string
   finishInvocation(token: string): void
-  constructor(projectRoot: string, hvigorUserHome: string | undefined | null, config: object, commandEntryTasks: Array<string>)
+  constructor(
+    projectRoot: string,
+    hvigorUserHome: string | undefined | null,
+    config: object,
+    commandEntryTasks: Array<string>,
+  )
   projectModel(): any
   moduleDescriptors(): Array<any>
   moduleDescriptor(root: string): any | null
@@ -51,7 +56,11 @@ export declare class RuntimeBuildScriptSession {
   projectPaths(options: RuntimeOhosContextPathOptions): any
   moduleTargetPaths(root: string, targetName: string, options: RuntimeOhosContextPathOptions): any
   prepareRuntimeTaskCycle(rootPaths: Array<string>, executionNodeNames: Array<string>): void
-  prepareCommandTaskCycle(executionNodeNames: Array<string>, commandRootPaths: Array<string>, requiredBoundaryPaths: Array<string>): void
+  prepareCommandTaskCycle(
+    executionNodeNames: Array<string>,
+    commandRootPaths: Array<string>,
+    requiredBoundaryPaths: Array<string>,
+  ): void
   prepareDirectTaskCycle(taskModel: any): Array<string>
   runtimeTaskSelection(validateBoundaries: boolean): any
   clearRuntimeTaskSelection(): void
@@ -60,7 +69,12 @@ export declare class RuntimeBuildScriptSession {
   collectPluginPaths(value: unknown, baseDir: string, includeCompilePluginFile?: boolean | undefined | null): any
   resolvePluginPath(candidate: string, baseDir: string): string | null
   inspectRemoteHspObjects(moduleRoot: string, projectRoot: string): any
-  captureHvigorOverrides(root: string, overrides: any | undefined | null, effectsBuildOption: any | undefined | null, sourceFile: string): any
+  captureHvigorOverrides(
+    root: string,
+    overrides: any | undefined | null,
+    effectsBuildOption: any | undefined | null,
+    sourceFile: string,
+  ): any
   runtimePropertyPlan(properties: any, extParams: any, coreStartParams: any): any
   compilePluginRecords(): any
   runtimePathPlan(properties: any, extParams: any): any
@@ -128,9 +142,7 @@ export declare class RuntimeFileSnapshot {
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator#iterator_helper_methods
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_iterator_and_iterable_protocols
  */
-export declare class RuntimeFileSnapshotIterator {
-
-}
+export declare class RuntimeFileSnapshotIterator {}
 
 /**
  * Rust-owned equivalent of Hvigor 6.24.x `ReportServiceImpl` process
@@ -210,11 +222,34 @@ export interface ArkdownPlugin {
   name?: string
   order?: 'first' | 'last' | ((nameToIndex: Record<string, number>) => number)
   buildStart?: (this: HvigorPluginContext) => void | Promise<void>
-  resolveId?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveId?: (
+    id: string,
+    importer?: string | null,
+    options?: JsResolveIdOptions,
+  ) =>
+    | string
+    | JsResolveIdOutput
+    | false
+    | null
+    | undefined
+    | Promise<string | JsResolveIdOutput | false | null | undefined>
   load?: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>
-  transform?: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
+  transform?: (
+    code: string,
+    id: string,
+  ) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
   moduleParsed?: (moduleInfo: HvigorModuleInfo) => void | Promise<void>
-  resolveDynamicImport?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
+  resolveDynamicImport?: (
+    id: string,
+    importer?: string | null,
+    options?: JsResolveIdOptions,
+  ) =>
+    | string
+    | JsResolveIdOutput
+    | false
+    | null
+    | undefined
+    | Promise<string | JsResolveIdOutput | false | null | undefined>
   beforeBuildEnd?: (this: HvigorPluginContext, input?: unknown) => unknown
   buildEnd?: (this: HvigorPluginContext, error?: Error) => void | Promise<void>
   shouldInvalidCache?: (request: PluginCacheRequest) => boolean | Promise<boolean>
@@ -252,7 +287,27 @@ export interface ArkdownPlugin {
  * Plugins are wrapped synchronously before spawning the async build task,
  * so non-Send JS values (Env, Array) don't cross the tokio task boundary.
  */
-export declare function build(config: BuildConfig, plugins?: Array<ArkdownPlugin> | undefined | null, runtimeTasks?: { tasks: Array<Record<string, unknown>>; catalogs: Array<Record<string, unknown>>; removedTaskPaths: string[]; selection: Record<string, unknown>; dispatchTask: (request: { taskPath: string; phase: string; error?: string }) => Record<string, unknown> | Promise<Record<string, unknown>>; commandModifierTypes: number[]; transformAbc: (event: unknown) => void | Promise<void>; modifyNativeCommand: (event: unknown) => string[] | Promise<string[]> } | undefined | null): Promise<BuildResult>
+export declare function build(
+  config: BuildConfig,
+  plugins?: Array<ArkdownPlugin> | undefined | null,
+  runtimeTasks?:
+    | {
+        tasks: Array<Record<string, unknown>>
+        catalogs: Array<Record<string, unknown>>
+        removedTaskPaths: string[]
+        selection: Record<string, unknown>
+        dispatchTask: (request: {
+          taskPath: string
+          phase: string
+          error?: string
+        }) => Record<string, unknown> | Promise<Record<string, unknown>>
+        commandModifierTypes: number[]
+        transformAbc: (event: unknown) => void | Promise<void>
+        modifyNativeCommand: (event: unknown) => string[] | Promise<string[]>
+      }
+    | undefined
+    | null,
+): Promise<BuildResult>
 
 export interface BuildConfig {
   project?: string
@@ -384,8 +439,7 @@ export interface JsBuildStartOptions {
   context: string
 }
 
-export type JsHookSideEffects =
-  boolean | string
+export type JsHookSideEffects = boolean | string
 
 export interface JsHvigorCompilePluginPlanConfig {
   compileMode?: string
@@ -464,8 +518,7 @@ export interface JsProcessMemoryUsage {
   arrayBuffers: number
 }
 
-export type JsResolvedExternal =
-  boolean | string
+export type JsResolvedExternal = boolean | string
 
 export interface JsResolveIdOptions {
   attributes: Record<string, string>
@@ -495,8 +548,7 @@ export interface JsRuntimeTaskCallbackResult {
   output?: Array<string>
 }
 
-export type JsSourceMap =
-  string | JsJsonSourceMap
+export type JsSourceMap = string | JsJsonSourceMap
 
 export interface JsTransformOutput {
   code?: string
@@ -566,7 +618,20 @@ export interface PluginCacheRequest {
  * Execute custom hvigor command roots through the Rust-owned task graph.
  * JavaScript remains only the callback host for user-authored task actions.
  */
-export declare function runRuntimeTasks(runtimeTasks: { tasks: Array<Record<string, unknown>>; catalogs: Array<Record<string, unknown>>; removedTaskPaths: string[]; selection: Record<string, unknown>; dispatchTask: (request: { taskPath: string; phase: string; error?: string }) => Record<string, unknown> | Promise<Record<string, unknown>>; commandModifierTypes: number[]; transformAbc: (event: unknown) => void | Promise<void>; modifyNativeCommand: (event: unknown) => string[] | Promise<string[]> }): Promise<Array<string>>
+export declare function runRuntimeTasks(runtimeTasks: {
+  tasks: Array<Record<string, unknown>>
+  catalogs: Array<Record<string, unknown>>
+  removedTaskPaths: string[]
+  selection: Record<string, unknown>
+  dispatchTask: (request: {
+    taskPath: string
+    phase: string
+    error?: string
+  }) => Record<string, unknown> | Promise<Record<string, unknown>>
+  commandModifierTypes: number[]
+  transformAbc: (event: unknown) => void | Promise<void>
+  modifyNativeCommand: (event: unknown) => string[] | Promise<string[]>
+}): Promise<Array<string>>
 
 export interface RuntimeBuildScriptPlanUpdate {
   productName: string
