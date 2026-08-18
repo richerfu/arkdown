@@ -24,7 +24,6 @@
 //! |------|---------------|
 //! | `error.rs` | `CacheError`, `CacheDiagnostic` |
 //! | `key.rs` | `CompileEnv`, `CacheKey`, `BundleCacheKey`, `StageCacheKey`, `CacheKeyMaterial` |
-//! | `compile_env.rs` | `CompileEnvCacheMaterial`, `CompileEnvFingerprint`, `CompileEnvCachePolicy` |
 //! | `manifest.rs` | `CacheManifest`, `CacheManifestEntry`, `CacheManifestVersion` |
 //! | `store.rs` | `BuildCache`, `BuildCacheOpener`, `CacheStore`, `CacheHit`, `CacheCommit` |
 //! | `namespace.rs` | `CacheNamespace`, `StageCacheNamespace` |
@@ -34,7 +33,6 @@
 //! | `event_name.rs` | `CacheEventName`, `UpdateEventNameHandler`, `ChangedFileEvent` |
 
 pub mod artifact;
-pub mod compile_env;
 pub mod error;
 pub mod event_name;
 pub mod group_invalidation;
@@ -57,9 +55,6 @@ pub use key::{
     compiler_cache_path, BundleCacheKey, CacheKey, CacheKeyMaterial, CompileEnv, StageCacheKey,
     MSGPACK_COMPILE_CACHE_DIR_NAME,
 };
-
-// compile_env — compile-environment policy
-pub use compile_env::{CompileEnvCacheMaterial, CompileEnvCachePolicy, CompileEnvFingerprint};
 
 // manifest — on-disk cache index
 pub use manifest::{CacheManifest, CacheManifestEntry, CacheManifestVersion};
