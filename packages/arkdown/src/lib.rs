@@ -31,7 +31,6 @@ pub mod cli_plan;
 pub mod cmd;
 mod hvigor_config_merge;
 mod hvigor_dependency_workspace;
-mod hvigor_json;
 mod hvigor_maintenance;
 mod hvigor_plugin_plan;
 mod hvigor_script;
@@ -113,13 +112,6 @@ pub fn hvigor_project_cache_hash(project_root: String) -> napi::Result<String> {
   arkdown_session::BuildScriptProjectCacheIdentity::new(project_root)
     .map(|identity| identity.hash())
     .map_err(|error| napi::Error::from_reason(error.to_string()))
-}
-
-/// Parse hvigor's JSON5-shaped public utility values through Rust/OXC. The
-/// tagged JSON bridge lets JavaScript revive values JSON cannot represent.
-#[napi]
-pub fn parse_hvigor_json_text(source: String, locations: Option<bool>) -> napi::Result<String> {
-  hvigor_json::HvigorJsonNapiParser::parse(&source, locations.unwrap_or(false))
 }
 
 /// Compile one hvigor TypeScript configuration module through Rust OXC and

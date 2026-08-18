@@ -719,7 +719,6 @@ impl<'a> PluginFactory<'a> {
             ohos_resolver,
             project_root.clone(),
             self.plan.use_normalized_ohm_url,
-            self.input.case_sensitive_check,
         ));
 
         // ── 4. ImportCheckPlugin (hvigor: sensitiveCheck) ────────────────────

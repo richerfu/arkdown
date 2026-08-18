@@ -851,9 +851,6 @@ impl HvigorCompilePluginPlanner {
                 HvigorNativePluginSlot::Minify,
             ));
         }
-        if !self.config.is_esmodule() {
-            entries.push(HvigorCompilePipelineEntry::glue("babel"));
-        }
         entries.push(HvigorCompilePipelineEntry::glue("createProgramPlugin"));
         if !self.config.preview {
             entries.push(HvigorCompilePipelineEntry::glue("delete"));

@@ -53,10 +53,6 @@ impl<'a> ProfileModuleLayout<'a> {
 
     /// Layout for a named target (e.g. `ohosTest`), keying the generated
     /// resource table path like hvigor (`generated/r/ohosTest/...`).
-    pub(crate) fn for_target(module_root: &'a Path, target_name: &'a str) -> Self {
-        Self::for_target_product(module_root, "default", target_name)
-    }
-
     pub(crate) fn for_target_product(
         module_root: &'a Path,
         product_name: &'a str,
@@ -72,10 +68,6 @@ impl<'a> ProfileModuleLayout<'a> {
 
     /// Local unit-test layout rooted at `<module>/.test` (hvigor
     /// `buildRoot=.test` injected for the `test` task).
-    pub(crate) fn for_test(module_root: &'a Path) -> Self {
-        Self::for_test_product(module_root, "default")
-    }
-
     pub(crate) fn for_test_product(module_root: &'a Path, product_name: &'a str) -> Self {
         Self {
             module_root,
@@ -86,10 +78,6 @@ impl<'a> ProfileModuleLayout<'a> {
     }
 
     /// Previewer layout rooted at `<module>/.preview`.
-    pub(crate) fn for_preview(module_root: &'a Path, target_name: &'a str) -> Self {
-        Self::for_preview_product(module_root, "default", target_name)
-    }
-
     pub(crate) fn for_preview_product(
         module_root: &'a Path,
         product_name: &'a str,

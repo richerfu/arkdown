@@ -35,8 +35,6 @@ pub struct OhosResolvePlugin {
     project_root: PathBuf,
     /// Mirror of [`ResolverConfig::use_normalized_ohm_url`].
     use_normalized_ohm_url: bool,
-    #[allow(dead_code)]
-    case_sensitive: bool,
 }
 
 impl std::fmt::Debug for OhosResolvePlugin {
@@ -51,19 +49,14 @@ impl std::fmt::Debug for OhosResolvePlugin {
 impl OhosResolvePlugin {
     /// Construct a plugin from a [`ResolverConfig`].
     ///
-    /// Reads `use_normalized_ohm_url` and `case_sensitive_check` from the
-    /// config before handing ownership to [`OhosResolver::new`].
-    pub fn new(
-        resolver_config: ResolverConfig,
-        project_root: PathBuf,
-        case_sensitive: bool,
-    ) -> Self {
+    /// Reads `use_normalized_ohm_url` from the config before handing
+    /// ownership to [`OhosResolver::new`].
+    pub fn new(resolver_config: ResolverConfig, project_root: PathBuf) -> Self {
         let use_normalized_ohm_url = resolver_config.use_normalized_ohm_url;
         Self::with_resolver(
             Arc::new(OhosResolver::new(resolver_config)),
             project_root,
             use_normalized_ohm_url,
-            case_sensitive,
         )
     }
 
@@ -73,13 +66,11 @@ impl OhosResolvePlugin {
         resolver: Arc<OhosResolver>,
         project_root: PathBuf,
         use_normalized_ohm_url: bool,
-        case_sensitive: bool,
     ) -> Self {
         OhosResolvePlugin {
             resolver,
             project_root,
             use_normalized_ohm_url,
-            case_sensitive,
         }
     }
 
@@ -464,7 +455,6 @@ mod tests {
                 source_set_overlays: vec![],
             },
             PathBuf::from("/tmp"),
-            false,
         )
     }
 
@@ -585,7 +575,6 @@ mod tests {
                 source_set_overlays: vec![],
             },
             project_root.to_path_buf(),
-            false,
         );
 
         let result = plugin
@@ -629,7 +618,6 @@ mod tests {
                 source_set_overlays: vec![],
             },
             dir.path().to_path_buf(),
-            false,
         );
 
         let result = plugin
@@ -664,7 +652,6 @@ mod tests {
                 source_set_overlays: vec![],
             },
             dir.path().to_path_buf(),
-            false,
         );
 
         let result = plugin

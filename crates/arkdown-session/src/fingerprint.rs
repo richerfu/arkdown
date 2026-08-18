@@ -562,10 +562,9 @@ impl FingerprintPathInventory {
     }
 
     fn is_source_input(path: &Path) -> bool {
-        matches!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("ets" | "ts" | "js" | "json" | "json5")
-        )
+        path.extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(crate::source_store::is_source_inventory_ext)
     }
 }
 

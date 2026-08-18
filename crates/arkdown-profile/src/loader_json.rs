@@ -245,8 +245,6 @@ struct AotLoaderFields {
 
 #[derive(Deserialize)]
 struct DependencyPackageJson {
-    #[serde(rename = "byteCodeHar", default)]
-    byte_code_har: bool,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -265,10 +263,6 @@ struct DependencyPackageJson {
 #[serde(rename_all = "camelCase")]
 struct DependencyPackageMetadata {
     #[serde(default)]
-    byte_code_har: bool,
-    #[serde(default)]
-    abc_path: Option<String>,
-    #[serde(default)]
     resource: Option<DependencyResourceMetadata>,
 }
 
@@ -286,8 +280,6 @@ struct DependencyModuleJson {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DependencyModuleSection {
-    #[serde(rename = "type", default)]
-    module_type: String,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -2039,15 +2031,6 @@ impl LoaderJson {
             .collect()
     }
 
-    #[allow(dead_code)]
-    fn is_source_har_package(pkg_root: &Path) -> bool {
-        if Self::is_bytecode_har_package(pkg_root) {
-            return false;
-        }
-        Self::read_dependency_module_json(pkg_root)
-            .is_some_and(|module_json| module_json.module.module_type == "har")
-    }
-
     fn collect_dependency_module_ability_source_files(dep_root: &Path) -> Vec<PathBuf> {
         let Some(module_json) = Self::read_dependency_module_json(dep_root) else {
             return vec![];
@@ -2169,40 +2152,6 @@ impl LoaderJson {
         serde_json::from_str(&content)
             .or_else(|_| json5::from_str(&content))
             .ok()
-    }
-
-    fn is_bytecode_har_package(pkg_root: &Path) -> bool {
-        let Some(pkg) = Self::read_dependency_package_json(pkg_root) else {
-            return false;
-        };
-        if pkg.byte_code_har {
-            return true;
-        }
-        if pkg
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.byte_code_har)
-        {
-            return true;
-        }
-        if pkg
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.abc_path.as_deref())
-            .is_some_and(|abc_path| pkg_root.join(abc_path).is_file())
-        {
-            return true;
-        }
-        if pkg
-            .main
-            .as_deref()
-            .is_some_and(|main| SourceFileName::new(Path::new(main)).has_extension("abc"))
-        {
-            return true;
-        }
-
-        let layout = ProfileModuleLayout::new(pkg_root);
-        layout.ets_modules_abc().is_file() || layout.index_abc().is_file()
     }
 
     fn collect_insight_intent_src_entries(module_cfg: &ModuleConfig) -> Vec<PathBuf> {
@@ -2467,7 +2416,6 @@ impl LoaderJson {
         map
     }
 
-    #[allow(dead_code)]
     fn dependency_package_name(pkg_dir: &Path) -> String {
         Self::read_dependency_package_json(pkg_dir)
             .and_then(|pkg| pkg.name)
@@ -2475,7 +2423,6 @@ impl LoaderJson {
             .unwrap_or_else(|| Self::dependency_package_name_from_path(pkg_dir))
     }
 
-    #[allow(dead_code)]
     fn dependency_package_name_from_path(pkg_dir: &Path) -> String {
         let name = pkg_dir
             .file_name()
@@ -2712,22 +2659,6 @@ impl LoaderJson {
             &context.version,
         )
         .into_string()
-    }
-
-    /// Resolve a dependency alias to its package directory under `oh_modules/`.
-    #[allow(dead_code)]
-    fn resolve_dep_dir(
-        dep_alias: &str,
-        module_oh_modules: &Path,
-        project_oh_modules: &Path,
-    ) -> Option<PathBuf> {
-        for base in &[module_oh_modules, project_oh_modules] {
-            let candidate = base.join(dep_alias);
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-        }
-        None
     }
 
     /// Return the entry file path relative to `pkg_dir` with extension stripped.
