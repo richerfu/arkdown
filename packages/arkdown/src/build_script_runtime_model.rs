@@ -1615,11 +1615,46 @@ impl RuntimeBuildScriptSession {
     }
     let model =
       crate::runtime_task::RuntimeTaskInventoryNapiInspector::new(env, nodes, include_catalog)
-        .inspect_model()?;
+        .inspect_model(|node_name, project_task| {
+          self.task_catalog_snapshot(node_name, project_task)
+        })?;
     if !include_catalog {
       self.runtime_task_model = Some(model.clone());
     }
     Ok(model)
+  }
+
+  /// Catalogs come from the session plan directly: the JavaScript catalog
+  /// facade's `request()`/`get()` re-enter the native `plan()` boundary and
+  /// conflict with the mutable borrow held during model inspection.
+  fn task_catalog_snapshot(
+    &self,
+    node_name: &str,
+    project_task: bool,
+  ) -> Result<crate::runtime_task::RuntimeTaskCatalogSnapshot> {
+    let request = self
+      .session
+      .task_catalog(node_name, project_task)
+      .ok_or_else(|| {
+        Error::new(
+          Status::InvalidArg,
+          format!(
+            "ARKDOWN_RUNTIME_TASK_CATALOG_NOT_FOUND: runtime plan has no task catalog for {node_name}"
+          ),
+        )
+      })?;
+    let request = serde_json::to_value(request).map_err(|error| {
+      Error::new(
+        Status::GenericFailure,
+        format!("failed to serialize runtime task catalog request: {error}"),
+      )
+    })?;
+    crate::runtime_task::RuntimeTaskCatalogSnapshot::resolve(request).map_err(|error| {
+      Error::new(
+        Status::InvalidArg,
+        format!("invalid runtime task catalog request: {error:#}"),
+      )
+    })
   }
 
   #[napi]

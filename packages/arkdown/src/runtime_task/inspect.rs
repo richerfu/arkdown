@@ -39,7 +39,15 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
     }
   }
 
-  pub(crate) fn inspect_model(&self) -> Result<Value> {
+  /// `resolve_catalog` answers catalog requests from the Rust session plan
+  /// instead of the JavaScript catalog facade. Calling the facade here would
+  /// re-enter the native `plan()` boundary while `inspect_runtime_task_model`
+  /// still holds the mutable borrow of the runtime session, which NAPI
+  /// rejects with a conflicting-borrow error.
+  pub(crate) fn inspect_model<F>(&self, resolve_catalog: F) -> Result<Value>
+  where
+    F: Fn(&str, bool) -> Result<super::catalog::RuntimeTaskCatalogSnapshot>,
+  {
     let mut descriptors = Vec::new();
     let mut command_nodes = Vec::new();
     let mut catalogs = Vec::new();
@@ -51,8 +59,8 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
       })?;
       let node_name = Self::required_property::<String>(&node, "name")?;
       let project_task = node.get::<bool>("isProject")?.unwrap_or(false);
-      let catalog = Self::required_property::<Object<'env>>(&node, "taskCatalog")?;
-      catalogs.push(Self::required_value_method(&catalog, "request")?);
+      let catalog = resolve_catalog(&node_name, project_task)?;
+      catalogs.push(catalog.request.clone());
       let core = Self::required_property::<Object<'env>>(&node, "coreWrapper")?;
       let task_values = Self::required_method(&core, "getAllTasks")?;
       let task_values = self.array_from(task_values)?;
@@ -73,7 +81,7 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
         let task_context = core_task
           .get::<Object<'env>>("taskContext")?
           .unwrap_or_else(|| core_task.clone());
-        let catalog_definition = Self::catalog_definition(&catalog, task_name.clone())?;
+        let catalog_definition = catalog.definition(&task_name);
         let explicitly_built_in = core_task
           .get::<Value>("__arkdownBuiltInDefinition")?
           .is_some_and(|value| !value.is_null());
@@ -242,22 +250,6 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
         napi::Error::from_reason(format!("Hvigor runtime object is missing {name}()"))
       })?
       .apply(object, ())
-  }
-
-  fn required_value_method(object: &Object<'env>, name: &str) -> Result<Value> {
-    object
-      .get::<Function<(), Value>>(name)?
-      .ok_or_else(|| {
-        napi::Error::from_reason(format!("Hvigor runtime object is missing {name}()"))
-      })?
-      .apply(object, ())
-  }
-
-  fn catalog_definition(catalog: &Object<'env>, task_name: String) -> Result<Option<Value>> {
-    catalog
-      .get::<Function<FnArgs<(String,)>, Option<Value>>>("get")?
-      .ok_or_else(|| napi::Error::from_reason("Hvigor runtime task catalog is missing get()"))?
-      .apply(catalog, FnArgs::from((task_name,)))
   }
 
   fn has_values(object: &Object<'env>, field: &str) -> bool {

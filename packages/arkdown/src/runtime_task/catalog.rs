@@ -195,6 +195,38 @@ impl RuntimeTaskCatalog {
   }
 }
 
+/// One node's catalog request plus its expanded entries, resolved entirely on
+/// the Rust side. Task-model inspection consumes this instead of calling back
+/// into the JavaScript catalog facade, whose `request()`/`get()` cross the
+/// native `plan()` boundary and would conflict with the active mutable borrow
+/// of the runtime session.
+pub(crate) struct RuntimeTaskCatalogSnapshot {
+  pub(super) request: serde_json::Value,
+  definitions: IndexMap<String, serde_json::Value>,
+}
+
+impl RuntimeTaskCatalogSnapshot {
+  pub(crate) fn resolve(request: serde_json::Value) -> anyhow::Result<Self> {
+    let entries = RuntimeTaskCatalog::from_value(request.clone())?.entries()?;
+    let definitions = entries
+      .iter()
+      .map(|entry| {
+        serde_json::to_value(entry)
+          .map_err(Into::into)
+          .map(|value| (entry.name.clone(), value))
+      })
+      .collect::<anyhow::Result<IndexMap<_, _>>>()?;
+    Ok(Self {
+      request,
+      definitions,
+    })
+  }
+
+  pub(super) fn definition(&self, task_name: &str) -> Option<serde_json::Value> {
+    self.definitions.get(task_name).cloned()
+  }
+}
+
 impl RuntimeTaskCatalogRequest {
   fn resolve_inventory(&mut self) {
     let project_remote_hsp_exists = self
