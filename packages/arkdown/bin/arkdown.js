@@ -88,10 +88,10 @@ class ArkdownPackageCli {
   }
 
   printHelp() {
-    writeStdout(`Usage: hvigorw [taskNames...] <options...>
+    writeStdout(`Usage: arkdown [taskNames...] <options...>
 
 Options:
-  -v, --version                         Shows the version of Hvigor.
+  -v, --version                         Shows the arkdown version.
   -e, --error                           Sets the log level to error.
   -w, --warn                            Sets the log level to warn.
   -i, --info                            Sets the log level to info.
@@ -108,15 +108,15 @@ Options:
   -h, --help                            Displays help information.
 
 Commands:
-  version                               Shows the version of Hvigor.
+  version                               Shows the arkdown version.
   tasks                                 Shows all available tasks of selected nodes.
   taskTree                              Shows all available task trees of selected nodes.
-  prune                                 Cleans old Hvigor caches and package-store entries.
+  prune                                 Cleans old build caches and package-store entries.
   collectCoverage                       Generates instrumentation coverage reports.
 
 Examples:
-  hvigorw assembleApp
-  hvigorw --mode module -p module=entry assembleHap`)
+  arkdown assembleApp
+  arkdown --mode module -p module=entry assembleHap`)
   }
 
   printBuildHelp() {
