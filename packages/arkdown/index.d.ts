@@ -529,12 +529,6 @@ export declare function parseArkdownBuildCliArgs(args: Array<string>): string
 export declare function parseHvigorCliArgs(args: Array<string>): string
 
 /**
- * Parse hvigor's JSON5-shaped public utility values through Rust/OXC. The
- * tagged JSON bridge lets JavaScript revive values JSON cannot represent.
- */
-export declare function parseHvigorJsonText(source: string, locations?: boolean | undefined | null): string
-
-/**
  * Compare latest-hvigor and SDK cache metadata without routing filesystem
  * behavior through the JavaScript plugin layer.
  * Parse JavaScript for plugin glue that is not currently inside a live

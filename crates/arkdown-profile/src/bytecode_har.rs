@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::dependency_graph::issuer_store_oh_modules_root;
 use crate::layout::ProfileModuleLayout;
 use crate::loader_json::ByteCodeHarEntry;
 use arkdown_path::{
@@ -958,7 +959,7 @@ impl LoaderByteCodeHarFields {
     ) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         let mut candidates = vec![issuer_root.join("oh_modules").join(dep_name)];
-        if let Some(store_root) = Self::issuer_store_oh_modules_root(issuer_root) {
+        if let Some(store_root) = issuer_store_oh_modules_root(issuer_root) {
             candidates.push(store_root.join("oh_modules").join(dep_name));
         }
         candidates.extend([
@@ -1194,7 +1195,7 @@ impl LoaderByteCodeHarFields {
         project_root: &Path,
     ) -> Option<PathBuf> {
         let mut roots = Vec::new();
-        if let Some(root) = Self::issuer_store_oh_modules_root(issuer_root) {
+        if let Some(root) = issuer_store_oh_modules_root(issuer_root) {
             roots.push(root);
         }
         roots.extend([
@@ -1209,21 +1210,6 @@ impl LoaderByteCodeHarFields {
             if candidate.is_dir() && seen.insert(ByteCodeHarScanEntry::path_key(&candidate)) {
                 return Some(candidate);
             }
-        }
-        None
-    }
-
-    fn issuer_store_oh_modules_root(issuer_root: &Path) -> Option<PathBuf> {
-        let mut current = issuer_root.parent();
-        while let Some(path) = current {
-            let Some(file_name) = path.file_name() else {
-                current = path.parent();
-                continue;
-            };
-            if file_name == "oh_modules" {
-                return Some(path.to_path_buf());
-            }
-            current = path.parent();
         }
         None
     }

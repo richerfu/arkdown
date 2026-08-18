@@ -102,23 +102,6 @@ impl LocalDependencyGraph {
     /// roots so that runtime-only ByteCode HARs are classified as
     /// `RuntimeOnly` rather than `RemoteOrUnknown`.
     pub fn build(module_root: &Path, project_root: &Path) -> Self {
-        Self::build_with_config(module_root, project_root, None)
-    }
-
-    /// Build the dependency graph with explicit resolution configuration.
-    ///
-    /// Mirrors hvigor's `DependencyManager` construction API — the config
-    /// controls offline mode, registry URL, and OHPM cache root.  When
-    /// `config.offline` is `false` (the default), packages not found locally
-    /// will be fetched from the OHPM registry (step 6 of resolution order).
-    ///
-    /// Section 3.4: "从 dependency graph 生成所有 package context" — this
-    /// is the entry point that drives all remote/cache package resolution.
-    pub fn build_with_config(
-        module_root: &Path,
-        project_root: &Path,
-        config: Option<&DependencyResolutionConfig>,
-    ) -> Self {
         let mut nodes = indexmap::IndexMap::new();
         let mut queue = std::collections::VecDeque::new();
 
@@ -147,13 +130,9 @@ impl LocalDependencyGraph {
             // Is this package listed as a runtimeOnly package?
             let is_runtime_only = is_runtime_only_package(&dep_name, module_root, project_root);
 
-            let Some(pkg_root) = resolve_dep_dir_with_config(
-                &dep_name,
-                &issuer_root,
-                module_root,
-                project_root,
-                config,
-            ) else {
+            let Some(pkg_root) =
+                resolve_dep_dir(&dep_name, &issuer_root, module_root, project_root)
+            else {
                 // Package not found locally on any path — mark remote/unknown.
                 nodes.insert(
                     dep_name.clone(),
@@ -390,15 +369,6 @@ fn is_runtime_only_package(dep_name: &str, module_root: &Path, project_root: &Pa
 ///
 /// Per SPEC-048: registry HTTP fetch has been removed; it is now orchestrated
 /// by `arkdown-session::PackageAcquisitionPlanner` via `arkdown-ohpm`.
-/// Configuration for dependency resolution in `DependencyGraphService`.
-///
-/// Per SPEC-048: OHPM registry network options have been removed. Registry
-/// access is now orchestrated by `arkdown-session` via `arkdown-ohpm`.
-/// This struct is retained for API compatibility; local graph resolution does
-/// not infer OHPM store directory names.
-#[derive(Debug, Clone, Default)]
-pub struct DependencyResolutionConfig {}
-
 /// Dependency directory resolution: local oh_modules/ and OHPM global cache.
 ///
 /// Implements hvigor's `DependencyManager` resolution order:
@@ -409,12 +379,11 @@ pub struct DependencyResolutionConfig {}
 ///
 /// OHPM store directories are opaque. This code follows the `oh_modules`
 /// symlinks that OHPM materializes instead of deriving store folder names.
-fn resolve_dep_dir_with_config(
+fn resolve_dep_dir(
     dep_name: &str,
     issuer_root: &Path,
     module_root: &Path,
     project_root: &Path,
-    _config: Option<&DependencyResolutionConfig>,
 ) -> Option<PathBuf> {
     let mut local_roots = Vec::with_capacity(4);
     if let Some(root) = issuer_store_oh_modules_root(issuer_root) {
@@ -436,7 +405,7 @@ fn resolve_dep_dir_with_config(
     None
 }
 
-fn issuer_store_oh_modules_root(issuer_root: &Path) -> Option<PathBuf> {
+pub(crate) fn issuer_store_oh_modules_root(issuer_root: &Path) -> Option<PathBuf> {
     let mut current = issuer_root.parent();
     while let Some(path) = current {
         let Some(file_name) = path.file_name() else {
@@ -707,8 +676,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = DependencyResolutionConfig {};
-        let graph = LocalDependencyGraph::build_with_config(tmp.path(), tmp.path(), Some(&config));
+        let graph = LocalDependencyGraph::build(tmp.path(), tmp.path());
         let node = graph.nodes.get("not-installed").expect("node in graph");
         assert_eq!(
             node.node_type,

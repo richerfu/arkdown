@@ -24,6 +24,17 @@ use rustc_hash::FxHashMap;
 
 use arkdown_core::SourceFileId;
 
+/// Whether `ext` (without the leading dot) belongs to a source-inventory
+/// file.
+///
+/// Must stay in sync with the watch trigger set in
+/// `arkdown-watcher::invalidation::is_source_ext` so that every file the
+/// watcher can invalidate on is also captured by the source store and the
+/// project fingerprint inventory.
+pub(crate) fn is_source_inventory_ext(ext: &str) -> bool {
+    matches!(ext, "ets" | "ts" | "js" | "mjs" | "cjs" | "json" | "json5")
+}
+
 // ---------------------------------------------------------------------------
 // SourceFingerprint
 // ---------------------------------------------------------------------------
@@ -232,7 +243,7 @@ impl SourceStore {
                     continue;
                 }
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !matches!(ext, "ets" | "ts" | "js" | "json" | "json5") {
+                if !is_source_inventory_ext(ext) {
                     continue;
                 }
                 if let Ok(meta) = std::fs::metadata(&path) {

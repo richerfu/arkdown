@@ -605,7 +605,6 @@ module.exports.installRuntimeObservability = nativeBinding.installRuntimeObserva
 module.exports.mergeHvigorConfig = nativeBinding.mergeHvigorConfig
 module.exports.parseArkdownBuildCliArgs = nativeBinding.parseArkdownBuildCliArgs
 module.exports.parseHvigorCliArgs = nativeBinding.parseHvigorCliArgs
-module.exports.parseHvigorJsonText = nativeBinding.parseHvigorJsonText
 module.exports.parsePluginAst = nativeBinding.parsePluginAst
 module.exports.persistRuntimeDetails = nativeBinding.persistRuntimeDetails
 module.exports.persistRuntimeReport = nativeBinding.persistRuntimeReport
