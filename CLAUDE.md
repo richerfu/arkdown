@@ -59,8 +59,8 @@ arkdown/
 ├── crates/
 │   ├── arkdown-core/         ← shared IDs, diagnostics, target/artifact contracts
 │   ├── arkdown-path/         ← typed paths: AbsPath, RelPath, ArtifactPath, OhmUrl
-│   ├── arkdown-ohos-schema/  ← typed OHOS JSON/JSON5 schemas
-│   ├── arkdown-config/       ← thin compatibility config facade
+│   ├── arkdown-ohos-schema/  ← raw OHOS JSON5 schemas (app.json5, oh-package.json5)
+│   ├── arkdown-config/       ← config parsing: build-profile/module.json/SDK discovery
 │   ├── arkdown-ohpm/         ← OHPM lockfile/cache/registry/tarball/integrity
 │   ├── arkdown-session/      ← BuildSession snapshots, dependency graph, source/profile/resource inventories
 │   ├── arkdown-resolver/     ← OHOS module/package resolution
@@ -68,13 +68,13 @@ arkdown/
 │   ├── arkdown/              ← Rolldown integration + built-in plugin adapters
 │   ├── arkdown-profile/      ← module/profile/router/startup/share/privacy/PAC processing
 │   ├── arkdown-resource/     ← resource inventory and restool-compatible plans
-│   ├── arkdown-ts2abc/       ← SDK es2abc/Rust bytecode backend planning
 │   ├── arkdown-pack/         ← HAP/HSP/HAR/app packaging
-│   ├── arkdown-sign/         ← signing and verification
+│   ├── arkdown-sign/         ← signing and verification (hapsigner backend)
 │   ├── arkdown-obfuscate/    ← obfuscation rule planning and mapping
 │   ├── arkdown-cache/        ← fingerprint-based cache keys and records
-│   ├── arkdown-watcher/      ← watch invalidation from session inventories
-│   └── arkdown-cli/          ← BuildCoordinator and CLI binary
+│   └── arkdown-watcher/      ← watch invalidation from session inventories
+└── packages/
+    └── arkdown/              ← NAPI binding + BuildCoordinator / CLI entry (`bin/arkdown.js`)
 ```
 
 Separate `arkdown-plugin-*` crates are obsolete in the final design. Rollup plugin
@@ -93,7 +93,7 @@ after the final production caller moves.
 | Type definitions             | `meta/design/types.md`                                                             |
 | Module loading, resolution   | `meta/design/module-resolution.md`                                                 |
 | Chunk output format          | `meta/design/chunk-model.md` — ESM output format; IIFE/globalThis legacy removed    |
-| ABC compiler (arkdown-abc)   | `meta/design/abc-pipeline.md` — Panda bytecode format, IR pipeline                 |
+| ABC compile (es2abc planning)| `meta/design/abc-pipeline.md` — Panda bytecode format (no Rust ABC crate exists yet) |
 | hvigorw replacement          | `meta/design/compat.md`                                                            |
 | Plugin work                  | `meta/design/plugins.md` — which JS plugins we're replacing and why                |
 | ArkTS transform (ets-loader) | `meta/tasks/SPEC-004-oxc-arkts-transform.md` |
@@ -107,15 +107,16 @@ after the final production caller moves.
 ## Critical Design Rules
 
 **1. Bytecode compilation is always required.** ArkRuntime executes `.abc`, not raw
-JavaScript. `arkdown-abc` must match upstream `es2abc` on both final bytecode and
-intermediate output files under the loader output tree.
+JavaScript. The SDK `es2abc` backend (a Rust `arkdown-abc` crate does not exist yet)
+must match upstream `es2abc` on both final bytecode and intermediate output files
+under the loader output tree.
 
 **2. es2abc/ts2abc module inputs are normal ESM source files.** Upstream
 `arkcompiler_ets_frontend` builds `SourceFile(..., options->IsModule(), ...)` and the
 `ts2abc.js` wrapper only forwards bytecode-version flags to `es2abc`. The bundler outputs
 clean ESM (`import`/`export` statements, no IIFE wrapper, no CJS interop helpers). The
-IIFE-unwrap and CJS-wrapper compatibility paths have been removed from `arkdown-abc`; the
-compiler always compiles the top-level program body directly in `--module` mode.
+IIFE-unwrap and CJS-wrapper compatibility paths have been removed; the compiler always
+compiles the top-level program body directly in `--module` mode.
 
 **3. Native SDK backends are allowed in the initial parity path.** If upstream
 behavior is implemented in C/C++, prefer invoking the corresponding SDK tool
@@ -136,10 +137,13 @@ See `meta/design/module-resolution.md`.
 `arkdown-profile`) instead of `build-profile.json5` or `module.json5`. The `compileEntry`
 array is the definitive list of entry points. See `meta/design/hvigorw-analysis.md`.
 
-**7. `bundleName` comes from `AppScope/app.json5`, not `products`.** In real DevEco Studio
-projects, `build-profile.json5` products do NOT contain `bundleName`. Read it from
-`AppScope/app.json5` via `load_app_json5()`. Signing configs live at
-`build-profile.json5#app.signingConfigs`; products reference them by name.
+**7. `bundleName` resolution mirrors hvigor's `AbstractMergeProfile` chain.** In real
+DevEco Studio projects `build-profile.json5` products do NOT contain `bundleName`, so
+`AppScope/app.json5` is the effective source; `arkdown-config/src/resolve.rs` reads
+`product.bundleName` first and falls back to `app.json5` only to keep old-format
+projects building (upstream parity, see `test_load_config_old_format_bundle_name_in_product`).
+Signing configs live at `build-profile.json5#app.signingConfigs`; products reference
+them by name.
 
 **8. The CLI plugin order must match hvigor's compile stage.** `EtsTransformPlugin` must
 run before resolution-sensitive plugins. Avoid injecting helper wrappers or rollup defaults
@@ -214,23 +218,14 @@ export OHOS_SDK_HOME=/path/to/sdk/default/openharmony
 | ------------------ | ------------ | ------------------ |
 | `ets-loader` JS plugins | Replaced by OXC transforms | `arkdown-ets-transform` + `arkdown/src/plugins/ets_transform.rs` |
 | Rollup | Replaced by Rolldown | `arkdown` |
-| `es2abc` | SDK backend by default | optional `arkdown-abc` backend |
+| `es2abc` | SDK backend by default | no Rust ABC crate yet (see `meta/design/abc-pipeline.md`) |
 | `restool` | SDK-compatible/native path allowed | `arkdown-resource` planning |
-| `hap-sign-tool.jar` | SDK/native path allowed | optional `arkdown-sign` backend |
+| `hap-sign-tool.jar` | Superseded | `arkdown-sign` via the published `hapsigner` crate |
 
-`arkdown-sign` also contains a Rust signing implementation:
-
-- PKCS#12 keystore loading (`pkcs12` crate)
-- CMS/PKCS#7 SignedData generation (`cms` + `der` crates)
-- ECDSA P-256 / RSA-PSS signing (`p256`, `rsa` crates)
-- ZIP alignment (4096-byte for `.abc`/`.so`) and signing block insertion
-- HAP-specific chunk digest (SHA-256 with `0x5a`/`0xa5` type-prefixed chunking)
-
-Magic constants from `developtools_hapsigner`:
-
-- V2 magic (compatibleSdkVersion < 8): `b"HAP Sig Block 42"` (16 bytes)
-- V3 magic (>= 8): `b"<hap sign block>"` (16 bytes)
-- Main sig block ID: `0x20000000`, profile block ID: `0x20000002`
+`arkdown-sign` signs through the published `hapsigner` crate (Rust port of
+`developtools_hapsigner`) — profile material planning in `config_material.rs` /
+`plan.rs`, signing via `backend.rs`. The former in-crate PKCS#12/CMS/zip
+implementation was removed when the backend moved to `hapsigner`.
 
 ---
 
@@ -278,10 +273,12 @@ Magic constants from `developtools_hapsigner`:
 Foundation crates must not depend on session, plugin, bundler, or CLI crates:
 
 ```
-arkdown-path → (no workspace deps)
-arkdown-ohos-schema → (no workspace deps)
-arkdown-ohpm → arkdown-path, arkdown-ohos-schema
-arkdown-session → arkdown-core, arkdown-path, arkdown-ohos-schema, arkdown-ohpm
+arkdown-path         → (no workspace deps)
+arkdown-ohos-schema  → (no workspace deps)
+arkdown-core         → arkdown-path
+arkdown-ohpm         → arkdown-core, arkdown-path, arkdown-ohos-schema
+arkdown-cache        → arkdown-core
+arkdown-session      → arkdown-core, arkdown-config, arkdown-path, arkdown-ohos-schema
 ```
 
 ### Forbidden patterns
@@ -290,6 +287,12 @@ arkdown-session → arkdown-core, arkdown-path, arkdown-ohos-schema, arkdown-ohp
 - `module_id.contains("oh_modules")` — use `arkdown_path::classify::is_inside_oh_modules()`
 - inline `.replace('\\', "/")` — use `ArtifactPathSerializer::path_to_slash()`
 - `index_vec::IndexVec` — use `oxc_index::IndexVec`
+- `runtime_os.eq_ignore_ascii_case("HarmonyOS"/"OpenHarmony")` — use
+  `arkdown_core::is_harmony_os()` (and `!is_harmony_os` for OpenHarmony)
+- inline FNV-1a offset-basis/prime loops — use `arkdown_core::fnv1a64` / `fnv1a64_fold`
+- hand-written `@bundle:`/`@normalized:` `starts_with` chains or `format!`-built OHM
+  URLs — use `arkdown_path::is_ohm_url_prefix` / `is_ohm_runtime_specifier` and the
+  `OhmUrl` constructors
 
 Avoid adding new dependencies without checking if an existing workspace dependency covers
 the need.

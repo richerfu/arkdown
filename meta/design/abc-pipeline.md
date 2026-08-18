@@ -6,6 +6,12 @@ In the initial parity path, arkdown may invoke the SDK `es2abc` backend
 directly. `arkdown-abc` remains an optional Rust backend for future replacement
 work and targeted experiments.
 
+> **Status note**: no `arkdown-abc` crate exists in this workspace yet (and none
+> has ever been committed). Sections below phrased as "current implementation"
+> describe the intended Rust backend design, not shipped code. The production
+> path today is the SDK `es2abc` backend invoked from
+> `packages/arkdown/src/cmd/build/bytecode/`.
+
 ---
 
 ## 1. Why ABC Is Required

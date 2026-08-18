@@ -145,8 +145,6 @@ pub struct ModuleIdx(u32);
 pub struct ArkChunk {
     /// Chunk file name (e.g., "EntryAbility", "commons", "vendors").
     pub name: String,
-    /// Content hash / fingerprint from rolldown metadata.
-    pub chunk_hash: String,
     /// Modules included in this chunk.
     pub modules: Vec<ModuleIdx>,
     /// Whether this chunk is an entry chunk.
