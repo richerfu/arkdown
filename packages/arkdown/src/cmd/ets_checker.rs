@@ -657,12 +657,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       "sdkInfo".to_string(),
       Value::String(format!(
         "{}:{}:{}:{}",
-        self
-          .input
-          .config
-          .product
-          .runtime_os
-          .eq_ignore_ascii_case("OpenHarmony"),
+        !arkdown_core::is_harmony_os(&self.input.config.product.runtime_os),
         self.input.config.sdk_config.compile_api_version,
         component_metadata.version,
         component_metadata.release_type
@@ -928,12 +923,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       })?;
     Ok(format!(
       "{}:{}:{}:{}",
-      self
-        .input
-        .config
-        .product
-        .runtime_os
-        .eq_ignore_ascii_case("OpenHarmony"),
+      !arkdown_core::is_harmony_os(&self.input.config.product.runtime_os),
       self.input.config.sdk_config.compile_api_version,
       component_metadata.version,
       component_metadata.release_type
@@ -1252,12 +1242,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
   fn external_api_paths(&self) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     if self.input.config.sdk_config.compile_api_version > 9
-      && self
-        .input
-        .config
-        .product
-        .runtime_os
-        .eq_ignore_ascii_case("HarmonyOS")
+      && arkdown_core::is_harmony_os(&self.input.config.product.runtime_os)
     {
       if let Some(hms_ets) = self.input.config.sdk_config.hms_ets_component_path() {
         paths.push(self.path(&hms_ets)?);

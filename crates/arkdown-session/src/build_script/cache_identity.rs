@@ -39,6 +39,12 @@ impl BuildScriptProjectCacheIdentity {
         &self.project_root
     }
 
+    /// Normalized 32-hex-character project cache identity.
+    ///
+    /// Truncated to the first 16 bytes of the SHA-256 digest (32 hex chars)
+    /// on purpose — this mirrors latest-hvigor's normalized project hash
+    /// length and is used as a directory/cache key, not as a content digest.
+    /// Do not compare it against full 64-hex-char fingerprints.
     pub fn hash(&self) -> String {
         let digest = Sha256::digest(self.project_root.to_string_lossy().as_bytes());
         let mut hash = String::with_capacity(32);

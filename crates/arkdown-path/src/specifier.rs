@@ -181,11 +181,7 @@ impl<'a> ModuleSpecifierText<'a> {
             || self.raw.starts_with("../")
         {
             SpecifierKind::Relative
-        } else if self.raw.starts_with("@bundle:")
-            || self.raw.starts_with("@shared:")
-            || self.raw.starts_with("@module:")
-            || self.raw.starts_with("@normalized:")
-        {
+        } else if crate::ohm::is_ohm_url_prefix(self.raw) {
             SpecifierKind::OhmUrl
         } else if Path::new(self.raw).has_root() {
             SpecifierKind::AbsolutePath

@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::{ArkdownError, ChunkSourceFile, HvigorModuleSourceFile, HvigorNpmEntry};
-use arkdown_path::{lexical_normalize, strip_relative_prefix, AbsPath, ArtifactPathSerializer};
+use arkdown_path::{
+    lexical_normalize, strip_relative_prefix, AbsPath, ArtifactPathSerializer, OhmUrl,
+};
 use arkdown_resolver::OhPackage;
 
 use crate::output;
@@ -31,9 +33,17 @@ impl<'a> HvigorNormalizedOhmUrl<'a> {
     }
 
     pub(crate) fn to_request(&self) -> String {
-        let is_so = if self.context.is_so { "Y" } else { "N" };
-        let module_name = self.context.module_name.as_str();
-        format!("@normalized:{}&{}&{}", is_so, module_name, self.to_record())
+        let source_path = Path::new(self.project_file_path).with_extension("");
+        let source_path = ArtifactPathSerializer::rel_to_slash(&source_path);
+        let normalized_import = format!("{}/{}", self.context.package_name, source_path);
+        OhmUrl::normalized(
+            self.context.is_so,
+            self.context.module_name.as_str(),
+            self.context.bundle_name.as_str(),
+            &normalized_import,
+            self.context.version.as_str(),
+        )
+        .into_string()
     }
 
     pub(crate) fn to_record(&self) -> String {

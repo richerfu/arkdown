@@ -36,7 +36,7 @@ pub use host::HostPlatform;
 pub use hvigor::HvigorModulePath;
 pub use native_library::HvigorNativeLibraryPattern;
 pub use normalize::{lexical_normalize, strip_relative_prefix};
-pub use ohm::{NormalizedOhmUrl, OhmSchema, OhmUrl};
+pub use ohm::{is_ohm_runtime_specifier, is_ohm_url_prefix, NormalizedOhmUrl, OhmSchema, OhmUrl};
 pub use rel::RelPath;
 pub use serializer::ArtifactPathSerializer;
 pub use source_file::{HvigorSourceFileFilter, SourceFileName};

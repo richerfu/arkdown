@@ -28,10 +28,7 @@ pub struct RawOhPackage {
 
 impl RawOhPackage {
     pub fn parse(content: &str, file: &Path) -> Result<RawOhPackage, ConfigError> {
-        json5::from_str::<RawOhPackage>(content).map_err(|e| ConfigError::ParseError {
-            file: file.to_path_buf(),
-            message: e.to_string(),
-        })
+        crate::error::parse_json5::<RawOhPackage>(content, file)
     }
 
     pub fn load(module_root: &Path) -> Result<RawOhPackage, ConfigError> {

@@ -811,18 +811,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         resolved_id: &str,
         module_records: &HvigorModuleSourceRecordIndex,
     ) -> Result<Option<String>, ArkdownError> {
-        if resolved_id.starts_with("@bundle:")
-            || resolved_id.starts_with("@package:")
-            || resolved_id.starts_with("@shared:")
-            || resolved_id.starts_with("@app:")
-            || resolved_id.starts_with("@normalized:")
-        {
-            return Ok(Some(resolved_id.to_string()));
-        }
-        if resolved_id.starts_with("@ohos:")
-            || resolved_id.starts_with("@hms:")
-            || resolved_id.starts_with("@native:")
-        {
+        if arkdown_path::is_ohm_runtime_specifier(resolved_id) {
             return Ok(Some(resolved_id.to_string()));
         }
 

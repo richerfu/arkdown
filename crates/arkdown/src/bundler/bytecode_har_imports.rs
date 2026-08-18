@@ -6,7 +6,7 @@ use rustc_hash::FxHashSet;
 
 use crate::plan::BundleRuntimePackageInfo;
 use arkdown_core::ArkdownError;
-use arkdown_path::ArtifactPathSerializer;
+use arkdown_path::{ArtifactPathSerializer, OhmUrl};
 
 pub(crate) struct HvigorBytecodeHarImports<'a> {
     pub(crate) runtime_packages: &'a BundleRuntimePackageInfo,
@@ -51,16 +51,18 @@ impl<'a> HvigorBytecodeHarImports<'a> {
         if !context.is_so {
             return None;
         }
-        Some(format!(
-            "@normalized:Y&{}&{}&{}&{}",
-            context.module_name,
-            context.bundle_name,
-            Path::new(request)
-                .file_name()
-                .and_then(|file_name| file_name.to_str())
-                .unwrap_or(request),
-            context.version
-        ))
+        Some(
+            OhmUrl::normalized_so(
+                context.module_name.as_str(),
+                context.bundle_name.as_str(),
+                Path::new(request)
+                    .file_name()
+                    .and_then(|file_name| file_name.to_str())
+                    .unwrap_or(request),
+                context.version.as_str(),
+            )
+            .into_string(),
+        )
     }
 
     pub(crate) fn alias_for_request(&self, request: &str) -> Option<&'a str> {
@@ -104,14 +106,14 @@ impl<'a> HvigorBytecodeHarImports<'a> {
         } else {
             request.replacen(package_name, &context.package_name, 1)
         };
-        Ok(format!(
-            "@normalized:{}&{}&{}&{}&{}",
-            if context.is_so { "Y" } else { "N" },
-            context.module_name,
-            context.bundle_name,
-            ArtifactPathSerializer::rel_to_slash(Path::new(&record)),
-            context.version
-        ))
+        Ok(OhmUrl::normalized(
+            context.is_so,
+            context.module_name.as_str(),
+            context.bundle_name.as_str(),
+            &ArtifactPathSerializer::rel_to_slash(Path::new(&record)),
+            context.version.as_str(),
+        )
+        .into_string())
     }
 
     pub(crate) fn remove_module_suffix(&self, value: &str) -> String {

@@ -44,6 +44,37 @@ pub enum OhmSchema {
     Normalized,
 }
 
+/// Whether `s` starts with a strict, parseable [`OhmUrl`] schema prefix
+/// (`@bundle:`, `@shared:`, `@module:`, `@normalized:`).
+///
+/// Single source of truth for [`OhmUrl::parse`], [`OhmUrl::schema`], and
+/// specifier classification — do not hand-write `starts_with` chains for
+/// this set.
+pub fn is_ohm_url_prefix(s: &str) -> bool {
+    s.starts_with("@bundle:")
+        || s.starts_with("@shared:")
+        || s.starts_with("@module:")
+        || s.starts_with(OhmUrl::NORMALIZED_PREFIX)
+}
+
+/// Whether `s` is an OHM-style runtime URL the bundler passes through
+/// untouched.
+///
+/// Deliberate superset of [`is_ohm_url_prefix`]: hvigor's module-source
+/// rewrite also treats the package/app registry prefixes (`@package:`,
+/// `@app:`) and the SDK system prefixes (`@ohos:`, `@hms:`, `@native:`) as
+/// already-resolved runtime URLs. These extras are NOT parseable
+/// [`OhmUrl`]s — code that needs schema access must go through
+/// [`OhmUrl::parse`], which stays strict.
+pub fn is_ohm_runtime_specifier(s: &str) -> bool {
+    is_ohm_url_prefix(s)
+        || s.starts_with("@package:")
+        || s.starts_with("@app:")
+        || s.starts_with("@ohos:")
+        || s.starts_with("@hms:")
+        || s.starts_with("@native:")
+}
+
 /// Parsed `@shared:<bundleName>/<moduleName>` reference parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OhmSharedParts<'a> {
@@ -131,6 +162,46 @@ impl OhmUrl {
         ))
     }
 
+    /// Construct a SO normalized OHM URL.
+    ///
+    /// ```text
+    /// @normalized:Y&<module_name>&<bundle_name>&<normalized_import>&<version>
+    /// ```
+    pub fn normalized_so(
+        module_name: &str,
+        bundle_name: &str,
+        normalized_import: &str,
+        version: &str,
+    ) -> Self {
+        Self(Self::ampersand_url(
+            "@normalized:Y",
+            &[module_name, bundle_name, normalized_import, version],
+        ))
+    }
+
+    /// Construct a normalized OHM URL with an explicit SO flag.
+    ///
+    /// Same field order as [`OhmUrl::normalized_non_so`] and
+    /// [`OhmUrl::normalized_so`]:
+    /// `<is_so>&<module_name>&<bundle_name>&<normalized_import>&<version>`.
+    pub fn normalized(
+        is_so: bool,
+        module_name: &str,
+        bundle_name: &str,
+        normalized_import: &str,
+        version: &str,
+    ) -> Self {
+        let prefix = if is_so {
+            "@normalized:Y"
+        } else {
+            Self::NORMALIZED_NOT_SO_PREFIX
+        };
+        Self(Self::ampersand_url(
+            prefix,
+            &[module_name, bundle_name, normalized_import, version],
+        ))
+    }
+
     fn prefixed(prefix: &str, value: &str) -> String {
         let mut url = String::with_capacity(prefix.len() + value.len());
         url.push_str(prefix);
@@ -171,11 +242,7 @@ impl OhmUrl {
     /// with `@bundle:`, `@shared:`, `@module:`, or `@normalized:`.
     pub fn parse(s: impl Into<String>) -> Result<Self, OhmUrlError> {
         let s = s.into();
-        if s.starts_with("@bundle:")
-            || s.starts_with("@shared:")
-            || s.starts_with("@module:")
-            || s.starts_with(Self::NORMALIZED_PREFIX)
-        {
+        if is_ohm_url_prefix(&s) {
             Ok(Self(s))
         } else {
             Err(OhmUrlError::UnrecognizedSchema(s))

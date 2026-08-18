@@ -82,18 +82,12 @@ impl RouterMapProcessor {
     ///
     /// Corresponds to `router-map-plugin.js` router map hash computation.
     pub fn fingerprint_inputs(&self) -> u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
+        let mut state = arkdown_core::fnv1a64(&[]);
         for e in &self.entries {
-            for b in e.route_name.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in e.src_path.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
+            state = arkdown_core::fnv1a64_fold(state, e.route_name.as_bytes());
+            state = arkdown_core::fnv1a64_fold(state, e.src_path.as_bytes());
         }
-        h
+        state
     }
 }
 
