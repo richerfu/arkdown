@@ -9,9 +9,6 @@ mod declaration_emit;
 pub(crate) mod decorator;
 mod entry;
 mod expand_import_path;
-pub(crate) use expand_import_path::{
-    apply as apply_expand_import_path, apply_to_program as apply_expand_import_path_to_program,
-};
 mod global_rewrite;
 mod navigation;
 pub(crate) mod source_emit;
@@ -29,14 +26,14 @@ use rustc_hash::FxHashSet;
 
 use arkdown_core::{AutoLazyFilter, ExpandImportPath, ModuleSource};
 use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, HvigorModulePath};
-use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
+use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
-    Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression,
-    FormalParameter, FormalParameterKind, Function, FunctionBody, FunctionType, ImportOrExportKind,
-    MethodDefinition, MethodDefinitionKind, MethodDefinitionType, Program, PropertyDefinition,
-    PropertyKey, Statement, StructElement, StructStatement, TSModuleDeclarationBody, TSType,
+    Argument, BindingPattern, BindingRestElement, Class, ClassElement, Declaration, Decorator,
+    Directive, ExportDefaultDeclarationKind, Expression, FormalParameter, FormalParameterKind,
+    FormalParameterRest, FormalParameters, Function, FunctionBody, FunctionType, MethodDefinition,
+    MethodDefinitionKind, MethodDefinitionType, Program, PropertyDefinition, PropertyKey,
+    Statement, StringLiteral, StructElement, StructStatement, TSNamespaceDeclarationBody, TSType,
 };
-use oxc_ast::NONE;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
@@ -452,7 +449,7 @@ impl<'a> ArktsTransformer<'a> {
             || replacement_plans.iter().any(Option::is_some)
         {
             let entry_registration_statements = entry_registrations.statements(
-                oxc_ast::AstBuilder::new(&allocator),
+                oxc_ast::builder::AstBuilder::new(&allocator),
                 &allocator,
                 options.component_metadata.runtime_names(),
             );
@@ -476,7 +473,7 @@ impl<'a> ArktsTransformer<'a> {
             body.extend(entry_registration_statements);
             body.extend(
                 navigation_registrations
-                    .statements(oxc_ast::AstBuilder::new(&allocator), &allocator),
+                    .statements(&oxc_ast::builder::AstBuilder::new(&allocator), &allocator),
             );
             parsed.program.body = body;
             ViewpuProgramFinalizer::new(&allocator, &mut parsed.program).finalize();
@@ -588,31 +585,40 @@ impl<'a> ConcurrentDirectiveLowerer<'a> {
     fn statement(&self, statement: &mut Statement<'a>) -> bool {
         match statement {
             Statement::FunctionDeclaration(function) => self.function(function),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_mut() {
-                Some(Declaration::FunctionDeclaration(function)) => self.function(function),
-                Some(Declaration::TSModuleDeclaration(module)) => {
+            Statement::ExportDeclaration(export) => match &mut export.declaration {
+                Declaration::FunctionDeclaration(function) => self.function(function),
+                Declaration::TSNamespaceDeclaration(module) => {
                     self.ts_module_body(&mut module.body)
                 }
                 _ => false,
             },
-            Statement::TSModuleDeclaration(module) => self.ts_module_body(&mut module.body),
+            Statement::TSNamespaceDeclaration(module) => self.ts_module_body(&mut module.body),
+            Statement::TSExternalModuleDeclaration(module) => match module.body.as_deref_mut() {
+                Some(block) => {
+                    let mut changed = false;
+                    for statement in &mut block.body {
+                        changed |= self.statement(statement);
+                    }
+                    changed
+                }
+                None => false,
+            },
             _ => false,
         }
     }
 
-    fn ts_module_body(&self, body: &mut Option<TSModuleDeclarationBody<'a>>) -> bool {
+    fn ts_module_body(&self, body: &mut TSNamespaceDeclarationBody<'a>) -> bool {
         match body {
-            Some(TSModuleDeclarationBody::TSModuleDeclaration(module)) => {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(module) => {
                 self.ts_module_body(&mut module.body)
             }
-            Some(TSModuleDeclarationBody::TSModuleBlock(block)) => {
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => {
                 let mut changed = false;
                 for statement in &mut block.body {
                     changed |= self.statement(statement);
                 }
                 changed
             }
-            None => false,
         }
     }
 
@@ -624,11 +630,17 @@ impl<'a> ConcurrentDirectiveLowerer<'a> {
         }
         function.decorators.clear();
         if let Some(body) = function.body.as_mut() {
-            let ast = oxc_ast::AstBuilder::new(self.allocator);
-            let directive = ast.directive(
+            let builder = oxc_ast::builder::AstBuilder::new(self.allocator);
+            let directive = Directive::new(
                 SPAN,
-                ast.string_literal(SPAN, ast.str(ConcurrentFunctionEmitter::DIRECTIVE), None),
-                ast.str(ConcurrentFunctionEmitter::DIRECTIVE),
+                oxc_ast::ast::StringLiteral::new(
+                    SPAN,
+                    ConcurrentFunctionEmitter::DIRECTIVE,
+                    None,
+                    &builder,
+                ),
+                ConcurrentFunctionEmitter::DIRECTIVE,
+                &builder,
             );
             body.directives.insert(0, directive);
         }
@@ -693,8 +705,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
     ) -> Result<Option<OxcVec<'b, Statement<'b>>>, EtsTransformError> {
         let (struct_stmt, is_exported, is_default) = match statement {
             Statement::StructStatement(s) => (s.as_ref(), false, false),
-            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
-                Some(Declaration::StructStatement(s)) => (s.as_ref(), true, false),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::StructStatement(s) => (s.as_ref(), true, false),
                 _ => return Ok(None),
             },
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
@@ -741,8 +753,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
     fn is_reusable_v2_component(&self, statement: &Statement<'_>) -> bool {
         let struct_stmt = match statement {
             Statement::StructStatement(s) => s.as_ref(),
-            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
-                Some(Declaration::StructStatement(s)) => s.as_ref(),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::StructStatement(s) => s.as_ref(),
                 _ => return false,
             },
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
@@ -763,8 +775,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
     ) -> Result<Option<(String, EntryRegistrationInfo<'s>)>, EtsTransformError> {
         let struct_stmt = match statement {
             Statement::StructStatement(s) => s.as_ref(),
-            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
-                Some(Declaration::StructStatement(s)) => s.as_ref(),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::StructStatement(s) => s.as_ref(),
                 _ => return Ok(None),
             },
             Statement::ExportDefaultDeclaration(e) => match &e.declaration {
@@ -803,9 +815,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             Statement::StructStatement(statement) => {
                 self.component_from_struct(statement, false, false)
             }
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::StructStatement(statement)) => {
-                    self.component_from_struct(statement, true, false)
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::StructStatement(statement) => {
+                    self.component_from_struct(statement.as_ref(), true, false)
                 }
                 _ => Ok(None),
             },
@@ -824,53 +836,53 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         statement: &Statement<'_>,
     ) -> Result<Option<StatementReplacementPlan<'b>>, EtsTransformError> {
         let replacement = match statement {
-            Statement::AnnotationDeclaration(annotation) => {
-                Some(StatementReplacementPlan::AstStatements(
-                    oxc_ast::AstBuilder::new(self.allocator).vec1(
-                        ParamsInterfaceEmitter::new(annotation).statement(self.allocator, false),
-                    ),
-                ))
-            }
+            Statement::AnnotationDeclaration(annotation) => Some(
+                StatementReplacementPlan::AstStatements(ArenaVec::from_value_in(
+                    ParamsInterfaceEmitter::new(annotation).statement(self.allocator, false),
+                    &self.allocator,
+                )),
+            ),
             Statement::ClassDeclaration(_)
                 if SendableClassLowerer::statement_needs_lowering(statement) =>
             {
                 Some(StatementReplacementPlan::LowerSendableClass)
             }
             Statement::FunctionDeclaration(function) if Self::is_styles_function(function, &[]) => {
-                Some(StatementReplacementPlan::AstStatements(
-                    oxc_ast::AstBuilder::new(self.allocator).vec(),
-                ))
+                Some(StatementReplacementPlan::AstStatements(ArenaVec::new_in(
+                    &self.allocator,
+                )))
             }
             Statement::FunctionDeclaration(function) => self
                 .decorated_function_statement(function, false, &[])?
                 .map(|statement| {
-                    StatementReplacementPlan::AstStatements(
-                        oxc_ast::AstBuilder::new(self.allocator).vec1(statement),
-                    )
+                    StatementReplacementPlan::AstStatements(ArenaVec::from_value_in(
+                        statement,
+                        &self.allocator,
+                    ))
                 }),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::FunctionDeclaration(function))
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::FunctionDeclaration(function)
                     if Self::is_styles_function(function, &export.decorators) =>
                 {
-                    Some(StatementReplacementPlan::AstStatements(
-                        oxc_ast::AstBuilder::new(self.allocator).vec(),
-                    ))
+                    Some(StatementReplacementPlan::AstStatements(ArenaVec::new_in(
+                        &self.allocator,
+                    )))
                 }
-                Some(Declaration::FunctionDeclaration(function)) => self
+                Declaration::FunctionDeclaration(function) => self
                     .decorated_function_statement(function, true, &export.decorators)?
                     .map(|statement| {
-                        StatementReplacementPlan::AstStatements(
-                            oxc_ast::AstBuilder::new(self.allocator).vec1(statement),
-                        )
+                        StatementReplacementPlan::AstStatements(ArenaVec::from_value_in(
+                            statement,
+                            &self.allocator,
+                        ))
                     }),
-                Some(Declaration::AnnotationDeclaration(annotation)) => {
-                    Some(StatementReplacementPlan::AstStatements(
-                        oxc_ast::AstBuilder::new(self.allocator).vec1(
-                            ParamsInterfaceEmitter::new(annotation).statement(self.allocator, true),
-                        ),
-                    ))
-                }
-                Some(Declaration::ClassDeclaration(_))
+                Declaration::AnnotationDeclaration(annotation) => Some(
+                    StatementReplacementPlan::AstStatements(ArenaVec::from_value_in(
+                        ParamsInterfaceEmitter::new(annotation).statement(self.allocator, true),
+                        &self.allocator,
+                    )),
+                ),
+                Declaration::ClassDeclaration(_)
                     if SendableClassLowerer::statement_needs_lowering(statement) =>
                 {
                     Some(StatementReplacementPlan::LowerSendableClass)
@@ -1260,6 +1272,10 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     regular_members.push(RegularMember::AccessorProperty(property));
                     source_members.push(ComponentSourceMember::Regular(regular_members.len() - 1));
                 }
+                // ETS overload declarations (`ETSOverloadDeclaration`) are
+                // managed-signature declarations, not runtime members; the
+                // ArkUI lowering below has no member category for them.
+                StructElement::ETSOverloadDeclaration(_) => {}
             }
         }
 
@@ -1325,29 +1341,23 @@ impl<'a> ConcurrentFunctionEmitter<'a> {
     }
 
     fn statement(&self, function: &Function<'_>, exported: bool) -> Statement<'a> {
-        let ast = oxc_ast::AstBuilder::new(self.allocator);
+        let ast = oxc_ast::builder::AstBuilder::new(self.allocator);
         let mut function = function.clone_in(self.allocator);
         function.decorators.clear();
         if let Some(body) = function.body.as_mut() {
-            let directive = ast.directive(
+            let directive = Directive::new(
                 SPAN,
-                ast.string_literal(SPAN, ast.str(Self::DIRECTIVE), None),
-                ast.str(Self::DIRECTIVE),
+                StringLiteral::new(SPAN, Self::DIRECTIVE, None, &ast),
+                Self::DIRECTIVE,
+                &ast,
             );
             body.directives.insert(0, directive);
         }
-        let function = ast.alloc(function);
+        let function = ArenaBox::new_in(function, &ast);
         if !exported {
             return Statement::FunctionDeclaration(function);
         }
-        Statement::ExportNamedDeclaration(ast.alloc_export_named_declaration(
-            SPAN,
-            Some(Declaration::FunctionDeclaration(function)),
-            ast.vec(),
-            None,
-            ImportOrExportKind::Value,
-            NONE,
-        ))
+        Statement::new_export_declaration(SPAN, Declaration::FunctionDeclaration(function), &ast)
     }
 }
 
@@ -1360,7 +1370,7 @@ impl<'a> ConcurrentFunctionEmitter<'a> {
 /// arkdown to erase or lower.
 struct SendableClassLowerer<'a> {
     allocator: &'a Allocator,
-    ast: oxc_ast::AstBuilder<'a>,
+    ast: oxc_ast::builder::AstBuilder<'a>,
 }
 
 impl<'a> SendableClassLowerer<'a> {
@@ -1370,7 +1380,7 @@ impl<'a> SendableClassLowerer<'a> {
     fn new(allocator: &'a Allocator) -> Self {
         Self {
             allocator,
-            ast: oxc_ast::AstBuilder::new(allocator),
+            ast: oxc_ast::builder::AstBuilder::new(allocator),
         }
     }
 
@@ -1381,9 +1391,9 @@ impl<'a> SendableClassLowerer<'a> {
     fn statements(&self, mut statement: Statement<'a>) -> OxcVec<'a, Statement<'a>> {
         match &mut statement {
             Statement::ClassDeclaration(class) => self.class(class),
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(export) => {
                 Self::remove_sendable_decorator(&mut export.decorators);
-                if let Some(Declaration::ClassDeclaration(class)) = &mut export.declaration {
+                if let Declaration::ClassDeclaration(class) = &mut export.declaration {
                     self.class(class);
                 }
             }
@@ -1396,20 +1406,20 @@ impl<'a> SendableClassLowerer<'a> {
             }
             _ => {}
         }
-        self.ast.vec1(statement)
+        ArenaVec::from_value_in(statement, &self.ast)
     }
 
     fn statement_has_class_decorator(statement: &Statement<'_>, name: &str) -> bool {
         match statement {
             Statement::ClassDeclaration(class) => Self::class_has_decorator(class, name),
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(export) => {
                 export
                     .decorators
                     .iter()
                     .any(|decorator| ArkuiDecorator::new(decorator).name() == name)
                     || matches!(
-                        export.declaration.as_ref(),
-                        Some(Declaration::ClassDeclaration(class)) if Self::class_has_decorator(class, name)
+                        &export.declaration,
+                        Declaration::ClassDeclaration(class) if Self::class_has_decorator(class, name)
                     )
             }
             Statement::ExportDefaultDeclaration(export) => {
@@ -1450,7 +1460,7 @@ impl<'a> SendableClassLowerer<'a> {
             }
         }
         if !has_constructor {
-            let constructor = self.constructor(class.super_class.is_some());
+            let constructor = self.constructor(class.heritage.is_some());
             class.body.body.insert(0, constructor);
         }
     }
@@ -1466,86 +1476,93 @@ impl<'a> SendableClassLowerer<'a> {
                         .iter()
                         .any(|ty| matches!(ty, TSType::TSUndefinedKeyword(_)))
                     {
-                        union.types.push(self.ast.ts_type_undefined_keyword(SPAN));
+                        union
+                            .types
+                            .push(TSType::new_ts_undefined_keyword(SPAN, &self.ast));
                     }
                     TSType::TSUnionType(union)
                 }
-                ty => self.ast.ts_type_union_type(
+                ty => TSType::new_ts_union_type(
                     SPAN,
-                    self.ast
-                        .vec_from_iter([ty, self.ast.ts_type_undefined_keyword(SPAN)]),
+                    ArenaVec::from_iter_in(
+                        [ty, TSType::new_ts_undefined_keyword(SPAN, &self.ast)],
+                        &self.ast,
+                    ),
+                    &self.ast,
                 ),
             };
         }
         if property.value.is_none() {
-            property.value = Some(
-                self.ast
-                    .expression_identifier(SPAN, self.ast.str("undefined")),
-            );
+            property.value = Some(Expression::new_identifier(SPAN, "undefined", &self.ast));
         }
     }
 
     fn constructor(&self, has_super_class: bool) -> ClassElement<'a> {
         let rest = has_super_class.then(|| {
-            self.ast.alloc_formal_parameter_rest(
+            FormalParameterRest::boxed(
                 SPAN,
-                self.ast.vec(),
-                self.ast.binding_rest_element(
+                ArenaVec::new_in(&self.ast),
+                BindingRestElement::new(
                     SPAN,
-                    self.ast
-                        .binding_pattern_binding_identifier(SPAN, self.ast.str(Self::SUPER_ARGS)),
+                    BindingPattern::new_binding_identifier(SPAN, Self::SUPER_ARGS, &self.ast),
+                    &self.ast,
                 ),
-                NONE,
+                None,
+                &self.ast,
             )
         });
-        let params = self.ast.alloc_formal_parameters(
+        let params = FormalParameters::boxed(
             SPAN,
             FormalParameterKind::FormalParameter,
-            self.ast.vec(),
+            ArenaVec::new_in(&self.ast),
             rest,
+            &self.ast,
         );
-        let mut statements = self.ast.vec();
+        let mut statements = ArenaVec::new_in(&self.ast);
         if has_super_class {
-            let arguments = self.ast.vec1(
-                self.ast.argument_spread_element(
+            let arguments = ArenaVec::from_value_in(
+                Argument::new_spread_element(
                     SPAN,
-                    self.ast
-                        .expression_identifier(SPAN, self.ast.str(Self::SUPER_ARGS)),
+                    Expression::new_identifier(SPAN, Self::SUPER_ARGS, &self.ast),
+                    &self.ast,
                 ),
+                &self.ast,
             );
-            let call = self.ast.expression_call(
+            let call = Expression::new_call_expression(
                 SPAN,
-                self.ast.expression_super(SPAN),
-                NONE,
+                Expression::new_super(SPAN, &self.ast),
+                None,
                 arguments,
                 false,
+                &self.ast,
             );
-            statements.push(self.ast.statement_expression(SPAN, call));
+            statements.push(Statement::new_expression_statement(SPAN, call, &self.ast));
         }
-        let body = self
-            .ast
-            .function_body(SPAN, self.ast.vec1(self.directive()), statements);
-        let function = self.ast.alloc_function(
+        let body = FunctionBody::boxed(
+            SPAN,
+            ArenaVec::from_value_in(self.directive(), &self.ast),
+            statements,
+            &self.ast,
+        );
+        let function = Function::boxed(
             SPAN,
             FunctionType::FunctionExpression,
             None,
             false,
             false,
             false,
-            NONE,
-            NONE,
+            None,
+            None,
             params,
-            NONE,
+            None,
             Some(body),
+            &self.ast,
         );
-        self.ast.class_element_method_definition(
+        ClassElement::new_method_definition(
             SPAN,
             MethodDefinitionType::MethodDefinition,
-            self.ast.vec(),
-            PropertyKey::StaticIdentifier(
-                self.ast
-                    .alloc_identifier_name(SPAN, self.ast.str("constructor")),
-            ),
+            ArenaVec::new_in(&self.ast),
+            PropertyKey::new_static_identifier(SPAN, "constructor", &self.ast),
             function,
             MethodDefinitionKind::Constructor,
             false,
@@ -1553,15 +1570,16 @@ impl<'a> SendableClassLowerer<'a> {
             false,
             false,
             None,
+            &self.ast,
         )
     }
 
     fn directive(&self) -> oxc_ast::ast::Directive<'a> {
-        self.ast.directive(
+        Directive::new(
             SPAN,
-            self.ast
-                .string_literal(SPAN, self.ast.str(Self::DIRECTIVE), None),
-            self.ast.str(Self::DIRECTIVE),
+            StringLiteral::new(SPAN, Self::DIRECTIVE, None, &self.ast),
+            Self::DIRECTIVE,
+            &self.ast,
         )
     }
 
@@ -1615,11 +1633,14 @@ impl<'program, 'ast, 'source> TopLevelStylesInventory<'program, 'ast, 'source> {
                 Statement::FunctionDeclaration(function) => {
                     self.push_function(&mut styles, function, &[], allocator)?;
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::FunctionDeclaration(function)) =
-                        export.declaration.as_ref()
-                    {
-                        self.push_function(&mut styles, function, &export.decorators, allocator)?;
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::FunctionDeclaration(function) = &export.declaration {
+                        self.push_function(
+                            &mut styles,
+                            function.as_ref(),
+                            &export.decorators,
+                            allocator,
+                        )?;
                     }
                 }
                 _ => {}

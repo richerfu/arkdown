@@ -1,9 +1,10 @@
-use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
+use oxc_allocator::{Allocator, ArenaBox, CloneIn, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
-    Argument, Expression, FormalParameterKind, MemberExpression, ObjectPropertyKind, PropertyKey,
-    PropertyKind, Statement, VariableDeclarationKind,
+    Argument, ArrowFunctionBody, BindingPattern, Expression, FormalParameterKind, FormalParameters,
+    IdentifierName, MemberExpression, NewExpression, ObjectPropertyKind, PropertyKey, PropertyKind,
+    Statement, VariableDeclarationKind, VariableDeclarator,
 };
-use oxc_ast::{AstBuilder, NONE};
+use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
 use oxc_syntax::operator::{BinaryOperator, LogicalOperator};
 use std::path::PathBuf;
@@ -104,7 +105,7 @@ impl<'a> EntryRegistrationBlock<'a> {
         allocator: &'b Allocator,
         runtime_names: &ArkuiRuntimeNames,
     ) -> OxcVec<'b, Statement<'b>> {
-        let mut statements = ast.vec();
+        let mut statements = OxcVec::new_in(&ast);
         for registration in &self.registrations {
             statements.extend(
                 EntryRegistrationAstEmitter::new(
@@ -112,7 +113,7 @@ impl<'a> EntryRegistrationBlock<'a> {
                     registration.info.as_ref(),
                     runtime_names,
                 )
-                .statements(ast, allocator),
+                .statements(&ast, allocator),
             );
         }
         statements
@@ -169,11 +170,11 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
 
     fn statements<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
     ) -> OxcVec<'b, Statement<'b>> {
         let Some(info) = self.info else {
-            return ast.vec1(self.named_route_statement(ast, allocator));
+            return OxcVec::from_value_in(self.named_route_statement(ast, allocator), ast);
         };
 
         if info.form_entry {
@@ -185,19 +186,22 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
         }
 
         if info.options.argument.is_some() {
-            return ast.vec1(self.identifier_entry_statement(
+            return OxcVec::from_value_in(
+                self.identifier_entry_statement(
+                    ast,
+                    allocator,
+                    info.options.argument.expect("checked above"),
+                ),
                 ast,
-                allocator,
-                info.options.argument.expect("checked above"),
-            ));
+            );
         }
 
-        ast.vec1(self.named_route_statement(ast, allocator))
+        OxcVec::from_value_in(self.named_route_statement(ast, allocator), ast)
     }
 
     fn named_route_statement<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
     ) -> Statement<'b> {
         self.named_route_statement_with(ast, allocator, None, None)
@@ -205,25 +209,28 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
 
     fn named_route_statement_with<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         route_name: Option<Expression<'b>>,
         storage: Option<Expression<'b>>,
     ) -> Statement<'b> {
-        let arguments = ast.vec_from_iter([
-            Self::argument_from_expression(self.component_factory_arrow(ast, storage)),
-            Self::argument_from_expression(route_name.unwrap_or_else(|| {
-                ast.expression_string_literal(SPAN, EntryRuntimeName::EMPTY_ROUTE, None)
-            })),
-            Self::argument_from_expression(self.metadata_expression(ast)),
-        ]);
+        let arguments = OxcVec::from_iter_in(
+            [
+                Self::argument_from_expression(self.component_factory_arrow(ast, storage)),
+                Self::argument_from_expression(route_name.unwrap_or_else(|| {
+                    Expression::new_string_literal(SPAN, EntryRuntimeName::EMPTY_ROUTE, None, ast)
+                })),
+                Self::argument_from_expression(self.metadata_expression(ast)),
+            ],
+            ast,
+        );
         let _ = allocator;
         self.call_statement(ast, EntryRuntimeName::REGISTER_NAMED_ROUTE, arguments)
     }
 
     fn object_entry_statements<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         info: &EntryRegistrationInfo<'_>,
         allocator: &'b Allocator,
     ) -> OxcVec<'b, Statement<'b>> {
@@ -234,106 +241,122 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
         let storage = self.entry_storage_expression(ast, allocator, &info.options);
 
         match (route_name, storage) {
-            (Some(route_name), Some(storage)) => {
-                ast.vec1(self.route_and_storage_block(ast, allocator, route_name, storage))
+            (Some(route_name), Some(storage)) => OxcVec::from_value_in(
+                self.route_and_storage_block(ast, allocator, route_name, storage),
+                ast,
+            ),
+            (Some(route_name), None) => {
+                OxcVec::from_value_in(self.route_block(ast, allocator, route_name), ast)
             }
-            (Some(route_name), None) => ast.vec1(self.route_block(ast, allocator, route_name)),
-            (None, Some(storage)) => {
-                ast.vec1(self.named_route_statement_with(ast, allocator, None, Some(storage)))
-            }
-            (None, None) => ast.vec1(self.named_route_statement(ast, allocator)),
+            (None, Some(storage)) => OxcVec::from_value_in(
+                self.named_route_statement_with(ast, allocator, None, Some(storage)),
+                ast,
+            ),
+            (None, None) => OxcVec::from_value_in(self.named_route_statement(ast, allocator), ast),
         }
     }
 
     fn route_and_storage_block<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         route_name: Expression<'b>,
         storage: Expression<'b>,
     ) -> Statement<'b> {
-        let mut statements = ast.vec();
+        let mut statements = OxcVec::new_in(ast);
         statements.push(self.route_name_declaration(ast, route_name));
         let alternate_storage = storage.clone_in(allocator);
-        let consequent = ast.statement_block(
+        let consequent = Statement::new_block_statement(
             SPAN,
-            ast.vec1(self.named_route_statement_with(
+            OxcVec::from_value_in(
+                self.named_route_statement_with(
+                    ast,
+                    allocator,
+                    Some(Expression::new_identifier(
+                        SPAN,
+                        EntryRuntimeName::ROUTENAME_NODE,
+                        ast,
+                    )),
+                    Some(storage),
+                ),
                 ast,
-                allocator,
-                Some(ast.expression_identifier(SPAN, EntryRuntimeName::ROUTENAME_NODE)),
-                Some(storage),
-            )),
+            ),
+            ast,
         );
-        let alternate = ast.statement_block(
+        let alternate = Statement::new_block_statement(
             SPAN,
-            ast.vec1(self.named_route_statement_with(
+            OxcVec::from_value_in(
+                self.named_route_statement_with(ast, allocator, None, Some(alternate_storage)),
                 ast,
-                allocator,
-                None,
-                Some(alternate_storage),
-            )),
+            ),
+            ast,
         );
-        statements.push(ast.statement_if(
+        statements.push(Statement::new_if_statement(
             SPAN,
             self.route_name_node_not_undefined(ast),
             consequent,
             Some(alternate),
+            ast,
         ));
-        ast.statement_block(SPAN, statements)
+        Statement::new_block_statement(SPAN, statements, ast)
     }
 
     fn route_block<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         route_name: Expression<'b>,
     ) -> Statement<'b> {
-        let mut statements = ast.vec();
+        let mut statements = OxcVec::new_in(ast);
         statements.push(self.route_name_declaration(ast, route_name));
         statements.push(self.named_route_statement_with(
             ast,
             allocator,
-            Some(ast.expression_identifier(SPAN, EntryRuntimeName::ROUTENAME_NODE)),
+            Some(Expression::new_identifier(
+                SPAN,
+                EntryRuntimeName::ROUTENAME_NODE,
+                ast,
+            )),
             None,
         ));
-        ast.statement_block(SPAN, statements)
+        Statement::new_block_statement(SPAN, statements, ast)
     }
 
     fn route_name_declaration<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         init: Expression<'b>,
     ) -> Statement<'b> {
         let binding =
-            ast.binding_pattern_binding_identifier(SPAN, EntryRuntimeName::ROUTENAME_NODE);
-        let declarator = ast.variable_declarator(
+            BindingPattern::new_binding_identifier(SPAN, EntryRuntimeName::ROUTENAME_NODE, ast);
+        let declarator = VariableDeclarator::new(SPAN, binding, None, Some(init), false, ast);
+        Statement::new_variable_declaration(
             SPAN,
             VariableDeclarationKind::Let,
-            binding,
-            NONE,
-            Some(init),
+            OxcVec::from_value_in(declarator, ast),
             false,
-        );
-        Statement::from(ast.declaration_variable(
-            SPAN,
-            VariableDeclarationKind::Let,
-            ast.vec1(declarator),
-            false,
-        ))
+            ast,
+        )
     }
 
-    fn route_name_node_not_undefined<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
-        ast.expression_binary(
+    fn route_name_node_not_undefined<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
+        Expression::new_binary_expression(
             SPAN,
-            ast.expression_identifier(SPAN, EntryRuntimeName::ROUTENAME_NODE),
+            Expression::new_identifier(SPAN, EntryRuntimeName::ROUTENAME_NODE, ast),
             BinaryOperator::Inequality,
-            ast.expression_identifier(SPAN, ast.str(self.runtime_names.undefined.as_str())),
+            Expression::new_identifier(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(self.runtime_names.undefined.as_str()),
+                ast,
+            ),
+            ast,
         )
     }
 
     fn identifier_entry_statement<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         argument: &Expression<'_>,
     ) -> Statement<'b> {
@@ -407,35 +430,59 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
             Some(argument.clone_in(allocator)),
         );
 
-        let shared_or_fallback = ast.statement_if(
+        let shared_or_fallback = Statement::new_if_statement(
             SPAN,
             shared_storage,
-            ast.statement_block(SPAN, ast.vec1(shared_storage_statement)),
-            Some(ast.statement_block(SPAN, ast.vec1(fallback_statement))),
+            Statement::new_block_statement(
+                SPAN,
+                OxcVec::from_value_in(shared_storage_statement, ast),
+                ast,
+            ),
+            Some(Statement::new_block_statement(
+                SPAN,
+                OxcVec::from_value_in(fallback_statement, ast),
+                ast,
+            )),
+            ast,
         );
-        let storage_or_shared = ast.statement_if(
+        let storage_or_shared = Statement::new_if_statement(
             SPAN,
             storage_only,
-            ast.statement_block(SPAN, ast.vec1(storage_only_statement)),
+            Statement::new_block_statement(
+                SPAN,
+                OxcVec::from_value_in(storage_only_statement, ast),
+                ast,
+            ),
             Some(shared_or_fallback),
+            ast,
         );
-        let route_or_storage = ast.statement_if(
+        let route_or_storage = Statement::new_if_statement(
             SPAN,
             route_only,
-            ast.statement_block(SPAN, ast.vec1(route_only_statement)),
+            Statement::new_block_statement(
+                SPAN,
+                OxcVec::from_value_in(route_only_statement, ast),
+                ast,
+            ),
             Some(storage_or_shared),
+            ast,
         );
-        ast.statement_if(
+        Statement::new_if_statement(
             SPAN,
             route_and_storage,
-            ast.statement_block(SPAN, ast.vec1(route_and_storage_statement)),
+            Statement::new_block_statement(
+                SPAN,
+                OxcVec::from_value_in(route_and_storage_statement, ast),
+                ast,
+            ),
             Some(route_or_storage),
+            ast,
         )
     }
 
     fn identifier_route_and_storage_condition<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         argument: &Expression<'_>,
         route_operator: BinaryOperator,
@@ -456,68 +503,83 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
             EntryRuntimeName::STORAGE,
             storage_operator,
         );
-        ast.expression_logical(
+        Expression::new_logical_expression(
             SPAN,
-            ast.expression_logical(SPAN, argument_exists, LogicalOperator::And, route_condition),
+            Expression::new_logical_expression(
+                SPAN,
+                argument_exists,
+                LogicalOperator::And,
+                route_condition,
+                ast,
+            ),
             LogicalOperator::And,
             storage_condition,
+            ast,
         )
     }
 
     fn identifier_property_condition<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         argument: &Expression<'_>,
         property: &'static str,
         operator: BinaryOperator,
     ) -> Expression<'b> {
-        ast.expression_logical(
+        Expression::new_logical_expression(
             SPAN,
             argument.clone_in(allocator),
             LogicalOperator::And,
             self.identifier_property_comparison(ast, allocator, argument, property, operator),
+            ast,
         )
     }
 
     fn identifier_property_comparison<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         argument: &Expression<'_>,
         property: &'static str,
         operator: BinaryOperator,
     ) -> Expression<'b> {
-        ast.expression_binary(
+        Expression::new_binary_expression(
             SPAN,
             self.identifier_property_expression(ast, allocator, argument, property),
             operator,
-            ast.expression_identifier(SPAN, ast.str(self.runtime_names.undefined.as_str())),
+            Expression::new_identifier(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(self.runtime_names.undefined.as_str()),
+                ast,
+            ),
+            ast,
         )
     }
 
     fn identifier_property_expression<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         argument: &Expression<'_>,
         property: &'static str,
     ) -> Expression<'b> {
-        Self::member_expression_to_expression(ast.member_expression_static(
+        Self::member_expression_to_expression(MemberExpression::new_static_member_expression(
             SPAN,
             argument.clone_in(allocator),
-            ast.identifier_name(SPAN, property),
+            IdentifierName::new(SPAN, property, ast),
             false,
+            ast,
         ))
     }
 
     fn identifier_storage_expression<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         argument: &Expression<'_>,
     ) -> Expression<'b> {
-        ast.expression_conditional(
+        Expression::new_conditional_expression(
             SPAN,
             self.identifier_property_expression(
                 ast,
@@ -532,56 +594,60 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
                 argument,
                 EntryRuntimeName::STORAGE,
             ),
+            ast,
         )
     }
 
     fn entry_storage_expression<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         options: &EntryOptions<'_>,
     ) -> Option<Expression<'b>> {
         if let Some(use_shared_storage) = options.use_shared_storage {
-            return Some(
-                ast.expression_conditional(
-                    SPAN,
-                    use_shared_storage.clone_in(allocator),
-                    self.local_storage_get_shared_call(ast),
-                    options
-                        .storage
-                        .map(|storage| storage.clone_in(allocator))
-                        .unwrap_or_else(|| {
-                            ast.expression_identifier(
-                                SPAN,
-                                ast.str(self.runtime_names.undefined.as_str()),
-                            )
-                        }),
-                ),
-            );
+            return Some(Expression::new_conditional_expression(
+                SPAN,
+                use_shared_storage.clone_in(allocator),
+                self.local_storage_get_shared_call(ast),
+                options
+                    .storage
+                    .map(|storage| storage.clone_in(allocator))
+                    .unwrap_or_else(|| {
+                        Expression::new_identifier(
+                            SPAN,
+                            ast.allocator()
+                                .alloc_str(self.runtime_names.undefined.as_str()),
+                            ast,
+                        )
+                    }),
+                ast,
+            ));
         }
 
         options.storage.map(|storage| storage.clone_in(allocator))
     }
 
-    fn local_storage_get_shared_call<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
-        let member = ast.member_expression_static(
+    fn local_storage_get_shared_call<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
+        let member = MemberExpression::new_static_member_expression(
             SPAN,
-            ast.expression_identifier(SPAN, EntryRuntimeName::LOCAL_STORAGE),
-            ast.identifier_name(SPAN, EntryRuntimeName::GET_SHARED),
+            Expression::new_identifier(SPAN, EntryRuntimeName::LOCAL_STORAGE, ast),
+            IdentifierName::new(SPAN, EntryRuntimeName::GET_SHARED, ast),
             false,
+            ast,
         );
-        ast.expression_call(
+        Expression::new_call_expression(
             SPAN,
             Self::member_expression_to_expression(member),
-            NONE,
-            ast.vec(),
+            None,
+            OxcVec::new_in(ast),
             false,
+            ast,
         )
     }
 
     fn card_statements<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         info: &EntryRegistrationInfo<'_>,
         allocator: &'b Allocator,
     ) -> OxcVec<'b, Statement<'b>> {
@@ -589,109 +655,141 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
             ast,
             &self.runtime_names.view_stack_processor,
             EntryRuntimeName::ALLOCATE_NEW_ELMET_ID_FOR_NEXT_COMPONENT,
-            ast.vec(),
+            OxcVec::new_in(ast),
         );
         let start_call = self.member_call_expression(
             ast,
             &self.runtime_names.view_stack_processor,
             &self.runtime_names.start_get_access_recording_for,
-            ast.vec1(Self::argument_from_expression(allocate_call)),
+            OxcVec::from_value_in(Self::argument_from_expression(allocate_call), ast),
         );
         let storage = info
             .options
             .argument
             .map(|expression| expression.clone_in(allocator));
-        let load_call = ast.expression_call(
+        let load_call = Expression::new_call_expression(
             SPAN,
-            ast.expression_identifier(SPAN, EntryRuntimeName::LOAD_ETS_CARD),
-            NONE,
-            ast.vec_from_iter([
-                Self::argument_from_expression(self.component_new_expression(ast, storage)),
-                Self::argument_from_expression(ast.expression_string_literal(
-                    SPAN,
-                    ast.str(&self.record_name(info)),
-                    None,
-                )),
-            ]),
+            Expression::new_identifier(SPAN, EntryRuntimeName::LOAD_ETS_CARD, ast),
+            None,
+            OxcVec::from_iter_in(
+                [
+                    Self::argument_from_expression(Expression::NewExpression(
+                        self.component_new_expression(ast, storage),
+                    )),
+                    Self::argument_from_expression(Expression::new_string_literal(
+                        SPAN,
+                        ast.allocator().alloc_str(&self.record_name(info)),
+                        None,
+                        ast,
+                    )),
+                ],
+                ast,
+            ),
             false,
+            ast,
         );
         let stop_call = self.member_call_expression(
             ast,
             &self.runtime_names.view_stack_processor,
             &self.runtime_names.stop_get_access_recording,
-            ast.vec(),
+            OxcVec::new_in(ast),
         );
 
-        ast.vec_from_iter([
-            ast.statement_expression(SPAN, start_call),
-            ast.statement_expression(SPAN, load_call),
-            ast.statement_expression(SPAN, stop_call),
-        ])
+        OxcVec::from_iter_in(
+            [
+                Statement::new_expression_statement(SPAN, start_call, ast),
+                Statement::new_expression_statement(SPAN, load_call, ast),
+                Statement::new_expression_statement(SPAN, stop_call, ast),
+            ],
+            ast,
+        )
     }
 
     fn component_factory_arrow<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         storage: Option<Expression<'b>>,
     ) -> Expression<'b> {
         let expression = self.component_new_expression(ast, storage);
-        let body = ast.function_body(
+        let body = ArrowFunctionBody::NewExpression(expression);
+        Expression::new_arrow_function_expression(
             SPAN,
-            ast.vec(),
-            ast.vec1(ast.statement_expression(SPAN, expression)),
-        );
-        ast.expression_arrow_function(
-            SPAN,
-            true,
             false,
-            NONE,
-            ast.formal_parameters(
-                SPAN,
-                FormalParameterKind::ArrowFormalParameters,
-                ast.vec(),
-                NONE,
+            None,
+            ArenaBox::new_in(
+                FormalParameters::new(
+                    SPAN,
+                    FormalParameterKind::ArrowFormalParameters,
+                    OxcVec::new_in(ast),
+                    None,
+                    ast,
+                ),
+                ast,
             ),
-            NONE,
+            None,
             body,
+            ast,
         )
     }
 
     fn component_new_expression<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         storage: Option<Expression<'b>>,
-    ) -> Expression<'b> {
-        let mut arguments = ast.vec_from_iter([
-            Self::argument_from_expression(
-                ast.expression_identifier(SPAN, ast.str(&self.runtime_names.undefined)),
-            ),
-            Self::argument_from_expression(ast.expression_object(SPAN, ast.vec())),
-        ]);
+    ) -> ArenaBox<'b, NewExpression<'b>> {
+        let mut arguments = OxcVec::from_iter_in(
+            [
+                Self::argument_from_expression(Expression::new_identifier(
+                    SPAN,
+                    ast.allocator().alloc_str(&self.runtime_names.undefined),
+                    ast,
+                )),
+                Self::argument_from_expression(Expression::new_object_expression(
+                    SPAN,
+                    OxcVec::new_in(ast),
+                    ast,
+                )),
+            ],
+            ast,
+        );
         if let Some(storage) = storage {
             arguments.push(Self::argument_from_expression(storage));
         }
-        ast.expression_new(
+        NewExpression::boxed(
             SPAN,
-            ast.expression_identifier(SPAN, ast.str(self.component_name)),
-            NONE,
+            Expression::new_identifier(SPAN, ast.allocator().alloc_str(self.component_name), ast),
+            None,
             arguments,
+            ast,
         )
     }
 
-    fn metadata_expression<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
+    fn metadata_expression<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
         let Some(info) = self.info else {
-            return ast.expression_object(SPAN, ast.vec());
+            return Expression::new_object_expression(SPAN, OxcVec::new_in(ast), ast);
         };
-        ast.expression_object(
+        Expression::new_object_expression(
             SPAN,
-            ast.vec_from_iter([
-                self.string_property(ast, EntryRuntimeName::BUNDLE_NAME, &info.bundle_name),
-                self.string_property(ast, EntryRuntimeName::MODULE_NAME, &info.module_name),
-                self.string_property(ast, EntryRuntimeName::PAGE_PATH, &info.page_path),
-                self.string_property(ast, EntryRuntimeName::PAGE_FULL_PATH, &info.page_full_path),
-                self.string_property(ast, EntryRuntimeName::INTEGRATED_HSP, &info.integrated_hsp),
-                self.string_property(ast, EntryRuntimeName::MODULE_TYPE, &info.module_type),
-            ]),
+            OxcVec::from_iter_in(
+                [
+                    self.string_property(ast, EntryRuntimeName::BUNDLE_NAME, &info.bundle_name),
+                    self.string_property(ast, EntryRuntimeName::MODULE_NAME, &info.module_name),
+                    self.string_property(ast, EntryRuntimeName::PAGE_PATH, &info.page_path),
+                    self.string_property(
+                        ast,
+                        EntryRuntimeName::PAGE_FULL_PATH,
+                        &info.page_full_path,
+                    ),
+                    self.string_property(
+                        ast,
+                        EntryRuntimeName::INTEGRATED_HSP,
+                        &info.integrated_hsp,
+                    ),
+                    self.string_property(ast, EntryRuntimeName::MODULE_TYPE, &info.module_type),
+                ],
+                ast,
+            ),
+            ast,
         )
     }
 
@@ -705,58 +803,63 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
 
     fn string_property<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         name: &'static str,
         value: &str,
     ) -> ObjectPropertyKind<'b> {
-        ast.object_property_kind_object_property(
+        ObjectPropertyKind::new_object_property(
             SPAN,
             PropertyKind::Init,
-            ast.property_key_static_identifier(SPAN, name),
-            ast.expression_string_literal(SPAN, ast.str(value), None),
+            PropertyKey::new_static_identifier(SPAN, name, ast),
+            Expression::new_string_literal(SPAN, ast.allocator().alloc_str(value), None, ast),
             false,
             false,
             false,
+            ast,
         )
     }
 
     fn call_statement<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         callee_name: &str,
         arguments: OxcVec<'b, Argument<'b>>,
     ) -> Statement<'b> {
-        ast.statement_expression(
+        Statement::new_expression_statement(
             SPAN,
-            ast.expression_call(
+            Expression::new_call_expression(
                 SPAN,
-                ast.expression_identifier(SPAN, ast.str(callee_name)),
-                NONE,
+                Expression::new_identifier(SPAN, ast.allocator().alloc_str(callee_name), ast),
+                None,
                 arguments,
                 false,
+                ast,
             ),
+            ast,
         )
     }
 
     fn member_call_expression<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         object: &str,
         property: &str,
         arguments: OxcVec<'b, Argument<'b>>,
     ) -> Expression<'b> {
-        let member = ast.member_expression_static(
+        let member = MemberExpression::new_static_member_expression(
             SPAN,
-            ast.expression_identifier(SPAN, ast.str(object)),
-            ast.identifier_name(SPAN, ast.str(property)),
+            Expression::new_identifier(SPAN, ast.allocator().alloc_str(object), ast),
+            IdentifierName::new(SPAN, ast.allocator().alloc_str(property), ast),
             false,
+            ast,
         );
-        ast.expression_call(
+        Expression::new_call_expression(
             SPAN,
             Self::member_expression_to_expression(member),
-            NONE,
+            None,
             arguments,
             false,
+            ast,
         )
     }
 

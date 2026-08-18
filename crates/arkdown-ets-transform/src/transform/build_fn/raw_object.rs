@@ -1,6 +1,8 @@
-use oxc_allocator::{Allocator, CloneIn, TakeIn};
-use oxc_ast::ast::{Argument, CallExpression, ChainElement, Expression, MemberExpression};
-use oxc_ast::{AstBuilder, NONE};
+use oxc_allocator::{Allocator, CloneIn, GetAllocator, TakeIn, Vec as OxcVec};
+use oxc_ast::ast::{
+    Argument, CallExpression, ChainElement, Expression, IdentifierName, MemberExpression,
+};
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_span::SPAN;
 
@@ -240,23 +242,32 @@ impl<'alloc, 'ctx> RawObjectCallEmitter<'alloc, 'ctx> {
     }
 
     fn wrap(&self, expression: Expression<'alloc>) -> Expression<'alloc> {
-        let ast = AstBuilder::new(self.allocator);
+        let ast = &AstBuilder::new(self.allocator);
         let runtime_names = self.context.runtime_names();
-        let observed_object =
-            ast.expression_identifier(SPAN, ast.str(&runtime_names.observed_object));
-        let method = ast.identifier_name(SPAN, ast.str(&runtime_names.get_raw_object));
-        let callee = Self::member_to_expression(ast.member_expression_static(
+        let observed_object = Expression::new_identifier(
+            SPAN,
+            ast.allocator().alloc_str(&runtime_names.observed_object),
+            ast,
+        );
+        let method = IdentifierName::new(
+            SPAN,
+            ast.allocator().alloc_str(&runtime_names.get_raw_object),
+            ast,
+        );
+        let callee = Self::member_to_expression(MemberExpression::new_static_member_expression(
             SPAN,
             observed_object,
             method,
             false,
+            ast,
         ));
-        ast.expression_call(
+        Expression::new_call_expression(
             SPAN,
             callee,
-            NONE,
-            ast.vec1(Argument::from(expression)),
+            None,
+            OxcVec::from_value_in(Argument::from(expression), ast),
             false,
+            ast,
         )
     }
 

@@ -9,9 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize};
-use oxc_allocator::{Allocator, Vec as OxcVec};
-use oxc_ast::ast::{Argument, Expression, FormalParameterKind, FunctionType, Statement};
-use oxc_ast::{AstBuilder, NONE};
+use oxc_allocator::{Allocator, ArenaBox, ArenaVec, Vec as OxcVec};
+use oxc_ast::ast::{
+    Argument, Expression, FormalParameterKind, FormalParameters, Function, FunctionBody,
+    FunctionType, Statement,
+};
+use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -181,11 +184,11 @@ impl NavigationBuilderRegistrationBlock {
 
     pub(super) fn statements<'a>(
         &self,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
     ) -> OxcVec<'a, Statement<'a>> {
         if self.routes.is_empty() {
-            return ast.vec();
+            return OxcVec::new_in(ast);
         }
         NavigationBuilderRegistrationAstEmitter::new(&self.routes).statements(ast, allocator)
     }
@@ -210,84 +213,118 @@ impl<'a> NavigationBuilderRegistrationAstEmitter<'a> {
 
     fn statements<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
     ) -> OxcVec<'b, Statement<'b>> {
-        let mut registrations = ast.vec();
+        let mut registrations = OxcVec::new_in(ast);
         for route in self.routes {
             registrations.push(self.registration_statement(ast, allocator, route));
         }
 
-        let guard = ast.expression_binary(
+        let guard = Expression::new_binary_expression(
             SPAN,
-            ast.expression_unary(
+            Expression::new_unary_expression(
                 SPAN,
                 UnaryOperator::Typeof,
-                ast.expression_identifier(SPAN, NavigationBuilderRuntimeName::REGISTER),
+                Expression::new_identifier(SPAN, NavigationBuilderRuntimeName::REGISTER, ast),
+                ast,
             ),
             BinaryOperator::StrictEquality,
-            ast.expression_string_literal(SPAN, NavigationBuilderRuntimeName::FUNCTION, None),
+            Expression::new_string_literal(SPAN, NavigationBuilderRuntimeName::FUNCTION, None, ast),
+            ast,
         );
-        let guarded_registrations =
-            ast.statement_if(SPAN, guard, ast.statement_block(SPAN, registrations), None);
-        let function = Expression::FunctionExpression(ast.alloc_function(
+        let guarded_registrations = Statement::new_if_statement(
             SPAN,
-            FunctionType::FunctionExpression,
+            guard,
+            Statement::new_block_statement(SPAN, registrations, ast),
             None,
-            false,
-            false,
-            false,
-            NONE,
-            NONE,
-            ast.alloc_formal_parameters(
-                SPAN,
-                FormalParameterKind::FormalParameter,
-                ast.vec(),
-                NONE,
-            ),
-            NONE,
-            Some(ast.function_body(SPAN, ast.vec(), ast.vec1(guarded_registrations))),
-        ));
-        let invoke = ast.expression_call(
-            SPAN,
-            ast.expression_parenthesized(SPAN, function),
-            NONE,
-            ast.vec(),
-            false,
+            ast,
         );
-        ast.vec1(ast.statement_expression(SPAN, invoke))
+        let function = Expression::FunctionExpression(ArenaBox::new_in(
+            Function::new(
+                SPAN,
+                FunctionType::FunctionExpression,
+                None,
+                false,
+                false,
+                false,
+                None,
+                None,
+                ArenaBox::new_in(
+                    FormalParameters::new(
+                        SPAN,
+                        FormalParameterKind::FormalParameter,
+                        ArenaVec::new_in(ast),
+                        None,
+                        ast,
+                    ),
+                    ast,
+                ),
+                None,
+                Some(ArenaBox::new_in(
+                    FunctionBody::new(
+                        SPAN,
+                        ArenaVec::new_in(ast),
+                        ArenaVec::from_value_in(guarded_registrations, ast),
+                        ast,
+                    ),
+                    ast,
+                )),
+                ast,
+            ),
+            ast,
+        ));
+        let invoke = Expression::new_call_expression(
+            SPAN,
+            Expression::new_parenthesized_expression(SPAN, function, ast),
+            None,
+            ArenaVec::new_in(ast),
+            false,
+            ast,
+        );
+        OxcVec::from_value_in(Statement::new_expression_statement(SPAN, invoke, ast), ast)
     }
 
     fn registration_statement<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
         route: &NavigationRoute,
     ) -> Statement<'b> {
-        let wrapped_builder = ast.expression_call(
+        let wrapped_builder = Expression::new_call_expression(
             SPAN,
-            ast.expression_identifier(SPAN, NavigationBuilderRuntimeName::WRAP_BUILDER),
-            NONE,
-            ast.vec1(Argument::from(ast.expression_identifier(
-                SPAN,
-                allocator.alloc_str(&route.build_function),
-            ))),
-            false,
-        );
-        let registration = ast.expression_call(
-            SPAN,
-            ast.expression_identifier(SPAN, NavigationBuilderRuntimeName::REGISTER),
-            NONE,
-            ast.vec_from_iter([
-                Argument::from(ast.expression_string_literal(
+            Expression::new_identifier(SPAN, NavigationBuilderRuntimeName::WRAP_BUILDER, ast),
+            None,
+            ArenaVec::from_value_in(
+                Argument::from(Expression::new_identifier(
                     SPAN,
-                    allocator.alloc_str(&route.name),
-                    None,
+                    allocator.alloc_str(&route.build_function),
+                    ast,
                 )),
-                Argument::from(wrapped_builder),
-            ]),
+                ast,
+            ),
             false,
+            ast,
         );
-        ast.statement_expression(SPAN, registration)
+        let registration = Expression::new_call_expression(
+            SPAN,
+            Expression::new_identifier(SPAN, NavigationBuilderRuntimeName::REGISTER, ast),
+            None,
+            ArenaVec::from_iter_in(
+                [
+                    Argument::from(Expression::new_string_literal(
+                        SPAN,
+                        allocator.alloc_str(&route.name),
+                        None,
+                        ast,
+                    )),
+                    Argument::from(wrapped_builder),
+                ],
+                ast,
+            ),
+            false,
+            ast,
+        );
+        Statement::new_expression_statement(SPAN, registration, ast)
     }
 }

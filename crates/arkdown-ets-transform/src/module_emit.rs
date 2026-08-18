@@ -1,9 +1,11 @@
 use oxc_allocator::Vec as ArenaVec;
 use oxc_ast::ast::{
-    ExportSpecifier, ImportOrExportKind, ModuleExportName, Statement, StringLiteral,
+    BindingIdentifier, ExportSpecifier, ImportDeclarationSpecifier, ImportOrExportKind,
+    ModuleExportName, Statement, StringLiteral,
 };
-use oxc_ast::{AstBuilder, NONE};
+use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
+use oxc_str::{Ident, Str};
 
 #[derive(Debug)]
 pub(super) struct NamedImportBinding {
@@ -61,8 +63,8 @@ impl ImportSplitEmitter {
         }
     }
 
-    pub(super) fn statements<'a>(&self, ast: AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
-        let mut statements = ast.vec();
+    pub(super) fn statements<'a>(&self, ast: &AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
+        let mut statements = ArenaVec::new_in(ast);
         if !self.value_bindings.is_empty() {
             statements.push(self.import_statement(ast, ImportOrExportKind::Value));
         }
@@ -72,25 +74,30 @@ impl ImportSplitEmitter {
         statements
     }
 
-    fn type_import_statements<'a>(&self, ast: AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
-        let mut statements = ast.vec();
+    fn type_import_statements<'a>(&self, ast: &AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
+        let mut statements = ArenaVec::new_in(ast);
         let default_binding = self.type_bindings.iter().find_map(|binding| match binding {
             TypeImportBinding::Default(local) => Some(local.as_str()),
             TypeImportBinding::Named(_) => None,
         });
         if let Some(local) = default_binding {
-            let specifiers = ast.vec1(ast.import_declaration_specifier_import_default_specifier(
-                SPAN,
-                ast.binding_identifier(SPAN, ast.str(local)),
-            ));
-            statements.push(Statement::from(ast.module_declaration_import_declaration(
+            let specifiers = ArenaVec::from_value_in(
+                ImportDeclarationSpecifier::new_import_default_specifier(
+                    SPAN,
+                    BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
+                    ast,
+                ),
+                ast,
+            );
+            statements.push(Statement::new_import_declaration(
                 SPAN,
                 Some(specifiers),
                 self.source.to_ast(ast),
                 None,
-                NONE,
+                None,
                 ImportOrExportKind::Type,
-            )));
+                ast,
+            ));
         }
 
         let named_bindings = self
@@ -100,23 +107,28 @@ impl ImportSplitEmitter {
                 TypeImportBinding::Default(_) => None,
                 TypeImportBinding::Named(binding) => Some(binding),
             });
-        let specifiers = ast.vec_from_iter(named_bindings.map(|binding| {
-            ast.import_declaration_specifier_import_specifier(
-                SPAN,
-                binding.imported.to_ast(ast),
-                ast.binding_identifier(SPAN, ast.str(&binding.local)),
-                ImportOrExportKind::Value,
-            )
-        }));
+        let specifiers = ArenaVec::from_iter_in(
+            named_bindings.map(|binding| {
+                ImportDeclarationSpecifier::new_import_specifier(
+                    SPAN,
+                    binding.imported.to_ast(ast),
+                    BindingIdentifier::new(SPAN, Ident::from_str_in(&binding.local, ast), ast),
+                    ImportOrExportKind::Value,
+                    ast,
+                )
+            }),
+            ast,
+        );
         if !specifiers.is_empty() {
-            statements.push(Statement::from(ast.module_declaration_import_declaration(
+            statements.push(Statement::new_import_declaration(
                 SPAN,
                 Some(specifiers),
                 self.source.to_ast(ast),
                 None,
-                NONE,
+                None,
                 ImportOrExportKind::Type,
-            )));
+                ast,
+            ));
         }
 
         statements
@@ -124,58 +136,78 @@ impl ImportSplitEmitter {
 
     fn import_statement<'a>(
         &self,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         import_kind: ImportOrExportKind,
     ) -> Statement<'a> {
         let specifiers = if import_kind.is_type() {
-            ast.vec_from_iter(self.type_bindings.iter().map(|binding| match binding {
-                TypeImportBinding::Default(local) => {
-                    ast.import_declaration_specifier_import_default_specifier(
-                        SPAN,
-                        ast.binding_identifier(SPAN, ast.str(local)),
-                    )
-                }
-                TypeImportBinding::Named(binding) => {
-                    ast.import_declaration_specifier_import_specifier(
-                        SPAN,
-                        binding.imported.to_ast(ast),
-                        ast.binding_identifier(SPAN, ast.str(&binding.local)),
-                        ImportOrExportKind::Value,
-                    )
-                }
-            }))
+            ArenaVec::from_iter_in(
+                self.type_bindings.iter().map(|binding| match binding {
+                    TypeImportBinding::Default(local) => {
+                        ImportDeclarationSpecifier::new_import_default_specifier(
+                            SPAN,
+                            BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
+                            ast,
+                        )
+                    }
+                    TypeImportBinding::Named(binding) => {
+                        ImportDeclarationSpecifier::new_import_specifier(
+                            SPAN,
+                            binding.imported.to_ast(ast),
+                            BindingIdentifier::new(
+                                SPAN,
+                                Ident::from_str_in(&binding.local, ast),
+                                ast,
+                            ),
+                            ImportOrExportKind::Value,
+                            ast,
+                        )
+                    }
+                }),
+                ast,
+            )
         } else {
-            ast.vec_from_iter(self.value_bindings.iter().map(|binding| match binding {
-                ValueImportBinding::Default(local) => {
-                    ast.import_declaration_specifier_import_default_specifier(
-                        SPAN,
-                        ast.binding_identifier(SPAN, ast.str(local)),
-                    )
-                }
-                ValueImportBinding::Namespace(local) => {
-                    ast.import_declaration_specifier_import_namespace_specifier(
-                        SPAN,
-                        ast.binding_identifier(SPAN, ast.str(local)),
-                    )
-                }
-                ValueImportBinding::Named(binding) => {
-                    ast.import_declaration_specifier_import_specifier(
-                        SPAN,
-                        binding.imported.to_ast(ast),
-                        ast.binding_identifier(SPAN, ast.str(&binding.local)),
-                        ImportOrExportKind::Value,
-                    )
-                }
-            }))
+            ArenaVec::from_iter_in(
+                self.value_bindings.iter().map(|binding| match binding {
+                    ValueImportBinding::Default(local) => {
+                        ImportDeclarationSpecifier::new_import_default_specifier(
+                            SPAN,
+                            BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
+                            ast,
+                        )
+                    }
+                    ValueImportBinding::Namespace(local) => {
+                        ImportDeclarationSpecifier::new_import_namespace_specifier(
+                            SPAN,
+                            BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
+                            ast,
+                        )
+                    }
+                    ValueImportBinding::Named(binding) => {
+                        ImportDeclarationSpecifier::new_import_specifier(
+                            SPAN,
+                            binding.imported.to_ast(ast),
+                            BindingIdentifier::new(
+                                SPAN,
+                                Ident::from_str_in(&binding.local, ast),
+                                ast,
+                            ),
+                            ImportOrExportKind::Value,
+                            ast,
+                        )
+                    }
+                }),
+                ast,
+            )
         };
-        Statement::from(ast.module_declaration_import_declaration(
+        Statement::new_import_declaration(
             SPAN,
             Some(specifiers),
             self.source.to_ast(ast),
             None,
-            NONE,
+            None,
             import_kind,
-        ))
+            ast,
+        )
     }
 }
 
@@ -203,8 +235,8 @@ impl ReExportSplitEmitter {
         }
     }
 
-    pub(super) fn statements<'a>(&self, ast: AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
-        let mut statements = ast.vec();
+    pub(super) fn statements<'a>(&self, ast: &AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
+        let mut statements = ArenaVec::new_in(ast);
         if !self.value_bindings.is_empty() {
             statements.push(self.export_statement(
                 ast,
@@ -218,26 +250,30 @@ impl ReExportSplitEmitter {
 
     fn export_statement<'a>(
         &self,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         bindings: &[ExportBinding],
         export_kind: ImportOrExportKind,
     ) -> Statement<'a> {
-        let specifiers = ast.vec_from_iter(bindings.iter().map(|binding| {
-            ast.export_specifier(
-                SPAN,
-                binding.local.to_ast(ast),
-                binding.exported.to_ast(ast),
-                ImportOrExportKind::Value,
-            )
-        }));
-        Statement::from(ast.module_declaration_export_named_declaration(
+        let specifiers = ArenaVec::from_iter_in(
+            bindings.iter().map(|binding| {
+                ExportSpecifier::new(
+                    SPAN,
+                    binding.local.to_ast(ast),
+                    binding.exported.to_ast(ast),
+                    ImportOrExportKind::Value,
+                    ast,
+                )
+            }),
+            ast,
+        );
+        Statement::new_export_from_declaration(
             SPAN,
-            None,
             specifiers,
-            Some(self.source.to_ast(ast)),
+            self.source.to_ast(ast),
             export_kind,
-            NONE,
-        ))
+            None,
+            ast,
+        )
     }
 }
 
@@ -252,8 +288,8 @@ impl LocalExportSplitEmitter {
         }
     }
 
-    pub(super) fn statements<'a>(&self, ast: AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
-        let mut statements = ast.vec();
+    pub(super) fn statements<'a>(&self, ast: &AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
+        let mut statements = ArenaVec::new_in(ast);
         if !self.value_bindings.is_empty() {
             statements.push(self.export_statement(
                 ast,
@@ -267,26 +303,23 @@ impl LocalExportSplitEmitter {
 
     fn export_statement<'a>(
         &self,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         bindings: &[ExportBinding],
         export_kind: ImportOrExportKind,
     ) -> Statement<'a> {
-        let specifiers = ast.vec_from_iter(bindings.iter().map(|binding| {
-            ast.export_specifier(
-                SPAN,
-                binding.local.to_ast(ast),
-                binding.exported.to_ast(ast),
-                ImportOrExportKind::Value,
-            )
-        }));
-        Statement::from(ast.module_declaration_export_named_declaration(
-            SPAN,
-            None,
-            specifiers,
-            None,
-            export_kind,
-            NONE,
-        ))
+        let specifiers = ArenaVec::from_iter_in(
+            bindings.iter().map(|binding| {
+                ExportSpecifier::new(
+                    SPAN,
+                    binding.local.to_ast(ast),
+                    binding.exported.to_ast(ast),
+                    ImportOrExportKind::Value,
+                    ast,
+                )
+            }),
+            ast,
+        );
+        Statement::new_export_named_declaration(SPAN, specifiers, export_kind, ast)
     }
 }
 
@@ -298,11 +331,12 @@ impl ModuleStringLiteral {
         }
     }
 
-    pub(super) fn to_ast<'a>(&self, ast: AstBuilder<'a>) -> StringLiteral<'a> {
-        ast.string_literal(
+    pub(super) fn to_ast<'a>(&self, ast: &AstBuilder<'a>) -> StringLiteral<'a> {
+        StringLiteral::new(
             SPAN,
-            ast.str(&self.value),
-            self.raw.as_ref().map(|raw| ast.str(raw)),
+            Str::from_str_in(&self.value, ast),
+            self.raw.as_ref().map(|raw| Str::from_str_in(raw, ast)),
+            ast,
         )
     }
 }
@@ -322,9 +356,11 @@ impl ModuleBindingName {
         }
     }
 
-    fn to_ast<'a>(&self, ast: AstBuilder<'a>) -> ModuleExportName<'a> {
+    fn to_ast<'a>(&self, ast: &AstBuilder<'a>) -> ModuleExportName<'a> {
         match self {
-            Self::Identifier(name) => ast.module_export_name_identifier_name(SPAN, ast.str(name)),
+            Self::Identifier(name) => {
+                ModuleExportName::new_identifier_name(SPAN, Ident::from_str_in(name, ast), ast)
+            }
             Self::StringLiteral(literal) => ModuleExportName::StringLiteral(literal.to_ast(ast)),
         }
     }

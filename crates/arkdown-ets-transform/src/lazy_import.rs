@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::{ImportOrExportKind, LazyImportDeclaration, Statement};
-use oxc_ast::AstBuilder;
+use oxc_ast::builder::AstBuilder;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 
@@ -44,8 +44,9 @@ impl<'a> LazyImportRolldownAdapter<'a> {
         }
 
         let ast = AstBuilder::new(&allocator);
-        let mut body = ast.vec_with_capacity(parsed.program.body.len());
-        let old_body = std::mem::replace(&mut parsed.program.body, ast.vec());
+        let mut body = oxc_allocator::Vec::with_capacity_in(parsed.program.body.len(), &ast);
+        let old_body =
+            std::mem::replace(&mut parsed.program.body, oxc_allocator::Vec::new_in(&ast));
         for (statement, replace) in old_body.into_iter().zip(replacements) {
             if replace {
                 let Statement::LazyImportDeclaration(declaration) = statement else {
@@ -65,21 +66,20 @@ impl<'a> LazyImportRolldownAdapter<'a> {
         allocator: &'ast Allocator,
     ) -> Statement<'ast> {
         let ast = AstBuilder::new(allocator);
-        Statement::ImportDeclaration(
-            ast.alloc_import_declaration(
-                declaration.span,
-                declaration
-                    .specifiers
-                    .as_ref()
-                    .map(|specifiers| specifiers.clone_in(allocator)),
-                declaration.source.clone_in(allocator),
-                None,
-                declaration
-                    .with_clause
-                    .as_ref()
-                    .map(|with_clause| with_clause.clone_in(allocator)),
-                ImportOrExportKind::Value,
-            ),
+        Statement::new_import_declaration(
+            declaration.span,
+            declaration
+                .specifiers
+                .as_ref()
+                .map(|specifiers| specifiers.clone_in(allocator)),
+            declaration.source.clone_in(allocator),
+            None,
+            declaration
+                .with_clause
+                .as_ref()
+                .map(|with_clause| with_clause.clone_in(allocator)),
+            ImportOrExportKind::Value,
+            &ast,
         )
     }
 }

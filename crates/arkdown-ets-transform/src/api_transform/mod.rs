@@ -4,9 +4,12 @@ mod version_table;
 #[cfg(test)]
 use std::borrow::Cow;
 
-use oxc_allocator::{Allocator, Vec as OxcVec};
-use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, Statement};
-use oxc_ast::{AstBuilder, NONE};
+use oxc_allocator::{Allocator, GetAllocator, Vec as OxcVec};
+use oxc_ast::ast::{
+    BindingIdentifier, ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind,
+    ModuleExportName, Statement, StringLiteral,
+};
+use oxc_ast::builder::AstBuilder;
 #[cfg(test)]
 use oxc_codegen::Codegen;
 #[cfg(test)]
@@ -84,7 +87,7 @@ impl KitImportRewriter {
         for (statement, replacement_plan) in old_body.into_iter().zip(replacement_plans) {
             if let Some(imports) = replacement_plan {
                 changed = true;
-                for statement in KitImportEmitter::new(imports).statements(ast) {
+                for statement in KitImportEmitter::new(imports).statements(&ast) {
                     body.push(statement);
                 }
             } else {
@@ -224,38 +227,38 @@ impl KitImportEmitter {
         Self { imports }
     }
 
-    fn statements<'a>(&self, ast: AstBuilder<'a>) -> OxcVec<'a, Statement<'a>> {
-        ast.vec_from_iter(
+    fn statements<'a>(&self, ast: &AstBuilder<'a>) -> OxcVec<'a, Statement<'a>> {
+        OxcVec::from_iter_in(
             self.imports
                 .iter()
                 .map(|import| self.import_statement(ast, import)),
+            ast,
         )
     }
 
     fn import_statement<'a>(
         &self,
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         import: &KitImportBinding,
     ) -> Statement<'a> {
-        let local_name: &'a str = ast.allocator.alloc_str(&import.local_name);
-        let module: &'a str = ast.allocator.alloc_str(&import.module);
+        let local_name: &'a str = ast.allocator().alloc_str(&import.local_name);
+        let module: &'a str = ast.allocator().alloc_str(&import.module);
         let specifier = match &import.binding {
-            KitEntry::Default(_) => ImportDeclarationSpecifier::ImportDefaultSpecifier(
-                ast.alloc_import_default_specifier(
-                    import.specifier_span,
-                    ast.binding_identifier(import.local_span, local_name),
-                ),
+            KitEntry::Default(_) => ImportDeclarationSpecifier::new_import_default_specifier(
+                import.specifier_span,
+                BindingIdentifier::new(import.local_span, local_name, ast),
+                ast,
             ),
             KitEntry::Named(_, binding_name) => {
-                let binding_name: &'a str = ast.allocator.alloc_str(binding_name);
+                let binding_name: &'a str = ast.allocator().alloc_str(binding_name);
                 let is_renamed = local_name != binding_name;
                 // When not renamed the OXC codegen omits the `as` clause automatically
                 // because `imported` == `local`. When renamed we set `imported` to the
                 // binding name so codegen emits `{ binding_name as local_name }`.
                 let imported = if is_renamed {
-                    ast.module_export_name_identifier_name(import.specifier_span, binding_name)
+                    ModuleExportName::new_identifier_name(import.specifier_span, binding_name, ast)
                 } else {
-                    ast.module_export_name_identifier_name(import.specifier_span, local_name)
+                    ModuleExportName::new_identifier_name(import.specifier_span, local_name, ast)
                 };
                 // When the statement is emitted as `import type { ... }`, the
                 // specifier must not carry a redundant `type` modifier
@@ -267,33 +270,37 @@ impl KitImportEmitter {
                 } else {
                     import.import_kind
                 };
-                ImportDeclarationSpecifier::ImportSpecifier(ast.alloc_import_specifier(
+                ImportDeclarationSpecifier::new_import_specifier(
                     import.specifier_span,
                     imported,
-                    ast.binding_identifier(import.local_span, local_name),
+                    BindingIdentifier::new(import.local_span, local_name, ast),
                     specifier_import_kind,
-                ))
+                    ast,
+                )
             }
         };
+        let specifiers = Some(OxcVec::from_value_in(specifier, ast));
         if import.lazy {
-            Statement::from(ast.module_declaration_lazy_import_declaration(
+            Statement::new_lazy_import_declaration(
                 import.declaration_span,
-                Some(ast.vec1(specifier)),
+                specifiers,
                 // `process_kit_import.js` creates a fresh module request.
                 // Keeping the kit declaration's literal span would make the
                 // source-shape printer reuse `@kit.*`'s raw text here.
-                ast.string_literal(SPAN, module, None),
-                NONE,
-            ))
-        } else {
-            Statement::from(ast.module_declaration_import_declaration(
-                import.declaration_span,
-                Some(ast.vec1(specifier)),
-                ast.string_literal(SPAN, module, None),
+                StringLiteral::new(SPAN, module, None, ast),
                 None,
-                NONE,
+                ast,
+            )
+        } else {
+            Statement::new_import_declaration(
+                import.declaration_span,
+                specifiers,
+                StringLiteral::new(SPAN, module, None, ast),
+                None,
+                None,
                 import.import_kind,
-            ))
+                ast,
+            )
         }
     }
 }

@@ -1,7 +1,7 @@
 use rustc_hash::FxHashSet;
 
 use oxc_ast::ast::{
-    Argument, ArkUIChild, ArkUIComponentExpression, CallExpression, Declaration,
+    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, CallExpression, Declaration,
     ExportDefaultDeclarationKind, Expression, FunctionBody, Program, Statement, StructElement,
     StructStatement,
 };
@@ -42,8 +42,8 @@ impl ComponentNameCollector {
             Statement::StructStatement(statement) => {
                 self.collect_struct_components(statement);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::StructStatement(statement) = &export.declaration {
                     self.collect_struct_components(statement);
                 }
             }
@@ -84,8 +84,8 @@ impl ComponentNameCollector {
             Statement::StructStatement(statement) => {
                 self.collect_struct_if_components(statement);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::StructStatement(statement) = &export.declaration {
                     self.collect_struct_if_components(statement);
                 }
             }
@@ -202,7 +202,9 @@ impl ComponentNameCollector {
             return;
         };
         if let Expression::ArrowFunctionExpression(arrow) = expression {
-            self.collect_body_components(&arrow.body);
+            if let ArrowFunctionBody::FunctionBody(body) = &arrow.body {
+                self.collect_body_components(body);
+            }
         }
     }
 

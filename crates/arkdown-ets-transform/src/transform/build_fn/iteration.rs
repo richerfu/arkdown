@@ -1,12 +1,12 @@
 use rustc_hash::FxHashSet;
 
-use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
+use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
-    Argument, ArkUIComponentExpression, ArrowFunctionExpression, Expression, FormalParameter,
-    FormalParameterKind, FormalParameters, Statement, VariableDeclarationKind,
+    Argument, ArkUIComponentExpression, ArrowFunctionBody, ArrowFunctionExpression, BindingPattern,
+    Expression, FormalParameter, FormalParameterKind, FormalParameters, FunctionBody,
+    IdentifierName, MemberExpression, Statement, VariableDeclarationKind, VariableDeclarator,
 };
-use oxc_ast::AstBuilder;
-use oxc_ast::NONE;
+use oxc_ast::builder::AstBuilder;
 use oxc_span::{GetSpan, SPAN};
 use oxc_syntax::operator::UnaryOperator;
 
@@ -37,7 +37,7 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
 
     pub(super) fn lazy_list_item_creation2_statement<'c>(
         &self,
-        ast: AstBuilder<'c>,
+        ast: &AstBuilder<'c>,
         allocator: &'c Allocator,
         attributes: &[LeafAttribute<'_>],
         builder_methods: &FxHashSet<String>,
@@ -50,13 +50,18 @@ impl<'a, 'b> IterationComponent<'a, 'b> {
             &context.runtime_names().component_list_item,
             &context.runtime_names().method_create,
             {
-                let mut arguments = ast.vec_from_iter([
-                    Argument::from(ast.expression_identifier(
-                        SPAN,
-                        ast.str(&context.runtime_names().deep_render_function),
-                    )),
-                    Argument::from(ast.expression_boolean_literal(SPAN, true)),
-                ]);
+                let mut arguments = ArenaVec::from_iter_in(
+                    [
+                        Argument::from(Expression::new_identifier(
+                            SPAN,
+                            ast.allocator()
+                                .alloc_str(&context.runtime_names().deep_render_function),
+                            ast,
+                        )),
+                        Argument::from(Expression::new_boolean_literal(SPAN, true, ast)),
+                    ],
+                    ast,
+                );
                 arguments.extend(self.component.arguments.iter().map(|argument| {
                     BuildArgumentEmitter::new()
                         .with_context(context)
@@ -129,41 +134,51 @@ impl IterationArgument {
 pub(super) struct IterationFormalParameters;
 
 impl IterationFormalParameters {
-    pub(super) fn empty<'a>(ast: AstBuilder<'a>) -> FormalParameters<'a> {
-        ast.formal_parameters(
+    pub(super) fn empty<'a>(ast: &AstBuilder<'a>) -> FormalParameters<'a> {
+        FormalParameters::new(
             SPAN,
             FormalParameterKind::ArrowFormalParameters,
-            ast.vec(),
-            NONE,
+            oxc_allocator::ArenaVec::new_in(ast),
+            None,
+            ast,
         )
     }
 
     pub(super) fn from_names<'a, const N: usize>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         names: [&str; N],
     ) -> FormalParameters<'a> {
-        ast.formal_parameters(
+        FormalParameters::new(
             SPAN,
             FormalParameterKind::ArrowFormalParameters,
-            ast.vec_from_iter(names.into_iter().map(|name| {
-                ast.formal_parameter(
-                    SPAN,
-                    ast.vec(),
-                    ast.binding_pattern_binding_identifier(SPAN, ast.str(name)),
-                    NONE,
-                    NONE,
-                    false,
-                    None,
-                    false,
-                    false,
-                )
-            })),
-            NONE,
+            oxc_allocator::ArenaVec::from_iter_in(
+                names.into_iter().map(|name| {
+                    FormalParameter::new(
+                        SPAN,
+                        oxc_allocator::ArenaVec::new_in(ast),
+                        BindingPattern::new_binding_identifier(
+                            SPAN,
+                            ast.allocator().alloc_str(name),
+                            ast,
+                        ),
+                        None,
+                        None,
+                        false,
+                        None,
+                        false,
+                        false,
+                        ast,
+                    )
+                }),
+                ast,
+            ),
+            None,
+            ast,
         )
     }
 
     pub(super) fn render_callback<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         context: &BuildContext,
     ) -> FormalParameters<'a> {
         Self::from_names(
@@ -176,7 +191,7 @@ impl IterationFormalParameters {
     }
 
     pub(super) fn for_each_generator<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         item: Option<&FormalParameter<'_>>,
         index: Option<&FormalParameter<'_>>,
@@ -189,43 +204,53 @@ impl IterationFormalParameters {
                 items.push(index.clone_in(allocator));
             }
         }
-        ast.formal_parameters(
+        FormalParameters::new(
             SPAN,
             FormalParameterKind::ArrowFormalParameters,
             items,
-            NONE,
+            None,
+            ast,
         )
     }
 
     pub(super) fn from_source<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         params: &FormalParameters<'_>,
     ) -> FormalParameters<'a> {
-        let items = ast.vec_from_iter(params.items.iter().map(|param| param.clone_in(allocator)));
+        let items = oxc_allocator::ArenaVec::from_iter_in(
+            params.items.iter().map(|param| param.clone_in(allocator)),
+            ast,
+        );
         let rest = params.rest.as_ref().map(|rest| rest.clone_in(allocator));
-        ast.formal_parameters(
+        FormalParameters::new(
             SPAN,
             FormalParameterKind::ArrowFormalParameters,
             items,
             rest,
+            ast,
         )
     }
 
     fn for_each_item_parameter<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         item_binding_name: &str,
     ) -> FormalParameter<'a> {
-        ast.formal_parameter(
+        FormalParameter::new(
             SPAN,
-            ast.vec(),
-            ast.binding_pattern_binding_identifier(SPAN, ast.str(item_binding_name)),
-            NONE,
-            NONE,
+            oxc_allocator::ArenaVec::new_in(ast),
+            BindingPattern::new_binding_identifier(
+                SPAN,
+                ast.allocator().alloc_str(item_binding_name),
+                ast,
+            ),
+            None,
+            None,
             false,
             None,
             false,
             false,
+            ast,
         )
     }
 }
@@ -234,7 +259,7 @@ pub(super) struct IterationAstStatement;
 
 impl IterationAstStatement {
     pub(super) fn const_arrow_function<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         name: &str,
         params: FormalParameters<'a>,
         statements: OxcVec<'a, Statement<'a>>,
@@ -243,7 +268,7 @@ impl IterationAstStatement {
     }
 
     pub(super) fn const_arrow_function_with_params<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         name: &str,
         params: FormalParameters<'a>,
         statements: OxcVec<'a, Statement<'a>>,
@@ -251,42 +276,56 @@ impl IterationAstStatement {
         Self::const_declaration(
             ast,
             name,
-            ast.expression_arrow_function(
+            Expression::new_arrow_function_expression(
                 SPAN,
                 false,
-                false,
-                NONE,
-                params,
-                NONE,
-                ast.function_body(SPAN, ast.vec(), statements),
+                None,
+                ArenaBox::new_in(params, ast),
+                None,
+                oxc_ast::ast::ArrowFunctionBody::FunctionBody(ArenaBox::new_in(
+                    FunctionBody::new(SPAN, ArenaVec::new_in(ast), statements, ast),
+                    ast,
+                )),
+                ast,
             ),
         )
     }
 
     pub(super) fn item_creation_call<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         context: &BuildContext,
     ) -> Statement<'a> {
-        let callee =
-            ast.expression_identifier(SPAN, ast.str(&context.runtime_names().item_creation));
-        let arguments =
-            ast.vec_from_iter([
-                Argument::from(
-                    ast.expression_identifier(SPAN, ast.str(&context.runtime_names().elmt_id)),
-                ),
-                Argument::from(ast.expression_identifier(
-                    SPAN,
-                    ast.str(&context.runtime_names().is_initial_render),
-                )),
-            ]);
-        ast.statement_expression(
+        let callee = Expression::new_identifier(
             SPAN,
-            ast.expression_call(SPAN, callee, NONE, arguments, false),
+            ast.allocator()
+                .alloc_str(&context.runtime_names().item_creation),
+            ast,
+        );
+        let arguments = ArenaVec::from_iter_in(
+            [
+                Argument::from(Expression::new_identifier(
+                    SPAN,
+                    ast.allocator().alloc_str(&context.runtime_names().elmt_id),
+                    ast,
+                )),
+                Argument::from(Expression::new_identifier(
+                    SPAN,
+                    ast.allocator()
+                        .alloc_str(&context.runtime_names().is_initial_render),
+                    ast,
+                )),
+            ],
+            ast,
+        );
+        Statement::new_expression_statement(
+            SPAN,
+            Expression::new_call_expression(SPAN, callee, None, arguments, false, ast),
+            ast,
         )
     }
 
     pub(super) fn lazy_list_item_creation<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         component: &ArkUIComponentExpression<'_>,
         context: &BuildContext,
@@ -297,18 +336,27 @@ impl IterationAstStatement {
             allocator,
             &context.runtime_names().view_stack_processor,
             &context.runtime_names().start_get_access_recording_for,
-            ast.vec1(Argument::from(ast.expression_identifier(
-                SPAN,
-                ast.str(&context.runtime_names().elmt_id),
-            ))),
+            ArenaVec::from_value_in(
+                Argument::from(Expression::new_identifier(
+                    SPAN,
+                    ast.allocator().alloc_str(&context.runtime_names().elmt_id),
+                    ast,
+                )),
+                ast,
+            ),
         ));
-        let mut create_arguments = ast.vec_from_iter([
-            Argument::from(ast.expression_identifier(
-                SPAN,
-                ast.str(&context.runtime_names().deep_render_function),
-            )),
-            Argument::from(ast.expression_boolean_literal(SPAN, true)),
-        ]);
+        let mut create_arguments = ArenaVec::from_iter_in(
+            [
+                Argument::from(Expression::new_identifier(
+                    SPAN,
+                    ast.allocator()
+                        .alloc_str(&context.runtime_names().deep_render_function),
+                    ast,
+                )),
+                Argument::from(Expression::new_boolean_literal(SPAN, true, ast)),
+            ],
+            ast,
+        );
         create_arguments.extend(component.arguments.iter().map(|argument| {
             BuildArgumentEmitter::new()
                 .with_context(context)
@@ -329,7 +377,7 @@ impl IterationAstStatement {
             allocator,
             &context.runtime_names().view_stack_processor,
             &context.runtime_names().stop_get_access_recording,
-            ast.vec(),
+            ArenaVec::new_in(ast),
         ));
         Self::const_arrow_function(
             ast,
@@ -340,26 +388,33 @@ impl IterationAstStatement {
     }
 
     pub(super) fn observed_item_create<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         component_name: &str,
         source_arguments: &[Argument<'_>],
         context: &BuildContext,
     ) -> Statement<'a> {
-        let empty_body = ast.function_body(SPAN, ast.vec(), ast.vec());
-        let empty_builder = ast.expression_arrow_function(
+        let empty_builder = Expression::new_arrow_function_expression(
             SPAN,
             false,
-            false,
-            NONE,
-            IterationFormalParameters::empty(ast),
-            NONE,
-            empty_body,
+            None,
+            ArenaBox::new_in(IterationFormalParameters::empty(ast), ast),
+            None,
+            ArrowFunctionBody::new_function_body(
+                SPAN,
+                ArenaVec::new_in(ast),
+                ArenaVec::new_in(ast),
+                ast,
+            ),
+            ast,
         );
-        let mut arguments = ast.vec_from_iter([
-            Argument::from(empty_builder),
-            Argument::from(ast.expression_boolean_literal(SPAN, false)),
-        ]);
+        let mut arguments = ArenaVec::from_iter_in(
+            [
+                Argument::from(empty_builder),
+                Argument::from(Expression::new_boolean_literal(SPAN, false, ast)),
+            ],
+            ast,
+        );
         arguments.extend(source_arguments.iter().map(|argument| {
             BuildArgumentEmitter::new()
                 .with_context(context)
@@ -375,7 +430,7 @@ impl IterationAstStatement {
     }
 
     pub(super) fn for_each_update<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         context: &BuildContext,
         data: Expression<'a>,
@@ -392,7 +447,7 @@ impl IterationAstStatement {
     }
 
     pub(super) fn lazy_for_each_create<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         context: &BuildContext,
         data: Expression<'a>,
@@ -402,7 +457,7 @@ impl IterationAstStatement {
     }
 
     pub(super) fn item_binding_declaration<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         item_param: &FormalParameter<'_>,
         context: &BuildContext,
@@ -412,101 +467,125 @@ impl IterationAstStatement {
     }
 
     pub(super) fn member_call<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         object: Expression<'a>,
         method_name: &str,
         arguments: OxcVec<'a, Argument<'a>>,
     ) -> Statement<'a> {
-        let property = ast.identifier_name(SPAN, allocator.alloc_str(method_name));
-        let member = ast.member_expression_static(SPAN, object, property, false);
-        let call = ast.expression_call(SPAN, Expression::from(member), NONE, arguments, false);
-        ast.statement_expression(SPAN, call)
+        let property = IdentifierName::new(SPAN, allocator.alloc_str(method_name), ast);
+        let member =
+            MemberExpression::new_static_member_expression(SPAN, object, property, false, ast);
+        let call = Expression::new_call_expression(
+            SPAN,
+            Expression::from(member),
+            None,
+            arguments,
+            false,
+            ast,
+        );
+        Statement::new_expression_statement(SPAN, call, ast)
     }
 
-    pub(super) fn identifier_call<'a>(ast: AstBuilder<'a>, name: &str) -> Statement<'a> {
-        ast.statement_expression(
+    pub(super) fn identifier_call<'a>(ast: &AstBuilder<'a>, name: &str) -> Statement<'a> {
+        Statement::new_expression_statement(
             SPAN,
-            ast.expression_call(
+            Expression::new_call_expression(
                 SPAN,
-                ast.expression_identifier(SPAN, ast.str(name)),
-                NONE,
-                ast.vec(),
+                Expression::new_identifier(SPAN, ast.allocator().alloc_str(name), ast),
+                None,
+                ArenaVec::new_in(ast),
                 false,
+                ast,
             ),
+            ast,
         )
     }
 
     pub(super) fn const_declaration<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         name: &str,
         init: Expression<'a>,
     ) -> Statement<'a> {
-        let binding = ast.binding_pattern_binding_identifier(SPAN, ast.str(name));
-        let declarator = ast.variable_declarator(
+        let binding =
+            BindingPattern::new_binding_identifier(SPAN, ast.allocator().alloc_str(name), ast);
+        let declarator = VariableDeclarator::new(SPAN, binding, None, Some(init), false, ast);
+        Statement::new_variable_declaration(
             SPAN,
             VariableDeclarationKind::Const,
-            binding,
-            NONE,
-            Some(init),
+            ArenaVec::from_value_in(declarator, ast),
             false,
-        );
-        Statement::from(ast.declaration_variable(
-            SPAN,
-            VariableDeclarationKind::Const,
-            ast.vec1(declarator),
-            false,
-        ))
+            ast,
+        )
     }
 
-    pub(super) fn view_context<'a>(ast: AstBuilder<'a>, context: &BuildContext) -> Expression<'a> {
+    pub(super) fn view_context<'a>(ast: &AstBuilder<'a>, context: &BuildContext) -> Expression<'a> {
         if !context.use_parent_context {
-            return ast.expression_this(SPAN);
+            return Expression::new_this_expression(SPAN, ast);
         }
-        let test = ast.expression_identifier(SPAN, GeneratedViewpuName::PARENT);
-        let consequent = ast.expression_identifier(SPAN, GeneratedViewpuName::PARENT);
-        let alternate = ast.expression_this(SPAN);
-        ast.expression_parenthesized(
+        let test = Expression::new_identifier(SPAN, GeneratedViewpuName::PARENT, ast);
+        let consequent = Expression::new_identifier(SPAN, GeneratedViewpuName::PARENT, ast);
+        let alternate = Expression::new_this_expression(SPAN, ast);
+        Expression::new_parenthesized_expression(
             SPAN,
-            ast.expression_conditional(SPAN, test, consequent, alternate),
+            Expression::new_conditional_expression(SPAN, test, consequent, alternate, ast),
+            ast,
         )
     }
 
     fn lazy_list_item_not_initial_render<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         context: &BuildContext,
     ) -> Statement<'a> {
-        let test = ast.expression_unary(
+        let test = Expression::new_unary_expression(
             SPAN,
             UnaryOperator::LogicalNot,
-            ast.expression_identifier(SPAN, ast.str(&context.runtime_names().is_initial_render)),
-        );
-        let consequent = ast.statement_block(
-            SPAN,
-            ast.vec1(Self::static_call(
+            Expression::new_identifier(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(&context.runtime_names().is_initial_render),
                 ast,
-                allocator,
-                &context.runtime_names().component_list_item,
-                &context.runtime_names().method_pop,
-                ast.vec(),
-            )),
+            ),
+            ast,
         );
-        ast.statement_if(SPAN, test, consequent, None)
+        let consequent = Statement::new_block_statement(
+            SPAN,
+            ArenaVec::from_value_in(
+                Self::static_call(
+                    ast,
+                    allocator,
+                    &context.runtime_names().component_list_item,
+                    &context.runtime_names().method_pop,
+                    ArenaVec::new_in(ast),
+                ),
+                ast,
+            ),
+            ast,
+        );
+        Statement::new_if_statement(SPAN, test, consequent, None, ast)
     }
 
     pub(super) fn static_call<'a>(
-        ast: AstBuilder<'a>,
+        ast: &AstBuilder<'a>,
         allocator: &'a Allocator,
         object_name: &str,
         method_name: &str,
         arguments: OxcVec<'a, Argument<'a>>,
     ) -> Statement<'a> {
-        let object = ast.expression_identifier(SPAN, allocator.alloc_str(object_name));
-        let property = ast.identifier_name(SPAN, allocator.alloc_str(method_name));
-        let member = ast.member_expression_static(SPAN, object, property, false);
-        let call = ast.expression_call(SPAN, Expression::from(member), NONE, arguments, false);
-        ast.statement_expression(SPAN, call)
+        let object = Expression::new_identifier(SPAN, allocator.alloc_str(object_name), ast);
+        let property = IdentifierName::new(SPAN, allocator.alloc_str(method_name), ast);
+        let member =
+            MemberExpression::new_static_member_expression(SPAN, object, property, false, ast);
+        let call = Expression::new_call_expression(
+            SPAN,
+            Expression::from(member),
+            None,
+            arguments,
+            false,
+            ast,
+        );
+        Statement::new_expression_statement(SPAN, call, ast)
     }
 }
 
@@ -515,14 +594,18 @@ pub(super) struct ForEachKeyExpression<'a> {
     pub(super) uses_index: bool,
 }
 
-struct ForEachUpdateEmitter<'a, 'ctx> {
-    ast: AstBuilder<'a>,
+struct ForEachUpdateEmitter<'a, 'ast, 'ctx> {
+    ast: &'ast AstBuilder<'a>,
     allocator: &'a Allocator,
     context: &'ctx BuildContext,
 }
 
-impl<'a, 'ctx> ForEachUpdateEmitter<'a, 'ctx> {
-    fn new(ast: AstBuilder<'a>, allocator: &'a Allocator, context: &'ctx BuildContext) -> Self {
+impl<'a, 'ast, 'ctx> ForEachUpdateEmitter<'a, 'ast, 'ctx> {
+    fn new(
+        ast: &'ast AstBuilder<'a>,
+        allocator: &'a Allocator,
+        context: &'ctx BuildContext,
+    ) -> Self {
         Self {
             ast,
             allocator,
@@ -555,54 +638,67 @@ impl<'a, 'ctx> ForEachUpdateEmitter<'a, 'ctx> {
         key: Option<ForEachKeyExpression<'a>>,
     ) -> OxcVec<'a, Argument<'a>> {
         let mut arguments = OxcVec::new_in(&self.allocator);
-        arguments.push(Argument::from(self.ast.expression_identifier(
+        arguments.push(Argument::from(Expression::new_identifier(
             SPAN,
-            self.ast.str(&self.context.runtime_names().elmt_id),
+            self.ast
+                .allocator()
+                .alloc_str(&self.context.runtime_names().elmt_id),
+            self.ast,
         )));
         arguments.push(Argument::from(data));
-        arguments.push(Argument::from(
-            self.ast.expression_identifier(
-                SPAN,
-                self.ast
-                    .str(&self.context.runtime_names().foreach_item_gen_function),
-            ),
-        ));
+        arguments.push(Argument::from(Expression::new_identifier(
+            SPAN,
+            self.ast
+                .allocator()
+                .alloc_str(&self.context.runtime_names().foreach_item_gen_function),
+            self.ast,
+        )));
         if !has_item_param {
             return arguments;
         }
         if let Some(key) = key {
             arguments.push(Argument::from(key.expression));
-            arguments.push(Argument::from(
-                self.ast
-                    .expression_boolean_literal(SPAN, item_gen_uses_index),
-            ));
-            arguments.push(Argument::from(
-                self.ast.expression_boolean_literal(SPAN, key.uses_index),
-            ));
-        } else if item_gen_uses_index {
-            arguments.push(Argument::from(self.ast.expression_identifier(
+            arguments.push(Argument::from(Expression::new_boolean_literal(
                 SPAN,
-                self.ast.str(&self.context.runtime_names().undefined),
+                item_gen_uses_index,
+                self.ast,
             )));
-            arguments.push(Argument::from(
-                self.ast.expression_boolean_literal(SPAN, true),
-            ));
-            arguments.push(Argument::from(
-                self.ast.expression_boolean_literal(SPAN, false),
-            ));
+            arguments.push(Argument::from(Expression::new_boolean_literal(
+                SPAN,
+                key.uses_index,
+                self.ast,
+            )));
+        } else if item_gen_uses_index {
+            arguments.push(Argument::from(Expression::new_identifier(
+                SPAN,
+                self.ast
+                    .allocator()
+                    .alloc_str(&self.context.runtime_names().undefined),
+                self.ast,
+            )));
+            arguments.push(Argument::from(Expression::new_boolean_literal(
+                SPAN, true, self.ast,
+            )));
+            arguments.push(Argument::from(Expression::new_boolean_literal(
+                SPAN, false, self.ast,
+            )));
         }
         arguments
     }
 }
 
-struct LazyForEachCreateEmitter<'a, 'ctx> {
-    ast: AstBuilder<'a>,
+struct LazyForEachCreateEmitter<'a, 'ast, 'ctx> {
+    ast: &'ast AstBuilder<'a>,
     allocator: &'a Allocator,
     context: &'ctx BuildContext,
 }
 
-impl<'a, 'ctx> LazyForEachCreateEmitter<'a, 'ctx> {
-    fn new(ast: AstBuilder<'a>, allocator: &'a Allocator, context: &'ctx BuildContext) -> Self {
+impl<'a, 'ast, 'ctx> LazyForEachCreateEmitter<'a, 'ast, 'ctx> {
+    fn new(
+        ast: &'ast AstBuilder<'a>,
+        allocator: &'a Allocator,
+        context: &'ctx BuildContext,
+    ) -> Self {
         Self {
             ast,
             allocator,
@@ -622,34 +718,34 @@ impl<'a, 'ctx> LazyForEachCreateEmitter<'a, 'ctx> {
 
     fn arguments(&self, data: Expression<'a>, has_id_func: bool) -> OxcVec<'a, Argument<'a>> {
         let mut arguments = OxcVec::new_in(&self.allocator);
-        arguments.push(Argument::from(
-            self.ast.expression_string_literal(
-                SPAN,
-                self.ast
-                    .str(&self.context.runtime_names().lazy_foreach_create_version),
-                None,
-            ),
-        ));
+        arguments.push(Argument::from(Expression::new_string_literal(
+            SPAN,
+            self.ast
+                .allocator()
+                .alloc_str(&self.context.runtime_names().lazy_foreach_create_version),
+            None,
+            self.ast,
+        )));
         arguments.push(Argument::from(IterationAstStatement::view_context(
             self.ast,
             self.context,
         )));
         arguments.push(Argument::from(data));
-        arguments.push(Argument::from(
-            self.ast.expression_identifier(
+        arguments.push(Argument::from(Expression::new_identifier(
+            SPAN,
+            self.ast
+                .allocator()
+                .alloc_str(&self.context.runtime_names().lazy_foreach_item_gen_function),
+            self.ast,
+        )));
+        if has_id_func {
+            arguments.push(Argument::from(Expression::new_identifier(
                 SPAN,
                 self.ast
-                    .str(&self.context.runtime_names().lazy_foreach_item_gen_function),
-            ),
-        ));
-        if has_id_func {
-            arguments.push(Argument::from(
-                self.ast.expression_identifier(
-                    SPAN,
-                    self.ast
-                        .str(&self.context.runtime_names().lazy_foreach_item_id_func),
-                ),
-            ));
+                    .allocator()
+                    .alloc_str(&self.context.runtime_names().lazy_foreach_item_id_func),
+                self.ast,
+            )));
         }
         arguments
     }
@@ -657,31 +753,37 @@ impl<'a, 'ctx> LazyForEachCreateEmitter<'a, 'ctx> {
 
 struct ItemBindingDeclarationEmitter<'a> {
     parameter: &'a FormalParameter<'a>,
-    item_binding_name: &'a str,
+    item_binding_name: String,
 }
 
 impl<'a> ItemBindingDeclarationEmitter<'a> {
-    fn new(parameter: &'a FormalParameter<'a>, item_binding_name: &'a str) -> Self {
+    fn new(parameter: &'a FormalParameter<'a>, item_binding_name: &str) -> Self {
+        let item_binding_name = item_binding_name.to_string();
         Self {
             parameter,
             item_binding_name,
         }
     }
 
-    fn statement<'b>(&self, ast: AstBuilder<'b>, allocator: &'b Allocator) -> Statement<'b> {
-        let declarator = ast.variable_declarator(
+    fn statement<'b>(&self, ast: &AstBuilder<'b>, allocator: &'b Allocator) -> Statement<'b> {
+        let declarator = VariableDeclarator::new(
             SPAN,
-            VariableDeclarationKind::Const,
             self.parameter.pattern.clone_in(allocator),
-            NONE,
-            Some(ast.expression_identifier(SPAN, ast.str(self.item_binding_name))),
+            None,
+            Some(Expression::new_identifier(
+                SPAN,
+                ast.allocator().alloc_str(&self.item_binding_name),
+                ast,
+            )),
             false,
+            ast,
         );
-        Statement::from(ast.declaration_variable(
+        Statement::new_variable_declaration(
             SPAN,
             VariableDeclarationKind::Const,
-            ast.vec1(declarator),
+            ArenaVec::from_value_in(declarator, ast),
             false,
-        ))
+            ast,
+        )
     }
 }

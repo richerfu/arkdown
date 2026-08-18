@@ -8,14 +8,15 @@
 
 use rustc_hash::FxHashMap;
 
-use oxc_allocator::{Allocator, CloneIn};
+use oxc_allocator::{Allocator, ArenaVec, CloneIn, GetAllocator};
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, CallExpression, Expression, NumberBase, ObjectPropertyKind,
-    PropertyKey, PropertyKind,
+    PropertyKey, PropertyKind, StringLiteral,
 };
-use oxc_ast::AstBuilder;
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::SPAN;
+use oxc_str::Str;
 
 pub(crate) const RAWFILE_RUNTIME_TYPE: i64 = 30000;
 
@@ -74,7 +75,7 @@ impl<'a> ResourceObject<'a> {
         }
     }
 
-    fn expression<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
+    fn expression<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
         ResourceObjectEmitter::new(self).expression(ast)
     }
 }
@@ -88,11 +89,15 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
         Self { resource }
     }
 
-    fn expression<'c>(&self, ast: AstBuilder<'c>) -> Expression<'c> {
-        ast.expression_object(SPAN, ast.vec_from_iter(self.properties(ast)))
+    fn expression<'c>(&self, ast: &AstBuilder<'c>) -> Expression<'c> {
+        Expression::new_object_expression(
+            SPAN,
+            ArenaVec::from_iter_in(self.properties(ast), ast),
+            ast,
+        )
     }
 
-    fn properties<'c>(&self, ast: AstBuilder<'c>) -> [ObjectPropertyKind<'c>; 5] {
+    fn properties<'c>(&self, ast: &AstBuilder<'c>) -> [ObjectPropertyKind<'c>; 5] {
         [
             self.number_property(ast, ResourceObjectPropertyName::ID, self.resource.id),
             self.number_property(
@@ -116,48 +121,55 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
 
     fn number_property<'c>(
         &self,
-        ast: AstBuilder<'c>,
+        ast: &AstBuilder<'c>,
         name: &'static str,
         value: i64,
     ) -> ObjectPropertyKind<'c> {
-        let raw = ast.str(&value.to_string());
+        let raw = Str::from_str_in(&value.to_string(), ast);
         self.property(
             ast,
             name,
-            ast.expression_numeric_literal(SPAN, value as f64, Some(raw), NumberBase::Decimal),
+            Expression::new_numeric_literal(
+                SPAN,
+                value as f64,
+                Some(raw),
+                NumberBase::Decimal,
+                ast,
+            ),
         )
     }
 
     fn string_property<'c>(
         &self,
-        ast: AstBuilder<'c>,
+        ast: &AstBuilder<'c>,
         name: &'static str,
         value: &str,
     ) -> ObjectPropertyKind<'c> {
         self.property(
             ast,
             name,
-            ast.expression_string_literal(SPAN, ast.str(value), None),
+            Expression::new_string_literal(SPAN, Str::from_str_in(value, ast), None, ast),
         )
     }
 
-    fn params_property<'c>(&self, ast: AstBuilder<'c>) -> ObjectPropertyKind<'c> {
-        let elements = ast.vec_from_iter(
+    fn params_property<'c>(&self, ast: &AstBuilder<'c>) -> ObjectPropertyKind<'c> {
+        let elements = ArenaVec::from_iter_in(
             self.resource
                 .params
                 .iter()
-                .map(|argument| ArrayExpressionElement::from(argument.clone_in(ast.allocator))),
+                .map(|argument| ArrayExpressionElement::from(argument.clone_in(ast.allocator()))),
+            ast,
         );
         self.property(
             ast,
             ResourceObjectPropertyName::PARAMS,
-            ast.expression_array(SPAN, elements),
+            Expression::new_array_expression(SPAN, elements, ast),
         )
     }
 
     fn property<'c>(
         &self,
-        ast: AstBuilder<'c>,
+        ast: &AstBuilder<'c>,
         name: &'static str,
         value: Expression<'c>,
     ) -> ObjectPropertyKind<'c> {
@@ -167,11 +179,16 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
             // alone is created with `createIdentifier`. Keeping this AST shape
             // matters because CompileArkTS feeds the emitted source into
             // es2abc, including generated closure-name hashing.
-            PropertyKey::StringLiteral(ast.alloc_string_literal(SPAN, ast.str(name), None))
+            PropertyKey::StringLiteral(StringLiteral::boxed(
+                SPAN,
+                Str::from_str_in(name, ast),
+                None,
+                ast,
+            ))
         } else {
-            ast.property_key_static_identifier(SPAN, ast.str(name))
+            PropertyKey::new_static_identifier(SPAN, name, ast)
         };
-        ast.object_property_kind_object_property(
+        ObjectPropertyKind::new_object_property(
             SPAN,
             PropertyKind::Init,
             key,
@@ -179,6 +196,7 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
             false,
             false,
             false,
+            ast,
         )
     }
 }
@@ -285,7 +303,7 @@ impl<'a> ResourceReferenceMutator<'a, '_> {
             ResourceCallName::RAWFILE => self.rawfile_object(call),
             _ => return None,
         }?;
-        Some(replacement.expression(AstBuilder::new(self.allocator)))
+        Some(replacement.expression(&AstBuilder::new(self.allocator)))
     }
 
     fn resource_object(&self, call: &CallExpression<'_>) -> Option<ResourceObject<'a>> {

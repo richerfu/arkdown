@@ -438,7 +438,9 @@ impl<'src> ScriptVisitor<'src> {
                 }
             }
             Expression::ArrowFunctionExpression(arrow) => {
-                self.visit_program(&arrow.body.statements);
+                if let oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) = &arrow.body {
+                    self.visit_program(&body.statements);
+                }
             }
             Expression::AssignmentExpression(assign) => {
                 // target.getCompileArkTsOption().compilePluginPath = "./my.js"

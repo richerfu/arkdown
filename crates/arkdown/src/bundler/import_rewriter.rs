@@ -197,10 +197,15 @@ impl<'a> Visit<'a> for HvigorModuleRequestLiteralInventory {
         &mut self,
         declaration: &oxc_ast::ast::ExportNamedDeclaration<'a>,
     ) {
-        if let Some(source) = &declaration.source {
-            self.push(source, false);
-        }
         walk::walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_export_from_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::ExportFromDeclaration<'a>,
+    ) {
+        self.push(&declaration.source, false);
+        walk::walk_export_from_declaration(self, declaration);
     }
 
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {

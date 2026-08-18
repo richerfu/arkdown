@@ -47,27 +47,28 @@ arkdown-watcher = { path = "crates/arkdown-watcher" }
 hapsigner = { version = "0.2.0", default-features = false }
 
 # Parser — ohos-rs OXC fork with ArkTS/ArkUI support.
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808", features = ["full"] }
-oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_isolated_declarations = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
-oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "39b0ce7aeda63ab83ccea796c5c321fbeee36808" }
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_str = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_isolated_declarations = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
 oxc_resolver = "11.21.3"
 
 # Rolldown
-rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36", default-features = false, features = ["experimental"] }
-rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
-rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
-rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
-rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
-rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "61f8e278e7fa7acfb7eb09ff8de40ef895d82a36" }
+rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03", default-features = false, features = ["experimental"] }
+rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
+rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
+rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
+rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
+rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
 
 # NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
 napi = { version = "3.9.1", features = [

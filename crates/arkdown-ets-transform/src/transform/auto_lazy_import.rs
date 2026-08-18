@@ -7,11 +7,11 @@
 
 use std::borrow::Cow;
 
-use oxc_allocator::{Allocator, CloneIn};
+use oxc_allocator::{Allocator, CloneIn, GetAllocator};
 use oxc_ast::ast::{
     ImportDeclaration, ImportDeclarationSpecifier, LazyImportDeclaration, Program, Statement,
 };
-use oxc_ast::AstBuilder;
+use oxc_ast::builder::AstBuilder;
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
@@ -129,34 +129,33 @@ fn lazy_import<'a>(
     }
 
     let mut kept: oxc_allocator::Vec<'_, ImportDeclarationSpecifier<'_>> =
-        ast.vec_with_capacity(specifiers.len());
+        oxc_allocator::ArenaVec::with_capacity_in(specifiers.len(), ast);
     for specifier in specifiers {
         match specifier {
             ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
                 if is_referenced(specifier.local.symbol_id.get(), scoping) {
                     kept.push(ImportDeclarationSpecifier::ImportSpecifier(
-                        specifier.clone_in(ast.allocator),
+                        specifier.clone_in(ast.allocator()),
                     ));
                 }
             }
-            _ => kept.push(specifier.clone_in(ast.allocator)),
+            _ => kept.push(specifier.clone_in(ast.allocator())),
         }
     }
     if kept.is_empty() {
         return None;
     }
 
-    Some(
-        ast.alloc_lazy_import_declaration(
-            import.span,
-            Some(kept),
-            import.source.clone_in(ast.allocator),
-            import
-                .with_clause
-                .as_ref()
-                .map(|with_clause| with_clause.clone_in(ast.allocator)),
-        ),
-    )
+    Some(LazyImportDeclaration::boxed(
+        import.span,
+        Some(kept),
+        import.source.clone_in(ast.allocator()),
+        import
+            .with_clause
+            .as_ref()
+            .map(|with_clause| with_clause.clone_in(ast.allocator())),
+        ast,
+    ))
 }
 
 /// `meta.isReferencedAliasDeclaration` equivalent: the binding symbol has at

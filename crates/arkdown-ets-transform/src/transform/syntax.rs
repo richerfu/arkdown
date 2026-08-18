@@ -1,6 +1,6 @@
 use oxc_ast::ast::{
     Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Program, Statement,
-    TSModuleDeclarationBody,
+    TSNamespaceDeclarationBody,
 };
 
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
@@ -87,26 +87,25 @@ impl ArktsTransformSyntaxDetector {
             Statement::FunctionDeclaration(function) => {
                 self.decorators_have_arkui_syntax(&function.decorators)
             }
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(export) => {
                 self.decorators_have_arkui_syntax(&export.decorators)
                     || matches!(
-                        export.declaration.as_ref(),
-                        Some(Declaration::StructStatement(_))
-                            | Some(Declaration::AnnotationDeclaration(_))
+                        &export.declaration,
+                        Declaration::StructStatement(_) | Declaration::AnnotationDeclaration(_)
                     )
                     || matches!(
-                        export.declaration.as_ref(),
-                        Some(Declaration::FunctionDeclaration(function))
+                        &export.declaration,
+                        Declaration::FunctionDeclaration(function)
                             if self.decorators_have_arkui_syntax(&function.decorators)
                     )
                     || matches!(
-                        export.declaration.as_ref(),
-                        Some(Declaration::ClassDeclaration(class))
+                        &export.declaration,
+                        Declaration::ClassDeclaration(class)
                             if self.class_has_decorators(class)
                     )
                     || matches!(
-                        export.declaration.as_ref(),
-                        Some(Declaration::TSModuleDeclaration(module))
+                        &export.declaration,
+                        Declaration::TSNamespaceDeclaration(module)
                             if self.ts_module_body(&module.body)
                     )
             }
@@ -120,20 +119,23 @@ impl ArktsTransformSyntaxDetector {
                         if self.class_has_decorators(class)
                 )
             }
-            Statement::TSModuleDeclaration(module) => self.ts_module_body(&module.body),
+            Statement::TSNamespaceDeclaration(module) => self.ts_module_body(&module.body),
+            Statement::TSExternalModuleDeclaration(module) => match module.body.as_deref() {
+                Some(block) => block.body.iter().any(|s| self.statement(s)),
+                None => false,
+            },
             _ => false,
         }
     }
 
-    fn ts_module_body(&self, body: &Option<TSModuleDeclarationBody<'_>>) -> bool {
+    fn ts_module_body(&self, body: &TSNamespaceDeclarationBody<'_>) -> bool {
         match body {
-            Some(TSModuleDeclarationBody::TSModuleDeclaration(module)) => {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(module) => {
                 self.ts_module_body(&module.body)
             }
-            Some(TSModuleDeclarationBody::TSModuleBlock(block)) => {
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => {
                 block.body.iter().any(|statement| self.statement(statement))
             }
-            None => false,
         }
     }
 
@@ -150,7 +152,7 @@ impl ArktsTransformSyntaxDetector {
                 ClassElement::PropertyDefinition(property) => !property.decorators.is_empty(),
                 ClassElement::AccessorProperty(accessor) => !accessor.decorators.is_empty(),
                 ClassElement::MethodDefinition(method) => !method.decorators.is_empty(),
-                ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => false,
+                _ => false,
             })
     }
 }

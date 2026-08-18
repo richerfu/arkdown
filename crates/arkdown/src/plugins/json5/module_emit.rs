@@ -1,10 +1,10 @@
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
-    ArrayExpressionElement, Declaration, ExportDefaultDeclarationKind, Expression,
-    ImportOrExportKind, MemberExpression, NumberBase, ObjectPropertyKind, Program, PropertyKey,
-    PropertyKind, Statement, VariableDeclarationKind,
+    ArrayExpressionElement, BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
+    MemberExpression, NumberBase, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
+    Statement, VariableDeclarationKind, VariableDeclarator,
 };
-use oxc_ast::{AstBuilder, NONE};
+use oxc_ast::builder::AstBuilder;
 use oxc_codegen::Codegen;
 use oxc_span::{SourceType, SPAN};
 use oxc_syntax::{identifier::is_identifier_name, keyword::is_reserved_keyword};
@@ -41,14 +41,14 @@ impl<'a> JsonModuleEmitter<'a> {
     pub(crate) fn emit(&self) -> String {
         let allocator = Allocator::default();
         let ast = AstBuilder::new(&allocator);
-        let program = self.program(ast);
+        let program = self.program(&ast);
         Codegen::new().build(&program).code
     }
 
-    fn program<'b>(&self, ast: AstBuilder<'b>) -> Program<'b> {
+    fn program<'b>(&self, ast: &AstBuilder<'b>) -> Program<'b> {
         let statements = match self.value {
             serde_json::Value::Object(map) => {
-                let mut statements = ast.vec();
+                let mut statements = OxcVec::new_in(ast);
                 statements.push(self.default_binding_statement(ast));
                 for key in map.keys().filter(|key| Self::is_valid_js_identifier(key)) {
                     statements.push(self.named_export_statement(ast, key));
@@ -56,80 +56,86 @@ impl<'a> JsonModuleEmitter<'a> {
                 statements.push(self.default_export_statement(ast));
                 statements
             }
-            value => ast.vec1(self.inline_default_export_statement(ast, value)),
+            value => OxcVec::from_value_in(self.inline_default_export_statement(ast, value), ast),
         };
 
-        ast.program(
+        Program::new(
             SPAN,
             SourceType::default().with_module(true),
             "",
-            ast.vec(),
+            OxcVec::new_in(ast),
             None,
-            ast.vec(),
+            OxcVec::new_in(ast),
             statements,
+            ast,
         )
     }
 
-    fn default_binding_statement<'b>(&self, ast: AstBuilder<'b>) -> Statement<'b> {
-        Statement::from(ast.declaration_variable(
+    fn default_binding_statement<'b>(&self, ast: &AstBuilder<'b>) -> Statement<'b> {
+        Statement::new_variable_declaration(
             SPAN,
             VariableDeclarationKind::Var,
-            ast.vec1(ast.variable_declarator(
+            OxcVec::from_value_in(
+                VariableDeclarator::new(
+                    SPAN,
+                    BindingPattern::new_binding_identifier(SPAN, DEFAULT_BINDING, ast),
+                    None,
+                    Some(Self::json_value_expression(self.value, ast)),
+                    false,
+                    ast,
+                ),
+                ast,
+            ),
+            false,
+            ast,
+        )
+    }
+
+    fn named_export_statement<'b>(&self, ast: &AstBuilder<'b>, key: &str) -> Statement<'b> {
+        let key = ast.allocator().alloc_str(key);
+        Statement::new_export_declaration(
+            SPAN,
+            Declaration::new_variable_declaration(
                 SPAN,
                 VariableDeclarationKind::Var,
-                ast.binding_pattern_binding_identifier(SPAN, DEFAULT_BINDING),
-                NONE,
-                Some(Self::json_value_expression(self.value, ast)),
-                false,
-            )),
-            false,
-        ))
-    }
-
-    fn named_export_statement<'b>(&self, ast: AstBuilder<'b>, key: &str) -> Statement<'b> {
-        Statement::from(ast.module_declaration_export_named_declaration(
-            SPAN,
-            Some(Declaration::VariableDeclaration(
-                ast.alloc_variable_declaration(
-                    SPAN,
-                    VariableDeclarationKind::Var,
-                    ast.vec1(ast.variable_declarator(
+                OxcVec::from_value_in(
+                    VariableDeclarator::new(
                         SPAN,
-                        VariableDeclarationKind::Var,
-                        ast.binding_pattern_binding_identifier(SPAN, ast.allocator.alloc_str(key)),
-                        NONE,
+                        BindingPattern::new_binding_identifier(SPAN, key, ast),
+                        None,
                         Some(self.default_member_expression(ast, key)),
                         false,
-                    )),
-                    false,
+                        ast,
+                    ),
+                    ast,
                 ),
-            )),
-            ast.vec(),
-            None,
-            ImportOrExportKind::Value,
-            NONE,
-        ))
+                false,
+                ast,
+            ),
+            ast,
+        )
     }
 
-    fn default_member_expression<'b>(&self, ast: AstBuilder<'b>, key: &str) -> Expression<'b> {
-        Self::member_expression_to_expression(ast.member_expression_computed(
+    fn default_member_expression<'b>(&self, ast: &AstBuilder<'b>, key: &'b str) -> Expression<'b> {
+        Self::member_expression_to_expression(MemberExpression::new_computed_member_expression(
             SPAN,
-            ast.expression_identifier(SPAN, DEFAULT_BINDING),
-            ast.expression_string_literal(SPAN, ast.str(key), None),
+            Expression::new_identifier(SPAN, DEFAULT_BINDING, ast),
+            Expression::new_string_literal(SPAN, key, None, ast),
             false,
+            ast,
         ))
     }
 
-    fn default_export_statement<'b>(&self, ast: AstBuilder<'b>) -> Statement<'b> {
+    fn default_export_statement<'b>(&self, ast: &AstBuilder<'b>) -> Statement<'b> {
         self.export_default_expression_statement(
             ast,
-            ast.expression_identifier(SPAN, DEFAULT_BINDING),
+            Expression::new_identifier(SPAN, DEFAULT_BINDING, ast),
         )
     }
 
     fn inline_default_export_statement<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         value: &serde_json::Value,
     ) -> Statement<'b> {
         self.export_default_expression_statement(ast, Self::json_value_expression(value, ast))
@@ -137,13 +143,14 @@ impl<'a> JsonModuleEmitter<'a> {
 
     fn export_default_expression_statement<'b>(
         &self,
-        ast: AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         expression: Expression<'b>,
     ) -> Statement<'b> {
-        Statement::from(ast.module_declaration_export_default_declaration(
+        Statement::new_export_default_declaration(
             SPAN,
             ExportDefaultDeclarationKind::from(expression),
-        ))
+            ast,
+        )
     }
 
     fn member_expression_to_expression<'b>(member: MemberExpression<'b>) -> Expression<'b> {
@@ -160,46 +167,63 @@ impl<'a> JsonModuleEmitter<'a> {
         }
     }
 
-    fn json_value_expression<'b>(value: &serde_json::Value, ast: AstBuilder<'b>) -> Expression<'b> {
+    fn json_value_expression<'b>(
+        value: &serde_json::Value,
+        ast: &AstBuilder<'b>,
+    ) -> Expression<'b> {
         match value {
-            serde_json::Value::Null => ast.expression_null_literal(SPAN),
-            serde_json::Value::Bool(value) => ast.expression_boolean_literal(SPAN, *value),
+            serde_json::Value::Null => Expression::new_null_literal(SPAN, ast),
+            serde_json::Value::Bool(value) => Expression::new_boolean_literal(SPAN, *value, ast),
             serde_json::Value::Number(value) => {
                 let raw = value.to_string();
-                ast.expression_numeric_literal(
+                Expression::new_numeric_literal(
                     SPAN,
                     value
                         .as_f64()
                         .expect("JSON numbers are representable as f64"),
-                    Some(ast.str(&raw)),
+                    Some(ast.allocator().alloc_str(&raw).into()),
                     NumberBase::Decimal,
+                    ast,
                 )
             }
             serde_json::Value::String(value) => {
-                ast.expression_string_literal(SPAN, ast.str(value), None)
+                Expression::new_string_literal(SPAN, ast.allocator().alloc_str(value), None, ast)
             }
-            serde_json::Value::Array(values) => ast.expression_array(
+            serde_json::Value::Array(values) => Expression::new_array_expression(
                 SPAN,
-                ast.vec_from_iter(values.iter().map(|value| {
-                    ArrayExpressionElement::from(Self::json_value_expression(value, ast))
-                })),
+                OxcVec::from_iter_in(
+                    values.iter().map(|value| {
+                        ArrayExpressionElement::from(Self::json_value_expression(value, ast))
+                    }),
+                    ast,
+                ),
+                ast,
             ),
-            serde_json::Value::Object(values) => ast.expression_object(
+            serde_json::Value::Object(values) => Expression::new_object_expression(
                 SPAN,
-                ast.vec_from_iter(values.iter().map(|(key, value)| {
-                    let property_key =
-                        PropertyKey::from(ast.expression_string_literal(SPAN, ast.str(key), None));
-                    let property_value = Self::json_value_expression(value, ast);
-                    ObjectPropertyKind::from(ast.object_property_kind_object_property(
-                        SPAN,
-                        PropertyKind::Init,
-                        property_key,
-                        property_value,
-                        false,
-                        false,
-                        false,
-                    ))
-                })),
+                OxcVec::from_iter_in(
+                    values.iter().map(|(key, value)| {
+                        let property_key = PropertyKey::from(Expression::new_string_literal(
+                            SPAN,
+                            ast.allocator().alloc_str(key),
+                            None,
+                            ast,
+                        ));
+                        let property_value = Self::json_value_expression(value, ast);
+                        ObjectPropertyKind::new_object_property(
+                            SPAN,
+                            PropertyKind::Init,
+                            property_key,
+                            property_value,
+                            false,
+                            false,
+                            false,
+                            ast,
+                        )
+                    }),
+                    ast,
+                ),
+                ast,
             ),
         }
     }
@@ -231,11 +255,10 @@ mod tests {
             let parsed =
                 Parser::new(&allocator, self.code, SourceType::ts().with_module(true)).parse();
             parsed.program.body.iter().any(|statement| {
-                let Statement::ExportNamedDeclaration(export) = statement else {
+                let Statement::ExportDeclaration(export) = statement else {
                     return false;
                 };
-                let Some(Declaration::VariableDeclaration(declaration)) = &export.declaration
-                else {
+                let Declaration::VariableDeclaration(declaration) = &export.declaration else {
                     return false;
                 };
                 declaration.declarations.iter().any(|declarator| {
