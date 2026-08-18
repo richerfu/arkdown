@@ -12,20 +12,21 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use arkdown_core::ArkTscTarget;
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, ArenaVec};
 use oxc_ast::ast::{
     Argument, AssignmentTarget, ChainElement, ComputedMemberExpression, Declaration,
-    ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
-    IdentifierReference, ImportDeclaration, ImportDeclarationSpecifier, Program, Statement,
-    StaticMemberExpression, TSModuleDeclarationBody, TSModuleDeclarationName, VariableDeclaration,
-    VariableDeclarationKind,
+    ExportAllDeclaration, ExportDefaultDeclarationKind, ExportFromDeclaration,
+    ExportNamedDeclaration, Expression, IdentifierReference, ImportDeclaration,
+    ImportDeclarationSpecifier, Program, Statement, StaticMemberExpression, TSNamespaceDeclaration,
+    TSNamespaceDeclarationBody, VariableDeclaration, VariableDeclarationKind,
 };
-use oxc_ast::AstBuilder;
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, SPAN};
+use oxc_str::{Ident, Str};
 use oxc_syntax::{
     number::NumberBase,
     operator::{AssignmentOperator, LogicalOperator, UnaryOperator},
@@ -276,13 +277,15 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
     /// emits a `let` initialized from a pure IIFE that returns the enum object.
     /// The latter adds different ABC records even though it is value-equivalent.
     fn canonicalize_regular_enum_declarations(&self, program: &mut Program<'a>) {
-        let old_body = std::mem::replace(&mut program.body, self.ast.vec());
-        let mut body = self.ast.vec_with_capacity(old_body.len());
+        let old_body = std::mem::replace(&mut program.body, ArenaVec::new_in(&self.ast));
+        let mut body = ArenaVec::with_capacity_in(old_body.len(), &self.ast);
         for mut statement in old_body {
             let enum_iife = self.take_oxc_enum_iife_declaration(&mut statement);
             body.push(statement);
             if let Some(enum_iife) = enum_iife {
-                body.push(self.ast.statement_expression(SPAN, enum_iife));
+                body.push(Statement::new_expression_statement(
+                    SPAN, enum_iife, &self.ast,
+                ));
             }
         }
         program.body = body;
@@ -294,10 +297,8 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
     ) -> Option<Expression<'a>> {
         let declaration = match statement {
             Statement::VariableDeclaration(declaration) => declaration,
-            Statement::ExportNamedDeclaration(export) => {
-                let Some(Declaration::VariableDeclaration(declaration)) =
-                    export.declaration.as_mut()
-                else {
+            Statement::ExportDeclaration(export) => {
+                let Declaration::VariableDeclaration(declaration) = &mut export.declaration else {
                     return None;
                 };
                 declaration
@@ -341,27 +342,28 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
             .statements
             .pop();
         call.pure = false;
-        call.arguments = self.ast.vec1(Argument::from(
-            self.ast.expression_logical(
+        let enum_identifier = || Ident::from_str_in(enum_name.as_str(), &self.ast);
+        call.arguments = ArenaVec::from_value_in(
+            Argument::from(Expression::new_logical_expression(
                 SPAN,
-                self.ast
-                    .expression_identifier(SPAN, self.ast.str(&enum_name)),
+                Expression::new_identifier(SPAN, enum_identifier(), &self.ast),
                 LogicalOperator::Or,
-                self.ast.expression_assignment(
+                Expression::new_assignment_expression(
                     SPAN,
                     AssignmentOperator::Assign,
-                    self.ast
-                        .simple_assignment_target_assignment_target_identifier(
-                            SPAN,
-                            self.ast.str(&enum_name),
-                        )
-                        .into(),
-                    self.ast.expression_object(SPAN, self.ast.vec()),
+                    AssignmentTarget::new_assignment_target_identifier(
+                        SPAN,
+                        enum_identifier(),
+                        &self.ast,
+                    ),
+                    Expression::new_object_expression(SPAN, ArenaVec::new_in(&self.ast), &self.ast),
+                    &self.ast,
                 ),
-            ),
-        ));
+                &self.ast,
+            )),
+            &self.ast,
+        );
         declaration.kind = VariableDeclarationKind::Var;
-        declarator.kind = VariableDeclarationKind::Var;
         Some(Expression::CallExpression(call))
     }
 
@@ -415,8 +417,8 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
             return;
         }
 
-        let old_body = std::mem::replace(&mut program.body, self.ast.vec());
-        let mut body = self.ast.vec_with_capacity(old_body.len());
+        let old_body = std::mem::replace(&mut program.body, ArenaVec::new_in(&self.ast));
+        let mut body = ArenaVec::with_capacity_in(old_body.len(), &self.ast);
         for mut statement in old_body {
             if Self::is_oxc_class_alias_assignment(&statement, &aliases)
                 || !self.retain_non_alias_variable_declarators(&mut statement, &aliases)
@@ -474,8 +476,8 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
                 .id
                 .as_ref()
                 .map(|identifier| identifier.name.to_string()),
-            Statement::ExportNamedDeclaration(export) => {
-                let Some(Declaration::ClassDeclaration(class)) = &export.declaration else {
+            Statement::ExportDeclaration(export) => {
+                let Declaration::ClassDeclaration(class) = &export.declaration else {
                     return None;
                 };
                 class
@@ -555,8 +557,9 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
             return true;
         }
 
-        let old_declarations = std::mem::replace(&mut declaration.declarations, self.ast.vec());
-        let mut declarations = self.ast.vec_with_capacity(old_declarations.len());
+        let old_declarations =
+            std::mem::replace(&mut declaration.declarations, ArenaVec::new_in(&self.ast));
+        let mut declarations = ArenaVec::with_capacity_in(old_declarations.len(), &self.ast);
         for declarator in old_declarations {
             let is_alias = declarator.init.is_none()
                 && declarator
@@ -594,20 +597,22 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
         }
 
         let mut rewriter =
-            OxcClassStaticAliasReferenceRewriter::new(self.ast, aliases, class_name.as_str());
+            OxcClassStaticAliasReferenceRewriter::new(&self.ast, aliases, class_name.as_str());
         rewriter.visit_expression(&mut assignment.right);
     }
 }
 
-struct OxcClassStaticAliasReferenceRewriter<'ast, 'aliases, 'class> {
-    ast: AstBuilder<'ast>,
+struct OxcClassStaticAliasReferenceRewriter<'ast, 'aliases, 'class, 'builder> {
+    ast: &'builder AstBuilder<'ast>,
     aliases: &'aliases FxHashMap<String, String>,
     class_name: &'class str,
 }
 
-impl<'ast, 'aliases, 'class> OxcClassStaticAliasReferenceRewriter<'ast, 'aliases, 'class> {
+impl<'ast, 'aliases, 'class, 'builder>
+    OxcClassStaticAliasReferenceRewriter<'ast, 'aliases, 'class, 'builder>
+{
     fn new(
-        ast: AstBuilder<'ast>,
+        ast: &'builder AstBuilder<'ast>,
         aliases: &'aliases FxHashMap<String, String>,
         class_name: &'class str,
     ) -> Self {
@@ -619,14 +624,14 @@ impl<'ast, 'aliases, 'class> OxcClassStaticAliasReferenceRewriter<'ast, 'aliases
     }
 }
 
-impl<'ast> VisitMut<'ast> for OxcClassStaticAliasReferenceRewriter<'ast, '_, '_> {
+impl<'ast> VisitMut<'ast> for OxcClassStaticAliasReferenceRewriter<'ast, '_, '_, '_> {
     fn visit_identifier_reference(&mut self, identifier: &mut IdentifierReference<'ast>) {
         if self
             .aliases
             .get(identifier.name.as_str())
             .is_some_and(|target| target == self.class_name)
         {
-            identifier.name = self.ast.str(self.class_name).into();
+            identifier.name = Ident::from_str_in(self.class_name, self.ast);
         }
     }
 }
@@ -850,7 +855,7 @@ struct LocalEnumValueMutator<'ast, 'scope> {
 impl<'ast> VisitMut<'ast> for LocalEnumValueMutator<'ast, '_> {
     fn visit_expression(&mut self, expr: &mut Expression<'ast>) {
         if let Some(replacement) = self.const_enum_replacement(expr).cloned() {
-            *expr = ConstEnumValueEmitter::new(&replacement).expression(self.ast);
+            *expr = ConstEnumValueEmitter::new(&replacement).expression(&self.ast);
             self.changed = true;
             return;
         }
@@ -870,7 +875,7 @@ impl<'ast> VisitMut<'ast> for LocalEnumValueMutator<'ast, '_> {
     fn visit_ts_enum_member(&mut self, member: &mut oxc_ast::ast::TSEnumMember<'ast>) {
         if let Some(replacement) = self.enum_member_replacement(member).cloned() {
             member.initializer =
-                Some(ConstEnumValueEmitter::new(&replacement).expression(self.ast));
+                Some(ConstEnumValueEmitter::new(&replacement).expression(&self.ast));
             self.changed = true;
             return;
         }
@@ -1202,20 +1207,14 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
 
         let mut local_namespaces = FxHashMap::default();
         for statement in &parsed.program.body {
-            let declaration =
-                match statement {
-                    Statement::TSModuleDeclaration(declaration) => Some(declaration.as_ref()),
-                    Statement::ExportNamedDeclaration(export) => export
-                        .declaration
-                        .as_ref()
-                        .and_then(|declaration| match declaration {
-                            Declaration::TSModuleDeclaration(declaration) => {
-                                Some(declaration.as_ref())
-                            }
-                            _ => None,
-                        }),
+            let declaration = match statement {
+                Statement::TSNamespaceDeclaration(declaration) => Some(declaration.as_ref()),
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::TSNamespaceDeclaration(declaration) => Some(declaration.as_ref()),
                     _ => None,
-                };
+                },
+                _ => None,
+            };
             let Some(declaration) = declaration else {
                 continue;
             };
@@ -1233,15 +1232,19 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         let mut exports = ConstEnumExports::default();
         for statement in &parsed.program.body {
             match statement {
-                Statement::ExportNamedDeclaration(export) => {
-                    self.collect_named_export(
-                        export,
+                Statement::ExportDeclaration(export) => {
+                    self.collect_declaration(
+                        &export.declaration,
                         scoping,
                         include_ambient_enums,
-                        visited,
-                        &imported_bindings,
                         &mut exports,
                     );
+                }
+                Statement::ExportNamedDeclaration(export) => {
+                    self.collect_local_named_export(export, &imported_bindings, &mut exports);
+                }
+                Statement::ExportFromDeclaration(export) => {
+                    self.collect_reexport(export, visited, &mut exports);
                 }
                 Statement::ExportDefaultDeclaration(export) => {
                     let oxc_ast::ast::ExportDefaultDeclarationKind::Identifier(identifier) =
@@ -1327,33 +1330,32 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         bindings
     }
 
-    fn collect_named_export(
+    fn collect_local_named_export(
         &self,
         export: &ExportNamedDeclaration<'_>,
-        scoping: Option<&oxc_semantic::Scoping>,
-        include_ambient_enums: bool,
-        visited: &mut FxHashSet<PathBuf>,
         imported_bindings: &FxHashMap<String, ConstEnumImport>,
         exports: &mut ConstEnumExports,
     ) {
-        if let Some(declaration) = &export.declaration {
-            self.collect_declaration(declaration, scoping, include_ambient_enums, exports);
-        }
-
-        let Some(source) = &export.source else {
-            for specifier in &export.specifiers {
-                if export.export_kind.is_type() || specifier.export_kind.is_type() {
-                    continue;
-                }
-                let local_name = ModuleExportNameText::new(&specifier.local).binding_name();
-                let exported_name = ModuleExportNameText::new(&specifier.exported).binding_name();
-                if let Some(binding) = imported_bindings.get(&local_name) {
-                    Self::insert_export_binding(exports, exported_name, binding.clone());
-                }
+        for specifier in &export.specifiers {
+            if export.export_kind.is_type() || specifier.export_kind.is_type() {
+                continue;
             }
-            return;
-        };
-        let Some(target_exports) = self.analyze_reexport_source(source.value.as_str(), visited)
+            let local_name = ModuleExportNameText::new(&specifier.local).binding_name();
+            let exported_name = ModuleExportNameText::new(&specifier.exported).binding_name();
+            if let Some(binding) = imported_bindings.get(&local_name) {
+                Self::insert_export_binding(exports, exported_name, binding.clone());
+            }
+        }
+    }
+
+    fn collect_reexport(
+        &self,
+        export: &ExportFromDeclaration<'_>,
+        visited: &mut FxHashSet<PathBuf>,
+        exports: &mut ConstEnumExports,
+    ) {
+        let Some(target_exports) =
+            self.analyze_reexport_source(export.source.value.as_str(), visited)
         else {
             return;
         };
@@ -1434,7 +1436,7 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
                         .insert(declaration.id.name.to_string(), imported_enum);
                 }
             }
-            Declaration::TSModuleDeclaration(declaration) => {
+            Declaration::TSNamespaceDeclaration(declaration) => {
                 let Some(scoping) = scoping else {
                     return;
                 };
@@ -1478,14 +1480,14 @@ struct ConstEnumNamespace {
 }
 
 struct ConstEnumNamespaceCollector<'a, 'b> {
-    declaration: &'a oxc_ast::ast::TSModuleDeclaration<'a>,
+    declaration: &'a TSNamespaceDeclaration<'a>,
     scoping: &'b oxc_semantic::Scoping,
     include_ambient_enums: bool,
 }
 
 impl<'a, 'b> ConstEnumNamespaceCollector<'a, 'b> {
     fn new(
-        declaration: &'a oxc_ast::ast::TSModuleDeclaration<'a>,
+        declaration: &'a TSNamespaceDeclaration<'a>,
         scoping: &'b oxc_semantic::Scoping,
         include_ambient_enums: bool,
     ) -> Self {
@@ -1497,24 +1499,18 @@ impl<'a, 'b> ConstEnumNamespaceCollector<'a, 'b> {
     }
 
     fn collect(&self) -> Option<ConstEnumNamespace> {
-        let TSModuleDeclarationName::Identifier(name) = &self.declaration.id else {
-            return None;
-        };
-        let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = &self.declaration.body else {
+        let name = &self.declaration.id;
+        let TSNamespaceDeclarationBody::TSModuleBlock(block) = &self.declaration.body else {
             return None;
         };
         let mut enums = FxHashMap::default();
         for statement in &block.body {
             let enum_decl = match statement {
                 Statement::TSEnumDeclaration(enum_decl) => Some(enum_decl.as_ref()),
-                Statement::ExportNamedDeclaration(export) => {
-                    export.declaration.as_ref().and_then(|declaration| {
-                        let Declaration::TSEnumDeclaration(enum_decl) = declaration else {
-                            return None;
-                        };
-                        Some(enum_decl.as_ref())
-                    })
-                }
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::TSEnumDeclaration(enum_decl) => Some(enum_decl.as_ref()),
+                    _ => None,
+                },
                 _ => None,
             };
             let Some(enum_decl) = enum_decl else {
@@ -1655,7 +1651,7 @@ impl<'a> VisitMut<'a> for ConstEnumInlineMutator<'a> {
             if let Some(local_name) = self.inlined_import_local_name(expr) {
                 self.inlined_import_locals.insert(local_name.to_string());
             }
-            *expr = ConstEnumValueEmitter::new(&replacement).expression(self.ast);
+            *expr = ConstEnumValueEmitter::new(&replacement).expression(&self.ast);
             self.changed = true;
             return;
         }
@@ -1734,9 +1730,9 @@ impl<'a> ConstEnumValueEmitter<'a> {
         Self { value }
     }
 
-    fn expression<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
+    fn expression<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
         match self.value {
-            EnumValue::Number(number) => ast.expression_numeric_literal(
+            EnumValue::Number(number) => Expression::new_numeric_literal(
                 SPAN,
                 *number,
                 None,
@@ -1745,8 +1741,11 @@ impl<'a> ConstEnumValueEmitter<'a> {
                 } else {
                     NumberBase::Float
                 },
+                ast,
             ),
-            EnumValue::String(text) => ast.expression_string_literal(SPAN, ast.str(text), None),
+            EnumValue::String(text) => {
+                Expression::new_string_literal(SPAN, Str::from_str_in(text, ast), None, ast)
+            }
         }
     }
 }

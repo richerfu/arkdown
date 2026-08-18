@@ -1,7 +1,8 @@
 use super::*;
 use oxc_allocator::Allocator;
+use oxc_allocator::Vec as OxcVec;
 use oxc_ast::ast::{Declaration, StructElement};
-use oxc_ast::AstBuilder;
+use oxc_ast::builder::AstBuilder;
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_span::{SourceType, SPAN};
@@ -110,14 +111,15 @@ fn lower_build_body_with_component_context_and_module(
     let allocator = Allocator::default();
     let ast = AstBuilder::new(&allocator);
     let statements = plan.statements(&allocator)?;
-    let program = ast.program(
+    let program = oxc_ast::ast::Program::new(
         SPAN,
         SourceType::ts().with_module(true),
         "",
-        ast.vec(),
+        OxcVec::new_in(&ast),
         None,
-        ast.vec(),
+        OxcVec::new_in(&ast),
         statements,
+        &ast,
     );
     let code = Codegen::new()
         .with_options(CodegenOptions {
@@ -192,8 +194,8 @@ fn parse_and_lower_with_visible_builder_methods(
         .iter()
         .find_map(|s| match s {
             Statement::StructStatement(st) => Some(st.as_ref()),
-            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
-                Some(Declaration::StructStatement(st)) => Some(st.as_ref()),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::StructStatement(st) => Some(st.as_ref()),
                 _ => None,
             },
             _ => None,
@@ -1613,8 +1615,8 @@ struct Index {
         .iter()
         .find_map(|statement| match statement {
             Statement::StructStatement(statement) => Some(statement.as_ref()),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::StructStatement(statement)) => Some(statement.as_ref()),
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::StructStatement(statement) => Some(statement.as_ref()),
                 _ => None,
             },
             _ => None,
@@ -1684,8 +1686,8 @@ fn parse_and_lower_with_module(
         .iter()
         .find_map(|s| match s {
             Statement::StructStatement(st) => Some(st.as_ref()),
-            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
-                Some(Declaration::StructStatement(st)) => Some(st.as_ref()),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::StructStatement(st) => Some(st.as_ref()),
                 _ => None,
             },
             _ => None,
@@ -1816,8 +1818,8 @@ fn parse_and_lower_with_custom_components(
         .iter()
         .find_map(|s| match s {
             Statement::StructStatement(st) => Some(st.as_ref()),
-            Statement::ExportNamedDeclaration(e) => match e.declaration.as_ref() {
-                Some(Declaration::StructStatement(st)) => Some(st.as_ref()),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::StructStatement(st) => Some(st.as_ref()),
                 _ => None,
             },
             _ => None,

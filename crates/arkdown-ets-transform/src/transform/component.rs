@@ -1,18 +1,17 @@
 use rustc_hash::FxHashSet;
 
-use oxc_allocator::Allocator;
-use oxc_allocator::CloneIn;
+use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, FromIn};
 use oxc_ast::ast::{
-    AccessorProperty, Argument, AssignmentExpression, AssignmentTarget, ClassElement, Expression,
-    FormalParameterKind, FormalParameters, MemberExpression, MethodDefinition, NumberBase,
-    ObjectPropertyKind, Program, PropertyDefinition, PropertyKind, Statement, StaticBlock,
-    TSIndexSignature, TSType, TSTypeAnnotation, TSTypeName, VariableDeclarationKind,
-    VariableDeclarator,
+    AccessorProperty, Argument, ArrowFunctionBody, AssignmentExpression, AssignmentTarget,
+    BindingPattern, ClassElement, Expression, FormalParameterKind, FormalParameters, FunctionBody,
+    IdentifierName, MemberExpression, MethodDefinition, NumberBase, ObjectPropertyKind, Program,
+    PropertyDefinition, PropertyKey, PropertyKind, Statement, StaticBlock, TSIndexSignature,
+    TSType, TSTypeAnnotation, TSTypeName, VariableDeclarationKind, VariableDeclarator,
 };
-use oxc_ast::AstBuilder;
-use oxc_ast::NONE;
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::{Span, SPAN};
+use oxc_str::{Ident, Str};
 use oxc_syntax::operator::AssignmentOperator;
 
 use crate::transform::build_fn::{
@@ -246,7 +245,11 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             Some(Argument::ObjectExpression(object)) => {
                 Expression::ObjectExpression(object.clone_in(self.allocator))
             }
-            None => self.ast.expression_object(SPAN, self.ast.vec()),
+            None => Expression::new_object_expression(
+                SPAN,
+                ArenaVec::new_in(&self.allocator),
+                &self.ast,
+            ),
             _ => return None,
         };
         Some((dialog_name.to_string(), params, call.span))
@@ -310,7 +313,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         controller_expression: Expression<'a>,
         source_span: Span,
     ) -> Expression<'a> {
-        let mut statements = self.ast.vec();
+        let mut statements = ArenaVec::<Statement<'a>>::new_in(&self.allocator);
         let params_for_generator = params.clone_in(self.allocator);
         statements.push(self.variable_declaration(
             CustomDialogBuilderName::JS_DIALOG,
@@ -318,7 +321,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         ));
         statements.push(self.js_dialog_call_statement(
             GeneratedViewpuName::SET_CONTROLLER,
-            self.ast.vec1(Argument::from(controller_expression)),
+            ArenaVec::from_value_in(Argument::from(controller_expression), &self.allocator),
         ));
         statements.push(self.viewpu_create_statement());
         statements.push(self.variable_declaration(
@@ -327,14 +330,22 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         ));
         statements.push(self.js_dialog_params_generator_assignment());
 
-        self.ast.expression_arrow_function(
+        Expression::new_arrow_function_expression(
             SPAN,
             false,
-            false,
-            NONE,
+            None,
             self.empty_arrow_parameters(),
-            NONE,
-            self.ast.function_body(SPAN, self.ast.vec(), statements),
+            None,
+            ArrowFunctionBody::FunctionBody(ArenaBox::new_in(
+                FunctionBody::new(
+                    SPAN,
+                    ArenaVec::new_in(&self.allocator),
+                    statements,
+                    &self.ast,
+                ),
+                &self.allocator,
+            )),
+            &self.ast,
         )
     }
 
@@ -344,19 +355,26 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         params: Expression<'a>,
         source_span: Span,
     ) -> Expression<'a> {
-        self.ast.expression_new(
+        Expression::new_new_expression(
             SPAN,
-            self.ast
-                .expression_identifier(SPAN, self.ast.str(dialog_name)),
-            NONE,
-            self.ast.vec_from_iter([
-                Argument::from(self.builder.this_expression()),
-                Argument::from(params),
-                Argument::from(self.builder.undefined_expression()),
-                Argument::from(self.builder.minus_one_expression()),
-                Argument::from(self.builder.empty_arrow_function_expression(None)),
-                Argument::from(self.source_info_expression(source_span)),
-            ]),
+            Expression::new_identifier(
+                SPAN,
+                Ident::from_in(dialog_name, self.allocator),
+                &self.ast,
+            ),
+            None,
+            ArenaVec::from_iter_in(
+                [
+                    Argument::from(self.builder.this_expression()),
+                    Argument::from(params),
+                    Argument::from(self.builder.undefined_expression()),
+                    Argument::from(self.builder.minus_one_expression()),
+                    Argument::from(self.builder.empty_arrow_function_expression(None)),
+                    Argument::from(self.source_info_expression(source_span)),
+                ],
+                &self.allocator,
+            ),
+            &self.ast,
         )
     }
 
@@ -367,77 +385,98 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
     fn source_info_expression(&self, source_span: Span) -> Expression<'a> {
         let (line, col) = self.source_metadata.source_position(source_span.start);
         let page = self.source_metadata.component_page_path();
-        self.ast.expression_object(
+        Expression::new_object_expression(
             SPAN,
-            self.ast.vec_from_iter([
-                self.object_property(
-                    GeneratedViewpuName::SOURCE_PAGE,
-                    self.ast
-                        .expression_string_literal(SPAN, self.ast.str(&page), None),
-                ),
-                self.object_property(
-                    GeneratedViewpuName::SOURCE_LINE,
-                    self.ast.expression_numeric_literal(
-                        SPAN,
-                        line as f64,
-                        None,
-                        NumberBase::Decimal,
+            ArenaVec::from_iter_in(
+                [
+                    self.object_property(
+                        GeneratedViewpuName::SOURCE_PAGE,
+                        Expression::new_string_literal(
+                            SPAN,
+                            Str::from_in(page.as_str(), self.allocator),
+                            None,
+                            &self.ast,
+                        ),
                     ),
-                ),
-                self.object_property(
-                    GeneratedViewpuName::SOURCE_COL,
-                    self.ast.expression_numeric_literal(
-                        SPAN,
-                        col as f64,
-                        None,
-                        NumberBase::Decimal,
+                    self.object_property(
+                        GeneratedViewpuName::SOURCE_LINE,
+                        Expression::new_numeric_literal(
+                            SPAN,
+                            line as f64,
+                            None,
+                            NumberBase::Decimal,
+                            &self.ast,
+                        ),
                     ),
-                ),
-            ]),
+                    self.object_property(
+                        GeneratedViewpuName::SOURCE_COL,
+                        Expression::new_numeric_literal(
+                            SPAN,
+                            col as f64,
+                            None,
+                            NumberBase::Decimal,
+                            &self.ast,
+                        ),
+                    ),
+                ],
+                &self.allocator,
+            ),
+            &self.ast,
         )
     }
 
     fn object_property(&self, name: &str, value: Expression<'a>) -> ObjectPropertyKind<'a> {
-        self.ast.object_property_kind_object_property(
+        ObjectPropertyKind::new_object_property(
             SPAN,
             PropertyKind::Init,
-            self.ast
-                .property_key_static_identifier(SPAN, self.ast.str(name)),
+            PropertyKey::new_static_identifier(
+                SPAN,
+                Ident::from_in(name, self.allocator),
+                &self.ast,
+            ),
             value,
             false,
             false,
             false,
+            &self.ast,
         )
     }
 
     fn params_lambda_expression(&self, params: Expression<'a>) -> Expression<'a> {
-        let body = self.ast.function_body(
+        let body = FunctionBody::new(
             SPAN,
-            self.ast.vec(),
-            self.ast.vec1(self.ast.statement_return(SPAN, Some(params))),
+            ArenaVec::new_in(&self.allocator),
+            ArenaVec::from_value_in(
+                Statement::new_return_statement(SPAN, Some(params), &self.ast),
+                &self.allocator,
+            ),
+            &self.ast,
         );
-        self.ast.expression_arrow_function(
+        Expression::new_arrow_function_expression(
             SPAN,
             false,
-            false,
-            NONE,
+            None,
             self.empty_arrow_parameters(),
-            NONE,
-            body,
+            None,
+            ArrowFunctionBody::FunctionBody(ArenaBox::new_in(body, &self.allocator)),
+            &self.ast,
         )
     }
 
     fn viewpu_create_statement(&self) -> Statement<'a> {
         self.call_statement(
             self.static_member_expression(
-                self.ast
-                    .expression_identifier(SPAN, GeneratedViewpuName::VIEWPU_BASE),
+                Expression::new_identifier(SPAN, GeneratedViewpuName::VIEWPU_BASE, &self.ast),
                 &self.runtime_names.method_create,
             ),
-            self.ast.vec1(Argument::from(
-                self.ast
-                    .expression_identifier(SPAN, CustomDialogBuilderName::JS_DIALOG),
-            )),
+            ArenaVec::from_value_in(
+                Argument::from(Expression::new_identifier(
+                    SPAN,
+                    CustomDialogBuilderName::JS_DIALOG,
+                    &self.ast,
+                )),
+                &self.allocator,
+            ),
         )
     }
 
@@ -448,8 +487,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
     ) -> Statement<'a> {
         self.call_statement(
             self.static_member_expression(
-                self.ast
-                    .expression_identifier(SPAN, CustomDialogBuilderName::JS_DIALOG),
+                Expression::new_identifier(SPAN, CustomDialogBuilderName::JS_DIALOG, &self.ast),
                 method,
             ),
             arguments,
@@ -457,41 +495,38 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
     }
 
     fn js_dialog_params_generator_assignment(&self) -> Statement<'a> {
-        let left = AssignmentTarget::from(
-            self.static_member(
-                self.ast
-                    .expression_identifier(SPAN, CustomDialogBuilderName::JS_DIALOG),
-                &self.runtime_names.params_generator_prefix,
-            ),
-        );
-        let assignment = self.ast.expression_assignment(
+        let left = AssignmentTarget::from(self.static_member(
+            Expression::new_identifier(SPAN, CustomDialogBuilderName::JS_DIALOG, &self.ast),
+            &self.runtime_names.params_generator_prefix,
+        ));
+        let assignment = Expression::new_assignment_expression(
             SPAN,
             AssignmentOperator::Assign,
             left,
-            self.ast
-                .expression_identifier(SPAN, self.ast.str(&self.runtime_names.params_lambda)),
+            Expression::new_identifier(
+                SPAN,
+                Ident::from_in(self.runtime_names.params_lambda.as_str(), self.allocator),
+                &self.ast,
+            ),
+            &self.ast,
         );
-        self.ast.statement_expression(SPAN, assignment)
+        Statement::new_expression_statement(SPAN, assignment, &self.ast)
     }
 
     fn variable_declaration(&self, name: &str, init: Expression<'a>) -> Statement<'a> {
-        let binding = self
-            .ast
-            .binding_pattern_binding_identifier(SPAN, self.ast.str(name));
-        let declarator = self.ast.variable_declarator(
+        let binding = BindingPattern::new_binding_identifier(
             SPAN,
-            VariableDeclarationKind::Let,
-            binding,
-            NONE,
-            Some(init),
-            false,
+            Ident::from_in(name, self.allocator),
+            &self.ast,
         );
-        Statement::from(self.ast.declaration_variable(
+        let declarator = VariableDeclarator::new(SPAN, binding, None, Some(init), false, &self.ast);
+        Statement::new_variable_declaration(
             SPAN,
             VariableDeclarationKind::Let,
-            self.ast.vec1(declarator),
+            ArenaVec::from_value_in(declarator, &self.allocator),
             false,
-        ))
+            &self.ast,
+        )
     }
 
     fn call_statement(
@@ -499,10 +534,10 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
         callee: Expression<'a>,
         arguments: oxc_allocator::Vec<'a, Argument<'a>>,
     ) -> Statement<'a> {
-        self.ast.statement_expression(
+        Statement::new_expression_statement(
             SPAN,
-            self.ast
-                .expression_call(SPAN, callee, NONE, arguments, false),
+            Expression::new_call_expression(SPAN, callee, None, arguments, false, &self.ast),
+            &self.ast,
         )
     }
 
@@ -511,20 +546,25 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
     }
 
     fn static_member(&self, object: Expression<'a>, property: &str) -> MemberExpression<'a> {
-        self.ast.member_expression_static(
+        MemberExpression::new_static_member_expression(
             SPAN,
             object,
-            self.ast.identifier_name(SPAN, self.ast.str(property)),
+            IdentifierName::new(SPAN, Ident::from_in(property, self.allocator), &self.ast),
             false,
+            &self.ast,
         )
     }
 
     fn empty_arrow_parameters(&self) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
-        self.ast.alloc_formal_parameters(
-            SPAN,
-            FormalParameterKind::ArrowFormalParameters,
-            self.ast.vec(),
-            NONE,
+        ArenaBox::new_in(
+            FormalParameters::new(
+                SPAN,
+                FormalParameterKind::ArrowFormalParameters,
+                ArenaVec::new_in(&self.allocator),
+                None,
+                &self.ast,
+            ),
+            &self.allocator,
         )
     }
 
@@ -681,24 +721,21 @@ impl<'a> RegularMember<'a> {
                 GlobalContextCallRewriter::new(allocator).method_definition(method)
             }
             Self::Property(property) => {
-                let ast = AstBuilder::new(allocator);
                 let mut property = property.clone_in(allocator);
                 property.decorators.clear();
-                ClassElement::PropertyDefinition(ast.alloc(property))
+                ClassElement::PropertyDefinition(ArenaBox::new_in(property, &allocator))
             }
             Self::StaticBlock(block) => {
-                let ast = AstBuilder::new(allocator);
-                ClassElement::StaticBlock(ast.alloc(block.clone_in(allocator)))
+                ClassElement::StaticBlock(ArenaBox::new_in(block.clone_in(allocator), &allocator))
             }
-            Self::TSIndexSignature(signature) => {
-                let ast = AstBuilder::new(allocator);
-                ClassElement::TSIndexSignature(ast.alloc(signature.clone_in(allocator)))
-            }
+            Self::TSIndexSignature(signature) => ClassElement::TSIndexSignature(ArenaBox::new_in(
+                signature.clone_in(allocator),
+                &allocator,
+            )),
             Self::AccessorProperty(property) => {
-                let ast = AstBuilder::new(allocator);
                 let mut property = property.clone_in(allocator);
                 property.decorators.clear();
-                ClassElement::AccessorProperty(ast.alloc(property))
+                ClassElement::AccessorProperty(ArenaBox::new_in(property, &allocator))
             }
         }
     }
@@ -795,8 +832,8 @@ impl<'a> ViewPuClassEmitter<'a> {
         self,
         allocator: &'b Allocator,
     ) -> Result<oxc_allocator::Vec<'b, oxc_ast::ast::Statement<'b>>, BuildLoweringError> {
-        let ast = oxc_ast::AstBuilder::new(allocator);
-        let interface_statement = self.build_params_interface_statement(ast, allocator);
+        let ast = AstBuilder::new(allocator);
+        let interface_statement = self.build_params_interface_statement(&ast, allocator);
         let elements = self.build_class_elements(allocator)?;
         let class_statement = ViewpuMemberAstEmitter::new(allocator)
             .class_declaration_statement_with_name_span(
@@ -807,13 +844,16 @@ impl<'a> ViewPuClassEmitter<'a> {
                 self.info.is_exported,
                 self.info.is_default_export,
             );
-        Ok(ast.vec_from_iter([interface_statement, class_statement]))
+        Ok(ArenaVec::from_iter_in(
+            [interface_statement, class_statement],
+            &allocator,
+        ))
     }
 
     /// Build the `interface Foo_Params { ... }` statement.
     fn build_params_interface_statement<'b>(
         &self,
-        ast: oxc_ast::AstBuilder<'b>,
+        ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
     ) -> oxc_ast::ast::Statement<'b> {
         let fields = self
@@ -840,8 +880,8 @@ impl<'a> ViewPuClassEmitter<'a> {
         &self,
         allocator: &'b Allocator,
     ) -> Result<oxc_allocator::Vec<'b, oxc_ast::ast::ClassElement<'b>>, BuildLoweringError> {
-        let ast = AstBuilder::new(allocator);
-        let mut elements = ast.vec();
+        let mut elements: oxc_allocator::Vec<'b, oxc_ast::ast::ClassElement<'b>> =
+            ArenaVec::new_in(&allocator);
 
         // constructor
         elements.push(self.build_constructor(allocator));

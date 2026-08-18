@@ -1,9 +1,9 @@
 use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
     AnnotationDeclaration, AnnotationElement, CallExpression, Expression, FormalParameters,
-    FunctionBody, Statement, TSTypeAnnotation,
+    FunctionBody, IdentifierName, MemberExpression, Statement, TSTypeAnnotation,
 };
-use oxc_ast::AstBuilder;
+use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
 
 use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError};
@@ -24,7 +24,7 @@ impl<'a> ParamsInterfaceEmitter<'a> {
     pub(crate) fn statement<'b>(&self, allocator: &'b Allocator, exported: bool) -> Statement<'b> {
         let fields = self.fields();
         ParamsInterfaceAstEmitter::new(self.annotation.id.name.as_str(), fields, exported)
-            .statement(AstBuilder::new(allocator), allocator)
+            .statement(&AstBuilder::new(allocator), allocator)
     }
 
     fn fields(&self) -> Vec<ParamsInterfaceField<'a>> {
@@ -210,31 +210,37 @@ impl<'a> ExtendBodyStatementEmitter<'a> {
         allocator: &'b Allocator,
     ) -> Statement<'b> {
         let ast = AstBuilder::new(allocator);
-        let member = ast.member_expression_static(
+        let member = MemberExpression::new_static_member_expression(
             call.span,
-            ast.expression_identifier(SPAN, allocator.alloc_str(self.component)),
-            ast.identifier_name(call.span, allocator.alloc_str(attribute)),
+            Expression::new_identifier(SPAN, allocator.alloc_str(self.component), &ast),
+            IdentifierName::new(call.span, allocator.alloc_str(attribute), &ast),
             false,
+            &ast,
         );
         let type_arguments = call
             .type_arguments
             .as_ref()
             .map(|type_arguments| type_arguments.clone_in(allocator));
-        let expression = ast.expression_call(
+        let expression = Expression::new_call_expression(
             call.span,
             Expression::from(member),
             type_arguments,
             call.arguments.clone_in(allocator),
             call.optional,
+            &ast,
         );
-        ast.statement_expression(call.span, expression)
+        Statement::new_expression_statement(call.span, expression, &ast)
     }
 
     fn statement<'b>(&self, statement: &Statement<'_>, allocator: &'b Allocator) -> Statement<'b> {
         match statement {
             Statement::ExpressionStatement(statement) => {
                 let expression = self.expression(&statement.expression, allocator);
-                AstBuilder::new(allocator).statement_expression(statement.span, expression)
+                Statement::new_expression_statement(
+                    statement.span,
+                    expression,
+                    &AstBuilder::new(allocator),
+                )
             }
             _ => statement.clone_in(allocator),
         }
@@ -283,12 +289,16 @@ impl<'a, 'b> ExtendLeadingDotPrefixer<'a, 'b> {
         match callee {
             Expression::Identifier(identifier) => {
                 let property_name = self.allocator.alloc_str(identifier.name.as_str());
-                let member = self.ast.member_expression_static(
+                let member = MemberExpression::new_static_member_expression(
                     identifier.span,
-                    self.ast
-                        .expression_identifier(SPAN, self.allocator.alloc_str(self.component)),
-                    self.ast.identifier_name(identifier.span, property_name),
+                    Expression::new_identifier(
+                        SPAN,
+                        self.allocator.alloc_str(self.component),
+                        &self.ast,
+                    ),
+                    IdentifierName::new(identifier.span, property_name, &self.ast),
                     false,
+                    &self.ast,
                 );
                 *callee = Expression::from(member);
                 true

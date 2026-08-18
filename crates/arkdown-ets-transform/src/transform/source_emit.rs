@@ -304,7 +304,7 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     /// LIFO because pop order mirrors the reverse of the source nesting).
     fn visit_expression_statement(&mut self, stmt: &ExpressionStatement<'a>) {
         if let Expression::CallExpression(call) = &stmt.expression {
-            if let Expression::StaticMemberExpression(member) = call.callee.without_parentheses() {}
+            if let Expression::StaticMemberExpression(_) = call.callee.without_parentheses() {}
         }
         if let Expression::CallExpression(call) = &stmt.expression {
             if let Expression::StaticMemberExpression(member) = call.callee.without_parentheses() {
@@ -1341,12 +1341,16 @@ impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
-        if !arrow.expression && arrow.body.is_empty() {
-            self.edits.push(HvigorTextEdit {
-                span: arrow.body.span,
-                replacement: "{ }".to_string(),
-                kind: HvigorTextEditKind::Other,
-            });
+        // Expression-bodied arrows cannot be empty; only a block body with no
+        // directives/statements renders as `{ }`.
+        if let oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) = &arrow.body {
+            if body.directives.is_empty() && body.statements.is_empty() {
+                self.edits.push(HvigorTextEdit {
+                    span: body.span,
+                    replacement: "{ }".to_string(),
+                    kind: HvigorTextEditKind::Other,
+                });
+            }
         }
         walk::walk_arrow_function_expression(self, arrow);
     }

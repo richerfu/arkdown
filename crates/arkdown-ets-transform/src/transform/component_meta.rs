@@ -959,8 +959,8 @@ impl<'a> SdkBuilderFunctionDeclarationCollector<'a> {
                 Statement::FunctionDeclaration(function) => {
                     self.collect_function(function, &mut builders);
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::FunctionDeclaration(function) = &export.declaration {
                         self.collect_function(function, &mut builders);
                     }
                 }
@@ -1010,8 +1010,8 @@ impl<'a> SdkModuleEnumDeclarationCollector<'a> {
                 Statement::TSEnumDeclaration(declaration) => {
                     declarations.exports.insert(declaration.id.name.to_string());
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
                         declarations.exports.insert(declaration.id.name.to_string());
                     }
                 }
@@ -1052,10 +1052,8 @@ impl<'a> SdkComponentDeclarationCollector<'a> {
                 Statement::StructStatement(statement) => {
                     self.insert(statement, &mut components);
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::StructStatement(statement)) =
-                        export.declaration.as_ref()
-                    {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::StructStatement(statement) = &export.declaration {
                         self.insert(statement, &mut components);
                     }
                 }
@@ -1204,8 +1202,8 @@ impl<'a> SdkEnumDeclarationCollector<'a> {
                 Statement::TSEnumDeclaration(declaration) => {
                     names.insert(declaration.id.name.to_string());
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
                         names.insert(declaration.id.name.to_string());
                     }
                 }

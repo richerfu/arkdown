@@ -11,12 +11,16 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use oxc_allocator::{Allocator, CloneIn};
-use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, Program, Statement};
-use oxc_ast::AstBuilder;
+use oxc_allocator::{Allocator, CloneIn, FromIn, GetAllocator, Vec as OxcVec};
+use oxc_ast::ast::{
+    ImportDeclaration, ImportDeclarationSpecifier, ModuleExportName, Program, Statement,
+    StringLiteral,
+};
+use oxc_ast::builder::AstBuilder;
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_span::SPAN;
+use oxc_str::Str;
 
 use rustc_hash::FxHashSet;
 
@@ -117,8 +121,8 @@ impl<'a> ImportPathExpander<'a> {
     fn expand(&self, program: &mut Program<'a>, allocator: &'a Allocator) -> bool {
         let mut changed = false;
         let ast = AstBuilder::new(allocator);
-        let mut body = ast.vec_with_capacity(program.body.len());
-        let old_body = std::mem::replace(&mut program.body, ast.vec());
+        let mut body = OxcVec::with_capacity_in(program.body.len(), &ast);
+        let old_body = std::mem::replace(&mut program.body, OxcVec::new_in(&ast));
         for statement in old_body {
             let Statement::ImportDeclaration(import) = &statement else {
                 body.push(statement);
@@ -231,7 +235,7 @@ impl<'a> ImportPathExpander<'a> {
                     match group {
                         Some((group, span)) => {
                             group.1.push(ExpandedSpecifier::Default {
-                                local: default.local.clone_in(ast.allocator),
+                                local: default.local.clone_in(ast.allocator()),
                                 export_name,
                                 is_default,
                             });
@@ -242,7 +246,7 @@ impl<'a> ImportPathExpander<'a> {
                             groups.push((
                                 request,
                                 vec![ExpandedSpecifier::Default {
-                                    local: default.local.clone_in(ast.allocator),
+                                    local: default.local.clone_in(ast.allocator()),
                                     export_name,
                                     is_default,
                                 }],
@@ -269,8 +273,8 @@ impl<'a> ImportPathExpander<'a> {
                     match group {
                         Some((group, span)) => {
                             group.1.push(ExpandedSpecifier::Named {
-                                local: specifier.local.clone_in(ast.allocator),
-                                imported: specifier.imported.clone_in(ast.allocator),
+                                local: specifier.local.clone_in(ast.allocator()),
+                                imported: specifier.imported.clone_in(ast.allocator()),
                                 export_name,
                                 is_default,
                             });
@@ -281,8 +285,8 @@ impl<'a> ImportPathExpander<'a> {
                             groups.push((
                                 request,
                                 vec![ExpandedSpecifier::Named {
-                                    local: specifier.local.clone_in(ast.allocator),
-                                    imported: specifier.imported.clone_in(ast.allocator),
+                                    local: specifier.local.clone_in(ast.allocator()),
+                                    imported: specifier.imported.clone_in(ast.allocator()),
                                     export_name,
                                     is_default,
                                 }],
@@ -298,10 +302,10 @@ impl<'a> ImportPathExpander<'a> {
         }
 
         // Emit one import declaration per declaring file.
-        let mut expanded = ast.vec_with_capacity(groups.len());
+        let mut expanded = OxcVec::with_capacity_in(groups.len(), ast);
         for ((request, specs), group_span) in groups.into_iter().zip(group_spans) {
             let import_span = oxc_span::Span::new(group_span, group_span);
-            let mut specifiers = ast.vec_with_capacity(specs.len());
+            let mut specifiers = OxcVec::with_capacity_in(specs.len(), ast);
             for spec in specs {
                 match spec {
                     ExpandedSpecifier::Default {
@@ -310,20 +314,22 @@ impl<'a> ImportPathExpander<'a> {
                         is_default,
                     } => {
                         if is_default {
-                            specifiers.push(ImportDeclarationSpecifier::ImportDefaultSpecifier(
-                                ast.alloc_import_default_specifier(SPAN, local),
-                            ));
-                        } else {
-                            specifiers.push(ImportDeclarationSpecifier::ImportSpecifier(
-                                ast.alloc_import_specifier(
-                                    SPAN,
-                                    ast.module_export_name_identifier_name(
-                                        SPAN,
-                                        ast.str(export_name.as_str()),
-                                    ),
-                                    local,
-                                    import.import_kind,
+                            specifiers.push(
+                                ImportDeclarationSpecifier::new_import_default_specifier(
+                                    SPAN, local, ast,
                                 ),
+                            );
+                        } else {
+                            specifiers.push(ImportDeclarationSpecifier::new_import_specifier(
+                                SPAN,
+                                ModuleExportName::new_identifier_name(
+                                    SPAN,
+                                    Str::from_in(export_name.as_str(), ast.allocator()),
+                                    ast,
+                                ),
+                                local,
+                                import.import_kind,
+                                ast,
                             ));
                         }
                     }
@@ -334,30 +340,37 @@ impl<'a> ImportPathExpander<'a> {
                         ..
                     } => {
                         if is_default {
-                            specifiers.push(ImportDeclarationSpecifier::ImportDefaultSpecifier(
-                                ast.alloc_import_default_specifier(SPAN, local),
-                            ));
-                        } else {
-                            specifiers.push(ImportDeclarationSpecifier::ImportSpecifier(
-                                ast.alloc_import_specifier(
-                                    SPAN,
-                                    imported,
-                                    local,
-                                    import.import_kind,
+                            specifiers.push(
+                                ImportDeclarationSpecifier::new_import_default_specifier(
+                                    SPAN, local, ast,
                                 ),
+                            );
+                        } else {
+                            specifiers.push(ImportDeclarationSpecifier::new_import_specifier(
+                                SPAN,
+                                imported,
+                                local,
+                                import.import_kind,
+                                ast,
                             ));
                         }
                     }
                 }
             }
-            expanded.push(Statement::ImportDeclaration(ast.alloc_import_declaration(
+            expanded.push(Statement::new_import_declaration(
                 import_span,
                 Some(specifiers),
-                ast.string_literal(import_span, ast.str(request.as_str()), None),
+                StringLiteral::new(
+                    import_span,
+                    Str::from_in(request.as_str(), ast.allocator()),
+                    None,
+                    ast,
+                ),
                 None,
-                None::<oxc_allocator::ArenaBox<'_, oxc_ast::ast::WithClause<'_>>>,
+                None,
                 import.import_kind,
-            )));
+                ast,
+            ));
         }
         expanded.into_iter().collect()
     }
@@ -398,7 +411,7 @@ impl<'a> ImportPathExpander<'a> {
         let source = self.sources.source_text(file)?;
         let allocator = Allocator::default();
         let source_type = CompileArktsSourceType::from_id(&file.to_string_lossy());
-        let mut parsed = Parser::new(&allocator, source.as_ref(), source_type).parse();
+        let parsed = Parser::new(&allocator, source.as_ref(), source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return None;
         }
@@ -406,9 +419,7 @@ impl<'a> ImportPathExpander<'a> {
         for statement in &parsed.program.body {
             match statement {
                 // `export { x }` / `export { x as y }` — local declaration.
-                Statement::ExportNamedDeclaration(export)
-                    if export.source.is_none() && export.declaration.is_none() =>
-                {
+                Statement::ExportNamedDeclaration(export) => {
                     for element in &export.specifiers {
                         let local_name = element.local.name().as_str();
                         let exported_name = element.exported.name().as_str();
@@ -418,15 +429,10 @@ impl<'a> ImportPathExpander<'a> {
                     }
                 }
                 // `export { x } from "./mod"` — recurse.
-                Statement::ExportNamedDeclaration(export)
-                    if export.source.is_some() && !export.specifiers.is_empty() =>
-                {
-                    let Some(source_specifier) = export.source.as_ref() else {
-                        continue;
-                    };
+                Statement::ExportFromDeclaration(export) if !export.specifiers.is_empty() => {
                     let Some(resolved) = self
                         .sources
-                        .resolve_relative_with_declarations(file, source_specifier.value.as_str())
+                        .resolve_relative_with_declarations(file, export.source.value.as_str())
                     else {
                         continue;
                     };
@@ -469,14 +475,10 @@ impl<'a> ImportPathExpander<'a> {
                     return Some((file.to_path_buf(), "default".to_string(), true));
                 }
                 // Direct `export const/function/class foo` declarations.
-                Statement::ExportNamedDeclaration(export)
-                    if export.source.is_none() && export.declaration.is_some() =>
-                {
-                    if let Some(declaration) = export.declaration.as_ref() {
-                        let names = declaration_names(declaration);
-                        if names.iter().any(|name| name == symbol) {
-                            return Some((file.to_path_buf(), symbol.to_string(), is_default));
-                        }
+                Statement::ExportDeclaration(export) => {
+                    let names = declaration_names(&export.declaration);
+                    if names.iter().any(|name| name == symbol) {
+                        return Some((file.to_path_buf(), symbol.to_string(), is_default));
                     }
                 }
                 _ => {}

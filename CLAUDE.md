@@ -12,7 +12,7 @@ OXC and Rolldown, while preserving hvigor's observable build contracts. It takes
 `.ets`/`.ts` source files and produces installable `.hap`/`.hsp`/`.har` artifacts.
 
 **Parser**: Uses `ohos-rs/oxc` (`https://github.com/ohos-rs/oxc`) — a fork of OXC pinned
-in the root `Cargo.toml` (`rev = "c8d02452469e159952f0181b022c1f304e77abee"`).
+in the root `Cargo.toml` (`rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db"`).
 Always use this pinned fork for `.ets` parsing. **Do not use upstream `oxc-project/oxc` crates.io
 releases for arkdown parser/transform crates** — they do not parse `.ets` syntax correctly.
 
@@ -124,7 +124,7 @@ first (`es2abc`, `restool`, signing) instead of blocking the JS/TS + Rollup
 replacement on a Rust port. Rust native backends remain optional parity targets.
 
 **4. Use ohos-rs/oxc (pinned rev), not oxc-project/oxc crates.io.** The ohos-rs fork (pinned at
-`rev = "c8d02452469e159952f0181b022c1f304e77abee"`) supports `.ets` parsing. The upstream
+`rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db"`) supports `.ets` parsing. The upstream
 crates.io releases do not. Always specify the `rev` in Cargo.toml; do not use a floating branch.
 `ohos-rs/oxc-ark` is a lint/format CLI, not a parser library — do not confuse the two.
 

@@ -5,14 +5,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_path::ModuleSpecifierText;
 use oxc_allocator::{Allocator, Vec as OxcVec};
-use oxc_ast::{
-    ast::{
-        BindingPattern, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
-        ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier, Program, Statement,
-        StringLiteral, TSImportEqualsDeclaration, TSModuleReference, TSTypeName,
-    },
-    AstBuilder,
+use oxc_ast::ast::{
+    BindingPattern, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
+    ExportFromDeclaration, ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier,
+    Program, Statement, StringLiteral, TSImportEqualsDeclaration, TSModuleReference, TSTypeName,
 };
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
@@ -20,6 +18,7 @@ use oxc_semantic::Scoping;
 #[cfg(test)]
 use oxc_span::SourceType;
 use oxc_span::SPAN;
+use oxc_str::Str;
 use oxc_syntax::reference::ReferenceId;
 use oxc_syntax::symbol::SymbolId;
 
@@ -143,7 +142,7 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
         for (statement, split_plan) in old_body.into_iter().zip(split_plans) {
             if let Some(split) = split_plan {
                 changed = true;
-                for statement in split.statements(ast) {
+                for statement in split.statements(&ast) {
                     body.push(statement);
                 }
             } else if let Some(split) = match &statement {
@@ -154,7 +153,7 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
                 _ => None,
             } {
                 changed = true;
-                for statement in split.statements(ast) {
+                for statement in split.statements(&ast) {
                     body.push(statement);
                 }
             } else {
@@ -546,10 +545,7 @@ impl<'a, 'b> LocalTypeOnlyExportSplit<'a, 'b> {
     }
 
     fn split(&self) -> Option<LocalExportSplitEmitter> {
-        if self.export.export_kind.is_type()
-            || self.export.source.is_some()
-            || self.export.specifiers.is_empty()
-        {
+        if self.export.export_kind.is_type() || self.export.specifiers.is_empty() {
             return None;
         }
 
@@ -711,14 +707,12 @@ where
             Statement::LazyImportDeclaration(import) => {
                 self.rewrite_literal(&mut import.source);
             }
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportFromDeclaration(export) => {
                 let is_type_only = export.export_kind.is_type();
-                if let Some(source) = &mut export.source {
-                    if self.should_skip_type_only(is_type_only, source) {
-                        return;
-                    }
-                    self.rewrite_literal(source);
+                if self.should_skip_type_only(is_type_only, &export.source) {
+                    return;
                 }
+                self.rewrite_literal(&mut export.source);
             }
             Statement::ExportAllDeclaration(export) => {
                 if self.should_skip_type_only(export.export_kind.is_type(), &export.source) {
@@ -751,7 +745,7 @@ where
         if replacement == specifier {
             return;
         }
-        literal.value = self.ast.str(&replacement);
+        literal.value = Str::from_str_in(&replacement, &self.ast);
         literal.raw = None;
         // TypeScript's printer emits a freshly rewritten module request with
         // its normal double-quote style. Keeping the old source span lets the
@@ -794,7 +788,7 @@ impl<'a> TypeOnlyReexportSplitter<'a> {
         let mut split_plans = Vec::with_capacity(program.body.len());
         for statement in &program.body {
             let split_plan = match statement {
-                Statement::ExportNamedDeclaration(export) => {
+                Statement::ExportFromDeclaration(export) => {
                     TypeOnlyReexportSplit::new(export, self.id, &mut binding_classifier).split()
                 }
                 _ => None,
@@ -809,7 +803,7 @@ impl<'a> TypeOnlyReexportSplitter<'a> {
         for (statement, split_plan) in old_body.into_iter().zip(split_plans) {
             if let Some(split) = split_plan {
                 changed = true;
-                for statement in split.statements(ast) {
+                for statement in split.statements(&ast) {
                     body.push(statement);
                 }
             } else {
@@ -822,14 +816,14 @@ impl<'a> TypeOnlyReexportSplitter<'a> {
 }
 
 struct TypeOnlyReexportSplit<'a, 'source, 'classifier> {
-    export: &'a ExportNamedDeclaration<'a>,
+    export: &'a ExportFromDeclaration<'a>,
     id: &'source str,
     binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
 }
 
 impl<'a, 'source, 'classifier> TypeOnlyReexportSplit<'a, 'source, 'classifier> {
     fn new(
-        export: &'a ExportNamedDeclaration<'a>,
+        export: &'a ExportFromDeclaration<'a>,
         id: &'source str,
         binding_classifier: &'classifier mut ModuleBindingClassifier<'source>,
     ) -> Self {
@@ -844,7 +838,7 @@ impl<'a, 'source, 'classifier> TypeOnlyReexportSplit<'a, 'source, 'classifier> {
         if self.export.export_kind.is_type() || self.export.specifiers.is_empty() {
             return None;
         }
-        let source = self.export.source.as_ref()?;
+        let source = &self.export.source;
         let specifier = source.value.as_str();
         let target_exports = self
             .binding_classifier
@@ -1066,14 +1060,19 @@ impl<'a> ModuleExportClassifier<'a> {
         let mut exports = FxHashMap::default();
         for statement in &parsed.program.body {
             match statement {
+                Statement::ExportDeclaration(export) => {
+                    ExportedDeclarationCollector::new(&export.declaration, &mut exports).collect();
+                }
                 Statement::ExportNamedDeclaration(export) => {
-                    self.collect_named_export(
+                    self.collect_local_named_export(
                         export,
                         &local_bindings,
                         &imported_bindings,
-                        visited,
                         &mut exports,
                     );
+                }
+                Statement::ExportFromDeclaration(export) => {
+                    self.collect_reexport(export, &imported_bindings, visited, &mut exports);
                 }
                 Statement::ExportDefaultDeclaration(export) => {
                     DefaultExportBindingCollector::new(
@@ -1094,25 +1093,47 @@ impl<'a> ModuleExportClassifier<'a> {
         Some(exports)
     }
 
-    fn collect_named_export(
+    fn collect_local_named_export(
         &self,
         export: &ExportNamedDeclaration<'_>,
         local_bindings: &FxHashMap<String, ModuleBindingKind>,
         imported_bindings: &FxHashMap<String, ModuleBindingKind>,
+        exports: &mut FxHashMap<String, ModuleBindingKind>,
+    ) {
+        for specifier in &export.specifiers {
+            let exported_name = ModuleExportNameText::new(&specifier.exported).binding_name();
+            let local_name = ModuleExportNameText::new(&specifier.local).binding_name();
+            if specifier.export_kind.is_type() || export.export_kind.is_type() {
+                ModuleBindingKind::record(exports, exported_name, ModuleBindingKind::Type);
+            } else if let Some(kind) = local_bindings.get(&local_name).copied() {
+                ModuleBindingKind::record(exports, exported_name, kind);
+            } else if let Some(kind) = exports.get(&local_name).copied() {
+                ModuleBindingKind::record(exports, exported_name, kind);
+            } else if let Some(kind) = imported_bindings.get(&local_name).copied() {
+                ModuleBindingKind::record(exports, exported_name, kind);
+            } else {
+                ModuleBindingKind::record(exports, exported_name, ModuleBindingKind::Value);
+            }
+        }
+    }
+
+    fn collect_reexport(
+        &self,
+        export: &ExportFromDeclaration<'_>,
+        imported_bindings: &FxHashMap<String, ModuleBindingKind>,
         visited: &mut FxHashSet<PathBuf>,
         exports: &mut FxHashMap<String, ModuleBindingKind>,
     ) {
-        if let Some(declaration) = &export.declaration {
-            ExportedDeclarationCollector::new(declaration, exports).collect();
-        }
-        let reexport_bindings = export.source.as_ref().and_then(|source| {
+        let reexport_bindings = (|| {
             let sources = self.sources?;
-            let target = sources
-                .resolve_static_with_declarations(&self.source.path, source.value.as_str())?;
+            let target = sources.resolve_static_with_declarations(
+                &self.source.path,
+                export.source.value.as_str(),
+            )?;
             ModuleExportClassifier::new(target)
                 .with_sources(sources)
                 .analyze_with_visited(visited)
-        });
+        })();
         for specifier in &export.specifiers {
             let exported_name = ModuleExportNameText::new(&specifier.exported).binding_name();
             let local_name = ModuleExportNameText::new(&specifier.local).binding_name();
@@ -1124,16 +1145,6 @@ impl<'a> ModuleExportClassifier<'a> {
                 .copied()
             {
                 ModuleBindingKind::record(exports, exported_name, kind);
-            } else if export.source.is_none() {
-                if let Some(kind) = local_bindings.get(&local_name).copied() {
-                    ModuleBindingKind::record(exports, exported_name, kind);
-                } else if let Some(kind) = exports.get(&local_name).copied() {
-                    ModuleBindingKind::record(exports, exported_name, kind);
-                } else if let Some(kind) = imported_bindings.get(&local_name).copied() {
-                    ModuleBindingKind::record(exports, exported_name, kind);
-                } else {
-                    ModuleBindingKind::record(exports, exported_name, ModuleBindingKind::Value);
-                }
             } else if let Some(kind) = exports.get(&local_name).copied() {
                 ModuleBindingKind::record(exports, exported_name, kind);
             } else if let Some(kind) = imported_bindings.get(&local_name).copied() {
@@ -1394,9 +1405,6 @@ impl<'a> ExportImportLocalCollector<'a> {
                 }
                 continue;
             };
-            if export.source.is_some() {
-                continue;
-            }
             for specifier in &export.specifiers {
                 locals.insert(ModuleExportNameText::new(&specifier.local).binding_name());
             }
@@ -1475,10 +1483,8 @@ impl<'a> TopLevelBindingKindCollector<'a> {
         bindings: &mut FxHashMap<String, ModuleBindingKind>,
     ) {
         match statement {
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    ExportedDeclarationCollector::new(declaration, bindings).collect();
-                }
+            Statement::ExportDeclaration(export) => {
+                ExportedDeclarationCollector::new(&export.declaration, bindings).collect();
             }
             Statement::VariableDeclaration(declaration) => {
                 for declarator in &declaration.declarations {
@@ -1531,11 +1537,13 @@ impl<'a> TopLevelBindingKindCollector<'a> {
                     ModuleBindingKind::Value,
                 );
             }
-            Statement::TSModuleDeclaration(declaration) => {
-                if !declaration.declare && declaration.body.is_some() {
-                    if let Some(name) = ModuleDeclarationName::new(&declaration.id).binding_name() {
-                        ModuleBindingKind::record(bindings, name, ModuleBindingKind::Value);
-                    }
+            Statement::TSNamespaceDeclaration(declaration) => {
+                if !declaration.declare {
+                    ModuleBindingKind::record(
+                        bindings,
+                        declaration.id.name.to_string(),
+                        ModuleBindingKind::Value,
+                    );
                 }
             }
             Statement::TSImportEqualsDeclaration(declaration) => {
@@ -1619,16 +1627,20 @@ impl<'a, 'b> ExportedDeclarationCollector<'a, 'b> {
                     BindingNameCollector::new(&declarator.id, self.exports).collect();
                 }
             }
-            Declaration::TSModuleDeclaration(declaration) => {
-                if !declaration.declare && declaration.body.is_some() {
-                    if let Some(name) = ModuleDeclarationName::new(&declaration.id).binding_name() {
-                        ModuleBindingKind::record(self.exports, name, ModuleBindingKind::Value);
-                    }
+            Declaration::TSNamespaceDeclaration(declaration) => {
+                if !declaration.declare {
+                    ModuleBindingKind::record(
+                        self.exports,
+                        declaration.id.name.to_string(),
+                        ModuleBindingKind::Value,
+                    );
                 }
             }
-            Declaration::TSGlobalDeclaration(_)
+            Declaration::TSExternalModuleDeclaration(_)
+            | Declaration::TSGlobalDeclaration(_)
             | Declaration::StructStatement(_)
-            | Declaration::AnnotationDeclaration(_) => {}
+            | Declaration::AnnotationDeclaration(_)
+            | Declaration::ETSOverloadDeclaration(_) => {}
             Declaration::TSImportEqualsDeclaration(declaration) => {
                 ModuleBindingKind::record(
                     self.exports,
@@ -1636,25 +1648,6 @@ impl<'a, 'b> ExportedDeclarationCollector<'a, 'b> {
                     ModuleBindingKind::Value,
                 );
             }
-        }
-    }
-}
-
-struct ModuleDeclarationName<'a> {
-    name: &'a oxc_ast::ast::TSModuleDeclarationName<'a>,
-}
-
-impl<'a> ModuleDeclarationName<'a> {
-    fn new(name: &'a oxc_ast::ast::TSModuleDeclarationName<'a>) -> Self {
-        Self { name }
-    }
-
-    fn binding_name(&self) -> Option<String> {
-        match self.name {
-            oxc_ast::ast::TSModuleDeclarationName::Identifier(identifier) => {
-                Some(identifier.name.to_string())
-            }
-            oxc_ast::ast::TSModuleDeclarationName::StringLiteral(_) => None,
         }
     }
 }

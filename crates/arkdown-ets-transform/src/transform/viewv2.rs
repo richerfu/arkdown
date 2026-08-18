@@ -7,14 +7,15 @@
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
-use oxc_allocator::{Allocator, CloneIn, Vec as OxcVec};
+use oxc_allocator::{Allocator, ArenaBox, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
-    AccessorProperty, Argument, ClassElement, Decorator, Expression, FormalParameterKind,
-    FormalParameters, FunctionType, MethodDefinition, MethodDefinitionKind, PropertyDefinition,
-    PropertyKind, Statement, StaticBlock, StructElement, StructStatement, TSAccessibility,
-    TSIndexSignature, TSType, TSTypeAnnotation,
+    AccessorProperty, Argument, ArrowFunctionBody, BindingIdentifier, ClassElement, Decorator,
+    Expression, FormalParameterKind, FormalParameters, Function, FunctionBody, FunctionType,
+    IdentifierName, MemberExpression, MethodDefinition, MethodDefinitionKind, ObjectPropertyKind,
+    PropertyDefinition, PropertyKey, PropertyKind, Statement, StaticBlock, StructElement,
+    StructStatement, TSAccessibility, TSIndexSignature, TSType, TSTypeAnnotation,
 };
-use oxc_ast::{AstBuilder, NONE};
+use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
 
 use crate::transform::build_fn::{
@@ -95,15 +96,16 @@ impl<'a> V2RegularMember<'a> {
             } => GlobalContextCallRewriter::new(allocator)
                 .method_definition_with_decorators(method, *retain_decorators),
             Self::StaticBlock(block) => {
-                ClassElement::StaticBlock(ast.alloc(block.clone_in(allocator)))
+                ClassElement::StaticBlock(ArenaBox::new_in(block.clone_in(allocator), &ast))
             }
-            Self::TSIndexSignature(signature) => {
-                ClassElement::TSIndexSignature(ast.alloc(signature.clone_in(allocator)))
-            }
+            Self::TSIndexSignature(signature) => ClassElement::TSIndexSignature(ArenaBox::new_in(
+                signature.clone_in(allocator),
+                &ast,
+            )),
             Self::AccessorProperty(property) => {
                 let mut property = property.clone_in(allocator);
                 property.decorators.clear();
-                ClassElement::AccessorProperty(ast.alloc(property))
+                ClassElement::AccessorProperty(ArenaBox::new_in(property, &ast))
             }
         }
     }
@@ -356,6 +358,10 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     regular_members.push(V2RegularMember::AccessorProperty(property));
                     source_members.push(V2SourceMember::Regular(regular_members.len() - 1));
                 }
+                // ETS overload declarations (`ETSOverloadDeclaration`) are
+                // managed-signature declarations, not runtime members; the
+                // ArkUI lowering below has no member category for them.
+                StructElement::ETSOverloadDeclaration(_) => {}
             }
         }
 
@@ -366,7 +372,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         }
 
         let ast = AstBuilder::new(self.allocator);
-        let mut elements = ast.vec();
+        let mut elements = OxcVec::new_in(&ast);
 
         elements.push(self.constructor_element(constructor_method, &fields));
         elements.push(self.reset_state_vars_on_reuse_element(
@@ -405,7 +411,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             elements.push(self.entry_name_element(name));
         }
 
-        let mut statements = ast.vec();
+        let mut statements = OxcVec::new_in(&ast);
         if self.emit_reusable_v2_helper {
             statements.push(self.reusable_v2_helper_statement());
         }
@@ -426,102 +432,133 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
     fn class_decorators(&self) -> OxcVec<'b, Decorator<'b>> {
         let ast = AstBuilder::new(self.allocator);
         if !self.is_reusable_v2() {
-            return ast.vec();
+            return OxcVec::new_in(&ast);
         }
-        let decorator = ast.decorator(
+        let decorator = Decorator::new(
             SPAN,
-            ast.expression_identifier(SPAN, GeneratedViewpuName::REUSABLE_V2_INNER_DECORATOR),
+            Expression::new_identifier(
+                SPAN,
+                GeneratedViewpuName::REUSABLE_V2_INNER_DECORATOR,
+                &ast,
+            ),
+            &ast,
         );
-        ast.vec1(decorator)
+        OxcVec::from_value_in(decorator, &ast)
     }
 
     fn reusable_v2_helper_statement(&self) -> Statement<'b> {
         let ast = AstBuilder::new(self.allocator);
         let builder = ViewpuAstBuilder::new(self.allocator);
-        let base_class = ast.expression_identifier(SPAN, GeneratedViewpuName::BASE_CLASS);
-        let base_class_prototype = ast.member_expression_static(
+        let base_class = Expression::new_identifier(SPAN, GeneratedViewpuName::BASE_CLASS, &ast);
+        let base_class_prototype = MemberExpression::new_static_member_expression(
             SPAN,
             base_class,
-            ast.identifier_name(SPAN, GeneratedViewpuName::PROTOTYPE),
+            IdentifierName::new(SPAN, GeneratedViewpuName::PROTOTYPE, &ast),
             false,
+            &ast,
         );
-        let getter_body = ast.function_body(
+        let getter_body =
+            ArrowFunctionBody::from(Expression::new_boolean_literal(SPAN, true, &ast));
+        let getter = Expression::new_arrow_function_expression(
             SPAN,
-            ast.vec(),
-            ast.vec1(ast.statement_expression(SPAN, ast.expression_boolean_literal(SPAN, true))),
-        );
-        let getter = ast.expression_arrow_function(
-            SPAN,
-            true,
             false,
-            NONE,
-            ast.formal_parameters(
-                SPAN,
-                FormalParameterKind::ArrowFormalParameters,
-                ast.vec(),
-                NONE,
+            None,
+            ArenaBox::new_in(
+                FormalParameters::new(
+                    SPAN,
+                    FormalParameterKind::ArrowFormalParameters,
+                    OxcVec::new_in(&ast),
+                    None,
+                    &ast,
+                ),
+                &ast,
             ),
-            NONE,
+            None,
             getter_body,
+            &ast,
         );
-        let descriptor = ast.expression_object(
+        let descriptor = Expression::new_object_expression(
             SPAN,
-            ast.vec1(ast.object_property_kind_object_property(
-                SPAN,
-                PropertyKind::Init,
-                ast.property_key_static_identifier(SPAN, ast.str(GeneratedViewpuName::GET)),
-                getter,
-                false,
-                false,
-                false,
-            )),
+            OxcVec::from_value_in(
+                ObjectPropertyKind::new_object_property(
+                    SPAN,
+                    PropertyKind::Init,
+                    PropertyKey::new_static_identifier(SPAN, GeneratedViewpuName::GET, &ast),
+                    getter,
+                    false,
+                    false,
+                    false,
+                    &ast,
+                ),
+                &ast,
+            ),
+            &ast,
         );
-        let reflect_define_property = ast.member_expression_static(
+        let reflect_define_property = MemberExpression::new_static_member_expression(
             SPAN,
-            ast.expression_identifier(SPAN, GeneratedViewpuName::REFLECT),
-            ast.identifier_name(SPAN, GeneratedViewpuName::DEFINE_PROPERTY),
+            Expression::new_identifier(SPAN, GeneratedViewpuName::REFLECT, &ast),
+            IdentifierName::new(SPAN, GeneratedViewpuName::DEFINE_PROPERTY, &ast),
             false,
+            &ast,
         );
-        let call = ast.expression_call(
+        let call = Expression::new_call_expression(
             SPAN,
             Expression::from(reflect_define_property),
-            NONE,
-            ast.vec_from_iter([
-                Argument::from(Expression::from(base_class_prototype)),
-                Argument::from(ast.expression_string_literal(
-                    SPAN,
-                    ast.str(GeneratedViewpuName::IS_REUSABLE),
-                    None,
-                )),
-                Argument::from(descriptor),
-            ]),
-            false,
-        );
-        let body = ast.alloc_function_body(
-            SPAN,
-            ast.vec(),
-            ast.vec1(ast.statement_expression(SPAN, call)),
-        );
-        let function = ast.alloc_function(
-            SPAN,
-            FunctionType::FunctionDeclaration,
-            Some(ast.binding_identifier(
-                SPAN,
-                ast.str(GeneratedViewpuName::REUSABLE_V2_INNER_DECORATOR),
-            )),
-            false,
-            false,
-            false,
-            NONE,
-            NONE,
-            ast.alloc_formal_parameters(
-                SPAN,
-                FormalParameterKind::FormalParameter,
-                ast.vec1(builder.formal_parameter(GeneratedViewpuName::BASE_CLASS)),
-                NONE,
+            None,
+            OxcVec::from_iter_in(
+                [
+                    Argument::from(Expression::from(base_class_prototype)),
+                    Argument::from(Expression::new_string_literal(
+                        SPAN,
+                        GeneratedViewpuName::IS_REUSABLE,
+                        None,
+                        &ast,
+                    )),
+                    Argument::from(descriptor),
+                ],
+                &ast,
             ),
-            NONE,
-            Some(body),
+            false,
+            &ast,
+        );
+        let body = FunctionBody::boxed(
+            SPAN,
+            OxcVec::new_in(&ast),
+            OxcVec::from_value_in(Statement::new_expression_statement(SPAN, call, &ast), &ast),
+            &ast,
+        );
+        let function = ArenaBox::new_in(
+            Function::new(
+                SPAN,
+                FunctionType::FunctionDeclaration,
+                Some(BindingIdentifier::new(
+                    SPAN,
+                    GeneratedViewpuName::REUSABLE_V2_INNER_DECORATOR,
+                    &ast,
+                )),
+                false,
+                false,
+                false,
+                None,
+                None,
+                ArenaBox::new_in(
+                    FormalParameters::new(
+                        SPAN,
+                        FormalParameterKind::FormalParameter,
+                        OxcVec::from_value_in(
+                            builder.formal_parameter(GeneratedViewpuName::BASE_CLASS),
+                            &ast,
+                        ),
+                        None,
+                        &ast,
+                    ),
+                    &ast,
+                ),
+                None,
+                Some(body),
+                &ast,
+            ),
+            &ast,
         );
         Statement::FunctionDeclaration(function)
     }
@@ -837,7 +874,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             property.value = None;
         }
         property.decorators = self.filtered_field_decorators(field);
-        ClassElement::PropertyDefinition(ast.alloc(property))
+        ClassElement::PropertyDefinition(ArenaBox::new_in(property, &ast))
     }
 
     fn filtered_field_decorators(&self, field: &V2Field<'_>) -> OxcVec<'b, Decorator<'b>> {
@@ -859,7 +896,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 true
             })
             .map(|decorator| decorator.clone_in(self.allocator))
-            .fold(ast.vec(), |mut decorators, decorator| {
+            .fold(OxcVec::new_in(&ast), |mut decorators, decorator| {
                 decorators.push(decorator);
                 decorators
             })

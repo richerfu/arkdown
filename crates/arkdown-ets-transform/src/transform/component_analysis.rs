@@ -5,10 +5,10 @@ use std::sync::Arc;
 use arkdown_path::ModuleSpecifierText;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArkUIChild, ArkUIComponentExpression, CallExpression, Declaration, Decorator,
-    ExportDefaultDeclarationKind, Expression, Function, FunctionBody, ImportDeclarationSpecifier,
-    ModuleExportName, Program, Statement, StructElement, StructStatement, TSLiteral, TSType,
-    TSTypeName,
+    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, CallExpression, Declaration,
+    Decorator, ExportDefaultDeclarationKind, Expression, Function, FunctionBody,
+    ImportDeclarationSpecifier, ModuleExportName, Program, Statement, StructElement,
+    StructStatement, TSLiteral, TSType, TSTypeName,
 };
 use rayon::prelude::*;
 
@@ -33,10 +33,8 @@ impl ExtendAttributeIndex {
                 Statement::FunctionDeclaration(function) => {
                     index.collect_function(function, &[]);
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::FunctionDeclaration(function)) =
-                        export.declaration.as_ref()
-                    {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::FunctionDeclaration(function) = &export.declaration {
                         index.collect_function(function, &export.decorators);
                     }
                 }
@@ -104,8 +102,8 @@ impl<'a> CustomComponentNameCollector<'a> {
             Statement::StructStatement(statement) => {
                 self.names.insert(statement.id.name.to_string());
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::StructStatement(statement) = &export.declaration {
                     self.names.insert(statement.id.name.to_string());
                 }
             }
@@ -135,8 +133,8 @@ impl<'a> LocalComponentUpdatePropsCollector<'a> {
             Statement::StructStatement(statement) if Self::is_component(statement) => {
                 self.insert(statement);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::StructStatement(statement) = &export.declaration {
                     if Self::is_component(statement) {
                         self.insert(statement);
                     }
@@ -472,8 +470,8 @@ impl ImportedArkuiComponentUsageCollector {
             Statement::StructStatement(statement) => {
                 self.collect_struct(statement);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::StructStatement(statement) = &export.declaration {
                     self.collect_struct(statement);
                 }
             }
@@ -591,7 +589,9 @@ impl ImportedArkuiComponentUsageCollector {
             return;
         };
         if let Expression::ArrowFunctionExpression(arrow) = expression {
-            self.collect_body(&arrow.body);
+            if let ArrowFunctionBody::FunctionBody(body) = &arrow.body {
+                self.collect_body(body);
+            }
         }
     }
 }
@@ -652,8 +652,8 @@ impl<'a> BuilderFunctionNameCollector<'a> {
                         names.insert(function_id.name.to_string());
                     }
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::FunctionDeclaration(function) = &export.declaration {
                         if FunctionDecorators::new(function).has(ArkuiDecoratorName::BUILDER)
                             || export.decorators.iter().any(|d| {
                                 ArkuiDecorator::new(d).name() == ArkuiDecoratorName::BUILDER
@@ -1140,8 +1140,8 @@ impl<'a> LocalEnumNamesCollector<'a> {
                 Statement::TSEnumDeclaration(declaration) => {
                     enums.insert(declaration.id.name.to_string());
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
                         enums.insert(declaration.id.name.to_string());
                     }
                 }
@@ -1166,10 +1166,8 @@ impl<'a> LocalSimpleTypeAliasCollector<'a> {
         for statement in &self.program.body {
             let declaration = match statement {
                 Statement::TSTypeAliasDeclaration(declaration) => Some(declaration.as_ref()),
-                Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                    Some(Declaration::TSTypeAliasDeclaration(declaration)) => {
-                        Some(declaration.as_ref())
-                    }
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::TSTypeAliasDeclaration(declaration) => Some(declaration.as_ref()),
                     _ => None,
                 },
                 _ => None,
@@ -1449,13 +1447,11 @@ impl ModuleExportFacts {
                         facts.direct.builders.insert(function_id.name.to_string());
                     }
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
                         facts.direct.enums.insert(declaration.id.name.to_string());
                     }
-                    if let Some(Declaration::TSTypeAliasDeclaration(declaration)) =
-                        &export.declaration
-                    {
+                    if let Declaration::TSTypeAliasDeclaration(declaration) = &export.declaration {
                         if facts
                             .local_simple_type_aliases
                             .contains(declaration.id.name.as_str())
@@ -1466,7 +1462,7 @@ impl ModuleExportFacts {
                                 .insert(declaration.id.name.to_string());
                         }
                     }
-                    if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
+                    if let Declaration::FunctionDeclaration(function) = &export.declaration {
                         if FunctionDecorators::new(function).has(ArkuiDecoratorName::BUILDER)
                             || export.decorators.iter().any(|decorator| {
                                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::BUILDER
@@ -1477,9 +1473,7 @@ impl ModuleExportFacts {
                             }
                         }
                     }
-                    if let Some(Declaration::StructStatement(statement)) =
-                        export.declaration.as_ref()
-                    {
+                    if let Declaration::StructStatement(statement) = &export.declaration {
                         if ComponentExportRules::is_exported_component_struct(statement) {
                             facts.direct.components.named.insert(
                                 statement.id.name.to_string(),
@@ -1536,13 +1530,12 @@ impl ModuleExportFacts {
                     }
                     facts.imports.push(fact);
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if matches!(
-                        export.declaration.as_ref(),
-                        Some(Declaration::StructStatement(_))
-                    ) {
+                Statement::ExportDeclaration(export) => {
+                    if matches!(&export.declaration, Declaration::StructStatement(_)) {
                         continue;
                     }
+                }
+                Statement::ExportNamedDeclaration(export) => {
                     let bindings = export
                         .specifiers
                         .iter()
@@ -1551,17 +1544,26 @@ impl ModuleExportFacts {
                             exported: ComponentModuleExportName::value(&specifier.exported),
                         })
                         .collect::<Vec<_>>();
-                    if let Some(source) = &export.source {
-                        if let Some(target) = resolver.resolve(source.value.as_str()) {
-                            facts.exports.push(ModuleExportFact::NamedFrom {
-                                target: target.path,
-                                bindings,
-                            });
-                        }
-                    } else if !bindings.is_empty() {
+                    if !bindings.is_empty() {
                         facts
                             .exports
                             .push(ModuleExportFact::NamedLocal { bindings });
+                    }
+                }
+                Statement::ExportFromDeclaration(export) => {
+                    let bindings = export
+                        .specifiers
+                        .iter()
+                        .map(|specifier| ModuleExportBindingFact {
+                            local: ComponentModuleExportName::value(&specifier.local),
+                            exported: ComponentModuleExportName::value(&specifier.exported),
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(target) = resolver.resolve(export.source.value.as_str()) {
+                        facts.exports.push(ModuleExportFact::NamedFrom {
+                            target: target.path,
+                            bindings,
+                        });
                     }
                 }
                 Statement::ExportDefaultDeclaration(export) => {
@@ -1809,8 +1811,8 @@ impl<'a> LocalComponentExportCollector<'a> {
             {
                 self.insert(statement);
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::StructStatement(statement)) = export.declaration.as_ref() {
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::StructStatement(statement) = &export.declaration {
                     if ComponentExportRules::is_exported_component_struct(statement) {
                         self.insert(statement);
                     }

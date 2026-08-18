@@ -158,17 +158,16 @@ mod tests {
             let allocator = Allocator::default();
             let parsed =
                 Parser::new(&allocator, self.code, SourceType::ts().with_module(true)).parse();
-            parsed.program.body.iter().any(|statement| {
-                let Statement::ExportNamedDeclaration(export) = statement else {
-                    return false;
-                };
-                let Some(Declaration::VariableDeclaration(declaration)) = &export.declaration
-                else {
-                    return false;
-                };
-                declaration.declarations.iter().any(|declarator| {
-                    declarator.id.get_identifier_name().as_deref() == Some(expected)
-                })
+            parsed.program.body.iter().any(|statement| match statement {
+                Statement::ExportDeclaration(export) => {
+                    let Declaration::VariableDeclaration(declaration) = &export.declaration else {
+                        return false;
+                    };
+                    declaration.declarations.iter().any(|declarator| {
+                        declarator.id.get_identifier_name().as_deref() == Some(expected)
+                    })
+                }
+                _ => false,
             })
         }
 

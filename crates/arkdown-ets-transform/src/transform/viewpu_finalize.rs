@@ -1,9 +1,10 @@
-use oxc_allocator::{Allocator, Vec as OxcVec};
+use oxc_allocator::{Allocator, ArenaBox, ArenaVec, Vec as OxcVec};
 use oxc_ast::ast::{
-    Argument, Declaration, ExportDefaultDeclarationKind, Expression, Program, Statement,
+    Argument, Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters,
+    FunctionBody, IdentifierName, MemberExpression, Program, Statement,
 };
-use oxc_ast::{AstBuilder, NONE};
-use oxc_span::{GetSpan, Span};
+use oxc_ast::builder::AstBuilder;
+use oxc_span::Span;
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
 use crate::transform::viewpu_emit::GeneratedViewpuName;
@@ -75,7 +76,7 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
         }
 
         if needs_shim {
-            final_body.push(FinalizeConstructionShim::new().statement(ast, self.allocator));
+            final_body.push(FinalizeConstructionShim::new().statement(&ast));
             self.push_params_interfaces(&mut final_body, params);
             for (_, statement) in rest {
                 final_body.push(statement);
@@ -156,94 +157,111 @@ impl FinalizeConstructionShim {
         Self
     }
 
-    fn statement<'a>(&self, ast: AstBuilder<'a>, allocator: &'a Allocator) -> Statement<'a> {
-        let test = ast.expression_unary(
+    fn statement<'a>(&self, ast: &AstBuilder<'a>) -> Statement<'a> {
+        let test = Expression::new_unary_expression(
             Span::default(),
             UnaryOperator::LogicalNot,
-            ast.expression_parenthesized(Span::default(), self.finalize_in_viewpu_prototype(ast)),
+            Expression::new_parenthesized_expression(
+                Span::default(),
+                self.finalize_in_viewpu_prototype(ast),
+                ast,
+            ),
+            ast,
         );
-        ast.statement_if(
+        Statement::new_if_statement(
             Span::default(),
             test,
-            ast.statement_block(
+            Statement::new_block_statement(
                 Span::default(),
-                ast.vec1(self.reflect_set_statement(ast, allocator)),
+                ArenaVec::from_value_in(self.reflect_set_statement(ast), ast),
+                ast,
             ),
             None,
+            ast,
         )
     }
 
-    fn finalize_in_viewpu_prototype<'a>(&self, ast: AstBuilder<'a>) -> Expression<'a> {
-        ast.expression_binary(
+    fn finalize_in_viewpu_prototype<'a>(&self, ast: &AstBuilder<'a>) -> Expression<'a> {
+        Expression::new_binary_expression(
             Span::default(),
-            ast.expression_string_literal(
+            Expression::new_string_literal(
                 Span::default(),
                 GeneratedViewpuName::FINALIZE_CONSTRUCTION,
                 None,
+                ast,
             ),
             BinaryOperator::In,
             self.viewpu_prototype_expression(ast),
+            ast,
         )
     }
 
-    fn viewpu_prototype_expression<'a>(&self, ast: AstBuilder<'a>) -> Expression<'a> {
-        let object = ast.expression_identifier(Span::default(), GeneratedViewpuName::VIEWPU_BASE);
-        Expression::from(ast.member_expression_static(
+    fn viewpu_prototype_expression<'a>(&self, ast: &AstBuilder<'a>) -> Expression<'a> {
+        let object =
+            Expression::new_identifier(Span::default(), GeneratedViewpuName::VIEWPU_BASE, ast);
+        Expression::from(MemberExpression::new_static_member_expression(
             Span::default(),
             object,
-            ast.identifier_name(Span::default(), GeneratedViewpuName::PROTOTYPE),
+            IdentifierName::new(Span::default(), GeneratedViewpuName::PROTOTYPE, ast),
             false,
+            ast,
         ))
     }
 
-    fn reflect_set_statement<'a>(
-        &self,
-        ast: AstBuilder<'a>,
-        allocator: &'a Allocator,
-    ) -> Statement<'a> {
-        let callee = Expression::from(ast.member_expression_static(
+    fn reflect_set_statement<'a>(&self, ast: &AstBuilder<'a>) -> Statement<'a> {
+        let callee = Expression::from(MemberExpression::new_static_member_expression(
             Span::default(),
-            ast.expression_identifier(Span::default(), GeneratedViewpuName::REFLECT),
-            ast.identifier_name(Span::default(), GeneratedViewpuName::SET),
+            Expression::new_identifier(Span::default(), GeneratedViewpuName::REFLECT, ast),
+            IdentifierName::new(Span::default(), GeneratedViewpuName::SET, ast),
             false,
+            ast,
         ));
-        let arguments = ast.vec_from_iter([
-            Argument::from(self.viewpu_prototype_expression(ast)),
-            Argument::from(ast.expression_string_literal(
-                Span::default(),
-                GeneratedViewpuName::FINALIZE_CONSTRUCTION,
-                None,
-            )),
-            Argument::from(self.empty_arrow_function(ast, allocator)),
-        ]);
-        ast.statement_expression(
+        let arguments = ArenaVec::from_iter_in(
+            [
+                Argument::from(self.viewpu_prototype_expression(ast)),
+                Argument::from(Expression::new_string_literal(
+                    Span::default(),
+                    GeneratedViewpuName::FINALIZE_CONSTRUCTION,
+                    None,
+                    ast,
+                )),
+                Argument::from(self.empty_arrow_function(ast)),
+            ],
+            ast,
+        );
+        Statement::new_expression_statement(
             Span::default(),
-            ast.expression_call(Span::default(), callee, NONE, arguments, false),
+            Expression::new_call_expression(Span::default(), callee, None, arguments, false, ast),
+            ast,
         )
     }
 
-    fn empty_arrow_function<'a>(
-        &self,
-        ast: AstBuilder<'a>,
-        allocator: &'a Allocator,
-    ) -> Expression<'a> {
-        ast.expression_arrow_function(
+    fn empty_arrow_function<'a>(&self, ast: &AstBuilder<'a>) -> Expression<'a> {
+        Expression::new_arrow_function_expression(
             Span::default(),
             false,
-            false,
-            NONE,
-            ast.formal_parameters(
-                Span::default(),
-                oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
-                OxcVec::new_in(&allocator),
-                NONE,
+            None,
+            ArenaBox::new_in(
+                FormalParameters::new(
+                    Span::default(),
+                    oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
+                    OxcVec::new_in(ast),
+                    None,
+                    ast,
+                ),
+                ast,
             ),
-            NONE,
-            ast.function_body(
-                Span::default(),
-                OxcVec::new_in(&allocator),
-                OxcVec::new_in(&allocator),
-            ),
+            None,
+            oxc_ast::ast::ArrowFunctionBody::FunctionBody(ArenaBox::new_in(
+                FunctionBody::new(
+                    Span::default(),
+                    OxcVec::new_in(ast),
+                    OxcVec::new_in(ast),
+                    ast,
+                ),
+                ast,
+            )),
+            ast,
         )
     }
 }
@@ -267,21 +285,26 @@ struct ViewpuClassProbe;
 impl ViewpuClassProbe {
     fn declares_view_class(statement: &Statement<'_>) -> bool {
         match statement {
-            Statement::ClassDeclaration(class) => Self::class_extends_view_base(&class.super_class),
-            Statement::ExportDefaultDeclaration(export) => {
-                matches!(&export.declaration, ExportDefaultDeclarationKind::ClassDeclaration(class) if Self::class_extends_view_base(&class.super_class))
+            Statement::ClassDeclaration(class) => {
+                Self::class_extends_view_base(class.heritage.as_ref())
             }
-            Statement::ExportNamedDeclaration(export) => {
-                matches!(&export.declaration, Some(Declaration::ClassDeclaration(class)) if Self::class_extends_view_base(&class.super_class))
+            Statement::ExportDefaultDeclaration(export) => {
+                matches!(&export.declaration, ExportDefaultDeclarationKind::ClassDeclaration(class) if Self::class_extends_view_base(class.heritage.as_ref()))
+            }
+            Statement::ExportDeclaration(export) => {
+                matches!(&export.declaration, Declaration::ClassDeclaration(class) if Self::class_extends_view_base(class.heritage.as_ref()))
             }
             _ => false,
         }
     }
 
-    fn class_extends_view_base(super_class: &Option<Expression<'_>>) -> bool {
-        matches!(super_class, Some(Expression::Identifier(identifier)) if matches!(
-            identifier.name.as_str(),
-            GeneratedViewpuName::VIEWPU_BASE | GeneratedViewpuName::VIEW_V2_BASE
+    fn class_extends_view_base(heritage: Option<&oxc_ast::ast::ClassHeritage<'_>>) -> bool {
+        matches!(heritage, Some(heritage) if matches!(
+            &heritage.expression,
+            Expression::Identifier(identifier) if matches!(
+                identifier.name.as_str(),
+                GeneratedViewpuName::VIEWPU_BASE | GeneratedViewpuName::VIEW_V2_BASE
+            )
         ))
     }
 }

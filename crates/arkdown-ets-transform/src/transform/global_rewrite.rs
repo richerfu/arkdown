@@ -1,8 +1,9 @@
-use oxc_allocator::{Allocator, CloneIn};
+use oxc_allocator::{Allocator, ArenaBox, CloneIn, FromIn};
 use oxc_ast::ast::{
-    CallExpression, ClassElement, Expression, MemberExpression, MethodDefinition, Program,
+    CallExpression, ClassElement, Expression, IdentifierName, MemberExpression, MethodDefinition,
+    Program,
 };
-use oxc_ast::AstBuilder;
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_syntax::scope::ScopeFlags;
 
@@ -59,7 +60,7 @@ impl<'a> GlobalContextCallRewriter<'a> {
         if !retain_decorators {
             method.decorators.clear();
         }
-        ClassElement::MethodDefinition(ast.alloc(method))
+        ClassElement::MethodDefinition(ArenaBox::new_in(method, &ast))
     }
 
     fn rewrite_owned_expression(&self, expression: &mut Expression<'a>) -> bool {
@@ -161,13 +162,15 @@ impl GlobalContextCallRewrite {
     ) -> Expression<'a> {
         debug_assert!(self.is_target_callee(callee_name));
         let ast = AstBuilder::new(allocator);
-        let object = ast.expression_identifier(oxc_span::SPAN, Self::CONTEXT);
-        let property = ast.identifier_name(oxc_span::SPAN, ast.str(callee_name));
-        Self::member_to_expression(ast.member_expression_static(
+        let object = Expression::new_identifier(oxc_span::SPAN, Self::CONTEXT, &ast);
+        let callee_name = oxc_str::Ident::from_in(callee_name, allocator);
+        let property = IdentifierName::new(oxc_span::SPAN, callee_name, &ast);
+        Self::member_to_expression(MemberExpression::new_static_member_expression(
             oxc_span::SPAN,
             object,
             property,
             false,
+            &ast,
         ))
     }
 

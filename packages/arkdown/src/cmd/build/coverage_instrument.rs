@@ -13,16 +13,18 @@
 
 use arkdown_cache::CacheKeyMaterial;
 use arkdown_path::ArtifactPathSerializer;
-use oxc_allocator::{Allocator, TakeIn, Vec as OxcVec};
+use oxc_allocator::{Allocator, GetAllocator, TakeIn, Vec as OxcVec};
 use oxc_ast::ast::{
-  Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget, ClassElement,
-  ClassType, ConditionalExpression, DoWhileStatement, Expression, ForInStatement, ForOfStatement,
-  ForStatement, FormalParameter, FormalParameterKind, FormalParameters, Function, FunctionType,
+  Argument, ArrayExpressionElement, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget,
+  BindingIdentifier, BindingPattern, ClassBody, ClassElement, ClassType, ConditionalExpression,
+  DoWhileStatement, Expression, ForInStatement, ForOfStatement, ForStatement, FormalParameter,
+  FormalParameterKind, FormalParameters, Function, FunctionBody, FunctionType, IdentifierName,
   IfStatement, MemberExpression, MethodDefinitionKind, MethodDefinitionType, NumberBase,
   ObjectPropertyKind, PropertyDefinitionType, PropertyKey, PropertyKind, SimpleAssignmentTarget,
-  Statement, SwitchStatement, TryStatement, VariableDeclarationKind, WhileStatement,
+  Statement, SwitchStatement, TryStatement, VariableDeclarationKind, VariableDeclarator,
+  WhileStatement,
 };
-use oxc_ast::{AstBuilder, NONE};
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
@@ -68,43 +70,50 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
   }
 
   fn statements(&self) -> OxcVec<'a, Statement<'a>> {
-    self.ast.vec1(self.class_statement())
+    OxcVec::from_value_in(self.class_statement(), &self.ast)
   }
 
   fn class_statement(&self) -> Statement<'a> {
-    let body = self.ast.alloc_class_body(
+    let body = ClassBody::boxed(
       SPAN,
-      self.ast.vec_from_iter([
-        self.coverage_property(),
-        self.constructor_method(),
-        self.instrument_function_method(),
-        self.instrument_region_method(),
-        self.instrument_branch_method(),
-      ]),
+      OxcVec::from_iter_in(
+        [
+          self.coverage_property(),
+          self.constructor_method(),
+          self.instrument_function_method(),
+          self.instrument_region_method(),
+          self.instrument_branch_method(),
+        ],
+        &self.ast,
+      ),
+      &self.ast,
     );
-    let class = self.ast.alloc_class(
+    Statement::new_class_declaration(
       SPAN,
       ClassType::ClassDeclaration,
-      self.ast.vec(),
-      Some(self.ast.binding_identifier(SPAN, BjcCovRuntimeName::CLASS)),
-      NONE,
+      OxcVec::new_in(&self.ast),
+      Some(BindingIdentifier::new(
+        SPAN,
+        BjcCovRuntimeName::CLASS,
+        &self.ast,
+      )),
       None,
-      NONE,
-      self.ast.vec(),
+      None,
+      OxcVec::new_in(&self.ast),
       body,
       false,
       false,
-    );
-    Statement::ClassDeclaration(class)
+      &self.ast,
+    )
   }
 
   fn coverage_property(&self) -> ClassElement<'a> {
-    self.ast.class_element_property_definition(
+    ClassElement::new_property_definition(
       SPAN,
       PropertyDefinitionType::PropertyDefinition,
-      self.ast.vec(),
+      OxcVec::new_in(&self.ast),
       self.property_key(BjcCovRuntimeName::COVERAGE),
-      Option::<oxc_allocator::Box<'a, oxc_ast::ast::TSTypeAnnotation<'a>>>::None,
+      None,
       None,
       false,
       false,
@@ -114,6 +123,7 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
       false,
       false,
       None,
+      &self.ast,
     )
   }
 
@@ -122,27 +132,34 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
       BjcCovRuntimeName::CONSTRUCTOR,
       MethodDefinitionKind::Constructor,
       [BjcCovRuntimeName::COV_DATA],
-      self.ast.vec_from_iter([
-        self.variable_statement(
-          VariableDeclarationKind::Const,
-          BjcCovRuntimeName::GCV,
-          self
-            .ast
-            .expression_string_literal(SPAN, BjcCovRuntimeName::GLOBAL_COVERAGE, None),
-        ),
-        self.variable_statement(
-          VariableDeclarationKind::Let,
-          BjcCovRuntimeName::COVERAGE,
-          self.ast.expression_logical(
-            SPAN,
-            self.global_coverage_expression(),
-            LogicalOperator::Or,
-            self.global_coverage_assignment_expression(),
+      OxcVec::from_iter_in(
+        [
+          self.variable_statement(
+            VariableDeclarationKind::Const,
+            BjcCovRuntimeName::GCV,
+            Expression::new_string_literal(
+              SPAN,
+              BjcCovRuntimeName::GLOBAL_COVERAGE,
+              None,
+              &self.ast,
+            ),
           ),
-        ),
-        self.coverage_init_statement(),
-        self.this_coverage_assignment_statement(),
-      ]),
+          self.variable_statement(
+            VariableDeclarationKind::Let,
+            BjcCovRuntimeName::COVERAGE,
+            Expression::new_logical_expression(
+              SPAN,
+              self.global_coverage_expression(),
+              LogicalOperator::Or,
+              self.global_coverage_assignment_expression(),
+              &self.ast,
+            ),
+          ),
+          self.coverage_init_statement(),
+          self.this_coverage_assignment_statement(),
+        ],
+        &self.ast,
+      ),
     )
   }
 
@@ -151,10 +168,13 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
       BjcCovRuntimeName::INSTRUMENT_FUNCTION,
       MethodDefinitionKind::Method,
       [BjcCovRuntimeName::FUNC],
-      self.ast.vec_from_iter([
-        self.increment_statement(self.function_count_target()),
-        self.increment_statement(self.function_first_region_count_target()),
-      ]),
+      OxcVec::from_iter_in(
+        [
+          self.increment_statement(self.function_count_target()),
+          self.increment_statement(self.function_first_region_count_target()),
+        ],
+        &self.ast,
+      ),
     )
   }
 
@@ -163,9 +183,10 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
       BjcCovRuntimeName::INSTRUMENT_REGION,
       MethodDefinitionKind::Method,
       [BjcCovRuntimeName::FUNC, BjcCovRuntimeName::REGION],
-      self
-        .ast
-        .vec1(self.increment_statement(self.region_count_target())),
+      OxcVec::from_value_in(
+        self.increment_statement(self.region_count_target()),
+        &self.ast,
+      ),
     )
   }
 
@@ -178,25 +199,29 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
         BjcCovRuntimeName::BRANCH,
         BjcCovRuntimeName::TRUE_OR_FALSE,
       ],
-      self.ast.vec1(
-        self.ast.statement_if(
+      OxcVec::from_value_in(
+        Statement::new_if_statement(
           SPAN,
           self.identifier(BjcCovRuntimeName::TRUE_OR_FALSE),
-          self.ast.statement_block(
+          Statement::new_block_statement(
             SPAN,
-            self
-              .ast
-              .vec1(self.increment_statement(self.branch_count_target(true))),
-          ),
-          Some(
-            self.ast.statement_block(
-              SPAN,
-              self
-                .ast
-                .vec1(self.increment_statement(self.branch_count_target(false))),
+            OxcVec::from_value_in(
+              self.increment_statement(self.branch_count_target(true)),
+              &self.ast,
             ),
+            &self.ast,
           ),
+          Some(Statement::new_block_statement(
+            SPAN,
+            OxcVec::from_value_in(
+              self.increment_statement(self.branch_count_target(false)),
+              &self.ast,
+            ),
+            &self.ast,
+          )),
+          &self.ast,
         ),
+        &self.ast,
       ),
     )
   }
@@ -208,23 +233,29 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
     params: [&'a str; N],
     statements: OxcVec<'a, Statement<'a>>,
   ) -> ClassElement<'a> {
-    let function = self.ast.alloc_function(
+    let function = Function::boxed(
       SPAN,
       FunctionType::FunctionExpression,
       None,
       false,
       false,
       false,
-      NONE,
-      NONE,
+      None,
+      None,
       self.formal_parameters(params),
-      Option::<oxc_allocator::Box<'a, oxc_ast::ast::TSTypeAnnotation<'a>>>::None,
-      Some(self.ast.function_body(SPAN, self.ast.vec(), statements)),
+      None,
+      Some(FunctionBody::boxed(
+        SPAN,
+        OxcVec::new_in(&self.ast),
+        statements,
+        &self.ast,
+      )),
+      &self.ast,
     );
-    self.ast.class_element_method_definition(
+    ClassElement::new_method_definition(
       SPAN,
       MethodDefinitionType::MethodDefinition,
-      self.ast.vec(),
+      OxcVec::new_in(&self.ast),
       self.property_key(name),
       function,
       kind,
@@ -233,6 +264,7 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
       false,
       false,
       None,
+      &self.ast,
     )
   }
 
@@ -240,27 +272,30 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
     &self,
     params: [&'a str; N],
   ) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
-    self.ast.alloc_formal_parameters(
+    FormalParameters::boxed(
       SPAN,
       FormalParameterKind::FormalParameter,
-      self
-        .ast
-        .vec_from_iter(params.into_iter().map(|name| self.formal_parameter(name))),
-      NONE,
+      OxcVec::from_iter_in(
+        params.into_iter().map(|name| self.formal_parameter(name)),
+        &self.ast,
+      ),
+      None,
+      &self.ast,
     )
   }
 
   fn formal_parameter(&self, name: &'a str) -> FormalParameter<'a> {
-    self.ast.formal_parameter(
+    FormalParameter::new(
       SPAN,
-      self.ast.vec(),
-      self.ast.binding_pattern_binding_identifier(SPAN, name),
-      NONE,
-      NONE,
+      OxcVec::new_in(&self.ast),
+      BindingPattern::new_binding_identifier(SPAN, name, &self.ast),
+      None,
+      None,
       false,
       None,
       false,
       false,
+      &self.ast,
     )
   }
 
@@ -270,36 +305,44 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
     name: &'a str,
     init: Expression<'a>,
   ) -> Statement<'a> {
-    Statement::from(self.ast.declaration_variable(
+    Statement::new_variable_declaration(
       SPAN,
       kind,
-      self.ast.vec1(self.ast.variable_declarator(
-        SPAN,
-        kind,
-        self.ast.binding_pattern_binding_identifier(SPAN, name),
-        NONE,
-        Some(init),
-        false,
-      )),
+      OxcVec::from_value_in(
+        VariableDeclarator::new(
+          SPAN,
+          BindingPattern::new_binding_identifier(SPAN, name, &self.ast),
+          None,
+          Some(init),
+          false,
+          &self.ast,
+        ),
+        &self.ast,
+      ),
       false,
-    ))
+      &self.ast,
+    )
   }
 
   fn coverage_init_statement(&self) -> Statement<'a> {
-    self.ast.statement_if(
+    Statement::new_if_statement(
       SPAN,
-      self.ast.expression_unary(
+      Expression::new_unary_expression(
         SPAN,
         UnaryOperator::LogicalNot,
         self.coverage_entry_expression(),
+        &self.ast,
       ),
-      self.ast.statement_block(
+      Statement::new_block_statement(
         SPAN,
-        self
-          .ast
-          .vec1(self.assignment_statement(self.coverage_entry_target(), self.cov_data())),
+        OxcVec::from_value_in(
+          self.assignment_statement(self.coverage_entry_target(), self.cov_data()),
+          &self.ast,
+        ),
+        &self.ast,
       ),
       None,
+      &self.ast,
     )
   }
 
@@ -315,29 +358,34 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
     left: AssignmentTarget<'a>,
     right: Expression<'a>,
   ) -> Statement<'a> {
-    self.ast.statement_expression(
+    Statement::new_expression_statement(
       SPAN,
-      self
-        .ast
-        .expression_assignment(SPAN, AssignmentOperator::Assign, left, right),
+      Expression::new_assignment_expression(
+        SPAN,
+        AssignmentOperator::Assign,
+        left,
+        right,
+        &self.ast,
+      ),
+      &self.ast,
     )
   }
 
   fn global_coverage_assignment_expression(&self) -> Expression<'a> {
-    self.ast.expression_assignment(
+    Expression::new_assignment_expression(
       SPAN,
       AssignmentOperator::Assign,
       self.global_coverage_target(),
-      self.ast.expression_object(SPAN, self.ast.vec()),
+      Expression::new_object_expression(SPAN, OxcVec::new_in(&self.ast), &self.ast),
+      &self.ast,
     )
   }
 
   fn increment_statement(&self, target: SimpleAssignmentTarget<'a>) -> Statement<'a> {
-    self.ast.statement_expression(
+    Statement::new_expression_statement(
       SPAN,
-      self
-        .ast
-        .expression_update(SPAN, UpdateOperator::Increment, false, target),
+      Expression::new_update_expression(SPAN, UpdateOperator::Increment, false, target, &self.ast),
+      &self.ast,
     )
   }
 
@@ -355,9 +403,13 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
           self.function_record_expression(BjcCovRuntimeName::FUNC),
           BjcCovRuntimeName::REGIONS,
         ),
-        self
-          .ast
-          .expression_numeric_literal(SPAN, 0.0, Some("0".into()), NumberBase::Decimal),
+        Expression::new_numeric_literal(
+          SPAN,
+          0.0,
+          Some("0".into()),
+          NumberBase::Decimal,
+          &self.ast,
+        ),
       ),
       BjcCovRuntimeName::COUNT,
     )
@@ -423,7 +475,10 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
   }
 
   fn this_coverage_expression(&self) -> Expression<'a> {
-    self.static_member(self.ast.expression_this(SPAN), BjcCovRuntimeName::COVERAGE)
+    self.static_member(
+      Expression::new_this_expression(SPAN, &self.ast),
+      BjcCovRuntimeName::COVERAGE,
+    )
   }
 
   fn cov_data(&self) -> Expression<'a> {
@@ -431,34 +486,37 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
   }
 
   fn identifier(&self, name: &str) -> Expression<'a> {
-    self.ast.expression_identifier(SPAN, self.ast.str(name))
+    Expression::new_identifier(SPAN, self.ast.allocator().alloc_str(name), &self.ast)
   }
 
   fn this_coverage_target(&self) -> AssignmentTarget<'a> {
-    AssignmentTarget::from(self.ast.member_expression_static(
+    AssignmentTarget::from(MemberExpression::new_static_member_expression(
       SPAN,
-      self.ast.expression_this(SPAN),
-      self.ast.identifier_name(SPAN, BjcCovRuntimeName::COVERAGE),
+      Expression::new_this_expression(SPAN, &self.ast),
+      IdentifierName::new(SPAN, BjcCovRuntimeName::COVERAGE, &self.ast),
       false,
+      &self.ast,
     ))
   }
 
   fn global_coverage_target(&self) -> AssignmentTarget<'a> {
-    AssignmentTarget::ComputedMemberExpression(self.ast.alloc_computed_member_expression(
+    AssignmentTarget::new_computed_member_expression(
       SPAN,
       self.identifier(BjcCovRuntimeName::GLOBAL_THIS),
       self.identifier(BjcCovRuntimeName::GCV),
       false,
-    ))
+      &self.ast,
+    )
   }
 
   fn coverage_entry_target(&self) -> AssignmentTarget<'a> {
-    AssignmentTarget::ComputedMemberExpression(self.ast.alloc_computed_member_expression(
+    AssignmentTarget::new_computed_member_expression(
       SPAN,
       self.identifier(BjcCovRuntimeName::COVERAGE),
       self.cov_data_path_expression(),
       false,
-    ))
+      &self.ast,
+    )
   }
 
   fn static_assignment_target(
@@ -466,33 +524,31 @@ impl<'a> BjcCovRuntimeEmitter<'a> {
     object: Expression<'a>,
     property: &'a str,
   ) -> SimpleAssignmentTarget<'a> {
-    SimpleAssignmentTarget::StaticMemberExpression(self.ast.alloc_static_member_expression(
+    SimpleAssignmentTarget::new_static_member_expression(
       SPAN,
       object,
-      self.ast.identifier_name(SPAN, property),
+      IdentifierName::new(SPAN, property, &self.ast),
       false,
-    ))
+      &self.ast,
+    )
   }
 
   fn static_member(&self, object: Expression<'a>, property: &'a str) -> Expression<'a> {
-    Expression::from(self.ast.member_expression_static(
+    Expression::from(MemberExpression::new_static_member_expression(
       SPAN,
       object,
-      self.ast.identifier_name(SPAN, property),
+      IdentifierName::new(SPAN, property, &self.ast),
       false,
+      &self.ast,
     ))
   }
 
   fn computed_member(&self, object: Expression<'a>, expression: Expression<'a>) -> Expression<'a> {
-    Expression::ComputedMemberExpression(
-      self
-        .ast
-        .alloc_computed_member_expression(SPAN, object, expression, false),
-    )
+    Expression::new_computed_member_expression(SPAN, object, expression, false, &self.ast)
   }
 
   fn property_key(&self, name: &'a str) -> PropertyKey<'a> {
-    PropertyKey::StaticIdentifier(self.ast.alloc(self.ast.identifier_name(SPAN, name)))
+    PropertyKey::new_static_identifier(SPAN, name, &self.ast)
   }
 }
 
@@ -567,7 +623,7 @@ impl<'a> CoverageInstrumenter<'a> {
         generated_names.bcv_var(),
         &normalized_path,
       )
-      .statements(ast, &functions),
+      .statements(&ast, &functions),
     );
     body.extend(parsed.program.body.take_in(&ast));
     parsed.program.body = body;
@@ -657,184 +713,246 @@ impl<'a> CoveragePreludeEmitter<'a> {
 
   fn statements<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     functions: &[FunctionInfo],
   ) -> OxcVec<'b, Statement<'b>> {
-    ast.vec_from_iter([
-      self.coverage_data_statement(ast, functions),
-      self.bjc_instance_statement(ast),
-    ])
+    OxcVec::from_iter_in(
+      [
+        self.coverage_data_statement(ast, functions),
+        self.bjc_instance_statement(ast),
+      ],
+      ast,
+    )
   }
 
   fn coverage_data_statement<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     functions: &[FunctionInfo],
   ) -> Statement<'b> {
-    Statement::from(ast.declaration_variable(
+    Statement::new_variable_declaration(
       SPAN,
       VariableDeclarationKind::Const,
-      ast.vec1(ast.variable_declarator(
-        SPAN,
-        VariableDeclarationKind::Const,
-        ast.binding_pattern_binding_identifier(SPAN, ast.str(self.cov_data_var)),
-        NONE,
-        Some(ast.expression_object(
+      OxcVec::from_value_in(
+        VariableDeclarator::new(
           SPAN,
-          ast.vec_from_iter([
-            self.property(
+          BindingPattern::new_binding_identifier(
+            SPAN,
+            ast.allocator().alloc_str(self.cov_data_var),
+            ast,
+          ),
+          None,
+          Some(Expression::new_object_expression(
+            SPAN,
+            OxcVec::from_iter_in(
+              [
+                self.property(
+                  ast,
+                  BjcCovRuntimeName::PATH,
+                  Expression::new_string_literal(
+                    SPAN,
+                    ast.allocator().alloc_str(self.normalized_path),
+                    None,
+                    ast,
+                  ),
+                ),
+                self.property(
+                  ast,
+                  BjcCovRuntimeName::FUNCTIONS,
+                  self.functions_expression(ast, functions),
+                ),
+              ],
               ast,
-              BjcCovRuntimeName::PATH,
-              ast.expression_string_literal(SPAN, ast.str(self.normalized_path), None),
             ),
-            self.property(
-              ast,
-              BjcCovRuntimeName::FUNCTIONS,
-              self.functions_expression(ast, functions),
-            ),
-          ]),
-        )),
-        false,
-      )),
+            ast,
+          )),
+          false,
+          ast,
+        ),
+        ast,
+      ),
       false,
-    ))
+      ast,
+    )
   }
 
-  fn bjc_instance_statement<'b>(&self, ast: AstBuilder<'b>) -> Statement<'b> {
-    Statement::from(ast.declaration_variable(
+  fn bjc_instance_statement<'b>(&self, ast: &AstBuilder<'b>) -> Statement<'b> {
+    Statement::new_variable_declaration(
       SPAN,
       VariableDeclarationKind::Let,
-      ast.vec1(ast.variable_declarator(
-        SPAN,
-        VariableDeclarationKind::Let,
-        ast.binding_pattern_binding_identifier(SPAN, ast.str(self.bcv_var)),
-        NONE,
-        Some(ast.expression_new(
+      OxcVec::from_value_in(
+        VariableDeclarator::new(
           SPAN,
-          ast.expression_identifier(SPAN, BjcCovRuntimeName::CLASS),
-          NONE,
-          ast.vec1(Argument::from(
-            ast.expression_identifier(SPAN, ast.str(self.cov_data_var)),
+          BindingPattern::new_binding_identifier(
+            SPAN,
+            ast.allocator().alloc_str(self.bcv_var),
+            ast,
+          ),
+          None,
+          Some(Expression::new_new_expression(
+            SPAN,
+            Expression::new_identifier(SPAN, BjcCovRuntimeName::CLASS, ast),
+            None,
+            OxcVec::from_value_in(
+              Argument::from(Expression::new_identifier(
+                SPAN,
+                ast.allocator().alloc_str(self.cov_data_var),
+                ast,
+              )),
+              ast,
+            ),
+            ast,
           )),
-        )),
-        false,
-      )),
+          false,
+          ast,
+        ),
+        ast,
+      ),
       false,
-    ))
+      ast,
+    )
   }
 
   fn functions_expression<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     functions: &[FunctionInfo],
   ) -> Expression<'b> {
-    ast.expression_array(
+    Expression::new_array_expression(
       SPAN,
-      ast.vec_from_iter(
+      OxcVec::from_iter_in(
         functions
           .iter()
           .map(|function| ArrayExpressionElement::from(self.function_expression(ast, function))),
+        ast,
       ),
+      ast,
     )
   }
 
   fn function_expression<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     function: &FunctionInfo,
   ) -> Expression<'b> {
-    ast.expression_object(
+    Expression::new_object_expression(
       SPAN,
-      ast.vec_from_iter([
-        self.property(
-          ast,
-          BjcCovRuntimeName::NAME,
-          ast.expression_string_literal(SPAN, ast.str(&function.name), None),
-        ),
-        self.property(ast, BjcCovRuntimeName::COUNT, self.zero_expression(ast)),
-        self.property(
-          ast,
-          BjcCovRuntimeName::REGIONS,
-          self.regions_expression(ast, function),
-        ),
-        self.property(
-          ast,
-          BjcCovRuntimeName::BRANCHES,
-          self.branches_expression(ast, function),
-        ),
-      ]),
+      OxcVec::from_iter_in(
+        [
+          self.property(
+            ast,
+            BjcCovRuntimeName::NAME,
+            Expression::new_string_literal(
+              SPAN,
+              ast.allocator().alloc_str(&function.name),
+              None,
+              ast,
+            ),
+          ),
+          self.property(ast, BjcCovRuntimeName::COUNT, self.zero_expression(ast)),
+          self.property(
+            ast,
+            BjcCovRuntimeName::REGIONS,
+            self.regions_expression(ast, function),
+          ),
+          self.property(
+            ast,
+            BjcCovRuntimeName::BRANCHES,
+            self.branches_expression(ast, function),
+          ),
+        ],
+        ast,
+      ),
+      ast,
     )
   }
 
-  fn regions_expression<'b>(&self, ast: AstBuilder<'b>, function: &FunctionInfo) -> Expression<'b> {
-    ast.expression_array(
+  fn regions_expression<'b>(
+    &self,
+    ast: &AstBuilder<'b>,
+    function: &FunctionInfo,
+  ) -> Expression<'b> {
+    Expression::new_array_expression(
       SPAN,
-      ast.vec_from_iter(
+      OxcVec::from_iter_in(
         (0..=function.regions.len())
           .map(|_| ArrayExpressionElement::from(self.count_object_expression(ast))),
+        ast,
       ),
+      ast,
     )
   }
 
   fn branches_expression<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     function: &FunctionInfo,
   ) -> Expression<'b> {
-    ast.expression_array(
+    Expression::new_array_expression(
       SPAN,
-      ast.vec_from_iter(
+      OxcVec::from_iter_in(
         function
           .branches
           .iter()
           .map(|_| ArrayExpressionElement::from(self.branch_object_expression(ast))),
+        ast,
       ),
+      ast,
     )
   }
 
-  fn count_object_expression<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
-    ast.expression_object(
+  fn count_object_expression<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
+    Expression::new_object_expression(
       SPAN,
-      ast.vec1(self.property(ast, BjcCovRuntimeName::COUNT, self.zero_expression(ast))),
+      OxcVec::from_value_in(
+        self.property(ast, BjcCovRuntimeName::COUNT, self.zero_expression(ast)),
+        ast,
+      ),
+      ast,
     )
   }
 
-  fn branch_object_expression<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
-    ast.expression_object(
+  fn branch_object_expression<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
+    Expression::new_object_expression(
       SPAN,
-      ast.vec_from_iter([
-        self.property(
-          ast,
-          BjcCovRuntimeName::TRUE_COUNT,
-          self.zero_expression(ast),
-        ),
-        self.property(
-          ast,
-          BjcCovRuntimeName::FALSE_COUNT,
-          self.zero_expression(ast),
-        ),
-      ]),
+      OxcVec::from_iter_in(
+        [
+          self.property(
+            ast,
+            BjcCovRuntimeName::TRUE_COUNT,
+            self.zero_expression(ast),
+          ),
+          self.property(
+            ast,
+            BjcCovRuntimeName::FALSE_COUNT,
+            self.zero_expression(ast),
+          ),
+        ],
+        ast,
+      ),
+      ast,
     )
   }
 
-  fn zero_expression<'b>(&self, ast: AstBuilder<'b>) -> Expression<'b> {
-    ast.expression_numeric_literal(SPAN, 0.0, None, NumberBase::Decimal)
+  fn zero_expression<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
+    Expression::new_numeric_literal(SPAN, 0.0, None, NumberBase::Decimal, ast)
   }
 
   fn property<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     name: &str,
     value: Expression<'b>,
   ) -> ObjectPropertyKind<'b> {
-    ast.object_property_kind_object_property(
+    ObjectPropertyKind::new_object_property(
       SPAN,
       PropertyKind::Init,
-      ast.property_key_static_identifier(SPAN, ast.str(name)),
+      PropertyKey::new_static_identifier(SPAN, ast.allocator().alloc_str(name), ast),
       value,
       false,
       false,
       false,
+      ast,
     )
   }
 }
@@ -850,7 +968,7 @@ impl<'a> CoverageCallEmitter<'a> {
 
   fn function_entry_statement<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     function_index: usize,
   ) -> Statement<'b> {
     self.call_statement(
@@ -862,7 +980,7 @@ impl<'a> CoverageCallEmitter<'a> {
 
   fn region_statement<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     function_index: usize,
     region_index: usize,
   ) -> Statement<'b> {
@@ -878,7 +996,7 @@ impl<'a> CoverageCallEmitter<'a> {
 
   fn branch_statement<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     function_index: usize,
     branch_index: usize,
     true_or_false: bool,
@@ -889,26 +1007,27 @@ impl<'a> CoverageCallEmitter<'a> {
       [
         self.index_argument(ast, function_index),
         self.index_argument(ast, branch_index),
-        Argument::from(ast.expression_boolean_literal(SPAN, true_or_false)),
+        Argument::from(Expression::new_boolean_literal(SPAN, true_or_false, ast)),
       ],
     )
   }
 
   fn call_statement<'b, const N: usize>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     method: &str,
     arguments: [Argument<'b>; N],
   ) -> Statement<'b> {
-    ast.statement_expression(
+    Statement::new_expression_statement(
       SPAN,
-      self.instrument_call_expression(ast, method, ast.vec_from_iter(arguments)),
+      self.instrument_call_expression(ast, method, OxcVec::from_iter_in(arguments, ast)),
+      ast,
     )
   }
 
   fn branch_call_expression<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     function_index: usize,
     branch_index: usize,
     true_or_false: bool,
@@ -916,40 +1035,46 @@ impl<'a> CoverageCallEmitter<'a> {
     self.instrument_call_expression(
       ast,
       BjcCovRuntimeName::INSTRUMENT_BRANCH,
-      ast.vec_from_iter([
-        self.index_argument(ast, function_index),
-        self.index_argument(ast, branch_index),
-        Argument::from(ast.expression_boolean_literal(SPAN, true_or_false)),
-      ]),
+      OxcVec::from_iter_in(
+        [
+          self.index_argument(ast, function_index),
+          self.index_argument(ast, branch_index),
+          Argument::from(Expression::new_boolean_literal(SPAN, true_or_false, ast)),
+        ],
+        ast,
+      ),
     )
   }
 
   fn instrument_call_expression<'b>(
     &self,
-    ast: AstBuilder<'b>,
+    ast: &AstBuilder<'b>,
     method: &str,
     arguments: oxc_allocator::Vec<'b, Argument<'b>>,
   ) -> Expression<'b> {
-    ast.expression_call(
+    Expression::new_call_expression(
       SPAN,
-      Self::member_expression_to_expression(ast.member_expression_static(
+      Self::member_expression_to_expression(MemberExpression::new_static_member_expression(
         SPAN,
-        ast.expression_identifier(SPAN, ast.str(self.bcv_var)),
-        ast.identifier_name(SPAN, ast.str(method)),
+        Expression::new_identifier(SPAN, ast.allocator().alloc_str(self.bcv_var), ast),
+        IdentifierName::new(SPAN, ast.allocator().alloc_str(method), ast),
         false,
+        ast,
       )),
-      NONE,
+      None,
       arguments,
       false,
+      ast,
     )
   }
 
-  fn index_argument<'b>(&self, ast: AstBuilder<'b>, index: usize) -> Argument<'b> {
-    Argument::from(ast.expression_numeric_literal(
+  fn index_argument<'b>(&self, ast: &AstBuilder<'b>, index: usize) -> Argument<'b> {
+    Argument::from(Expression::new_numeric_literal(
       SPAN,
       index as f64,
-      Some(ast.str(&index.to_string())),
+      Some(ast.allocator().alloc_str(&index.to_string()).into()),
       NumberBase::Decimal,
+      ast,
     ))
   }
 
@@ -1196,7 +1321,7 @@ impl<'a> CoverageAstInstrumenter<'a> {
     statements: [Statement<'a>; N],
   ) {
     let old_body = body.take_in(&self.ast);
-    body.extend(self.ast.vec_from_iter(statements));
+    body.extend(OxcVec::from_iter_in(statements, &self.ast));
     body.extend(old_body);
   }
 
@@ -1204,7 +1329,7 @@ impl<'a> CoverageAstInstrumenter<'a> {
     if let Some((function_index, region_index)) = self.next_region_index() {
       let statement = self
         .call_emitter
-        .region_statement(self.ast, function_index, region_index);
+        .region_statement(&self.ast, function_index, region_index);
       self.prepend_statement(body, statement);
     }
   }
@@ -1220,7 +1345,7 @@ impl<'a> CoverageAstInstrumenter<'a> {
     let branch_statement =
       self
         .call_emitter
-        .branch_statement(self.ast, function_index, branch_index, true_or_false);
+        .branch_statement(&self.ast, function_index, branch_index, true_or_false);
     if let Some((function_index, region_index)) = self.next_region_index() {
       self.prepend_statements(
         body,
@@ -1228,7 +1353,7 @@ impl<'a> CoverageAstInstrumenter<'a> {
           branch_statement,
           self
             .call_emitter
-            .region_statement(self.ast, function_index, region_index),
+            .region_statement(&self.ast, function_index, region_index),
         ],
       );
     } else {
@@ -1253,7 +1378,7 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
     if let Some(body) = function.body.as_mut() {
       let statement = self
         .call_emitter
-        .function_entry_statement(self.ast, function_index);
+        .function_entry_statement(&self.ast, function_index);
       self.prepend_statement(&mut body.statements, statement);
     }
     walk_mut::walk_function(self, function, flags);
@@ -1262,11 +1387,11 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
 
   fn visit_arrow_function_expression(&mut self, arrow: &mut ArrowFunctionExpression<'a>) {
     let function_index = self.push_function();
-    if !arrow.expression {
+    if let ArrowFunctionBody::FunctionBody(body) = &mut arrow.body {
       let statement = self
         .call_emitter
-        .function_entry_statement(self.ast, function_index);
-      self.prepend_statement(&mut arrow.body.statements, statement);
+        .function_entry_statement(&self.ast, function_index);
+      self.prepend_statement(&mut body.statements, statement);
     }
     walk_mut::walk_arrow_function_expression(self, arrow);
     self.pop_function();
@@ -1279,7 +1404,7 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
       let branch_statement =
         self
           .call_emitter
-          .branch_statement(self.ast, function_index, branch_index, true);
+          .branch_statement(&self.ast, function_index, branch_index, true);
       if let Some((function_index, region_index)) = self.next_region_index() {
         self.prepend_statements(
           body,
@@ -1287,7 +1412,7 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
             branch_statement,
             self
               .call_emitter
-              .region_statement(self.ast, function_index, region_index),
+              .region_statement(&self.ast, function_index, region_index),
           ],
         );
       } else {
@@ -1302,7 +1427,7 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
           let branch_statement =
             self
               .call_emitter
-              .branch_statement(self.ast, function_index, branch_index, false);
+              .branch_statement(&self.ast, function_index, branch_index, false);
           if let Some((function_index, region_index)) = self.next_region_index() {
             self.prepend_statements(
               body,
@@ -1310,7 +1435,7 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
                 branch_statement,
                 self
                   .call_emitter
-                  .region_statement(self.ast, function_index, region_index),
+                  .region_statement(&self.ast, function_index, region_index),
               ],
             );
           } else {
@@ -1325,19 +1450,19 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
         let branch_statement =
           self
             .call_emitter
-            .branch_statement(self.ast, function_index, branch_index, false);
+            .branch_statement(&self.ast, function_index, branch_index, false);
         statement.alternate = if let Some(alternate) = statement.alternate.take() {
-          Some(
-            self
-              .ast
-              .statement_block(SPAN, self.ast.vec_from_iter([branch_statement, alternate])),
-          )
+          Some(Statement::new_block_statement(
+            SPAN,
+            OxcVec::from_iter_in([branch_statement, alternate], &self.ast),
+            &self.ast,
+          ))
         } else {
-          Some(
-            self
-              .ast
-              .statement_block(SPAN, self.ast.vec1(branch_statement)),
-          )
+          Some(Statement::new_block_statement(
+            SPAN,
+            OxcVec::from_value_in(branch_statement, &self.ast),
+            &self.ast,
+          ))
         };
       }
       None => {}
@@ -1405,30 +1530,43 @@ impl<'a> VisitMut<'a> for CoverageAstInstrumenter<'a> {
       return;
     };
     let consequent = expression.consequent.take_in(&self.ast);
-    expression.consequent = self.ast.expression_parenthesized(
+    expression.consequent = Expression::new_parenthesized_expression(
       SPAN,
-      self.ast.expression_sequence(
+      Expression::new_sequence_expression(
         SPAN,
-        self.ast.vec_from_iter([
-          self
-            .call_emitter
-            .branch_call_expression(self.ast, function_index, branch_index, true),
-          consequent,
-        ]),
+        OxcVec::from_iter_in(
+          [
+            self
+              .call_emitter
+              .branch_call_expression(&self.ast, function_index, branch_index, true),
+            consequent,
+          ],
+          &self.ast,
+        ),
+        &self.ast,
       ),
+      &self.ast,
     );
     let alternate = expression.alternate.take_in(&self.ast);
-    expression.alternate = self.ast.expression_parenthesized(
+    expression.alternate = Expression::new_parenthesized_expression(
       SPAN,
-      self.ast.expression_sequence(
+      Expression::new_sequence_expression(
         SPAN,
-        self.ast.vec_from_iter([
-          self
-            .call_emitter
-            .branch_call_expression(self.ast, function_index, branch_index, false),
-          alternate,
-        ]),
+        OxcVec::from_iter_in(
+          [
+            self.call_emitter.branch_call_expression(
+              &self.ast,
+              function_index,
+              branch_index,
+              false,
+            ),
+            alternate,
+          ],
+          &self.ast,
+        ),
+        &self.ast,
       ),
+      &self.ast,
     );
     walk_mut::walk_conditional_expression(self, expression);
   }

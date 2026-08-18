@@ -801,8 +801,8 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
                 &export.declaration,
                 ExportDefaultDeclarationKind::ClassDeclaration(_)
             ),
-            Statement::ExportNamedDeclaration(export) => {
-                matches!(&export.declaration, Some(Declaration::ClassDeclaration(_)))
+            Statement::ExportDeclaration(export) => {
+                matches!(&export.declaration, Declaration::ClassDeclaration(_))
             }
             _ => false,
         }

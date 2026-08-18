@@ -18,6 +18,7 @@ tracing = { workspace = true }
 # OXC parser/transformer for ArkTS source processing
 # Uses ohos-rs/oxc fork with .ets StructStatement support
 oxc_allocator = { workspace = true }
+oxc_str = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_codegen = { workspace = true }

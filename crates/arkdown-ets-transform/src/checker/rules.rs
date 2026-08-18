@@ -77,10 +77,8 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                         });
                     }
                 }
-                Statement::ExportNamedDeclaration(export) => {
-                    if let Some(Declaration::StructStatement(statement)) =
-                        export.declaration.as_ref()
-                    {
+                Statement::ExportDeclaration(export) => {
+                    if let Declaration::StructStatement(statement) = &export.declaration {
                         check_struct_component(
                             statement,
                             file,
@@ -109,8 +107,8 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             // (Top-level @Builder/@Styles function declarations)
             let func_decl = match stmt {
                 Statement::FunctionDeclaration(f) => Some(f.as_ref()),
-                Statement::ExportNamedDeclaration(e) => {
-                    if let Some(Declaration::FunctionDeclaration(f)) = e.declaration.as_ref() {
+                Statement::ExportDeclaration(e) => {
+                    if let Declaration::FunctionDeclaration(f) = &e.declaration {
                         Some(f.as_ref())
                     } else {
                         None
