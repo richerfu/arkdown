@@ -51,13 +51,6 @@ pub struct ChunkSourceFile {
 pub struct ArkChunk {
     /// Chunk file name (e.g., `"EntryAbility"`, `"commons"`, `"vendors"`).
     pub name: String,
-    /// Legacy content hash for the `globalThis` registry key.
-    ///
-    /// Rolldown's public output currently exposes final filenames, but not the
-    /// Rollup-style `chunkHash` that hvigor's wrapper chunk plugin reads during
-    /// `renderChunk`; rolldown-backed builds therefore leave this empty unless
-    /// a future pipeline stage owns a real final-hash value.
-    pub chunk_hash: String,
     /// Modules included in this chunk.
     pub modules: Vec<ModuleIdx>,
     /// Rolldown/Rollup module IDs included in this chunk.
@@ -187,7 +180,6 @@ mod tests {
     fn test_ark_chunk_default_is_empty_and_zero() {
         let chunk = ArkChunk::default();
         assert!(chunk.name.is_empty());
-        assert!(chunk.chunk_hash.is_empty());
         assert!(chunk.modules.is_empty());
         assert!(!chunk.is_entry);
         assert!(!chunk.is_dynamic_entry);
@@ -227,11 +219,9 @@ mod tests {
         let idx = ModuleIdx::from_usize(3);
         let mut chunk = ArkChunk::default();
         chunk.name = "EntryAbility".to_string();
-        chunk.chunk_hash = "deadbeef".to_string();
         chunk.is_entry = true;
         chunk.entry_module = Some(idx);
         assert_eq!(chunk.name, "EntryAbility");
-        assert_eq!(chunk.chunk_hash, "deadbeef");
         assert!(chunk.is_entry);
         assert_eq!(chunk.entry_module, Some(idx));
     }

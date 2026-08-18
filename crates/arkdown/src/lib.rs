@@ -9,7 +9,6 @@
 //! |------|---------------|
 //! | `plan.rs` | `BundlePlan`, `BundleInput`, `BundleOutputOptions`, `BundleCachePolicy` |
 //! | `bundler.rs` | `Bundler`, `BundleOutput` — Rolldown orchestration |
-//! | `compile_env.rs` | `CompileEnvironment`, `CompileEnvFlagSet` |
 //! | `manual_chunks.rs` | `ManualChunkPolicy`, `ManualChunkDecision`, `ChunkName` |
 //! | `watch_config.rs` | `WatchConfigBridge`, `WatchInvalidationEvent` |
 //! | `facts.rs` | `BundleFacts`, `ModuleFact`, `ImporteeFact` |
@@ -22,7 +21,6 @@ pub mod bundler;
 pub mod cache_bridge;
 mod chunk_module_request;
 pub mod compile_entry;
-pub mod compile_env;
 pub mod diagnostics;
 pub mod facts;
 pub mod hvigor_json;
@@ -56,9 +54,6 @@ pub use plan::{
     BundleRuntimePackageContext, BundleRuntimePackageInfo, BundleSourceMapPackageInfo,
     LoaderResourceJoin, SourceMapPolicy,
 };
-
-// compile_env — compile environment
-pub use compile_env::{CompileEnvFlagSet, CompileEnvironment, CompileMode, FastBuildFeatureFlags};
 
 // manual_chunks — chunk policy
 pub use manual_chunks::{ChunkName, ManualChunkDecision, ManualChunkPolicy};

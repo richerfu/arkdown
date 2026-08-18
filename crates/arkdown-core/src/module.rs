@@ -13,8 +13,6 @@ pub enum ModuleDefFormat {
     #[default]
     Unknown,
     Esm,
-    Cjs,
-    Iife,
 }
 
 /// A fully resolved module identifier.
@@ -32,7 +30,7 @@ pub struct ResolvedId {
     pub external: bool,
     /// Module type inferred from extension or resolver metadata.
     pub module_type: ModuleType,
-    /// Definition format of the module (ESM, CJS, IIFE, or unknown).
+    /// Definition format of the module (ESM or unknown).
     pub module_def_format: ModuleDefFormat,
 }
 
@@ -134,9 +132,6 @@ mod tests {
     fn test_module_def_format_variants_exist() {
         // Ensure all variants are constructible and distinguishable.
         assert_ne!(ModuleDefFormat::Unknown, ModuleDefFormat::Esm);
-        assert_ne!(ModuleDefFormat::Esm, ModuleDefFormat::Cjs);
-        assert_ne!(ModuleDefFormat::Cjs, ModuleDefFormat::Iife);
-        assert_ne!(ModuleDefFormat::Iife, ModuleDefFormat::Unknown);
     }
 
     // ── ModuleType ───────────────────────────────────────────────────────────
