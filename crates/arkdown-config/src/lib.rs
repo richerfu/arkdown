@@ -11,7 +11,6 @@ pub mod error;
 pub mod hvigor_overrides;
 pub mod hvigor_runtime;
 pub mod module_json;
-pub mod oh_package;
 pub mod resolve;
 pub mod sdk;
 
