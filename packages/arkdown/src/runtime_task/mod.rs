@@ -24,6 +24,7 @@ mod task_info_tests;
 
 pub(crate) use bridge::{RuntimeTaskActorObserver, RuntimeTaskBridgeSeed};
 pub(crate) use catalog::RuntimeTaskCatalog;
+pub(crate) use catalog::RuntimeTaskCatalogSnapshot;
 pub(crate) use catalog::RuntimeTaskNodeKind;
 pub(crate) use command_plan::RuntimeCommandPlanner;
 pub(crate) use inspect::{RuntimeTaskInventoryNapiInspector, RuntimeTaskNapiInspector};
