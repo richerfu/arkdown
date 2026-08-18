@@ -541,12 +541,7 @@ fn is_source_ext(ext: &str) -> bool {
 /// Returns `Err` if the file cannot be read (deleted, permission denied, etc.).
 fn compute_file_fingerprint(path: &Path) -> Result<u64, std::io::Error> {
     let bytes = std::fs::read(path)?;
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    Ok(hash)
+    Ok(arkdown_core::fnv1a64(&bytes))
 }
 
 // ---------------------------------------------------------------------------

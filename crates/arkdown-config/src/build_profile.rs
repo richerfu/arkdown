@@ -56,10 +56,7 @@ pub struct RawBuildProfile {
 impl RawBuildProfile {
     /// Parse `build-profile.json5` content from a string.
     pub fn parse(content: &str, file: &std::path::Path) -> Result<RawBuildProfile, ConfigError> {
-        json5::from_str::<RawBuildProfile>(content).map_err(|e| ConfigError::ParseError {
-            file: file.to_path_buf(),
-            message: e.to_string(),
-        })
+        crate::error::parse_json5::<RawBuildProfile>(content, file)
     }
 
     /// Load and parse `build-profile.json5` from the project root.
@@ -94,10 +91,7 @@ impl RawAppJson5 {
             });
         }
         let content = fs_err::read_to_string(&path)?;
-        let app: RawAppJson5 = json5::from_str(&content).map_err(|e| ConfigError::ParseError {
-            file: path.clone(),
-            message: e.to_string(),
-        })?;
+        let app: RawAppJson5 = crate::error::parse_json5(&content, &path)?;
         Self::validate(&app, &path)?;
         Ok(app)
     }
@@ -1652,12 +1646,7 @@ impl BuildProfileValue {
     }
 
     fn parse(content: &str, path: &Path) -> Result<Self, ConfigError> {
-        let value = json5::from_str::<serde_json::Value>(content).map_err(|error| {
-            ConfigError::ParseError {
-                file: path.to_path_buf(),
-                message: error.to_string(),
-            }
-        })?;
+        let value = crate::error::parse_json5::<serde_json::Value>(content, path)?;
         Ok(Self { value })
     }
 
@@ -2166,11 +2155,7 @@ pub fn resolve_effective_har_artifact_type(
         return Ok(product_artifact_type);
     }
     let content = std::fs::read_to_string(&module_profile_path)?;
-    let profile: RawModuleBuildProfile =
-        json5::from_str(&content).map_err(|error| ConfigError::ParseError {
-            file: module_profile_path.clone(),
-            message: error.to_string(),
-        })?;
+    let profile: RawModuleBuildProfile = crate::error::parse_json5(&content, &module_profile_path)?;
     let mut artifact_type = product_artifact_type;
     let mut apply = |build_option: &RawBuildOption| -> Result<(), ConfigError> {
         if let Some(value) = build_option.artifact_type.as_deref() {
@@ -2307,11 +2292,7 @@ pub fn resolve_effective_native_build_option(
         return Ok(effective);
     }
     let content = std::fs::read_to_string(&module_profile_path)?;
-    let profile: RawModuleBuildProfile =
-        json5::from_str(&content).map_err(|error| ConfigError::ParseError {
-            file: module_profile_path.clone(),
-            message: error.to_string(),
-        })?;
+    let profile: RawModuleBuildProfile = crate::error::parse_json5(&content, &module_profile_path)?;
 
     if let Some(build_option) = profile.build_option.as_ref() {
         NativeBuildOptionMerger::new(&mut effective).apply_build_option(build_option);
@@ -2409,10 +2390,7 @@ impl<'a> EffectiveObfuscationConfigResolver<'a> {
         }
         let content = std::fs::read_to_string(&module_profile_path)?;
         let profile: RawModuleBuildProfile =
-            json5::from_str(&content).map_err(|error| ConfigError::ParseError {
-                file: module_profile_path.clone(),
-                message: error.to_string(),
-            })?;
+            crate::error::parse_json5(&content, &module_profile_path)?;
         let mut effective = self.product_config.cloned();
         let mut merger = ObfuscationConfigMerger::new(self.module_root, &mut effective);
 

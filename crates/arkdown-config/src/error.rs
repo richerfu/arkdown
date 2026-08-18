@@ -31,3 +31,17 @@ pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Parse JSON5 text into `T`, reporting failures against `file`.
+///
+/// Single parse entry for every JSON5 read in this crate so error formatting
+/// cannot drift between call sites.
+pub(crate) fn parse_json5<T: serde::de::DeserializeOwned>(
+    content: &str,
+    file: &std::path::Path,
+) -> Result<T, ConfigError> {
+    json5::from_str::<T>(content).map_err(|e| ConfigError::ParseError {
+        file: file.to_path_buf(),
+        message: e.to_string(),
+    })
+}

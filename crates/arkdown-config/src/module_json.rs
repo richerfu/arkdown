@@ -16,10 +16,7 @@ pub struct RawModuleJson {
 
 impl RawModuleJson {
     pub fn parse(content: &str, file: &Path) -> Result<RawModuleJson, ConfigError> {
-        json5::from_str::<RawModuleJson>(content).map_err(|e| ConfigError::ParseError {
-            file: file.to_path_buf(),
-            message: e.to_string(),
-        })
+        crate::error::parse_json5::<RawModuleJson>(content, file)
     }
 
     pub fn load(module_root: &Path) -> Result<RawModuleJson, ConfigError> {

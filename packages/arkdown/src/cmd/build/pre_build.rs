@@ -599,8 +599,7 @@ impl<'a> PreBuildValidator<'a> {
   /// `devices.general` differs from deviceTypes (element-wise after sort,
   /// `array-util.js::checkArrayElementIsSame`).
   pub(super) fn validate_pre_check_syscap(&self) -> Result<()> {
-    let runtime_os = self.config.product.runtime_os.as_str();
-    if runtime_os.eq_ignore_ascii_case("HarmonyOS") {
+    if arkdown_core::is_harmony_os(&self.config.product.runtime_os) {
       return Ok(());
     }
     let module_json = self.read_module_json()?;
@@ -714,8 +713,7 @@ impl<'a> PreBuildValidator<'a> {
   /// `sysCapValidate`: the `syscap.json` profile must satisfy the SDK
   /// syscap schema for non-HarmonyOS targets.
   fn validate_syscap_schema(&self) -> Result<()> {
-    let runtime_os = self.config.product.runtime_os.as_str();
-    if runtime_os.eq_ignore_ascii_case("HarmonyOS") {
+    if arkdown_core::is_harmony_os(&self.config.product.runtime_os) {
       return Ok(());
     }
     let syscap_dir = self.module.src_path.join("src/main/resources/base/profile");

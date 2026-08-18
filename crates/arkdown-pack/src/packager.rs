@@ -928,6 +928,7 @@ impl Packager {
         if let Some(res_src) = &input.resources_src_dir {
             if res_src.exists() {
                 for entry in walkdir::WalkDir::new(res_src)
+                    .follow_links(false)
                     .into_iter()
                     .filter_map(|e| e.ok())
                     .filter(|e| e.file_type().is_file())

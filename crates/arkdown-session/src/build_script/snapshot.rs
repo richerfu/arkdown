@@ -68,13 +68,8 @@ pub struct BuildScriptFingerprint {
 impl BuildScriptFingerprint {
     /// Compute a fingerprint from the raw file bytes.
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut h: u64 = 0xcbf29ce484222325;
-        for b in bytes {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
         Self {
-            content_hash: format!("{h:016x}"),
+            content_hash: format!("{:016x}", arkdown_core::fnv1a64(bytes)),
             size: bytes.len() as u64,
         }
     }

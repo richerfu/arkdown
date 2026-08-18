@@ -2,6 +2,17 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Whether `runtime_os` selects the HarmonyOS (HMS) toolchain variant.
+///
+/// Canonical predicate for every runtime-OS branch in the workspace. Anything
+/// that is not HarmonyOS (i.e. OpenHarmony) takes the OpenHarmony path, so
+/// "is OpenHarmony" must be spelled `!is_harmony_os(..)` — never a separate
+/// `eq_ignore_ascii_case("OpenHarmony")` check, which would disagree on any
+/// third runtime-OS string.
+pub fn is_harmony_os(runtime_os: &str) -> bool {
+    runtime_os.eq_ignore_ascii_case("HarmonyOS")
+}
+
 /// Hvigor build mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildMode {
@@ -828,7 +839,7 @@ impl SdkConfig {
     /// OpenHarmony ETS loader. OpenHarmony products continue to use the
     /// selected component's toolchains schema.
     pub fn pac_schema_path_for_runtime(&self, runtime_os: &str) -> Option<std::path::PathBuf> {
-        if runtime_os.eq_ignore_ascii_case("HarmonyOS") {
+        if is_harmony_os(runtime_os) {
             let path = self
                 .component_root()?
                 .parent()?
@@ -855,7 +866,7 @@ impl SdkConfig {
         file_name: &str,
     ) -> Option<std::path::PathBuf> {
         let component_root = self.component_root()?;
-        let schema_component = if runtime_os.eq_ignore_ascii_case("HarmonyOS")
+        let schema_component = if is_harmony_os(runtime_os)
             && matches!(file_name, "app.json" | "module.json" | "systemTheme.json")
         {
             component_root.parent()?.join("hms")
@@ -993,7 +1004,7 @@ impl SdkConfig {
             .map(|directory| ets_root.join(directory))
             .filter(|path| path.is_dir())
             .collect::<Vec<_>>();
-        if self.compile_api_version <= 9 || !runtime_os.eq_ignore_ascii_case("HarmonyOS") {
+        if self.compile_api_version <= 9 || !is_harmony_os(runtime_os) {
             return paths;
         }
         let Some(sdk_root) = self.component_root().and_then(std::path::Path::parent) else {

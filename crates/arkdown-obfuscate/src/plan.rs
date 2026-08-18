@@ -328,19 +328,13 @@ impl ObfuscationPlan {
 /// Missing files are silently skipped (matching hvigor's `fse.existsSync`
 /// guard in `computeObfuscationFileHash`).
 fn fnv1a_hash_files(paths: &[&PathBuf]) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-
-    let mut h = OFFSET_BASIS;
+    let mut state = arkdown_core::fnv1a64(&[]);
     for path in paths {
         if let Ok(content) = std::fs::read(path) {
-            for b in &content {
-                h ^= *b as u64;
-                h = h.wrapping_mul(PRIME);
-            }
+            state = arkdown_core::fnv1a64_fold(state, &content);
         }
     }
-    h
+    state
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

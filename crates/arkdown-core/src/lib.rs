@@ -28,6 +28,7 @@ pub mod config;
 pub mod diagnostic;
 pub mod error;
 pub mod graph;
+pub mod hash;
 pub mod ids;
 pub mod manifest;
 pub mod module;
@@ -52,12 +53,12 @@ pub use chunk::{ArkChunk, ChunkGraph, ChunkIdx, ChunkSourceFile, CrossChunkImpor
 // SPEC-048: these will migrate to `arkdown-config` in Phase 3; kept here for
 // migration period.
 pub use config::{
-    AppOptionOverride, ArkOptions, ArkTscConfig, ArkTscTarget, ArkdownConfig, AutoLazyFilter,
-    BuildMode, BuildOption, CompileMode, CopyCodeResource, ExpandImportPath, ExternalNativeOptions,
-    HarArtifactType, ModuleConfig, NativeDebugSymbolOption, NativeLibFilterOption, NativeLibOption,
-    NativeLibPackageSelection, NativeLibraryInfo, ObfuscationConfig, OhosModuleType, OutputTarget,
-    ProductConfig, ResOptions, RuntimeOnlyConfig, SdkConfig, SigningConfig, SourceOption,
-    StrictModeConfig, WidgetArkOptions,
+    is_harmony_os, AppOptionOverride, ArkOptions, ArkTscConfig, ArkTscTarget, ArkdownConfig,
+    AutoLazyFilter, BuildMode, BuildOption, CompileMode, CopyCodeResource, ExpandImportPath,
+    ExternalNativeOptions, HarArtifactType, ModuleConfig, NativeDebugSymbolOption,
+    NativeLibFilterOption, NativeLibOption, NativeLibPackageSelection, NativeLibraryInfo,
+    ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig, ResOptions, RuntimeOnlyConfig,
+    SdkConfig, SigningConfig, SourceOption, StrictModeConfig, WidgetArkOptions,
 };
 
 // diagnostic
@@ -71,6 +72,9 @@ pub use graph::{
     ExportBinding, ExternalModule, HostModuleInfo, ImportEdge, ImportKind, ImportedName, Module,
     ModuleGraph, ModuleIdx, ModuleMeta, NormalModule,
 };
+
+// hash — shared FNV-1a primitive for cache keys and fingerprints.
+pub use hash::{fnv1a64, fnv1a64_fold};
 
 // ids — Typed build-context IDs (SPEC-048 Phase 3+).
 pub use ids::{

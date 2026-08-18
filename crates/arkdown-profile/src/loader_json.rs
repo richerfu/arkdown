@@ -411,7 +411,7 @@ impl AotLoaderFields {
         }
 
         let host_pgo = config.product.build_option.host_pgo == Some(true);
-        let is_openharmony = !config.product.runtime_os.eq_ignore_ascii_case("HarmonyOS");
+        let is_openharmony = !arkdown_core::is_harmony_os(&config.product.runtime_os);
         if is_openharmony
             && !aot_fixed_sdk_version(&config.sdk_config.compile_sdk_version)
             && !host_pgo

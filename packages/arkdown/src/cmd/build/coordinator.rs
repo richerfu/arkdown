@@ -4836,9 +4836,9 @@ impl BuildCoordinator {
       && !session
         .sdk
         .tools()
-        .supports_preview_compile_resource_increment(
-          config.product.runtime_os.eq_ignore_ascii_case("HarmonyOS"),
-        )
+        .supports_preview_compile_resource_increment(arkdown_core::is_harmony_os(
+          &config.product.runtime_os,
+        ))
     {
       anyhow::bail!(
         "ARKDOWN_PREVIEW_INCREMENTAL_RESOURCE_SDK: compileResInc=true requires component API >= 9 and a toolchains component supporting incremental preview resources (SDK {})",
@@ -10750,11 +10750,7 @@ impl<'a> BuildPolicy<'a> {
 
   fn uses_sdk_permission_validation(&self) -> bool {
     self.config.sdk_config.compile_api_version >= 12
-      || self
-        .config
-        .product
-        .runtime_os
-        .eq_ignore_ascii_case("HarmonyOS")
+      || arkdown_core::is_harmony_os(&self.config.product.runtime_os)
   }
 
   fn module_processes_privacy_profile(module_type: &arkdown_core::OhosModuleType) -> bool {
@@ -11272,7 +11268,7 @@ impl PackageSignHarPlan {
       || config.product.signing_config.is_none()
       || config.sdk_config.compile_api_version < 12
       || parse_api_version(&config.product.compatible_sdk_version).unwrap_or_default() < 12
-      || !config.product.runtime_os.eq_ignore_ascii_case("HarmonyOS")
+      || !arkdown_core::is_harmony_os(&config.product.runtime_os)
     {
       return None;
     }

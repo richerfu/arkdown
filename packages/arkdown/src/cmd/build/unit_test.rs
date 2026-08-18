@@ -212,7 +212,7 @@ impl UnitTestExecutionPlan {
         sdk_config.ets_loader_path.display()
       )
     })?;
-    let runtime_type = if runtime_os.eq_ignore_ascii_case("HarmonyOS") {
+    let runtime_type = if arkdown_core::is_harmony_os(runtime_os) {
       UnitTestRuntimeType::HarmonyOS
     } else {
       UnitTestRuntimeType::OpenHarmony
