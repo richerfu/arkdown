@@ -26,7 +26,7 @@ cases derived from the installed IDE source.
 | [TEST-005](TEST-005-bundler.md)           | `arkdown`                                                          | Link, tree-shake, chunk split                           |
 | [TEST-007](TEST-007-json5.md)             | `arkdown::plugins::json5`                                          | **Installed-IDE behavioral parity**                     |
 | [TEST-008](TEST-008-duplicate-check.md)   | `arkdown::plugins::duplicate_check`                                | **Installed-IDE behavioral parity**                     |
-| [TEST-009](TEST-009-abc-compiler.md)      | `arkdown-abc`                                                      | **Original behavioral parity** (Rust ABC compiler)      |
+| [TEST-009](TEST-009-abc-compiler.md)      | `arkdown-abc` (planned; SDK `es2abc` backend today)                | **Original behavioral parity** (Rust ABC compiler)      |
 | [TEST-010](TEST-010-profile.md)           | `arkdown-profile`                                                  | loader.json generation                                  |
 | [TEST-011](TEST-011-resource.md)          | `arkdown-resource`                                                 | **Original behavioral parity** (Rust resource compiler) |
 | [TEST-012](TEST-012-packager.md)          | `arkdown-pack`                                                     | ZIP structure correctness                               |
