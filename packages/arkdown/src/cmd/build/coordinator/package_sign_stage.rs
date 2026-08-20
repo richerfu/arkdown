@@ -349,11 +349,6 @@ impl BuildCoordinator {
       std::fs::create_dir_all(&output_dir)?;
 
       for artifact_target_label in &target_labels {
-        let output_artifact_name = module_config
-          .product
-          .artifact_name
-          .as_deref()
-          .unwrap_or(&module.name);
         let interface_source_roots = all_applicable
           .iter()
           .find(|target| target.name == *artifact_target_label)
@@ -1689,7 +1684,7 @@ impl BuildCoordinator {
                   sdk_root: &session.sdk.sdk_root,
                   project_path: &config.project_root,
                   module,
-                  artifact_name: output_artifact_name,
+                  target_artifact_name: module_config.product.artifact_name.as_deref(),
                   product_name: &module_config.product.name,
                   bundle_name: &module_config.product.bundle_name,
                   bundle_type,

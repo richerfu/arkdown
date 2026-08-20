@@ -37,7 +37,6 @@ pub(crate) struct CoordinatorBundleStageInput<'a> {
 
 pub(crate) struct CoordinatorBundleStageOutput {
   pub(crate) bundle_outs: Vec<(BundleStageOutput,)>,
-  pub(crate) bundle_ets_transform_plans: Vec<Option<Arc<RolldownEtsTransformPlan>>>,
   pub(crate) widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>>,
   pub(crate) compile_task_active: Vec<bool>,
   pub(crate) module_obfuscation_contexts: Vec<ModuleObfuscationContext>,
@@ -77,7 +76,6 @@ impl BuildCoordinator {
     // ── Step 3: Bundling ──────────────────────────────────────────────
     progress.step(3, 6, "Bundling");
     let mut bundle_outs: Vec<(BundleStageOutput,)> = Vec::new();
-    let mut bundle_ets_transform_plans: Vec<Option<Arc<RolldownEtsTransformPlan>>> = Vec::new();
     let mut widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>> = Vec::new();
     let mut compile_task_active = Vec::new();
     let module_obfuscation_contexts = loader_jsons
@@ -150,7 +148,6 @@ impl BuildCoordinator {
         bundle_outs.push((BundleStageOutput::skipped_original_har(
           cached_abc, output_dir,
         ),));
-        bundle_ets_transform_plans.push(None);
         widget_bundle_outs.push(None);
         compile_task_active.push(false);
         continue;
@@ -280,7 +277,6 @@ impl BuildCoordinator {
           .up_to_date(&module.name, Some(module_target_name), "BuildJS")
           .await?;
         bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir),));
-        bundle_ets_transform_plans.push(None);
         widget_bundle_outs.push(None);
         compile_task_active.push(false);
         continue;
@@ -296,7 +292,6 @@ impl BuildCoordinator {
         bundle_outs.push((BundleStageOutput::skipped_original_har(
           cached_abc, output_dir,
         ),));
-        bundle_ets_transform_plans.push(None);
         widget_bundle_outs.push(None);
         compile_task_active.push(false);
         continue;
@@ -331,6 +326,18 @@ impl BuildCoordinator {
       let module_context = session.module_context(&module.name).ok_or_else(|| {
         anyhow::anyhow!("missing build session module context for {}", module.name)
       })?;
+      let ohos_test_templates_after_migration = module_target_name == "ohosTest"
+        && module_context
+          .module
+          .ohos_test_module_json_value
+          .as_deref()
+          .is_some_and(|module_json| {
+            module_layout
+              .source()
+              .ohos_test_templates_after_migration(module_json)
+          });
+      let ohos_test_template_layout =
+        ModuleBuildLayout::for_ohos_test_template(&module.src_path, &module_config.product.name);
       let pkg_context_builder =
         PkgContextInfoInputBuilder::new(module_config.as_ref(), session, module, &module_context)
           .with_local_native_dependencies(
@@ -381,11 +388,11 @@ impl BuildCoordinator {
           runtime: runtime_packages,
         },
       );
-      if module_target_name == "ohosTest" {
+      if ohos_test_templates_after_migration {
         // The ohosTest module's ets root is the generated template tree
         // (`.test/<product>/intermediates/src/ohosTest/ets`); entry page
         // paths resolve against it (`testability/pages/Index`).
-        let template_ets = module_layout.ohos_test_ets_root();
+        let template_ets = ohos_test_template_layout.ohos_test_ets_root();
         if template_ets.is_dir() {
           bundle_plan.input.project_path = template_ets;
         }
@@ -426,7 +433,8 @@ impl BuildCoordinator {
           }
         }
       }
-      let preload_system_so_enabled = module_build_option.preload_system_so
+      let preload_system_so_enabled = module_target_name != "ohosTest"
+        && module_build_option.preload_system_so
         && module.module_type != OhosModuleType::Shared
         && match config.output_target {
           OutputTarget::Hap => true,
@@ -526,13 +534,12 @@ impl BuildCoordinator {
           module_layout.test_sources_dir(),
         ]
       } else if module_target_name == "ohosTest" {
-        vec![
-          crate::cmd::build::unit_test::ohos_test_template_root(
-            &module.src_path,
-            &module_config.product.name,
-          ),
-          module_layout.source().target_ets(&module_target_name),
-        ]
+        let mut roots = Vec::with_capacity(2);
+        if ohos_test_templates_after_migration {
+          roots.push(ohos_test_template_layout.ohos_test_ets_root());
+        }
+        roots.push(module_layout.source().target_ets(&module_target_name));
+        roots
       } else {
         Vec::new()
       };
@@ -873,7 +880,6 @@ impl BuildCoordinator {
       }
 
       bundle_outs.push((bundle_out,));
-      bundle_ets_transform_plans.push(Some(ets_transform_plan));
       widget_bundle_outs.push(widget_bundle_out);
     }
     progress.done();
@@ -1026,7 +1032,6 @@ impl BuildCoordinator {
 
     Ok(CoordinatorBundleStageOutput {
       bundle_outs,
-      bundle_ets_transform_plans,
       widget_bundle_outs,
       compile_task_active,
       module_obfuscation_contexts,

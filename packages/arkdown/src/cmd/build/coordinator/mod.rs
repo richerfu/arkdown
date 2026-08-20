@@ -2313,16 +2313,28 @@ impl<'a> ResourceDirSelector<'a> {
   }
 
   fn select(&self) -> Vec<PathBuf> {
-    let target_dirs = self.resolve_target_dirs(&self.target.resource_directories);
-    if !target_dirs.is_empty() {
-      return target_dirs;
+    let mut selected = self.resolve_target_dirs(&self.target.resource_directories);
+    if selected.is_empty() {
+      if let Some(source_set_res) = self.source_set_dir(&self.target.name) {
+        selected.push(source_set_res);
+      }
     }
-    if let Some(source_set_res) = self.source_set_dir(&self.target.name) {
-      return vec![source_set_res];
-    }
-    vec![ModuleBuildLayout::new(&self.module.src_path)
+    let main_resources = ModuleBuildLayout::new(&self.module.src_path)
       .source()
-      .resources()]
+      .resources();
+    if selected.is_empty() {
+      selected.push(main_resources.clone());
+    }
+    // `AbstractProcessResource.addOhosTestExtraCompilationResources` adds
+    // `src/main/resources` after the selected ohosTest resource roots even
+    // when that target declares custom or source-set resources.
+    if self.target.name == "ohosTest"
+      && main_resources.is_dir()
+      && !selected.contains(&main_resources)
+    {
+      selected.push(main_resources);
+    }
+    selected
   }
 
   fn resolve_target_dirs(&self, directories: &[PathBuf]) -> Vec<PathBuf> {

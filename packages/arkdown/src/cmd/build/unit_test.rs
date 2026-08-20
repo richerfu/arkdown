@@ -20,16 +20,13 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::Result;
 use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use arkdown::HvigorModuleRequestRewritePlan;
 use arkdown_core::{HvigorModuleSourceFile, OhosModuleType, SdkConfig};
-use arkdown_ets_transform::{RolldownEtsTransformPlan, RolldownEtsTransformer};
 use arkdown_session::dependency_graph::snapshot::{
   DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeType,
 };
@@ -111,7 +108,7 @@ pub(crate) fn generate_ohos_test_template(
   product_name: &str,
   api_version: u32,
 ) -> Result<()> {
-  let layout = ModuleBuildLayout::for_test_product(module_root, product_name);
+  let layout = ModuleBuildLayout::for_ohos_test_template(module_root, product_name);
   let runner_dir = layout.ohos_test_runner_dir();
   let ability_dir = layout.ohos_test_ability_dir();
   let pages_dir = layout.ohos_test_pages_dir();
@@ -152,19 +149,10 @@ pub(crate) fn generate_ohos_test_template(
 /// Whether the generated `ohosTest` template exists — used to gate the
 /// ohosTest compile inputs.
 pub(crate) fn has_ohos_test_template(module_root: &Path, product_name: &str) -> bool {
-  ModuleBuildLayout::for_test_product(module_root, product_name)
+  ModuleBuildLayout::for_ohos_test_template(module_root, product_name)
     .ohos_test_ability_dir()
     .join("TestAbility.ets")
     .is_file()
-}
-
-/// Whether the generated `ohosTest` template exists — used to gate the
-/// ohosTest compile inputs.
-pub(crate) fn ohos_test_template_root(
-  module_root: &Path,
-  product_name: &str,
-) -> std::path::PathBuf {
-  ModuleBuildLayout::for_test_product(module_root, product_name).ohos_test_ets_root()
 }
 
 /// Typed `GenerateUnitTestResult` input. The SDK component roots and HSP
@@ -343,20 +331,22 @@ commandLine.executeCoverageTest({ ...request, logger })
   .catch((error) => { console.error(error && error.stack || error); process.exit(1); });
 "#;
 
-/// SDK-owned coverage insertion plan for `UnitTestArkTS`.
+/// SDK-owned coverage insertion plan for `UnitTestArkTS` and
+/// `OhosTestArkCompile`.
 ///
 /// Hvigor delegates this work to `@ohos/coverage`'s `bjcTransformer`, which
 /// both inserts the runtime counters and writes `init_coverage.json`. Keeping
 /// that owner avoids a second, subtly incompatible BJC implementation.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UnitTestCoverageInstrumentationPlan {
+pub(crate) struct TestCoverageInstrumentationPlan {
   module_path: PathBuf,
   project_path: PathBuf,
   init_coverage_path: PathBuf,
   ets_loader_path: PathBuf,
   coverage_package_path: PathBuf,
   coverage_mode: String,
+  test_mode: String,
   sources: Vec<UnitTestCoverageSource>,
   #[serde(skip)]
   node_executable: PathBuf,
@@ -369,12 +359,34 @@ struct UnitTestCoverageSource {
   module_id: PathBuf,
 }
 
-impl UnitTestCoverageInstrumentationPlan {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestCoverageMode {
+  UnitTest,
+  OhosTest,
+}
+
+impl TestCoverageMode {
+  const fn as_str(self) -> &'static str {
+    match self {
+      Self::UnitTest => "unitTest",
+      Self::OhosTest => "ohosTest",
+    }
+  }
+
+  const fn path_segment(self) -> &'static str {
+    match self {
+      Self::UnitTest => "test",
+      Self::OhosTest => "ohosTest",
+    }
+  }
+}
+
+impl TestCoverageInstrumentationPlan {
   pub(crate) fn from_build(
     sdk_config: &SdkConfig,
     project_path: &Path,
     module_path: &Path,
-    product_name: &str,
+    test_mode: TestCoverageMode,
     coverage_mode: Option<&str>,
     module_sources: &[HvigorModuleSourceFile],
     node_executable: PathBuf,
@@ -395,34 +407,26 @@ impl UnitTestCoverageInstrumentationPlan {
         })
       })
       .collect();
-    let layout = ModuleBuildLayout::for_test_product(module_path, product_name);
+    // `@ohos/coverage` 1.0.24 `buildInstrument.beforeBuildEnd` uses this
+    // fixed root even when the command overrides the build product.
+    let layout = ModuleBuildLayout::for_test_product(module_path, "default");
     Ok(Self {
       module_path: arkdown_path::canonicalize_or_owned(module_path),
       project_path: arkdown_path::canonicalize_or_owned(project_path),
-      init_coverage_path: layout.test_init_coverage_json(),
+      init_coverage_path: layout
+        .intermediates()
+        .join(test_mode.path_segment())
+        .join("init_coverage.json"),
       ets_loader_path: sdk_config.ets_loader_path.clone(),
       coverage_package_path,
       coverage_mode: coverage_mode.unwrap_or("white").to_string(),
+      test_mode: test_mode.as_str().to_string(),
       sources,
       node_executable,
     })
   }
 
-  pub(crate) fn execute(&self, ets_transform_plan: Arc<RolldownEtsTransformPlan>) -> Result<()> {
-    let transformer = RolldownEtsTransformer::new(ets_transform_plan);
-    let mut request_rewrite_plans = Vec::with_capacity(self.sources.len());
-    for source in &self.sources {
-      let original_source = std::fs::read_to_string(&source.module_id)?;
-      let transformed_source =
-        self.transform_module_source(&transformer, &original_source, &source.module_id)?;
-      let materialized_source = std::fs::read_to_string(&source.source_path)?;
-      request_rewrite_plans.push(HvigorModuleRequestRewritePlan::from_baseline(
-        arkdown_path::ArtifactPathSerializer::path_to_slash_string(&source.module_id)?,
-        &transformed_source,
-        &materialized_source,
-      )?);
-    }
-
+  pub(crate) fn execute(&self) -> Result<()> {
     let request = serde_json::to_string(self)?;
     let output = std::process::Command::new(&self.node_executable)
       .arg("-e")
@@ -433,54 +437,17 @@ impl UnitTestCoverageInstrumentationPlan {
       .map_err(|error| anyhow::anyhow!("start @ohos/coverage instrumenter failed: {error}"))?;
     if !output.status.success() {
       anyhow::bail!(
-        "ARKDOWN_UNIT_TEST_COVERAGE_INSTRUMENTATION_FAILED: @ohos/coverage exited with status {}: {}",
+        "ARKDOWN_TEST_COVERAGE_INSTRUMENTATION_FAILED: @ohos/coverage exited with status {}: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
       );
     }
-    let instrumented_module_ids = serde_json::from_slice::<BTreeSet<PathBuf>>(&output.stdout)
-      .map_err(|error| {
-        anyhow::anyhow!(
-          "ARKDOWN_UNIT_TEST_COVERAGE_INSTRUMENTATION_FAILED: invalid @ohos/coverage result: {error}"
-        )
-      })?;
-    for (source, rewrite_plan) in self.sources.iter().zip(request_rewrite_plans) {
-      if !instrumented_module_ids.contains(&source.module_id) {
-        continue;
-      }
-      let instrumented_source = std::fs::read_to_string(&source.source_path)?;
-      let transformed_source =
-        self.transform_module_source(&transformer, &instrumented_source, &source.module_id)?;
-      std::fs::write(
-        &source.source_path,
-        rewrite_plan.rewrite(&transformed_source).as_bytes(),
-      )?;
-    }
+    serde_json::from_slice::<BTreeSet<PathBuf>>(&output.stdout).map_err(|error| {
+      anyhow::anyhow!(
+        "ARKDOWN_TEST_COVERAGE_INSTRUMENTATION_FAILED: invalid @ohos/coverage result: {error}"
+      )
+    })?;
     Ok(())
-  }
-
-  fn transform_module_source(
-    &self,
-    transformer: &RolldownEtsTransformer,
-    source: &str,
-    module_id: &Path,
-  ) -> Result<String> {
-    let module_id = arkdown_path::ArtifactPathSerializer::path_to_slash_string(module_id)?;
-    let Some(output) = transformer
-      .compile_transform(source, &module_id)
-      .map_err(|error| anyhow::anyhow!(error.to_string()))?
-    else {
-      // ModuleMode also writes JavaScript dependencies. The ETS transform
-      // plugin intentionally leaves those byte-for-byte unchanged before its
-      // module-request pass, so the original text is their correct baseline.
-      return Ok(source.to_string());
-    };
-    Ok(
-      output
-        .module_source_code
-        .map(|source| source.to_string())
-        .unwrap_or(output.code),
-    )
   }
 }
 
@@ -506,13 +473,17 @@ const instrumentedModuleIds = [];
 for (const source of request.sources) {
   const moduleId = source.moduleId.replace(/\\/g, '/');
   if (filter.needToFilter(moduleId, defaultBlackList, blackList, whiteList)) continue;
-  const code = fs.readFileSync(source.moduleId, 'utf8');
+  // Hvigor's `buildInstrument.beforeBuildEnd` transforms
+  // `share.ModuleSourceFile.module.source`: the already materialized
+  // post-ArkUI TypeScript source, while retaining moduleId for filtering and
+  // coverage attribution.
+  const code = fs.readFileSync(source.sourcePath, 'utf8');
   const sourceFile = tsc.createSourceFile(source.moduleId, code, tsc.ScriptTarget.Latest, true);
   const transformed = tsc.transform(sourceFile, [bjcTransformer({
     projectTopDir: request.projectPath,
     modulePath: request.modulePath,
     coverageMode: request.coverageMode,
-    testMode: 'unitTest',
+    testMode: request.testMode,
   })]);
   try {
     const printer = tsc.createPrinter({ newLine: tsc.NewLineKind.LineFeed });

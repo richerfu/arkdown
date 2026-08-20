@@ -41,7 +41,7 @@ pub(super) struct DeviceTestExecutionInput<'a> {
   pub sdk_root: &'a Path,
   pub project_path: &'a Path,
   pub module: &'a ModuleConfig,
-  pub artifact_name: &'a str,
+  pub target_artifact_name: Option<&'a str>,
   pub product_name: &'a str,
   pub bundle_name: &'a str,
   pub bundle_type: &'a str,
@@ -106,7 +106,8 @@ impl DeviceTestExecutionPlan {
     let test_hap_path = Self::test_hap_path(
       &input.module.src_path,
       input.product_name,
-      input.artifact_name,
+      &input.module.name,
+      input.target_artifact_name,
     )?;
     let dependencies_paths =
       Self::dependency_paths(input.dependencies, input.project_path, input.product_name);
@@ -173,26 +174,38 @@ impl DeviceTestExecutionPlan {
     Ok(())
   }
 
-  fn test_hap_path(module_root: &Path, product_name: &str, artifact_name: &str) -> Result<PathBuf> {
+  fn test_hap_path(
+    module_root: &Path,
+    product_name: &str,
+    module_name: &str,
+    target_artifact_name: Option<&str>,
+  ) -> Result<PathBuf> {
     let output_dir = module_root
       .join("build")
       .join(product_name)
       .join("outputs")
       .join("ohosTest");
-    let stem = format!("{artifact_name}-ohosTest");
-    let candidates = [
-      output_dir.join(format!("{stem}-signed.hap")),
-      output_dir.join(format!("{stem}-unsigned.hap")),
-    ];
-    candidates
-      .into_iter()
-      .find(|candidate| candidate.is_file())
-      .ok_or_else(|| {
-        anyhow::anyhow!(
-          "ARKDOWN_DEVICE_TEST_HAP_MISSING: no ohosTest HAP was produced below {}",
-          output_dir.display()
-        )
-      })
+    let file_name = Self::test_hap_file_name(module_name, target_artifact_name);
+    let path = output_dir.join(file_name);
+    if !path.is_file() {
+      anyhow::bail!(
+        "ARKDOWN_DEVICE_TEST_HAP_MISSING: hvigor-compatible signed ohosTest HAP was not produced at {}",
+        path.display()
+      );
+    }
+    Ok(path)
+  }
+
+  /// Hvigor `GenerateDeviceCoverage` calls the default target's
+  /// `getModuleTargetOutputFileName(..., true, ..., "ohosTest")`.
+  pub(super) fn test_hap_file_name(
+    module_name: &str,
+    target_artifact_name: Option<&str>,
+  ) -> String {
+    target_artifact_name.map_or_else(
+      || format!("{module_name}-ohosTest-signed.hap"),
+      |artifact_name| format!("{artifact_name}.hap"),
+    )
   }
 
   fn dependency_paths(

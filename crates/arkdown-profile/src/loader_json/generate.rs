@@ -938,13 +938,16 @@ impl LoaderJson {
             cache_path,
             ace_module_build,
             build_mode: build_mode_str,
-            support_chunks: config
-                .product
-                .build_option
-                .ark_options
-                .as_ref()
-                .and_then(|ao| ao.support_chunks.then_some(true))
-                .unwrap_or(false),
+            // `OhosTestArkCompile.initDefaultArkCompileConfig()` forces
+            // `supportChunks=false` independently of the inherited target
+            // build option.
+            support_chunks: target_name != "ohosTest"
+                && config
+                    .product
+                    .build_option
+                    .ark_options
+                    .as_ref()
+                    .is_some_and(|options| options.support_chunks),
             use_normalized_ohm_url,
             api_version: config.sdk_config.compile_api_version,
             fallback_an_build: aot_fields.fallback_an_build,

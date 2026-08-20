@@ -49,12 +49,14 @@ impl BuildCoordinator {
         session.sdk.compile_sdk_version
       );
     }
-    // Local unit-test builds default to code-coverage instrumentation:
-    // hvigor `setTestDefaultParameters` injects `ohos-test-coverage=true`
-    // for the `test` task; the CLI flag can still override it.
-    let coverage_mode = args.coverage
-      || (matches!(config.output_target, OutputTarget::Test)
-        && args.ohos_test_coverage.unwrap_or(true));
+    // Local and on-device test builds default to code-coverage
+    // instrumentation: hvigor injects `ohos-test-coverage=true` for `test`
+    // and `onDeviceTest`; the CLI flag can still override it.
+    let ohos_test_coverage = args.ohos_test_coverage.unwrap_or_else(|| {
+      matches!(config.output_target, OutputTarget::Test)
+        || TargetBuildExecutionPlan::is_device_test(args)
+    });
+    let coverage_mode = args.coverage || ohos_test_coverage;
     let disable_abc_cache = args.disable_abc_cache || !args.cache;
     let cli_cache_file = args.cache_file.clone();
     let abc_backend = args.abc_backend;
@@ -355,6 +357,22 @@ impl BuildCoordinator {
       let module_context = session.module_context(&module.name).ok_or_else(|| {
         anyhow::anyhow!("missing build session module context for {}", module.name)
       })?;
+      let ohos_test_templates_after_migration = module_target_name == "ohosTest"
+        && module_context
+          .module
+          .ohos_test_module_json_value
+          .as_deref()
+          .is_some_and(|module_json| {
+            module_layout
+              .source()
+              .ohos_test_templates_after_migration(module_json)
+          });
+      // `ModulePathInfoIml.getOhosTestIntermediatesSrc*` is independent of
+      // the active target build root: generated ohosTest templates always
+      // live below `.test/<product>`, while target outputs use
+      // `build/<product>/.../ohosTest`.
+      let ohos_test_template_layout =
+        ModuleBuildLayout::for_ohos_test_template(&module.src_path, &module_config.product.name);
       let package_resolution = Arc::new(
         ModulePackageResolutionPlanner::new(&module_context, &local_package_source_roots)
           .build()?,
@@ -446,59 +464,39 @@ impl BuildCoordinator {
       // hvigor `GenerateOhosTestTemplate`: the `ohosTest` target build
       // (`-p module=entry@ohosTest`) copies the SDK test templates into
       // `.test/<product>/intermediates/src/ohosTest/`.
-      if module_target_name == "ohosTest"
-        && module_layout.source().ohos_test_module_json5().is_file()
+      if ohos_test_templates_after_migration
+        && task_lifecycle
+          .before(
+            &module.name,
+            Some(&module_target_name),
+            "GenerateOhosTestTemplate",
+          )
+          .await?
       {
-        let source_module_json = module_layout.source().ohos_test_module_json5();
-        let source_content = std::fs::read_to_string(&source_module_json)?;
-        let source_model =
-          json5::from_str::<arkdown_core::ModuleJson5>(&source_content).map_err(|error| {
-            anyhow::anyhow!(
-              "cannot parse ohosTest module.json5 '{}': {error}",
-              source_module_json.display()
-            )
-          })?;
-        let templates_after_migration = source_model
-          .module
-          .abilities
-          .iter()
-          .all(|ability| ability.src_entry.is_empty())
-          && !module_layout.source().ohos_test_runner_ets().is_file()
-          && !module_layout.source().ohos_test_runner_ts().is_file();
-        if templates_after_migration
-          && task_lifecycle
-            .before(
-              &module.name,
-              Some(&module_target_name),
-              "GenerateOhosTestTemplate",
-            )
-            .await?
-        {
-          let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
-          if !crate::cmd::build::unit_test::has_ohos_test_template(
+        let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
+        if !crate::cmd::build::unit_test::has_ohos_test_template(
+          &module.src_path,
+          &module_config.product.name,
+        ) {
+          crate::cmd::build::unit_test::generate_ohos_test_template(
             &module.src_path,
             &module_config.product.name,
-          ) {
-            crate::cmd::build::unit_test::generate_ohos_test_template(
-              &module.src_path,
-              &module_config.product.name,
-              config.sdk_config.compile_api_version,
+            config.sdk_config.compile_api_version,
+          )
+          .map_err(|error| {
+            anyhow::anyhow!(
+              "GenerateOhosTestTemplate failed for module '{}': {error}",
+              module.name
             )
-            .map_err(|error| {
-              anyhow::anyhow!(
-                "GenerateOhosTestTemplate failed for module '{}': {error}",
-                module.name
-              )
-            })?;
-          }
-          task_lifecycle
-            .after(
-              &module.name,
-              Some(&module_target_name),
-              "GenerateOhosTestTemplate",
-            )
-            .await?;
+          })?;
         }
+        task_lifecycle
+          .after(
+            &module.name,
+            Some(&module_target_name),
+            "GenerateOhosTestTemplate",
+          )
+          .await?;
       }
       let module_info_task_name = if module.module_type == OhosModuleType::Har {
         "CreateHarModuleInfo"
@@ -868,13 +866,7 @@ impl BuildCoordinator {
               ohos_test_json5.display()
             )
           })?;
-        let template_after_migration = parsed
-          .module
-          .abilities
-          .iter()
-          .all(|ability| ability.src_entry.is_empty())
-          && !module_layout.source().ohos_test_runner_ets().is_file();
-        if template_after_migration {
+        if ohos_test_templates_after_migration {
           // `getOhosTestAbilityConfig()`: description/mainElement/pages +
           // the synthetic TestAbility, overlaid by the source module.json5
           // (hvigor `MergeProfile`: `{...getOhosTestAbilityConfig(),
@@ -1754,8 +1746,8 @@ impl BuildCoordinator {
         // The `ohosTest` target compiles the generated template resources
         // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
         // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
-        if module_target_name == "ohosTest" {
-          let template_resources = module_layout.ohos_test_resources_root();
+        if ohos_test_templates_after_migration {
+          let template_resources = ohos_test_template_layout.ohos_test_resources_root();
           if template_resources.is_dir() && !module_res_dirs.contains(&template_resources) {
             module_res_dirs.push(template_resources);
           }
@@ -1867,8 +1859,8 @@ impl BuildCoordinator {
         // The `ohosTest` target compiles the generated template resources
         // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
         // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
-        if module_target_name == "ohosTest" {
-          let template_resources = module_layout.ohos_test_resources_root();
+        if ohos_test_templates_after_migration {
+          let template_resources = ohos_test_template_layout.ohos_test_resources_root();
           res_dirs.insert_existing(template_resources);
         }
         (app_scope_res, res_dirs.into_paths())
@@ -1879,6 +1871,10 @@ impl BuildCoordinator {
         for dir in ResourceDirSelector::new(module_config.as_ref(), module, &module_target).select()
         {
           current_module_resource_dirs.insert_existing(dir);
+        }
+        if ohos_test_templates_after_migration {
+          current_module_resource_dirs
+            .insert_existing(ohos_test_template_layout.ohos_test_resources_root());
         }
         let current_module_resource_dirs = current_module_resource_dirs.into_paths();
         let dependency_resource_dirs: Vec<PathBuf> = res_dirs
@@ -2248,6 +2244,20 @@ impl BuildCoordinator {
         config.output_target.clone(),
       );
 
+      if module_target_name == "ohosTest" {
+        // The ohosTest loader names the test module (`entry_test`) and maps
+        // it to the same source path (hvigor `modulePathMap`). Apply this
+        // before GenerateLoaderJson writes the SDK handoff so the file and
+        // the in-memory compiler model cannot diverge.
+        loader_json.module_name = module_json5.module.name.clone();
+        let test_module_path =
+          std::fs::canonicalize(&module.src_path).unwrap_or_else(|_| module.src_path.clone());
+        loader_json.module_path_map.insert(
+          module_json5.module.name.clone(),
+          arkdown_path::ArtifactPathSerializer::path_to_slash_string(&test_module_path)?,
+        );
+      }
+
       if skip_profile_writes {
         task_lifecycle
           .up_to_date(
@@ -2359,17 +2369,6 @@ impl BuildCoordinator {
           .await?;
       }
 
-      if module_target_name == "ohosTest" {
-        // The ohosTest loader names the test module (`entry_test`) and maps
-        // it to the same source path (hvigor `modulePathMap`).
-        loader_json.module_name = module_json5.module.name.clone();
-        let test_module_path =
-          std::fs::canonicalize(&module.src_path).unwrap_or_else(|_| module.src_path.clone());
-        loader_json.module_path_map.insert(
-          module_json5.module.name.clone(),
-          arkdown_path::ArtifactPathSerializer::path_to_slash_string(&test_module_path)?,
-        );
-      }
       if ReloadResourceTaskPlan::requested_for_module(&args.native_task_roots, &module.name) {
         HotReloadProcessor::new(&module_layout, &project_root).validate_resource_model(
           &loader_json.compile_mode,
@@ -2531,20 +2530,42 @@ impl BuildCoordinator {
               module.name
             )
           })?;
+        let ace_module_root = if module_target_name == "ohosTest" {
+          let source = module_layout.source();
+          let target_ets = source.target_ets(module_target_name);
+          if module_context
+            .module
+            .ohos_test_module_json_value
+            .as_deref()
+            .is_some_and(|module_json| source.ohos_test_templates_after_migration(module_json))
+          {
+            ModuleBuildLayout::for_ohos_test_template(&module.src_path, &module_config.product.name)
+              .ohos_test_ets_root()
+          } else {
+            target_ets
+          }
+        } else {
+          module_layout.source().ets()
+        };
+        let ace_super_visual_path = if module_target_name == "ohosTest" {
+          module_layout.source().ohos_test_dir().join("supervisual")
+        } else {
+          module_layout.source().src_main().join("supervisual")
+        };
         let paths = SdkEtsCheckerPaths::build(
           module_layout.res_profile_dir(),
           module_layout.res_ark_module_json(),
           module_layout.resource_table_txt(),
           module_layout.res_resources_dir().join("rawfile"),
-          module_layout.source().ets(),
-          module_layout.source().src_main().join("supervisual"),
+          ace_module_root.clone(),
+          ace_super_visual_path,
           module_layout.loader_json(),
           PathBuf::from(&loader_json.cache_path),
           PathBuf::from(&loader_json.ace_module_build),
           generated_profile_path,
           module_layout.generated_resource_table_typescript(),
         );
-        let entries = SdkEtsCheckerEntryCollector::new(loader_json).collect();
+        let entries = SdkEtsCheckerEntryCollector::new(loader_json, &ace_module_root).collect();
         checker_plans.push(
           SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
             config: module_config.as_ref(),
@@ -2609,7 +2630,6 @@ impl BuildCoordinator {
       })
       .await?;
     let mut bundle_outs = bundle_stage_output.bundle_outs;
-    let bundle_ets_transform_plans = bundle_stage_output.bundle_ets_transform_plans;
     let widget_bundle_outs = bundle_stage_output.widget_bundle_outs;
     let compile_task_active = bundle_stage_output.compile_task_active;
     let module_obfuscation_contexts = bundle_stage_output.module_obfuscation_contexts;
@@ -2699,40 +2719,33 @@ impl BuildCoordinator {
 
     // ── Coverage instrumentation ──────────────────────────────────────
     if coverage_mode {
-      if matches!(config.output_target, OutputTarget::Test) {
+      if ohos_test_coverage {
+        let test_mode = if matches!(config.output_target, OutputTarget::Test) {
+          crate::cmd::build::unit_test::TestCoverageMode::UnitTest
+        } else {
+          crate::cmd::build::unit_test::TestCoverageMode::OhosTest
+        };
         for (
-          (
-            (module, _manifest, _loader_json, _resource_refs, _module_target_name, module_config),
-            (bundle_out,),
-          ),
-          ets_transform_plan,
-        ) in loader_jsons
-          .iter()
-          .zip(bundle_outs.iter())
-          .zip(bundle_ets_transform_plans.iter())
+          (module, _manifest, _loader_json, _resource_refs, _module_target_name, _module_config),
+          (bundle_out,),
+        ) in loader_jsons.iter().zip(bundle_outs.iter())
         {
           if bundle_out.bundle_output.module_source_files.is_empty() {
             continue;
           }
-          let ets_transform_plan = ets_transform_plan.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-              "UnitTestArkTS coverage transform plan is missing for module '{}'",
-              module.name
-            )
-          })?;
-          crate::cmd::build::unit_test::UnitTestCoverageInstrumentationPlan::from_build(
+          crate::cmd::build::unit_test::TestCoverageInstrumentationPlan::from_build(
             &config.sdk_config,
             &config.project_root,
             &module.src_path,
-            &module_config.product.name,
+            test_mode,
             args.coverage_mode.as_deref(),
             &bundle_out.bundle_output.module_source_files,
             args.resolved_node_executable(),
           )?
-          .execute(Arc::clone(ets_transform_plan))
+          .execute()
           .with_context(|| {
             format!(
-              "UnitTestArkTS coverage instrumentation failed for module '{}'",
+              "test coverage instrumentation failed for module '{}'",
               module.name
             )
           })?;

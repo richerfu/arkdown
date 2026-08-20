@@ -3368,6 +3368,38 @@ fn test_loader_json_routes_ohos_test_sources_only_to_ohos_test_target() {
     );
 }
 
+#[test]
+fn ohos_test_loader_disables_chunks_like_ohos_test_ark_compile() {
+    let tmp = tempfile::tempdir().expect("create module root");
+    let module_root = tmp.path().join("entry");
+    fs::create_dir_all(module_root.join("src/main/ets")).expect("create main source root");
+
+    let mut config = make_config(false);
+    config.project_root = tmp.path().to_path_buf();
+    config.product.build_option.ark_options = Some(
+        serde_json::from_value(serde_json::json!({
+            "obfuscation": null,
+            "types": [],
+            "runtime_only": null,
+            "support_chunks": true
+        }))
+        .expect("decode ArkOptions"),
+    );
+    let module = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Entry,
+    };
+
+    let default_loader = LoaderJson::try_generate(&config, &module, &make_manifest(), "default")
+        .expect("generate default loader");
+    let ohos_test_loader = LoaderJson::try_generate(&config, &module, &make_manifest(), "ohosTest")
+        .expect("generate ohosTest loader");
+
+    assert!(default_loader.support_chunks);
+    assert!(!ohos_test_loader.support_chunks);
+}
+
 /// 6.24.3 `pkgName2OtherCompileFiles` is a widget-loader-only field: the
 /// common `loader.json` never carries it, the widget loader always does
 /// (`Some(empty)` object when `widget.transitiveDeps` is off).

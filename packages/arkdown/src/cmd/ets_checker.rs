@@ -232,15 +232,21 @@ impl<'a> SdkEtsCheckerModuleLayout<'a> {
 /// once for the SDK service.
 pub(crate) struct SdkEtsCheckerEntryCollector<'a> {
   loader_json: &'a LoaderJson,
+  source_root: PathBuf,
 }
 
 impl<'a> SdkEtsCheckerEntryCollector<'a> {
-  pub(crate) fn new(loader_json: &'a LoaderJson) -> Self {
-    Self { loader_json }
+  pub(crate) fn new(loader_json: &'a LoaderJson, ace_module_root: &Path) -> Self {
+    Self {
+      loader_json,
+      source_root: ace_module_root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&loader_json.module_root_path)),
+    }
   }
 
   pub(crate) fn collect(&self) -> Vec<PathBuf> {
-    let source_main = PathBuf::from(&self.loader_json.module_root_path);
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
     for entry in self
@@ -254,7 +260,7 @@ impl<'a> SdkEtsCheckerEntryCollector<'a> {
       let path = if path.is_absolute() {
         path
       } else {
-        source_main.join(path)
+        self.source_root.join(path)
       };
       let path = lexical_normalize(&path);
       if seen.insert(path.clone()) {
@@ -805,7 +811,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       test_framework_par: json!({
         "testMode": if matches!(self.input.config.output_target, arkdown_core::OutputTarget::Test) {
           "unitTest"
-        } else if self.input.target_name == "ohosTest" {
+        } else if self.input.coverage_enabled || self.input.target_name == "ohosTest" {
           "ohosTest"
         } else {
           ""
@@ -828,12 +834,16 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       bundle_name: self.input.config.product.bundle_name.clone(),
       ets_loader_version: component_metadata.version.clone(),
       ets_loader_release_type: component_metadata.release_type.clone(),
-      aot_compile_mode: self
-        .input
-        .module_build_option
-        .aot_compile_mode
-        .clone()
-        .unwrap_or_else(|| "type".to_string()),
+      aot_compile_mode: if self.input.coverage_enabled {
+        String::new()
+      } else {
+        self
+          .input
+          .module_build_option
+          .aot_compile_mode
+          .clone()
+          .unwrap_or_else(|| "type".to_string())
+      },
       ap_path: self
         .input
         .module_build_option
@@ -844,7 +854,11 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
         .unwrap_or_default(),
       entry_module_name: self.input.module.name.clone(),
       entry_module_version: module_package.version.clone(),
-      entry_package_name: module_package.name.clone(),
+      entry_package_name: if self.input.target_name == "ohosTest" && self.input.coverage_enabled {
+        format!("{}_test", module_package.name)
+      } else {
+        module_package.name.clone()
+      },
       all_module_name_hash: self.all_module_name_hash()?,
       external_api_paths: self.external_api_paths()?,
       compiler_types: self
