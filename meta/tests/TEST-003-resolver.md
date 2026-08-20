@@ -114,3 +114,25 @@ crates/arkdown-resolver/src/
 
 - **Setup**: `oh-package.json5` with `{ "metadata": { "abcPath": "index.abc" } }`
 - **Expected**: `BytecodeHar { abc_path: "oh_modules/pkg/index.abc" }`
+
+### TC-017: active package wins a same-name installed dependency
+
+- **Setup**: the package plan contains an installed `@scope/runtime`, then the
+  active module is inserted with the same package name
+- **Input**: `"@scope/runtime"` from a source file in the active module
+- **Expected**: resolution returns the active module's canonical `main` file
+
+### TC-018: self subpath probes package source roots
+
+- **Setup**: active package source root is `src/main`
+- **Input**: `"@scope/runtime/ets/util/Helper"` from inside that package
+- **Expected**: resolves `src/main/ets/util/Helper.ets`; the same subpath import
+  from an unrelated package does not use the source-root fallback
+
+### TC-019: importer-local `oh_modules` precedes host paths
+
+- **Setup**: a local source package has
+  `oh_modules/@scope/dependency` as a symlink to an OHPM store package; the
+  dependency is absent from the host package plan
+- **Expected**: resolution starts from the importing package, follows the
+  symlink, reads its OHOS package entry, and returns the canonical physical file

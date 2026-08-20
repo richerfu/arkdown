@@ -1,5 +1,6 @@
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arkdown_core::{ModuleType, OhosResolvedModule, PkgContext};
 use arkdown_path::{
@@ -12,6 +13,7 @@ use oxc_resolver::{
 
 use crate::error::ResolveError;
 use crate::oh_modules::OhPackage;
+use crate::plan::PackageResolutionPlan;
 
 /// Configuration for the OHOS module resolver.
 pub struct ResolverConfig {
@@ -31,8 +33,8 @@ pub struct ResolverConfig {
     pub source_roots: Vec<PathBuf>,
     /// Absolute module lookup directories matching hvigor `getResolveModules()`.
     pub module_paths: Vec<PathBuf>,
-    /// Map from package name → `PkgBriefInfo` (from `loader.json` `pkgBriefInfo`).
-    pub pkg_name_to_pkg_info: FxHashMap<String, PkgBriefInfo>,
+    /// Immutable package-name/source-root index derived before hooks run.
+    pub package_resolution: Arc<PackageResolutionPlan>,
     /// Whether to use normalized OHM URLs as module identifiers.
     pub use_normalized_ohm_url: bool,
     /// Whether to enforce case-sensitive import checks.
@@ -54,20 +56,6 @@ pub struct ResolverConfig {
     pub source_set_overlays: Vec<(PathBuf, PathBuf)>,
 }
 
-/// Brief package information extracted from `loader.json`.
-#[derive(Debug, Clone)]
-pub struct PkgBriefInfo {
-    /// Absolute path to the package root directory.
-    pub pkg_root: PathBuf,
-    /// The package name (e.g. `"@ohos/axios"`).
-    pub pkg_name: String,
-    /// Whether this package should resolve as local source with package
-    /// context instead of an `oh_modules` remote package.
-    pub local_source: bool,
-    /// Source root directories within this package.
-    pub source_roots: Vec<PathBuf>,
-}
-
 /// OHOS module resolver.
 ///
 /// Maps import specifiers to [`OhosResolvedModule`] values following OHOS-specific
@@ -76,7 +64,8 @@ pub struct OhosResolver {
     config: ResolverConfig,
     fs_resolver: OxcResolver,
     require_fs_resolver: OxcResolver,
-    package_roots: FxHashMap<String, PackageRoot>,
+    package_roots: FxHashMap<String, Arc<PackageRoot>>,
+    package_roots_by_path: FxHashMap<PathBuf, Arc<PackageRoot>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +79,7 @@ struct PackageRoot {
     path: PathBuf,
     package_name: String,
     local_source: bool,
+    source_roots: Vec<PathBuf>,
 }
 
 struct ResolverSpecifier<'a> {
@@ -155,12 +145,13 @@ impl OhosResolver {
             &config,
             ResolveImportKind::Require,
         ));
-        let package_roots = PackageRootIndex::build(&config).into_roots();
+        let (package_roots, package_roots_by_path) = PackageRootIndex::build(&config).into_roots();
         OhosResolver {
             config,
             fs_resolver,
             require_fs_resolver,
             package_roots,
+            package_roots_by_path,
         }
     }
 
@@ -170,7 +161,7 @@ impl OhosResolver {
     /// 1. `@bundle:` / `@shared:` → external bundle / HSP reference
     /// 2. Bare source names from hvigor's module source/profile roots
     /// 3. Bare package names, including scoped `@ohos/*` packages, from
-    ///    `pkg_name_to_pkg_info` / `oh_modules/`
+    ///    the package-resolution plan / `oh_modules/`
     /// 4. `@ohos/` → SDK API declaration
     /// 5. `@kit.` → SDK kit declaration
     /// 6. Relative (`./`, `../`) → local source file
@@ -354,8 +345,24 @@ impl OhosResolver {
             return None;
         }
 
+        let importer_package = self.package_for_importer(importer);
         for candidate in candidates {
-            if let Some(pkg_root) = self.package_root_for(candidate.package_name(), importer) {
+            let is_self_reference = importer_package
+                .as_ref()
+                .is_some_and(|package| package.package_name == candidate.package_name());
+            if !is_self_reference {
+                if let Some(resolved) = importer_package.as_ref().and_then(|package| {
+                    self.resolve_package_from_importer_modules(
+                        candidate.package_name(),
+                        candidate.subpath(),
+                        package,
+                        import_kind,
+                    )
+                }) {
+                    return Some(resolved);
+                }
+            }
+            if let Some(pkg_root) = self.package_root_for(candidate.package_name()) {
                 if let Some(resolved) = self.resolve_package_entry(
                     candidate.package_name(),
                     candidate.subpath(),
@@ -364,12 +371,89 @@ impl OhosResolver {
                 ) {
                     return Some(resolved);
                 }
+                if is_self_reference {
+                    if let Some(resolved) = self.resolve_package_source_root(
+                        candidate.package_name(),
+                        candidate.subpath(),
+                        &pkg_root,
+                        import_kind,
+                    ) {
+                        return Some(resolved);
+                    }
+                }
             }
         }
         self.resolve_package_from_module_paths(specifier, importer, import_kind)
     }
 
-    fn package_root_for(&self, package_name: &str, _importer: &Path) -> Option<PackageRoot> {
+    /// Find hvigor's importer `meta.pkgName` equivalent without filesystem
+    /// discovery. Package roots are canonicalized when the plan is built; this
+    /// loop only probes the immutable root index by path component.
+    fn package_for_importer(&self, importer: &Path) -> Option<Arc<PackageRoot>> {
+        let mut current = if importer.extension().is_some() {
+            importer.parent()
+        } else {
+            Some(importer)
+        };
+        while let Some(path) = current {
+            if let Some(package) = self.package_roots_by_path.get(path) {
+                return Some(Arc::clone(package));
+            }
+            current = path.parent();
+        }
+        None
+    }
+
+    /// Resolve an undeclared package from the importing package's own
+    /// `oh_modules` directory before host/project module paths. This matches
+    /// node-resolve's `baseDir = dirname(importer)` walk and is required for
+    /// source packages such as `msi_runtime` whose installed dependency links
+    /// are more complete than their published manifest.
+    fn resolve_package_from_importer_modules(
+        &self,
+        package_name: &str,
+        subpath: &str,
+        importer_package: &PackageRoot,
+        import_kind: ResolveImportKind,
+    ) -> Option<OhosResolvedModule> {
+        let package_root = importer_package.path.join("oh_modules").join(package_name);
+        if !package_root.is_dir() {
+            return None;
+        }
+        let package_root = arkdown_path::canonicalize_or_owned(&package_root);
+        self.resolve_package_entry(
+            package_name,
+            subpath,
+            &PackageRoot {
+                path: package_root,
+                package_name: package_name.to_string(),
+                local_source: false,
+                source_roots: Vec::new(),
+            },
+            import_kind,
+        )
+    }
+
+    fn resolve_package_source_root(
+        &self,
+        package_name: &str,
+        subpath: &str,
+        pkg_root: &PackageRoot,
+        import_kind: ResolveImportKind,
+    ) -> Option<OhosResolvedModule> {
+        let request = if subpath.is_empty() { "index" } else { subpath };
+        for source_root in &pkg_root.source_roots {
+            let Some(resolved) = self.resolve_package_path(source_root, request, import_kind)
+            else {
+                continue;
+            };
+            let module_type = ModuleType::infer(&resolved);
+            return Some(pkg_root.to_resolved_module(resolved, module_type, package_name));
+        }
+        None
+    }
+
+    fn package_root_for(&self, package_name: &str) -> Option<Arc<PackageRoot>> {
         if let Some(root) = self.package_roots.get(package_name) {
             return Some(root.clone());
         }
@@ -415,6 +499,7 @@ impl OhosResolver {
                 path: package_root,
                 package_name: package_name.clone(),
                 local_source: false,
+                source_roots: Vec::new(),
             }
             .to_resolved_module(resolved, module_type, &package_name),
         )
@@ -458,7 +543,12 @@ impl OhosResolver {
         };
         let resolved = self
             .resolve_package_path(&pkg_root.path, &requested, import_kind)
-            .or_else(|| self.resolve_package_path(&pkg_root.path, "index", import_kind))?;
+            .or_else(|| {
+                subpath
+                    .is_empty()
+                    .then(|| self.resolve_package_path(&pkg_root.path, "index", import_kind))
+                    .flatten()
+            })?;
         let module_type = ModuleType::infer(&resolved);
 
         Some(pkg_root.to_resolved_module(resolved, module_type, package_name))
@@ -627,8 +717,8 @@ impl PackageRoot {
 }
 
 struct PackageRootIndex {
-    roots: FxHashMap<String, PackageRoot>,
-    case_insensitive_roots: FxHashMap<String, PackageRoot>,
+    roots: FxHashMap<String, Arc<PackageRoot>>,
+    case_insensitive_roots: FxHashMap<String, Arc<PackageRoot>>,
 }
 
 impl PackageRootIndex {
@@ -638,27 +728,51 @@ impl PackageRootIndex {
             case_insensitive_roots: FxHashMap::default(),
         };
 
-        for (name, info) in &config.pkg_name_to_pkg_info {
-            let root = PackageRoot {
-                path: arkdown_path::canonicalize_or_owned(&info.pkg_root),
+        for (name, info) in config.package_resolution.sorted_entries() {
+            let package_root = arkdown_path::canonicalize_or_owned(&info.pkg_root);
+            let root = Arc::new(PackageRoot {
+                source_roots: info
+                    .source_roots
+                    .iter()
+                    .map(|source_root| {
+                        let source_root = if source_root.has_root() {
+                            source_root.clone()
+                        } else {
+                            package_root.join(source_root)
+                        };
+                        arkdown_path::canonicalize_or_owned(&source_root)
+                    })
+                    .collect(),
+                path: package_root,
                 package_name: info.pkg_name.clone(),
                 local_source: info.local_source,
-            };
+            });
             index
                 .case_insensitive_roots
                 .entry(PackageNameCase::new(name).lowercase())
                 .or_insert_with(|| root.clone());
-            index.roots.insert(name.clone(), root);
+            index.roots.insert(name.to_string(), root);
         }
 
         index
     }
 
-    fn into_roots(mut self) -> FxHashMap<String, PackageRoot> {
+    fn into_roots(
+        mut self,
+    ) -> (
+        FxHashMap<String, Arc<PackageRoot>>,
+        FxHashMap<PathBuf, Arc<PackageRoot>>,
+    ) {
         for (name, root) in self.case_insensitive_roots {
             self.roots.entry(name).or_insert(root);
         }
-        self.roots
+        let mut by_path = FxHashMap::default();
+        for root in self.roots.values() {
+            by_path
+                .entry(root.path.clone())
+                .or_insert_with(|| root.clone());
+        }
+        (self.roots, by_path)
     }
 }
 
@@ -723,6 +837,7 @@ impl<'a> ResolverPathText<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::PkgBriefInfo;
     use std::fs;
     use tempfile::TempDir;
 
@@ -730,7 +845,7 @@ mod tests {
         project_root: PathBuf,
         sdk_api_dirs: Vec<PathBuf>,
         sdk_kits_dirs: Vec<PathBuf>,
-        pkg_name_to_pkg_info: FxHashMap<String, PkgBriefInfo>,
+        packages: FxHashMap<String, PkgBriefInfo>,
     ) -> OhosResolver {
         OhosResolver::new(ResolverConfig {
             project_root,
@@ -739,7 +854,7 @@ mod tests {
             sdk_arkts_dirs: vec![],
             source_roots: vec![],
             module_paths: vec![],
-            pkg_name_to_pkg_info,
+            package_resolution: Arc::new(packages.into()),
             use_normalized_ohm_url: true,
             case_sensitive_check: false,
             source_set_overlays: vec![],
@@ -910,7 +1025,7 @@ mod tests {
             sdk_arkts_dirs: vec![arkts_dir],
             source_roots: vec![],
             module_paths: vec![],
-            pkg_name_to_pkg_info: FxHashMap::default(),
+            package_resolution: Arc::new(PackageResolutionPlan::default()),
             use_normalized_ohm_url: true,
             case_sensitive_check: false,
             source_set_overlays: vec![],
@@ -1141,7 +1256,7 @@ mod tests {
             sdk_arkts_dirs: vec![],
             source_roots: vec![],
             module_paths: vec![module_root.join("oh_modules")],
-            pkg_name_to_pkg_info: FxHashMap::default(),
+            package_resolution: Arc::new(PackageResolutionPlan::default()),
             use_normalized_ohm_url: true,
             case_sensitive_check: false,
             source_set_overlays: vec![],
@@ -1183,7 +1298,7 @@ mod tests {
             sdk_arkts_dirs: vec![],
             source_roots: vec![source_root, generated_profile_root],
             module_paths: vec![module_root.join("oh_modules")],
-            pkg_name_to_pkg_info: FxHashMap::default(),
+            package_resolution: Arc::new(PackageResolutionPlan::default()),
             use_normalized_ohm_url: true,
             case_sensitive_check: false,
             source_set_overlays: vec![],
@@ -1339,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_ohpm_scoped_symlink_dependency_resolves_from_importer_package_store() {
+    fn importer_local_oh_modules_resolves_symlink_dependency_absent_from_host_plan() {
         let dir = TempDir::new().unwrap();
         let oh_modules_dir = dir.path().join("oh_modules");
         let cloud_root = oh_modules_dir
@@ -1376,12 +1491,7 @@ mod tests {
         let base64_entry = base64_root.join("index.js");
         fs::write(&base64_entry, "export default {};").unwrap();
 
-        let scoped_nested_root = cloud_root
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("@protobufjs");
+        let scoped_nested_root = cloud_root.join("oh_modules/@protobufjs");
         fs::create_dir_all(&scoped_nested_root).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&base64_root, scoped_nested_root.join("base64")).unwrap();
@@ -1392,9 +1502,11 @@ mod tests {
             dir.path().to_path_buf(),
             vec![],
             vec![],
-            pkg_index("@protobufjs/base64", &base64_root, false),
+            pkg_index("@hw-agconnect/cloud", &cloud_root, true),
         );
         let importer = cloud_root.join("src/main/ets/database/utils/Serializable.ts");
+        fs::write(&importer, "import base64 from '@protobufjs/base64';").unwrap();
+        let importer = arkdown_path::canonicalize_or_owned(&importer);
         let result = resolver.resolve("@protobufjs/base64", &importer).unwrap();
         match result {
             OhosResolvedModule::RemotePackage {
@@ -1409,6 +1521,128 @@ mod tests {
             }
             _ => panic!("expected RemotePackage"),
         }
+    }
+
+    #[test]
+    fn hvigor_self_last_package_plan_resolves_current_main_without_symlink_bounce() {
+        let dir = TempDir::new().unwrap();
+        let current_root = dir.path().join("msi_runtime");
+        let installed_root = dir.path().join("oh_modules/@msi/runtime");
+        fs::create_dir_all(current_root.join("src/main/ets/util")).unwrap();
+        fs::create_dir_all(&installed_root).unwrap();
+        fs::write(
+            current_root.join("oh-package.json5"),
+            r#"{ "name": "@msi/runtime", "version": "1.0.0", "main": "Index.ets" }"#,
+        )
+        .unwrap();
+        fs::write(
+            installed_root.join("oh-package.json5"),
+            r#"{ "name": "@msi/runtime", "version": "0.9.0", "main": "Index.ets" }"#,
+        )
+        .unwrap();
+        let current_entry = current_root.join("Index.ets");
+        fs::write(&current_entry, "export const current = true;").unwrap();
+        fs::write(
+            installed_root.join("Index.ets"),
+            "export const installed = true;",
+        )
+        .unwrap();
+        let importer = current_root.join("src/main/ets/util/NetworkTypeUtil.ets");
+        fs::write(&importer, "import { current } from '@msi/runtime';").unwrap();
+
+        let mut builder = crate::plan::PackageResolutionPlanBuilder::new();
+        builder.insert_dependency(
+            "@msi/runtime",
+            PkgBriefInfo {
+                pkg_root: installed_root,
+                pkg_name: "@msi/runtime".to_string(),
+                local_source: false,
+                source_roots: vec![],
+            },
+        );
+        builder.insert_current(PkgBriefInfo {
+            pkg_root: current_root.clone(),
+            pkg_name: "@msi/runtime".to_string(),
+            local_source: true,
+            source_roots: vec![current_root.join("src/main")],
+        });
+        let resolver = OhosResolver::new(ResolverConfig {
+            project_root: dir.path().to_path_buf(),
+            sdk_api_dirs: vec![],
+            sdk_kits_dirs: vec![],
+            sdk_arkts_dirs: vec![],
+            source_roots: vec![],
+            module_paths: vec![dir.path().join("oh_modules")],
+            package_resolution: Arc::new(builder.build()),
+            use_normalized_ohm_url: false,
+            case_sensitive_check: false,
+            source_set_overlays: vec![],
+        });
+
+        let result = resolver.resolve("@msi/runtime", &importer).unwrap();
+        match result {
+            OhosResolvedModule::LocalSource { path, .. } => {
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&current_entry));
+            }
+            _ => panic!("expected current package local source"),
+        }
+    }
+
+    #[test]
+    fn hvigor_self_subpath_uses_source_roots_only_for_owning_package() {
+        let dir = TempDir::new().unwrap();
+        let package_root = dir.path().join("msi_runtime");
+        let source_root = package_root.join("src/main");
+        let importer = source_root.join("ets/util/NetworkTypeUtil.ets");
+        let target = source_root.join("ets/util/GrayscaleUtils.ets");
+        fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        fs::write(
+            package_root.join("oh-package.json5"),
+            r#"{ "name": "@msi/runtime", "main": "Index.ets" }"#,
+        )
+        .unwrap();
+        fs::write(package_root.join("Index.ets"), "export {};").unwrap();
+        fs::write(&importer, "export {};").unwrap();
+        fs::write(&target, "export const grayscale = true;").unwrap();
+        let importer = arkdown_path::canonicalize_or_owned(&importer);
+
+        let mut builder = crate::plan::PackageResolutionPlanBuilder::new();
+        builder.insert_current(PkgBriefInfo {
+            pkg_root: package_root.clone(),
+            pkg_name: "@msi/runtime".to_string(),
+            local_source: true,
+            source_roots: vec![source_root],
+        });
+        let resolver = OhosResolver::new(ResolverConfig {
+            project_root: dir.path().to_path_buf(),
+            sdk_api_dirs: vec![],
+            sdk_kits_dirs: vec![],
+            sdk_arkts_dirs: vec![],
+            source_roots: vec![],
+            module_paths: vec![],
+            package_resolution: Arc::new(builder.build()),
+            use_normalized_ohm_url: false,
+            case_sensitive_check: false,
+            source_set_overlays: vec![],
+        });
+
+        let result = resolver
+            .resolve("@msi/runtime/ets/util/GrayscaleUtils", &importer)
+            .unwrap();
+        match result {
+            OhosResolvedModule::LocalSource { path, .. } => {
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&target));
+            }
+            _ => panic!("expected self source-root resolution"),
+        }
+
+        let outside_importer = dir.path().join("entry/src/main/ets/Index.ets");
+        fs::create_dir_all(outside_importer.parent().unwrap()).unwrap();
+        fs::write(&outside_importer, "export {};").unwrap();
+        let outside_importer = arkdown_path::canonicalize_or_owned(&outside_importer);
+        assert!(resolver
+            .resolve("@msi/runtime/ets/util/GrayscaleUtils", &outside_importer,)
+            .is_err());
     }
 
     // Test 8: @shared: → ExternalHsp
@@ -1467,7 +1701,7 @@ mod tests {
             sdk_arkts_dirs: vec![],
             source_roots: vec![],
             module_paths: vec![],
-            pkg_name_to_pkg_info: FxHashMap::default(),
+            package_resolution: Arc::new(PackageResolutionPlan::default()),
             use_normalized_ohm_url: false,
             case_sensitive_check: false,
             source_set_overlays: vec![(base_ets.clone(), target_ets.clone())],
@@ -1496,7 +1730,7 @@ mod tests {
             sdk_arkts_dirs: vec![],
             source_roots: vec![],
             module_paths: vec![],
-            pkg_name_to_pkg_info: FxHashMap::default(),
+            package_resolution: Arc::new(PackageResolutionPlan::default()),
             use_normalized_ohm_url: false,
             case_sensitive_check: false,
             source_set_overlays: vec![],

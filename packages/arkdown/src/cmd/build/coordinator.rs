@@ -72,6 +72,9 @@ use super::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
 };
 use super::module_plan::ModuleSelectionPlanner;
+use super::native_stage::{
+  NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
+};
 use super::packing_check::PackingCheck;
 use super::pre_build::PreBuildValidator;
 use super::preload_system_so::{PreloadSystemSoArtifactWriter, PreloadSystemSoPlan};
@@ -100,6 +103,9 @@ use crate::cmd::ets_checker::{
 use crate::cmd::native_build::{
   DebugSymbolCollector, HvigorModuleCleanStage, NativeBuildSanitizers, NativeCmakeLocalDependency,
   NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
+};
+use crate::cmd::package_resolution::{
+  LocalPackageSourceRootInventory, ModulePackageResolutionPlanner,
 };
 use crate::progress::Progress;
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
@@ -136,7 +142,7 @@ use arkdown_profile::{
   PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
   ProfileProcessor,
 };
-use arkdown_resolver::{OhPackage, PkgBriefInfo};
+use arkdown_resolver::{OhPackage, PackageResolutionPlan};
 use arkdown_resource::{
   IdDefinedFileProcessor, ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput,
 };
@@ -616,7 +622,12 @@ impl BuildTaskLifecycle {
     Ok(())
   }
 
-  fn has_root(&self, module_name: &str, target_name: Option<&str>, task_name: &str) -> bool {
+  pub(super) fn has_root(
+    &self,
+    module_name: &str,
+    target_name: Option<&str>,
+    task_name: &str,
+  ) -> bool {
     self.remaining_roots.iter().any(|root| {
       root.module_name == module_name
         && root.target_name.as_deref() == target_name
@@ -668,7 +679,7 @@ impl BuildTaskLifecycle {
       .await
   }
 
-  async fn execute_ninja_build(
+  pub(super) async fn execute_ninja_build(
     &self,
     module_name: &str,
     target_name: &str,
@@ -2007,6 +2018,7 @@ struct PkgContextInfoInputBuilder<'a> {
   module: &'a ModuleConfig,
   module_context: &'a ModuleCompileContext,
   excluded_package_roots: FxHashSet<PathBuf>,
+  local_native_dependencies: Arc<[NativeCmakeLocalDependency]>,
 }
 
 impl<'a> PkgContextInfoInputBuilder<'a> {
@@ -2022,6 +2034,7 @@ impl<'a> PkgContextInfoInputBuilder<'a> {
       module,
       module_context,
       excluded_package_roots: FxHashSet::default(),
+      local_native_dependencies: Arc::from([]),
     }
   }
 
@@ -2030,6 +2043,14 @@ impl<'a> PkgContextInfoInputBuilder<'a> {
       .iter()
       .map(|root| canonicalize_or_owned(root))
       .collect();
+    self
+  }
+
+  fn with_local_native_dependencies(
+    mut self,
+    dependencies: Arc<[NativeCmakeLocalDependency]>,
+  ) -> Self {
+    self.local_native_dependencies = dependencies;
     self
   }
 
@@ -2120,7 +2141,8 @@ impl<'a> PkgContextInfoInputBuilder<'a> {
     .with_policy(
       NativeLibCollectionPolicy::default()
         .with_native_lib_option(native_build_option.native_lib)
-        .with_self_package(self.self_package_info()),
+        .with_self_package(self.self_package_info())
+        .with_cmake_local_dependency_inventory(Arc::clone(&self.local_native_dependencies)),
     )
     .collect_context_names();
 
@@ -3888,6 +3910,7 @@ impl ModuleTargetSelection {
   }
 }
 
+#[derive(Clone)]
 struct ModuleBuildConfiguration {
   target_name: String,
   target: EffectiveTargetConfig,
@@ -4051,6 +4074,177 @@ impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
         module.module_type.clone(),
         native.native_lib,
       ));
+    }
+    Ok(dependencies)
+  }
+}
+
+/// Projects hvigor's cross-module native task edges into dependency-first
+/// coarse stage waves without adding HAR/HSP modules to the artifact build
+/// set. `ConfigureCmake` and `BuildNativeWithNinja` consume these modules as
+/// native prerequisites only.
+struct NativeDependencyStagePlanBuilder<'a> {
+  config: &'a ArkdownConfig,
+  session: &'a BuildSession,
+  args: &'a BuildArgs,
+}
+
+impl<'a> NativeDependencyStagePlanBuilder<'a> {
+  fn new(config: &'a ArkdownConfig, session: &'a BuildSession, args: &'a BuildArgs) -> Self {
+    Self {
+      config,
+      session,
+      args,
+    }
+  }
+
+  fn build(
+    &self,
+    roots: &[&ModuleConfig],
+    root_configs: &[ModuleBuildConfiguration],
+  ) -> Result<NativeDependencyStagePlan> {
+    let mut planned = Vec::new();
+    let mut visiting = FxHashSet::default();
+    let mut visited = FxHashMap::default();
+    for (root, resolved) in roots.iter().zip(root_configs) {
+      for dependency in self.direct_local_dependencies(root)? {
+        self.visit(
+          &dependency,
+          &resolved.target_name,
+          &mut visiting,
+          &mut visited,
+          &mut planned,
+        )?;
+      }
+    }
+    let mut waves = BTreeMap::<usize, Vec<NativeDependencyStageInput>>::new();
+    for (wave, input) in planned {
+      waves.entry(wave).or_default().push(input);
+    }
+    Ok(NativeDependencyStagePlan::new(
+      waves.into_values().collect(),
+    ))
+  }
+
+  fn visit(
+    &self,
+    module: &ModuleConfig,
+    super_target: &str,
+    visiting: &mut FxHashSet<(PathBuf, String)>,
+    visited: &mut FxHashMap<(PathBuf, String), Option<usize>>,
+    planned: &mut Vec<(usize, NativeDependencyStageInput)>,
+  ) -> Result<Option<usize>> {
+    let resolved = ModuleBuildConfiguration::resolve_dependency(
+      self.config,
+      self.session.build_options.as_ref(),
+      module,
+      Some(super_target),
+      self.args.module_hvigor_overrides.get(&module.name),
+      &self.args.hvigor_properties,
+    )?;
+    let key = (
+      canonicalize_or_owned(&module.src_path),
+      resolved.target_name.clone(),
+    );
+    if let Some(wave) = visited.get(&key) {
+      return Ok(*wave);
+    }
+    if !visiting.insert(key.clone()) {
+      anyhow::bail!(
+        "NATIVE_DEPENDENCY_CYCLE: local native module '{}' target '{}' participates in a dependency cycle",
+        module.name,
+        resolved.target_name
+      );
+    }
+    let mut dependency_wave = None;
+    for dependency in self.direct_local_dependencies(module)? {
+      let wave = self.visit(
+        &dependency,
+        &resolved.target_name,
+        visiting,
+        visited,
+        planned,
+      )?;
+      dependency_wave = dependency_wave.max(wave);
+    }
+    visiting.remove(&key);
+
+    let native = arkdown_config::build_profile::EffectiveNativeBuildOption::from_build_option(
+      &resolved.config.product.build_option,
+    );
+    let Some(external) = native.external_native_options.as_ref() else {
+      visited.insert(key, dependency_wave);
+      return Ok(dependency_wave);
+    };
+    let default_cmake = module
+      .src_path
+      .join("src")
+      .join("main")
+      .join("cpp")
+      .join("CMakeLists.txt");
+    if !external.path.as_ref().is_some_and(|path| path.is_file()) && !default_cmake.is_file() {
+      visited.insert(key, dependency_wave);
+      return Ok(dependency_wave);
+    }
+    let module_context = self.session.module_context(&module.name).ok_or_else(|| {
+      anyhow::anyhow!(
+        "missing build session module context for native dependency '{}'",
+        module.name
+      )
+    })?;
+    let local_dependencies = Arc::from(
+      NativeCmakeLocalDependencyInventoryBuilder::new(
+        self.config,
+        self.session,
+        self.args,
+        &resolved.target_name,
+        module_context.deps.as_ref(),
+      )
+      .build()?,
+    );
+    let wave = dependency_wave.map_or(0, |wave| wave + 1);
+    planned.push((
+      wave,
+      NativeDependencyStageInput {
+        module: module.clone(),
+        module_context,
+        target_name: resolved.target_name,
+        config: resolved.config,
+        local_dependencies,
+      },
+    ));
+    visited.insert(key, Some(wave));
+    Ok(Some(wave))
+  }
+
+  fn direct_local_dependencies(&self, module: &ModuleConfig) -> Result<Vec<ModuleConfig>> {
+    let context = self.session.module_context(&module.name).ok_or_else(|| {
+      anyhow::anyhow!(
+        "missing build session module context while planning native dependencies for '{}'",
+        module.name
+      )
+    })?;
+    let host_root = canonicalize_or_owned(&context.deps.host_root);
+    let mut dependencies = Vec::new();
+    let mut seen = FxHashSet::default();
+    for edge in &context.deps.edges {
+      if edge.kind == DependencyEdgeKind::DevDependency
+        || canonicalize_or_owned(&edge.issuer_root) != host_root
+      {
+        continue;
+      }
+      let dependency_root = canonicalize_or_owned(&edge.package_root);
+      let Some(dependency) = self
+        .config
+        .modules
+        .iter()
+        .find(|candidate| canonicalize_or_owned(&candidate.src_path) == dependency_root)
+      else {
+        continue;
+      };
+      if seen.insert(dependency.name.as_str()) {
+        dependencies.push(dependency.clone());
+      }
     }
     Ok(dependencies)
   }
@@ -4910,6 +5104,34 @@ impl BuildCoordinator {
         )
       })
       .collect::<Result<Vec<_>>>()?;
+    let mut local_package_source_roots = LocalPackageSourceRootInventory::default();
+    for (module, resolved) in build_modules.iter().zip(&build_module_configs) {
+      let module_layout = ModuleBuildLayout::for_output_target_product(
+        &resolved.config.output_target,
+        &module.src_path,
+        &resolved.config.product.name,
+        &resolved.target_name,
+      );
+      let generated_profile_root = module_layout
+        .build_profile_for_module(&module.module_type, &resolved.target_name)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+          anyhow::anyhow!(
+            "cannot derive generated profile root for module '{}' target '{}'",
+            module.name,
+            resolved.target_name
+          )
+        })?;
+      let source_roots = resolved
+        .target
+        .source_roots
+        .iter()
+        .map(|root| module.src_path.join(root))
+        .chain(std::iter::once(module.src_path.join("src").join("main")))
+        .chain(std::iter::once(generated_profile_root));
+      local_package_source_roots.insert(&module.src_path, source_roots);
+    }
     let mut har_dedup_config = config.as_ref().clone();
     har_dedup_config.product.build_option.deduplicate_har = build_module_configs
       .iter()
@@ -4994,6 +5216,19 @@ impl BuildCoordinator {
       .with_sdk_toolchain(native_sdk_toolchain.clone())
       .with_binxo_config(hwasan_config, binxo_config);
 
+    let native_dependency_plan = NativeDependencyStagePlanBuilder::new(config, session, args)
+      .build(&build_modules, &build_module_configs)?;
+    if !native_dependency_plan.is_empty() {
+      let _timer = BuildTimingProbe::global("native_dependency_waves");
+      NativeDependencyStageExecutor::new(
+        &mut task_lifecycle,
+        &sanitizer_native_policy,
+        args.hvigor_properties.release_cmake_build_type.as_deref(),
+      )
+      .execute(&native_dependency_plan)
+      .await?;
+    }
+
     // ── Step 2: Profile + Resource (per module) ───────────────────────
     progress.step(2, 6, "Processing profiles");
 
@@ -5006,6 +5241,10 @@ impl BuildCoordinator {
     let distro_filter_processor = arkdown_profile::DistroFilterProcessor::new();
 
     let mut loader_jsons = Vec::new();
+    let mut package_resolution_plans: BTreeMap<String, Arc<PackageResolutionPlan>> =
+      BTreeMap::new();
+    let mut local_native_dependencies: BTreeMap<String, Arc<[NativeCmakeLocalDependency]>> =
+      BTreeMap::new();
     let mut module_pack_info_plans = Vec::new();
     let mut all_bc_har_deps: Vec<Vec<ByteCodeHarScanEntry>> = Vec::new();
     let mut privacy_profile_paths: Vec<Option<PathBuf>> = Vec::new();
@@ -5105,6 +5344,11 @@ impl BuildCoordinator {
       let module_context = session.module_context(&module.name).ok_or_else(|| {
         anyhow::anyhow!("missing build session module context for {}", module.name)
       })?;
+      let package_resolution = Arc::new(
+        ModulePackageResolutionPlanner::new(&module_context, &local_package_source_roots)
+          .build()?,
+      );
+      package_resolution_plans.insert(module.name.clone(), package_resolution);
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
       let skip_profile_writes = args.skip_profile;
 
@@ -5430,21 +5674,24 @@ impl BuildCoordinator {
         .as_ref()
         .map(|package| NativeLibPackageInfo::local(package.name.clone(), package.version.clone()))
         .unwrap_or_else(|| NativeLibPackageInfo::local(module.name.clone(), String::new()));
-      let cmake_local_dependencies = NativeCmakeLocalDependencyInventoryBuilder::new(
-        config,
-        session,
-        args,
-        &module_target_name,
-        module_context.deps.as_ref(),
-      )
-      .build()?;
+      let cmake_local_dependencies = Arc::from(
+        NativeCmakeLocalDependencyInventoryBuilder::new(
+          config,
+          session,
+          args,
+          &module_target_name,
+          module_context.deps.as_ref(),
+        )
+        .build()?,
+      );
+      local_native_dependencies.insert(module.name.clone(), Arc::clone(&cmake_local_dependencies));
       let native_policy = sanitizer_native_policy
         .clone()
         .with_release_cmake_build_type(args.hvigor_properties.release_cmake_build_type.as_deref())
         .with_external_native_options(native_build_option.external_native_options.clone())
         .with_native_lib_option(native_build_option.native_lib.clone())
         .with_self_package(self_package)
-        .with_cmake_local_dependencies(cmake_local_dependencies);
+        .with_cmake_local_dependency_inventory(Arc::clone(&cmake_local_dependencies));
       let native_collector = NativeLibCollector::new(
         module,
         &native_build_option.abi_filters,
@@ -5867,6 +6114,7 @@ impl BuildCoordinator {
         let _timer = BuildTimingProbe::module(&module.name, "pkg_context_info_generate");
         let input =
           PkgContextInfoInputBuilder::new(module_config.as_ref(), session, module, &module_context)
+            .with_local_native_dependencies(Arc::clone(&cmake_local_dependencies))
             .excluding_package_roots(module_har_dedup_plan.duplicate_package_roots())
             .build()?;
         Some(
@@ -6554,16 +6802,14 @@ impl BuildCoordinator {
         let include_app_scope =
           ResourceDirSelector::new(module_config.as_ref(), module, &module_target)
             .include_app_scope();
-        let mut res_dirs: Vec<PathBuf> = vec![];
-        let app_scope_res = project_layout.app_scope_resources();
+        let mut res_dirs = ResourceInputRootCollector::default();
+        let app_scope_res = canonicalize_or_owned(&project_layout.app_scope_resources());
         if include_app_scope && app_scope_res.exists() {
-          res_dirs.push(app_scope_res.clone());
+          res_dirs.insert_resolved(app_scope_res.clone());
         }
         if let Some(res_opts) = module_build_option.res_options.as_ref() {
           for dir in &res_opts.resource_directories {
-            if dir.exists() && !res_dirs.contains(dir) {
-              res_dirs.push(dir.clone());
-            }
+            res_dirs.insert_existing(dir.clone());
           }
         }
         for resource_module in
@@ -6584,9 +6830,7 @@ impl BuildCoordinator {
           )
           .select()
           {
-            if module_res_dir.exists() && !res_dirs.contains(&module_res_dir) {
-              res_dirs.push(module_res_dir);
-            }
+            res_dirs.insert_existing(module_res_dir);
           }
         }
         for dependency_res_dir in
@@ -6600,64 +6844,52 @@ impl BuildCoordinator {
           {
             continue;
           }
-          if !res_dirs.contains(&dependency_res_dir) {
-            res_dirs.push(dependency_res_dir);
-          }
+          // `HarResourceDependencySelector` already returns canonical roots;
+          // preserve that startup resolution instead of repeating filesystem
+          // canonicalization for every dependency.
+          res_dirs.insert_resolved(dependency_res_dir);
         }
         // `AbstractResource.getRestoolConfigBuilder` registers the permission
         // reason `resource_str` intermediate after all HAR resource roots.
         let resource_str = module_layout.res_resource_str_dir();
-        if resource_str.is_dir() && !res_dirs.contains(&resource_str) {
-          res_dirs.push(resource_str);
-        }
+        res_dirs.insert_existing(resource_str);
         // The `ohosTest` target compiles the generated template resources
         // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
         // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
         if module_target_name == "ohosTest" {
           let template_resources = module_layout.ohos_test_resources_root();
-          if template_resources.is_dir() && !res_dirs.contains(&template_resources) {
-            res_dirs.push(template_resources);
-          }
+          res_dirs.insert_existing(template_resources);
         }
-        (app_scope_res, res_dirs)
+        (app_scope_res, res_dirs.into_paths())
       };
       if !skip_profile_writes {
         let _timer = BuildTimingProbe::module(&module.name, "resource_config_write_final");
-        let current_module_resource_dirs: Vec<PathBuf> =
-          ResourceDirSelector::new(module_config.as_ref(), module, &module_target)
-            .select()
-            .into_iter()
-            .filter(|dir| dir.exists())
-            .collect();
+        let mut current_module_resource_dirs = ResourceInputRootCollector::default();
+        for dir in ResourceDirSelector::new(module_config.as_ref(), module, &module_target).select()
+        {
+          current_module_resource_dirs.insert_existing(dir);
+        }
+        let current_module_resource_dirs = current_module_resource_dirs.into_paths();
         let dependency_resource_dirs: Vec<PathBuf> = res_dirs
           .iter()
           .filter(|dir| **dir != app_scope_res)
           .filter(|dir| !current_module_resource_dirs.contains(dir))
           .cloned()
           .collect();
-        if current_module_resource_dirs.is_empty() {
-          intermediate_writer.write_resource_config_files(
-            &project_root,
-            module,
-            module_config.as_ref(),
-            &res_out,
-          )?;
-        } else {
-          intermediate_writer.write_resource_config_files_with_dirs_and_names(
-            &project_root,
-            module,
-            module_config.as_ref(),
-            &res_out,
-            &current_module_resource_dirs,
-            &dependency_resource_dirs,
-            if module_target_name == "ohosTest" {
-              std::slice::from_ref(&module_json5.module.name)
-            } else {
-              &[]
-            },
-            &module_target_name,
-          )?;
-        }
+        intermediate_writer.write_resource_config_files_with_dirs_and_names(
+          &project_root,
+          module,
+          module_config.as_ref(),
+          &res_out,
+          &current_module_resource_dirs,
+          &dependency_resource_dirs,
+          if module_target_name == "ohosTest" {
+            std::slice::from_ref(&module_json5.module.name)
+          } else {
+            &[]
+          },
+          &module_target_name,
+        )?;
       }
       if process_resource_enabled {
         task_lifecycle
@@ -7180,6 +7412,12 @@ impl BuildCoordinator {
       let module_context = session.module_context(&module.name).ok_or_else(|| {
         anyhow::anyhow!("missing build session module context for {}", module.name)
       })?;
+      let package_resolution = package_resolution_plans.get(&module.name).ok_or_else(|| {
+        anyhow::anyhow!(
+          "missing package resolution plan for module '{}'",
+          module.name
+        )
+      })?;
       let module_layout = ModuleBuildLayout::for_output_target_product(
         &config.output_target,
         &module.src_path,
@@ -7215,6 +7453,7 @@ impl BuildCoordinator {
           session: session.as_ref(),
           module,
           module_context: &module_context,
+          package_resolution,
           module_build_option: &module_config.product.build_option,
           loader_json: None,
           target_name: module_target_name,
@@ -7259,6 +7498,12 @@ impl BuildCoordinator {
         let module_context = session.module_context(&module.name).ok_or_else(|| {
           anyhow::anyhow!("missing build session module context for {}", module.name)
         })?;
+        let package_resolution = package_resolution_plans.get(&module.name).ok_or_else(|| {
+          anyhow::anyhow!(
+            "missing package resolution plan for module '{}'",
+            module.name
+          )
+        })?;
         let module_layout = ModuleBuildLayout::for_output_target_product(
           &config.output_target,
           &module.src_path,
@@ -7295,6 +7540,7 @@ impl BuildCoordinator {
             session: session.as_ref(),
             module,
             module_context: &module_context,
+            package_resolution,
             module_build_option: &module_config.product.build_option,
             loader_json: Some(loader_json),
             target_name: module_target_name,
@@ -7582,6 +7828,12 @@ impl BuildCoordinator {
       })?;
       let pkg_context_builder =
         PkgContextInfoInputBuilder::new(module_config.as_ref(), session, module, &module_context)
+          .with_local_native_dependencies(
+            local_native_dependencies
+              .get(&module.name)
+              .cloned()
+              .unwrap_or_else(|| Arc::from([])),
+          )
           .excluding_package_roots(module_har_dedup_plan.duplicate_package_roots());
       let source_map_packages = pkg_context_builder.source_map_package_info()?;
       let runtime_pkg_contexts = PkgContextInfoGenerator::new()
@@ -7696,26 +7948,15 @@ impl BuildCoordinator {
         .values()
         .filter_map(|node| node.package_root.clone())
         .collect();
-      let mut pkg_name_to_pkg_info = FxHashMap::default();
-      for node in module_context.deps.nodes.values() {
-        let Some(pkg_root) = node.package_root.clone() else {
-          continue;
-        };
-        let info = PkgBriefInfo {
-          local_source: !arkdown_path::classify::is_inside_oh_modules(&pkg_root),
-          pkg_root,
-          pkg_name: node.package_name.clone(),
-          source_roots: vec![],
-        };
-        pkg_name_to_pkg_info
-          .entry(node.package_name.clone())
-          .or_insert_with(|| info.clone());
-        if node.alias != node.package_name {
-          pkg_name_to_pkg_info
-            .entry(node.alias.clone())
-            .or_insert_with(|| info.clone());
-        }
-      }
+      let package_resolution = package_resolution_plans
+        .get(&module.name)
+        .cloned()
+        .ok_or_else(|| {
+          anyhow::anyhow!(
+            "missing package resolution plan for module '{}'",
+            module.name
+          )
+        })?;
 
       // Compute source-set overlays for build-target overrides.
       let source_set_overlays: Vec<(PathBuf, PathBuf)> = {
@@ -7832,7 +8073,7 @@ impl BuildCoordinator {
         transform_sources,
         navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
         allowed_package_roots,
-        pkg_name_to_pkg_info,
+        package_resolution,
         source_set_overlays: source_set_overlays.clone(),
         checker_mode,
         tsc_target: module_build_option
@@ -7868,15 +8109,11 @@ impl BuildCoordinator {
           .collect(),
         // `meta.pkgName` for `isNotAutoLazyImport`: the owning module's
         // `oh-package.json5#name`.
-        module_pkg_name: std::fs::read_to_string(module.src_path.join("oh-package.json5"))
-          .ok()
-          .and_then(|content| json5::from_str::<serde_json::Value>(&content).ok())
-          .and_then(|raw| {
-            raw
-              .get("name")
-              .and_then(|name| name.as_str())
-              .map(str::to_string)
-          }),
+        module_pkg_name: module_context
+          .module
+          .package
+          .as_ref()
+          .map(|package| package.name.clone()),
       };
       let collect_factory_output = if module_har_dedup_plan.is_empty() {
         None
@@ -8514,6 +8751,12 @@ impl BuildCoordinator {
           .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
         let pkg_context_input =
           PkgContextInfoInputBuilder::new(module_config.as_ref(), session, module, &module_context)
+            .with_local_native_dependencies(
+              local_native_dependencies
+                .get(&module.name)
+                .cloned()
+                .unwrap_or_else(|| Arc::from([])),
+            )
             .excluding_package_roots(module_har_dedup_plan.duplicate_package_roots())
             .build()?;
         let pkg_context_info = PkgContextInfoGenerator::new()
@@ -8756,6 +8999,12 @@ impl BuildCoordinator {
             session,
             module,
             &module_context,
+          )
+          .with_local_native_dependencies(
+            local_native_dependencies
+              .get(&module.name)
+              .cloned()
+              .unwrap_or_else(|| Arc::from([])),
           )
           .excluding_package_roots(module_har_dedup_plan.duplicate_package_roots())
           .build()?;
@@ -9455,12 +9704,17 @@ impl BuildCoordinator {
           .as_ref()
           .map(|package| NativeLibPackageInfo::local(package.name.clone(), package.version.clone()))
           .unwrap_or_else(|| NativeLibPackageInfo::local(module.name.clone(), String::new()));
+        let cmake_local_dependencies = local_native_dependencies
+          .get(&module.name)
+          .cloned()
+          .unwrap_or_else(|| Arc::from([]));
         let native_policy = sanitizer_native_policy
           .clone()
           .with_release_cmake_build_type(args.hvigor_properties.release_cmake_build_type.as_deref())
           .with_external_native_options(native_build_option.external_native_options.clone())
           .with_native_lib_option(native_build_option.native_lib.clone())
-          .with_self_package(self_package);
+          .with_self_package(self_package)
+          .with_cmake_local_dependency_inventory(cmake_local_dependencies);
         let native_collector = NativeLibCollector::new(
           module,
           &native_build_option.abi_filters,
@@ -9854,6 +10108,12 @@ impl BuildCoordinator {
                   session,
                   module,
                   &module_context,
+                )
+                .with_local_native_dependencies(
+                  local_native_dependencies
+                    .get(&module.name)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::from([])),
                 )
                 .build()?;
                 let pkg_context_info = PkgContextInfoGenerator::new()
@@ -10796,6 +11056,40 @@ impl<'a> BuildPolicy<'a> {
 // ResourceDirSelector — same logic as in runner.rs
 // ---------------------------------------------------------------------------
 
+/// Ordered resource roots in the physical-path identity domain used by
+/// Hvigor's `BasePackageResolver.resolvePackagePath()`.
+///
+/// Hvigor resolves installed packages with `realpathSync.native()` before its
+/// dependency manager and `RestoolConfigBuilder` see their resource roots. An
+/// arkdown build can discover the same local HAR through a project module path
+/// containing `..` and through one or more `oh_modules` symlinks. Canonicalize
+/// at this merge boundary so those spellings cannot become duplicate restool
+/// inputs after artifact serialization.
+#[derive(Default)]
+struct ResourceInputRootCollector {
+  roots: Vec<PathBuf>,
+  seen: FxHashSet<PathBuf>,
+}
+
+impl ResourceInputRootCollector {
+  fn insert_existing(&mut self, root: PathBuf) {
+    if !root.is_dir() {
+      return;
+    }
+    self.insert_resolved(canonicalize_or_owned(&root));
+  }
+
+  fn insert_resolved(&mut self, root: PathBuf) {
+    if self.seen.insert(root.clone()) {
+      self.roots.push(root);
+    }
+  }
+
+  fn into_paths(self) -> Vec<PathBuf> {
+    self.roots
+  }
+}
+
 struct ResourceDirSelector<'a> {
   config: &'a ArkdownConfig,
   module: &'a ModuleConfig,
@@ -10873,6 +11167,55 @@ impl<'a> ResourceDirSelector<'a> {
         self.module.name
     );
     true
+  }
+}
+
+#[cfg(test)]
+mod resource_input_root_collector_tests {
+  use super::*;
+
+  #[test]
+  fn hvigor_realpath_identity_deduplicates_local_and_oh_modules_resource_roots() {
+    let temp = tempfile::tempdir().expect("create resource roots fixture");
+    let package_root = temp.path().join("store/@msi/jsi_interface");
+    let resources = package_root.join("src/main/resources");
+    let project_link = temp.path().join("oh_modules/@msi/jsi_interface");
+    let transitive_link = temp
+      .path()
+      .join("example/oh_modules/@msi/jsi/oh_modules/@msi/jsi_interface");
+    fs_err::create_dir_all(&resources).expect("create physical resources");
+    fs_err::create_dir_all(project_link.parent().expect("project link parent"))
+      .expect("create project link parent");
+    fs_err::create_dir_all(transitive_link.parent().expect("transitive link parent"))
+      .expect("create transitive link parent");
+    link_directory(&package_root, &project_link).expect("create project oh_modules link");
+    link_directory(&package_root, &transitive_link).expect("create transitive oh_modules link");
+
+    let mut roots = ResourceInputRootCollector::default();
+    roots.insert_existing(
+      package_root
+        .join("src/main")
+        .join("..")
+        .join("main/resources"),
+    );
+    roots.insert_resolved(canonicalize_or_owned(
+      &project_link.join("src/main/resources"),
+    ));
+    roots.insert_resolved(canonicalize_or_owned(
+      &transitive_link.join("src/main/resources"),
+    ));
+
+    assert_eq!(roots.into_paths(), vec![canonicalize_or_owned(&resources)]);
+  }
+
+  #[cfg(unix)]
+  fn link_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+  }
+
+  #[cfg(windows)]
+  fn link_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    junction::create(source, destination)
   }
 }
 

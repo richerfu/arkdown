@@ -7,3 +7,4 @@ pub(crate) mod ets_checker;
 #[cfg(test)]
 mod ets_checker_tests;
 pub mod native_build;
+pub(crate) mod package_resolution;

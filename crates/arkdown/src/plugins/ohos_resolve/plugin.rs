@@ -22,7 +22,8 @@ const HVIGOR_IGNORE_PREFIX: &str = "\0hvigor_ignore_";
 /// - `@bundle:` / `@shared:` — forwarded to the resolver and returned as external.
 /// - `@ohos/` / `@kit.` SDK declarations — resolved to declaration file paths
 ///   and externalized so rolldown does not try to bundle `.d.ts` files.
-/// - Bare package specifiers — resolved through `oh_modules/` / `pkg_name_to_pkg_info`.
+/// - Bare package specifiers — resolved through importer-local `oh_modules/`
+///   and the shared package-resolution plan.
 /// - Relative imports (`./`, `../`) — resolved through the filesystem resolver.
 /// - Absolute paths — passed through unchanged (`None` return lets rolldown handle them).
 ///
@@ -437,7 +438,7 @@ impl<'a> HvigorIgnoreModuleLoader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arkdown_resolver::PkgBriefInfo;
+    use arkdown_resolver::{PackageResolutionPlan, PkgBriefInfo};
     use rustc_hash::FxHashMap;
 
     fn make_plugin() -> OhosResolvePlugin {
@@ -449,7 +450,7 @@ mod tests {
                 sdk_arkts_dirs: vec![],
                 source_roots: vec![],
                 module_paths: vec![],
-                pkg_name_to_pkg_info: FxHashMap::default(),
+                package_resolution: Arc::new(PackageResolutionPlan::default()),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 source_set_overlays: vec![],
@@ -569,7 +570,7 @@ mod tests {
                 sdk_arkts_dirs: vec![],
                 source_roots: vec![],
                 module_paths: vec![project_root.join("oh_modules")],
-                pkg_name_to_pkg_info: FxHashMap::default(),
+                package_resolution: Arc::new(PackageResolutionPlan::default()),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 source_set_overlays: vec![],
@@ -594,8 +595,8 @@ mod tests {
         std::fs::write(pkg_dir.join("oh-package.json5"), r#"{ name: "decl-only" }"#).unwrap();
         let declaration = pkg_dir.join("index.d.ts");
         std::fs::write(&declaration, "export declare const value: string;").unwrap();
-        let mut pkg_name_to_pkg_info = FxHashMap::default();
-        pkg_name_to_pkg_info.insert(
+        let mut packages = FxHashMap::default();
+        packages.insert(
             "decl-only".to_string(),
             PkgBriefInfo {
                 pkg_root: pkg_dir.clone(),
@@ -612,7 +613,7 @@ mod tests {
                 sdk_arkts_dirs: vec![],
                 source_roots: vec![],
                 module_paths: vec![],
-                pkg_name_to_pkg_info,
+                package_resolution: Arc::new(packages.into()),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 source_set_overlays: vec![],
@@ -646,7 +647,7 @@ mod tests {
                 sdk_arkts_dirs: vec![],
                 source_roots: vec![],
                 module_paths: vec![],
-                pkg_name_to_pkg_info: FxHashMap::default(),
+                package_resolution: Arc::new(PackageResolutionPlan::default()),
                 use_normalized_ohm_url: false,
                 case_sensitive_check: false,
                 source_set_overlays: vec![],

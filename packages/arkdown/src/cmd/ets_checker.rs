@@ -28,6 +28,7 @@ use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{ArkdownConfig, BuildMode, BuildOption, ModuleConfig, OhosModuleType};
 use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
 use arkdown_profile::LoaderJson;
+use arkdown_resolver::PackageResolutionPlan;
 use arkdown_session::{BuildSession, ModuleCompileContext};
 
 static CHECKER_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -179,6 +180,7 @@ pub(crate) struct SdkEtsCheckerInput<'a> {
   pub(crate) session: &'a BuildSession,
   pub(crate) module: &'a ModuleConfig,
   pub(crate) module_context: &'a ModuleCompileContext,
+  pub(crate) package_resolution: &'a PackageResolutionPlan,
   pub(crate) module_build_option: &'a BuildOption,
   pub(crate) loader_json: Option<&'a LoaderJson>,
   pub(crate) target_name: &'a str,
@@ -1067,38 +1069,24 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
 
   fn package_brief_info(&self) -> Result<Value> {
     let mut output = Map::new();
-    let current = self
-      .input
-      .module_context
-      .module
-      .package
-      .as_ref()
-      .ok_or_else(|| {
-        anyhow::anyhow!("ARKDOWN_ETS_CHECKER_PACKAGE_METADATA: missing module package")
-      })?;
-    output.insert(
-      current.name.clone(),
-      json!({
-        "pkgRoot": self.path(&current.root)?,
-        "sourceRoots": ["src/main", self.relative_glob(&self.input.paths.ace_module_root, &self.input.paths.generated_profile_path)?.trim_end_matches("/*")],
-        "pkgName": current.name,
-      }),
-    );
-    for node in self.input.module_context.deps.nodes.values() {
-      let Some(root) = node.package_root.as_ref() else {
-        continue;
-      };
-      let package = json!({
-        "pkgRoot": self.path(root)?,
-        "sourceRoots": ["src/main"],
-        "pkgName": node.package_name,
-      });
-      output
-        .entry(node.package_name.clone())
-        .or_insert_with(|| package.clone());
-      if node.alias != node.package_name {
-        output.entry(node.alias.clone()).or_insert(package);
-      }
+    for (specifier, package) in self.input.package_resolution.sorted_entries() {
+      let source_roots = package
+        .source_roots
+        .iter()
+        .map(|source_root| {
+          self
+            .relative_path(&package.pkg_root, source_root)
+            .map(|path| ArtifactPathSerializer::rel_to_slash(&path))
+        })
+        .collect::<Result<Vec<_>>>()?;
+      output.insert(
+        specifier.to_string(),
+        json!({
+          "pkgRoot": self.path(&package.pkg_root)?,
+          "sourceRoots": source_roots,
+          "pkgName": package.pkg_name,
+        }),
+      );
     }
     Ok(Value::Object(output))
   }
@@ -1177,38 +1165,20 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
 
   fn other_paths(&self, project_path: &Path) -> Result<Value> {
     let mut output = Map::new();
-    let current_package = self
-      .input
-      .module_context
-      .module
-      .package
-      .as_ref()
-      .ok_or_else(|| {
-        anyhow::anyhow!("ARKDOWN_ETS_CHECKER_PACKAGE_METADATA: missing module package")
-      })?;
-    output.insert(
-      format!("{}/*", current_package.name),
-      Value::Array(vec![
-        Value::String(
-          self.relative_glob(project_path, &self.input.module_context.module.src_main)?,
-        ),
-        Value::String(self.relative_glob(project_path, &self.input.paths.generated_profile_path)?),
-      ]),
-    );
-    for node in self.input.module_context.deps.nodes.values() {
-      let Some(root) = node.package_root.as_ref() else {
+    for (specifier, package) in self.input.package_resolution.sorted_entries() {
+      if package.source_roots.is_empty() {
         continue;
-      };
-      let source_root = root.join("src").join("main");
-      let values = Value::Array(vec![Value::String(
-        self.relative_glob(project_path, &source_root)?,
-      )]);
-      output
-        .entry(format!("{}/*", node.package_name))
-        .or_insert_with(|| values.clone());
-      if node.alias != node.package_name {
-        output.entry(format!("{}/*", node.alias)).or_insert(values);
       }
+      let values = package
+        .source_roots
+        .iter()
+        .map(|source_root| {
+          self
+            .relative_glob(project_path, source_root)
+            .map(Value::String)
+        })
+        .collect::<Result<Vec<_>>>()?;
+      output.insert(format!("{specifier}/*"), Value::Array(values));
     }
     Ok(Value::Object(output))
   }
