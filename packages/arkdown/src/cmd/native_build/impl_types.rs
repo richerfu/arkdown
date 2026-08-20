@@ -133,6 +133,72 @@ impl NativeBuildSanitizers {
   pub(crate) fn hwasan(self) -> bool {
     self.hwasan
   }
+
+  pub(super) fn from_cmake_arguments(arguments: &[OsString]) -> Self {
+    Self {
+      asan: Self::cmake_value(arguments, "OHOS_ENABLE_ASAN") == Some("ON"),
+      tsan: Self::cmake_value(arguments, "OHOS_ENABLE_TSAN") == Some("ON"),
+      hwasan: Self::cmake_value(arguments, "OHOS_ENABLE_HWASAN") == Some("ON"),
+      ubsan: Self::cmake_value(arguments, "OHOS_ENABLE_UBSAN").is_some_and(Self::cmake_truthy),
+    }
+  }
+
+  pub(super) fn cmake_value<'a>(arguments: &'a [OsString], key: &str) -> Option<&'a str> {
+    arguments.iter().find_map(|argument| {
+      argument
+        .to_str()?
+        .strip_prefix("-D")?
+        .split_once('=')
+        .filter(|(candidate, _)| *candidate == key)
+        .map(|(_, value)| value)
+    })
+  }
+
+  fn cmake_truthy(value: &str) -> bool {
+    matches!(
+      value.to_ascii_uppercase().as_str(),
+      "1" | "ON" | "YES" | "TRUE" | "Y"
+    )
+  }
+}
+
+pub(super) struct NativeOhosAbi<'a> {
+  name: &'a str,
+}
+
+impl<'a> NativeOhosAbi<'a> {
+  pub(super) fn new(name: &'a str) -> Self {
+    Self { name }
+  }
+
+  pub(super) fn target_triple(&self) -> NativeBuildResult<&'static str> {
+    match self.name {
+      "arm64-v8a" => Ok("aarch64-linux-ohos"),
+      "armeabi-v7a" => Ok("arm-linux-ohos"),
+      "x86_64" => Ok("x86_64-linux-ohos"),
+      _ => Err(NativeBuildError::UnknownCpuAbi {
+        abi: self.name.to_string(),
+      }),
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum NativeOhosStl {
+  Shared,
+  None,
+}
+
+impl NativeOhosStl {
+  pub(super) fn from_cmake_arguments(arguments: &[OsString]) -> Result<Self, String> {
+    match NativeBuildSanitizers::cmake_value(arguments, "OHOS_STL").unwrap_or("c++_shared") {
+      "c++_shared" => Ok(Self::Shared),
+      "none" => Ok(Self::None),
+      value => Err(format!(
+        "unsupported OHOS_STL value for Zig toolchain: {value}"
+      )),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -343,6 +409,29 @@ pub struct NativeSdkToolchain {
   pub(crate) binxo: Option<PathBuf>,
   pub(crate) native_dir: Option<PathBuf>,
   pub(crate) toolchain_file: Option<PathBuf>,
+  pub(super) compiler: NativeCompilerDriver,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) enum NativeCompilerDriver {
+  #[default]
+  SdkClang,
+  Zig {
+    executable: PathBuf,
+  },
+}
+
+impl NativeCompilerDriver {
+  pub(super) fn zig_executable(&self) -> Option<&Path> {
+    match self {
+      Self::SdkClang => None,
+      Self::Zig { executable } => Some(executable),
+    }
+  }
+
+  pub(super) fn requires_cache_reset_without_state(&self) -> bool {
+    matches!(self, Self::Zig { .. })
+  }
 }
 
 impl NativeSdkToolchain {
@@ -365,7 +454,18 @@ impl NativeSdkToolchain {
       binxo,
       native_dir: Some(native_dir),
       toolchain_file: Some(toolchain_file),
+      compiler: NativeCompilerDriver::default(),
     }
+  }
+
+  pub(crate) fn with_zig_enabled(mut self, enabled: bool) -> NativeBuildResult<Self> {
+    if !enabled {
+      return Ok(self);
+    }
+    self.compiler = NativeCompilerDriver::Zig {
+      executable: super::zig::NativeZigExecutableResolver::resolve()?,
+    };
+    Ok(self)
   }
 
   /// Construct the subset of the SDK toolchain needed by hvigor `clean`.
@@ -422,6 +522,7 @@ impl NativeSdkToolchain {
       ninja,
       native_dir,
       toolchain_file,
+      compiler: &self.compiler,
     })
   }
 
@@ -439,6 +540,7 @@ pub(crate) struct ResolvedNativeSdkToolchain<'a> {
   pub(crate) ninja: &'a Path,
   pub(crate) native_dir: &'a Path,
   pub(crate) toolchain_file: &'a Path,
+  pub(super) compiler: &'a NativeCompilerDriver,
 }
 
 /// One Rust-owned native command with an optional argument tail that Hvigor
@@ -585,6 +687,12 @@ pub(crate) type NativeBuildResult<T> = Result<T, NativeBuildError>;
 
 #[derive(Debug)]
 pub enum NativeBuildError {
+  ZigCompilerNotFound,
+  ZigSanitizerRuntimeUnavailable {
+    path: PathBuf,
+    abi: String,
+    message: String,
+  },
   CmakeFailed {
     module_root: PathBuf,
     message: String,
@@ -640,6 +748,15 @@ pub enum NativeBuildError {
 impl fmt::Display for NativeBuildError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
+      Self::ZigCompilerNotFound => write!(
+        f,
+        "ARKDOWN_ZIG_COMPILER_NOT_FOUND: --enable-zig requires the Zig executable on PATH"
+      ),
+      Self::ZigSanitizerRuntimeUnavailable { path, abi, message } => write!(
+        f,
+        "ARKDOWN_ZIG_SANITIZER_RUNTIME_UNAVAILABLE: cannot configure OHOS sanitizer runtime for ABI '{abi}' at '{}': {message}",
+        path.display()
+      ),
       Self::CmakeFailed {
         module_root,
         message,
@@ -1879,14 +1996,7 @@ impl<'a> NativeCmakeDependencyConfigurator<'a> {
   }
 
   pub(crate) fn cpu_type(abi: &str) -> NativeBuildResult<&'static str> {
-    match abi {
-      "arm64-v8a" => Ok("aarch64-linux-ohos"),
-      "armeabi-v7a" => Ok("arm-linux-ohos"),
-      "x86_64" => Ok("x86_64-linux-ohos"),
-      _ => Err(NativeBuildError::UnknownCpuAbi {
-        abi: abi.to_string(),
-      }),
-    }
+    NativeOhosAbi::new(abi).target_triple()
   }
 
   pub(crate) fn write_if_changed(path: &Path, content: &[u8]) -> NativeBuildResult<()> {

@@ -69,6 +69,7 @@ const HVIGOR_LIBS_DIR: &str = "libs";
 
 mod impl_collector;
 mod impl_types;
+mod zig;
 
 pub(crate) use impl_collector::{
   NativeBinxoCache, NativeBinxoCacheSnapshot, NativeBinxoSymbol, NativeBinxoSymbolSnapshot,
@@ -87,6 +88,9 @@ pub(crate) use impl_types::{
   NativeSdkToolchain, ProjectDebugSymbolCollector, ProjectDebugSymbolOutput,
   ResolvedNativeSdkToolchain, SanitizerLibraryEvidence,
 };
+
+#[cfg(test)]
+use impl_types::NativeCompilerDriver;
 
 #[cfg(test)]
 mod tests {
@@ -139,6 +143,7 @@ mod tests {
       ninja: &ninja,
       native_dir: &native_dir,
       toolchain_file: &toolchain_file,
+      compiler: &NativeCompilerDriver::SdkClang,
     };
     let config = NativeBuildConfig {
       module_root,
@@ -163,6 +168,7 @@ mod tests {
 
     let command = config.cmake_configure_command(
       &toolchain,
+      &toolchain_file,
       "arm64-v8a",
       &config.module_root.join("src/main/cpp"),
       &build_dir,
@@ -201,6 +207,189 @@ mod tests {
   }
 
   #[test]
+  fn enable_zig_wraps_the_ohos_toolchain_and_overrides_profile_compilers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let build_dir = module_root.join(".cxx/default/default/debug/arm64-v8a");
+    let output_dir = module_root.join("build/default/intermediates/cmake/default/obj/arm64-v8a");
+    let find_root = module_root.join(".cxx/default/default/debug/hvigor/arm64-v8a");
+    fs::create_dir_all(&build_dir).unwrap();
+
+    let cmake = tmp.path().join("sdk/native/build-tools/cmake/bin/cmake");
+    let ninja = tmp.path().join("sdk/native/build-tools/cmake/bin/ninja");
+    let native_dir = tmp.path().join("sdk/native");
+    let sdk_toolchain_file = native_dir.join("build/cmake/ohos.toolchain.cmake");
+    let sanitizer_runtime = native_dir.join("llvm/lib/clang/15.0.4/lib/aarch64-linux-ohos");
+    let cxx_runtime = native_dir.join("llvm/lib/aarch64-linux-ohos");
+    fs::create_dir_all(native_dir.join("llvm/include/libcxx-ohos/include/c++/v1")).unwrap();
+    fs::create_dir_all(native_dir.join("llvm/lib/clang/15.0.4/include")).unwrap();
+    fs::create_dir_all(&cxx_runtime).unwrap();
+    fs::create_dir_all(&sanitizer_runtime).unwrap();
+    fs::create_dir_all(
+      native_dir
+        .join("sysroot/usr/include")
+        .join("aarch64-linux-ohos"),
+    )
+    .unwrap();
+    fs::create_dir_all(
+      native_dir
+        .join("sysroot/usr/lib")
+        .join("aarch64-linux-ohos"),
+    )
+    .unwrap();
+    for file_name in [
+      "libclang_rt.asan.so",
+      "libclang_rt.asan_static.a",
+      "libclang_rt.asan-preinit.a",
+    ] {
+      fs::write(sanitizer_runtime.join(file_name), "runtime").unwrap();
+    }
+    fs::write(cxx_runtime.join("libc++_shared.so"), "runtime").unwrap();
+    let zig = tmp.path().join("zig toolchain/bin/zig");
+    let compiler = NativeCompilerDriver::Zig {
+      executable: zig.clone(),
+    };
+    let toolchain = ResolvedNativeSdkToolchain {
+      cmake: &cmake,
+      ninja: &ninja,
+      native_dir: &native_dir,
+      toolchain_file: &sdk_toolchain_file,
+      compiler: &compiler,
+    };
+    let config = NativeBuildConfig {
+      module_root,
+      product_name: "default".to_string(),
+      target_name: "default".to_string(),
+      abi_filters: vec!["arm64-v8a".to_string()],
+      enable_cmake_build: true,
+      external_native_options: Some(ExternalNativeOptions {
+        arguments: vec![
+          "-DCMAKE_TOOLCHAIN_FILE=/ignored/project.toolchain.cmake".to_string(),
+          "-DOHOS_ENABLE_ASAN=ON".to_string(),
+        ],
+        ..Default::default()
+      }),
+      sanitizers: NativeBuildSanitizers::default(),
+      build_mode: "debug".to_string(),
+      sdk_toolchain: NativeSdkToolchain::default(),
+      collect_all_libs: false,
+      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
+    };
+
+    let generated_toolchain = config
+      .cmake_toolchain_file(&toolchain, &build_dir, "arm64-v8a")
+      .expect("Zig toolchain wrapper should be generated");
+    let generated = fs::read_to_string(&generated_toolchain).unwrap();
+    let serialized_sdk_toolchain =
+      ArtifactPathSerializer::path_to_slash_string(&sdk_toolchain_file).unwrap();
+    let serialized_zig = ArtifactPathSerializer::path_to_slash_string(&zig).unwrap();
+    let wrapper_suffix =
+      if arkdown_path::HostPlatform::CURRENT == arkdown_path::HostPlatform::Windows {
+        ".cmd"
+      } else {
+        ""
+      };
+    let c_wrapper = build_dir.join(format!("arkdown-zig-cc{wrapper_suffix}"));
+    let cxx_wrapper = build_dir.join(format!("arkdown-zig-cxx{wrapper_suffix}"));
+    let serialized_c_wrapper = ArtifactPathSerializer::path_to_slash_string(&c_wrapper).unwrap();
+    assert!(generated.contains(&format!("include([[{serialized_sdk_toolchain}]])")));
+    assert!(generated.contains(&format!("set(CMAKE_C_COMPILER [[{serialized_c_wrapper}]])")));
+    assert!(!generated.contains("CMAKE_C_COMPILER_ARG1"));
+    assert!(!generated.contains("CMAKE_CXX_COMPILER_ARG1"));
+    assert!(generated.contains("unset(CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN)"));
+    assert!(generated.contains("unset(CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN)"));
+    assert!(
+      generated.contains("set_property(TARGET \"${_arkdown_target}\" PROPERTY C_CLANG_TIDY \"\")")
+    );
+    assert!(generated
+      .contains("set_property(TARGET \"${_arkdown_target}\" PROPERTY CXX_CLANG_TIDY \"\")"));
+    assert!(generated.contains(
+      "cmake_language(DEFER CALL _arkdown_disable_zig_incompatible_clang_tidy \"${CMAKE_SOURCE_DIR}\")"
+    ));
+    let c_wrapper_content = fs::read_to_string(c_wrapper).unwrap();
+    let cxx_wrapper_content = fs::read_to_string(cxx_wrapper).unwrap();
+    assert!(c_wrapper_content.contains(&serialized_zig));
+    assert!(c_wrapper_content.contains("cc"));
+    assert!(c_wrapper_content.contains("sysroot/usr/include"));
+    assert!(cxx_wrapper_content.contains(&serialized_zig));
+    assert!(cxx_wrapper_content.contains("c++"));
+    assert!(cxx_wrapper_content.contains("-nostdinc++"));
+    assert!(cxx_wrapper_content.contains("libcxx-ohos/include/c++/v1"));
+    assert!(cxx_wrapper_content.contains("lib/clang/15.0.4/include"));
+    assert!(cxx_wrapper_content.contains("sysroot/usr/include"));
+    assert!(generated.contains("SHELL:-L/usr/lib/aarch64-linux-ohos"));
+    assert!(generated.contains("-nostdlib++"));
+    assert!(generated.contains("libc++_shared.so"));
+    assert!(generated.contains("-Wl,--warn-shared-textrel"));
+    assert!(generated.contains("-Wl,--fatal-warnings"));
+    assert!(generated.contains("add_link_options("));
+    assert!(generated.contains("libclang_rt.asan.so"));
+    assert!(generated.contains("libclang_rt.asan_static.a"));
+    assert!(generated.contains("libclang_rt.asan-preinit.a"));
+
+    let command = config.cmake_configure_command(
+      &toolchain,
+      &generated_toolchain,
+      "arm64-v8a",
+      &config.module_root.join("src/main/cpp"),
+      &build_dir,
+      &output_dir,
+      &find_root,
+    );
+    let toolchain_arguments = command
+      .get_args()
+      .filter_map(OsStr::to_str)
+      .filter(|argument| argument.starts_with("-DCMAKE_TOOLCHAIN_FILE="))
+      .collect::<Vec<_>>();
+    assert_eq!(toolchain_arguments.len(), 1);
+    assert_eq!(
+      toolchain_arguments[0],
+      format!("-DCMAKE_TOOLCHAIN_FILE={}", generated_toolchain.display())
+    );
+  }
+
+  #[test]
+  fn compiler_switch_resets_only_cmake_owned_cache_metadata() {
+    let tmp = tempfile::tempdir().unwrap();
+    let build_dir = tmp.path().join(".cxx/default/default/debug/arm64-v8a");
+    let cache_file = build_dir.join("CMakeCache.txt");
+    let compiler_metadata = build_dir.join("CMakeFiles");
+    let reply_dir = build_dir.join(".cmake/api/v1/reply");
+    let object_file = build_dir.join("CMakeFiles/native.dir/native.cpp.o");
+    fs::create_dir_all(object_file.parent().unwrap()).unwrap();
+    fs::create_dir_all(&reply_dir).unwrap();
+    fs::write(&cache_file, "cached compiler").unwrap();
+    fs::write(&object_file, "object").unwrap();
+    fs::write(reply_dir.join("index.json"), "{}").unwrap();
+
+    let sdk = NativeCompilerDriver::SdkClang;
+    let sdk_toolchain_file = tmp
+      .path()
+      .join("sdk/native/build/cmake/ohos.toolchain.cmake");
+    let sdk_state = zig::NativeCmakeCompilerState::new(&build_dir, &sdk, &sdk_toolchain_file);
+    sdk_state.prepare().unwrap();
+    assert!(cache_file.is_file());
+    sdk_state.commit().unwrap();
+
+    let zig = NativeCompilerDriver::Zig {
+      executable: tmp.path().join("bin/zig"),
+    };
+    let zig_state = zig::NativeCmakeCompilerState::new(&build_dir, &zig, &sdk_toolchain_file);
+    zig_state.prepare().unwrap();
+    assert!(!cache_file.exists());
+    assert!(!compiler_metadata.exists());
+    assert!(!reply_dir.exists());
+    assert!(!object_file.exists());
+    zig_state.commit().unwrap();
+
+    fs::create_dir_all(&compiler_metadata).unwrap();
+    fs::write(&cache_file, "zig compiler").unwrap();
+    sdk_state.prepare().unwrap();
+    assert!(!cache_file.exists());
+    assert!(!compiler_metadata.exists());
+  }
+
+  #[test]
   fn hvigor_ninja_command_uses_sdk_executable_without_implicit_parallel_flag() {
     let tmp = tempfile::tempdir().unwrap();
     let module_root = tmp.path().join("entry");
@@ -213,6 +402,7 @@ mod tests {
       ninja: &ninja,
       native_dir: &native_dir,
       toolchain_file: &toolchain_file,
+      compiler: &NativeCompilerDriver::SdkClang,
     };
     let config = NativeBuildConfig {
       module_root: module_root.clone(),
@@ -264,6 +454,7 @@ mod tests {
       ninja: &ninja,
       native_dir: &native_dir,
       toolchain_file: &toolchain_file,
+      compiler: &NativeCompilerDriver::SdkClang,
     };
     let config = NativeBuildConfig {
       module_root: module_root.clone(),

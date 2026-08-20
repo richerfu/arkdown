@@ -19,6 +19,7 @@ test('package CLI parses repeated hvigor plugin path flags', () => {
     './hvigor-plugin.js',
     '--build-version',
     '2026.07.23',
+    '--enable-zig',
   ])
 
   assert.deepEqual(config, {
@@ -26,6 +27,7 @@ test('package CLI parses repeated hvigor plugin path flags', () => {
     compilePluginPath: ['./compile-a.js', './compile-b.js'],
     hvigorPluginFile: './hvigor-plugin.js',
     buildVersion: '2026.07.23',
+    enableZig: true,
   })
 })
 

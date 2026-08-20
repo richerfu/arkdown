@@ -220,6 +220,13 @@ pub struct BuildArgs {
   /// `DoNativeBinxo` and fails with the same validation boundary as hvigor.
   #[arg(long = "ohos-enable-binxo", default_value = "false")]
   pub ohos_enable_binxo: bool,
+  /// Compile native C/C++ sources through `zig cc` and `zig c++` while
+  /// retaining the selected OHOS SDK sysroot, ABI, CMake, and Ninja setup.
+  ///
+  /// Zig must be available on `PATH`. Disabled by default so the native
+  /// command remains identical to hvigor unless explicitly requested.
+  #[arg(long = "enable-zig", default_value = "false")]
+  pub enable_zig: bool,
   /// Preview mode: watch resource directories and trigger resource recompilation (M3).
   /// Implies --watch; focuses change detection on src/main/resources/ for faster
   /// resource-only rebuilds during DevEco IDE preview sessions.

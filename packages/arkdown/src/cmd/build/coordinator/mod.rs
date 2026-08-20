@@ -330,6 +330,53 @@ struct SdkSemanticCheckStage {
   plans: Vec<SdkEtsCheckerPlan>,
 }
 
+#[derive(Debug)]
+struct SdkSemanticCheckFailure {
+  diagnostics: Vec<SdkSemanticCheckError>,
+}
+
+impl SdkSemanticCheckFailure {
+  fn new(diagnostics: Vec<SdkSemanticCheckError>) -> Self {
+    Self { diagnostics }
+  }
+}
+
+impl std::fmt::Display for SdkSemanticCheckFailure {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      formatter,
+      "ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported {} error(s)",
+      self.diagnostics.len()
+    )?;
+    for diagnostic in &self.diagnostics {
+      write!(
+        formatter,
+        "\n[{}] {}",
+        diagnostic.module_name,
+        diagnostic.message.trim()
+      )?;
+    }
+    Ok(())
+  }
+}
+
+impl std::error::Error for SdkSemanticCheckFailure {}
+
+#[derive(Debug)]
+struct SdkSemanticCheckError {
+  module_name: String,
+  message: String,
+}
+
+impl SdkSemanticCheckError {
+  fn new(module_name: String, message: String) -> Self {
+    Self {
+      module_name,
+      message,
+    }
+  }
+}
+
 impl SdkSemanticCheckStage {
   fn new(plans: Vec<SdkEtsCheckerPlan>) -> Self {
     Self { plans }
@@ -337,10 +384,10 @@ impl SdkSemanticCheckStage {
 
   fn run(self) -> Result<()> {
     let outputs = SdkEtsCheckerBatch::new(self.plans).run()?;
-    let mut errors = 0usize;
+    let mut errors = Vec::new();
     for output in outputs {
-      errors += output.error_count();
       for diagnostic in output.diagnostics {
+        let is_error = diagnostic.level.eq_ignore_ascii_case("error");
         match diagnostic.level.to_ascii_lowercase().as_str() {
           "error" => tracing::error!(
             module = %output.module_name,
@@ -359,12 +406,41 @@ impl SdkSemanticCheckStage {
             diagnostic.message
           ),
         }
+        if is_error {
+          errors.push(SdkSemanticCheckError::new(
+            output.module_name.clone(),
+            diagnostic.message,
+          ));
+        }
       }
     }
-    if errors > 0 {
-      anyhow::bail!("ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported {errors} error(s)");
+    if !errors.is_empty() {
+      return Err(SdkSemanticCheckFailure::new(errors).into());
     }
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod sdk_semantic_check_failure_tests {
+  use super::{SdkSemanticCheckError, SdkSemanticCheckFailure};
+
+  #[test]
+  fn failure_keeps_sdk_file_location_and_message_visible() {
+    let failure = SdkSemanticCheckFailure::new(vec![SdkSemanticCheckError::new(
+      "entry".to_string(),
+      "ArkTS:ERROR File: /project/entry/Index.ets:12:7\n Cannot find module '@scope/pkg'.\n"
+        .to_string(),
+    )]);
+
+    assert_eq!(
+      failure.to_string(),
+      concat!(
+        "ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported 1 error(s)\n",
+        "[entry] ArkTS:ERROR File: /project/entry/Index.ets:12:7\n",
+        " Cannot find module '@scope/pkg'."
+      )
+    );
   }
 }
 

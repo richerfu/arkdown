@@ -204,6 +204,7 @@ impl SelfConsistencyOracle {
         ohos_enable_tsan: false,
         ohos_enable_ubsan: false,
         ohos_enable_binxo: false,
+        enable_zig: false,
         preview: false,
         disable_abc_cache,
         cache_file: None,

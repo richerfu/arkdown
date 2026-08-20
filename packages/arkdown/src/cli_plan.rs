@@ -182,6 +182,8 @@ pub struct ArkdownBuildCliConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub ohos_enable_binxo: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub enable_zig: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub disable_abc_cache: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub cache_file: Option<String>,
@@ -719,6 +721,7 @@ impl<'a> ArkdownBuildArgsParser<'a> {
         "--ohos-enable-tsan" => self.config.ohos_enable_tsan = Some(true),
         "--ohos-enable-ubsan" => self.config.ohos_enable_ubsan = Some(true),
         "--ohos-enable-binxo" => self.config.ohos_enable_binxo = Some(true),
+        "--enable-zig" => self.config.enable_zig = Some(true),
         "--disable-abc-cache" => self.config.disable_abc_cache = Some(true),
         "--cache-file" => self.config.cache_file = Some(self.required_value(&mut index, arg)?),
         "--checker" => self.config.checker = Some(self.required_value(&mut index, arg)?),

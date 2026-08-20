@@ -57,6 +57,7 @@ pub(super) struct WatchStageInput {
   pub(super) ohos_enable_tsan: bool,
   pub(super) ohos_enable_ubsan: bool,
   pub(super) ohos_enable_binxo: bool,
+  pub(super) enable_zig: bool,
   pub(super) disable_abc_cache: bool,
   pub(super) cache_file: Option<PathBuf>,
   pub(super) checker: Option<String>,
@@ -119,6 +120,7 @@ impl WatchStageInput {
       ohos_enable_tsan: args.ohos_enable_tsan,
       ohos_enable_ubsan: args.ohos_enable_ubsan,
       ohos_enable_binxo: args.ohos_enable_binxo,
+      enable_zig: args.enable_zig,
       disable_abc_cache,
       cache_file,
       checker: args.checker.clone(),
@@ -175,6 +177,7 @@ impl WatchStage {
     let ohos_enable_tsan = input.ohos_enable_tsan;
     let ohos_enable_ubsan = input.ohos_enable_ubsan;
     let ohos_enable_binxo = input.ohos_enable_binxo;
+    let enable_zig = input.enable_zig;
     let disable_abc_cache = input.disable_abc_cache;
     let cache_file = input.cache_file;
     let checker = input.checker;
@@ -343,6 +346,7 @@ impl WatchStage {
           ohos_enable_tsan,
           ohos_enable_ubsan,
           ohos_enable_binxo,
+          enable_zig,
           preview: false,
           disable_abc_cache,
           cache_file: cache_file.clone(),
