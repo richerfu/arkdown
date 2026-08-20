@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "arkdown-napi"
-version = "0.0.1-beta.8"
+version = "0.0.1-beta.10"
 dependencies = [
  "anyhow",
  "arkdown",
