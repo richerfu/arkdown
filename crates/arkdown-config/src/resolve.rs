@@ -5,7 +5,9 @@ use arkdown_core::{
     ProductConfig, SigningConfig,
 };
 
-use crate::build_profile::{parse_api_version, BuildOptionDecoder, RawAppJson5, RawBuildProfile};
+use crate::build_profile::{
+    parse_api_version, BuildOptionDecoder, RawAppJson5, RawBuildProfile, RawSigningMaterial,
+};
 use crate::error::ConfigError;
 use crate::module_json::RawModuleJson;
 use crate::sdk::{discover_sdk_with_selection, SdkSelection};
@@ -21,6 +23,43 @@ pub struct ArkdownConfigLoader<'a> {
     product_name: Option<&'a str>,
     module_name: Option<&'a str>,
     runtime_overrides: Option<&'a RuntimeContextOverrides>,
+}
+
+/// Resolves signing material at the same project boundary as Hvigor.
+///
+/// `SignUtil.getSigningConfigInputFiles` passes every configured material path
+/// through `FileUtil.convertToAbsolutePath(path, projectDir)`. Keeping that
+/// conversion in the config owner makes signing independent of the caller's
+/// current working directory.
+struct SigningConfigDecoder<'a> {
+    project_root: &'a Path,
+}
+
+impl<'a> SigningConfigDecoder<'a> {
+    fn new(project_root: &'a Path) -> Self {
+        Self { project_root }
+    }
+
+    fn decode(&self, material: &RawSigningMaterial) -> SigningConfig {
+        SigningConfig {
+            cert_path: self.path(&material.cert_path),
+            key_alias: material.key_alias.clone(),
+            key_password: material.key_password.clone(),
+            profile_path: self.path(&material.profile),
+            sign_alg: material.sign_alg.clone(),
+            store_file: self.path(&material.store_file),
+            store_password: material.store_password.clone(),
+        }
+    }
+
+    fn path(&self, configured: &str) -> PathBuf {
+        let path = PathBuf::from(configured);
+        if path.has_root() {
+            arkdown_path::lexical_normalize(&path)
+        } else {
+            arkdown_path::lexical_normalize(&self.project_root.join(path))
+        }
+    }
 }
 
 impl<'a> ArkdownConfigLoader<'a> {
@@ -132,6 +171,7 @@ impl<'a> ArkdownConfigLoader<'a> {
 
         // Resolve signing config: new format references by name under app.signingConfigs;
         // fall back to old per-product embedded signingConfigs for backward compat.
+        let signing_config_decoder = SigningConfigDecoder::new(root);
         let signing_config = raw_product
             .signing_config
             .as_deref()
@@ -140,15 +180,7 @@ impl<'a> ArkdownConfigLoader<'a> {
                     .iter()
                     .find(|sc| sc.name == name)
                     .and_then(|sc| sc.material.as_ref())
-                    .map(|m| SigningConfig {
-                        cert_path: m.cert_path.clone().into(),
-                        key_alias: m.key_alias.clone(),
-                        key_password: m.key_password.clone(),
-                        profile_path: m.profile.clone().into(),
-                        sign_alg: m.sign_alg.clone(),
-                        store_file: m.store_file.clone().into(),
-                        store_password: m.store_password.clone(),
-                    })
+                    .map(|material| signing_config_decoder.decode(material))
             })
             .or_else(|| {
                 // Backward compat: old format had signing_configs embedded in products.
@@ -156,15 +188,7 @@ impl<'a> ArkdownConfigLoader<'a> {
                     .into_iter()
                     .next()
                     .and_then(|sc| sc.material)
-                    .map(|m| SigningConfig {
-                        cert_path: m.cert_path.into(),
-                        key_alias: m.key_alias,
-                        key_password: m.key_password,
-                        profile_path: m.profile.into(),
-                        sign_alg: m.sign_alg,
-                        store_file: m.store_file.into(),
-                        store_password: m.store_password,
-                    })
+                    .map(|material| signing_config_decoder.decode(&material))
             });
 
         let build_option = BuildOptionDecoder::new(
@@ -369,6 +393,29 @@ impl HvigorSdkCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signing_material_paths_follow_hvigor_project_directory_resolution() {
+        let project_root = std::env::temp_dir().join("arkdown-signing-material");
+        let material = RawSigningMaterial {
+            cert_path: "./SignFile/debug.cer".to_string(),
+            key_alias: "debug".to_string(),
+            key_password: "key-password".to_string(),
+            profile: "SignFile/debug.p7b".to_string(),
+            sign_alg: "SHA256withECDSA".to_string(),
+            store_file: "./SignFile/debug.p12".to_string(),
+            store_password: "store-password".to_string(),
+        };
+
+        let signing = SigningConfigDecoder::new(&project_root).decode(&material);
+
+        assert_eq!(signing.cert_path, project_root.join("SignFile/debug.cer"));
+        assert_eq!(
+            signing.profile_path,
+            project_root.join("SignFile/debug.p7b")
+        );
+        assert_eq!(signing.store_file, project_root.join("SignFile/debug.p12"));
+    }
 
     /// Smoke test: `load_config` on a non-existent root returns `FileNotFound`.
     #[test]
