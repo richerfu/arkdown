@@ -50,7 +50,7 @@ use arkdown_core::{ArkTscTarget, OutputTarget};
 use arkdown_path::{
     lexical_normalize, strip_relative_prefix, AbsPath, ModuleSpecifier, SpecifierKind,
 };
-use arkdown_resolver::{OhosResolver, PkgBriefInfo, ResolverConfig};
+use arkdown_resolver::{OhosResolver, PackageResolutionPlan, ResolverConfig};
 use rolldown_plugin::{
     __inner::SharedPluginable, HookBuildEndArgs, HookNoopReturn, HookUsage, Plugin, PluginContext,
     PluginHookMeta, PluginOrder as RolldownPluginOrder,
@@ -141,7 +141,7 @@ pub struct PluginFactoryInput {
     ///
     /// OhosResolver consumes this instead of scanning arbitrary `oh_modules`
     /// entries so package visibility matches hvigor's ModuleDependencyInfo.
-    pub pkg_name_to_pkg_info: FxHashMap<String, PkgBriefInfo>,
+    pub package_resolution: Arc<PackageResolutionPlan>,
     /// Source-set overlays for build-target overrides.
     ///
     /// Each entry is `(src_main_ets_root, target_ets_root)`.
@@ -200,7 +200,7 @@ impl PluginFactoryInput {
             transform_sources: TransformSourceSnapshot::default(),
             navigation_routes: NavigationRouteMap::default(),
             allowed_package_roots: vec![],
-            pkg_name_to_pkg_info: FxHashMap::default(),
+            package_resolution: Arc::new(PackageResolutionPlan::default()),
             source_set_overlays: vec![],
             checker_mode: CheckerMode::Oxc,
             tsc_target: ArkTscTarget::default(),
@@ -709,7 +709,7 @@ impl<'a> PluginFactory<'a> {
                 package_module_root.join("oh_modules"),
                 project_root.join("oh_modules"),
             ],
-            pkg_name_to_pkg_info: self.input.pkg_name_to_pkg_info,
+            package_resolution: self.input.package_resolution,
             use_normalized_ohm_url: self.plan.use_normalized_ohm_url,
             case_sensitive_check: self.input.case_sensitive_check,
             source_set_overlays: self.input.source_set_overlays,

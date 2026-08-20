@@ -20,6 +20,7 @@ pub mod case_check;
 pub mod error;
 pub mod oh_modules;
 pub mod ohm_url;
+pub mod plan;
 pub mod resolver;
 pub mod specifier;
 
@@ -27,5 +28,6 @@ pub use case_check::{CaseCheckPolicy, CaseCheckResult};
 pub use error::ResolveError;
 pub use oh_modules::{OhModulesLayout, OhPackage};
 pub use ohm_url::{OhmUrlBuilder, OhmUrlParseResult};
-pub use resolver::{OhosResolver, PkgBriefInfo, ResolveImportKind, ResolverConfig};
+pub use plan::{PackageResolutionPlan, PackageResolutionPlanBuilder, PkgBriefInfo};
+pub use resolver::{OhosResolver, ResolveImportKind, ResolverConfig};
 pub use specifier::SpecifierClass;

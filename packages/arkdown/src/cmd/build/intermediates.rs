@@ -552,18 +552,18 @@ impl IntermediateArtifactWriter {
     config: &ArkdownConfig,
     res_out: &Path,
   ) -> Result<()> {
-    // Use src/main/resources as the default module resources path when no
-    // specific resource directories have been determined.  The hvigor parity
-    // report reads resConfig.json to compare resource inputs; callers that
-    // know the effective resource directories should call the variant that
-    // accepts an explicit list.
+    // Use src/main/resources as the default module resources path only when it
+    // exists. Restool rejects nonexistent `inputPath` entries; latest hvigor's
+    // resource model omits the absent root rather than serializing the lexical
+    // module layout unconditionally.
     let default_res_dir = ModuleSourceLayout::new(&module.src_path).resources();
+    let module_res_dirs = default_res_dir.is_dir().then_some(default_res_dir);
     self.write_resource_config_files_with_dirs(
       project_root,
       module,
       config,
       res_out,
-      &[default_res_dir],
+      module_res_dirs.as_slice(),
       &[],
     )
   }

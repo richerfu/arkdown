@@ -25,6 +25,7 @@ use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
 use super::ets_checker::{
   SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder, SdkEtsCheckerRunner,
 };
+use super::package_resolution::{LocalPackageSourceRootInventory, ModulePackageResolutionPlanner};
 
 #[derive(Args, Debug)]
 pub struct CheckArgs {
@@ -176,11 +177,22 @@ impl<'a> CheckModuleRunner<'a> {
         )
       })?;
     let paths = SdkEtsCheckerPaths::standalone(&self.module_context.module.root, module_json_path);
+    let mut local_sources = LocalPackageSourceRootInventory::default();
+    local_sources.insert(
+      &self.module_context.module.root,
+      [
+        self.module_context.module.src_main.clone(),
+        paths.generated_profile_path.clone(),
+      ],
+    );
+    let package_resolution =
+      ModulePackageResolutionPlanner::new(self.module_context, &local_sources).build()?;
     let plan = SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
       config: self.config,
       session: self.session,
       module: self.module,
       module_context: self.module_context,
+      package_resolution: &package_resolution,
       module_build_option: &self.config.product.build_option,
       loader_json: None,
       target_name: "default",

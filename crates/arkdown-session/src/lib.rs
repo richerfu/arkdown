@@ -17,7 +17,6 @@
 //!   → InputFingerprintSet     (content hashes for cache invalidation)
 //!   → ArtifactLayout          (output paths)
 //!   → SourceStore             (source file inventory and fingerprints)
-//!   → ResolverIndexSnapshot   (resolver configuration per module)
 //!   → BuildScriptSnapshot[]   (hvigorfile.ts / hvigorconfig.ts declarative effects)
 //!   → BuildSession            (all of the above, Arc-shared)
 //! ```
@@ -51,7 +50,6 @@ pub mod plan_input;
 pub mod profiles;
 pub mod project;
 pub mod remote_hsp;
-pub mod resolver_index;
 pub mod resource_inventory;
 pub mod resources;
 pub mod sdk;
@@ -133,12 +131,6 @@ pub use profiles::store::{
 
 // project
 pub use project::snapshot::ProjectSnapshot;
-
-// resolver_index
-pub use resolver_index::{
-    ExtensionSet, PackageIndexEntry, ResolverIndexBuilder, ResolverIndexSnapshot, SdkModuleEntry,
-    SourceRootEntry,
-};
 
 // sdk
 pub use sdk::snapshot::SdkSnapshot;

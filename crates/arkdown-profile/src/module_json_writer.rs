@@ -282,12 +282,18 @@ impl ModuleJsonWriter {
             "appEnvironments",
             "bundleType",
             "buildMode",
+            "buildVersion",
+            "multiProjects",
+            "vendor",
+            "asanEnabled",
+            "tsanEnabled",
+            "hwasanEnabled",
+            "ubsanEnabled",
         ] {
             if let Some(value) = app.remove(key) {
                 ordered.insert(key.to_string(), value);
             }
         }
-        ordered.extend(app);
         ordered
     }
 
@@ -517,10 +523,6 @@ impl ModuleJsonWriter {
         if let Some(id) = label_id {
             obj.insert("labelId".into(), (id as u64).into());
         }
-        if project_multi_projects {
-            obj.insert("multiProjects".into(), true.into());
-        }
-
         if project_multi_projects {
             obj.insert("multiProjects".into(), true.into());
         }
@@ -2179,5 +2181,34 @@ mod tests {
             "a newly supplied buildVersion is appended after the source object"
         );
         let _ = &mut without;
+    }
+
+    /// `MergeProfile.computeAppJsonOpt` replaces a HAR app object with its
+    /// supported fields before later build/profile overlays are applied.
+    #[test]
+    fn hvigor_har_app_projection_drops_app_scope_resource_references() {
+        let app = serde_json::json!({
+            "bundleName": "com.example.app",
+            "versionCode": 1,
+            "label": "$string:app_name",
+            "icon": "$media:layered_image",
+            "labelId": 0x01000001,
+            "iconId": 0x01000002,
+            "buildVersion": "product-build",
+            "appEnvironments": [{ "name": "ENV", "value": "value" }]
+        })
+        .as_object()
+        .cloned()
+        .expect("app object");
+
+        let projected = ModuleJsonWriter::order_har_app_section(app);
+
+        assert_eq!(projected["bundleName"], "com.example.app");
+        assert_eq!(projected["buildVersion"], "product-build");
+        assert!(projected.contains_key("appEnvironments"));
+        assert!(!projected.contains_key("label"));
+        assert!(!projected.contains_key("icon"));
+        assert!(!projected.contains_key("labelId"));
+        assert!(!projected.contains_key("iconId"));
     }
 }

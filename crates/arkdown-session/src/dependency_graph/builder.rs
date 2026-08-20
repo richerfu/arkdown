@@ -639,6 +639,62 @@ mod tests {
     }
 
     #[test]
+    fn transitive_package_resolves_without_redundant_project_declaration() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "meituan",
+            r#"{
+              "name": "meituan",
+              "version": "1.0.0",
+              "dependencies": { "@msi/jsi": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "meituan/oh_modules/@msi/jsi",
+            r#"{
+              "name": "@msi/jsi",
+              "version": "1.0.0",
+              "dependencies": { "@msi/jsi_interface": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "meituan/oh_modules/@msi/jsi/oh_modules/@msi/jsi_interface",
+            r#"{
+              "name": "@msi/jsi_interface",
+              "version": "1.0.0",
+              "main": "index.ets"
+            }"#,
+        );
+
+        let graph = fixture.build_for("meituan");
+        let interface = graph
+            .nodes
+            .get("@msi/jsi_interface")
+            .expect("transitive interface package");
+        let expected_root = canonicalize_or_owned(
+            &fixture
+                .root()
+                .join("meituan/oh_modules/@msi/jsi/oh_modules/@msi/jsi_interface"),
+        );
+
+        assert!(interface.is_transitive);
+        assert_eq!(
+            interface.package_root.as_deref(),
+            Some(expected_root.as_path())
+        );
+        assert_eq!(
+            graph.roots_by_alias.get("@msi/jsi_interface"),
+            Some(&expected_root)
+        );
+        assert!(graph.edges.iter().any(|edge| {
+            edge.alias == "@msi/jsi_interface"
+                && edge.issuer_root
+                    == canonicalize_or_owned(&fixture.root().join("meituan/oh_modules/@msi/jsi"))
+        }));
+    }
+
+    #[test]
     fn includes_dev_and_dynamic_aliases_in_direct_deps() {
         let fixture = DependencyGraphFixture::new();
         fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);

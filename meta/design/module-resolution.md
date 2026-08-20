@@ -171,7 +171,8 @@ When `useNativeResolver` is disabled (default or unsupported platform), a JavaSc
 
 ### arkdown approach
 
-arkdown's `arkdown-plugin-ohos-resolve` crate implements a full Rust resolver:
+arkdown's internal `crates/arkdown/src/plugins/ohos_resolve` Rolldown adapter
+delegates to the full Rust resolver in `arkdown-resolver`:
 
 1. Start with the upstream Rust `oxc_resolver` crate as the base filesystem/package algorithm
 2. Layer OHOS-specific rules on top:
@@ -194,6 +195,26 @@ type PkgBriefInfoMap = Record<string, PkgBriefInfo>;
 ```
 
 This map is built by `ArkCompile.setPkgNameToPkgBriefInfo()` and passed to the resolver. It enables the resolver to find source files for local HAR dependencies without traversing the full file system. arkdown also scans project `oh-package.json5` `file:` dependencies up front so scoped aliases such as `@ohos/login/Index` resolve through the same package-root path as hvigor instead of falling through to SDK lookup or unresolved-external handling.
+
+### Self references and importer-local dependencies
+
+`ArkCompile.setPkgNameToPkgBriefInfo()` inserts dependency packages first and
+the active module last. Therefore an import of the active package name resolves
+directly to the module being compiled even when the project `oh_modules`
+contains a symlink with the same name. Self subpaths additionally probe that
+package's ordered `sourceRoots`.
+
+For a non-self bare import, node-resolve starts at the importing file's package
+directory before consulting module/project-level `modulePaths`. A source
+dependency can therefore resolve a package from its own `oh_modules` even when
+that package is absent from the host module's manifest. Resolved symlinks are
+realpathed before becoming Rollup/Rolldown module IDs, so the physical source
+file has one graph identity and ordinary ESM cycles do not recursively create a
+second module.
+
+Arkdown represents these inputs with one immutable
+`PackageResolutionPlan`. The SDK checker and Rolldown resolver consume the same
+plan; neither stage rebuilds package metadata independently.
 
 ---
 

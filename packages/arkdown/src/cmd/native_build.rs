@@ -46,6 +46,7 @@ use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use arkdown_core::{
@@ -183,7 +184,7 @@ pub struct NativeLibCollectionPolicy {
   native_lib: NativeLibOption,
   external_native_options: Option<ExternalNativeOptions>,
   self_package: Option<NativeLibPackageInfo>,
-  cmake_local_dependencies: Vec<NativeCmakeLocalDependency>,
+  cmake_local_dependencies: Arc<[NativeCmakeLocalDependency]>,
   release_cmake_build_type: NativeReleaseCmakeBuildType,
 }
 
@@ -199,7 +200,7 @@ impl NativeLibCollectionPolicy {
       native_lib: NativeLibOption::default(),
       external_native_options: None,
       self_package: None,
-      cmake_local_dependencies: Vec::new(),
+      cmake_local_dependencies: Arc::from([]),
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     }
   }
@@ -215,7 +216,7 @@ impl NativeLibCollectionPolicy {
       native_lib: NativeLibOption::default(),
       external_native_options: None,
       self_package: None,
-      cmake_local_dependencies: Vec::new(),
+      cmake_local_dependencies: Arc::from([]),
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     }
   }
@@ -269,9 +270,9 @@ impl NativeLibCollectionPolicy {
     self
   }
 
-  pub(crate) fn with_cmake_local_dependencies(
+  pub(crate) fn with_cmake_local_dependency_inventory(
     mut self,
-    dependencies: Vec<NativeCmakeLocalDependency>,
+    dependencies: Arc<[NativeCmakeLocalDependency]>,
   ) -> Self {
     self.cmake_local_dependencies = dependencies;
     self
@@ -337,6 +338,15 @@ impl NativeCmakeLocalDependency {
       module_type,
       native_lib,
     }
+  }
+
+  pub(crate) fn package_root(&self) -> &Path {
+    &self.package_root
+  }
+
+  fn process_libs_dir(&self) -> PathBuf {
+    NativeModuleLayout::for_variant(&self.package_root, &self.product_name, &self.target_name)
+      .process_libs_dir()
   }
 }
 
@@ -2765,12 +2775,9 @@ impl<'a> NativeLibCollector<'a> {
   fn dependency_default_lib_dirs(&self) -> Vec<NativeDependencyLibDir> {
     let mut dirs = Vec::new();
     let mut seen = FxHashSet::default();
-    let mut push_default_libs_dir = |root: &Path, package: NativeLibPackageInfo| {
-      if seen.insert(root.to_path_buf()) {
-        dirs.push(NativeDependencyLibDir {
-          libs_dir: root.join(HVIGOR_LIBS_DIR),
-          package,
-        });
+    let mut push_libs_dir = |libs_dir: PathBuf, package: NativeLibPackageInfo| {
+      if seen.insert(libs_dir.clone()) {
+        dirs.push(NativeDependencyLibDir { libs_dir, package });
       }
     };
     for edge in &self.deps.edges {
@@ -2791,7 +2798,19 @@ impl<'a> NativeLibCollector<'a> {
       {
         continue;
       }
-      push_default_libs_dir(root, NativeLibPackageInfo::dependency(node));
+      let package = NativeLibPackageInfo::dependency(node);
+      let canonical_root = canonicalize_or_owned(root);
+      if let Some(local) = self
+        .policy
+        .cmake_local_dependencies
+        .iter()
+        .find(|dependency| dependency.package_root() == canonical_root)
+      {
+        // Hvigor `ProcessLibs.collectLocalHarLibs()` registers the local
+        // module's ProcessLibs output before its source-tree `libs/` fallback.
+        push_libs_dir(local.process_libs_dir(), package.clone());
+      }
+      push_libs_dir(canonical_root.join(HVIGOR_LIBS_DIR), package);
     }
     // Older snapshots and focused callers may not have dependency edges. Keep
     // their deterministic node fallback, while production sessions take the
@@ -2806,7 +2825,17 @@ impl<'a> NativeLibCollector<'a> {
       {
         continue;
       }
-      push_default_libs_dir(root, NativeLibPackageInfo::dependency(node));
+      let package = NativeLibPackageInfo::dependency(node);
+      let canonical_root = canonicalize_or_owned(root);
+      if let Some(local) = self
+        .policy
+        .cmake_local_dependencies
+        .iter()
+        .find(|dependency| dependency.package_root() == canonical_root)
+      {
+        push_libs_dir(local.process_libs_dir(), package.clone());
+      }
+      push_libs_dir(canonical_root.join(HVIGOR_LIBS_DIR), package);
     }
     dirs
   }
@@ -4746,7 +4775,7 @@ mod tests {
     let policy = NativeLibCollectionPolicy::default()
       .with_build_mode("release".to_string())
       .with_external_native_options(Some(ExternalNativeOptions::default()))
-      .with_cmake_local_dependencies(vec![local_dependency]);
+      .with_cmake_local_dependency_inventory(Arc::from([local_dependency]));
 
     NativeLibCollector::new(&module, &["arm64-v8a".to_string()], &dependencies)
       .with_output_variant("paid", "phone")
@@ -5433,6 +5462,78 @@ mod tests {
       .expect("dependency native libs must be collected from getDefaultLibsDir");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libkept.so");
+  }
+
+  #[test]
+  fn hvigor_local_har_process_libs_precede_source_tree_libs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let module_root = tmp.path().join("entry");
+    let dependency_root = tmp.path().join("runtime");
+    let dependency_process_libs =
+      NativeModuleLayout::for_variant(&dependency_root, "paid", "phone")
+        .process_libs_dir()
+        .join("arm64-v8a");
+    let dependency_default_libs = dependency_root.join("libs/arm64-v8a");
+    fs::create_dir_all(&module_root).unwrap();
+    fs::create_dir_all(&dependency_process_libs).unwrap();
+    fs::create_dir_all(&dependency_default_libs).unwrap();
+    fs::write(
+      dependency_process_libs.join("libmsi.so"),
+      b"built C++ output",
+    )
+    .unwrap();
+    fs::write(
+      dependency_default_libs.join("libfallback.so"),
+      b"source fallback",
+    )
+    .unwrap();
+
+    let module = ModuleConfig {
+      name: "entry".to_string(),
+      src_path: module_root,
+      module_type: OhosModuleType::Entry,
+    };
+    let mut deps = DependencyGraphSnapshot::default();
+    add_dependency_node(
+      &mut deps,
+      "@msi/jsi",
+      "@msi/jsi",
+      "1.0.0",
+      dependency_root.clone(),
+    );
+    let local_dependency = NativeCmakeLocalDependency::new(
+      dependency_root,
+      "paid".to_string(),
+      "phone".to_string(),
+      "debug".to_string(),
+      OhosModuleType::Har,
+      NativeLibOption::default(),
+    );
+    let policy = NativeLibCollectionPolicy::default()
+      .with_cmake_local_dependency_inventory(Arc::from([local_dependency]));
+
+    let abi_filters = ["arm64-v8a".to_string()];
+    let collector = NativeLibCollector::new(&module, &abi_filters, &deps).with_policy(policy);
+    let dependency_dirs = collector.dependency_default_lib_dirs();
+    assert_eq!(dependency_dirs.len(), 2);
+    assert_eq!(
+      dependency_dirs[0].libs_dir,
+      canonicalize_or_owned(dependency_process_libs.parent().unwrap())
+    );
+    assert_eq!(
+      dependency_dirs[1].libs_dir,
+      canonicalize_or_owned(dependency_default_libs.parent().unwrap())
+    );
+
+    let outputs = collector
+      .process_libs()
+      .expect("local HAR ProcessLibs output must be collected");
+    let names = outputs
+      .iter()
+      .filter_map(|path| path.file_name().and_then(OsStr::to_str))
+      .collect::<Vec<_>>();
+
+    assert_eq!(names, ["libfallback.so", "libmsi.so"]);
   }
 
   #[test]
