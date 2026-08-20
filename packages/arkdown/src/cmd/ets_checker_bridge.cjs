@@ -135,14 +135,7 @@ function main() {
   } else {
     throw new Error(`unsupported SDK etsChecker phase: ${request.phase}`);
   }
-  const checkerExitCode = process.exitCode || 0;
-  // Diagnostic severity is returned to Rust. Avoid a process-level exit that
-  // would discard the complete deterministic diagnostic list.
-  process.exitCode = 0;
-  fs.writeFileSync(
-    responsePath,
-    JSON.stringify({ diagnostics, checkerExitCode }),
-  );
+  fs.writeFileSync(responsePath, JSON.stringify({ diagnostics }));
 }
 
 try {

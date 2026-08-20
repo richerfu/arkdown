@@ -66,6 +66,14 @@ fn direct_build_repeated_plugin_paths_keep_scalar_then_array_shape() {
 }
 
 #[test]
+fn direct_build_enables_the_typed_zig_native_toolchain() {
+  let config = PackageCliParser::parse_build(&args(&["--enable-zig"]))
+    .expect("Zig native toolchain flag should parse");
+
+  assert_eq!(config.enable_zig, Some(true));
+}
+
+#[test]
 fn hvigor_test_injects_exact_default_properties_and_module_mode() {
   let config = PackageCliParser::parse_hvigor(&args(&["test"]))
     .expect("hvigor local-test command should parse");

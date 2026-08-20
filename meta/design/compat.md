@@ -21,6 +21,11 @@ This document describes how arkdown provides a hvigorw-compatible interface so t
 | `./hvigorw --version`                  | `arkdown --version`                         |                        |
 | `./hvigorw -p key=value`               | `arkdown -p key=value`                      | Property override      |
 
+`arkdown build --enable-zig` is an arkdown-only compiler selection extension.
+It preserves hvigor's OHOS SDK CMake/Ninja inputs while replacing the C and C++
+compiler drivers with `zig cc` and `zig c++`. Without the flag, the generated
+native command remains on the SDK Clang path.
+
 ### Module-Scoped Builds
 
 hvigorw supports scoping to a specific module with `-m`:

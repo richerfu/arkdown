@@ -200,7 +200,8 @@ impl BuildCoordinator {
         .sdk
         .tool_path(SdkToolKind::Binxo)
         .map(|tool| tool.path),
-    );
+    )
+    .with_zig_enabled(args.enable_zig)?;
     let hwasan_config = args
       .hvigor_properties
       .hwasan_config

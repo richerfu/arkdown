@@ -138,6 +138,7 @@ Options:
   --ohos-debug-asan   Enable AddressSanitizer for the generated package.
   --ohos-enable-hwasan
                       Enable HWAddressSanitizer for the generated package.
+  --enable-zig        Compile native C/C++ with zig cc and zig c++.
   --disable-abc-cache Disable CompileArkTS cache.
   --cache-file <path> Override es2abc cache file.
   --checker <mode>    Checker mode: oxc or off. Defaults to oxc.

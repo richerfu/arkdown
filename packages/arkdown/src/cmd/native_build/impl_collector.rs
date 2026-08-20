@@ -29,6 +29,7 @@ const KNOWN_ABI_DIRS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "
 const HVIGOR_LIBS_DIR: &str = "libs";
 
 use crate::cmd::native_build::impl_types::*;
+use crate::cmd::native_build::zig::{NativeCmakeCompilerState, NativeZigToolchainWriter};
 
 pub struct NativeLibCollector<'a> {
   pub(crate) module: &'a ModuleConfig,
@@ -1616,9 +1617,18 @@ impl NativeBuildConfig {
         .map_err(|e| format!("cannot create CMake build dir: {e}"))?;
       std::fs::create_dir_all(&output_dir)
         .map_err(|e| format!("cannot create CMake output dir: {e}"))?;
+      let compiler_state =
+        NativeCmakeCompilerState::new(&build_dir, toolchain.compiler, toolchain.toolchain_file);
+      compiler_state
+        .prepare()
+        .map_err(|error| error.to_string())?;
       self.create_cmake_file_api_queries(&build_dir)?;
+      let cmake_toolchain_file = self
+        .cmake_toolchain_file(&toolchain, &build_dir, &abi)
+        .map_err(|error| error.to_string())?;
       let mut configure_cmd = self.cmake_configure_command(
         &toolchain,
+        &cmake_toolchain_file,
         &abi,
         source_dir,
         &build_dir,
@@ -1641,8 +1651,30 @@ impl NativeBuildConfig {
           "cmake configure for ABI {abi} exited with status {configure_status}"
         ));
       }
+      compiler_state.commit().map_err(|error| error.to_string())?;
     }
     Ok(())
+  }
+
+  pub(crate) fn cmake_toolchain_file(
+    &self,
+    toolchain: &ResolvedNativeSdkToolchain<'_>,
+    build_dir: &Path,
+    abi: &str,
+  ) -> NativeBuildResult<PathBuf> {
+    let Some(zig) = toolchain.compiler.zig_executable() else {
+      return Ok(toolchain.toolchain_file.to_path_buf());
+    };
+    NativeZigToolchainWriter::new(
+      toolchain.toolchain_file,
+      toolchain.native_dir,
+      zig,
+      self.effective_ohos_stl(abi)?,
+      self.effective_sanitizers(abi),
+      abi,
+      build_dir,
+    )
+    .write()
   }
 
   pub(crate) fn ninja_command_plans(&self) -> NativeBuildResult<Vec<NativeCommandPlan>> {
@@ -1672,6 +1704,7 @@ impl NativeBuildConfig {
   pub(crate) fn cmake_configure_command(
     &self,
     toolchain: &ResolvedNativeSdkToolchain<'_>,
+    cmake_toolchain_file: &Path,
     abi: &str,
     source_dir: &Path,
     build_dir: &Path,
@@ -1688,7 +1721,7 @@ impl NativeBuildConfig {
       OsString::from("-DCMAKE_SYSTEM_NAME=OHOS"),
       OsString::from(format!("-DCMAKE_OHOS_ARCH_ABI={abi}")),
       OsString::from("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"),
-      self.prefixed_path_argument("-DCMAKE_TOOLCHAIN_FILE=", toolchain.toolchain_file),
+      self.prefixed_path_argument("-DCMAKE_TOOLCHAIN_FILE=", cmake_toolchain_file),
       OsString::from("-GNinja"),
       self.prefixed_path_argument("-DCMAKE_MAKE_PROGRAM=", toolchain.ninja),
     ];
@@ -1717,7 +1750,16 @@ impl NativeBuildConfig {
       }
     }
 
-    let custom = self.custom_cmake_arguments(abi);
+    let mut custom = self.custom_cmake_arguments(abi);
+    if toolchain.compiler.zig_executable().is_some() {
+      // `--enable-zig` is an explicit CLI override. Put the generated
+      // toolchain before build-profile arguments so hvigor's first-key-wins
+      // merge cannot replace it with a project-supplied toolchain.
+      custom.insert(
+        0,
+        self.prefixed_path_argument("-DCMAKE_TOOLCHAIN_FILE=", cmake_toolchain_file),
+      );
+    }
     let mut command = Command::new(toolchain.cmake);
     command
       .args(self.merged_cmake_arguments(defaults, custom))
@@ -1769,6 +1811,21 @@ impl NativeBuildConfig {
     configured
       .chain(self.sanitizers.cmake_args_for_abi(abi).map(OsString::from))
       .collect()
+  }
+
+  fn effective_sanitizers(&self, abi: &str) -> NativeBuildSanitizers {
+    let arguments = self.merged_cmake_arguments(Vec::new(), self.custom_cmake_arguments(abi));
+    NativeBuildSanitizers::from_cmake_arguments(&arguments)
+  }
+
+  fn effective_ohos_stl(&self, abi: &str) -> NativeBuildResult<NativeOhosStl> {
+    let arguments = self.merged_cmake_arguments(Vec::new(), self.custom_cmake_arguments(abi));
+    NativeOhosStl::from_cmake_arguments(&arguments).map_err(|message| {
+      NativeBuildError::ConfigureCmakeFailed {
+        path: self.module_root.clone(),
+        message,
+      }
+    })
   }
 
   /// Mirrors hvigor `CmakeUtil.mergeCommandLine`: native arguments are parsed

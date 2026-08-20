@@ -330,6 +330,8 @@ export interface BuildConfig {
   ohosEnableTsan?: boolean
   ohosEnableUbsan?: boolean
   ohosEnableBinxo?: boolean
+  /** Compile native C/C++ sources with `zig cc` and `zig c++`. */
+  enableZig?: boolean
   disableAbcCache?: boolean
   cacheFile?: string
   checker?: string
