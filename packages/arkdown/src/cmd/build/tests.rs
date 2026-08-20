@@ -7,8 +7,82 @@ use indexmap::IndexMap;
 use tempfile::TempDir;
 
 use super::coordinator::PackInfoFormResourceResolver;
+use super::device_test::DeviceTestExecutionPlan;
 use super::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
 use super::layout::{ModuleBuildLayout, RestoolLayout};
+
+#[test]
+fn ohos_test_template_layout_stays_under_test_root_for_named_target_builds() {
+  let temp = TempDir::new().expect("create ohosTest layout root");
+  let target = ModuleBuildLayout::for_target_product(temp.path(), "tablet", "ohosTest");
+  let template = ModuleBuildLayout::for_ohos_test_template(temp.path(), "tablet");
+
+  assert_eq!(
+    target.res_module_json(),
+    temp
+      .path()
+      .join("build/tablet/intermediates/res/ohosTest/module.json")
+  );
+  assert_eq!(
+    template.ohos_test_resources_root(),
+    temp
+      .path()
+      .join(".test/tablet/intermediates/src/ohosTest/resources")
+  );
+  assert_eq!(
+    template.ohos_test_ets_root(),
+    temp
+      .path()
+      .join(".test/tablet/intermediates/src/ohosTest/ets")
+  );
+}
+
+#[test]
+fn device_test_hap_name_matches_hvigor_target_output_contract() {
+  assert_eq!(
+    DeviceTestExecutionPlan::test_hap_file_name("entry", None),
+    "entry-ohosTest-signed.hap"
+  );
+  assert_eq!(
+    DeviceTestExecutionPlan::test_hap_file_name("entry", Some("custom-test")),
+    "custom-test.hap"
+  );
+}
+
+#[test]
+fn ohos_test_template_migration_detection_matches_hvigor_first_ability_rule() {
+  let temp = TempDir::new().expect("create ohosTest source root");
+  let source = ModuleBuildLayout::new(temp.path()).source();
+
+  assert!(
+    source.ohos_test_templates_after_migration(&serde_json::json!({
+      "module": { "abilities": [{ "name": "TestAbility" }] }
+    }))
+  );
+  assert!(
+    !source.ohos_test_templates_after_migration(&serde_json::json!({
+      "module": { "abilities": [
+        { "name": "TestAbility", "srcEntry": "./ets/TestAbility.ets" },
+        { "name": "Ignored", "srcEntry": "" }
+      ] }
+    }))
+  );
+
+  std::fs::create_dir_all(temp.path().join("src/ohosTest/ets/testrunner"))
+    .expect("create legacy runner directory");
+  std::fs::write(
+    temp
+      .path()
+      .join("src/ohosTest/ets/testrunner/OpenHarmonyTestRunner.ts"),
+    "export default class OpenHarmonyTestRunner {}",
+  )
+  .expect("write legacy runner");
+  assert!(
+    !source.ohos_test_templates_after_migration(&serde_json::json!({
+      "module": {}
+    }))
+  );
+}
 
 #[test]
 fn make_pack_info_form_profiles_follow_form_widget_module_source_set() {

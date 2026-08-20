@@ -1,7 +1,38 @@
 use arkdown_config::{
+    build_profile::{BuildOptionProfileInventory, BuildOptionProfileModuleValue},
     BuildScriptRuntimeModulePlanRequest, BuildScriptRuntimePlanRequest, BuildScriptRuntimePlanner,
 };
 use serde_json::json;
+
+#[test]
+fn build_inventory_reads_artifact_name_from_module_target() {
+    let temp = tempfile::tempdir().expect("temp project");
+    let module_root = temp.path().join("entry");
+    let inventory = BuildOptionProfileInventory::from_values(
+        temp.path(),
+        json!({
+            "app": { "products": [{ "name": "default", "output": { "artifactName": "app" } }] },
+            "modules": [{
+                "name": "entry",
+                "srcPath": "./entry",
+                "targets": [{ "name": "default", "applyToProducts": ["default"] }]
+            }]
+        }),
+        &[BuildOptionProfileModuleValue {
+            name: "entry".to_string(),
+            root: module_root,
+            profile: json!({
+                "targets": [{ "name": "default", "output": { "artifactName": "entry-hap" } }]
+            }),
+        }],
+    )
+    .expect("build profile inventory");
+
+    assert_eq!(
+        inventory.module_target_artifact_name("entry", "default"),
+        Some("entry-hap")
+    );
+}
 
 #[test]
 fn runtime_planner_selects_targets_and_merges_build_options_in_rust() {

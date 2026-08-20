@@ -80,6 +80,29 @@ impl<'a> ModuleSourceLayout<'a> {
       .join("OpenHarmonyTestRunner.ts")
   }
 
+  /// Hvigor `ohos-test-util.ts::isTemplatesAfterSourceCodeMigration`.
+  ///
+  /// New-style `ohosTest` source sets omit the runner implementation and let
+  /// `GenerateOhosTestTemplate` materialize it below `.test/<product>`. When
+  /// abilities are declared, hvigor only inspects the first ability's
+  /// `srcEntry`; otherwise it falls back to the two legacy runner files.
+  pub(super) fn ohos_test_templates_after_migration(
+    &self,
+    module_json: &serde_json::Value,
+  ) -> bool {
+    if let Some(first_ability) = module_json
+      .pointer("/module/abilities")
+      .and_then(serde_json::Value::as_array)
+      .and_then(|abilities| abilities.first())
+    {
+      return first_ability
+        .get("srcEntry")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(str::is_empty);
+    }
+    !self.ohos_test_runner_ets().is_file() && !self.ohos_test_runner_ts().is_file()
+  }
+
   pub(super) fn target_ets(&self, target_name: &str) -> PathBuf {
     self.module_root.join("src").join(target_name).join("ets")
   }
@@ -153,6 +176,12 @@ impl<'a> ModuleBuildLayout<'a> {
       product_name,
       target_name: "default",
     }
+  }
+
+  /// Layout used by hvigor `GenerateOhosTestTemplate` while compiling the
+  /// normal `build/<product>/.../ohosTest` target.
+  pub(super) fn for_ohos_test_template(module_root: &'a Path, product_name: &'a str) -> Self {
+    Self::for_test_product(module_root, product_name)
   }
 
   /// Previewer layout rooted at `<module>/.preview`, matching

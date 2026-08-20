@@ -287,7 +287,7 @@ impl ModuleBuildConfiguration {
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
-    target: EffectiveTargetConfig,
+    mut target: EffectiveTargetConfig,
     build_script_override: Option<&serde_json::Value>,
   ) -> Result<Self> {
     let target_name = target.name.clone();
@@ -307,8 +307,16 @@ impl ModuleBuildConfiguration {
         module.name, target_name
       )
     })?;
+    target.artifact_name = build_options
+      .module_target_artifact_name(&module.name, &target_name)
+      .map(str::to_string)
+      .or(target.artifact_name);
     let mut resolved = config.clone();
     resolved.product.build_option = build_option;
+    // `ModuleTargetData.getModuleTargetOutputFileName` reads the module
+    // target's output override. Product output naming belongs to APP
+    // packaging and must not leak into HAP/HSP/HAR archive names.
+    resolved.product.artifact_name = target.artifact_name.clone();
     // Hvigor always packages the synthetic `ohosTest` target as a HAP,
     // regardless of whether the owning module normally produces HAP, HSP,
     // or HAR artifacts (`deviceTestComputeDepends` always points the test

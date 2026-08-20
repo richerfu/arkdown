@@ -1058,6 +1058,10 @@ pub struct RawModule {
 #[serde(rename_all = "camelCase")]
 pub struct RawTarget {
     pub name: String,
+    /// Module-target output naming consumed by
+    /// `ModuleTargetData.getModuleTargetOutputFileName`.
+    #[serde(default)]
+    pub output: Option<RawProductOutput>,
     /// Products this target applies to.  Empty means the target applies only to
     /// the product named `"default"` (hvigor's default-product fallback).
     #[serde(default)]
@@ -1151,6 +1155,8 @@ pub struct RawTargetAbility {
 pub struct EffectiveTargetConfig {
     /// Target name, e.g. `"default"` or `"phone"`.
     pub name: String,
+    /// Target-owned archive name from `target.output.artifactName`.
+    pub artifact_name: Option<String>,
     /// Target-specific resource directories (from `target.resource.directories`).
     /// Empty when the target has no resource override.
     pub resource_directories: Vec<PathBuf>,
@@ -1172,6 +1178,11 @@ impl EffectiveTargetConfig {
     fn from_raw(target: &RawTarget) -> Self {
         Self {
             name: target.name.clone(),
+            artifact_name: target
+                .output
+                .as_ref()
+                .and_then(|output| output.artifact_name.clone())
+                .filter(|name| !name.is_empty()),
             resource_directories: target
                 .resource
                 .as_ref()
@@ -1434,6 +1445,22 @@ impl BuildOptionProfileInventory {
             .map(EffectiveTargetConfig::from_raw)
     }
 
+    /// Return the module target's archive override.
+    ///
+    /// Hvigor owns this value on the module build profile target, not on the
+    /// selected project product. The project target descriptor remains a
+    /// compatibility fallback for statically extracted build-script models.
+    pub fn module_target_artifact_name(
+        &self,
+        module_name: &str,
+        target_name: &str,
+    ) -> Option<&str> {
+        self.modules
+            .get(module_name)
+            .and_then(|module| module.profile.as_ref())
+            .and_then(|profile| profile.target_artifact_name(target_name))
+    }
+
     fn module(&self, module_name: &str) -> Result<&ModuleBuildProfileSnapshot, ConfigError> {
         self.modules
             .get(module_name)
@@ -1691,6 +1718,20 @@ impl BuildProfileValue {
         target
             .pointer("/config/buildOption")
             .or_else(|| target.get("buildOption"))
+    }
+
+    fn target_artifact_name(&self, target_name: &str) -> Option<&str> {
+        self.value
+            .get("targets")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some(target_name)
+            })?
+            .pointer("/output/artifactName")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
     }
 
     fn selected_build_option(
@@ -3446,6 +3487,7 @@ mod tests {
         let targets: Vec<RawTarget> = vec![
             RawTarget {
                 name: "default".to_string(),
+                output: None,
                 apply_to_products: vec!["default".to_string()],
                 config: None,
                 resource: None,
@@ -3454,6 +3496,7 @@ mod tests {
             },
             RawTarget {
                 name: "phone".to_string(),
+                output: None,
                 apply_to_products: vec!["default".to_string()],
                 config: None,
                 resource: Some(RawTargetResource {
@@ -3464,6 +3507,7 @@ mod tests {
             },
             RawTarget {
                 name: "tablet".to_string(),
+                output: None,
                 apply_to_products: vec!["tablet-product".to_string()],
                 config: None,
                 resource: None,
@@ -3491,6 +3535,7 @@ mod tests {
         let targets: Vec<RawTarget> = vec![
             RawTarget {
                 name: "default".to_string(),
+                output: None,
                 apply_to_products: vec!["default".to_string()],
                 config: None,
                 resource: None,
@@ -3499,6 +3544,7 @@ mod tests {
             },
             RawTarget {
                 name: "release-only".to_string(),
+                output: None,
                 apply_to_products: vec!["default".to_string()],
                 config: None,
                 resource: None,
@@ -3819,6 +3865,7 @@ mod tests {
             // All-modes "default" target.
             RawTarget {
                 name: "default".to_string(),
+                output: None,
                 apply_to_products: vec!["default".to_string()],
                 config: None,
                 resource: None,
@@ -3828,6 +3875,7 @@ mod tests {
             // Release-only override target.
             RawTarget {
                 name: "release-override".to_string(),
+                output: None,
                 apply_to_products: vec!["default".to_string()],
                 config: None,
                 resource: Some(RawTargetResource {
@@ -3856,6 +3904,7 @@ mod tests {
     fn test_effective_target_config_resource_dirs() {
         let targets: Vec<RawTarget> = vec![RawTarget {
             name: "default".to_string(),
+            output: None,
             apply_to_products: vec!["default".to_string()],
             config: None,
             resource: Some(RawTargetResource {
@@ -3871,6 +3920,7 @@ mod tests {
         let target = pick_effective_raw_target(&targets, "default", "debug").unwrap();
         let cfg = EffectiveTargetConfig {
             name: target.name.clone(),
+            artifact_name: None,
             resource_directories: target
                 .resource
                 .as_ref()
