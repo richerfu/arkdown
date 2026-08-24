@@ -1,3 +1,5 @@
+use super::module_path_map::HvigorPackageModuleSource;
+use super::module_source_state::{HvigorCollectedModuleSource, HvigorResolvedImportRecord};
 use super::*;
 use crate::plan::{BundleMockConfig, BundleRuntimePackageContext, BundleRuntimePackageInfo};
 use rustc_hash::FxHashMap;
@@ -51,8 +53,8 @@ fn record_resolved_import(
         .or_default()
         .insert(specifier.to_string(), resolved_id.to_string());
     if let Some(source) = state.sources.get(importer) {
-        if let Some(source_span) =
-            source_span_for_module_request_literal(source.code.as_ref(), importer, specifier)
+        if source_span_for_module_request_literal(source.code.as_ref(), importer, specifier)
+            .is_some()
         {
             state
                 .resolved_import_records
@@ -60,7 +62,6 @@ fn record_resolved_import(
                 .or_default()
                 .push(HvigorResolvedImportRecord {
                     specifier: specifier.to_string(),
-                    source_span,
                 });
         }
     }
@@ -2254,7 +2255,6 @@ fn module_source_output_path_uses_transform_language_metadata() {
     );
     let output = HvigorModuleSourceOutputPath::new(
         Path::new("/workspace/cache"),
-        Path::new("/workspace"),
         &ownership,
         "entry",
         "ets/Zip.ts",
@@ -2293,6 +2293,49 @@ fn module_source_output_path_uses_transform_language_metadata() {
     assert_eq!(
         cjs_ownership.file_info_source_file("entry", "1.0.0", false, false),
         "entry|entry|1.0.0|src/main/ets/vendor/index.js"
+    );
+}
+
+#[test]
+fn package_source_output_uses_the_owning_dependency_project_like_hvigor() {
+    let temp = tempfile::tempdir().unwrap();
+    let dependency_project = temp.path().join("msi-harmony");
+    let package_root = dependency_project
+        .join("oh_modules/.ohpm/@meituan+cipstorage@1.0.0/oh_modules/@meituan/cipstorage");
+    std::fs::create_dir_all(&package_root).unwrap();
+    std::fs::write(
+        package_root.join("oh-package.json5"),
+        r#"{ "name": "@meituan/cipstorage", "version": "1.0.0", "main": "index.ts" }"#,
+    )
+    .unwrap();
+    let module_id = package_root.join("index.ts");
+    let package =
+        HvigorPackageModuleSource::new(&module_id, &package_root, "@meituan/cipstorage").unwrap();
+    let ownership = HvigorChunkSource::package_module(
+        "@meituan/cipstorage".to_string(),
+        "@meituan/cipstorage".to_string(),
+        "1.0.0".to_string(),
+        "index.ts".to_string(),
+        package,
+    );
+    let cache = temp.path().join("cache");
+
+    let output = HvigorModuleSourceOutputPath::new(
+        &cache,
+        &ownership,
+        "@meituan/cipstorage",
+        "index.ts",
+        module_id.to_str().unwrap(),
+        false,
+    )
+    .path()
+    .unwrap();
+
+    assert_eq!(
+        output,
+        cache.join(
+            "oh_modules/.ohpm/@meituan+cipstorage@1.0.0/oh_modules/@meituan/cipstorage/index.ts"
+        )
     );
 }
 

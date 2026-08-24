@@ -159,10 +159,10 @@ pub(crate) use compile_context::{
   CompileContextInfoWriter, CompileEnvKeyBuilder, PackageModuleJsonOptions,
   PkgContextInfoInputBuilder, SanitizerProfileFlags,
 };
-pub(crate) use obfuscation::{
+use obfuscation::{
   ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
 };
-pub(crate) use planning::{
+use planning::{
   copy_tree, BuildTimingProbe, DependencyCustomTypeInputBuilder, ModuleBuildConfiguration,
   ModuleTargetSelection, NativeCmakeLocalDependencyInventoryBuilder,
   NativeDependencyStagePlanBuilder, TargetBuildExecutionPlan,
@@ -1034,6 +1034,7 @@ impl<'a> WidgetCompileArktsPass<'a> {
 /// `FormUtil.getTargetModuleOptObj`: the form widget module (HSP declaring
 /// `formExtensionModule`) merges the form extension module's `type: "form"`
 /// abilities — reduced to `name`/`type`/`metadata` — into its ark module.
+#[cfg(test)]
 mod transform_source_snapshot_builder_tests {
   use super::*;
   use arkdown_ets_transform::{RolldownEtsTransformPlan, RolldownEtsTransformer};
@@ -1360,6 +1361,7 @@ export const nativeCall: () => void;"#,
   }
 }
 
+#[cfg(test)]
 mod compile_context_info_tests {
   use super::*;
   use arkdown_core::HvigorModuleSourceFile;
@@ -2911,28 +2913,6 @@ impl<'a> ArtifactOutputName<'a> {
       || CoordinatorText::from_parts([self.module_name, "-", self.target_label]),
       str::to_string,
     )
-  }
-}
-
-struct HexText;
-
-impl HexText {
-  fn lower_u64(hash: u64) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    let mut bytes = [0_u8; 16];
-    let mut len = 0;
-    let mut started = false;
-    for shift in (0..16).rev() {
-      let nibble = ((hash >> (shift * 4)) & 0x0f) as usize;
-      if nibble != 0 || started || shift == 0 {
-        started = true;
-        bytes[len] = HEX[nibble];
-        len += 1;
-      }
-    }
-
-    bytes[..len].iter().map(|byte| char::from(*byte)).collect()
   }
 }
 

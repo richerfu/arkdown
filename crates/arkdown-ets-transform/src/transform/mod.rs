@@ -37,8 +37,6 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
-#[cfg(test)]
-use oxc_span::SourceType;
 use oxc_span::{GetSpan, SPAN};
 
 use crate::error::EtsTransformError;
@@ -1112,8 +1110,6 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                                 .map(FieldExpression::from_expression);
                             regular_fields.push(RegularField {
                                 name: name.into_owned(),
-                                source_span: property.span,
-                                name_span: property.key.span(),
                                 type_annotation_ast: property.type_annotation.as_deref(),
                                 initializer,
                                 optional: property.optional,

@@ -4,23 +4,19 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use arkdown_core::{
-  BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibFilterOption, NativeLibOption,
-  NativeLibPackageSelection, OhosModuleType,
+  BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibOption, NativeLibPackageSelection,
+  OhosModuleType,
 };
 use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer, HvigorNativeLibraryPattern};
 use arkdown_session::dependency_graph::snapshot::{
   DependencyGraphSnapshot, DependencyNodeSnapshot,
 };
 use rustc_hash::FxHashSet;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// The set of ABI directories that hvigor's native pipeline produces under
 /// the CMake / NDK build intermediates.
@@ -34,9 +30,6 @@ const HVIGOR_LIBS_DIR: &str = "libs";
 pub struct NativeBuildOutput {
   /// Absolute paths to native shared libraries ready for packaging, indexed by ABI.
   pub libs_by_abi: Vec<(String, PathBuf)>,
-  /// Warning/diagnostic messages to emit.  Non-empty when the build was
-  /// partially skipped (missing toolchain, etc.).
-  pub warnings: Vec<String>,
 }
 
 /// Describes the native build configuration for one module.
@@ -217,38 +210,6 @@ pub struct NativeLibCollectionPolicy {
 }
 
 impl NativeLibCollectionPolicy {
-  pub fn asan() -> Self {
-    Self {
-      sanitizers: NativeBuildSanitizers::new(true, false, false, false),
-      hwasan_config: None,
-      binxo_config: None,
-      read_elf: None,
-      build_mode: String::new(),
-      sdk_toolchain: NativeSdkToolchain::default(),
-      native_lib: NativeLibOption::default(),
-      external_native_options: None,
-      self_package: None,
-      cmake_local_dependencies: Arc::from([]),
-      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
-    }
-  }
-
-  pub fn hwasan(read_elf: Option<PathBuf>) -> Self {
-    Self {
-      sanitizers: NativeBuildSanitizers::new(false, false, true, false),
-      hwasan_config: None,
-      binxo_config: None,
-      read_elf,
-      build_mode: String::new(),
-      sdk_toolchain: NativeSdkToolchain::default(),
-      native_lib: NativeLibOption::default(),
-      external_native_options: None,
-      self_package: None,
-      cmake_local_dependencies: Arc::from([]),
-      release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
-    }
-  }
-
   pub fn with_sanitizers(
     mut self,
     sanitizers: NativeBuildSanitizers,
@@ -1199,10 +1160,6 @@ pub(crate) struct NativeModuleLayout<'a> {
 }
 
 impl<'a> NativeModuleLayout<'a> {
-  pub(crate) fn new(module_root: &'a Path) -> Self {
-    Self::for_variant(module_root, "default", "default")
-  }
-
   pub(crate) fn for_variant(
     module_root: &'a Path,
     product_name: &'a str,

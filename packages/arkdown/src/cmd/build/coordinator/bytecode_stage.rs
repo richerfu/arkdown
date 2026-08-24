@@ -2,23 +2,23 @@
 
 use super::*;
 
-pub(crate) struct CoordinatorBytecodeStageInput<'a> {
-  pub(crate) args: &'a BuildArgs,
-  pub(crate) config: &'a Arc<ArkdownConfig>,
-  pub(crate) session: &'a Arc<BuildSession>,
-  pub(crate) package_plugins: &'a [PackagePlugin],
-  pub(crate) task_lifecycle: &'a mut BuildTaskLifecycle,
-  pub(crate) hot_reload_mode: bool,
-  pub(crate) coverage_mode: bool,
-  pub(crate) disable_abc_cache: bool,
-  pub(crate) cli_cache_file: &'a Option<PathBuf>,
-  pub(crate) abc_backend: AbcBackendChoice,
-  pub(crate) module_analyzer: ModuleAnalyzerKind,
-  pub(crate) project_root: &'a Path,
-  pub(crate) progress: &'a mut Progress,
-  pub(crate) intermediate_writer: &'a IntermediateArtifactWriter,
-  pub(crate) har_dedup_project_plan: &'a HarDedupProjectPlan,
-  pub(crate) loader_jsons: &'a [(
+pub(super) struct CoordinatorBytecodeStageInput<'a> {
+  pub(super) args: &'a BuildArgs,
+  pub(super) config: &'a Arc<ArkdownConfig>,
+  pub(super) session: &'a Arc<BuildSession>,
+  pub(super) package_plugins: &'a [PackagePlugin],
+  pub(super) task_lifecycle: &'a mut BuildTaskLifecycle,
+  pub(super) hot_reload_mode: bool,
+  pub(super) coverage_mode: bool,
+  pub(super) disable_abc_cache: bool,
+  pub(super) cli_cache_file: &'a Option<PathBuf>,
+  pub(super) abc_backend: AbcBackendChoice,
+  pub(super) module_analyzer: ModuleAnalyzerKind,
+  pub(super) project_root: &'a Path,
+  pub(super) progress: &'a mut Progress,
+  pub(super) intermediate_writer: &'a IntermediateArtifactWriter,
+  pub(super) har_dedup_project_plan: &'a HarDedupProjectPlan,
+  pub(super) loader_jsons: &'a [(
     ModuleConfig,
     HapManifest,
     LoaderJson,
@@ -26,22 +26,22 @@ pub(crate) struct CoordinatorBytecodeStageInput<'a> {
     String,
     Arc<ArkdownConfig>,
   )],
-  pub(crate) local_native_dependencies: &'a BTreeMap<String, Arc<[NativeCmakeLocalDependency]>>,
-  pub(crate) all_bc_har_deps: &'a [Vec<ByteCodeHarScanEntry>],
-  pub(crate) bundle_outs: &'a mut Vec<(BundleStageOutput,)>,
-  pub(crate) widget_bundle_outs: &'a [Option<WidgetCompileArktsOutput>],
-  pub(crate) compile_task_active: &'a [bool],
-  pub(crate) module_obfuscation_contexts: &'a [ModuleObfuscationContext],
-  pub(crate) pending_bytecode_obfuscations: &'a mut [Option<PendingBytecodeObfuscation>],
+  pub(super) local_native_dependencies: &'a BTreeMap<String, Arc<[NativeCmakeLocalDependency]>>,
+  pub(super) all_bc_har_deps: &'a [Vec<ByteCodeHarScanEntry>],
+  pub(super) bundle_outs: &'a mut Vec<(BundleStageOutput,)>,
+  pub(super) widget_bundle_outs: &'a [Option<WidgetCompileArktsOutput>],
+  pub(super) compile_task_active: &'a [bool],
+  pub(super) module_obfuscation_contexts: &'a [ModuleObfuscationContext],
+  pub(super) pending_bytecode_obfuscations: &'a mut [Option<PendingBytecodeObfuscation>],
 }
 
-pub(crate) struct CoordinatorBytecodeStageOutput {
-  pub(crate) early_output: Option<BuildOutput>,
-  pub(crate) bundle_package_outs: Vec<(BundlePackageOutput,)>,
+pub(super) struct CoordinatorBytecodeStageOutput {
+  pub(super) early_output: Option<BuildOutput>,
+  pub(super) bundle_package_outs: Vec<(BundlePackageOutput,)>,
 }
 
 impl BuildCoordinator {
-  pub(crate) async fn run_bytecode_stage(
+  pub(super) async fn run_bytecode_stage(
     &self,
     input: CoordinatorBytecodeStageInput<'_>,
   ) -> Result<CoordinatorBytecodeStageOutput> {

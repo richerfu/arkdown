@@ -145,12 +145,6 @@ impl<'a> ModuleBuildLayout<'a> {
     }
   }
 
-  /// Layout for a named target configuration (e.g. `ohosTest`), which keys
-  /// the intermediate/loader/cache directories like hvigor.
-  pub(super) fn for_target(module_root: &'a Path, target_name: &'a str) -> Self {
-    Self::for_target_product(module_root, "default", target_name)
-  }
-
   pub(super) fn for_target_product(
     module_root: &'a Path,
     product_name: &'a str,
@@ -162,11 +156,6 @@ impl<'a> ModuleBuildLayout<'a> {
       product_name,
       target_name,
     }
-  }
-
-  /// Unit-test build layout rooted at `<module>/.test` (hvigor `buildRoot=.test`).
-  pub(super) fn for_test(module_root: &'a Path) -> Self {
-    Self::for_test_product(module_root, "default")
   }
 
   pub(super) fn for_test_product(module_root: &'a Path, product_name: &'a str) -> Self {
@@ -184,12 +173,6 @@ impl<'a> ModuleBuildLayout<'a> {
     Self::for_test_product(module_root, product_name)
   }
 
-  /// Previewer layout rooted at `<module>/.preview`, matching
-  /// `ModulePathInfoIml.getModulePreviewPath()`.
-  pub(super) fn for_preview(module_root: &'a Path, target_name: &'a str) -> Self {
-    Self::for_preview_product(module_root, "default", target_name)
-  }
-
   pub(super) fn for_preview_product(
     module_root: &'a Path,
     product_name: &'a str,
@@ -201,17 +184,6 @@ impl<'a> ModuleBuildLayout<'a> {
       product_name,
       target_name,
     }
-  }
-
-  /// Layout for the active output target and module target name: local
-  /// unit-test builds root at `<module>/.test`; named targets (e.g.
-  /// `ohosTest`) key intermediate/loader/cache directories like hvigor.
-  pub(super) fn for_output_target(
-    output_target: &arkdown_core::OutputTarget,
-    module_root: &'a Path,
-    target_name: &'a str,
-  ) -> Self {
-    Self::for_output_target_product(output_target, module_root, "default", target_name)
   }
 
   pub(super) fn for_output_target_product(
@@ -229,10 +201,6 @@ impl<'a> ModuleBuildLayout<'a> {
     } else {
       Self::for_product(module_root, product_name)
     }
-  }
-
-  pub(super) fn is_test(&self) -> bool {
-    self.build_root == ".test"
   }
 
   pub(super) fn source(&self) -> ModuleSourceLayout<'a> {
@@ -440,12 +408,6 @@ impl<'a> ModuleBuildLayout<'a> {
 
   pub(super) fn res_profile_dir(&self) -> PathBuf {
     self.default_intermediate_nested_file("res", ["resources", "base", "profile"])
-  }
-
-  /// `res/profile/main_pages.json` — unit-test page override written by
-  /// ReplaceUnitTestIndexFile (`{ "src": ["<unit.test.replace.page>"] }`).
-  pub(super) fn res_main_pages_json(&self) -> PathBuf {
-    self.res_profile_dir().join("main_pages.json")
   }
 
   pub(super) fn preload_so_dir(&self) -> PathBuf {

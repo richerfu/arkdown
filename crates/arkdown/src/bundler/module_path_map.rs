@@ -1105,6 +1105,23 @@ impl HvigorPackageModuleSource {
         })
     }
 
+    /// `utils.genTemporaryPath` removes `meta.belongProjectPath` for package
+    /// modules. For nested `.ohpm` paths this is the owner of the outermost
+    /// `oh_modules`, which may be a local dependency project outside the host
+    /// application root.
+    pub(crate) fn belong_project_path(&self) -> &Path {
+        self.package_root
+            .ancestors()
+            .filter(|ancestor| {
+                ancestor
+                    .file_name()
+                    .is_some_and(|name| name == "oh_modules")
+            })
+            .last()
+            .and_then(Path::parent)
+            .unwrap_or(&self.package_root)
+    }
+
     pub(crate) fn normalized_project_file_path<'a>(
         &'a self,
         _context: &BundleRuntimePackageContext,

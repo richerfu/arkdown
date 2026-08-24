@@ -201,18 +201,13 @@ impl HarSignCommandPlan {
     fn run(&self) -> std::io::Result<Output> {
         Command::new(&self.program).args(&self.arguments).output()
     }
-
-    #[cfg(test)]
-    fn arguments(&self) -> impl Iterator<Item = &std::ffi::OsStr> {
-        self.arguments.iter().map(OsString::as_os_str)
-    }
 }
 
 #[cfg(test)]
 mod har_tests {
     use super::HarSignCommandPlan;
     use crate::plan::{SigningMaterial, SigningPassword};
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -235,7 +230,11 @@ mod har_tests {
             "store-secret",
             "key-secret",
         );
-        let arguments = command.arguments().collect::<Vec<_>>();
+        let arguments = command
+            .arguments
+            .iter()
+            .map(OsString::as_os_str)
+            .collect::<Vec<_>>();
         assert_eq!(
             arguments,
             [

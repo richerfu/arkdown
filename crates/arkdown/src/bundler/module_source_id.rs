@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use arkdown_core::ArkdownError;
 
+use super::module_path_map::HvigorPackageModuleSource;
 use super::*;
 
 pub(crate) struct HvigorModuleSourceId<'a> {
@@ -43,7 +44,6 @@ impl<'a> HvigorModuleSourceId<'a> {
 
 pub(crate) struct HvigorModuleSourceOutputPath<'a> {
     pub(crate) output_dir: &'a Path,
-    pub(crate) project_root: &'a Path,
     pub(crate) ownership: &'a HvigorChunkSource,
     pub(crate) module_name: &'a str,
     pub(crate) source_file: &'a str,
@@ -54,7 +54,6 @@ pub(crate) struct HvigorModuleSourceOutputPath<'a> {
 impl<'a> HvigorModuleSourceOutputPath<'a> {
     pub(crate) fn new(
         output_dir: &'a Path,
-        project_root: &'a Path,
         ownership: &'a HvigorChunkSource,
         module_name: &'a str,
         source_file: &'a str,
@@ -63,7 +62,6 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
     ) -> Self {
         Self {
             output_dir,
-            project_root,
             ownership,
             module_name,
             source_file,
@@ -81,7 +79,9 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
             HvigorChunkSourceKind::LocalDependencyModule(_) => {
                 self.local_dependency_cache_source_file()
             }
-            HvigorChunkSourceKind::PackageModule(_) => self.package_cache_source_file()?,
+            HvigorChunkSourceKind::PackageModule(package) => {
+                self.package_cache_source_file(package)?
+            }
         }))
     }
 
@@ -91,13 +91,21 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
             .with_extension(self.output_extension())
     }
 
-    pub(crate) fn package_cache_source_file(&self) -> Result<PathBuf, ArkdownError> {
+    pub(crate) fn package_cache_source_file(
+        &self,
+        package: &HvigorPackageModuleSource,
+    ) -> Result<PathBuf, ArkdownError> {
         let module_path = Path::new(self.module_id);
-        let relative = module_path.strip_prefix(self.project_root).map_err(|_| {
+        let belong_project_path = package.belong_project_path();
+        let relative = HvigorModulePathMap::relative_to_root_preserving_links(
+            module_path,
+            belong_project_path,
+        )
+        .ok_or_else(|| {
             ArkdownError::Bundler(format!(
-                "hvigor package module source is outside project root: {} not under {}",
+                "hvigor package module source is outside its owning project: {} not under {}",
                 module_path.display(),
-                self.project_root.display()
+                belong_project_path.display()
             ))
         })?;
         Ok(relative.with_extension(self.output_extension()))

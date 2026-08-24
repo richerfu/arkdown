@@ -343,22 +343,6 @@ pub struct ByteCodeHarEntry {
 // Generation
 // ---------------------------------------------------------------------------
 
-/// Generate a [`LoaderJson`] from the project config, module config, and
-/// processed manifest.
-///
-/// Entry points are collected from:
-/// 1. Each ability's `src_entry` path in the manifest
-/// 2. The module-level `src_entry` from the module.json5 (if recorded)
-///
-/// When `useNormalizedOHMUrl` is `true`, callers are expected to convert the
-/// `src_entry` paths to OHM URLs (`@bundle:…`) before passing the manifest —
-/// this function records whatever values are in `manifest.abilities[].src_entry`.
-
-/// Build the `pkgNameToPkgBriefInfo` map for the loader.json.
-///
-/// Produces one entry for the current module. HAR/HSP dependencies would be
-/// added by a later pass (see `arkdown-plugin-har-dedup`).
-
 /// Return an absolute, normalized path string for `path`.
 ///
 /// Strategy (matches hvigor's behavior of always writing absolute paths):

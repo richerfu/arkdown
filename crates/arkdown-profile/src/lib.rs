@@ -90,7 +90,7 @@ pub use pkg_context_info::{
 pub use pkg_sdk_info::PkgSdkInfoGenerator;
 pub use plan::{
     LoaderJsonPlan, PackageModuleJsonPlan, PkgContextInfoPlan, ProfileArtifactPaths,
-    ProfileProcessPlan,
+    ProfileProcessContextInput, ProfileProcessPlan,
 };
 
 use rustc_hash::{FxHashMap, FxHashSet};

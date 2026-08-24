@@ -1267,15 +1267,6 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         element
     }
 
-    pub(crate) fn getter(
-        &self,
-        name: &'a str,
-        body_stmts: OxcVec<'a, Statement<'a>>,
-        accessibility: Option<TSAccessibility>,
-    ) -> ClassElement<'a> {
-        self.getter_with_source_span(name, body_stmts, accessibility, SPAN, SPAN)
-    }
-
     pub(crate) fn getter_with_source_span(
         &self,
         name: &'a str,
@@ -1328,16 +1319,6 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
             accessibility,
             &self.ast,
         )
-    }
-
-    pub(crate) fn setter_with_param(
-        &self,
-        name: &'a str,
-        param: FormalParameter<'a>,
-        body_stmts: OxcVec<'a, Statement<'a>>,
-        accessibility: Option<TSAccessibility>,
-    ) -> ClassElement<'a> {
-        self.setter_with_param_and_source_span(name, param, body_stmts, accessibility, SPAN, SPAN)
     }
 
     pub(crate) fn setter_with_param_and_source_span(
@@ -1449,24 +1430,6 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
             false,
             accessibility,
             &self.ast,
-        )
-    }
-
-    pub(crate) fn class_declaration_statement(
-        &self,
-        name: &'a str,
-        super_class_name: &'a str,
-        elements: OxcVec<'a, ClassElement<'a>>,
-        is_exported: bool,
-        is_default_export: bool,
-    ) -> Statement<'a> {
-        self.class_declaration_statement_with_name_span(
-            name,
-            SPAN,
-            super_class_name,
-            elements,
-            is_exported,
-            is_default_export,
         )
     }
 

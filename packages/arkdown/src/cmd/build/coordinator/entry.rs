@@ -56,7 +56,7 @@ impl BuildCoordinator {
   /// intermediates into `intermediates/fastApp/<target>/` — `ets/` assets,
   /// compiled resources + `resources.index`, package context, module.json and
   /// pack.info with the owning bundle name / aligned device types.
-  pub(crate) fn run_fast_package(
+  pub(super) fn run_fast_package(
     loader_jsons: &[(
       ModuleConfig,
       HapManifest,
@@ -251,7 +251,7 @@ impl BuildCoordinator {
   }
 
   #[allow(clippy::too_many_arguments)]
-  pub(crate) fn pack_info_plans(
+  pub(super) fn pack_info_plans(
     config: &ArkdownConfig,
     module: &ModuleConfig,
     module_config: &ArkdownConfig,

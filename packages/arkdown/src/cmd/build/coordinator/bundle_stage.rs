@@ -2,25 +2,25 @@
 
 use super::*;
 
-pub(crate) struct CoordinatorBundleStageInput<'a> {
-  pub(crate) args: &'a BuildArgs,
-  pub(crate) config: &'a Arc<ArkdownConfig>,
-  pub(crate) session: &'a Arc<BuildSession>,
-  pub(crate) package_plugins: &'a [PackagePlugin],
-  pub(crate) task_lifecycle: &'a mut BuildTaskLifecycle,
-  pub(crate) collect_importers: bool,
-  pub(crate) is_incremental_watch: bool,
-  pub(crate) watch_changed_files: Vec<PathBuf>,
-  pub(crate) coverage_mode: bool,
-  pub(crate) disable_abc_cache: bool,
-  pub(crate) module_analyzer: ModuleAnalyzerKind,
-  pub(crate) checker_mode: CheckerMode,
-  pub(crate) project_root: &'a Path,
-  pub(crate) progress: &'a mut Progress,
-  pub(crate) custom_cfg: &'a arkdown_config::ArkdownCustomConfig,
-  pub(crate) intermediate_writer: &'a IntermediateArtifactWriter,
-  pub(crate) har_dedup_project_plan: &'a HarDedupProjectPlan,
-  pub(crate) loader_jsons: &'a mut [(
+pub(super) struct CoordinatorBundleStageInput<'a> {
+  pub(super) args: &'a BuildArgs,
+  pub(super) config: &'a Arc<ArkdownConfig>,
+  pub(super) session: &'a Arc<BuildSession>,
+  pub(super) package_plugins: &'a [PackagePlugin],
+  pub(super) task_lifecycle: &'a mut BuildTaskLifecycle,
+  pub(super) collect_importers: bool,
+  pub(super) is_incremental_watch: bool,
+  pub(super) watch_changed_files: Vec<PathBuf>,
+  pub(super) coverage_mode: bool,
+  pub(super) disable_abc_cache: bool,
+  pub(super) module_analyzer: ModuleAnalyzerKind,
+  pub(super) checker_mode: CheckerMode,
+  pub(super) project_root: &'a Path,
+  pub(super) progress: &'a mut Progress,
+  pub(super) custom_cfg: &'a arkdown_config::ArkdownCustomConfig,
+  pub(super) intermediate_writer: &'a IntermediateArtifactWriter,
+  pub(super) har_dedup_project_plan: &'a HarDedupProjectPlan,
+  pub(super) loader_jsons: &'a mut [(
     ModuleConfig,
     HapManifest,
     LoaderJson,
@@ -28,22 +28,22 @@ pub(crate) struct CoordinatorBundleStageInput<'a> {
     String,
     Arc<ArkdownConfig>,
   )],
-  pub(crate) package_resolution_plans: &'a BTreeMap<String, Arc<PackageResolutionPlan>>,
-  pub(crate) local_native_dependencies: &'a BTreeMap<String, Arc<[NativeCmakeLocalDependency]>>,
-  pub(crate) all_bc_har_deps: &'a [Vec<ByteCodeHarScanEntry>],
-  pub(crate) sdk_declaration_roots: &'a [PathBuf],
-  pub(crate) component_metadata: &'a ComponentMetadata,
+  pub(super) package_resolution_plans: &'a BTreeMap<String, Arc<PackageResolutionPlan>>,
+  pub(super) local_native_dependencies: &'a BTreeMap<String, Arc<[NativeCmakeLocalDependency]>>,
+  pub(super) all_bc_har_deps: &'a [Vec<ByteCodeHarScanEntry>],
+  pub(super) sdk_declaration_roots: &'a [PathBuf],
+  pub(super) component_metadata: &'a ComponentMetadata,
 }
 
-pub(crate) struct CoordinatorBundleStageOutput {
-  pub(crate) bundle_outs: Vec<(BundleStageOutput,)>,
-  pub(crate) widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>>,
-  pub(crate) compile_task_active: Vec<bool>,
-  pub(crate) module_obfuscation_contexts: Vec<ModuleObfuscationContext>,
+pub(super) struct CoordinatorBundleStageOutput {
+  pub(super) bundle_outs: Vec<(BundleStageOutput,)>,
+  pub(super) widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>>,
+  pub(super) compile_task_active: Vec<bool>,
+  pub(super) module_obfuscation_contexts: Vec<ModuleObfuscationContext>,
 }
 
 impl BuildCoordinator {
-  pub(crate) async fn run_bundle_stage(
+  pub(super) async fn run_bundle_stage(
     &self,
     input: CoordinatorBundleStageInput<'_>,
   ) -> Result<CoordinatorBundleStageOutput> {
@@ -455,12 +455,6 @@ impl BuildCoordinator {
             .entries()?;
       }
 
-      let allowed_package_roots: Vec<PathBuf> = module_context
-        .deps
-        .nodes
-        .values()
-        .filter_map(|node| node.package_root.clone())
-        .collect();
       let package_resolution = package_resolution_plans
         .get(&module.name)
         .cloned()
@@ -587,7 +581,6 @@ impl BuildCoordinator {
         component_metadata: component_metadata.clone(),
         transform_sources,
         navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
-        allowed_package_roots,
         package_resolution,
         source_set_overlays: source_set_overlays.clone(),
         checker_mode,

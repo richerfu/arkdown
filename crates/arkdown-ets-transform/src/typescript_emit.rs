@@ -122,10 +122,6 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
         self
     }
 
-    pub(crate) fn emit(&self) -> Option<String> {
-        self.emit_with_source_map().map(|output| output.code)
-    }
-
     pub(crate) fn emit_with_source_map(&self) -> Option<TypeScriptJavascriptEmitOutput> {
         let allocator = Allocator::default();
         let source_type = self.source_type();
@@ -1823,7 +1819,8 @@ mod tests {
         let output =
             TypeScriptJavascriptEmitter::new(source, source_path.to_str().unwrap(), &sources)
                 .with_const_enum_export_cache(&cache)
-                .emit()
+                .emit_with_source_map()
+                .map(|output| output.code)
                 .unwrap();
         assert!(
             output.contains("1240001") && !output.contains("from './ErrorCode'"),
@@ -1910,7 +1907,8 @@ export class StaticFields {
             source_path.to_str().expect("utf-8 source path"),
             &TransformSourceSnapshot::default(),
         )
-        .emit()
+        .emit_with_source_map()
+        .map(|output| output.code)
         .expect("TypeScript JavaScript emission");
 
         // Latest ets-loader `ets_checker.js::getTargetESVersion` defaults to
@@ -1941,7 +1939,8 @@ export enum QueryType {
             source_path.to_str().expect("UTF-8 fixture path"),
             &TransformSourceSnapshot::default(),
         )
-        .emit()
+        .emit_with_source_map()
+        .map(|output| output.code)
         .expect("TypeScript JavaScript emission");
 
         // Latest ets-loader delegates suppression-pragma emission to the
@@ -1976,7 +1975,8 @@ export class OpeTypeConversion {
             source_path.to_str().expect("UTF-8 fixture path"),
             &TransformSourceSnapshot::default(),
         )
-        .emit()
+        .emit_with_source_map()
+        .map(|output| output.code)
         .expect("TypeScript JavaScript emission");
 
         // TypeScript emits the post-class static assignment against the class
@@ -2006,7 +2006,8 @@ export class OpeTypeConversion {
             "import { Constant } from './Constant';\nconst key = Constant.Key.MapProviderKey;\n";
         let output =
             TypeScriptJavascriptEmitter::new(source, source_path.to_str().unwrap(), &sources)
-                .emit()
+                .emit_with_source_map()
+                .map(|output| output.code)
                 .unwrap();
         assert!(
             output.contains("\"provider\"") && !output.contains("Constant.Key.MapProviderKey"),
@@ -2077,7 +2078,8 @@ const runtimeScale = media.VideoScaleType.VIDEO_SCALE_TYPE_FIT;"#;
         let sources = TransformSourceSnapshot::default();
         let output =
             TypeScriptJavascriptEmitter::new(source, source_path.to_str().unwrap(), &sources)
-                .emit()
+                .emit_with_source_map()
+                .map(|output| output.code)
                 .unwrap();
         assert!(
             !output.contains("value;"),
@@ -2148,7 +2150,8 @@ const top = EdgeType.TOP;"#;
 
         let output =
             TypeScriptJavascriptEmitter::new(source, source_path.to_str().unwrap(), &sources)
-                .emit()
+                .emit_with_source_map()
+                .map(|output| output.code)
                 .unwrap();
 
         assert!(

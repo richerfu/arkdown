@@ -39,63 +39,45 @@
 //! - Running the native build automatically from the active SDK toolchain.
 //! - Failing with a structured diagnostic when required native tools are absent.
 
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
-
-use arkdown_core::{
-  BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibFilterOption, NativeLibOption,
-  NativeLibPackageSelection, OhosModuleType,
-};
-use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer, HvigorNativeLibraryPattern};
-use arkdown_session::dependency_graph::snapshot::{
-  DependencyGraphSnapshot, DependencyNodeSnapshot,
-};
-use rustc_hash::FxHashSet;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-/// The set of ABI directories that hvigor's native pipeline produces under
-/// the CMake / NDK build intermediates.
-const KNOWN_ABI_DIRS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "armeabi"];
-/// hvigor `BuildDirConst.LIBS`, used by `dependency.getDefaultLibsDir()`.
-const HVIGOR_LIBS_DIR: &str = "libs";
-
 mod impl_collector;
 mod impl_types;
 mod zig;
 
-pub(crate) use impl_collector::{
-  NativeBinxoCache, NativeBinxoCacheSnapshot, NativeBinxoSymbol, NativeBinxoSymbolSnapshot,
-  NativeDependencyLibDir, NativeDuplicateFile, NativeDuplicateGroup, NativeLibCache,
-  NativeLibCacheWriter, NativeLibCandidate, NativeLibCollector, NativeLibFilterApplier,
-  NativeLibSelectionResolver, NativeLibSelectionState, NativeProcessLibWriter,
-  NativeStripProcessor,
-};
+pub(crate) use impl_collector::NativeLibCollector;
 pub(crate) use impl_types::{
-  DebugSymbolCollector, DebugSymbolOutput, HvigorModuleCleanStage, InvalidSanitizerNativeLib,
-  NativeAbiFilters, NativeBinxoCommand, NativeBuildConfig, NativeBuildError, NativeBuildOutput,
-  NativeBuildResult, NativeBuildSanitizers, NativeCmakeCodeModelReader,
-  NativeCmakeDependencyConfigurator, NativeCmakeLibrary, NativeCmakeLocalDependency,
-  NativeCmakePackage, NativeCommandPlan, NativeHwasanValidator, NativeLibCollectionPolicy,
-  NativeLibPackageInfo, NativeLibraryRoot, NativeModuleLayout, NativeReleaseCmakeBuildType,
-  NativeSdkToolchain, ProjectDebugSymbolCollector, ProjectDebugSymbolOutput,
-  ResolvedNativeSdkToolchain, SanitizerLibraryEvidence,
+  DebugSymbolCollector, HvigorModuleCleanStage, NativeBuildSanitizers, NativeCmakeLocalDependency,
+  NativeLibCollectionPolicy, NativeLibPackageInfo, NativeSdkToolchain, ProjectDebugSymbolCollector,
 };
-
-#[cfg(test)]
-use impl_types::NativeCompilerDriver;
 
 #[cfg(test)]
 mod tests {
+  use super::impl_collector::{
+    NativeBinxoCache, NativeBinxoSymbol, NativeLibCacheWriter, NativeStripProcessor,
+  };
+  use super::impl_types::{
+    DebugSymbolOutput, NativeAbiFilters, NativeBinxoCommand, NativeBuildConfig, NativeBuildError,
+    NativeBuildResult, NativeCmakeDependencyConfigurator, NativeCompilerDriver, NativeModuleLayout,
+    NativeReleaseCmakeBuildType, ResolvedNativeSdkToolchain, SanitizerLibraryEvidence,
+  };
   use super::*;
+  use arkdown_core::{
+    BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibFilterOption, NativeLibOption,
+    NativeLibPackageSelection, OhosModuleType,
+  };
+  use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
+  use arkdown_session::dependency_graph::snapshot::{
+    DependencyGraphSnapshot, DependencyNodeSnapshot,
+  };
+  use sha2::{Digest, Sha256};
+  use std::collections::BTreeMap;
+  use std::ffi::OsStr;
   use std::fs;
+  use std::io::Read;
+  use std::path::{Path, PathBuf};
+  use std::sync::Arc;
+  use std::time::UNIX_EPOCH;
+
+  const KNOWN_ABI_DIRS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "armeabi"];
 
   fn add_dependency_node(
     deps: &mut DependencyGraphSnapshot,
@@ -121,6 +103,22 @@ mod tests {
         direct_deps: Vec::new(),
       },
     );
+  }
+
+  fn collect_native_libs(collector: NativeLibCollector<'_>) -> NativeBuildResult<Vec<PathBuf>> {
+    collector.configure_cmake_dependencies()?;
+    collector.configure_native()?;
+    collector.build_native()?;
+    let processed = collector.process_libs()?;
+    let strip_inputs = if collector.is_binxo_enabled() {
+      collector.binxo_libs(&processed)?
+    } else {
+      processed
+    };
+    let stripped = collector.strip_libs(&strip_inputs)?;
+    collector.cache_libs()?;
+    collector.validate_libs(&stripped)?;
+    Ok(stripped)
   }
 
   #[test]
@@ -421,7 +419,7 @@ mod tests {
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
 
-    let command = config.ninja_command(&toolchain, "arm64-v8a");
+    let command = config.ninja_command_plan(&toolchain, "arm64-v8a").command();
     let build_dir = module_root.join(".cxx/paid/phone/release/arm64-v8a");
     let arguments = command.get_args().collect::<Vec<_>>();
 
@@ -571,7 +569,7 @@ mod tests {
     let source_map_intermediate = tmp.path().join("source_map/sourceMaps.map");
     let source_map_origin = tmp.path().join("cache/sourceMaps.map");
     let name_cache = tmp.path().join("cache/obfuscation/nameCache.json");
-    let process_libs = NativeModuleLayout::new(&module_root)
+    let process_libs = NativeModuleLayout::for_variant(&module_root, "default", "default")
       .process_libs_dir()
       .join("arm64-v8a");
     for directory in [
@@ -687,7 +685,7 @@ mod tests {
       "cmake_minimum_required(VERSION 3.16)",
     )
     .unwrap();
-    assert!(NativeModuleLayout::new(tmp.path()).has_native_code());
+    assert!(NativeModuleLayout::for_variant(tmp.path(), "default", "default").has_native_code());
   }
 
   #[test]
@@ -696,7 +694,7 @@ mod tests {
     let libs_dir = tmp.path().join("libs/arm64-v8a");
     fs::create_dir_all(&libs_dir).unwrap();
     fs::write(libs_dir.join("libfoo.so"), b"ELF\x7f").unwrap();
-    assert!(NativeModuleLayout::new(tmp.path()).has_native_code());
+    assert!(NativeModuleLayout::for_variant(tmp.path(), "default", "default").has_native_code());
   }
 
   #[test]
@@ -705,13 +703,13 @@ mod tests {
     let libs_dir = tmp.path().join("libs/arm64-v8a");
     fs::create_dir_all(&libs_dir).unwrap();
     fs::write(libs_dir.join("libexpat.so.1"), b"ELF\x7f").unwrap();
-    assert!(NativeModuleLayout::new(tmp.path()).has_native_code());
+    assert!(NativeModuleLayout::for_variant(tmp.path(), "default", "default").has_native_code());
   }
 
   #[test]
   fn test_module_without_native_code_returns_false() {
     let tmp = tempfile::tempdir().unwrap();
-    assert!(!NativeModuleLayout::new(tmp.path()).has_native_code());
+    assert!(!NativeModuleLayout::for_variant(tmp.path(), "default", "default").has_native_code());
   }
 
   #[test]
@@ -966,7 +964,7 @@ mod tests {
       collect_all_libs: false,
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
-    let out = cfg.run().expect("native scan");
+    let out = cfg.scan().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 1);
     assert_eq!(out.libs_by_abi[0].0, "arm64-v8a");
     assert!(out.libs_by_abi[0].1.file_name().unwrap() == "libnative.so");
@@ -992,7 +990,7 @@ mod tests {
       collect_all_libs: false,
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
-    let out = cfg.run().expect("native scan");
+    let out = cfg.scan().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 1);
     assert_eq!(out.libs_by_abi[0].0, "arm64-v8a");
     assert_eq!(out.libs_by_abi[0].1.file_name().unwrap(), "libexpat.so.1");
@@ -1025,7 +1023,7 @@ mod tests {
       collect_all_libs: false,
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
-    let out = cfg.run().expect("native scan");
+    let out = cfg.scan().expect("native scan");
     let names = out
       .libs_by_abi
       .iter()
@@ -1055,7 +1053,7 @@ mod tests {
       collect_all_libs: false,
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
-    let out = cfg.run().expect("native scan");
+    let out = cfg.scan().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 1);
     assert_eq!(out.libs_by_abi[0].1.file_name().unwrap(), "libnative.so");
   }
@@ -1080,7 +1078,7 @@ mod tests {
       collect_all_libs: false,
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
-    let out = cfg.run().expect("native scan");
+    let out = cfg.scan().expect("native scan");
     assert!(out.libs_by_abi.is_empty());
   }
 
@@ -1198,7 +1196,7 @@ mod tests {
       module_type: arkdown_core::OhosModuleType::Entry,
     };
     let deps = DependencyGraphSnapshot::default();
-    let layout = NativeModuleLayout::new(&module_root);
+    let layout = NativeModuleLayout::for_variant(&module_root, "default", "default");
     let source = layout.process_libs_dir().join("arm64-v8a/libentry.so");
     let destination = layout.binxo_libs_dir().join("arm64-v8a/libentry.so");
     for path in [&source, &destination] {
@@ -1311,7 +1309,7 @@ mod tests {
       collect_all_libs: false,
       release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
     };
-    let out = cfg.run().expect("native scan");
+    let out = cfg.scan().expect("native scan");
     assert_eq!(out.libs_by_abi.len(), 2);
 
     let module = ModuleConfig {
@@ -1320,8 +1318,7 @@ mod tests {
       module_type: arkdown_core::OhosModuleType::Entry,
     };
     let deps = DependencyGraphSnapshot::default();
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("collect native libs");
     assert_eq!(libs.len(), 2);
   }
@@ -1340,11 +1337,10 @@ mod tests {
       module_type: arkdown_core::OhosModuleType::Entry,
     };
     let deps = DependencyGraphSnapshot::default();
-    let packaged = NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    let packaged = collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("native stages must succeed");
 
-    let layout = NativeModuleLayout::new(&module_root);
+    let layout = NativeModuleLayout::for_variant(&module_root, "default", "default");
     let processed = layout.process_libs_dir().join("arm64-v8a/libnative.so");
     let stripped = layout.stripped_libs_dir().join("arm64-v8a/libnative.so");
     assert_eq!(packaged, vec![stripped.clone()]);
@@ -1382,11 +1378,11 @@ mod tests {
     let tmp = tempfile::tempdir().unwrap();
     let option = NativeLibOption::default();
 
-    NativeLibCacheWriter::new(tmp.path(), &option, false)
+    NativeLibCacheWriter::for_variant(tmp.path(), "default", "default", &option, false)
       .write()
       .expect("write empty native caches");
 
-    let layout = NativeModuleLayout::new(tmp.path());
+    let layout = NativeModuleLayout::for_variant(tmp.path(), "default", "default");
     assert_eq!(
       fs::read_to_string(layout.native_lib_cache_file()).unwrap(),
       r#"{"libs":{},"stripped":{}}"#
@@ -1406,9 +1402,10 @@ mod tests {
     fs::write(&library, b"ELF native").unwrap();
     let option = NativeLibOption::default();
 
-    let hashes = NativeLibCacheWriter::new(tmp.path(), &option, false)
-      .hash_directory(&root)
-      .unwrap();
+    let hashes =
+      NativeLibCacheWriter::for_variant(tmp.path(), "default", "default", &option, false)
+        .hash_directory(&root)
+        .unwrap();
     let metadata = fs::metadata(&library).unwrap();
     let modified_ms = metadata
       .modified()
@@ -1427,7 +1424,7 @@ mod tests {
   #[test]
   fn native_cache_uses_binxo_as_strip_input_only_when_binxo_is_valid() {
     let tmp = tempfile::tempdir().unwrap();
-    let layout = NativeModuleLayout::new(tmp.path());
+    let layout = NativeModuleLayout::for_variant(tmp.path(), "default", "default");
     let process = layout.process_libs_dir().join("arm64-v8a/libnative.so");
     let binxo = layout.binxo_libs_dir().join("arm64-v8a/libnative.so");
     let stripped = layout.stripped_libs_dir().join("arm64-v8a/libnative.so");
@@ -1441,7 +1438,7 @@ mod tests {
     }
     let option = NativeLibOption::default();
 
-    NativeLibCacheWriter::new(tmp.path(), &option, true)
+    NativeLibCacheWriter::for_variant(tmp.path(), "default", "default", &option, true)
       .write()
       .unwrap();
     let strip_cache: serde_json::Value =
@@ -1492,17 +1489,15 @@ mod tests {
       module_type: arkdown_core::OhosModuleType::Entry,
     };
     let deps = DependencyGraphSnapshot::default();
-    NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("first native collection must succeed");
 
     fs::remove_file(stale_source).unwrap();
     fs::write(libs_dir.join("libcurrent.so"), b"current").unwrap();
-    NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("second native collection must succeed");
 
-    let layout = NativeModuleLayout::new(&module_root);
+    let layout = NativeModuleLayout::for_variant(&module_root, "default", "default");
     assert!(!layout
       .process_libs_dir()
       .join("arm64-v8a/libstale.so")
@@ -1541,8 +1536,7 @@ mod tests {
       dep_root,
     );
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("collect native libs");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libexpat.so.1");
@@ -1575,8 +1569,7 @@ mod tests {
       dep_root,
     );
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("dependency native libs must be collected from getDefaultLibsDir");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libkept.so");
@@ -1668,16 +1661,14 @@ mod tests {
       module_type: arkdown_core::OhosModuleType::Entry,
     };
     let deps = DependencyGraphSnapshot::default();
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .with_policy(
-        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
-          collect_all_libs: true,
-          filter: NativeLibFilterOption::default(),
-          ..Default::default()
-        }),
-      )
-      .collect()
-      .expect("collectAllLibs must collect non-.so files under libs like hvigor **/*");
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+        collect_all_libs: true,
+        filter: NativeLibFilterOption::default(),
+        ..Default::default()
+      }),
+    ))
+    .expect("collectAllLibs must collect non-.so files under libs like hvigor **/*");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libnative.sym");
   }
@@ -1698,19 +1689,17 @@ mod tests {
       module_type: arkdown_core::OhosModuleType::Entry,
     };
     let deps = DependencyGraphSnapshot::default();
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .with_policy(
-        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
-          collect_all_libs: false,
-          filter: NativeLibFilterOption {
-            excludes: vec!["**/libexcluded.so".to_string()],
-            ..Default::default()
-          },
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+        collect_all_libs: false,
+        filter: NativeLibFilterOption {
+          excludes: vec!["**/libexcluded.so".to_string()],
           ..Default::default()
-        }),
-      )
-      .collect()
-      .expect("nativeLib.filter.excludes must be applied like hvigor ProcessLibs");
+        },
+        ..Default::default()
+      }),
+    ))
+    .expect("nativeLib.filter.excludes must be applied like hvigor ProcessLibs");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libkept.so");
   }
@@ -1741,25 +1730,23 @@ mod tests {
     let mut deps = DependencyGraphSnapshot::default();
     add_dependency_node(&mut deps, "native_pkg", "native_pkg", "1.2.3", dep_root);
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .with_policy(
-        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
-          collect_all_libs: false,
-          filter: NativeLibFilterOption {
-            select: vec![NativeLibPackageSelection {
-              package: "native_pkg".to_string(),
-              version: Some("1.2.3".to_string()),
-              include: Some(vec!["libinclude.so".to_string()]),
-              exclude: Some(vec!["libexclude.so".to_string()]),
-              ..Default::default()
-            }],
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+        collect_all_libs: false,
+        filter: NativeLibFilterOption {
+          select: vec![NativeLibPackageSelection {
+            package: "native_pkg".to_string(),
+            version: Some("1.2.3".to_string()),
+            include: Some(vec!["libinclude.so".to_string()]),
+            exclude: Some(vec!["libexclude.so".to_string()]),
             ..Default::default()
-          },
+          }],
           ..Default::default()
-        }),
-      )
-      .collect()
-      .expect("nativeLib.filter.select must be applied like hvigor ProcessLibs");
+        },
+        ..Default::default()
+      }),
+    ))
+    .expect("nativeLib.filter.select must be applied like hvigor ProcessLibs");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libinclude.so");
   }
@@ -1801,35 +1788,31 @@ mod tests {
       );
     }
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .with_policy(
-        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
-          collect_all_libs: false,
-          filter: NativeLibFilterOption {
-            enable_override: true,
-            ..Default::default()
-          },
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+        collect_all_libs: false,
+        filter: NativeLibFilterOption {
+          enable_override: true,
           ..Default::default()
-        }),
-      )
-      .collect()
-      .expect("enableOverride must use latest hvigor dependency traversal order");
+        },
+        ..Default::default()
+      }),
+    ))
+    .expect("enableOverride must use latest hvigor dependency traversal order");
     assert_eq!(libs.len(), 1);
     assert_eq!(fs::read(&libs[0]).unwrap(), b"ELF A");
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .with_policy(
-        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
-          collect_all_libs: false,
-          filter: NativeLibFilterOption {
-            pick_lasts: vec!["**/libdup.so".to_string()],
-            ..Default::default()
-          },
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+        collect_all_libs: false,
+        filter: NativeLibFilterOption {
+          pick_lasts: vec!["**/libdup.so".to_string()],
           ..Default::default()
-        }),
-      )
-      .collect()
-      .expect("pickLasts must use latest hvigor dependency traversal order");
+        },
+        ..Default::default()
+      }),
+    ))
+    .expect("pickLasts must use latest hvigor dependency traversal order");
     assert_eq!(libs.len(), 1);
     assert_eq!(fs::read(&libs[0]).unwrap(), b"ELF A");
   }
@@ -1855,8 +1838,7 @@ mod tests {
     add_dependency_node(&mut deps, "a", "a", "1.0.0", dep_a);
     add_dependency_node(&mut deps, "b", "b", "1.0.0", dep_b);
 
-    let err = NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    let err = collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect_err("conflicting duplicate native libs must fail like hvigor ProcessLibs");
     assert!(
       matches!(err, NativeBuildError::DuplicatedFilesFoundInLibPath { .. }),
@@ -1885,8 +1867,7 @@ mod tests {
     add_dependency_node(&mut deps, "a", "a", "1.0.0", dep_a);
     add_dependency_node(&mut deps, "b", "b", "1.0.0", dep_b);
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("same-content duplicate native libs must collapse like hvigor ProcessLibs");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libdup.so");
@@ -1902,7 +1883,8 @@ mod tests {
       },
       ..Default::default()
     };
-    let processor = NativeStripProcessor::new(tmp.path(), None, &option);
+    let processor =
+      NativeStripProcessor::for_variant(tmp.path(), "default", "default", None, &option);
     let matchers = processor.exclude_matchers().expect("valid glob");
     assert!(matchers[0].is_match("arm64-v8a/libkeep-symbols.so"));
     assert!(!processor.should_strip(true));
@@ -1915,7 +1897,8 @@ mod tests {
       },
       ..Default::default()
     };
-    let processor = NativeStripProcessor::new(tmp.path(), None, &inverted);
+    let processor =
+      NativeStripProcessor::for_variant(tmp.path(), "default", "default", None, &inverted);
     assert!(processor.should_strip(true));
     assert!(!processor.should_strip(false));
   }
@@ -1937,20 +1920,17 @@ mod tests {
     let mut deps = DependencyGraphSnapshot::default();
     add_dependency_node(&mut deps, "native_pkg", "native_pkg", "1.0.0", dep_root);
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .collect()
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps))
       .expect("HAR dependency native libraries should be excluded by default");
     assert!(libs.is_empty());
 
-    let libs = NativeLibCollector::new(&module, &[], &deps)
-      .with_policy(
-        NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
-          exclude_from_har: false,
-          ..Default::default()
-        }),
-      )
-      .collect()
-      .expect("excludeFromHar=false should include dependency native libraries");
+    let libs = collect_native_libs(NativeLibCollector::new(&module, &[], &deps).with_policy(
+      NativeLibCollectionPolicy::default().with_native_lib_option(NativeLibOption {
+        exclude_from_har: false,
+        ..Default::default()
+      }),
+    ))
+    .expect("excludeFromHar=false should include dependency native libraries");
     assert_eq!(libs.len(), 1);
     assert_eq!(libs[0].file_name().unwrap(), "libdependency.so");
   }

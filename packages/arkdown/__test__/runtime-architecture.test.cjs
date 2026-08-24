@@ -31,7 +31,7 @@ test('JavaScript remains plugin glue around Rust OXC Rolldown planners', () => {
   const taskModel = fs.readFileSync(path.join(taskRoot, 'model.rs'), 'utf8')
   const taskCommand = fs.readFileSync(path.join(taskRoot, 'command_plan.rs'), 'utf8')
   const taskEngine = fs.readFileSync(path.join(taskRoot, 'engine.rs'), 'utf8')
-  const runtimeSession = fs.readFileSync(path.resolve(__dirname, '../src/build_script_runtime_model.rs'), 'utf8')
+  const runtimeSession = fs.readFileSync(path.resolve(__dirname, '../src/build_script_runtime_model/session.rs'), 'utf8')
   assert.match(taskGraph, /pub struct RuntimeTaskGraph/)
   assert.match(taskModel, /pub struct RuntimeTaskModelBuilder/)
   assert.match(taskCommand, /pub\(crate\) struct RuntimeCommandPlanner/)

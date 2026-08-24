@@ -2726,22 +2726,6 @@ impl<'a> NativeBuildOptionMerger<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing helpers
-// ---------------------------------------------------------------------------
-
-/// Parse the contents of `build-profile.json5`.
-
-/// Extract the numeric API version from a string like `"5.0.0(12)"` → `12`.
-/// Returns `None` if no parenthesised number is found.
-
-/// Load and parse a `build-profile.json5` file from the given `root` directory.
-
-/// Load and parse `AppScope/app.json5` from the project root.
-///
-/// Returns a default (all-empty) value if the file does not exist, so callers
-/// can use it without failing on older-layout projects.
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

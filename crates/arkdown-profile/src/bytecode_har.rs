@@ -144,7 +144,7 @@ impl OhPkgMinimal {
         self.dependencies
             .keys()
             .chain(self.dynamic_dependencies.keys())
-            .chain(runtime_only_pkgs.into_iter())
+            .chain(runtime_only_pkgs)
             .filter(|name| seen.insert((*name).clone()))
             .cloned()
             .collect()

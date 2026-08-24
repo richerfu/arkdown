@@ -2,25 +2,25 @@
 
 use super::*;
 
-pub(crate) struct ModuleObfuscationContext {
-  pub(crate) config: Option<ObfuscationConfig>,
-  pub(crate) dependency_rule_files: Vec<PathBuf>,
-  pub(crate) output_target: OutputTarget,
-  pub(crate) har_artifact_type: HarArtifactType,
-  pub(crate) target_name: Option<String>,
+pub(super) struct ModuleObfuscationContext {
+  pub(super) config: Option<ObfuscationConfig>,
+  pub(super) dependency_rule_files: Vec<PathBuf>,
+  pub(super) output_target: OutputTarget,
+  pub(super) har_artifact_type: HarArtifactType,
+  pub(super) target_name: Option<String>,
 }
 
-pub(crate) struct ModuleArkguardPlanBuilder<'a> {
-  pub(crate) config: &'a ArkdownConfig,
-  pub(crate) session: &'a BuildSession,
-  pub(crate) module: &'a ModuleConfig,
-  pub(crate) loader_json: &'a LoaderJson,
-  pub(crate) bundle_out: &'a BundleStageOutput,
-  pub(crate) node_executable: PathBuf,
+pub(super) struct ModuleArkguardPlanBuilder<'a> {
+  pub(super) config: &'a ArkdownConfig,
+  pub(super) session: &'a BuildSession,
+  pub(super) module: &'a ModuleConfig,
+  pub(super) loader_json: &'a LoaderJson,
+  pub(super) bundle_out: &'a BundleStageOutput,
+  pub(super) node_executable: PathBuf,
 }
 
 impl<'a> ModuleArkguardPlanBuilder<'a> {
-  pub(crate) fn new(
+  pub(super) fn new(
     config: &'a ArkdownConfig,
     session: &'a BuildSession,
     module: &'a ModuleConfig,
@@ -38,7 +38,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
     }
   }
 
-  pub(crate) fn build(&self) -> Result<(ArkguardAdapterOptions, ObfuscationModuleInput)> {
+  pub(super) fn build(&self) -> Result<(ArkguardAdapterOptions, ObfuscationModuleInput)> {
     let source_maps_path = self
       .bundle_out
       .bundle_output
@@ -178,7 +178,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
     ))
   }
 
-  pub(crate) fn bytecode_input(&self, module: ObfuscationModuleInput) -> BytecodeObfuscationInput {
+  pub(super) fn bytecode_input(&self, module: ObfuscationModuleInput) -> BytecodeObfuscationInput {
     let module_records = self
       .bundle_out
       .bundle_output
@@ -215,7 +215,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
     }
   }
 
-  pub(crate) fn arkguard_entry_array(&self) -> Vec<String> {
+  pub(super) fn arkguard_entry_array(&self) -> Vec<String> {
     let mut entries = self.loader_json.runtime_entry_sources.clone();
     entries.extend(self.loader_json.hvigor_compile_entry.iter().cloned());
     let mut seen = FxHashSet::default();
@@ -223,7 +223,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
     entries
   }
 
-  pub(crate) fn generated_resource_table_path(&self) -> Option<PathBuf> {
+  pub(super) fn generated_resource_table_path(&self) -> Option<PathBuf> {
     self
       .loader_json
       .hvigor_compile_entry
@@ -243,17 +243,17 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
   }
 }
 
-pub(crate) struct PendingBytecodeObfuscation {
-  pub(crate) obfuscator: Obfuscator,
-  pub(crate) input: BytecodeObfuscationInput,
+pub(super) struct PendingBytecodeObfuscation {
+  pub(super) obfuscator: Obfuscator,
+  pub(super) input: BytecodeObfuscationInput,
 }
 
 impl PendingBytecodeObfuscation {
-  pub(crate) fn new(obfuscator: Obfuscator, input: BytecodeObfuscationInput) -> Self {
+  pub(super) fn new(obfuscator: Obfuscator, input: BytecodeObfuscationInput) -> Self {
     Self { obfuscator, input }
   }
 
-  pub(crate) fn run(self, module_name: &str) -> Result<()> {
+  pub(super) fn run(self, module_name: &str) -> Result<()> {
     self
       .obfuscator
       .obfuscate_bytecode(self.input)
@@ -269,7 +269,7 @@ impl PendingBytecodeObfuscation {
 }
 
 impl ModuleObfuscationContext {
-  pub(crate) fn resolve(
+  pub(super) fn resolve(
     config: &ArkdownConfig,
     session: &BuildSession,
     module: &ModuleConfig,
@@ -299,7 +299,7 @@ impl ModuleObfuscationContext {
     })
   }
 
-  pub(crate) fn is_enabled(&self, build_mode: &BuildMode) -> bool {
+  pub(super) fn is_enabled(&self, build_mode: &BuildMode) -> bool {
     // hvigor UnitTestArkCompile/OhosTestArkCompile delete obfuscationOptions;
     // local unit-test and ohosTest builds never obfuscate.
     if matches!(self.output_target, OutputTarget::Test)
@@ -314,7 +314,7 @@ impl ModuleObfuscationContext {
   }
 
   /// `ProcessObfuscationFiles.taskShouldDo()` from hvigor 6.24.3.
-  pub(crate) fn should_process_consumer_rules(
+  pub(super) fn should_process_consumer_rules(
     &self,
     module_context: &ModuleCompileContext,
     build_mode: &BuildMode,
@@ -348,7 +348,7 @@ impl ModuleObfuscationContext {
   }
 
   /// `ProcessObfuscationFiles.doTaskAction()`.
-  pub(crate) fn process_consumer_rules(
+  pub(super) fn process_consumer_rules(
     &self,
     module_context: &ModuleCompileContext,
     build_mode: &BuildMode,

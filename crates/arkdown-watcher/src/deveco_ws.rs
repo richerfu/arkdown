@@ -675,7 +675,7 @@ impl ServerState {
         // Join new room.
         self.rooms
             .entry(room_name.to_string())
-            .or_insert_with(DevEcoRoom::new)
+            .or_default()
             .add_client(client_id);
         if let Some(state) = self.clients.get_mut(&client_id) {
             state.room = Some(room_name.to_string());
@@ -1072,7 +1072,11 @@ async fn read_http_upgrade(stream: &mut TcpStream) -> Result<String, String> {
     for line in request.lines() {
         let lower = line.to_ascii_lowercase();
         if lower.starts_with("sec-websocket-key:") {
-            let key = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+            let key = line
+                .split_once(':')
+                .map_or("", |(_, value)| value)
+                .trim()
+                .to_string();
             if !key.is_empty() {
                 return Ok(key);
             }
@@ -1281,7 +1285,7 @@ fn sha1_bytes(input: &[u8]) -> [u8; 20] {
 
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
 
-        for i in 0..80 {
+        for (i, word) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
@@ -1293,7 +1297,7 @@ fn sha1_bytes(input: &[u8]) -> [u8; 20] {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[i]);
+                .wrapping_add(*word);
             e = d;
             d = c;
             c = b.rotate_left(30);

@@ -457,7 +457,6 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         let emits_javascript = self.state.javascript_module_ids.contains(module_id);
         let path = HvigorModuleSourceOutputPath::new(
             &self.output_dir,
-            self.project_root,
             ownership,
             &ownership.module_name,
             &ownership.source_file,

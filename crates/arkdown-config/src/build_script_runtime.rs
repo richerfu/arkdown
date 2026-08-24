@@ -274,31 +274,56 @@ pub struct BuildScriptCompilePluginRecord {
 pub struct BuildScriptRuntimePlanDiagnostic {
     pub code: String,
     pub message: String,
+    #[serde(flatten)]
+    context: Box<BuildScriptRuntimePlanDiagnosticContext>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildScriptRuntimePlanDiagnosticContext {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub module_name: Option<String>,
+    module_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_name: Option<String>,
+    target_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub plugin_path: Option<PathBuf>,
+    plugin_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub module: Option<String>,
+    module: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+    target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub feature: Option<String>,
+    feature: Option<String>,
 }
 
 impl BuildScriptRuntimePlanDiagnostic {
+    pub fn module_name(&self) -> Option<&str> {
+        self.context.module_name.as_deref()
+    }
+
+    pub fn target_name(&self) -> Option<&str> {
+        self.context.target_name.as_deref()
+    }
+
+    pub fn module(&self) -> Option<&str> {
+        self.context.module.as_deref()
+    }
+
+    pub fn target(&self) -> Option<&str> {
+        self.context.target.as_deref()
+    }
+
+    pub fn feature(&self) -> Option<&str> {
+        self.context.feature.as_deref()
+    }
+
     fn model(module_name: &str, message: impl Into<String>) -> Self {
         Self {
             code: "INVALID_HVIGOR_BUILD_OPTION_PLAN".to_string(),
             message: message.into(),
-            module_name: Some(module_name.to_string()),
-            target_name: None,
-            plugin_path: None,
-            module: None,
-            target: None,
-            feature: None,
+            context: Box::new(BuildScriptRuntimePlanDiagnosticContext {
+                module_name: Some(module_name.to_string()),
+                ..Default::default()
+            }),
         }
     }
 
@@ -312,12 +337,10 @@ impl BuildScriptRuntimePlanDiagnostic {
         Self {
             code: code.to_string(),
             message,
-            module_name: Some(module_name.to_string()),
-            target_name: None,
-            plugin_path: None,
-            module: None,
-            target: None,
-            feature: None,
+            context: Box::new(BuildScriptRuntimePlanDiagnosticContext {
+                module_name: Some(module_name.to_string()),
+                ..Default::default()
+            }),
         }
     }
 
@@ -327,12 +350,11 @@ impl BuildScriptRuntimePlanDiagnostic {
             message: format!(
                 "target '{target_name}' was not found for module '{module_name}' in build-profile.json5"
             ),
-            module_name: Some(module_name.to_string()),
-            target_name: Some(target_name.to_string()),
-            plugin_path: None,
-            module: None,
-            target: None,
-            feature: None,
+            context: Box::new(BuildScriptRuntimePlanDiagnosticContext {
+                module_name: Some(module_name.to_string()),
+                target_name: Some(target_name.to_string()),
+                ..Default::default()
+            }),
         }
     }
 
@@ -345,12 +367,11 @@ impl BuildScriptRuntimePlanDiagnostic {
         Self {
             code: code.to_string(),
             message: message.into(),
-            module_name: Some(module_name.to_string()),
-            target_name: None,
-            plugin_path,
-            module: None,
-            target: None,
-            feature: None,
+            context: Box::new(BuildScriptRuntimePlanDiagnosticContext {
+                module_name: Some(module_name.to_string()),
+                plugin_path,
+                ..Default::default()
+            }),
         }
     }
 
@@ -360,12 +381,12 @@ impl BuildScriptRuntimePlanDiagnostic {
             message: format!(
                 "Cangjie compilation is configured for {module_name}:{target_name}, but Arkdown cannot execute the external @ohos/cangjie-build-support task pipeline yet"
             ),
-            module_name: None,
-            target_name: None,
-            plugin_path: None,
-            module: Some(module_name.to_string()),
-            target: Some(target_name.to_string()),
-            feature: Some("cangjieOptions".to_string()),
+            context: Box::new(BuildScriptRuntimePlanDiagnosticContext {
+                module: Some(module_name.to_string()),
+                target: Some(target_name.to_string()),
+                feature: Some("cangjieOptions".to_string()),
+                ..Default::default()
+            }),
         }
     }
 }

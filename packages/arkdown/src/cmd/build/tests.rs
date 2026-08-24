@@ -1128,7 +1128,7 @@ fn unit_test_artifact_handoffs_use_the_typed_module_layout() {
   )
   .expect("source map fixture");
 
-  let layout = ModuleBuildLayout::for_test(&module_root);
+  let layout = ModuleBuildLayout::for_test_product(&module_root, "default");
   let writer = UnitTestArtifactWriter::new(&module_root, "default");
   writer
     .stage_compiled_assets(&modules_abc, Some(&source_maps))

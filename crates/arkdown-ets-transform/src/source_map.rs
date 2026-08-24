@@ -4,11 +4,9 @@ use arkdown_path::ArtifactPathSerializer;
 use rolldown_sourcemap::{OwnedSourceMap, SourceMapBuilder};
 use rustc_hash::FxHashMap;
 
-/// Source Map helpers used by the ETS transforms.
-///
-/// Keep source-map encoding delegated to Rolldown's Rust sourcemap stack. This
-/// matches Rolldown's transform pipeline and avoids locally maintaining VLQ or
-/// Source Map JSON writers.
+// Source Map helpers used by the ETS transforms. Keep source-map encoding
+// delegated to Rolldown's Rust sourcemap stack instead of maintaining VLQ or
+// Source Map JSON writers locally.
 
 /// Convert a byte `offset` in `source` to a `(0-based line, 0-based col)` pair.
 pub fn offset_to_line_col(source: &str, offset: u32) -> (u32, u32) {

@@ -1,4 +1,5 @@
 use super::*;
+use oxc_span::SourceType;
 
 use arkdown_core::{ModuleType, ResolvedId};
 

@@ -56,18 +56,6 @@ pub struct RawModuleEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing helpers
-// ---------------------------------------------------------------------------
-
-/// Parse the contents of a `module.json5` file.
-
-/// Load and parse `module.json5` from the given path.
-///
-/// `module_root` is the module directory (e.g. `{project}/entry/`).
-/// The file is expected at `{module_root}/src/main/module.json5`.
-
-/// Map the raw `module.type` string to [`arkdown_core::OhosModuleType`].
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

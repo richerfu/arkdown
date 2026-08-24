@@ -59,11 +59,10 @@ impl PackageSnapshot {
         if !path.is_file() {
             return Ok(None);
         }
-        let content =
-            std::fs::read_to_string(&path).map_err(|source| PackageSnapshotError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        let content = std::fs::read_to_string(path).map_err(|source| PackageSnapshotError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let pkg: RawOhPackage =
             json5::from_str(&content).map_err(|error| PackageSnapshotError::Parse {
                 path: path.to_path_buf(),

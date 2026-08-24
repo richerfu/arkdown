@@ -1,8 +1,4 @@
 pub mod event_emitter;
-mod version_table;
-
-#[cfg(test)]
-use std::borrow::Cow;
 
 use oxc_allocator::{Allocator, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
@@ -10,20 +6,10 @@ use oxc_ast::ast::{
     ModuleExportName, Statement, StringLiteral,
 };
 use oxc_ast::builder::AstBuilder;
-#[cfg(test)]
-use oxc_codegen::Codegen;
-#[cfg(test)]
-use oxc_parser::Parser;
 use oxc_semantic::Scoping;
-#[cfg(test)]
-use oxc_semantic::SemanticBuilder;
-#[cfg(test)]
-use oxc_span::SourceType;
 use oxc_span::{Span, SPAN};
 
 use crate::kit_map::KitEntry;
-#[cfg(test)]
-use crate::transform::source_emit::CodegenSourceText;
 use crate::ModuleExportNameText;
 
 /// Rewrite `@kit.XxxKit` named imports to individual system module imports.
@@ -308,6 +294,12 @@ impl KitImportEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::source_emit::CodegenSourceText;
+    use oxc_codegen::Codegen;
+    use oxc_parser::Parser;
+    use oxc_semantic::SemanticBuilder;
+    use oxc_span::SourceType;
+    use std::borrow::Cow;
 
     fn rewrite_source(source: &str) -> Cow<'_, str> {
         let allocator = Allocator::default();
