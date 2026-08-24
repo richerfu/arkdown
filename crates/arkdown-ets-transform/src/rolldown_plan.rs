@@ -1092,9 +1092,11 @@ impl ComponentV2SourceMapLocations {
         let mut depth = 0u32;
         let mut entered = false;
         for (line_index, line) in lines.iter().enumerate().skip(build_line) {
-            let start = (line_index == build_line)
-                .then(|| build_source.find("build(").unwrap_or_default())
-                .unwrap_or_default();
+            let start = if line_index == build_line {
+                build_source.find("build(").unwrap_or_default()
+            } else {
+                0
+            };
             for (column, byte) in line.bytes().enumerate().skip(start) {
                 match byte {
                     b'{' => {

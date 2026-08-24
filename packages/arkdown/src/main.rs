@@ -14,6 +14,8 @@
 //! | CI integration tests (`tests/`) | Fixture/parity |
 //! | Manual debugging | Supported |
 
+#![recursion_limit = "256"]
+
 use clap::{Parser, Subcommand};
 
 use arkdown_napi::cmd;

@@ -87,9 +87,9 @@ impl AotLoaderFields {
         let ap_path = Self::resolve_ap_path(config, module_cfg);
         let ap_exists = ap_path.as_ref().is_some_and(|path| path.exists());
         let has_ap_path = ap_path.is_some();
-        let ap_suffix_valid = ap_path.as_ref().map_or(true, |path| {
-            path.extension().map_or(false, |ext| ext == "ap")
-        });
+        let ap_suffix_valid = ap_path
+            .as_ref()
+            .is_none_or(|path| path.extension().is_some_and(|ext| ext == "ap"));
 
         if api_version == 9 && an_build_mode != "partial" && has_ap_path {
             panic!(

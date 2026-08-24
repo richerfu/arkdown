@@ -2806,7 +2806,6 @@ impl BuildCoordinator {
         config,
         session,
         task_lifecycle: &mut task_lifecycle,
-        project_root: &project_root,
         quickfix_version_store: &quickfix_version_store,
         quickfix_patch_version,
         quickfix_version_advanced: &mut quickfix_version_advanced,

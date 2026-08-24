@@ -42,7 +42,11 @@ pub mod progress;
 mod remote_hsp;
 mod runtime_invocation;
 mod runtime_observe;
-pub use runtime_observe::{RuntimeObservability, RuntimeProcessMonitor};
+pub use runtime_observe::{
+  emit_runtime_log, finish_runtime_observability, install_runtime_observability,
+  persist_runtime_details, persist_runtime_report, runtime_observability_is_enabled,
+  ObservabilityInstallOptions, RuntimeLogRecord, RuntimeObservability, RuntimeProcessMonitor,
+};
 mod runtime_task;
 pub mod task_cache;
 

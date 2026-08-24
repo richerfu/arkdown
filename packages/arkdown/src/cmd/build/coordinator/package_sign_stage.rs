@@ -2,20 +2,19 @@
 
 use super::*;
 
-pub(crate) struct PackageSignStageInput<'a> {
-  pub(crate) args: &'a BuildArgs,
-  pub(crate) config: &'a ArkdownConfig,
-  pub(crate) session: &'a BuildSession,
-  pub(crate) task_lifecycle: &'a mut BuildTaskLifecycle,
-  pub(crate) project_root: &'a Path,
-  pub(crate) quickfix_version_store: &'a Option<QuickFixVersionStore>,
-  pub(crate) quickfix_patch_version: Option<u64>,
-  pub(crate) quickfix_version_advanced: &'a mut bool,
-  pub(crate) progress: &'a mut Progress,
-  pub(crate) intermediate_writer: &'a IntermediateArtifactWriter,
-  pub(crate) har_dedup_project_plan: &'a HarDedupProjectPlan,
-  pub(crate) sanitizer_native_policy: &'a NativeLibCollectionPolicy,
-  pub(crate) loader_jsons: &'a [(
+pub(super) struct PackageSignStageInput<'a> {
+  pub(super) args: &'a BuildArgs,
+  pub(super) config: &'a ArkdownConfig,
+  pub(super) session: &'a BuildSession,
+  pub(super) task_lifecycle: &'a mut BuildTaskLifecycle,
+  pub(super) quickfix_version_store: &'a Option<QuickFixVersionStore>,
+  pub(super) quickfix_patch_version: Option<u64>,
+  pub(super) quickfix_version_advanced: &'a mut bool,
+  pub(super) progress: &'a mut Progress,
+  pub(super) intermediate_writer: &'a IntermediateArtifactWriter,
+  pub(super) har_dedup_project_plan: &'a HarDedupProjectPlan,
+  pub(super) sanitizer_native_policy: &'a NativeLibCollectionPolicy,
+  pub(super) loader_jsons: &'a [(
     ModuleConfig,
     HapManifest,
     LoaderJson,
@@ -23,17 +22,17 @@ pub(crate) struct PackageSignStageInput<'a> {
     String,
     Arc<ArkdownConfig>,
   )],
-  pub(crate) local_native_dependencies: &'a BTreeMap<String, Arc<[NativeCmakeLocalDependency]>>,
-  pub(crate) module_pack_info_plans: &'a [Vec<ModulePackInfoPlan>],
-  pub(crate) privacy_profile_paths: &'a [Option<PathBuf>],
-  pub(crate) module_obfuscation_contexts: &'a [ModuleObfuscationContext],
-  pub(crate) bundle_package_outs: &'a [(BundlePackageOutput,)],
-  pub(crate) output_paths: &'a mut Vec<PathBuf>,
-  pub(crate) start: Instant,
+  pub(super) local_native_dependencies: &'a BTreeMap<String, Arc<[NativeCmakeLocalDependency]>>,
+  pub(super) module_pack_info_plans: &'a [Vec<ModulePackInfoPlan>],
+  pub(super) privacy_profile_paths: &'a [Option<PathBuf>],
+  pub(super) module_obfuscation_contexts: &'a [ModuleObfuscationContext],
+  pub(super) bundle_package_outs: &'a [(BundlePackageOutput,)],
+  pub(super) output_paths: &'a mut Vec<PathBuf>,
+  pub(super) start: Instant,
 }
 
 impl BuildCoordinator {
-  pub(crate) async fn run_package_sign_stage(
+  pub(super) async fn run_package_sign_stage(
     &self,
     input: PackageSignStageInput<'_>,
   ) -> Result<Option<BuildOutput>> {
@@ -42,7 +41,6 @@ impl BuildCoordinator {
       config,
       session,
       task_lifecycle,
-      project_root,
       quickfix_version_store,
       quickfix_patch_version,
       quickfix_version_advanced,

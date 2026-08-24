@@ -1,23 +1,17 @@
 //! Native library collection, cache, strip, and configuration orchestration.
 
 use std::collections::BTreeMap;
-use std::error::Error;
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use arkdown_core::{
-  BuildMode, ExternalNativeOptions, ModuleConfig, NativeLibFilterOption, NativeLibOption,
-  NativeLibPackageSelection, OhosModuleType,
+  ModuleConfig, NativeLibFilterOption, NativeLibOption, NativeLibPackageSelection,
 };
 use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer, HvigorNativeLibraryPattern};
-use arkdown_session::dependency_graph::snapshot::{
-  DependencyGraphSnapshot, DependencyNodeSnapshot,
-};
+use arkdown_session::dependency_graph::snapshot::DependencyGraphSnapshot;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -81,22 +75,6 @@ impl<'a> NativeLibCollector<'a> {
     self
   }
 
-  pub fn collect(&self) -> NativeBuildResult<Vec<PathBuf>> {
-    self.configure_cmake_dependencies()?;
-    self.configure_native()?;
-    self.build_native()?;
-    let processed = self.process_libs()?;
-    let strip_inputs = if self.is_binxo_enabled() {
-      self.binxo_libs(&processed)?
-    } else {
-      processed
-    };
-    let stripped = self.strip_libs(&strip_inputs)?;
-    self.cache_libs()?;
-    self.validate_libs(&stripped)?;
-    Ok(stripped)
-  }
-
   pub(crate) fn configure_cmake_dependencies(&self) -> NativeBuildResult<()> {
     let native_config = self.native_build_config();
     if !native_config.should_run_native_tasks() {
@@ -141,9 +119,6 @@ impl<'a> NativeLibCollector<'a> {
       tracing::debug!(module = %self.module.src_path.display(), "native: scanning for pre-built .so files");
     }
     let native_out = self.native_build_config().scan()?;
-    for warning in &native_out.warnings {
-      tracing::warn!("{}", warning);
-    }
     let self_package = self.self_package_info();
 
     if !(self.module.module_type == arkdown_core::OhosModuleType::Har
@@ -616,10 +591,6 @@ pub(crate) struct NativeProcessLibWriter<'a> {
 }
 
 impl<'a> NativeProcessLibWriter<'a> {
-  pub(crate) fn new(module_root: &'a Path) -> Self {
-    Self::for_variant(module_root, "default", "default")
-  }
-
   pub(crate) fn for_variant(
     module_root: &'a Path,
     product_name: &'a str,
@@ -737,10 +708,6 @@ pub(crate) struct NativeLibCacheWriter<'a> {
 }
 
 impl<'a> NativeLibCacheWriter<'a> {
-  pub(crate) fn new(module_root: &'a Path, option: &'a NativeLibOption, binxo_valid: bool) -> Self {
-    Self::for_variant(module_root, "default", "default", option, binxo_valid)
-  }
-
   pub(crate) fn for_variant(
     module_root: &'a Path,
     product_name: &'a str,
@@ -875,14 +842,6 @@ pub(crate) struct NativeStripProcessor<'a> {
 }
 
 impl<'a> NativeStripProcessor<'a> {
-  pub(crate) fn new(
-    module_root: &'a Path,
-    llvm_strip: Option<PathBuf>,
-    option: &'a NativeLibOption,
-  ) -> Self {
-    Self::for_variant(module_root, "default", "default", llvm_strip, option)
-  }
-
   pub(crate) fn for_variant(
     module_root: &'a Path,
     product_name: &'a str,
@@ -1472,23 +1431,6 @@ impl<'a> NativeDuplicateFile<'a> {
 }
 
 impl NativeBuildConfig {
-  /// Scan and optionally build native libraries for this module.
-  ///
-  /// Returns all native shared libraries that should be included in the HAP/HSP artifact.
-  ///
-  /// ## Algorithm
-  ///
-  /// 1. Check for `CMakeLists.txt` in `src/main/cpp/`.  If present and
-  ///    `enable_cmake_build` is true, attempt a CMake build.
-  /// 2. Collect pre-built shared libraries from hvigor ProcessLibs inputs
-  ///    (CMake output, Cangjie output, and module-root `libs/`).
-  /// 3. Return all discovered shared libraries whose ABI matches `abi_filters`.
-  pub fn run(&self) -> NativeBuildResult<NativeBuildOutput> {
-    self.configure()?;
-    self.build()?;
-    self.scan()
-  }
-
   /// Execute the latest-hvigor `BuildNativeWithCmake` action: validate and
   /// generate the ABI-specific CMake/Ninja build trees without compiling.
   pub fn configure(&self) -> NativeBuildResult<()> {
@@ -1526,8 +1468,6 @@ impl NativeBuildConfig {
   pub fn scan(&self) -> NativeBuildResult<NativeBuildOutput> {
     let mut output = NativeBuildOutput::default();
     let abi_filters = NativeAbiFilters::new(&self.abi_filters).package_abis();
-    let cmake_file = self.cmake_lists_path();
-    let has_cmake = cmake_file.is_file();
     let search_roots = self.so_search_roots();
     for root in &search_roots {
       for abi in &abi_filters {
@@ -1553,18 +1493,6 @@ impl NativeBuildConfig {
           output.libs_by_abi.push((abi.clone(), so_path));
         }
       }
-    }
-
-    if output.libs_by_abi.is_empty() && has_cmake {
-      output.warnings.push(format!(
-        "native: no shared libraries found for module '{}' after build/import scan. \
-                 Expected paths: {:?}",
-        self.module_root.display(),
-        search_roots
-          .iter()
-          .map(|p| p.display().to_string())
-          .collect::<Vec<_>>()
-      ));
     }
 
     Ok(output)
@@ -1765,16 +1693,6 @@ impl NativeBuildConfig {
       .args(self.merged_cmake_arguments(defaults, custom))
       .current_dir(build_dir);
     command
-  }
-
-  /// Build the base Ninja command wrapped by hvigor's
-  /// `CommandBuilderModifier`, before native targets are appended.
-  pub(crate) fn ninja_command(
-    &self,
-    toolchain: &ResolvedNativeSdkToolchain<'_>,
-    abi: &str,
-  ) -> Command {
-    self.ninja_command_plan(toolchain, abi).command()
   }
 
   pub(crate) fn ninja_command_plan(

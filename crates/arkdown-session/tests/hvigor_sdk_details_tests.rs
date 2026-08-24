@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use arkdown_session::{HvigorSdkDetailsError, HvigorSdkDetailsInventory, HvigorSdkDetailsRequest};
 
 #[test]
@@ -53,7 +51,7 @@ fn open_harmony_sdk_details_read_escaped_local_properties_path() {
     .inspect()
     .expect("SDK details");
 
-    assert_eq!(snapshot.sdk_dir, PathBuf::from(sdk_root));
+    assert_eq!(snapshot.sdk_dir, sdk_root);
 }
 
 #[test]

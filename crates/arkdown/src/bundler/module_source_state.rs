@@ -92,10 +92,6 @@ impl HvigorModuleSourceState {
                     .or_default()
                     .push(HvigorResolvedImportRecord {
                         specifier: import.module_request,
-                        source_span: HvigorSourceSpan {
-                            start: import.importer_span.start,
-                            end: import.importer_span.end,
-                        },
                     });
             }
         }
@@ -362,7 +358,6 @@ pub(crate) struct HvigorCollectedModuleSource {
 #[derive(Debug, Clone)]
 pub(crate) struct HvigorResolvedImportRecord {
     pub(crate) specifier: String,
-    pub(crate) source_span: HvigorSourceSpan,
 }
 
 #[derive(Debug, Clone, Copy)]

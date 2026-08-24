@@ -138,7 +138,7 @@ impl RemoteHspObjectInventory {
                 path: root.to_path_buf(),
                 source,
             })?;
-        entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+        entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let candidate = self.inspect_directory(&entry.path(), &entry.file_name())?;
             let replace = objects
@@ -166,7 +166,7 @@ impl RemoteHspObjectInventory {
                 path: directory.to_path_buf(),
                 source,
             })?;
-        entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+        entries.sort_by_key(|entry| entry.file_name());
         let mut hsp_file_name = None;
         let mut has_package = false;
         for entry in entries {

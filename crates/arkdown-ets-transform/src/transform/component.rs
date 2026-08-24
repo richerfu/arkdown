@@ -89,8 +89,6 @@ pub struct ParamField<'a> {
 #[derive(Debug, Clone)]
 pub struct RegularField<'a> {
     pub name: String,
-    pub source_span: Span,
-    pub name_span: Span,
     pub type_annotation_ast: Option<&'a TSTypeAnnotation<'a>>,
     pub initializer: Option<FieldExpression<'a>>,
     pub optional: bool,

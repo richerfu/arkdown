@@ -1,3 +1,4 @@
+use super::module_source_state::{HvigorCollectedModuleSource, HvigorResolvedImportRecord};
 use super::*;
 use crate::chunk_module_request::HvigorChunkImportMap;
 use crate::plan::{BundlePlan, BundleRuntimePackageContext, BundleRuntimePackageInfo};
@@ -61,8 +62,8 @@ fn record_resolved_import(
         .or_default()
         .insert(specifier.to_string(), resolved_id.to_string());
     if let Some(source) = state.sources.get(importer) {
-        if let Some(source_span) =
-            source_span_for_module_request_literal(source.code.as_ref(), importer, specifier)
+        if source_span_for_module_request_literal(source.code.as_ref(), importer, specifier)
+            .is_some()
         {
             state
                 .resolved_import_records
@@ -70,7 +71,6 @@ fn record_resolved_import(
                 .or_default()
                 .push(HvigorResolvedImportRecord {
                     specifier: specifier.to_string(),
-                    source_span,
                 });
         }
     }

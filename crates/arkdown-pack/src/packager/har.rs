@@ -258,7 +258,7 @@ impl Packager {
         input: &'a HarPackInput,
         variant: &HarVariantInput,
     ) -> Result<HarArchiveEntries<'a>, PackError> {
-        let manifest = HarManifest::load(&input, &variant, &self.config)?;
+        let manifest = HarManifest::load(input, variant, &self.config)?;
         let mut entries = HarArchiveEntries::new(&input.output_path);
         match variant.artifact_type {
             HarArtifactType::Original => entries.collect_original_sources(
@@ -336,7 +336,7 @@ impl Packager {
             } else {
                 entries.insert_bytes(
                     "BuildProfile.ets",
-                    manifest.build_profile(&self.config, &variant),
+                    manifest.build_profile(&self.config, variant),
                 );
             }
         }

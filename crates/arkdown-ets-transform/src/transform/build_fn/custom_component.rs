@@ -174,16 +174,16 @@ impl CustomComponentStatementEmitter {
             .unwrap_or_else(|| context.custom_component_base_name());
         let ast = &AstBuilder::new(allocator);
         statements.push(
-            CustomComponentAstEmitter::new(
+            CustomComponentAstEmitter {
                 allocator,
                 ast,
                 name,
-                &page,
+                page: &page,
                 line,
                 col,
                 runtime_base_name,
                 context,
-            )
+            }
             .statement(params),
         );
         statements
@@ -220,16 +220,16 @@ impl CustomComponentStatementEmitter {
         let runtime_base_name = component_info
             .map(CustomComponentInfo::runtime_base_name)
             .unwrap_or_else(|| context.custom_component_base_name());
-        ReusableCustomComponentAstEmitter::new(
+        ReusableCustomComponentAstEmitter {
             allocator,
             ast,
             name,
-            &page,
+            page: &page,
             line,
             col,
             runtime_base_name,
             context,
-        )
+        }
         .statement(params, reuse_id)
     }
 }
@@ -443,28 +443,6 @@ struct CustomComponentAstEmitter<'a, 'ast, 'b> {
 }
 
 impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
-    fn new(
-        allocator: &'a Allocator,
-        ast: &'ast AstBuilder<'a>,
-        name: &'b str,
-        page: &'b str,
-        line: usize,
-        col: usize,
-        runtime_base_name: &'static str,
-        context: &'b BuildContext,
-    ) -> Self {
-        Self {
-            allocator,
-            ast,
-            name,
-            page,
-            line,
-            col,
-            runtime_base_name,
-            context,
-        }
-    }
-
     fn statement(&self, params: CustomComponentParamExpressions<'a>) -> Statement<'a> {
         Statement::new_block_statement(
             SPAN,
@@ -901,28 +879,6 @@ struct ReusableCustomComponentAstEmitter<'a, 'ast, 'b> {
 }
 
 impl<'a, 'ast, 'b> ReusableCustomComponentAstEmitter<'a, 'ast, 'b> {
-    fn new(
-        allocator: &'a Allocator,
-        ast: &'ast AstBuilder<'a>,
-        name: &'b str,
-        page: &'b str,
-        line: usize,
-        col: usize,
-        runtime_base_name: &'static str,
-        context: &'b BuildContext,
-    ) -> Self {
-        Self {
-            allocator,
-            ast,
-            name,
-            page,
-            line,
-            col,
-            runtime_base_name,
-            context,
-        }
-    }
-
     fn statement(
         &self,
         params: CustomComponentParamExpressions<'a>,

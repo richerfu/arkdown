@@ -210,6 +210,18 @@ pub struct ProfileProcessPlan {
     pub artifacts: ProfileArtifactPaths,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProfileProcessContextInput {
+    pub module_name: String,
+    pub bundle_name: String,
+    pub module_root: PathBuf,
+    pub artifacts: ProfileArtifactPaths,
+    pub is_debug: bool,
+    pub device_types: Vec<String>,
+    pub version_code: u32,
+    pub version_name: String,
+}
+
 impl ProfileProcessPlan {
     /// Construct a plan from pre-resolved context inputs.
     ///
@@ -221,19 +233,17 @@ impl ProfileProcessPlan {
     ///
     /// Corresponds to assembling `ProcessProfile` and `GenerateLoaderJson`
     /// task inputs from `TaskCreator` in hvigor.
-    pub fn from_context_input(
-        module_name: impl Into<String>,
-        bundle_name: impl Into<String>,
-        module_root: PathBuf,
-        artifacts: ProfileArtifactPaths,
-        is_debug: bool,
-        device_types: Vec<String>,
-        version_code: u32,
-        version_name: impl Into<String>,
-    ) -> Self {
-        let module_name = module_name.into();
-        let bundle_name = bundle_name.into();
-        let version_name = version_name.into();
+    pub fn from_context_input(input: ProfileProcessContextInput) -> Self {
+        let ProfileProcessContextInput {
+            module_name,
+            bundle_name,
+            module_root,
+            artifacts,
+            is_debug,
+            device_types,
+            version_code,
+            version_name,
+        } = input;
         let module_layout = ProfileModuleLayout::new(&module_root);
         let source_root = module_layout.ets_source_root();
         let module_json5_path = module_layout.module_json5();
@@ -302,16 +312,16 @@ mod tests {
 
     fn make_plan() -> ProfileProcessPlan {
         let artifacts = ProfileArtifactPaths::from_intermediates_dir("/build/intermediates");
-        ProfileProcessPlan::from_context_input(
-            "entry",
-            "com.example.app",
-            PathBuf::from("/project/entry"),
+        ProfileProcessPlan::from_context_input(ProfileProcessContextInput {
+            module_name: "entry".to_string(),
+            bundle_name: "com.example.app".to_string(),
+            module_root: PathBuf::from("/project/entry"),
             artifacts,
-            true,
-            vec!["phone".to_string()],
-            1000000,
-            "1.0.0",
-        )
+            is_debug: true,
+            device_types: vec!["phone".to_string()],
+            version_code: 1000000,
+            version_name: "1.0.0".to_string(),
+        })
     }
 
     #[test]

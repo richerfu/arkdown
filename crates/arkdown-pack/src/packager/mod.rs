@@ -282,12 +282,9 @@ impl Packager {
         resources_src_dirs: &[PathBuf],
         module_json: &serde_json::Value,
     ) -> Option<Vec<serde_json::Value>> {
-        let Some(extension_abilities) = module_json
+        let extension_abilities = module_json
             .pointer("/module/extensionAbilities")
-            .and_then(|value| value.as_array())
-        else {
-            return None;
-        };
+            .and_then(|value| value.as_array())?;
 
         let mut out = Vec::new();
         for ability in extension_abilities {

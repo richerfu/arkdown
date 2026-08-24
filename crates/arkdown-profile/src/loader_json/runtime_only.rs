@@ -82,9 +82,9 @@ impl<'a> RuntimeOnlyCollector<'a> {
         // D3: also collect sources from dependency metadata.runtimeOnly.sources.
         // Matches hvigor's processIndirectDependency() over the dependency graph.
         for pkg_dir in &self.declared_dependency_roots {
-            let rt = self.read_pkg_runtime_only(&pkg_dir);
+            let rt = self.read_pkg_runtime_only(pkg_dir);
             for source in &rt.sources {
-                self.collect_source_config_entry(&pkg_dir, source, &mut files);
+                self.collect_source_config_entry(pkg_dir, source, &mut files);
             }
         }
 
@@ -110,7 +110,7 @@ impl<'a> RuntimeOnlyCollector<'a> {
         // D3: also include runtimeOnly.packages from dependency metadata
         // (matches hvigor's processIndirectDependency() over the dependency graph).
         for pkg_dir in &self.declared_dependency_roots {
-            packages.extend(self.read_pkg_runtime_only_packages(&pkg_dir));
+            packages.extend(self.read_pkg_runtime_only_packages(pkg_dir));
         }
 
         let mut files = Vec::new();

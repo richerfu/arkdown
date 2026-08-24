@@ -130,12 +130,6 @@ pub struct PluginFactoryInput {
     /// This feeds the SDK-equivalent `NavigationBuilderRegister` emission for
     /// local global `@Builder` functions.
     pub navigation_routes: NavigationRouteMap,
-    /// Package roots resolved from the current module's declared dependency graph.
-    ///
-    /// ImportCheck treats these roots as legal package-interface targets even
-    /// when the resolver maps a package import to a workspace `file:` HAR path
-    /// instead of an `oh_modules` path.
-    pub allowed_package_roots: Vec<PathBuf>,
     /// Package index resolved from the current module's declared dependency
     /// graph.
     ///
@@ -199,7 +193,6 @@ impl PluginFactoryInput {
             component_metadata: ComponentMetadata::default(),
             transform_sources: TransformSourceSnapshot::default(),
             navigation_routes: NavigationRouteMap::default(),
-            allowed_package_roots: vec![],
             package_resolution: Arc::new(PackageResolutionPlan::default()),
             source_set_overlays: vec![],
             checker_mode: CheckerMode::Oxc,
@@ -683,6 +676,12 @@ impl<'a> PluginFactory<'a> {
             .iter()
             .find_map(|(name, root)| (name == &module_name).then(|| root.clone()))
             .unwrap_or_else(|| module_root.clone());
+        let import_check_module_roots = self
+            .input
+            .all_module_roots
+            .iter()
+            .map(|(_, root)| root.clone())
+            .collect();
 
         let package_plugins = self
             .input
@@ -723,13 +722,10 @@ impl<'a> PluginFactory<'a> {
 
         // ── 4. ImportCheckPlugin (hvigor: sensitiveCheck) ────────────────────
         let import_check_plugin: SharedPluginable = Arc::new(ImportCheckPlugin::with_policy(
-            // `import-check-plugin.ts::getBelongModulePath` compares
-            // resolved files with `allModulePaths`, whose entries are
-            // OHOS package roots. `loader.json#moduleRootPath` is only the
-            // active `src/main` source root and would incorrectly reject
-            // sibling target source sets such as `src/ohosTest`.
-            package_module_root.clone(),
-            self.input.allowed_package_roots,
+            // `import-check-plugin.ts::getBelongModulePath` compares the
+            // importer with `allModulePaths`, whose entries are OHOS package
+            // roots rather than active `src/main` source roots.
+            import_check_module_roots,
             self.input.no_external_import_by_path,
         ));
 

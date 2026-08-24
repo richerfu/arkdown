@@ -75,12 +75,11 @@ impl OhosResolvePlugin {
         }
     }
 
-    /// Synchronous resolution helper used in unit tests.
-    #[cfg(test)]
-    pub(crate) fn resolve_sync(
+    fn resolve_request(
         &self,
         specifier: &str,
         importer: Option<&str>,
+        import_kind: ImportKind,
     ) -> anyhow::Result<Option<HookResolveIdOutput>> {
         let specifier = ResolveHookSpecifier::new(specifier);
         if specifier.is_virtual() {
@@ -107,7 +106,7 @@ impl OhosResolvePlugin {
         let resolved = match self.resolver.resolve_with_kind(
             specifier.as_str(),
             importer_path,
-            ResolveImportKind::Import,
+            resolve_import_kind(import_kind),
         ) {
             Ok(resolved) => resolved,
             Err(err) => return Err(err.into()),
@@ -132,55 +131,8 @@ impl Plugin for OhosResolvePlugin {
         _ctx: &PluginContext,
         args: &HookResolveIdArgs<'_>,
     ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
-        let specifier = args.specifier.to_owned();
-        let importer = args.importer.map(str::to_owned);
-        let resolver = Arc::clone(&self.resolver);
-        let project_root = self.project_root.clone();
-        let import_kind = args.kind;
-
-        async move {
-            let s = ResolveHookSpecifier::new(specifier.as_str());
-
-            if s.is_virtual() {
-                return Ok(None);
-            }
-
-            if s.is_native_shared_object() {
-                return Ok(Some(s.native_shared_object_output()));
-            }
-
-            // Fast path: colon-form OHOS builtins are always external.
-            if s.is_builtin_external() {
-                return Ok(Some(s.unresolved_external_output()));
-            }
-
-            // Absolute paths: let rolldown's default resolver handle them.
-            if s.is_absolute_path() {
-                return Ok(None);
-            }
-
-            let importer_path_buf: PathBuf;
-            let importer_path: &Path = if let Some(ref imp) = importer {
-                importer_path_buf = PathBuf::from(imp.as_str());
-                &importer_path_buf
-            } else {
-                project_root.as_path()
-            };
-
-            let resolved = match resolver.resolve_with_kind(
-                s.as_str(),
-                importer_path,
-                resolve_import_kind(import_kind),
-            ) {
-                Ok(resolved) => resolved,
-                Err(err) => return Err(err.into()),
-            };
-
-            let output =
-                ResolveHookOutputMapper::new(project_root.as_path()).map_resolved(resolved)?;
-
-            Ok(Some(output))
-        }
+        let result = self.resolve_request(args.specifier, args.importer, args.kind);
+        async move { result }
     }
 
     fn load(
@@ -463,7 +415,7 @@ mod tests {
     fn test_bundle_ref_is_external() {
         let plugin = make_plugin();
         let result = plugin
-            .resolve_sync("@bundle:com.foo/entry/ets/Index", None)
+            .resolve_request("@bundle:com.foo/entry/ets/Index", None, ImportKind::Import)
             .unwrap();
         let id = result.unwrap();
         assert!(matches!(id.external, Some(ResolvedExternal::Bool(true))));
@@ -473,7 +425,11 @@ mod tests {
     #[test]
     fn test_unknown_bare_specifier_is_reported() {
         let plugin = make_plugin();
-        let result = plugin.resolve_sync("some-unknown-package", Some("/tmp/main.ets"));
+        let result = plugin.resolve_request(
+            "some-unknown-package",
+            Some("/tmp/main.ets"),
+            ImportKind::Import,
+        );
         assert!(result.is_err());
     }
 
@@ -481,7 +437,11 @@ mod tests {
     fn test_native_shared_object_uses_hvigor_ignore_virtual_id() {
         let plugin = make_plugin();
         let result = plugin
-            .resolve_sync("libmtlauncher.so", Some("/tmp/main.ets"))
+            .resolve_request(
+                "libmtlauncher.so",
+                Some("/tmp/main.ets"),
+                ImportKind::Import,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(result.id.as_str(), "\0hvigor_ignore_libmtlauncher.so");
@@ -508,7 +468,7 @@ mod tests {
     fn test_unknown_relative_specifier_returns_error() {
         let plugin = make_plugin();
         let err = plugin
-            .resolve_sync("./missing", Some("/tmp/main.ets"))
+            .resolve_request("./missing", Some("/tmp/main.ets"), ImportKind::Import)
             .expect_err("relative resolution must stay strict");
         assert!(err.to_string().contains("Module not found"));
     }
@@ -517,7 +477,7 @@ mod tests {
     fn test_shared_ref_is_external() {
         let plugin = make_plugin();
         let result = plugin
-            .resolve_sync("@shared:com.example/sharedlib", None)
+            .resolve_request("@shared:com.example/sharedlib", None, ImportKind::Import)
             .unwrap();
         let id = result.unwrap();
         assert!(matches!(id.external, Some(ResolvedExternal::Bool(true))));
@@ -528,7 +488,7 @@ mod tests {
     fn test_builtin_ohos_specifier_is_external() {
         let plugin = make_plugin();
         let result = plugin
-            .resolve_sync("@ohos:hilog", Some("/tmp/main.ets"))
+            .resolve_request("@ohos:hilog", Some("/tmp/main.ets"), ImportKind::Import)
             .unwrap()
             .unwrap();
         assert!(matches!(
@@ -579,7 +539,11 @@ mod tests {
         );
 
         let result = plugin
-            .resolve_sync("@ohos/hypium", Some(importer.to_string_lossy().as_ref()))
+            .resolve_request(
+                "@ohos/hypium",
+                Some(importer.to_string_lossy().as_ref()),
+                ImportKind::Import,
+            )
             .unwrap()
             .unwrap();
 
@@ -622,7 +586,7 @@ mod tests {
         );
 
         let result = plugin
-            .resolve_sync("decl-only", Some("/tmp/main.ets"))
+            .resolve_request("decl-only", Some("/tmp/main.ets"), ImportKind::Import)
             .unwrap()
             .unwrap();
         assert!(result.id.starts_with(HVIGOR_IGNORE_PREFIX));
@@ -656,7 +620,7 @@ mod tests {
         );
 
         let result = plugin
-            .resolve_sync("@kit.ArkData", Some("/tmp/main.ets"))
+            .resolve_request("@kit.ArkData", Some("/tmp/main.ets"), ImportKind::Import)
             .unwrap()
             .unwrap();
         assert!(matches!(

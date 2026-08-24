@@ -223,7 +223,7 @@ impl HvigorSdkDetailsInventory {
             return roots;
         };
         let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+        entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let Ok(file_type) = entry.file_type() else {
                 continue;

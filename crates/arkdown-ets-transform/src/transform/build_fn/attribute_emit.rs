@@ -607,26 +607,6 @@ impl<'a, 'ctx> AttributeArgumentEmitter<'a, 'ctx> {
         }
     }
 
-    pub(super) fn arguments<'b>(
-        &self,
-        arguments: &[Argument<'_>],
-        allocator: &'b Allocator,
-    ) -> OxcVec<'b, Argument<'b>> {
-        if let Some(context) = self.context {
-            return AttributeBindingArgumentEmitter::new(
-                self.component_name,
-                self.attr_name,
-                self.builder_methods,
-                context,
-            )
-            .arguments(arguments, allocator);
-        }
-        BuildArgumentEmitter::new()
-            .with_optional_context(self.context)
-            .with_nested_raw_object_rewrite()
-            .arguments_with_allocator(arguments, allocator)
-    }
-
     pub(super) fn argument_refs<'b>(
         &self,
         arguments: &[&Argument<'_>],
@@ -668,19 +648,6 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
             builder_methods,
             context,
         }
-    }
-
-    pub(super) fn arguments<'b>(
-        &self,
-        arguments: &[Argument<'_>],
-        allocator: &'b Allocator,
-    ) -> OxcVec<'b, Argument<'b>> {
-        let processed = arguments
-            .iter()
-            .enumerate()
-            .map(|(index, argument)| self.argument(argument, index, allocator))
-            .collect();
-        self.double_dollar_arguments(processed, allocator)
     }
 
     pub(super) fn argument_refs<'b>(
@@ -1836,90 +1803,8 @@ impl ComponentCallStatementEmitter {
         )
     }
 
-    pub(super) fn attribute<'b>(
-        ast: &AstBuilder<'b>,
-        allocator: &'b Allocator,
-        component_name: &str,
-        attr_name: &str,
-        arguments: &[Argument<'_>],
-        builder_methods: &FxHashSet<String>,
-        context: &BuildContext,
-    ) -> Statement<'b> {
-        Self::attribute_with_source(
-            ast,
-            allocator,
-            component_name,
-            attr_name,
-            arguments,
-            builder_methods,
-            context,
-            SPAN,
-            SPAN,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn attribute_with_source<'b>(
-        ast: &AstBuilder<'b>,
-        allocator: &'b Allocator,
-        component_name: &str,
-        attr_name: &str,
-        arguments: &[Argument<'_>],
-        builder_methods: &FxHashSet<String>,
-        context: &BuildContext,
-        component_span: Span,
-        attribute_span: Span,
-    ) -> Statement<'b> {
-        let arguments = AttributeArgumentEmitter::new(
-            component_name,
-            attr_name,
-            builder_methods,
-            Some(context),
-        )
-        .arguments(arguments, allocator);
-        if context.is_extend_attribute(component_name, attr_name) {
-            return Self::raw_identifier_call(
-                ast,
-                &GeneratedViewpuName::extend_function(component_name, attr_name),
-                arguments,
-            );
-        }
-        if context
-            .runtime_names()
-            .component_attribute_requires_bind(attr_name)
-        {
-            return Self::raw_bound_call(ast, component_name, attr_name, arguments, context);
-        }
-        Self::raw_call_with_source(
-            ast,
-            component_name,
-            attr_name,
-            arguments,
-            component_span,
-            attribute_span,
-        )
-    }
-
     pub(super) fn is_animation_attribute(attr_name: &str) -> bool {
         attr_name == Self::ANIMATION_ATTRIBUTE
-    }
-
-    pub(super) fn animation<'b>(
-        ast: &AstBuilder<'b>,
-        allocator: &'b Allocator,
-        arguments: &[Argument<'_>],
-        context: &BuildContext,
-    ) -> Statement<'b> {
-        let arguments = BuildArgumentEmitter::new()
-            .with_context(context)
-            .with_nested_raw_object_rewrite()
-            .arguments_with_allocator(arguments, allocator);
-        Self::raw_call(
-            ast,
-            &context.runtime_names().component_context,
-            Self::ANIMATION_ATTRIBUTE,
-            arguments,
-        )
     }
 
     pub(super) fn animation_refs<'b>(
@@ -1962,28 +1847,6 @@ impl ComponentCallStatementEmitter {
         statements.extend(std::mem::replace(segment, OxcVec::new_in(&allocator)));
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn push_animation_segment<'b>(
-        statements: &mut OxcVec<'b, Statement<'b>>,
-        segment: &mut OxcVec<'b, Statement<'b>>,
-        ast: &AstBuilder<'b>,
-        allocator: &'b Allocator,
-        arguments: &[Argument<'_>],
-        context: &BuildContext,
-        emit_configuration: bool,
-        emit_clear: bool,
-    ) {
-        if emit_configuration {
-            statements.push(Self::animation(ast, allocator, arguments, context));
-            Self::flush_animation_segment(statements, segment, allocator);
-        } else {
-            debug_assert!(segment.is_empty());
-        }
-        if emit_clear {
-            statements.push(Self::clear_animation(ast, context));
-        }
-    }
-
     pub(super) fn push_animation_ref_segment<'b>(
         statements: &mut OxcVec<'b, Statement<'b>>,
         segment: &mut OxcVec<'b, Statement<'b>>,
@@ -2007,10 +1870,6 @@ impl ComponentCallStatementEmitter {
 
     pub(super) fn is_null_animation_refs(arguments: &[&Argument<'_>]) -> bool {
         matches!(arguments, [argument] if matches!(argument, Argument::NullLiteral(_)))
-    }
-
-    pub(super) fn is_null_animation(arguments: &[Argument<'_>]) -> bool {
-        matches!(arguments, [Argument::NullLiteral(_)])
     }
 
     pub(super) fn argument_refs<'b>(

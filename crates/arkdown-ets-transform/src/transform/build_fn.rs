@@ -2164,11 +2164,6 @@ impl BuildContext {
         self.extend_attributes.contains(component_name, attr_name)
     }
 
-    fn is_create_bind_component(&self, component_name: &str) -> bool {
-        self.component_metadata
-            .is_create_bind_component(component_name)
-    }
-
     fn is_builder_attribute_without_key(&self, attr_name: &str) -> bool {
         self.component_metadata
             .is_builder_attribute_without_key(attr_name)

@@ -297,16 +297,6 @@ impl<'a> CollectFilePath<'a> {
         Self { path }
     }
 
-    pub(crate) fn default_for_module(module_root: &Path) -> PathBuf {
-        module_root
-            .join("build")
-            .join("default")
-            .join("intermediates")
-            .join("har_files")
-            .join("default")
-            .join("har_files.json")
-    }
-
     /// Derive a short HAR package name from the collect file path.
     ///
     /// Uses the file stem of the collect file (e.g. `"har_files"` from

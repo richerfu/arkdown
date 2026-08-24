@@ -1,35 +1,13 @@
-#[cfg(test)]
-use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, Program, PropertyKey,
     Statement, StructElement, StructStatement, TSType,
 };
-#[cfg(test)]
-use oxc_parser::Parser;
-#[cfg(test)]
-use oxc_span::SourceType;
 use std::path::Path;
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use rustc_hash::FxHashSet;
-
-/// Run all etsChecker validation rules against the given source text.
-///
-/// Returns a list of diagnostics (errors and warnings). The list may be empty.
-/// This function never panics — parse errors are silently skipped so that
-/// downstream transforms can still attempt to proceed.
-#[cfg(test)]
-fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(file).unwrap_or_else(|_| SourceType::ets());
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.diagnostics.is_empty() {
-        return Vec::new();
-    }
-    EtsChecker::new(&parsed.program, file).check()
-}
 
 pub struct EtsChecker<'program, 'alloc, 'file> {
     program: &'program Program<'alloc>,
@@ -1005,6 +983,19 @@ impl<'a> CheckerSourcePath<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn check(source: &str, file: &str) -> Vec<EtsTransformError> {
+        let allocator = Allocator::default();
+        let source_type = SourceType::from_path(file).unwrap_or_else(|_| SourceType::ets());
+        let parsed = Parser::new(&allocator, source, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Vec::new();
+        }
+        EtsChecker::new(&parsed.program, file).check()
+    }
 
     fn has_error_containing(source: &str, fragment: &str) -> bool {
         let errs = check(source, "test.ets");

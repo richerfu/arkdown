@@ -310,11 +310,13 @@ mod tests {
 
     #[test]
     fn preview_mode_active() {
-        let mut inv = BuildModeInventory::default();
-        inv.preview = Some(PreviewInventory {
-            preview_port: Some(8080),
+        let inv = BuildModeInventory {
+            preview: Some(PreviewInventory {
+                preview_port: Some(8080),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         assert!(inv.has_active_mode());
         assert_eq!(inv.preview_inputs().unwrap().preview_port, Some(8080));
     }
@@ -322,11 +324,13 @@ mod tests {
     #[test]
     fn reload_patch_config_forwarded() {
         let patch = std::path::PathBuf::from("/project/patch.json");
-        let mut inv = BuildModeInventory::default();
-        inv.reload = Some(ReloadInventory {
-            patch_config: Some(patch.clone()),
+        let inv = BuildModeInventory {
+            reload: Some(ReloadInventory {
+                patch_config: Some(patch.clone()),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         assert_eq!(inv.reload_patch_config(), Some(&patch));
     }
 

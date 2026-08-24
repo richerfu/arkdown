@@ -38,8 +38,6 @@ pub(crate) use module_path_map::{HvigorChunkSource, HvigorChunkSourceKind, Hvigo
 pub(crate) use module_source_id::{
     HvigorModuleSourceFileAttribution, HvigorModuleSourceId, HvigorModuleSourceOutputPath,
 };
-#[cfg(test)]
-pub(crate) use module_source_state::{HvigorCollectedModuleSource, HvigorResolvedImportRecord};
 pub(crate) use module_source_state::{HvigorModuleSourceState, HvigorSourceSpan, ModuleGraphFacts};
 pub(crate) use module_source_writer::HvigorModuleSourceWriter;
 #[cfg(feature = "memory-diagnostics")]
@@ -227,14 +225,19 @@ impl Bundler {
         // `SHIMMED_EXPORT` is always suppressed, `SOURCEMAP_BROKEN` only in FA
         // mode (out of scope), and everything else is `console.warn` to the
         // build log. The scan warnings must not be silently dropped.
+        let mut emitted_warnings = FxHashSet::default();
         for warning in &module_source_scan.warnings {
-            if warning.kind().to_string() == "SHIMMED_EXPORT" {
+            let kind = warning.kind().to_string();
+            if kind == "SHIMMED_EXPORT" {
                 continue;
             }
-            let message = format!("{}: {}", warning.kind(), warning);
-            match warning.id() {
-                Some(module_id) => tracing::warn!("{module_id}: {message}"),
-                None => tracing::warn!("{message}"),
+            let message = format!("{kind}: {warning}");
+            let rendered = warning.id().map_or_else(
+                || message.clone(),
+                |module_id| format!("{module_id}: {message}"),
+            );
+            if emitted_warnings.insert(rendered.clone()) {
+                tracing::warn!("{rendered}");
             }
         }
 

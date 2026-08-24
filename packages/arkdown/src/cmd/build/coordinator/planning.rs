@@ -2,12 +2,12 @@
 
 use super::*;
 
-pub(crate) struct TargetBuildExecutionPlan {
-  pub(crate) target_names: Vec<String>,
+pub(super) struct TargetBuildExecutionPlan {
+  pub(super) target_names: Vec<String>,
 }
 
 impl TargetBuildExecutionPlan {
-  pub(crate) fn new(
+  pub(super) fn new(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     args: &BuildArgs,
@@ -56,7 +56,7 @@ impl TargetBuildExecutionPlan {
     Self::from_implicit_targets(applicable_target_names)
   }
 
-  pub(crate) fn is_device_test(args: &BuildArgs) -> bool {
+  pub(super) fn is_device_test(args: &BuildArgs) -> bool {
     args.native_task_roots.iter().any(|root| {
       matches!(
         root.task_name.as_str(),
@@ -65,7 +65,7 @@ impl TargetBuildExecutionPlan {
     })
   }
 
-  pub(crate) fn aligned_target_for_action(
+  pub(super) fn aligned_target_for_action(
     output_target: &OutputTarget,
     args: &BuildArgs,
   ) -> Option<String> {
@@ -76,7 +76,7 @@ impl TargetBuildExecutionPlan {
       .flatten()
   }
 
-  pub(crate) fn from_implicit_targets(target_names: impl IntoIterator<Item = String>) -> Self {
+  pub(super) fn from_implicit_targets(target_names: impl IntoIterator<Item = String>) -> Self {
     let mut selected = Vec::new();
     for target_name in target_names {
       // Hvigor 6.24.3 `ModuleTaskService.targetNeedPack()` treats an ordinary
@@ -94,12 +94,12 @@ impl TargetBuildExecutionPlan {
   }
 }
 
-pub(crate) struct ModuleTargetSelection {
-  pub(crate) target: EffectiveTargetConfig,
+pub(super) struct ModuleTargetSelection {
+  pub(super) target: EffectiveTargetConfig,
 }
 
 impl ModuleTargetSelection {
-  pub(crate) fn resolve_build(
+  pub(super) fn resolve_build(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
@@ -152,7 +152,7 @@ impl ModuleTargetSelection {
     Self { target }
   }
 
-  pub(crate) fn resolve_dependency(
+  pub(super) fn resolve_dependency(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
@@ -202,7 +202,7 @@ impl ModuleTargetSelection {
     Self { target }
   }
 
-  pub(crate) fn first_named_target<'a>(
+  pub(super) fn first_named_target<'a>(
     targets: &[EffectiveTargetConfig],
     candidates: impl IntoIterator<Item = &'a str>,
   ) -> Option<EffectiveTargetConfig> {
@@ -214,7 +214,7 @@ impl ModuleTargetSelection {
     None
   }
 
-  pub(crate) fn named_synthetic_target(name: &str) -> Self {
+  pub(super) fn named_synthetic_target(name: &str) -> Self {
     Self {
       target: EffectiveTargetConfig {
         name: name.to_string(),
@@ -223,13 +223,13 @@ impl ModuleTargetSelection {
     }
   }
 
-  pub(crate) fn default_target() -> Self {
+  pub(super) fn default_target() -> Self {
     Self {
       target: Self::default_target_config(),
     }
   }
 
-  pub(crate) fn default_target_config() -> EffectiveTargetConfig {
+  pub(super) fn default_target_config() -> EffectiveTargetConfig {
     EffectiveTargetConfig {
       name: "default".to_string(),
       ..EffectiveTargetConfig::default()
@@ -238,14 +238,14 @@ impl ModuleTargetSelection {
 }
 
 #[derive(Clone)]
-pub(crate) struct ModuleBuildConfiguration {
-  pub(crate) target_name: String,
-  pub(crate) target: EffectiveTargetConfig,
-  pub(crate) config: Arc<ArkdownConfig>,
+pub(super) struct ModuleBuildConfiguration {
+  pub(super) target_name: String,
+  pub(super) target: EffectiveTargetConfig,
+  pub(super) config: Arc<ArkdownConfig>,
 }
 
 impl ModuleBuildConfiguration {
-  pub(crate) fn resolve_build(
+  pub(super) fn resolve_build(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
@@ -264,7 +264,7 @@ impl ModuleBuildConfiguration {
     Self::resolve_for_target(config, build_options, module, target, build_script_override)
   }
 
-  pub(crate) fn resolve_dependency(
+  pub(super) fn resolve_dependency(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
@@ -283,7 +283,7 @@ impl ModuleBuildConfiguration {
     Self::resolve_for_target(config, build_options, module, target, build_script_override)
   }
 
-  pub(crate) fn resolve_for_target(
+  pub(super) fn resolve_for_target(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
@@ -336,16 +336,16 @@ impl ModuleBuildConfiguration {
 /// `ConfigureCmake.PackageResolver`. This keeps dependency target selection in
 /// the coordinator and passes only resolved immutable native data to the
 /// native domain owner.
-pub(crate) struct NativeCmakeLocalDependencyInventoryBuilder<'a> {
-  pub(crate) config: &'a ArkdownConfig,
-  pub(crate) session: &'a BuildSession,
-  pub(crate) args: &'a BuildArgs,
-  pub(crate) target_name: &'a str,
-  pub(crate) dependencies: &'a DependencyGraphSnapshot,
+pub(super) struct NativeCmakeLocalDependencyInventoryBuilder<'a> {
+  pub(super) config: &'a ArkdownConfig,
+  pub(super) session: &'a BuildSession,
+  pub(super) args: &'a BuildArgs,
+  pub(super) target_name: &'a str,
+  pub(super) dependencies: &'a DependencyGraphSnapshot,
 }
 
 impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
-  pub(crate) fn new(
+  pub(super) fn new(
     config: &'a ArkdownConfig,
     session: &'a BuildSession,
     args: &'a BuildArgs,
@@ -361,7 +361,7 @@ impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
     }
   }
 
-  pub(crate) fn build(&self) -> Result<Vec<NativeCmakeLocalDependency>> {
+  pub(super) fn build(&self) -> Result<Vec<NativeCmakeLocalDependency>> {
     let dependency_roots = self
       .dependencies
       .nodes
@@ -418,14 +418,14 @@ impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
 /// coarse stage waves without adding HAR/HSP modules to the artifact build
 /// set. `ConfigureCmake` and `BuildNativeWithNinja` consume these modules as
 /// native prerequisites only.
-pub(crate) struct NativeDependencyStagePlanBuilder<'a> {
-  pub(crate) config: &'a ArkdownConfig,
-  pub(crate) session: &'a BuildSession,
-  pub(crate) args: &'a BuildArgs,
+pub(super) struct NativeDependencyStagePlanBuilder<'a> {
+  pub(super) config: &'a ArkdownConfig,
+  pub(super) session: &'a BuildSession,
+  pub(super) args: &'a BuildArgs,
 }
 
 impl<'a> NativeDependencyStagePlanBuilder<'a> {
-  pub(crate) fn new(
+  pub(super) fn new(
     config: &'a ArkdownConfig,
     session: &'a BuildSession,
     args: &'a BuildArgs,
@@ -437,7 +437,7 @@ impl<'a> NativeDependencyStagePlanBuilder<'a> {
     }
   }
 
-  pub(crate) fn build(
+  pub(super) fn build(
     &self,
     roots: &[&ModuleConfig],
     root_configs: &[ModuleBuildConfiguration],
@@ -465,7 +465,7 @@ impl<'a> NativeDependencyStagePlanBuilder<'a> {
     ))
   }
 
-  pub(crate) fn visit(
+  pub(super) fn visit(
     &self,
     module: &ModuleConfig,
     super_target: &str,
@@ -556,7 +556,7 @@ impl<'a> NativeDependencyStagePlanBuilder<'a> {
     Ok(Some(wave))
   }
 
-  pub(crate) fn direct_local_dependencies(
+  pub(super) fn direct_local_dependencies(
     &self,
     module: &ModuleConfig,
   ) -> Result<Vec<ModuleConfig>> {
@@ -595,17 +595,17 @@ impl<'a> NativeDependencyStagePlanBuilder<'a> {
 /// Builds the exact dependency custom-type input list consumed by
 /// `ArkCompile.collectCustomTypes()`. Local source HARs use their effective
 /// target build option; packaged HARs use `metadata.customTypes`.
-pub(crate) struct DependencyCustomTypeInputBuilder<'a> {
-  pub(crate) dependencies: &'a DependencyGraphSnapshot,
-  pub(crate) config: &'a ArkdownConfig,
-  pub(crate) build_options: &'a BuildOptionProfileInventory,
-  pub(crate) target_name: &'a str,
-  pub(crate) module_overrides: &'a BTreeMap<String, serde_json::Value>,
-  pub(crate) properties: &'a HvigorRuntimeProperties,
+pub(super) struct DependencyCustomTypeInputBuilder<'a> {
+  pub(super) dependencies: &'a DependencyGraphSnapshot,
+  pub(super) config: &'a ArkdownConfig,
+  pub(super) build_options: &'a BuildOptionProfileInventory,
+  pub(super) target_name: &'a str,
+  pub(super) module_overrides: &'a BTreeMap<String, serde_json::Value>,
+  pub(super) properties: &'a HvigorRuntimeProperties,
 }
 
 impl<'a> DependencyCustomTypeInputBuilder<'a> {
-  pub(crate) fn new(
+  pub(super) fn new(
     dependencies: &'a DependencyGraphSnapshot,
     config: &'a ArkdownConfig,
     build_options: &'a BuildOptionProfileInventory,
@@ -623,7 +623,7 @@ impl<'a> DependencyCustomTypeInputBuilder<'a> {
     }
   }
 
-  pub(crate) fn collect(&self) -> Result<Vec<DependencyCustomTypeInput>> {
+  pub(super) fn collect(&self) -> Result<Vec<DependencyCustomTypeInput>> {
     let mut output = Vec::new();
     let mut seen = BTreeSet::new();
     for edge in &self.dependencies.edges {
@@ -692,7 +692,7 @@ impl<'a> DependencyCustomTypeInputBuilder<'a> {
 }
 
 /// Recursively copy a directory tree (hvigor `fs-extra.copy` semantics).
-pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+pub(super) fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
   for entry in walkdir::WalkDir::new(source) {
     let entry = entry.map_err(|error| anyhow::anyhow!("copy tree walk: {error}"))?;
     let relative = entry
@@ -712,14 +712,14 @@ pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
   Ok(())
 }
 
-pub(crate) struct BuildTimingProbe<'a> {
-  pub(crate) stage: &'static str,
-  pub(crate) module: Option<&'a str>,
-  pub(crate) start: Instant,
+pub(super) struct BuildTimingProbe<'a> {
+  pub(super) stage: &'static str,
+  pub(super) module: Option<&'a str>,
+  pub(super) start: Instant,
 }
 
 impl<'a> BuildTimingProbe<'a> {
-  pub(crate) fn global(stage: &'static str) -> Self {
+  pub(super) fn global(stage: &'static str) -> Self {
     Self {
       stage,
       module: None,
@@ -727,7 +727,7 @@ impl<'a> BuildTimingProbe<'a> {
     }
   }
 
-  pub(crate) fn module(module: &'a str, stage: &'static str) -> Self {
+  pub(super) fn module(module: &'a str, stage: &'static str) -> Self {
     Self {
       stage,
       module: Some(module),

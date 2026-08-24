@@ -38,10 +38,6 @@ impl HarDedupModulePlan {
     self.bytecode_har_packages.contains(package_name)
   }
 
-  pub(super) fn bytecode_har_packages(&self) -> &BTreeSet<String> {
-    &self.bytecode_har_packages
-  }
-
   pub(super) fn collect_bytecode_module_ids<'a>(
     &self,
     external_module_ids: impl IntoIterator<Item = &'a String>,

@@ -104,7 +104,6 @@ fn runtime_planner_selects_targets_and_merges_build_options_in_rust() {
             })),
             kind: Some("hap".to_string()),
             package: json!({ "name": "entry" }),
-            ..Default::default()
         }],
         product_name: "default".to_string(),
         build_mode_name: "debug".to_string(),
@@ -349,8 +348,8 @@ fn runtime_planner_returns_typed_unknown_target_diagnostic() {
         .plan()
         .expect_err("unknown target must be rejected");
     assert_eq!(diagnostic.code, "UNKNOWN_MODULE_TARGET_IN_COMMAND_LINE");
-    assert_eq!(diagnostic.module_name.as_deref(), Some("entry"));
-    assert_eq!(diagnostic.target_name.as_deref(), Some("missing"));
+    assert_eq!(diagnostic.module_name(), Some("entry"));
+    assert_eq!(diagnostic.target_name(), Some("missing"));
 }
 
 #[test]
@@ -536,7 +535,7 @@ fn runtime_planner_rejects_selected_cangjie_build_before_native_execution() {
         .expect("Cangjie requires an unsupported external task pipeline");
 
     assert_eq!(diagnostic.code, "ARKDOWN_UNSUPPORTED_CANGJIE_BUILD");
-    assert_eq!(diagnostic.module.as_deref(), Some("entry"));
-    assert_eq!(diagnostic.target.as_deref(), Some("default"));
-    assert_eq!(diagnostic.feature.as_deref(), Some("cangjieOptions"));
+    assert_eq!(diagnostic.module(), Some("entry"));
+    assert_eq!(diagnostic.target(), Some("default"));
+    assert_eq!(diagnostic.feature(), Some("cangjieOptions"));
 }

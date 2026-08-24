@@ -15,8 +15,6 @@ use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
-#[cfg(test)]
-use oxc_span::SourceType;
 use oxc_span::SPAN;
 use oxc_str::Str;
 use oxc_syntax::reference::ReferenceId;
@@ -77,20 +75,6 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
     pub(super) fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
         self.module_analyzer = module_analyzer;
         self
-    }
-
-    pub(crate) fn split_program<'ast>(
-        &self,
-        allocator: &'ast Allocator,
-        program: &mut Program<'ast>,
-        scoping: &Scoping,
-    ) -> bool {
-        self.split_program_with_inlined_const_enum_imports(
-            allocator,
-            program,
-            scoping,
-            &FxHashSet::default(),
-        )
     }
 
     /// Split imports after the SDK const-enum pass has replaced property
@@ -317,11 +301,11 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
         let usage =
             ImportLocalReferenceUsage::new(self.scoping, symbol_id, self.import_equals_usage);
         if usage.is_unused() {
-            return self
-                .inlined_const_enum_import_locals
-                .contains(local_name)
-                .then_some(ImportBindingDecision::Type)
-                .unwrap_or(ImportBindingDecision::Drop);
+            return if self.inlined_const_enum_import_locals.contains(local_name) {
+                ImportBindingDecision::Type
+            } else {
+                ImportBindingDecision::Drop
+            };
         }
         if usage.has_value {
             return if self.imported_binding_is_declared_type(imported_name) {
@@ -1537,14 +1521,12 @@ impl<'a> TopLevelBindingKindCollector<'a> {
                     ModuleBindingKind::Value,
                 );
             }
-            Statement::TSNamespaceDeclaration(declaration) => {
-                if !declaration.declare {
-                    ModuleBindingKind::record(
-                        bindings,
-                        declaration.id.name.to_string(),
-                        ModuleBindingKind::Value,
-                    );
-                }
+            Statement::TSNamespaceDeclaration(declaration) if !declaration.declare => {
+                ModuleBindingKind::record(
+                    bindings,
+                    declaration.id.name.to_string(),
+                    ModuleBindingKind::Value,
+                );
             }
             Statement::TSImportEqualsDeclaration(declaration) => {
                 ModuleBindingKind::record(
@@ -1700,6 +1682,7 @@ impl<'a, 'b> BindingNameCollector<'a, 'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxc_span::SourceType;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1753,7 +1736,12 @@ mod tests {
         let scoping = semantic_ret.semantic.into_scoping();
         let changed = TypeOnlyNamedImportSplitter::new(id, sources)
             .with_module_analyzer(module_analyzer)
-            .split_program(&allocator, &mut parsed.program, &scoping);
+            .split_program_with_inlined_const_enum_imports(
+                &allocator,
+                &mut parsed.program,
+                &scoping,
+                &FxHashSet::default(),
+            );
         if changed {
             Cow::Owned(codegen_source(&parsed.program))
         } else {
@@ -1878,7 +1866,8 @@ export const AESEncrypt: (input: string, key: string, iv: string) => EncryptionR
         assert!(split.contains("export type { EncryptionResult };"));
 
         let emitted = TypeScriptJavascriptEmitter::new(&split, importer_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("type-only import/export must be valid TypeScript");
         assert!(emitted.contains("libmtcrypto.so"));
         assert!(!emitted.contains("../../cpp/types/libmtcrypto"));
@@ -2013,7 +2002,8 @@ export { EncryptionResult };
         );
 
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("type-only reexport must be valid TypeScript");
         assert!(emitted.contains("AESUtil"));
         assert!(!emitted.contains("EncryptionResult"));
@@ -2072,7 +2062,8 @@ export { setSwitchTestEnvListener, removeSwitchTestEnvListener, switchTestEnvLis
             dispatcher.to_str().unwrap(),
             &sources,
         )
-        .emit()
+        .emit_with_source_map()
+        .map(|output| output.code)
         .expect("type-only local export must be valid TypeScript");
         assert!(dispatcher_emitted.contains("setSwitchTestEnvListener"));
         assert!(!dispatcher_emitted.contains("switchTestEnvListener"));
@@ -2094,7 +2085,8 @@ export { setSwitchTestEnvListener, removeSwitchTestEnvListener, switchTestEnvLis
             switch_test_env.to_str().unwrap(),
             &sources,
         )
-        .emit()
+        .emit_with_source_map()
+        .map(|output| output.code)
         .expect("type-only reexport must be valid TypeScript");
         assert!(switch_emitted.contains("setSwitchTestEnvListener"));
         assert!(!switch_emitted.contains("switchTestEnvListener"));
@@ -2115,7 +2107,8 @@ export { setSwitchTestEnvListener, removeSwitchTestEnvListener, switchTestEnvLis
         );
         let index_emitted =
             TypeScriptJavascriptEmitter::new(&index_split, index.to_str().unwrap(), &sources)
-                .emit()
+                .emit_with_source_map()
+                .map(|output| output.code)
                 .expect("type-only reexport must be valid TypeScript");
         assert!(index_emitted.contains("setSwitchTestEnvListener"));
         assert!(!index_emitted.contains("switchTestEnvListener"));
@@ -2159,7 +2152,8 @@ export {
         );
         let http_emitted =
             TypeScriptJavascriptEmitter::new(&http_split, http.to_str().unwrap(), &sources)
-                .emit()
+                .emit_with_source_map()
+                .map(|output| output.code)
                 .expect("local interface export list must be valid TypeScript");
         assert!(http_emitted.contains("getCardDataAndFormat"));
         assert!(!http_emitted.contains("ShowData"));
@@ -2180,7 +2174,8 @@ export {
         );
         let index_emitted =
             TypeScriptJavascriptEmitter::new(&index_split, index.to_str().unwrap(), &sources)
-                .emit()
+                .emit_with_source_map()
+                .map(|output| output.code)
                 .expect("type-only index reexport must be valid TypeScript");
         assert!(index_emitted.contains("getCardDataAndFormat"));
         assert!(!index_emitted.contains("ShowData"));
@@ -2312,7 +2307,8 @@ export { InterruptConfig };"#;
             "{split}"
         );
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("type-only local export must be valid TypeScript");
         assert!(!emitted.contains("InterruptConfig"));
         assert!(!emitted.contains("types/Interceptor"));
@@ -2348,7 +2344,8 @@ export interface RerouteOptions {
             "{split}"
         );
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("type-only reexport must be valid TypeScript");
         assert!(!emitted.contains("QueryRerouteConfigInfo"));
         assert!(!emitted.contains("RerouteOptions"));
@@ -2420,7 +2417,8 @@ export class RNInstancesCoordinator {}"#;
             "{split}"
         );
         let emitted = TypeScriptJavascriptEmitter::new(&split, entry_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("type-only reexport must be valid TypeScript");
         assert!(emitted.contains("RNInstancesCoordinator"));
         assert!(!emitted.contains("RNInstancesCoordinatorOptions"));
@@ -2453,7 +2451,8 @@ export namespace AddressDataCenter {
         assert_eq!(split, index_source);
 
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("runtime namespace reexport must be valid TypeScript");
         assert!(
             emitted.contains("AddressDataCenter"),
@@ -2496,7 +2495,8 @@ export { UnreadResponseData }"#;
         );
 
         let emitted = TypeScriptJavascriptEmitter::new(&split, unread_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("default interface import/export must be valid TypeScript");
         assert!(emitted.contains("requestUnread"));
         assert!(!emitted.contains("UnreadResponseData"));
@@ -2610,7 +2610,8 @@ export { Model as default };"#;
             "{split}"
         );
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("default type alias reexport must be valid TypeScript");
         assert!(!emitted.contains("Model"));
         assert!(!emitted.contains("./models"));
@@ -2644,7 +2645,8 @@ export const RuntimeModel = {
             "{split}"
         );
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("type export-all chain must be valid TypeScript");
         assert!(!emitted.contains("Model"));
         assert!(!emitted.contains("./barrel"));
@@ -2709,7 +2711,8 @@ export enum NetworkType {
             "{split}"
         );
         let emitted = TypeScriptJavascriptEmitter::new(&split, core_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("type-only package reexport must be valid TypeScript");
         assert!(emitted.contains("NetworkType"));
         assert!(!emitted.contains("IKNBInitConfig"));
@@ -2756,7 +2759,8 @@ export const nativeCall: () => void;"#;
             "{split}"
         );
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("native declaration type reexport must be valid TypeScript");
         assert!(emitted.contains("nativeCall"));
         assert!(!emitted.contains("EdgeType"));
@@ -2936,7 +2940,8 @@ export const logan = loganNapi;"#;
         );
         assert!(split.contains("export const logan = loganNapi;"), "{split}");
         let emitted = TypeScriptJavascriptEmitter::new(&split, index_id, &sources)
-            .emit()
+            .emit_with_source_map()
+            .map(|output| output.code)
             .expect("native default import must be valid TypeScript");
         assert!(emitted.contains("loganNapi"), "{emitted}");
     }

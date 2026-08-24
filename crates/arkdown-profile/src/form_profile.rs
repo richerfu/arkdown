@@ -422,7 +422,7 @@ impl FormProfileProcessor {
         let entries = match fs_err::read_dir(&profile_dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ArkdownError::Io(error.into())),
+            Err(error) => return Err(ArkdownError::Io(error)),
         };
         for entry in entries {
             let entry = entry?;

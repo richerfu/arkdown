@@ -8,7 +8,6 @@
 //! to the file that actually declares it; a new import statement is emitted
 //! per declaration file.
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use oxc_allocator::{Allocator, CloneIn, FromIn, GetAllocator, Vec as OxcVec};
@@ -17,7 +16,6 @@ use oxc_ast::ast::{
     StringLiteral,
 };
 use oxc_ast::builder::AstBuilder;
-use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_span::SPAN;
 use oxc_str::Str;
@@ -25,8 +23,6 @@ use oxc_str::Str;
 use rustc_hash::FxHashSet;
 
 use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
-use crate::transform::source_emit::HvigorTypescriptPrinter;
-use crate::transform::source_text::ViewpuOutputText;
 use crate::transform::TransformOptions;
 
 /// Parse `source`, expand package-level imports into direct source-file
@@ -54,46 +50,6 @@ pub(crate) fn apply_to_program<'a>(
         &options.hsp_har_package_names,
     );
     rewriter.expand(program, allocator)
-}
-
-/// Parse `source`, expand package-level imports into direct source-file
-/// imports, and print the result. Returns the input unchanged when expansion
-/// does not apply.
-pub(crate) fn apply<'a>(
-    source: &'a str,
-    id: &str,
-    options: &TransformOptions,
-    sources: &TransformSourceSnapshot,
-) -> Cow<'a, str> {
-    let Some(expand) = options.expand_import_path.as_ref() else {
-        return Cow::Borrowed(source);
-    };
-    if !expand.enable {
-        return Cow::Borrowed(source);
-    }
-    let allocator = Allocator::default();
-    let source_type = CompileArktsSourceType::from_id(id);
-    let mut parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.diagnostics.is_empty() {
-        return Cow::Borrowed(source);
-    }
-
-    let rewriter =
-        ImportPathExpander::new(id, &expand.exclude, sources, &options.hsp_har_package_names);
-    if !rewriter.expand(&mut parsed.program, &allocator) {
-        return Cow::Borrowed(source);
-    }
-    let code = HvigorTypescriptPrinter::print(
-        &parsed.program,
-        CodegenOptions {
-            comments: CommentOptions::disabled(),
-            source_map_path: None,
-            indent_char: IndentChar::Space,
-            indent_width: 4,
-            ..CodegenOptions::default()
-        },
-    );
-    Cow::Owned(ViewpuOutputText::new(code).without_extra_trailing_blank_lines())
 }
 
 struct ImportPathExpander<'a> {
@@ -256,7 +212,7 @@ impl<'a> ImportPathExpander<'a> {
                 }
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
                     let imported_name = specifier.imported.name().as_str();
-                    let Some((decl_file, export_name, is_default)) = self.resolve_symbol(
+                    let Some((decl_file, _export_name, is_default)) = self.resolve_symbol(
                         &entry_path,
                         imported_name,
                         false,
@@ -275,7 +231,6 @@ impl<'a> ImportPathExpander<'a> {
                             group.1.push(ExpandedSpecifier::Named {
                                 local: specifier.local.clone_in(ast.allocator()),
                                 imported: specifier.imported.clone_in(ast.allocator()),
-                                export_name,
                                 is_default,
                             });
                             *span = (*span).min(specifier.span.start);
@@ -287,7 +242,6 @@ impl<'a> ImportPathExpander<'a> {
                                 vec![ExpandedSpecifier::Named {
                                     local: specifier.local.clone_in(ast.allocator()),
                                     imported: specifier.imported.clone_in(ast.allocator()),
-                                    export_name,
                                     is_default,
                                 }],
                             ));
@@ -539,7 +493,6 @@ enum ExpandedSpecifier<'b> {
     Named {
         local: oxc_ast::ast::BindingIdentifier<'b>,
         imported: oxc_ast::ast::ModuleExportName<'b>,
-        export_name: String,
         is_default: bool,
     },
 }
@@ -549,6 +502,9 @@ use arkdown_path::{ArtifactPathSerializer, ModuleSpecifierText};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::source_emit::HvigorTypescriptPrinter;
+    use crate::transform::source_text::ViewpuOutputText;
+    use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
     use std::sync::Arc;
 
     fn snapshot(files: &[(&str, &str)]) -> TransformSourceSnapshot {
@@ -565,7 +521,34 @@ mod tests {
         options: &TransformOptions,
         sources: &TransformSourceSnapshot,
     ) -> String {
-        apply(source, id, options, sources).into_owned()
+        let Some(expand) = options.expand_import_path.as_ref() else {
+            return source.to_string();
+        };
+        if !expand.enable {
+            return source.to_string();
+        }
+        let allocator = Allocator::default();
+        let source_type = CompileArktsSourceType::from_id(id);
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        if !parsed.diagnostics.is_empty() {
+            return source.to_string();
+        }
+        let rewriter =
+            ImportPathExpander::new(id, &expand.exclude, sources, &options.hsp_har_package_names);
+        if !rewriter.expand(&mut parsed.program, &allocator) {
+            return source.to_string();
+        }
+        let code = HvigorTypescriptPrinter::print(
+            &parsed.program,
+            CodegenOptions {
+                comments: CommentOptions::disabled(),
+                source_map_path: None,
+                indent_char: IndentChar::Space,
+                indent_width: 4,
+                ..CodegenOptions::default()
+            },
+        );
+        ViewpuOutputText::new(code).without_extra_trailing_blank_lines()
     }
 
     fn options() -> TransformOptions {
