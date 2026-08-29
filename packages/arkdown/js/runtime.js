@@ -3,11 +3,9 @@
 const fs = require('node:fs')
 const crypto = require('node:crypto')
 const Module = require('node:module')
-const nativeModuleLoad = Module._load
 const os = require('node:os')
 const path = require('node:path')
-const util = require('node:util')
-const nativeRuntimeBinding = require('./index.js')
+const nativeRuntimeBinding = require('../index.js')
 
 // Behavior baseline verified against the hvigor bundled with DevEco Studio
 // 6.1.1. Keep this explicit so compatibility changes are evidence-driven.
@@ -47,235 +45,67 @@ const SIMPLE_OHOS_FACADE_FIELDS = {
     getEtsComponentReleaseType: 'etsComponentReleaseType',
   },
 }
+const UNSUPPORTED_HVIGOR_INTERNAL_EXPORTS = new Set(
+  `
+    AnalyzeModeMap CUSTOM_WORKER_REQUEST CacheStore CacheStoreManager ContinualEvent
+    DEFAULT_HVIGOR_CONFIG_JSON_FILE_NAME DurationEvent ExtendedErrorInfo GlobalParam
+    HVIGOR_PROJECT_WRAPPER_HOME HvigorBuildConst HvigorCommonConst HvigorConfigLoader HvigorLogger
+    HvigorSystemPlugin HvigorTaskGroupType INCREMENTAL_OPTIMIZATION Json5Reader LocalFileWriter
+    LogLevelMap MAIN_THREAD MarkEvent MarkEventType MetricEventType MetricFactory MetricLogType
+    MetricService OHOS_ARK_COMPILE_SOURCE_MAP_DIR ParseJsonFile PathUtil PoolConstant
+    ProjectCacheService ReplacePlaceHolderUtil ReportServiceImpl TaskDirectedAcyclicGraph TaskProxy
+    Tasks TcbStore TraceManager TrackAPI WatchEvent WithParamReplacement WorkerEvent
+    WorkerPoolDelegator addExtensionHandler addLayout configure connectLogger coreParameter
+    doCompilePluginTypeCheck formatTime formatTimeToNumber getAlignTarget getConfiguration
+    getHvigorConfigValue getLogger globalData hash hashFile iconv isConfigured isLinux isMac
+    isWindows levelMap levels maxPathLength noop normalWorker parseJsonFile projectTaskDag
+    readJavaDaemonInfoFromCacheFile recording replaceBundleName setCategoriesLevel shutdown
+    splitTime startEnvironment watchWorker
+  `
+    .trim()
+    .split(/\s+/),
+)
 
-function createHvigorPublicUtilities(host, options = {}) {
-  // Hvigor owns its public utility surface. Arkdown only binds process-global
-  // services to the active Rust build session; duplicating these utilities here
-  // makes compatibility drift inevitable and keeps plugin code on the JS path.
-  const load = (specifier) => nativeModuleLoad.call(Module, specifier, module, false)
-  const official = load('@ohos/hvigor')
-  const exports = { ...official }
-  // The Harmony npm registry publishes the readable core only through
-  // 6.24.2, while DevEco Studio 6.1.1 ships the 6.24.3 wrapper. Preserve the
-  // only version-bearing public class field without reimplementing the class.
-  exports.HvigorSystemPlugin = class HvigorSystemPlugin extends official.HvigorSystemPlugin {
-    constructor(pluginId) {
-      super(pluginId)
-      this.pluginVersion = HVIGOR_PARITY_VERSION
-    }
+const { createHvigorTaskUtilities } = require('./hvigor-task-runtime')
+const { createHvigorParameterUtilities } = require('./hvigor-parameter-runtime')
+const {
+  createHvigorPublicFacade,
+  createRuntimeLoggerFactory,
+  createToolingModelRegistry,
+} = require('./hvigor-public-runtime')
+const { createHvigorWorkerRuntime } = require('./hvigor-worker-runtime')
+
+function createHvigorPublicUtilities(host) {
+  const publicFacade = createHvigorPublicFacade(nativeRuntimeBinding)
+  const loggerFactory = createRuntimeLoggerFactory(nativeRuntimeBinding)
+  const workerPool = createHvigorWorkerRuntime(nativeRuntimeBinding, host, {
+    priority: publicFacade.Priority,
+    worker: publicFacade.workerConstants,
+  })
+  const taskUtilities = createHvigorTaskUtilities(nativeRuntimeBinding, {
+    getLogger: (category) => loggerFactory.getLogger(category),
+    getWorkerPool: () => workerPool,
+  })
+  const defaultModelRegistry = createToolingModelRegistry(loggerFactory.getLogger('ToolingModelBeanRegistry'))
+  const exports = {
+    hvigor: {},
+    BuildResult: publicFacade.BuildResult,
+    FileUtil: publicFacade.FileUtil,
+    Priority: publicFacade.Priority,
+    TaskState: publicFacade.TaskState,
+    replacer: publicFacade.replacer,
+    ...taskUtilities,
+    defaultModelRegistry,
   }
-  official.coreParameter.clean()
-  official.coreParameter.properties = host._coreParameter.properties
-  official.coreParameter.extParams = host._coreParameter.extParams
-  Object.assign(official.coreParameter.startParams, host._coreParameter.startParams)
-  official.coreParameter.startParams.logLevel =
-    official.levelMap.get(String(official.coreParameter.startParams.logLevel || 'info').toLowerCase()) ||
-    official.levelMap.get('info')
-  official.coreParameter.workspaceDir = host._coreParameter.workspaceDir
-  host._coreParameter = official.coreParameter
-  host._parameter = official.hvigorCore.getParameter()
-  class PathUtil extends official.PathUtil {
-    static getHvigorCacheDir(logger) {
-      return host.hvigorCacheDir(logger)
-    }
-
-    static getReportDirPath() {
-      return path.resolve(this.getHvigorCacheDir(), 'report')
-    }
-  }
-
-  const configuration = official.getConfiguration()
-  configuration.appenders['debug-log-file'].filename = path.resolve(
-    options.cacheDir || host.hvigorCacheDir(),
-    'outputs',
-    'build-logs',
-    'build.log',
-  )
-  let consoleOwner = options.consoleOwner === 'tracing' ? 'tracing' : 'log4js'
-  const nativeAppender = {
-    configure: () => (event) => {
-      const level = event.level.levelStr.toLowerCase()
-      if (!nativeRuntimeBinding.runtimeObservabilityIsEnabled(level, 'arkdown_napi::hvigor')) return
-      nativeRuntimeBinding.emitRuntimeLog({
-        level,
-        category: event.categoryName,
-        message: official.replaceBundleName(
-          util.format(...event.data),
-          host._runtimeSession.selectedProductBundleName(),
-        ),
-        source: 'js_plugin',
-      })
-    },
-  }
-  const activeLoggingConfiguration = () => {
-    // log4js appender definitions may contain factory functions. Preserve
-    // those official Hvigor values while isolating the arrays we mutate.
-    const active = {
-      ...configuration,
-      appenders: Object.fromEntries(
-        Object.entries(configuration.appenders).map(([name, value]) => [name, { ...value }]),
-      ),
-      categories: Object.fromEntries(
-        Object.entries(configuration.categories).map(([name, value]) => [
-          name,
-          { ...value, appenders: [...value.appenders] },
-        ]),
-      ),
-    }
-    delete active.appenders['debug-log-file']
-    delete active.categories['debug-file']
-    active.appenders['arkdown-native'] = { type: nativeAppender }
-    active.appenders.silent ||= { type: 'stdout', layout: { type: 'dummy' } }
-    active.categories['debug-file'] = { appenders: ['silent'], level: 'off' }
-    for (const value of Object.values(active.categories)) {
-      if (value.level !== 'off' && !value.appenders.includes('arkdown-native')) value.appenders.push('arkdown-native')
-    }
-    if (consoleOwner === 'tracing') {
-      active.categories.default.appenders = ['arkdown-native']
-      active.categories['no-pattern-info'].appenders = ['arkdown-native']
-    }
-    return active
-  }
-  const applyConsoleOwner = (owner) => {
-    consoleOwner = owner === 'tracing' ? 'tracing' : 'log4js'
-    const active = activeLoggingConfiguration()
-    Object.assign(configuration.appenders, active.appenders)
-    Object.assign(configuration.categories, active.categories)
-    official.configure(configuration)
-    official.HvigorLogger.clean()
-    host._observabilityEnabledCache = new Map()
-  }
-  const configuredLogLevel = String(options.logLevel ?? 'debug').toLowerCase()
-  const logLevel = official.levelMap.get(configuredLogLevel) || official.levelMap.get('debug')
-  official.setCategoriesLevel(logLevel)
-  for (const [category, value] of Object.entries(configuration.categories)) {
-    if (!category.includes('file')) value.level = logLevel.levelStr.toLowerCase()
-  }
-  applyConsoleOwner(consoleOwner)
-
-  class HvigorConfigLoader {
-    static getInstance() {
-      this.instance ||= new HvigorConfigLoader()
-      return this.instance
-    }
-
-    static clean() {
-      this.instance = undefined
-    }
-
-    static init(config = {}) {
-      for (const entry of toArray(config.config)) {
-        const separator = typeof entry === 'string' ? entry.indexOf('=') : -1
-        if (separator < 0) continue
-        const key = entry.slice(0, separator).replace(/^properties\./, '')
-        official.coreParameter.properties[key] = this._coerce(entry.slice(separator + 1))
-      }
-    }
-
-    static _coerce(value) {
-      try {
-        return JSON.parse(value)
-      } catch {
-        return value
-      }
-    }
-
-    getHvigorConfig() {
-      return mergeHvigorConfig(host._userHvigorConfig, host._projectHvigorConfig)
-    }
-
-    getPropertiesConfigValue(name) {
-      const environment = process.env.config
-      if (environment) {
-        try {
-          const value = JSON.parse(environment)[`properties.${name}`]
-          if (value !== undefined) return HvigorConfigLoader._coerce(value)
-        } catch {}
-      }
-      return this.getHvigorConfig()?.properties?.[name]
-    }
-  }
-
-  class TraceManager extends official.TraceManager {
-    flush() {
-      for (const callback of Object.values(this.callBackList)) callback()
-      if (!host.observabilityInstalled()) host.installObservability()
-      return nativeRuntimeBinding.persistRuntimeDetails(JSON.stringify(structuredClone(this.data), official.replacer))
-    }
-
-    static trace(key, data, callback) {
-      this.instance ||= new TraceManager()
-      this.instance.trace(key, data, callback)
-    }
-  }
-
-  class ReportServiceImpl extends official.ReportServiceImpl {
-    constructor() {
-      super()
-      this.reportListeners = [official.MetricService.getInstance()]
-    }
-
-    static getInstance() {
-      this.instance ||= new ReportServiceImpl()
-      return this.instance
-    }
-
-    report() {
-      if (!host.observabilityInstalled()) host.installObservability()
-      ReportServiceImpl.buildId = exports.globalData.buildId
-      return nativeRuntimeBinding.persistRuntimeReport(
-        JSON.stringify(this.getReport(), official.replacer),
-        official.coreParameter.properties['hvigor.analyzeHtml'] === true,
-      )
-    }
-
-    startProcessMonitor() {
-      this.processMemorySampler ||= () => process.memoryUsage()
-      this.processMonitor ||= new nativeRuntimeBinding.RuntimeProcessMonitor(this.processMemorySampler, process.pid)
-      this.processMonitor.start()
-    }
-
-    stopProcessMonitor() {
-      this.processMonitor?.stop()
-    }
-  }
-
-  host._officialCompilePluginTypeCheck = official.doCompilePluginTypeCheck
-  applyConsoleOwner(consoleOwner)
+  const nativeFileApi = new nativeRuntimeBinding.RuntimeHvigorFileApi()
   const bindTaskToSession = (task, sync = false) => {
-    wrapIncrementalDeclarations(task, official)
+    wrapIncrementalDeclarations(task, exports)
     task.__arkdownClassTask = true
     task.__arkdownSyncTask = sync
-    task.taskLog = official.HvigorLogger.getLogger(task.getPath())
+    task.taskLog = loggerFactory.getLogger(task.getPath())
     return task
   }
-
-  const addExtensionHandler = (suffixes) => {
-    for (const suffix of suffixes) {
-      Module._extensions[suffix] = (mod, filename) => {
-        mod._compile(
-          compileHvigorScriptSync(path.resolve(filename), Boolean(host.startParameters().printStackTrace)),
-          filename,
-        )
-      }
-    }
-  }
-  exports.PathUtil = PathUtil
-  exports.HvigorConfigLoader = HvigorConfigLoader
-  exports.getHvigorConfigValue = (key) => {
-    const value = key
-      .split('.')
-      .reduce((current, part) => current?.[part], HvigorConfigLoader.getInstance().getHvigorConfig())
-    return value === false
-  }
-  exports.bindTaskToSession = bindTaskToSession
-  exports.TraceManager = TraceManager
-  exports.ReportServiceImpl = ReportServiceImpl
-  exports.startEnvironment = {
-    nodeHome: host.config.nodeHome ?? process.env.NODE_HOME ?? '',
-    workspaceDir: host._parameter.getWorkspaceDirInternal(),
-  }
-  official.globalData.init(
+  host._parameterUtilities.globalData.init(
     {
       ...process.env,
       cwd: host.projectRoot,
@@ -283,10 +113,12 @@ function createHvigorPublicUtilities(host, options = {}) {
     },
     { ...host.config, _: host._commandEntryTasks },
   )
-  exports.globalData = official.globalData
-  exports.doCompilePluginTypeCheck = (pluginFile) => host._typeCheckCompilePlugin(pluginFile)
-  exports.addExtensionHandler = addExtensionHandler
-  exports.applyConsoleOwner = applyConsoleOwner
+  Object.defineProperties(exports, {
+    bindTaskToSession: { value: bindTaskToSession },
+    hash: { value: (value) => nativeFileApi.hashText(String(value)) },
+    loggerFactory: { value: loggerFactory },
+    workerPool: { value: workerPool },
+  })
   return exports
 }
 
@@ -749,19 +581,29 @@ function aliasMethods(target, aliases) {
 }
 
 function createRuntimeLifecycle(host) {
-  const callbacks = new Map(HVIGOR_LIFECYCLE_HOOKS.map((name) => [name, []]))
+  const lifecycle = new nativeRuntimeBinding.RuntimeHvigorLifecycle()
+  const invocationValues = new Map()
+  let nextInvocation = 0
   return {
     register(name, callback) {
       if (typeof callback !== 'function') {
         throw host._error('INVALID_HVIGOR_LIFECYCLE_CALLBACK', `hvigor.${name} expects a function`)
       }
-      callbacks.get(name).push(callback)
+      lifecycle.register(name, (invocation) => callback(invocationValues.get(invocation)))
     },
     clear() {
-      for (const hookCallbacks of callbacks.values()) hookCallbacks.length = 0
+      lifecycle.clear()
+      invocationValues.clear()
     },
     async runHook(name, value) {
-      for (const callback of callbacks.get(name) || []) await callback(value)
+      const invocation = nextInvocation
+      nextInvocation = (nextInvocation + 1) >>> 0
+      invocationValues.set(invocation, value)
+      try {
+        await lifecycle.runHook(name, invocation)
+      } finally {
+        invocationValues.delete(invocation)
+      }
     },
   }
 }
@@ -1094,6 +936,7 @@ class HvigorRuntimeHost {
     this._hvigorTypeScriptRoots = new Set()
     this._toolingModelRegistry = undefined
     this._lifecycle = undefined
+    this._processMonitor = undefined
     this._commandBuilderModifiers = new Map()
     this._syncNodeNames = undefined
     this._syncVersionChanged = this._readSyncVersionChanged()
@@ -1105,9 +948,9 @@ class HvigorRuntimeHost {
 
   _ensurePublicUtilities() {
     if (!this._publicUtilities) {
-      this._publicUtilities = createHvigorPublicUtilities(this, this._publicUtilityOptions)
+      this._publicUtilities = createHvigorPublicUtilities(this)
       this._hvigorConfig = createHvigorConfig(this)
-      this._workerPool = new this._publicUtilities.WorkerPoolDelegator()
+      this._workerPool = this._publicUtilities.workerPool
       this._toolingModelRegistry = this._publicUtilities.defaultModelRegistry
       this._toolingModelRegistry.clear()
       this._lifecycle = createRuntimeLifecycle(this)
@@ -1116,6 +959,7 @@ class HvigorRuntimeHost {
   }
 
   installObservability() {
+    this._ensurePublicUtilities()
     const consoleToken = String(process.env.ARKDOWN_LOG_CONSOLE || '')
       .trim()
       .toLowerCase()
@@ -1124,11 +968,7 @@ class HvigorRuntimeHost {
       this.startParameters().logLevel?.levelStr || this.startParameters().logLevel || 'info',
     ).toLowerCase()
     const cacheDir = this.hvigorCacheDir()
-    this._publicUtilityOptions = { consoleOwner, logLevel, cacheDir }
-    if (this._publicUtilities) {
-      this._publicUtilities.applyConsoleOwner(consoleOwner)
-    }
-    this._observabilityBuildId ||= crypto.randomUUID()
+    this._observabilityBuildId ||= this._parameterUtilities.globalData.buildId
     nativeRuntimeBinding.installRuntimeObservability({
       mode: 'napi',
       cacheDir,
@@ -1137,7 +977,8 @@ class HvigorRuntimeHost {
       consoleOwner,
     })
     if (this.startParameters().analyze === 1) {
-      this._ensurePublicUtilities().ReportServiceImpl.getInstance().startProcessMonitor()
+      this._processMonitor = new nativeRuntimeBinding.RuntimeProcessMonitor(() => process.memoryUsage(), process.pid)
+      this._processMonitor.start()
     }
     this._observabilityInstalled = true
   }
@@ -1569,22 +1410,25 @@ class HvigorRuntimeHost {
 
   async runBuildFinished(error, _nativeReturn = null) {
     const utilities = this._ensurePublicUtilities()
-    const reportService = utilities.ReportServiceImpl.getInstance()
-    const result = new utilities.BuildResult(error, reportService.getReport())
+    const report = nativeRuntimeBinding.runtimeHvigorReportSnapshot(process.ppid)
+    const result = new utilities.BuildResult(error, report)
     try {
       await this._lifecycle.runHook('buildFinished', result)
     } finally {
       try {
-        try {
-          this._publicUtilities.ProjectCacheService.instance?.close()
-          this._publicUtilities.TraceManager.instance ||= new this._publicUtilities.TraceManager()
-          this._publicUtilities.TraceManager.instance.flush()
-          if (this.startParameters().analyze !== 2) reportService.report()
-        } finally {
-          reportService.stopProcessMonitor()
+        if (this.observabilityInstalled() && this.startParameters().analyze !== 2) {
+          nativeRuntimeBinding.persistRuntimeReport(
+            JSON.stringify(report, utilities.replacer),
+            this._coreParameter.properties['hvigor.analyzeHtml'] === true,
+          )
         }
       } finally {
-        await this._workerPool?.terminate()
+        try {
+          this._processMonitor?.stop()
+        } finally {
+          this._processMonitor = undefined
+          await this._workerPool?.terminate()
+        }
       }
     }
   }
@@ -1644,22 +1488,9 @@ class HvigorRuntimeHost {
         { cause },
       )
     }
-    const core = {
-      properties: plan.properties || {},
-      extParams: plan.extParams || {},
-      startParams: plan.coreStartParams || {},
-      workspaceDir: plan.workspaceDir,
-    }
-    for (const key of toArray(plan.undefinedPropertyKeys)) core.properties[key] = undefined
-    for (const key of toArray(plan.undefinedExtParamKeys)) core.extParams[key] = undefined
-    this._coreParameter = core
-    return {
-      getPropertyInternal: (key) => core.properties[key],
-      getPropertiesInternal: () => core.properties,
-      getExtParam: (key) => core.extParams[key],
-      getExtParamInternal: (key) => core.extParams[key],
-      getExtParamsInternal: () => core.extParams,
-    }
+    this._parameterUtilities = createHvigorParameterUtilities(nativeRuntimeBinding, plan)
+    this._coreParameter = this._parameterUtilities.coreParameter
+    return this._parameterUtilities.parameter
   }
 
   runtimePropertyPlan(startParams) {
@@ -1954,7 +1785,34 @@ class HvigorRuntimeHost {
   _typeCheckCompilePlugin(pluginFile) {
     this._ensurePublicUtilities()
     try {
-      this._officialCompilePluginTypeCheck(pluginFile)
+      const ts = require('typescript')
+      const program = ts.createProgram([pluginFile], {
+        baseUrl: this.hvigorWorkspaceNodeModules || path.join(this.projectRoot, 'node_modules'),
+        target: ts.ScriptTarget.ES2016,
+        module: ts.ModuleKind.CommonJS,
+        types: [],
+        allowJs: true,
+        esModuleInterop: true,
+        forceConsistentCasingInFileNames: true,
+        strict: true,
+        skipLibCheck: true,
+        noImplicitAny: false,
+        noImplicitReturns: false,
+        alwaysStrict: false,
+        declaration: false,
+        noEmit: true,
+      })
+      const diagnostics = ts.getPreEmitDiagnostics(program)
+      if (diagnostics.length) {
+        const formatHost = {
+          getCanonicalFileName: (value) => value,
+          getCurrentDirectory: ts.sys.getCurrentDirectory,
+          getNewLine: () => ts.sys.newLine,
+        }
+        const cause = new Error(ts.formatDiagnostics(diagnostics, formatHost))
+        cause.name = 'AdaptorError'
+        throw cause
+      }
     } catch (cause) {
       throw this._error('TYPE_ERRORS', cause.message, { cause, pluginPath: pluginFile })
     }
@@ -2359,13 +2217,23 @@ class HvigorRuntimeHost {
       hvigor,
       hvigorConfig: host._hvigorConfig,
       submitWorker: (node, taskName, workPath, options) => host._submitWorker(node, taskName, workPath, options),
-      HVIGOR_PROJECT_WRAPPER_HOME: path.resolve(host.projectRoot, 'hvigor'),
-      getAlignTarget: () => host._parameter.getPropertyInternal('ohos.align.target'),
       defaultModelRegistry: host._toolingModelRegistry,
       hvigorCore,
     }
-    host._hvigorExports.set(cacheKey, exports)
-    return exports
+    const guardedExports = new Proxy(exports, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && UNSUPPORTED_HVIGOR_INTERNAL_EXPORTS.has(property)) {
+          throw host._error(
+            'ARKDOWN_UNSUPPORTED_HVIGOR_INTERNAL_EXPORT',
+            `@ohos/hvigor internal export ${property} is not part of the declared 6.24.3 API`,
+            { exportName: property },
+          )
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    host._hvigorExports.set(cacheKey, guardedExports)
+    return guardedExports
   }
 
   loadWithModuleMocks(file, callback) {

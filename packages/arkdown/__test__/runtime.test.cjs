@@ -6,7 +6,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
-const { parsePluginAst, runRuntimeTasks } = require('../index.js')
+const { parsePluginAst, runRuntimeTasks, RuntimeHvigorLifecycle } = require('../index.js')
 
 const {
   HVIGOR_PARITY_VERSION,
@@ -22,7 +22,7 @@ const {
   buildPluginContext,
   requireDefaultExport,
   hvigorProjectHash,
-} = require('../runtime')
+} = require('../js/runtime')
 
 const nativeRuntime = { runRuntimeTasks }
 
@@ -84,6 +84,26 @@ function copyFixture(name) {
 
 test('runtime reports the same Hvigor parity version as Rust cache and sync metadata', () => {
   assert.equal(HVIGOR_PARITY_VERSION, '6.24.3')
+})
+
+test('Rust lifecycle owner awaits callbacks sequentially and releases cleared hooks', async () => {
+  const lifecycle = new RuntimeHvigorLifecycle()
+  const events = []
+  lifecycle.register('configEvaluated', async (invocation) => {
+    events.push(`first-start:${invocation}`)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    events.push(`first-end:${invocation}`)
+  })
+  lifecycle.register('configEvaluated', (invocation) => {
+    events.push(`second:${invocation}`)
+  })
+
+  await lifecycle.runHook('configEvaluated', 7)
+  assert.deepEqual(events, ['first-start:7', 'first-end:7', 'second:7'])
+
+  lifecycle.clear()
+  await lifecycle.runHook('configEvaluated', 8)
+  assert.deepEqual(events, ['first-start:7', 'first-end:7', 'second:7'])
 })
 
 test('hvigor project cache hash matches latest 32-character cache layout', () => {
@@ -799,32 +819,25 @@ test('latest hvigor incremental task exports use FileSet and CoreTask class sema
   assert.deepEqual(task.declareExecutionEnv(), new Map())
 })
 
-test('latest hvigor root exports every runtime value from the 6.24.3 public index', () => {
+test('Hvigor mock exports the declared API plus the existing Arkdown task compatibility allowlist', () => {
   const hvigor = new HvigorRuntimeHost(tempProject())._makeHvigorMock()
   const expected = `
-    AnalyzeModeMap BuildResult CUSTOM_WORKER_REQUEST CacheStore CacheStoreManager ContinualEvent
-    CoreTask DEFAULT_HVIGOR_CONFIG_JSON_FILE_NAME DefaultSyncTask DefaultTask DurationEvent
-    ExtendedErrorInfo FileSet FileUtil GlobalParam HVIGOR_PROJECT_WRAPPER_HOME HvigorBuildConst
-    HvigorCommonConst HvigorConfigLoader HvigorLogger HvigorSystemPlugin HvigorTaskGroupType
-    INCREMENTAL_OPTIMIZATION IgnoreSuperIncremental IncrementalExecTask Input InputFile InputFiles
-    Inputs Json5Reader LocalFileWriter LogLevelMap MAIN_THREAD MarkEvent MarkEventType
-    MetricEventType MetricFactory MetricLogType MetricService OHOS_ARK_COMPILE_SOURCE_MAP_DIR
-    OutputFile OutputFiles ParseJsonFile PathUtil PoolConstant Priority ProjectCacheService
-    ReplacePlaceHolderUtil ReportServiceImpl TaskDirectedAcyclicGraph TaskInput TaskOutput TaskProxy
-    TaskState Tasks TcbStore TraceManager TrackAPI WatchEvent WithParamReplacement WorkerEvent
-    WorkerPoolDelegator addExtensionHandler coreParameter defaultModelRegistry doCompilePluginTypeCheck
-    formatTime formatTimeToNumber getAlignTarget getConfiguration getHvigorConfigValue getHvigorNode
-    getNode globalData hash hashFile hvigor hvigorConfig hvigorCore iconv isLinux isMac isWindows
-    levelMap maxPathLength noop normalWorker parseJsonFile projectTaskDag
-    readJavaDaemonInfoFromCacheFile replaceBundleName replacer setCategoriesLevel splitTime
-    startEnvironment submitWorker watchWorker
+    BuildResult CoreTask DefaultSyncTask DefaultTask FileSet FileUtil IgnoreSuperIncremental
+    IncrementalExecTask Input InputFile InputFiles Inputs OutputFile OutputFiles Priority TaskInput
+    TaskOutput TaskState defaultModelRegistry getHvigorNode getNode hvigor hvigorConfig hvigorCore
+    replacer submitWorker
   `
     .trim()
     .split(/\s+/)
 
+  assert.deepEqual(Object.keys(hvigor).sort(), expected.sort())
   for (const exportName of expected) {
     assert.equal(exportName in hvigor, true, exportName)
   }
+  assert.throws(
+    () => hvigor.MetricFactory,
+    (error) => error.code === 'ARKDOWN_UNSUPPORTED_HVIGOR_INTERNAL_EXPORT' && error.exportName === 'MetricFactory',
+  )
 })
 
 test('latest hvigor exports reuse singleton state while retaining caller-bound node lookup', () => {
@@ -853,134 +866,19 @@ test('latest hvigor exports reuse singleton state while retaining caller-bound n
   assert.equal(projectExports.hvigorCore.getProject().getName(), path.basename(root))
 })
 
-test('latest hvigor cache, DAG, metrics, trace, and system-plugin exports retain behavior', () => {
+test('declared Hvigor FileUtil and replacer delegate filesystem behavior to Rust', async () => {
   const root = tempProject()
-  const host = new HvigorRuntimeHost(root)
-  const hvigor = host._makeHvigorMock()
-
-  const manager = new hvigor.CacheStoreManager({ capacity: 2 })
-  const cache = manager.mount('fixture')
-  cache.set('first', 1).set('second', 2)
-  assert.equal(cache.get('first'), 1)
-  cache.set('third', 3)
-  assert.equal(cache.hasCache('second'), false)
-  assert.deepEqual([...cache.keys()], ['first', 'third'])
-  assert.equal(manager.cacheItemSize(), 2)
-
-  const dag = new hvigor.TaskDirectedAcyclicGraph()
-  dag.addEdge('compile', 'package')
-  dag.addEdge('package', 'sign')
-  assert.deepEqual([...dag.getAllStartNodes()], ['compile'])
-  assert.deepEqual([...dag.getAllEndNodes()], ['sign'])
-  assert.deepEqual(dag.checkCircle(), { hasCircle: false, circlePath: [] })
-  dag.addEdge('sign', 'compile')
-  assert.deepEqual(dag.checkCircle(), {
-    hasCircle: true,
-    circlePath: ['compile', 'package', 'sign', 'compile'],
-  })
-
-  const duration = hvigor.MetricFactory.createDurationEvent('entry:default@CompileArkTS', 'compile', 'build')
-  const child = duration.createSubEvent('worker', 'worker action').start()
-  child.stop()
-  duration.start().stop()
-  duration.setLog(undefined, hvigor.MetricLogType.INFO)
-  const report = hvigor.MetricService.getInstance().queryReport()
-  assert.equal(report.getName(), 'events')
-  assert.equal(
-    report.getValue().some((event) => event.getId() === duration.getId()),
-    true,
-  )
-  assert.equal(duration.additional.moduleName, 'entry')
-  assert.equal(duration.additional.targetName, 'default')
-
-  const trace = new hvigor.TraceManager()
-  let callbackCalled = false
-  trace.trace('entry.compile', { result: 'success' }, () => {
-    callbackCalled = true
-  })
-  trace.flush()
-  assert.equal(callbackCalled, true)
-  assert.deepEqual(
-    JSON.parse(fs.readFileSync(path.join(root, '.hvigor', 'outputs', 'logs', 'details', 'details.json'), 'utf8')),
-    { 'entry.compile': { result: 'success' } },
-  )
-  assert.equal(hvigor.TraceManager.transformKey('entry.compile'), 'entry_compile')
-
-  class FixturePlugin extends hvigor.HvigorSystemPlugin {
-    getContext() {
-      return { kind: 'fixture' }
-    }
-  }
-  const plugin = new FixturePlugin('fixture.plugin')
-  assert.equal(plugin.getPluginId(), 'fixture.plugin')
-  assert.equal(plugin.pluginVersion, HVIGOR_PARITY_VERSION)
-  assert.deepEqual(plugin.getContext(), { kind: 'fixture' })
-
-  const tcb = { getId: () => 'fixture-tcb' }
-  hvigor.TcbStore.add(tcb)
-  assert.equal(hvigor.TcbStore.getTCB('fixture-tcb'), tcb)
-  hvigor.TcbStore.clear()
-  assert.equal(hvigor.TcbStore.getTCB('fixture-tcb'), undefined)
-  assert.equal(hvigor.PoolConstant.MAX_POOL_NUM, os.cpus().length - 1)
-  assert.equal(hvigor.WorkerEvent.CUSTOM_WORKER_REQUEST, 'CUSTOM_WORKER_REQUEST')
-  assert.equal(hvigor.WatchEvent.WATCH_RESULT, 'WatchResult')
-})
-
-test('latest hvigor cross-platform, hash, JSON5, path, and placeholder utilities are executable', async () => {
-  const root = tempProject()
-  const host = new HvigorRuntimeHost(root, {
-    customizedParam: { source: { root: 'src/generated' }, profile: { mode: 'release' } },
-  })
-  const hvigor = host._makeHvigorMock()
+  const hvigor = new HvigorRuntimeHost(root)._makeHvigorMock()
   const jsonFile = path.join(root, 'fixture.json5')
-  const buildProfile = path.join(root, 'build-profile.json5')
-  fs.writeFileSync(
-    jsonFile,
-    `{
- foo: 1,
- nested: { bar: 'x' },
- array: [true, { z: 2 }, 3]
-}`,
-  )
-  fs.writeFileSync(
-    buildProfile,
-    `{ sourceRoots: ['@param:source.root'], buildProfileFields: { mode: '@param:profile.mode' } }`,
-  )
-
-  assert.equal(hvigor.hash('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
-  assert.equal(hvigor.hashFile(jsonFile), hvigor.hash(fs.readFileSync(jsonFile, 'utf8')))
-  assert.equal(hvigor.hashFile(path.join(root, 'missing')), undefined)
-  assert.equal([hvigor.isWindows(), hvigor.isMac(), hvigor.isLinux()].filter(Boolean).length, 1)
-  assert.equal(hvigor.maxPathLength(), process.platform === 'darwin' ? 1016 : process.platform === 'win32' ? 259 : 4095)
-  assert.equal(hvigor.formatTime([61, 234000000]), '1 min 1 s 234 ms ')
-  assert.equal(hvigor.splitTime('999 microseconds'), '1 ms ')
-  assert.equal(hvigor.formatTimeToNumber([1, 2]), 1000000002)
+  fs.writeFileSync(jsonFile, `{ foo: 1, nested: { bar: 'x' }, array: [true, { z: 2 }, 3] }`)
 
   assert.deepEqual(JSON.parse(JSON.stringify(new Map([['key', 1]]), hvigor.replacer)), { key: 1 })
   assert.deepEqual(JSON.parse(JSON.stringify(new Set(['a', 'b']), hvigor.replacer)), ['a', 'b'])
-  assert.deepEqual(hvigor.replaceBundleName({ value: 'com.example.app' }, 'com.example.app'), {
-    value: 'c***p',
+  assert.deepEqual(hvigor.FileUtil.readJson5(jsonFile), {
+    foo: 1,
+    nested: { bar: 'x' },
+    array: [true, { z: 2 }, 3],
   })
-
-  assert.deepEqual(hvigor.parseJsonFile(jsonFile, true), {
-    _line: 1,
-    _column: 1,
-    foo: { value: 1, _line: 2, _column: 7 },
-    nested: { _line: 3, _column: 10, bar: { value: 'x', _line: 3, _column: 19 } },
-    array: Object.assign(
-      [
-        { value: true, _line: 4, _column: 13 },
-        { _line: 4, _column: 16, z: { value: 2, _line: 4, _column: 21 } },
-        { value: 3, _line: 4, _column: 26 },
-      ],
-      { _line: 4, _column: 9 },
-    ),
-  })
-  assert.deepEqual(hvigor.Json5Reader.getJson5Obj(buildProfile), {
-    sourceRoots: ['src/generated'],
-    buildProfileFields: { mode: 'release' },
-  })
-  assert.equal(hvigor.Json5Reader.getJson5ObjProp({ nested: { value: 1 } }, 'nested.value'), 1)
 
   const ensuredFile = path.join(root, 'nested', 'file.txt')
   hvigor.FileUtil.ensureFileSync(ensuredFile)
@@ -991,151 +889,62 @@ test('latest hvigor cross-platform, hash, JSON5, path, and placeholder utilities
   assert.equal(hvigor.FileUtil.readFileSync(ensuredFile).toString(), 'content')
   await hvigor.FileUtil.writeFile(ensuredFile, 'async-content')
   assert.equal((await hvigor.FileUtil.readFile(ensuredFile)).toString(), 'async-content')
-  assert.equal(hvigor.PathUtil.getHvigorCacheDir(), path.join(root, '.hvigor'))
-  assert.equal(hvigor.PathUtil.getReportDirPath(), path.join(root, '.hvigor', 'report'))
-  assert.equal(hvigor.HvigorBuildConst.MODULE_MODE, 'module')
-  assert.equal(hvigor.HvigorCommonConst.BUILD_PROFILE_FILE, 'build-profile.json5')
-  assert.equal(hvigor.OHOS_ARK_COMPILE_SOURCE_MAP_DIR, 'ohos.arkCompile.sourceMapDir')
+  assert.equal(hvigor.FileUtil.pathResolve(root, 'nested', '..', 'fixture.json5'), jsonFile)
 })
 
-test('latest hvigor logging, config, global parameter, extension, and iconv APIs execute real behavior', async () => {
-  const root = tempProject()
-  const hvigorHome = tempProject()
-  const previousHvigorHome = process.env.HVIGOR_USER_HOME
-  const previousConfig = process.env.config
-  process.env.HVIGOR_USER_HOME = hvigorHome
-  fs.mkdirSync(path.join(root, 'hvigor'))
-  fs.writeFileSync(
-    path.join(root, 'hvigor', 'hvigor-config.json5'),
-    `{ properties: { projectFlag: false, projectNumber: 7 }, execution: { parallel: false } }`,
+test('Rust parameter owner preserves Hvigor mutable core state and immutable external snapshots', () => {
+  const host = new HvigorRuntimeHost(tempProject())
+  const hvigor = host._makeHvigorMock()
+  const parameter = hvigor.hvigor.getParameter()
+  const coreParameter = host._coreParameter
+  const deviceTypes = ['phone']
+
+  coreParameter.properties['ohos.align.deviceTypes'] = deviceTypes
+  assert.equal(coreParameter.properties['ohos.align.deviceTypes'], deviceTypes)
+  deviceTypes.push('tablet')
+
+  const properties = parameter.getProperties()
+  assert.deepEqual(properties['ohos.align.deviceTypes'], ['phone', 'tablet'])
+  assert.equal(Object.isFrozen(properties), true)
+  assert.equal(Object.isFrozen(properties['ohos.align.deviceTypes']), true)
+  assert.notEqual(properties['ohos.align.deviceTypes'], deviceTypes)
+  assert.throws(() => properties['ohos.align.deviceTypes'].push('tv'), TypeError)
+
+  parameter.setProperty('fixture.scalar', 7)
+  parameter.setProperty('ohos.align.deviceTypes', ['phone', '2in1'])
+  assert.equal(parameter.getPropertyInternal('fixture.scalar'), 7)
+  assert.deepEqual(parameter._getProperty('ohos.align.deviceTypes'), ['phone', '2in1'])
+  assert.throws(
+    () => parameter.setProperty('fixture.invalid', {}),
+    (error) => error.code === 'ARKDOWN_HVIGOR_PARAMETER_VALIDATION_FAILED',
   )
-  fs.writeFileSync(
-    path.join(hvigorHome, 'hvigor-config.json5'),
-    `{ properties: { userOnly: 'user', projectNumber: 3 } }`,
+  assert.throws(
+    () => parameter.setProperty('ohos.align.deviceTypes', ['phone', 'phone']),
+    (error) => error.code === 'ARKDOWN_HVIGOR_PARAMETER_VALIDATION_FAILED',
   )
 
-  try {
-    const host = new HvigorRuntimeHost(root)
-    const hvigor = host._makeHvigorMock()
-    for (const exportName of [
-      'GlobalParam',
-      'HvigorConfigLoader',
-      'HvigorLogger',
-      'LocalFileWriter',
-      'TrackAPI',
-      'addExtensionHandler',
-      'doCompilePluginTypeCheck',
-      'getLogger',
-      'configure',
-      'shutdown',
-    ]) {
-      assert.equal(typeof hvigor[exportName], 'function', exportName)
-    }
-    assert.equal(hvigor.isConfigured(), true)
-    assert.equal(hvigor.levels.INFO.level, 20000)
-    assert.equal(hvigor.levelMap.get('info'), hvigor.levels.INFO)
-    assert.equal(hvigor.LogLevelMap.get('info'), hvigor.levels.INFO)
-    assert.equal(hvigor.getConfiguration().categories.default.level, 'debug')
-    assert.equal(
-      hvigor
-        .getConfiguration()
-        .appenders['debug-log-file'].filename.endsWith(path.join('.hvigor', 'outputs', 'build-logs', 'build.log')),
-      true,
-    )
+  coreParameter.startParams.analyze = 3
+  coreParameter.startParams.incrementalExecution = false
+  assert.deepEqual(parameter.getStartParams(), {
+    daemon: true,
+    analyze: 'ultrafine',
+    parallel: true,
+    incremental: false,
+    logLevel: 'info',
+    typeCheck: false,
+    optimizationStrategy: 'memory',
+    hotCompile: false,
+    hotReloadBuild: false,
+  })
+  assert.equal(Object.isFrozen(parameter.getStartParams()), true)
+  assert.equal(parameter.getWorkspaceDirInternal(), host._runtimeSession.parameterPlan().workspaceDir)
+  assert.deepEqual(Object.keys(coreParameter), ['_properties', '_extParams', '_startParams', '_workspaceDir'])
 
-    const logger = hvigor.HvigorLogger.getLogger('fixture')
-    assert.equal(logger, hvigor.HvigorLogger.getLogger('fixture'))
-    logger.setLevel('warn')
-    assert.equal(logger.getLevel(), hvigor.levels.WARN)
-    assert.equal(logger.getMessage('value=%d', 7), 'value=7')
-    assert.throws(() => logger.errorMessageExit('failed %s', 'now'), /failed now/)
-
-    const loader = hvigor.HvigorConfigLoader.getInstance()
-    assert.deepEqual(loader.getHvigorConfig().properties, {
-      userOnly: 'user',
-      projectNumber: 7,
-      projectFlag: false,
-    })
-    assert.equal(loader.getPropertiesConfigValue('userOnly'), 'user')
-    process.env.config = JSON.stringify({ 'properties.projectNumber': '9' })
-    assert.equal(loader.getPropertiesConfigValue('projectNumber'), 9)
-    hvigor.HvigorConfigLoader.init({ config: ['properties.cliFlag=true'], prop: [] })
-    assert.equal(hvigor.coreParameter.properties.cliFlag, true)
-
-    assert.equal(hvigor.getHvigorConfigValue('properties.projectFlag'), true)
-    assert.equal(hvigor.getHvigorConfigValue('properties.projectNumber'), false)
-    assert.equal(hvigor.HVIGOR_PROJECT_WRAPPER_HOME, path.join(root, 'hvigor'))
-    assert.equal(hvigor.startEnvironment.workspaceDir, host._parameter.getWorkspaceDirInternal())
-    assert.equal(typeof hvigor.globalData.buildId, 'string')
-    assert.match(hvigor.globalData.buildId, /^\d{18}$/)
-
-    hvigor.coreParameter.properties.runtimeValue = 11
-    assert.equal(hvigor.hvigor.getParameter().getProperty('runtimeValue'), 11)
-    hvigor.coreParameter.startParams.incrementalExecution = true
-    assert.equal(hvigor.hvigor.getParameter().getStartParams().incremental, true)
-    assert.deepEqual(Object.keys(hvigor.hvigor.getParameter().getStartParams()), [
-      'daemon',
-      'analyze',
-      'parallel',
-      'incremental',
-      'logLevel',
-      'typeCheck',
-      'optimizationStrategy',
-      'hotCompile',
-      'hotReloadBuild',
-    ])
-
-    const outputFile = path.join(root, 'writer', 'value.json')
-    const writer = hvigor.LocalFileWriter.getInstance()
-    writer.withSpace(2)
-    writer.write(outputFile, { map: new Map([['key', 1]]), values: [1, 2] })
-    assert.equal(
-      fs.readFileSync(outputFile, 'utf8'),
-      '{\n  "map": {\n    "key": 1\n  },\n  "values": [\n    1,\n    2\n  ]\n}',
-    )
-
-    assert.equal(hvigor.iconv.encodingExists('utf-8'), true)
-    assert.equal(hvigor.iconv.encodingExists('gbk'), true)
-    assert.equal(hvigor.iconv.encodingExists('gb2312'), false)
-    assert.equal(hvigor.iconv.encode('中A', 'gbk').toString('hex'), 'd6d041')
-    assert.equal(hvigor.iconv.decode(Buffer.from('d6d041', 'hex'), 'gbk'), '中A')
-
-    const tracked = []
-    const descriptor = {
-      value(value) {
-        tracked.push(value)
-        return value + 1
-      },
-    }
-    hvigor.TrackAPI({}, 'trackedMethod', descriptor)
-    assert.equal(descriptor.value(2), 3)
-    assert.deepEqual(tracked, [2])
-
-    const extensionFile = path.join(root, 'extension.fixturets')
-    fs.writeFileSync(extensionFile, `export = { value: 42 }\n`)
-    hvigor.addExtensionHandler(['.fixturets'])
-    delete require.cache[extensionFile]
-    assert.deepEqual(require(extensionFile), { value: 42 })
-
-    const validPlugin = path.join(root, 'valid-plugin.ts')
-    const invalidPlugin = path.join(root, 'invalid-plugin.ts')
-    fs.writeFileSync(validPlugin, `export default { name: 'valid-plugin' }\n`)
-    fs.writeFileSync(invalidPlugin, `const value: number = 'invalid'\nexport default value\n`)
-    assert.equal(hvigor.doCompilePluginTypeCheck(validPlugin), undefined)
-    assert.throws(
-      () => hvigor.doCompilePluginTypeCheck(invalidPlugin),
-      (error) => error.code === 'TYPE_ERRORS' && error.cause?.name === 'AdaptorError',
-    )
-
-    const globalParam = hvigor.GlobalParam.getInstance()
-    globalParam.setConfig('arkdown.fixture.value', 'fixture')
-    assert.equal(globalParam.getConfig('arkdown.fixture.value'), 'fixture')
-  } finally {
-    if (previousHvigorHome === undefined) delete process.env.HVIGOR_USER_HOME
-    else process.env.HVIGOR_USER_HOME = previousHvigorHome
-    if (previousConfig === undefined) delete process.env.config
-    else process.env.config = previousConfig
-  }
+  coreParameter.clean()
+  assert.deepEqual(parameter.getProperties(), {})
+  assert.deepEqual(parameter.getExtParamsInternal(), {})
+  assert.equal(parameter.getWorkspaceDir(), '')
+  assert.equal(parameter.getStartParams().incremental, true)
 })
 
 test('decorated IncrementalExecTask matches latest beforeAlways, hook order, and up-to-date behavior', async () => {
@@ -3232,7 +3041,7 @@ test('createBuild forwards native BuildConfig fields and strips runtime plugin p
       assert.equal(
         capturedConfig[key],
         undefined,
-        `BuildConfig.${key} must be consumed by runtime.js before nativeBuild`,
+        `BuildConfig.${key} must be consumed by js/runtime.js before nativeBuild`,
       )
       continue
     }

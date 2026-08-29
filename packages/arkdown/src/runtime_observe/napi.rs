@@ -84,6 +84,11 @@ pub fn finish_runtime_observability() -> napi::Result<()> {
 }
 
 #[napi]
+pub fn runtime_hvigor_report_snapshot(ppid: u32) -> serde_json::Value {
+  RuntimeObservability::hvigor_report_snapshot(ppid)
+}
+
+#[napi]
 pub fn persist_runtime_report(report_json: String, analyze_html: bool) -> napi::Result<String> {
   RuntimeObservability::global()
     .ok_or_else(|| napi::Error::from_reason("runtime observability is not installed"))?

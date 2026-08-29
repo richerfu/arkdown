@@ -21,7 +21,7 @@ pub struct ProjectHvigorOverrides {
     pub signing_config: Option<HvigorSigningConfigOverride>,
 }
 
-/// Module-root keyed build-option overrides evaluated by `runtime.js`.
+/// Module-root keyed build-option overrides evaluated by `packages/arkdown/js/runtime.js`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct ModuleHvigorOverrides(BTreeMap<PathBuf, serde_json::Value>);

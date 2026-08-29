@@ -1,6 +1,6 @@
 'use strict'
 
-const nativeBinding = require('./index.js')
+const nativeBinding = require('../index.js')
 const { createBuild, createHvigorCommand, HVIGOR_PARITY_VERSION } = require('./runtime.js')
 const nativeBuild = nativeBinding.build
 

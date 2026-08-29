@@ -119,6 +119,10 @@ release modes, including cold/unchanged/changed incremental builds.
 npm install @ohos-rs/arkdown
 ```
 
+The package does not install `@ohos/hvigor`. Its declared Hvigor API and the
+custom-task compatibility subset used by Arkdown are provided by the native
+runtime, so installation does not depend on the DevEco-only package registry.
+
 ### CLI
 
 Build a HAP from an OpenHarmony project:

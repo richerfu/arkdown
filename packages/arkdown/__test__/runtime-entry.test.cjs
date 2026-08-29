@@ -6,7 +6,7 @@ const test = require('node:test')
 
 test('runtime entry keeps runHvigorCommand bound to the raw native build', async (context) => {
   const indexPath = require.resolve('../index.js')
-  const entryPath = require.resolve('../runtime-entry.js')
+  const entryPath = require.resolve('../js/runtime-entry.js')
   const actualNativeBinding = require('../index.js')
   const previousIndex = require.cache[indexPath]
   const previousEntry = require.cache[entryPath]
@@ -22,6 +22,18 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
       return { artifacts: ['entry.hap'], elapsedMs: 1 }
     },
     RuntimeBuildScriptSession: actualNativeBinding.RuntimeBuildScriptSession,
+    RuntimeHvigorLifecycle: actualNativeBinding.RuntimeHvigorLifecycle,
+    RuntimeHvigorFileSet: actualNativeBinding.RuntimeHvigorFileSet,
+    RuntimeHvigorTaskState: actualNativeBinding.RuntimeHvigorTaskState,
+    RuntimeHvigorTaskHooks: actualNativeBinding.RuntimeHvigorTaskHooks,
+    RuntimeHvigorTaskExecutionState: actualNativeBinding.RuntimeHvigorTaskExecutionState,
+    RuntimeHvigorCacheStoreManager: actualNativeBinding.RuntimeHvigorCacheStoreManager,
+    RuntimeHvigorConstantApi: actualNativeBinding.RuntimeHvigorConstantApi,
+    RuntimeHvigorParameterState: actualNativeBinding.RuntimeHvigorParameterState,
+    RuntimeHvigorGlobalData: actualNativeBinding.RuntimeHvigorGlobalData,
+    RuntimeHvigorFileApi: actualNativeBinding.RuntimeHvigorFileApi,
+    RuntimeHvigorWorkerPoolState: actualNativeBinding.RuntimeHvigorWorkerPoolState,
+    RuntimeProcessMonitor: actualNativeBinding.RuntimeProcessMonitor,
     installRuntimeObservability() {},
     finishRuntimeObservability() {},
     persistRuntimeReport() {},
@@ -30,6 +42,7 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
       return false
     },
     emitRuntimeLog() {},
+    runtimeHvigorReportSnapshot: actualNativeBinding.runtimeHvigorReportSnapshot,
     compileHvigorScript: actualNativeBinding.compileHvigorScript,
     compileHvigorScriptSync: actualNativeBinding.compileHvigorScriptSync,
     hvigorProjectCacheHash: actualNativeBinding.hvigorProjectCacheHash,
@@ -56,7 +69,7 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
     else delete require.cache[entryPath]
   })
 
-  const runtime = require('../runtime-entry.js')
+  const runtime = require('../js/runtime-entry.js')
   const project = path.resolve(__dirname, '../../../tests/fixtures/minimal-hap')
   const result = await runtime.runHvigorCommand({
     project,

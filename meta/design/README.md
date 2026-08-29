@@ -64,20 +64,27 @@ parity tests.
 
 The stated goal is that the JavaScript layer keeps only what is necessary to
 host the hvigor plugin system and the externally-exposed API surface. Current
-state (audited 2026-08-17):
+state (audited 2026-08-29):
 
 **Necessary JS (retained):**
-- `runtime.js` callback facade — hosts `hvigorfile.ts` plugin objects, dispatches
-  `HvigorPlugin` lifecycle callbacks, and binds the `@ohos/hvigor` public utility
-  surface (log4js, TraceManager, WorkerPool, task classes) that plugin code
-  expects to exist. All typed planning (task catalog, module descriptors,
-  parameter/property/command/path plans, schema validation) is Rust-owned
-  (`arkdown-session`/`arkdown-config`); JS owns only the live plugin object
-  lifecycle.
-- Entry/CLI/worker V8 host files required to boot the N-API bridge.
+- `packages/arkdown/js/runtime.js` callback facade — hosts `hvigorfile.ts` plugin objects, dispatches
+  `HvigorPlugin` lifecycle callbacks, and binds the values formally declared by
+  `@ohos/hvigor/index.d.ts`. The existing Arkdown custom-task contract retains
+  a narrow allowlist for task subclasses/decorators, core-node access, task
+  state, and tooling-model callbacks. Filesystem behavior, task metadata and
+  hooks, parameters, reports, and Worker scheduling are Rust-owned; JavaScript
+  owns only live plugin/callback identity, Proxy semantics, Buffer conversion,
+  and `worker_threads` message transport. Undeclared root leaks such as log4js,
+  metrics, TraceManager, internal caches, DAGs, and direct/watch workers are not
+  reimplemented.
+- Entry/CLI/worker V8 host files required to boot the N-API bridge. All
+  handwritten production JavaScript for the Node package is colocated under
+  `packages/arkdown/js/`; generated N-API access files remain at the package
+  root, while tests and development scripts stay in their purpose-specific
+  directories.
 
 **Known gaps (on the production critical path, awaiting a Rust port):**
-- `ets_checker_bridge.cjs` — SDK etsChecker semantic check, runs in every build.
+- `packages/arkdown/js/ets-checker-bridge.cjs` — SDK etsChecker semantic check, runs in every build.
 - `arkguard_bridge.cjs` — ArkGuard source obfuscation, release builds.
 - `bytecode_arkguard_bridge.cjs` — BytecodeObfuscator, release builds.
 

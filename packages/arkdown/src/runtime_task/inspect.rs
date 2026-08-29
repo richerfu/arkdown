@@ -19,6 +19,16 @@ pub(crate) struct RuntimeTaskNapiInspector<'env> {
   class_incremental_task: bool,
 }
 
+struct RuntimeTaskDescriptorContext {
+  path: String,
+  node_name: String,
+  built_in: bool,
+  project_task: bool,
+  catalog_definition: Option<Value>,
+  graph_bound_custom: bool,
+  realization_order: u32,
+}
+
 /// Projects the complete live official node/task inventory in one native
 /// boundary. JavaScript synchronizes LazyTaskContainer first because plugin
 /// objects live in V8; Rust reads the official task container directly and
@@ -80,7 +90,7 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
         realized_task_names.insert(task_name.clone());
         let task_context = core_task
           .get::<Object<'env>>("taskContext")?
-          .unwrap_or_else(|| core_task.clone());
+          .unwrap_or(core_task);
         let catalog_definition = catalog.definition(&task_name);
         let explicitly_built_in = core_task
           .get::<Value>("__arkdownBuiltInDefinition")?
@@ -97,17 +107,17 @@ impl<'env> RuntimeTaskInventoryNapiInspector<'env> {
           && Self::has_function(&core_task, "declareOutputFiles")?;
         let inspector =
           RuntimeTaskNapiInspector::new(self.env, core_task, task_context, class_incremental_task);
-        let descriptor = inspector.descriptor(
-          task_path,
-          node_name.clone(),
+        let descriptor = inspector.descriptor(RuntimeTaskDescriptorContext {
+          path: task_path,
+          node_name: node_name.clone(),
           built_in,
           project_task,
           catalog_definition,
-          definition.as_ref().is_some_and(|value| {
+          graph_bound_custom: definition.as_ref().is_some_and(|value| {
             Self::has_values(value, "dependencies") || Self::has_values(value, "postDependencies")
           }),
           realization_order,
-        )?;
+        })?;
         if !built_in {
           custom_tasks.push(json!({
             "taskName": task_name,
@@ -309,16 +319,16 @@ impl<'env> RuntimeTaskNapiInspector<'env> {
     }
   }
 
-  pub(crate) fn descriptor(
-    &self,
-    path: String,
-    node_name: String,
-    built_in: bool,
-    project_task: bool,
-    catalog_definition: Option<Value>,
-    graph_bound_custom: bool,
-    realization_order: u32,
-  ) -> Result<Value> {
+  fn descriptor(&self, context: RuntimeTaskDescriptorContext) -> Result<Value> {
+    let RuntimeTaskDescriptorContext {
+      path,
+      node_name,
+      built_in,
+      project_task,
+      catalog_definition,
+      graph_bound_custom,
+      realization_order,
+    } = context;
     let task_name = self.required_string_method("getName")?;
     let group = self
       .optional_string_method("getGroup")?
@@ -381,13 +391,16 @@ impl<'env> RuntimeTaskNapiInspector<'env> {
 
   fn enabled(&self) -> Result<bool> {
     let value = self.required_method("getEnabled")?;
-    Ok(!(value.get_type()? == ValueType::Boolean && unsafe { value.cast::<bool>()? } == false))
+    Ok(value.get_type()? != ValueType::Boolean || unsafe { value.cast::<bool>()? })
   }
 
   fn track_state(&self) -> Result<bool> {
     let Some(status) = self.core_task.get::<Object<'env>>("taskExecutedStatus")? else {
       return Ok(true);
     };
+    if let Some(is_track_state) = status.get::<Function<(), bool>>("isTrackState")? {
+      return is_track_state.apply(status, ());
+    }
     Ok(status.get::<Unknown<'env>>("unTrackStateReason")?.is_none())
   }
 
@@ -431,7 +444,7 @@ impl<'env> RuntimeTaskNapiInspector<'env> {
     let source = if source.get_type()? == ValueType::Object && !source.is_array()? {
       let object = unsafe { source.cast::<Object<'env>>()? };
       if let Some(collect) = object.get::<Function<(), Unknown<'env>>>("collect")? {
-        collect.apply(&object, ())?
+        collect.apply(object, ())?
       } else {
         source
       }
@@ -556,7 +569,7 @@ impl<'env> RuntimeTaskNapiInspector<'env> {
     self
       .core_task
       .get::<Function<(), Unknown<'env>>>(name)?
-      .map(|method| method.apply(&self.core_task, ()))
+      .map(|method| method.apply(self.core_task, ()))
       .transpose()
   }
 

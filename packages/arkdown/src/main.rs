@@ -4,7 +4,7 @@
 //!
 //! This binary is intended for internal debugging and fixture testing only.
 //! Production OHOS builds must go through `packages/arkdown.build()`.
-//! The npm package exposes this binary through `packages/arkdown/bin/arkdown.js`.
+//! The npm package exposes this binary through `packages/arkdown/js/arkdown-cli.js`.
 //!
 //! # Intended callers
 //!

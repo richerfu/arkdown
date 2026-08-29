@@ -178,6 +178,17 @@ impl RuntimeObservability {
       .unwrap_or_else(|_| Arc::from(""))
   }
 
+  /// Materialize the formally declared `BuildResult.getReportJson()` payload.
+  /// Undocumented metric listeners are intentionally outside Arkdown's public
+  /// compatibility contract, while the 6.24.3 report envelope remains stable.
+  pub(crate) fn hvigor_report_snapshot(ppid: u32) -> serde_json::Value {
+    serde_json::json!({
+      "version": "2.0",
+      "ppid": ppid,
+      "events": [],
+    })
+  }
+
   pub(crate) fn has_active_napi_plan(&self) -> bool {
     self
       .state

@@ -52,7 +52,7 @@ const configureCompilePlugin = {
 ```
 
 Arkdown's direct package API also accepts `compilePluginPath` and
-`hvigorPluginFile`. Every path is loaded by `packages/arkdown/runtime.js` and
+`hvigorPluginFile`. Every path is loaded by `packages/arkdown/js/runtime.js` and
 must default-export one object or a flat object array. The strict latest-hvigor
 surface is:
 
