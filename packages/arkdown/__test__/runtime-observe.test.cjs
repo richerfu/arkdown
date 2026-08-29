@@ -6,19 +6,18 @@ const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
 
-const { HvigorRuntimeHost } = require('../runtime')
+const { HvigorRuntimeHost } = require('../js/runtime')
 const native = require('../index.js')
 
 function tempProject() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-observe-'))
 }
 
-test('installObservability writes one JS info line into build.log and not a second log4js file handle', () => {
+test('installObservability routes the internal JS bridge logger into the native build log', () => {
   const root = tempProject()
   const host = new HvigorRuntimeHost(root)
   host.installObservability()
-  const hvigor = host._makeHvigorMock()
-  const logger = hvigor.HvigorLogger.getLogger('fixture')
+  const logger = host._publicUtilities.loggerFactory.getLogger('fixture')
   logger.info('observe-info-line')
   host.finishObservability()
   const logFile = path.join(root, '.hvigor', 'outputs', 'build-logs', 'build.log')
@@ -26,13 +25,6 @@ test('installObservability writes one JS info line into build.log and not a seco
   const content = fs.readFileSync(logFile, 'utf8')
   assert.match(content, /observe-info-line/)
   assert.match(content, /arkdown_napi::hvigor/)
-  assert.equal(hvigor.getConfiguration().appenders['debug-log-file'].type, 'file')
-  assert.equal(
-    hvigor
-      .getConfiguration()
-      .appenders['debug-log-file'].filename.endsWith(path.join('.hvigor', 'outputs', 'build-logs', 'build.log')),
-    true,
-  )
 })
 
 test('runtime observability NAPI exports match the generated camelCase names', () => {

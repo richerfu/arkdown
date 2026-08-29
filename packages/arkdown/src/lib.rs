@@ -33,6 +33,13 @@ mod hvigor_config_merge;
 mod hvigor_dependency_workspace;
 mod hvigor_maintenance;
 mod hvigor_plugin_plan;
+mod hvigor_runtime;
+pub use hvigor_runtime::{
+  RuntimeHvigorCacheStoreManager, RuntimeHvigorConstantApi, RuntimeHvigorFileApi,
+  RuntimeHvigorFileSet, RuntimeHvigorGlobalData, RuntimeHvigorLifecycle,
+  RuntimeHvigorParameterState, RuntimeHvigorTaskExecutionState, RuntimeHvigorTaskHooks,
+  RuntimeHvigorTaskState, RuntimeHvigorWorkerPoolState,
+};
 mod hvigor_script;
 mod hvigor_sync;
 mod js_callback;
@@ -44,8 +51,9 @@ mod runtime_invocation;
 mod runtime_observe;
 pub use runtime_observe::{
   emit_runtime_log, finish_runtime_observability, install_runtime_observability,
-  persist_runtime_details, persist_runtime_report, runtime_observability_is_enabled,
-  ObservabilityInstallOptions, RuntimeLogRecord, RuntimeObservability, RuntimeProcessMonitor,
+  persist_runtime_details, persist_runtime_report, runtime_hvigor_report_snapshot,
+  runtime_observability_is_enabled, ObservabilityInstallOptions, RuntimeLogRecord,
+  RuntimeObservability, RuntimeProcessMonitor,
 };
 mod runtime_task;
 pub mod task_cache;
@@ -1010,7 +1018,7 @@ impl HvigorPluginGapHooks for JsPlugin {
 /// Project config metadata available as `this.share.projectConfig` inside plugin hooks.
 ///
 /// This corresponds to the subset of hvigor's `projectConfig` that arkdown
-/// serializes from the Rust build coordinator and passes through `runtime.js`.
+/// serializes from the Rust build coordinator and passes through `js/runtime.js`.
 #[napi(object)]
 pub struct HvigorProjectConfig {
   pub bundle_name: Option<String>,
@@ -1128,7 +1136,7 @@ impl HvigorModuleInfo {
 ///
 /// Runtime JS binds this object before forwarding hooks into the Rust NAPI
 /// bridge. Methods are typed here for generated TypeScript declarations; the
-/// actual method implementations live in `runtime.js`.
+/// actual method implementations live in `js/runtime.js`.
 #[napi(object)]
 pub struct HvigorPluginContext {
   pub share: Option<HvigorShareContext>,
@@ -1155,7 +1163,7 @@ pub struct PluginCacheRequest {
 ///
 /// The runtime loader accepts plugin objects from explicit `build(config,
 /// plugins)`, `compilePluginPath`, `hvigorPluginFile`, and discovered
-/// hvigorfiles. Hooks are normalized by `runtime.js` before they are passed to
+/// hvigorfiles. Hooks are normalized by `js/runtime.js` before they are passed to
 /// Rust, so user-facing cache hooks receive structured objects while the native
 /// bridge still exchanges JSON strings internally.
 #[napi(object)]

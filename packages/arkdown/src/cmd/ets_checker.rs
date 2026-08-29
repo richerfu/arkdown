@@ -1415,7 +1415,11 @@ impl<'a> SdkEtsCheckerRunner<'a> {
     let bridge_path = self.plan.workspace.join("ets-checker-bridge.cjs");
     let request_path = self.plan.workspace.join("request.json");
     let response_path = self.plan.workspace.join("response.json");
-    std::fs::write(&bridge_path, include_str!("ets_checker_bridge.cjs")).with_context(|| {
+    std::fs::write(
+      &bridge_path,
+      include_str!("../../js/ets-checker-bridge.cjs"),
+    )
+    .with_context(|| {
       format!(
         "ARKDOWN_ETS_CHECKER_BRIDGE_WRITE: write {}",
         bridge_path.display()

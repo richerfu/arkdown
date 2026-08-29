@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { HVIGOR_PARITY_VERSION } = require('../runtime.js')
+const { HVIGOR_PARITY_VERSION } = require('./runtime.js')
 const { parseArkdownBuildCliArgs, parseHvigorCliArgs } = require('../index.js')
 
 function decodeCliPlan(response) {

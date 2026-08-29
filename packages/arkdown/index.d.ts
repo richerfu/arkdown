@@ -133,6 +133,209 @@ export declare class RuntimeFileSnapshotIterator {
 }
 
 /**
+ * Rust-owned shared LRU index behind Hvigor's public CacheStoreManager.
+ * Arbitrary cached JavaScript values remain in V8 and are addressed only by
+ * the store/key identity selected here.
+ */
+export declare class RuntimeHvigorCacheStoreManager {
+  constructor(config?: RuntimeHvigorCacheConfig | undefined | null, enabled?: boolean | undefined | null)
+  mount(storeName: string, pinned?: boolean | undefined | null): boolean
+  unmount(storeName: string): boolean
+  access(storeName: string, key: string): void
+  set(storeName: string, key: string, pinned?: boolean | undefined | null): RuntimeHvigorCacheEviction | null
+  delete(storeName: string, key: string): void
+  clear(): void
+  get enabled(): boolean
+  get ttl(): number | null
+}
+
+/**
+ * Rust-owned value plan for the declared worker API and the small set of
+ * task constants required by Arkdown's existing custom-task compatibility.
+ */
+export declare class RuntimeHvigorConstantApi {
+  constructor()
+  snapshot(): any
+}
+
+/**
+ * Rust-owned filesystem boundary for the formally declared Hvigor
+ * `FileUtil` surface. JavaScript only unwraps `NormalizedFile.filePath` and
+ * preserves the public static method names.
+ */
+export declare class RuntimeHvigorFileApi {
+  constructor()
+  exists(path: string): boolean
+  isDirectory(path: string): boolean
+  isFile(path: string): boolean
+  checkCopyPathIsSame(source: string, target: string): boolean
+  ensureDirectory(path: string): void
+  ensureFile(path: string): void
+  readFileSync(path: string): Buffer
+  readFile(path: string): Promise<Buffer>
+  readJson5(path: string): any
+  hashText(content: string): string
+  writeFileSync(path: string, content: Buffer): void
+  writeFile(path: string, content: Buffer): Promise<void>
+  copyFileSync(source: string, target: string): void
+  copyFile(source: string, target: string): Promise<void>
+  pathResolve(segments: Array<string>): string
+}
+
+/**
+ * Rust-owned ordered path inventory behind Hvigor's public `FileSet` class.
+ *
+ * The associated options object remains in the owning V8 isolate because
+ * `addEntry` exposes its exact object identity through `collect()`. Rust owns
+ * insertion order, replacement, deletion, and live-entry selection; the
+ * numeric token is only an ABI handle for that JavaScript value.
+ */
+export declare class RuntimeHvigorFileSet {
+  constructor()
+  addEntry(path: string): RuntimeHvigorFileSetMutation
+  addEntries(paths: Array<string>): Array<RuntimeHvigorFileSetMutation>
+  deleteEntry(path: string): number | null
+  collectEntries(): Array<RuntimeHvigorFileSetEntry>
+  get size(): number
+}
+
+/**
+ * Rust-owned build identity behind Hvigor's undocumented `globalData` export.
+ * The JavaScript facade retains `cliEnv` and `cliOpts` only because callers
+ * expect their exact V8 object identities.
+ */
+export declare class RuntimeHvigorGlobalData {
+  constructor()
+  init(): string
+  clean(): void
+  get buildId(): string | null
+}
+
+/**
+ * Owns latest-hvigor lifecycle registration order and sequential callback
+ * scheduling. The numeric invocation token resolves the live hook argument
+ * in JavaScript because arbitrary objects cannot leave their V8 isolate.
+ */
+export declare class RuntimeHvigorLifecycle {
+  constructor()
+  register(name: string, callback: (invocation: number) => void | Promise<void>): void
+  clear(): void
+  runHook(name: string, invocation: number): Promise<void>
+}
+
+/**
+ * Rust-owned mutable state behind Hvigor's `coreParameter` and
+ * `ExternalParameter` APIs.
+ *
+ * Primitive configuration values live directly in Rust. JavaScript objects
+ * that must preserve V8 identity are represented by numeric tokens; the thin
+ * JavaScript facade retains only those token/value pairs.
+ */
+export declare class RuntimeHvigorParameterState {
+  constructor()
+  keys(scope: string): Array<string>
+  entry(scope: string, key: string): RuntimeHvigorParameterEntry
+  setJsonEntry(scope: string, key: string, value: any): number | null
+  setUndefinedEntry(scope: string, key: string): number | null
+  setV8Entry(scope: string, key: string): RuntimeHvigorParameterMutation
+  deleteEntry(scope: string, key: string): number | null
+  clearScope(scope: string): Array<number>
+  clean(): Array<number>
+  get workspaceDir(): string
+  set workspaceDir(value: string)
+  /**
+   * Materialize the public `StartParam` shape from the internal core fields.
+   * The field order follows Hvigor 6.24.3 `ExternalParameter._getStartParams`.
+   */
+  publicStartSnapshot(): any
+  /**
+   * Validate the value accepted by `ExternalParameter.setProperty` against
+   * the 6.24.3 `hvigor-config-schema.json` properties contract.
+   */
+  validateProperty(key: string, value: any, javascriptType: string): void
+}
+
+/** Rust-owned task execution status used by worker and incremental execution. */
+export declare class RuntimeHvigorTaskExecutionState {
+  constructor()
+  setState(state: number): void
+  getState(): number
+  getTaskBeginTime(): Array<number> | null
+  setIsUpToDate(value: boolean): void
+  isUpToDate(): boolean
+  setWorkerTimePeriod(value: Array<number>): void
+  getWorkerTimePeriod(): Array<Array<number>>
+  get unTrackStateReason(): string | null
+  set unTrackStateReason(value: string | undefined | null)
+  isTrackState(): boolean
+}
+
+/**
+ * Owns latest-hvigor's LIFO `beforeRun` and FIFO `afterRun` scheduling.
+ * Callback bodies remain in V8, while ordering, draining, and sequential
+ * Promise awaiting are performed by Rust.
+ */
+export declare class RuntimeHvigorTaskHooks {
+  constructor()
+  beforeRun(callback: () => void | Promise<void>): void
+  afterRun(callback: () => void | Promise<void>): void
+  get beforeCount(): number
+  get afterCount(): number
+  executeBefore(): Promise<void>
+  executeAfter(): Promise<void>
+}
+
+/**
+ * Primitive task metadata and dependency ownership for the public Hvigor
+ * task hierarchy. Node objects and virtual task actions stay in JavaScript;
+ * they are live V8 identities rather than build state.
+ */
+export declare class RuntimeHvigorTaskState {
+  constructor(nodeName: string, projectTask: boolean, info: RuntimeHvigorTaskInfo)
+  getName(): string | null
+  getPath(): string
+  setDependsOn(dependencies: Array<string>): void
+  addDependsOn(dependency: string): void
+  getDependsOn(): Array<string>
+  getEnabled(): boolean | null
+  setEnabled(enabled?: boolean | undefined | null): void
+  setDescription(description?: string | undefined | null): void
+  getDescription(): string | null
+  getGroup(): string | null
+  setGroup(group?: string | undefined | null): void
+  getSourcePluginId(): string | null
+}
+
+/**
+ * Rust-owned priority queue and lifecycle state for the public Hvigor worker
+ * pool. Node worker threads execute JavaScript modules because those modules
+ * are V8 values; acceptance, targeting, ordering, IDs, and transitions stay
+ * native and are shared by all delegator facades for one runtime host.
+ */
+export declare class RuntimeHvigorWorkerPoolState {
+  constructor(maxPoolNum?: number | undefined | null)
+  submit(parallelExecution: boolean, priority: number, targetWorkers?: Array<number> | undefined | null): RuntimeHvigorWorkerSubmission
+  takeForWorker(workerId: number, startTime: number): string | null
+  finish(workId: string, succeeded: boolean, endTime: number): void
+  setWorkPriority(workId: string, priority: number): boolean
+  setWorkState(workId: string, next: string): boolean
+  setWorkWorkerId(workId: string, workerId: number): void
+  setWorkStartTime(workId: string, startTime: number): void
+  setWorkEndTime(workId: string, endTime: number): void
+  snapshot(workId: string): RuntimeHvigorWorkerControlSnapshot
+  candidateWorkers(workId: string): Array<number>
+  hasQueuedWork(): boolean
+  setState(next: string): void
+  terminate(): void
+  reset(): void
+  get state(): string
+  get maxPoolNum(): number
+  get minPoolNum(): number
+  get resident(): boolean
+  set resident(resident: boolean)
+}
+
+/**
  * Rust-owned equivalent of Hvigor 6.24.x `ReportServiceImpl` process
  * monitoring. JavaScript supplies only the live V8 memory snapshot because
  * those counters are not available from the Rust process APIs.
@@ -154,20 +357,26 @@ export declare class RuntimeProcessMonitor {
 export declare class RuntimeTaskCacheSession {
   constructor(projectRoot: string, cacheEnabled: boolean)
   createSnapshot(request: RuntimeTaskSnapshotRequest): RuntimeTaskSnapshot
+  createTaskSnapshot(task: object): RuntimeTaskSnapshot
+  getTaskSnapshot(task: object): RuntimeTaskSnapshot | null
   check(snapshot: RuntimeTaskSnapshot): boolean
   recordSnapshot(taskSnapshot: RuntimeTaskSnapshot): RuntimeTaskSnapshot
   inputValueChanged(snapshot: RuntimeTaskSnapshot, inputKey: string): boolean
   fileCompare(snapshot: RuntimeTaskSnapshot, declaration: RuntimeTaskFileDeclarationInput): RuntimeFileCompareResult
+  fileComparePath(snapshot: RuntimeTaskSnapshot, path: string, options?: object | undefined | null): RuntimeFileCompareResult
   getTask(taskPath: string, nodeName: string, taskName: string, projectTask: boolean): RuntimeTaskSnapshot | null
   getFile(declaration: RuntimeTaskFileDeclarationInput): RuntimeFileSnapshot | null
+  getFilePath(path: string, options?: object | undefined | null): RuntimeFileSnapshot | null
   storeFile(declaration: RuntimeTaskFileDeclarationInput, snapshot: RuntimeFileSnapshot): void
+  storeFilePath(path: string, options: object | undefined | null, snapshot: RuntimeFileSnapshot): void
   buildInfo(): string
+  buildInfoValue(): any
 }
 
 /**
  * Native snapshot model behind the public Hvigor `TaskProxy` result. The
  * class keeps comparison, hashing, success state, and serialization out of
- * `runtime.js` while retaining a JavaScript object with the official methods.
+ * `js/runtime.js` while retaining a JavaScript object with the official methods.
  */
 export declare class RuntimeTaskSnapshot {
   getKey(): string
@@ -176,6 +385,7 @@ export declare class RuntimeTaskSnapshot {
   getTaskName(): string
   getProjectName(): string
   isSuccessful(): boolean
+  isIncremental(): boolean
   setExecutedSuccessful(): void
   addInput(name: string, value: unknown): void
   getInputs(): Array<RuntimeTaskValueEntry>
@@ -202,7 +412,7 @@ export declare class RuntimeTaskValueEntry {
  *
  * The runtime loader accepts plugin objects from explicit `build(config,
  * plugins)`, `compilePluginPath`, `hvigorPluginFile`, and discovered
- * hvigorfiles. Hooks are normalized by `runtime.js` before they are passed to
+ * hvigorfiles. Hooks are normalized by `js/runtime.js` before they are passed to
  * Rust, so user-facing cache hooks receive structured objects while the native
  * bridge still exchanges JSON strings internally.
  */
@@ -331,7 +541,7 @@ export interface HvigorModuleInfo {
  *
  * Runtime JS binds this object before forwarding hooks into the Rust NAPI
  * bridge. Methods are typed here for generated TypeScript declarations; the
- * actual method implementations live in `runtime.js`.
+ * actual method implementations live in `js/runtime.js`.
  */
 export interface HvigorPluginContext {
   share?: HvigorShareContext
@@ -351,7 +561,7 @@ export declare function hvigorProjectCacheHash(projectRoot: string): string
  * Project config metadata available as `this.share.projectConfig` inside plugin hooks.
  *
  * This corresponds to the subset of hvigor's `projectConfig` that arkdown
- * serializes from the Rust build coordinator and passes through `runtime.js`.
+ * serializes from the Rust build coordinator and passes through `js/runtime.js`.
  */
 export interface HvigorProjectConfig {
   bundleName?: string
@@ -592,6 +802,40 @@ export interface RuntimeFileMetadata {
   lastModifiedTime: number
 }
 
+export interface RuntimeHvigorCacheConfig {
+  capacity?: number
+  ttl?: number
+}
+
+export interface RuntimeHvigorCacheEviction {
+  storeName: string
+  key: string
+}
+
+export interface RuntimeHvigorFileSetEntry {
+  path: string
+  token: number
+}
+
+export interface RuntimeHvigorFileSetMutation {
+  token: number
+  replacedToken?: number
+}
+
+export interface RuntimeHvigorParameterEntry {
+  exists: boolean
+  kind: string
+  value?: any
+  token?: number
+}
+
+export interface RuntimeHvigorParameterMutation {
+  token: number
+  replacedToken?: number
+}
+
+export declare function runtimeHvigorReportSnapshot(ppid: number): any
+
 export interface RuntimeHvigorSyncState {
   configBuildVersion?: any
   selectedNodeNames?: Array<string>
@@ -599,6 +843,28 @@ export interface RuntimeHvigorSyncState {
   moduleCustomTasks: any
   customModels: any
   customModelTaskInfo: any
+}
+
+export interface RuntimeHvigorTaskInfo {
+  name?: string
+  group?: string
+  isEnabled?: boolean
+  description?: string
+  sourcePluginId?: string
+}
+
+export interface RuntimeHvigorWorkerControlSnapshot {
+  state: string
+  workerId?: number
+  startTime?: number
+  endTime?: number
+}
+
+export interface RuntimeHvigorWorkerSubmission {
+  accepted: boolean
+  workId: string
+  candidateWorkers: Array<number>
+  submitTime: number
 }
 
 export interface RuntimeLogRecord {

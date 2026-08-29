@@ -69,6 +69,7 @@ rayon = { workspace = true }
 regex = { workspace = true }
 semver = { workspace = true }
 sha2 = { workspace = true }
+time = { workspace = true }
 dhat = { workspace = true, optional = true }
 dunce = { workspace = true }
 jsonschema = "0.49.7"

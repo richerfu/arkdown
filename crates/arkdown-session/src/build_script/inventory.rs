@@ -28,7 +28,7 @@ pub enum BuildScriptOverrideError {
 
 /// Statically evaluated project/module hvigorfile overrides.
 ///
-/// The Node package evaluates arbitrary JavaScript in `runtime.js`. The pure
+/// The Node package evaluates arbitrary JavaScript in `packages/arkdown/js/runtime.js`. The pure
 /// Rust CLI accepts the literal-object subset and rejects dynamic values with a
 /// typed diagnostic.
 #[derive(Debug, Clone, Default)]

@@ -15,6 +15,7 @@ use napi::bindgen_prelude::{
 use napi::{JsValue, ValueType};
 use napi_derive::napi;
 
+use super::inspect::RuntimeTaskNapiInspector;
 use super::model::{
   RuntimeTaskDescriptor, RuntimeTaskFileConfig, RuntimeTaskFileDeclaration, RuntimeTaskFileFilter,
   RuntimeTaskProperty,
@@ -449,6 +450,39 @@ impl RuntimeTaskCacheSession {
   }
 
   #[napi]
+  pub fn create_task_snapshot(
+    &self,
+    env: Env,
+    task: Object<'_>,
+  ) -> napi::Result<RuntimeTaskSnapshot> {
+    let (project_name, mut descriptor) = self.task_descriptor(env, task)?;
+    descriptor.normalize_declared_paths(&self.project_root, cfg!(windows));
+    Ok(RuntimeTaskSnapshot::from_descriptor(
+      project_name,
+      descriptor,
+      false,
+    ))
+  }
+
+  #[napi]
+  pub fn get_task_snapshot(
+    &self,
+    env: Env,
+    task: Object<'_>,
+  ) -> napi::Result<Option<RuntimeTaskSnapshot>> {
+    let (_, descriptor) = self.task_descriptor(env, task)?;
+    Ok(self.cache.task_snapshot(&descriptor.path).map(|stored| {
+      RuntimeTaskSnapshot::from_stored_snapshot(
+        descriptor.path,
+        descriptor.node_name,
+        descriptor.task_name,
+        descriptor.project_task,
+        stored,
+      )
+    }))
+  }
+
+  #[napi]
   pub fn check(&self, snapshot: &RuntimeTaskSnapshot) -> napi::Result<bool> {
     self
       .cache
@@ -511,6 +545,16 @@ impl RuntimeTaskCacheSession {
   }
 
   #[napi]
+  pub fn file_compare_path(
+    &self,
+    snapshot: &RuntimeTaskSnapshot,
+    path: String,
+    options: Option<Object<'_>>,
+  ) -> napi::Result<RuntimeFileCompareResult> {
+    self.file_compare(snapshot, Self::file_declaration(path, options.as_ref())?)
+  }
+
+  #[napi]
   pub fn get_task(
     &self,
     task_path: String,
@@ -544,6 +588,15 @@ impl RuntimeTaskCacheSession {
   }
 
   #[napi]
+  pub fn get_file_path(
+    &self,
+    path: String,
+    options: Option<Object<'_>>,
+  ) -> napi::Result<Option<RuntimeFileSnapshot>> {
+    Ok(self.get_file(Self::file_declaration(path, options.as_ref())?))
+  }
+
+  #[napi]
   pub fn store_file(
     &mut self,
     declaration: RuntimeTaskFileDeclarationInput,
@@ -558,21 +611,166 @@ impl RuntimeTaskCacheSession {
   }
 
   #[napi]
+  pub fn store_file_path(
+    &mut self,
+    path: String,
+    options: Option<Object<'_>>,
+    snapshot: &RuntimeFileSnapshot,
+  ) -> napi::Result<()> {
+    self.store_file(Self::file_declaration(path, options.as_ref())?, snapshot)
+  }
+
+  #[napi]
   pub fn build_info(&self) -> napi::Result<String> {
+    Self::json(&self.build_info_value())
+  }
+
+  #[napi]
+  pub fn build_info_value(&self) -> serde_json::Value {
     let path = self
       .project_root
       .join(".hvigor")
       .join("cache")
       .join("last-build-info.json");
-    let value = fs::read_to_string(path)
+    fs::read_to_string(path)
       .ok()
       .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-      .unwrap_or_else(|| serde_json::json!({}));
-    Self::json(&value)
+      .unwrap_or_else(|| serde_json::json!({}))
   }
 }
 
 impl RuntimeTaskCacheSession {
+  fn task_descriptor(
+    &self,
+    env: Env,
+    task: Object<'_>,
+  ) -> napi::Result<(String, RuntimeTaskDescriptor)> {
+    let task_context = task.get::<Object<'_>>("taskContext")?.unwrap_or(task);
+    let class_incremental_task = ["declareInputs", "declareInputFiles", "declareOutputFiles"]
+      .into_iter()
+      .map(|name| Self::has_function(&task, name))
+      .collect::<napi::Result<Vec<_>>>()?
+      .into_iter()
+      .all(|value| value);
+    let inspector = RuntimeTaskNapiInspector::new(env, task, task_context, class_incremental_task);
+    let state =
+      serde_json::from_value::<super::model::RuntimeTaskCallbackResult>(inspector.state()?)
+        .map_err(Self::napi_error)?;
+    let task_name = Self::required_string_method(&task, "getName")?;
+    let path = Self::required_string_method(&task, "getPath")?;
+    let node = Self::required_object_method(&task, "getNode")?;
+    let node_name = Self::node_name(&node)?;
+    let project_task = node
+      .get::<String>("classKind")?
+      .is_some_and(|kind| kind == "project");
+    let project = if project_task {
+      node
+    } else {
+      Self::required_object_method(&node, "getProject")?
+    };
+    let project_name = Self::node_name(&project)?;
+    Ok((
+      project_name,
+      RuntimeTaskDescriptor {
+        path,
+        node_name,
+        task_name,
+        built_in: false,
+        project_task,
+        lazy: false,
+        enabled: state.enabled.unwrap_or(true),
+        track_state: state.track_state.unwrap_or(true),
+        refresh_declarations: state.refresh_declarations.unwrap_or(class_incremental_task),
+        has_before_run: state.has_before_run.unwrap_or(false),
+        has_after_run: state.has_after_run.unwrap_or(false),
+        has_failed: state.has_failed.unwrap_or(false),
+        has_task_should_do: state.has_task_should_do.unwrap_or(false),
+        graph_bound_custom: false,
+        dependencies: Self::required_string_array_method(&task, "getDependsOn")?,
+        user_dependencies: Vec::new(),
+        input_properties: state.input_properties.unwrap_or_default(),
+        input_files: state.input_files.unwrap_or_default(),
+        output_files: state.output_files.unwrap_or_default(),
+      },
+    ))
+  }
+
+  fn file_declaration(
+    path: String,
+    options: Option<&Object<'_>>,
+  ) -> napi::Result<RuntimeTaskFileDeclarationInput> {
+    let is_directory = options
+      .map(|value| value.get::<bool>("isDirectory"))
+      .transpose()?
+      .flatten();
+    let depth = options
+      .map(|value| value.get::<u32>("depth"))
+      .transpose()?
+      .flatten();
+    let file_snap_shot_hash_value = options
+      .map(|value| value.get::<String>("fileSnapShotHashValue"))
+      .transpose()?
+      .flatten();
+    let test = options
+      .map(|value| value.get::<Object<'_>>("test"))
+      .transpose()?
+      .flatten()
+      .map(|value| -> napi::Result<RuntimeTaskFileFilterInput> {
+        Ok(RuntimeTaskFileFilterInput {
+          source: value.get::<String>("source")?.unwrap_or_default(),
+          flags: value.get::<String>("flags")?,
+        })
+      })
+      .transpose()?;
+    Ok(RuntimeTaskFileDeclarationInput {
+      path,
+      is_directory,
+      test,
+      depth,
+      file_snap_shot_hash_value,
+    })
+  }
+
+  fn required_string_method(object: &Object<'_>, name: &str) -> napi::Result<String> {
+    object
+      .get::<Function<(), String>>(name)?
+      .ok_or_else(|| napi::Error::from_reason(format!("Hvigor task is missing {name}()")))?
+      .apply(object, ())
+  }
+
+  fn required_string_array_method(object: &Object<'_>, name: &str) -> napi::Result<Vec<String>> {
+    object
+      .get::<Function<(), Vec<String>>>(name)?
+      .ok_or_else(|| napi::Error::from_reason(format!("Hvigor task is missing {name}()")))?
+      .apply(object, ())
+  }
+
+  fn required_object_method<'env>(object: &Object<'env>, name: &str) -> napi::Result<Object<'env>> {
+    object
+      .get::<Function<(), Object<'env>>>(name)?
+      .ok_or_else(|| napi::Error::from_reason(format!("Hvigor task is missing {name}()")))?
+      .apply(object, ())
+  }
+
+  fn node_name(node: &Object<'_>) -> napi::Result<String> {
+    for name in ["getName", "getNodeName"] {
+      if let Some(method) = node.get::<Function<(), String>>(name)? {
+        return method.apply(node, ());
+      }
+    }
+    Err(napi::Error::from_reason(
+      "Hvigor task node is missing getName()/getNodeName()",
+    ))
+  }
+
+  fn has_function(object: &Object<'_>, name: &str) -> napi::Result<bool> {
+    Ok(object.get::<Unknown<'_>>(name)?.is_some_and(|value| {
+      value
+        .get_type()
+        .is_ok_and(|kind| kind == ValueType::Function)
+    }))
+  }
+
   fn json(value: &impl Serialize) -> napi::Result<String> {
     serde_json::to_string(value).map_err(Self::napi_error)
   }
@@ -1052,7 +1250,7 @@ impl<'env> RuntimeFileSnapshotVisitorAdapter<'env> {
           "ARKDOWN_RUNTIME_TASK_CACHE_FAILED: snapshot visitor is missing {name}()"
         ))
       })?;
-    callback.apply(&self.visitor, FnArgs::from((snapshot,)))
+    callback.apply(self.visitor, FnArgs::from((snapshot,)))
   }
 
   fn call_void(&self, name: &str, snapshot: Object<'env>) -> napi::Result<()> {
@@ -1064,7 +1262,7 @@ impl<'env> RuntimeFileSnapshotVisitorAdapter<'env> {
           "ARKDOWN_RUNTIME_TASK_CACHE_FAILED: snapshot visitor is missing {name}()"
         ))
       })?;
-    callback.apply(&self.visitor, FnArgs::from((snapshot,)))?;
+    callback.apply(self.visitor, FnArgs::from((snapshot,)))?;
     Ok(())
   }
 }
@@ -1176,7 +1374,7 @@ impl RuntimeTaskValueEntry {
 
 /// Native snapshot model behind the public Hvigor `TaskProxy` result. The
 /// class keeps comparison, hashing, success state, and serialization out of
-/// `runtime.js` while retaining a JavaScript object with the official methods.
+/// `js/runtime.js` while retaining a JavaScript object with the official methods.
 #[napi]
 pub struct RuntimeTaskSnapshot {
   snapshot: TaskSnapshot,
@@ -1221,6 +1419,11 @@ impl RuntimeTaskSnapshot {
   #[napi]
   pub fn is_successful(&self) -> bool {
     self.successful
+  }
+
+  #[napi]
+  pub fn is_incremental(&self) -> bool {
+    self.descriptor.is_incremental()
   }
 
   #[napi]

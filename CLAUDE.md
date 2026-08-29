@@ -74,7 +74,7 @@ arkdown/
 │   ├── arkdown-cache/        ← fingerprint-based cache keys and records
 │   └── arkdown-watcher/      ← watch invalidation from session inventories
 └── packages/
-    └── arkdown/              ← NAPI binding + BuildCoordinator / CLI entry (`bin/arkdown.js`)
+    └── arkdown/              ← NAPI binding + BuildCoordinator / CLI entry (`js/arkdown-cli.js`)
 ```
 
 Separate `arkdown-plugin-*` crates are obsolete in the final design. Rollup plugin

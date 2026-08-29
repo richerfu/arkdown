@@ -166,6 +166,15 @@ Each target in `modules[].targets` may have its own `buildOption`:
 The Node package follows the `@ohos/hvigor@6.24.3` custom plugin contract. The
 `apply` argument is a `HvigorNode`; the OHOS context is obtained from that node:
 
+The `@ohos/hvigor` module mock exposes the runtime values declared by the
+6.24.3 `index.d.ts`: `replacer`, `hvigor`, `BuildResult`, `getNode`,
+`hvigorConfig`, `FileUtil`, `TaskInput`, `TaskOutput`, `submitWorker`, and
+`Priority`. Arkdown additionally retains the task subclass/decorator,
+core-node, task-state, and tooling-model values exercised by its supported
+custom-task workflow. Other values accidentally leaked by Hvigor's generated
+CommonJS root are not a compatibility contract; accessing a known leaked value
+fails with `ARKDOWN_UNSUPPORTED_HVIGOR_INTERNAL_EXPORT`.
+
 ```typescript
 // hvigorfile.ts (module-level)
 import { hapTasks, OhosHapContext, OhosPluginId } from "@ohos/hvigor-ohos-plugin";

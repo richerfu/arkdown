@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 
-const { ArkdownPackageCli } = require('../bin/arkdown.js')
+const { ArkdownPackageCli } = require('../js/arkdown-cli.js')
 
 test('package CLI parses repeated hvigor plugin path flags', () => {
   const cli = new ArkdownPackageCli([], async () => ({ artifacts: [] }))
@@ -92,17 +92,10 @@ test('hvigor-compatible CLI applies the latest buildVersion grammar', () => {
 test('hvigor-compatible daemon commands preserve latest CLI exit behavior without a fake daemon', () => {
   const cli = new ArkdownPackageCli([])
 
-  assert.deepEqual(cli.daemonCommandOutput(cli.parseHvigorArgs(['--status-daemon'])), [
-    'PID\tSTATUS\tPORT\tROOT_PATH',
-  ])
-  assert.deepEqual(cli.daemonCommandOutput(cli.parseHvigorArgs(['--stop-daemon'])), [
+  assert.deepEqual(cli.daemonCommandOutput(cli.parseHvigorArgs(['--status-daemon'])), ['PID\tSTATUS\tPORT\tROOT_PATH'])
+  assert.deepEqual(cli.daemonCommandOutput(cli.parseHvigorArgs(['--stop-daemon'])), ['Stopped 0 daemon in total.'])
+  assert.deepEqual(cli.daemonCommandOutput(cli.parseHvigorArgs(['--stop-daemon-all'])), ['Stopped 0 daemon in total.'])
+  assert.deepEqual(cli.daemonCommandOutput(cli.parseHvigorArgs(['--stop-daemon', '--status-daemon'])), [
     'Stopped 0 daemon in total.',
   ])
-  assert.deepEqual(cli.daemonCommandOutput(cli.parseHvigorArgs(['--stop-daemon-all'])), [
-    'Stopped 0 daemon in total.',
-  ])
-  assert.deepEqual(
-    cli.daemonCommandOutput(cli.parseHvigorArgs(['--stop-daemon', '--status-daemon'])),
-    ['Stopped 0 daemon in total.'],
-  )
 })

@@ -1,7 +1,8 @@
 'use strict'
 
 const path = require('node:path')
-const { parentPort } = require('node:worker_threads')
+const { parentPort, workerData } = require('node:worker_threads')
+const nativeRuntimeBinding = require('../index.js')
 
 const CUSTOM_WORKER_REQUEST = 'CUSTOM_WORKER_REQUEST'
 
@@ -14,7 +15,7 @@ class WorkerCacheStore {
   }
 
   getCache(key) {
-    this.manager.access(this.name, key)
+    this.manager.nativeManager.access(this.name, String(key))
     return this.values.get(key)
   }
 
@@ -24,7 +25,8 @@ class WorkerCacheStore {
 
   setCache(key, value, pinned = false) {
     this.values.set(key, value)
-    if (!pinned && !this.pinned) this.manager.insert(this.name, key)
+    const eviction = this.manager.nativeManager.set(this.name, String(key), pinned)
+    if (eviction) this.manager.evict(eviction)
     return this
   }
 
@@ -37,12 +39,12 @@ class WorkerCacheStore {
   }
 
   clear() {
-    for (const key of this.values.keys()) this.manager.remove(this.name, key)
+    for (const key of this.values.keys()) this.manager.nativeManager.delete(this.name, String(key))
     this.values.clear()
   }
 
   delete(key) {
-    this.manager.remove(this.name, key)
+    this.manager.nativeManager.delete(this.name, String(key))
     return this.values.delete(key)
   }
 
@@ -57,26 +59,29 @@ class WorkerCacheStore {
 
 class WorkerCacheManager {
   constructor(capacity = 4) {
-    this.capacity = capacity
+    this.nativeManager = new nativeRuntimeBinding.RuntimeHvigorCacheStoreManager({ capacity }, true)
     this.stores = new Map()
-    this.lru = []
   }
 
   mount(key, pinned = false) {
-    if (!this.stores.has(key)) this.stores.set(key, new WorkerCacheStore(this, key, pinned))
+    if (!this.stores.has(key)) {
+      this.nativeManager.mount(key, pinned)
+      this.stores.set(key, new WorkerCacheStore(this, key, pinned))
+    }
     return this.stores.get(key)
   }
 
   unmount(key) {
     const store = this.stores.get(key)
     store?.clear()
+    this.nativeManager.unmount(key)
     return this.stores.delete(key)
   }
 
   clear() {
     for (const store of this.stores.values()) store.values.clear()
+    this.nativeManager.clear()
     this.stores.clear()
-    this.lru.length = 0
   }
 
   size() {
@@ -93,33 +98,15 @@ class WorkerCacheManager {
     return size
   }
 
-  identity(store, key) {
-    return `${store}\0${key}`
-  }
-
-  access(store, key) {
-    const identity = this.identity(store, key)
-    const index = this.lru.indexOf(identity)
-    if (index >= 0) {
-      this.lru.splice(index, 1)
-      this.lru.unshift(identity)
+  evict({ storeName, key }) {
+    const store = this.stores.get(storeName)
+    if (!store) return
+    for (const candidate of store.values.keys()) {
+      if (String(candidate) === key) {
+        store.values.delete(candidate)
+        return
+      }
     }
-  }
-
-  insert(store, key) {
-    const identity = this.identity(store, key)
-    const index = this.lru.indexOf(identity)
-    if (index >= 0) this.lru.splice(index, 1)
-    this.lru.unshift(identity)
-    if (this.capacity === undefined || this.lru.length <= this.capacity) return
-    const evicted = this.lru.pop()
-    const separator = evicted.indexOf('\0')
-    this.stores.get(evicted.slice(0, separator))?.values.delete(evicted.slice(separator + 1))
-  }
-
-  remove(store, key) {
-    const index = this.lru.indexOf(this.identity(store, key))
-    if (index >= 0) this.lru.splice(index, 1)
   }
 }
 
@@ -170,7 +157,9 @@ class HvigorWorkerRuntime {
     if (message?.event === CUSTOM_WORKER_REQUEST) return
     const startTime = Number(process.hrtime.bigint())
     try {
+      for (const dependency of message.preludeDeps || workerData?.preludeDeps || []) require(dependency)
       const action = this.workFunction(message.workPath)
+      if (typeof action !== 'function') throw new TypeError(`Worker action was not found at ${message.workPath}`)
       const returnVal = await action(message.workInput, this.cacheManager)
       this.port.postMessage({
         event: 'work done',

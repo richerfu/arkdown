@@ -2,11 +2,11 @@
   "name": "@ohos-rs/arkdown",
   "version": "0.0.1-beta.11",
   "description": "Node.js bindings for arkdown — OHOS build tool with Rolldown-aligned plugin support",
-  "main": "runtime-entry.js",
+  "main": "js/runtime-entry.js",
   "types": "runtime-entry.d.ts",
   "bin": {
-    "arkdown": "bin/arkdown.js",
-    "hvigorw": "bin/arkdown.js"
+    "arkdown": "js/arkdown-cli.js",
+    "hvigorw": "js/arkdown-cli.js"
   },
   "repository": {
     "type": "git",
@@ -23,13 +23,10 @@
     "bundler"
   ],
   "files": [
-    "bin/arkdown.js",
+    "js/",
     "index.d.ts",
     "index.js",
-    "runtime-entry.js",
     "runtime-entry.d.ts",
-    "hvigor-worker.js",
-    "runtime.js",
     "README.md"
   ],
   "napi": {
@@ -53,7 +50,7 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "test": "node --test",
-    "smoke": "node -e \"const arkdown = require('./index.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node bin/arkdown.js --help",
+    "smoke": "node -e \"const arkdown = require('./js/runtime-entry.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node js/arkdown-cli.js --help",
     "publish:local": "bash scripts/publish-local.sh",
     "format": "prettier . -w",
     "format:rs": "cargo fmt",
@@ -62,7 +59,6 @@
     "version": "napi version"
   },
   "dependencies": {
-    "@ohos/hvigor": "6.24.2",
     "typescript": "4.9.5"
   },
   "devDependencies": {
