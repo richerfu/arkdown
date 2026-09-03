@@ -176,6 +176,9 @@ impl RolldownEtsTransformPlan {
     /// Select the explicitly requested ArkTS compiler language and rebuild the
     /// cross-file export index with the matching OXC parser mode.
     pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
+        if self.arkts_language_version == version {
+            return self;
+        }
         self.arkts_language_version = version;
         self.module_exports = ModuleExportIndex::build_with_version(
             &self.sources,

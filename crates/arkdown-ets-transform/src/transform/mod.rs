@@ -83,7 +83,9 @@ use crate::transform::static_graph::StaticArktsGraphProjection;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
-pub(crate) use component_analysis::ModuleExportIndex;
+pub(crate) use component_analysis::{
+    ClassObservation, ImportedClassObservations, ModuleExportIndex,
+};
 pub use navigation::{NavigationRoute, NavigationRouteMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +366,14 @@ impl<'a> ArktsTransformer<'a> {
             }
             let report = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
                 .with_component_metadata(&options.component_metadata)
+                .with_imported_class_observations(
+                    options.module_exports.imported_class_observations(
+                        &parsed.program,
+                        Path::new(&source.id.id),
+                        &options.sources,
+                        &options.module_roots,
+                    ),
+                )
                 .with_page_context(
                     options.entry_source,
                     options.preview_mode,

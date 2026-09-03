@@ -10,6 +10,8 @@ use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 
+use super::arkts11_monitor::Arkts11MonitorValidator;
+
 /// Checks the ArkTS 1.1 struct/member contracts owned by
 /// `process_component_class.ts` and `process_component_member.ts`.
 ///
@@ -347,6 +349,14 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             self.check_lifecycle_method(method);
             for decorator in &method.decorators {
                 let name = ArkuiDecorator::new(decorator).name();
+                if self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
+                    && matches!(
+                        name,
+                        ArkuiDecoratorName::MONITOR | ArkuiDecoratorName::SYNC_MONITOR
+                    )
+                {
+                    Arkts11MonitorValidator::new(decorator, self.file, self.errors).check();
+                }
                 if Self::is_v1_component_member_decorator(name)
                     || matches!(
                         name,
@@ -806,6 +816,20 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
 
             let has_require = decorators.contains(&ArkuiDecoratorName::REQUIRE);
             for decorator in &decorators {
+                if Self::forbids_function_type(decorator)
+                    && property.type_annotation.as_ref().is_some_and(|annotation| {
+                        Self::is_function_type(&annotation.type_annotation)
+                    })
+                {
+                    self.error(
+                        "10905363",
+                        format!(
+                            "The V1 decorator '@{decorator}' cannot be applied to a Function-type variable '{name}'.(From Api Version 23)"
+                        ),
+                        property.span,
+                        &[],
+                    );
+                }
                 if Self::requires_default_value(decorator)
                     && property.value.is_none()
                     && !(has_require && Self::require_releases_default(decorator))
@@ -1258,6 +1282,35 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             name,
             ArkuiDecoratorName::PROP | ArkuiDecoratorName::LINK | ArkuiDecoratorName::OBJECT_LINK
         )
+    }
+
+    fn forbids_function_type(name: &str) -> bool {
+        matches!(
+            name,
+            ArkuiDecoratorName::STATE
+                | ArkuiDecoratorName::PROP
+                | ArkuiDecoratorName::LINK
+                | ArkuiDecoratorName::STORAGE_PROP
+                | ArkuiDecoratorName::STORAGE_LINK
+                | ArkuiDecoratorName::PROVIDE
+                | ArkuiDecoratorName::CONSUME
+                | ArkuiDecoratorName::LOCAL_STORAGE_LINK
+                | ArkuiDecoratorName::LOCAL_STORAGE_PROP
+        )
+    }
+
+    fn is_function_type(ty: &TSType<'_>) -> bool {
+        match ty {
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::is_function_type(&parenthesized.type_annotation)
+            }
+            TSType::TSFunctionType(_) => true,
+            TSType::TSTypeReference(reference) => matches!(
+                &reference.type_name,
+                TSTypeName::IdentifierReference(identifier) if identifier.name == "Function"
+            ),
+            _ => false,
+        }
     }
 
     fn error(&mut self, code: &str, message: impl Into<String>, span: Span, solutions: &[&str]) {

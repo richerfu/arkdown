@@ -1416,6 +1416,31 @@ pub(crate) struct ModuleExportIndex {
     entries: Arc<FxHashMap<PathBuf, ModuleExportEntry>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClassObservation {
+    pub(crate) observed_v1: bool,
+    pub(crate) observed_v2: bool,
+}
+
+impl ClassObservation {
+    fn from_class(class: &oxc_ast::ast::Class<'_>) -> Self {
+        Self {
+            observed_v1: class.decorators.iter().any(|decorator| {
+                ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::OBSERVED
+            }),
+            observed_v2: class.decorators.iter().any(|decorator| {
+                ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::OBSERVED_V2
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ImportedClassObservations {
+    pub(crate) bindings: FxHashMap<String, ClassObservation>,
+    pub(crate) namespaces: FxHashMap<String, FxHashMap<String, ClassObservation>>,
+}
+
 impl ModuleExportIndex {
     pub(crate) fn build(
         sources: &crate::source::TransformSourceSnapshot,
@@ -1491,6 +1516,62 @@ impl ModuleExportIndex {
             .map(|entry| entry.components.clone())
             .unwrap_or_default()
     }
+
+    pub(crate) fn imported_class_observations(
+        &self,
+        program: &Program<'_>,
+        importer: &Path,
+        sources: &crate::source::TransformSourceSnapshot,
+        module_roots: &[(String, PathBuf)],
+    ) -> ImportedClassObservations {
+        let resolver = ImportTargetResolver::new(importer, sources, module_roots);
+        let mut observations = ImportedClassObservations::default();
+        for statement in &program.body {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            if import.import_kind.is_type() {
+                continue;
+            }
+            let Some(target) = resolver.resolve(import.source.value.as_str()) else {
+                continue;
+            };
+            let Some(exports) = self.entries.get(&target.path).map(|entry| &entry.classes) else {
+                continue;
+            };
+            let Some(specifiers) = &import.specifiers else {
+                continue;
+            };
+            for specifier in specifiers {
+                match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                        if !specifier.import_kind.is_type() =>
+                    {
+                        let imported = ComponentModuleExportName::value(&specifier.imported);
+                        if let Some(observation) = exports.get(&imported) {
+                            observations
+                                .bindings
+                                .insert(specifier.local.name.to_string(), observation);
+                        }
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        if let Some(observation) = exports.default {
+                            observations
+                                .bindings
+                                .insert(specifier.local.name.to_string(), observation);
+                        }
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        observations
+                            .namespaces
+                            .insert(specifier.local.name.to_string(), exports.namespace());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        observations
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1499,6 +1580,35 @@ struct ModuleExportEntry {
     simple_type_aliases: FxHashSet<String>,
     builders: FxHashSet<String>,
     components: ExportedComponentNames,
+    classes: ExportedClassObservations,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ExportedClassObservations {
+    named: FxHashMap<String, ClassObservation>,
+    default: Option<ClassObservation>,
+}
+
+impl ExportedClassObservations {
+    fn get(&self, name: &str) -> Option<ClassObservation> {
+        if name == ComponentModuleExportName::DEFAULT {
+            self.default
+        } else {
+            self.named.get(name).copied()
+        }
+    }
+
+    fn namespace(&self) -> FxHashMap<String, ClassObservation> {
+        let mut namespace = self.named.clone();
+        if let Some(default) = self.default {
+            namespace.insert(ComponentModuleExportName::DEFAULT.to_string(), default);
+        }
+        namespace
+    }
+
+    fn extend_named(&mut self, other: &Self) {
+        self.named.extend(other.named.clone());
+    }
 }
 
 struct ModuleExportFactInventory {
@@ -1558,6 +1668,7 @@ struct ModuleExportFacts {
     local_enums: FxHashSet<String>,
     local_simple_type_aliases: FxHashSet<String>,
     local_components: CustomComponentUpdateProps,
+    local_classes: FxHashMap<String, ClassObservation>,
     imports: Vec<ModuleImportFact>,
     exports: Vec<ModuleExportFact>,
 }
@@ -1593,6 +1704,13 @@ impl ModuleExportFacts {
         };
         for statement in &program.body {
             match statement {
+                Statement::ClassDeclaration(class) => {
+                    if let Some(name) = &class.id {
+                        facts
+                            .local_classes
+                            .insert(name.name.to_string(), ClassObservation::from_class(class));
+                    }
+                }
                 Statement::FunctionDeclaration(function)
                     if FunctionDecorators::new(function).has(ArkuiDecoratorName::BUILDER) =>
                 {
@@ -1601,6 +1719,19 @@ impl ModuleExportFacts {
                     }
                 }
                 Statement::ExportDeclaration(export) => {
+                    if let Declaration::ClassDeclaration(class) = &export.declaration {
+                        if let Some(name) = &class.id {
+                            let observation = ClassObservation::from_class(class);
+                            facts
+                                .local_classes
+                                .insert(name.name.to_string(), observation);
+                            facts
+                                .direct
+                                .classes
+                                .named
+                                .insert(name.name.to_string(), observation);
+                        }
+                    }
                     if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
                         facts.direct.enums.insert(declaration.id.name.to_string());
                     }
@@ -1636,6 +1767,17 @@ impl ModuleExportFacts {
                     }
                 }
                 Statement::ExportDefaultDeclaration(export) => {
+                    if let ExportDefaultDeclarationKind::ClassDeclaration(class) =
+                        &export.declaration
+                    {
+                        let observation = ClassObservation::from_class(class);
+                        facts.direct.classes.default = Some(observation);
+                        if let Some(name) = &class.id {
+                            facts
+                                .local_classes
+                                .insert(name.name.to_string(), observation);
+                        }
+                    }
                     if let ExportDefaultDeclarationKind::StructStatement(statement) =
                         &export.declaration
                     {
@@ -1723,7 +1865,7 @@ impl ModuleExportFacts {
                     if let ExportDefaultDeclarationKind::Identifier(identifier) =
                         &export.declaration
                     {
-                        facts.exports.push(ModuleExportFact::DefaultLocalComponent {
+                        facts.exports.push(ModuleExportFact::DefaultLocal {
                             local: identifier.name.to_string(),
                         });
                     }
@@ -1770,7 +1912,7 @@ enum ModuleExportFact {
     NamedLocal {
         bindings: Vec<ModuleExportBindingFact>,
     },
-    DefaultLocalComponent {
+    DefaultLocal {
         local: String,
     },
     AllFrom {
@@ -1814,6 +1956,7 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
         let mut local_enums = facts.local_enums.clone();
         let local_simple_type_aliases = facts.local_simple_type_aliases.clone();
         let mut local_components = facts.local_components.clone();
+        let mut local_classes = facts.local_classes.clone();
 
         for import in &facts.imports {
             let target_entry = self.export_entry(&import.target);
@@ -1831,6 +1974,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 if let Some(props) = props {
                     local_components.insert(binding.local.clone(), props.clone());
                 }
+                if let Some(observation) = target_entry.classes.get(&binding.imported) {
+                    local_classes.insert(binding.local.clone(), observation);
+                }
             }
             for local in &import.default_components {
                 if target_entry.components.has_default {
@@ -1842,6 +1988,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     .get(ComponentModuleExportName::DEFAULT)
                 {
                     local_components.insert(local.clone(), props.clone());
+                }
+                if let Some(observation) = target_entry.classes.default {
+                    local_classes.insert(local.clone(), observation);
                 }
             }
         }
@@ -1859,6 +2008,16 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                         }
                         if target_entry.builders.contains(&binding.local) {
                             entry.builders.insert(binding.exported.clone());
+                        }
+                        if let Some(observation) = target_entry.classes.get(&binding.local) {
+                            if binding.exported == ComponentModuleExportName::DEFAULT {
+                                entry.classes.default = Some(observation);
+                            } else {
+                                entry
+                                    .classes
+                                    .named
+                                    .insert(binding.exported.clone(), observation);
+                            }
                         }
                         let props = if binding.local == ComponentModuleExportName::DEFAULT
                             && target_entry.components.has_default
@@ -1901,12 +2060,25 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                         if local_enums.contains(&binding.local) {
                             entry.enums.insert(binding.exported.clone());
                         }
+                        if let Some(observation) = local_classes.get(&binding.local).copied() {
+                            if binding.exported == ComponentModuleExportName::DEFAULT {
+                                entry.classes.default = Some(observation);
+                            } else {
+                                entry
+                                    .classes
+                                    .named
+                                    .insert(binding.exported.clone(), observation);
+                            }
+                        }
                     }
                 }
-                ModuleExportFact::DefaultLocalComponent { local } => {
+                ModuleExportFact::DefaultLocal { local } => {
                     if let Some(info) = local_components.get(local) {
                         entry.components.has_default = true;
                         entry.components.default_info = info.clone();
+                    }
+                    if let Some(observation) = local_classes.get(local).copied() {
+                        entry.classes.default = Some(observation);
                     }
                 }
                 ModuleExportFact::AllFrom { target } => {
@@ -1917,6 +2089,7 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                         .extend(target_entry.simple_type_aliases);
                     entry.builders.extend(target_entry.builders);
                     entry.components.extend(target_entry.components);
+                    entry.classes.extend_named(&target_entry.classes);
                 }
             }
         }

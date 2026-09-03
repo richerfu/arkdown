@@ -5,6 +5,7 @@ use oxc_ast::ast::{
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
+use crate::transform::{ClassObservation, ImportedClassObservations};
 use rustc_hash::FxHashMap;
 
 use super::arkts11_class::Arkts11ClassValidator;
@@ -55,6 +56,7 @@ pub struct EtsChecker<'program, 'alloc, 'file> {
     file: &'file str,
     page_context: Option<PageValidationContext>,
     component_metadata: Option<&'program ComponentMetadata>,
+    imported_class_observations: ImportedClassObservations,
 }
 
 impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
@@ -64,6 +66,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             file,
             page_context: None,
             component_metadata: None,
+            imported_class_observations: ImportedClassObservations::default(),
         }
     }
 
@@ -86,6 +89,14 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             preview_mode,
             check_entry,
         });
+        self
+    }
+
+    pub(crate) fn with_imported_class_observations(
+        mut self,
+        observations: ImportedClassObservations,
+    ) -> Self {
+        self.imported_class_observations = observations;
         self
     }
 
@@ -197,8 +208,8 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
         inventory
     }
 
-    fn class_observation_inventory(&self) -> FxHashMap<String, (bool, bool)> {
-        let mut inventory = FxHashMap::default();
+    fn class_observation_inventory(&self) -> ImportedClassObservations {
+        let mut inventory = self.imported_class_observations.clone();
         for statement in &self.program.body {
             let class = match statement {
                 Statement::ClassDeclaration(class) => Some(class.as_ref()),
@@ -224,7 +235,13 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             let observed_v2 = class.decorators.iter().any(|decorator| {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::OBSERVED_V2
             });
-            inventory.insert(name.name.to_string(), (observed_v1, observed_v2));
+            inventory.bindings.insert(
+                name.name.to_string(),
+                ClassObservation {
+                    observed_v1,
+                    observed_v2,
+                },
+            );
         }
         inventory
     }

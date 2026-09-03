@@ -13,7 +13,9 @@ use anyhow::Result;
 use clap::Args;
 use walkdir::WalkDir;
 
-use arkdown::plugins::ets_transform::{ArktsSourceChecker, ComponentMetadata};
+use arkdown::plugins::ets_transform::{
+  ArktsSourceChecker, ComponentMetadata, TransformSourceSnapshot,
+};
 use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
 use arkdown_path::{ArtifactPathSerializer, HostPlatform};
 use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
@@ -246,22 +248,44 @@ impl<'a> CheckModuleRunner<'a> {
     let component_metadata = Arc::new(ComponentMetadata::from_ets_loader_path(
       &self.config.sdk_config.ets_loader_path,
     )?);
-    let checker = ArktsSourceChecker::new(component_metadata).with_api_available_context(
-      &self.config.product.compatible_sdk_version,
-      &self.config.product.runtime_os,
-    );
+    let mut source_texts = rustc_hash::FxHashMap::default();
     let mut errors = 0usize;
     for path in sources
       .iter()
       .filter(|path| CheckSourceInventory::is_arkts_source(path))
     {
-      let source = match std::fs::read_to_string(path) {
-        Ok(source) => source,
+      match std::fs::read_to_string(path) {
+        Ok(source) => {
+          source_texts.insert(
+            arkdown_path::canonicalize_or_owned(path),
+            Arc::<str>::from(source),
+          );
+        }
         Err(error) => {
           tracing::error!(path = %path.display(), error = %error, "check cannot read source");
           errors += 1;
-          continue;
         }
+      }
+    }
+    let project_sources = TransformSourceSnapshot::new(source_texts);
+    let module_roots = self
+      .config
+      .modules
+      .iter()
+      .map(|module| (module.name.clone(), module.src_path.clone()))
+      .collect();
+    let checker = ArktsSourceChecker::new(component_metadata)
+      .with_project_sources(project_sources.clone(), module_roots)
+      .with_api_available_context(
+        &self.config.product.compatible_sdk_version,
+        &self.config.product.runtime_os,
+      );
+    for path in sources
+      .iter()
+      .filter(|path| CheckSourceInventory::is_arkts_source(path))
+    {
+      let Some(source) = project_sources.source_text(path) else {
+        continue;
       };
       let source_id = match ArtifactPathSerializer::path_to_slash_string(path) {
         Ok(source_id) => source_id,

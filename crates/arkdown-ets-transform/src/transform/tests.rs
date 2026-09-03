@@ -51,6 +51,66 @@ fn test_non_component_passthrough() {
 }
 
 #[test]
+fn observed_inheritance_resolves_import_aliases_defaults_namespaces_and_reexports() {
+    let legacy_path = PathBuf::from("/project/model/Legacy.ets");
+    let modern_path = PathBuf::from("/project/model/Modern.ets");
+    let barrel_path = PathBuf::from("/project/model/Index.ets");
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        legacy_path,
+        std::sync::Arc::<str>::from("@Observed\nexport class LegacyBase {}\n"),
+    );
+    source_map.insert(
+        modern_path,
+        std::sync::Arc::<str>::from("@ObservedV2\nexport default class ModernBase {}\n"),
+    );
+    source_map.insert(
+        barrel_path,
+        std::sync::Arc::<str>::from("export { LegacyBase as ReexportedLegacy } from './Legacy';\n"),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = std::sync::Arc::new(ComponentMetadata::default());
+    let module_roots = Vec::new();
+    let module_exports = ModuleExportIndex::build(&sources, &module_roots, &metadata);
+    let options = TransformOptions {
+        component_metadata: metadata,
+        sources,
+        module_exports,
+        ..TransformOptions::default()
+    };
+
+    let named_error = TransformHarness::transform_with_options(
+        &make_source(
+            "/project/Named.ets",
+            "import { ReexportedLegacy as Parent } from './model/Index';\n@ObservedV2\nclass Child extends Parent {}\n",
+        ),
+        &options,
+    )
+    .expect_err("named re-export must resolve to the observed parent class");
+    assert!(named_error.to_string().contains("10905225"));
+
+    let namespace_error = TransformHarness::transform_with_options(
+        &make_source(
+            "/project/Namespace.ets",
+            "import * as Models from './model/Index';\n@ObservedV2\nclass Child extends Models.ReexportedLegacy {}\n",
+        ),
+        &options,
+    )
+    .expect_err("namespace re-export must resolve to the observed parent class");
+    assert!(namespace_error.to_string().contains("10905225"));
+
+    let default_error = TransformHarness::transform_with_options(
+        &make_source(
+            "/project/Default.ets",
+            "import Parent from './model/Modern';\n@Observed\nclass Child extends Parent {}\n",
+        ),
+        &options,
+    )
+    .expect_err("default import must resolve to the observed-v2 parent class");
+    assert!(default_error.to_string().contains("10905224"));
+}
+
+#[test]
 fn api_available_calls_and_references_match_reference_compiler_lowering() {
     let src = r#"import deviceInfo from '@ohos.deviceInfo'
 const direct = deviceInfo.apiAvailable(25)
