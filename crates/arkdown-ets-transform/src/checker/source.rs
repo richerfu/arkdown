@@ -7,6 +7,8 @@ use crate::error::EtsTransformError;
 use crate::source::CompileArktsSourceType;
 use crate::transform::api_available::{ApiAvailableTransformOptions, ApiAvailableValidator};
 use crate::transform::component_meta::ComponentMetadata;
+use crate::transform::ModuleExportIndex;
+use crate::TransformSourceSnapshot;
 
 use super::{EtsCheckReport, EtsChecker};
 
@@ -20,6 +22,7 @@ pub struct ArktsSourceChecker {
     arkts_language_version: ArktsLanguageVersion,
     api_available: ApiAvailableTransformOptions,
     page_context: Option<ArktsSourcePageContext>,
+    project_semantics: Option<ArktsProjectSemantics>,
 }
 
 impl ArktsSourceChecker {
@@ -29,11 +32,44 @@ impl ArktsSourceChecker {
             arkts_language_version: ArktsLanguageVersion::default(),
             api_available: ApiAvailableTransformOptions::default(),
             page_context: None,
+            project_semantics: None,
         }
     }
 
     pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
         self.arkts_language_version = version;
+        if let Some(project) = &mut self.project_semantics {
+            project.module_exports = ModuleExportIndex::build_with_version(
+                &project.sources,
+                &project.module_roots,
+                &self.component_metadata,
+                version,
+            );
+        }
+        self
+    }
+
+    /// Attach the immutable source graph used for cross-file ArkTS checks.
+    ///
+    /// The export closure is built once here and shared by every subsequent
+    /// `check` call. The checker never reads files or reparses sibling modules
+    /// from an individual source callback.
+    pub fn with_project_sources(
+        mut self,
+        sources: TransformSourceSnapshot,
+        module_roots: Vec<(String, std::path::PathBuf)>,
+    ) -> Self {
+        let module_exports = ModuleExportIndex::build_with_version(
+            &sources,
+            &module_roots,
+            &self.component_metadata,
+            self.arkts_language_version,
+        );
+        self.project_semantics = Some(ArktsProjectSemantics {
+            sources,
+            module_roots,
+            module_exports,
+        });
         self
     }
 
@@ -85,6 +121,16 @@ impl ArktsSourceChecker {
 
         let mut checker = EtsChecker::new(&parsed.program, source_id)
             .with_component_metadata(&self.component_metadata);
+        if let Some(project) = &self.project_semantics {
+            checker = checker.with_imported_class_observations(
+                project.module_exports.imported_class_observations(
+                    &parsed.program,
+                    std::path::Path::new(source_id),
+                    &project.sources,
+                    &project.module_roots,
+                ),
+            );
+        }
         if let Some(context) = self.page_context {
             checker = checker.with_page_context(
                 context.entry_source,
@@ -108,4 +154,10 @@ struct ArktsSourcePageContext {
     entry_source: bool,
     preview_mode: bool,
     check_entry: bool,
+}
+
+struct ArktsProjectSemantics {
+    sources: TransformSourceSnapshot,
+    module_roots: Vec<(String, std::path::PathBuf)>,
+    module_exports: ModuleExportIndex,
 }

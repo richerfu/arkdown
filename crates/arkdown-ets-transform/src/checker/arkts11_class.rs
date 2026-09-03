@@ -1,8 +1,9 @@
-use oxc_ast::ast::{Class, ClassElement, MethodDefinitionKind};
-use rustc_hash::FxHashMap;
-
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
+use crate::transform::{ClassObservation, ImportedClassObservations};
+
+use super::arkts11_monitor::Arkts11MonitorValidator;
+use oxc_ast::ast::{Class, ClassElement, MethodDefinitionKind};
 
 /// Rejects struct-only ArkUI decorators on ordinary classes.
 ///
@@ -13,7 +14,7 @@ pub(super) struct Arkts11ClassValidator<'class, 'errors> {
     class: &'class Class<'class>,
     file: &'errors str,
     errors: &'errors mut Vec<EtsTransformError>,
-    class_observations: Option<&'class FxHashMap<String, (bool, bool)>>,
+    class_observations: Option<&'class ImportedClassObservations>,
 }
 
 impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
@@ -32,7 +33,7 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
 
     pub(super) fn with_class_observation_inventory(
         mut self,
-        class_observations: &'class FxHashMap<String, (bool, bool)>,
+        class_observations: &'class ImportedClassObservations,
     ) -> Self {
         self.class_observations = Some(class_observations);
         self
@@ -114,6 +115,14 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
                 ClassElement::MethodDefinition(method) => {
                     for decorator in &method.decorators {
                         let name = ArkuiDecorator::new(decorator).name();
+                        if observed_v2
+                            && matches!(
+                                name,
+                                ArkuiDecoratorName::MONITOR | ArkuiDecoratorName::SYNC_MONITOR
+                            )
+                        {
+                            Arkts11MonitorValidator::new(decorator, self.file, self.errors).check();
+                        }
                         let (code, message) = if matches!(
                             name,
                             ArkuiDecoratorName::BUILDER
@@ -182,27 +191,15 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
     }
 
     fn check_observed_inheritance(&mut self, observed_v1: bool, observed_v2: bool) {
-        let Some(parent_name) =
-            self.class
-                .heritage
-                .as_ref()
-                .and_then(|heritage| match &heritage.expression {
-                    oxc_ast::ast::Expression::Identifier(identifier) => {
-                        Some(identifier.name.as_str())
-                    }
-                    _ => None,
-                })
+        let Some(parent) = self
+            .class
+            .heritage
+            .as_ref()
+            .and_then(|heritage| self.parent_observation(&heritage.expression))
         else {
             return;
         };
-        let Some((parent_v1, parent_v2)) = self
-            .class_observations
-            .and_then(|inventory| inventory.get(parent_name))
-            .copied()
-        else {
-            return;
-        };
-        if observed_v2 && parent_v1 {
+        if observed_v2 && parent.observed_v1 {
             self.errors.push(Self::diagnostic(
                 self.file,
                 "10905225",
@@ -210,7 +207,7 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
                     .to_string(),
                 self.class.span,
             ));
-        } else if observed_v1 && parent_v2 {
+        } else if observed_v1 && parent.observed_v2 {
             self.errors.push(Self::diagnostic(
                 self.file,
                 "10905224",
@@ -218,6 +215,29 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
                     .to_string(),
                 self.class.span,
             ));
+        }
+    }
+
+    fn parent_observation(
+        &self,
+        expression: &oxc_ast::ast::Expression<'_>,
+    ) -> Option<ClassObservation> {
+        let inventory = self.class_observations?;
+        match expression {
+            oxc_ast::ast::Expression::Identifier(identifier) => {
+                inventory.bindings.get(identifier.name.as_str()).copied()
+            }
+            oxc_ast::ast::Expression::StaticMemberExpression(member) => {
+                let oxc_ast::ast::Expression::Identifier(namespace) = &member.object else {
+                    return None;
+                };
+                inventory
+                    .namespaces
+                    .get(namespace.name.as_str())
+                    .and_then(|classes| classes.get(member.property.name.as_str()))
+                    .copied()
+            }
+            _ => None,
         }
     }
 

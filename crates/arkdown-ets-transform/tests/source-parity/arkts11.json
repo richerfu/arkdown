@@ -192,6 +192,34 @@
       "expect": { "errorCode": "10905383" }
     },
     {
+      "id": "v1-state-function-type",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateNonFunctionTypeWithDecorator",
+      "file": "StateFunction.ets",
+      "source": "@Component struct StateFunction { @State callback: () => void = () => {}; build() {} }",
+      "expect": { "errorCode": "10905363" }
+    },
+    {
+      "id": "sync-monitor-constant-argument",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkMonitorDecoratorsArg",
+      "file": "SyncMonitorConstant.ets",
+      "source": "@ObservedV2 class SyncMonitorConstant { value: string = ''; @SyncMonitor(value) changed() {} }",
+      "expect": { "errorCode": "10905365" }
+    },
+    {
+      "id": "sync-monitor-wildcard-position",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkWildCard",
+      "file": "SyncMonitorWildcard.ets",
+      "source": "@ObservedV2 class SyncMonitorWildcard { @Trace value: object = {}; @SyncMonitor('value.*.name') changed() {} }",
+      "expect": { "errorCode": "10905367" }
+    },
+    {
+      "id": "monitor-enable-wildcard-boolean",
+      "owner": "compiler/src/validate_ui_syntax.ts::shouldMonitorCheckWild",
+      "file": "MonitorWildcardOptions.ets",
+      "source": "@ObservedV2 class MonitorWildcardOptions { @Trace value: object = {}; @Monitor({ enableWildcard: 'yes' }, 'value.*') changed() {} }",
+      "expect": { "errorCode": "10905372" }
+    },
+    {
       "id": "observed-version-conflict",
       "owner": "compiler/src/validate_ui_syntax.ts::validateMutilObserved",
       "file": "ObservedConflict.ets",

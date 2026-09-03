@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use arkdown_ets_transform::{
     error::EtsTransformError, transform::component_meta::ComponentMetadata, ArktsSourceChecker,
-    EtsChecker,
+    EtsChecker, TransformSourceSnapshot,
 };
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
@@ -128,6 +128,34 @@ fn arkts11_state_controller_types_use_source_forbidden_type_inventory() {
         matches!(
             diagnostic,
             EtsTransformError::CodedDiagnostic { code, .. } if code == "10905308"
+        )
+    }));
+}
+
+#[test]
+fn arkts11_source_checker_reuses_project_export_closure_for_imported_inheritance() {
+    let base_path = PathBuf::from("/project/model/Base.ets");
+    let barrel_path = PathBuf::from("/project/model/Index.ets");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        base_path,
+        Arc::<str>::from("@Observed\nexport class Base {}\n"),
+    );
+    files.insert(
+        barrel_path,
+        Arc::<str>::from("export { Base as LegacyBase } from './Base';\n"),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(TransformSourceSnapshot::new(files), Vec::new());
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { LegacyBase as Parent } from './model/Index';\n@ObservedV2\nclass Child extends Parent {}\n",
+    );
+
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. } if code == "10905225"
         )
     }));
 }
