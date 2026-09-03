@@ -32,6 +32,7 @@ pub struct ComponentMetadata {
     atomic_components: FxHashSet<String>,
     single_child_components: FxHashSet<String>,
     specific_child_components: FxHashMap<String, Vec<String>>,
+    specific_parent_components: FxHashMap<String, Vec<String>>,
     builtin_style_names: FxHashSet<String>,
     system_api_style_names: FxHashSet<String>,
     need_pop_components: FxHashSet<String>,
@@ -117,6 +118,10 @@ impl ComponentMetadata {
 
     pub(crate) fn specific_child_components(&self, name: &str) -> Option<&[String]> {
         self.specific_child_components.get(name).map(Vec::as_slice)
+    }
+
+    pub(crate) fn specific_parent_components(&self, name: &str) -> Option<&[String]> {
+        self.specific_parent_components.get(name).map(Vec::as_slice)
     }
 
     pub(crate) fn is_builtin_style_name(&self, name: &str) -> bool {
@@ -638,6 +643,7 @@ impl<'a> ComponentMetadataLoader<'a> {
             atomic_components: component_grammar.atomic,
             single_child_components: component_grammar.single,
             specific_child_components: component_grammar.children,
+            specific_parent_components: component_grammar.parents,
             builtin_style_names: component_grammar.attrs,
             system_api_style_names: component_grammar.system_api_attrs,
             need_pop_components: semantics.need_pop_components,
@@ -701,6 +707,8 @@ struct SdkComponentGrammar {
     #[serde(default)]
     children: Vec<String>,
     #[serde(default)]
+    parents: Vec<String>,
+    #[serde(default)]
     attrs: Vec<String>,
     #[serde(default, rename = "systemApi")]
     system_api: bool,
@@ -711,6 +719,7 @@ struct SdkComponentGrammarInventory {
     atomic: FxHashSet<String>,
     single: FxHashSet<String>,
     children: FxHashMap<String, Vec<String>>,
+    parents: FxHashMap<String, Vec<String>>,
     attrs: FxHashSet<String>,
     system_api_attrs: FxHashSet<String>,
 }
@@ -727,7 +736,10 @@ impl SdkComponentGrammarInventory {
             self.single.insert(name.clone());
         }
         if !component.children.is_empty() {
-            self.children.insert(name, component.children);
+            self.children.insert(name.clone(), component.children);
+        }
+        if !component.parents.is_empty() {
+            self.parents.insert(name.clone(), component.parents);
         }
         self.attrs.extend(component.attrs.iter().cloned());
         if component.system_api {
