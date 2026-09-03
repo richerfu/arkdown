@@ -61,8 +61,8 @@ use crate::plugins::api_transform::ApiTransformPlugin;
 use crate::plugins::duplicate_check::DuplicateCheckPlugin;
 use crate::plugins::ets_transform::{
     CheckerMode, ComponentMetadata, EtsTransformPlugin, NavigationRouteMap,
-    ResourceTransformContext, RolldownEtsTransformPlan, TransformEntrySourceId,
-    TransformSourceSnapshot,
+    ResourceTransformContext, RolldownEtsTransformPlan, SystemApiCheckOptions,
+    TransformEntrySourceId, TransformSourceSnapshot,
 };
 use crate::plugins::har_dedup::HarDedupPlugin;
 use crate::plugins::hvigor_compile::{HvigorCompilePluginShare, HvigorNativePluginSlot};
@@ -127,6 +127,8 @@ pub struct PluginFactoryInput {
     pub resource_context: ResourceTransformContext,
     /// SDK ArkUI component metadata loaded before Rolldown hooks run.
     pub component_metadata: ComponentMetadata,
+    /// System-API compatibility inputs normalized before Rolldown starts.
+    pub system_api: SystemApiCheckOptions,
     /// Source files loaded before Rolldown hooks run for cross-file AST analysis.
     pub transform_sources: TransformSourceSnapshot,
     /// Router-map metadata indexed before transform hooks begin.
@@ -196,6 +198,9 @@ impl PluginFactoryInput {
             resource_refs: FxHashMap::default(),
             resource_context: ResourceTransformContext::default(),
             component_metadata: ComponentMetadata::default(),
+            system_api: SystemApiCheckOptions::default()
+                .with_compatible_sdk_version(plan.compatible_sdk_version.clone())
+                .with_compile_sdk_version(plan.target_api_version.to_string()),
             transform_sources: TransformSourceSnapshot::default(),
             navigation_routes: NavigationRouteMap::default(),
             package_resolution: Arc::new(PackageResolutionPlan::default()),
@@ -773,6 +778,7 @@ impl<'a> PluginFactory<'a> {
         .with_should_emit_js(self.plan.should_emit_js)
         .with_arkts_language_version(self.plan.arkts_language_version)
         .with_api_available_context(&self.plan.compatible_sdk_version, &self.plan.runtime_os)
+        .with_system_api_context(self.input.system_api)
         .with_resource_context(self.input.resource_context)
         .with_tsc_target(self.input.tsc_target)
         .with_module_analyzer(self.plan.module_analyzer)

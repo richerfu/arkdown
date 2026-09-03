@@ -119,12 +119,12 @@ impl<'a> ApiAvailableValidator<'a> {
 }
 
 #[derive(Default)]
-struct ApiAvailableSdkBindings {
+pub(super) struct ApiAvailableSdkBindings {
     symbols: FxHashSet<SymbolId>,
 }
 
 impl ApiAvailableSdkBindings {
-    fn from_program(program: &Program<'_>) -> Self {
+    pub(super) fn from_program(program: &Program<'_>) -> Self {
         let mut bindings = Self::default();
         for statement in &program.body {
             let Statement::ImportDeclaration(import) = statement else {
@@ -170,7 +170,7 @@ impl ApiAvailableSdkBindings {
         self.symbols.is_empty()
     }
 
-    fn contains(&self, reference: &IdentifierReference<'_>, scoping: &Scoping) -> bool {
+    pub(super) fn contains(&self, reference: &IdentifierReference<'_>, scoping: &Scoping) -> bool {
         reference
             .reference_id
             .get()

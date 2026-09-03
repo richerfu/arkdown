@@ -264,6 +264,17 @@ impl TransformSourceSnapshot {
         files
     }
 
+    /// Whether a source belongs to one of the SDK declaration roots captured
+    /// by the build-session inventory.
+    pub(crate) fn is_sdk_declaration(&self, path: &Path) -> bool {
+        let path = self
+            .indexed_path_or_canonical(path)
+            .unwrap_or_else(|| lexical_normalize(path));
+        self.sdk_declaration_roots
+            .iter()
+            .any(|root| path.starts_with(root))
+    }
+
     pub fn source_text(&self, path: &Path) -> Option<Arc<str>> {
         self.indexed_path(path)
             .and_then(|indexed| self.files.get(indexed))
@@ -689,6 +700,11 @@ impl SourceSnapshotPathCandidates {
         if matches!(self.mode, SourceSnapshotCandidateMode::Declarations) {
             candidates.push(self.candidate.with_extension("d.ets"));
             candidates.push(self.candidate.with_extension("d.ts"));
+            // TypeScript module resolution appends declaration extensions to
+            // dotted SDK basenames such as `@ohos.deviceInfo`; Path::with_extension
+            // alone would incorrectly replace `.deviceInfo`.
+            candidates.push(self.with_appended_extension("d.ets"));
+            candidates.push(self.with_appended_extension("d.ts"));
         }
         candidates.extend([
             self.candidate.join("Index.ets"),
@@ -705,6 +721,16 @@ impl SourceSnapshotPathCandidates {
             ]);
         }
         candidates
+    }
+
+    fn with_appended_extension(&self, extension: &str) -> PathBuf {
+        let Some(file_name) = self.candidate.file_name() else {
+            return self.candidate.clone();
+        };
+        let mut appended = file_name.to_os_string();
+        appended.push(".");
+        appended.push(extension);
+        self.candidate.with_file_name(appended)
     }
 }
 

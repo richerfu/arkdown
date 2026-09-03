@@ -81,6 +81,7 @@ use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
 use crate::transform::static_graph::StaticArktsGraphProjection;
 use crate::transform::system_api::Arkts11SystemApiValidator;
+pub use crate::transform::system_api::SystemApiCheckOptions;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
@@ -100,6 +101,7 @@ pub struct TransformOptions {
     /// Explicit build-wide ArkTS language. The default remains ArkTS 1.1.
     pub arkts_language_version: ArktsLanguageVersion,
     pub(crate) api_available: ApiAvailableTransformOptions,
+    pub system_api: SystemApiCheckOptions,
     pub bundle_name: Option<String>,
     pub module_name: Option<String>,
     pub project_root: Option<PathBuf>,
@@ -163,6 +165,7 @@ impl Default for TransformOptions {
         Self {
             arkts_language_version: ArktsLanguageVersion::default(),
             api_available: ApiAvailableTransformOptions::default(),
+            system_api: SystemApiCheckOptions::default(),
             bundle_name: None,
             module_name: None,
             project_root: None,
@@ -353,8 +356,15 @@ impl<'a> ArktsTransformer<'a> {
             false
         };
         let needs_api_available = options.api_available.should_transform_source(content);
-        let system_api_validator =
-            Arkts11SystemApiValidator::new(&source.id.id, content, options.api_available);
+        let system_api_validator = Arkts11SystemApiValidator::new(
+            &source.id.id,
+            content,
+            options.api_available,
+            &options.system_api,
+            &options.module_exports,
+            &options.sources,
+            &options.module_roots,
+        );
         let needs_system_api_validation = system_api_validator.is_required();
         let syntax_detector = ArktsTransformSyntaxDetector::new();
         if !mock_setup_decorators_lowered

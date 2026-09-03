@@ -320,6 +320,7 @@ fn test_loader_json_golden_minimal_hap() {
           use_normalized_ohm_url: false,
           no_external_import_by_path: None,
           duplicate_dependency_check: false,
+          api_compatibility_check: None,
         },
         ark_options: None,
         res_options: None,

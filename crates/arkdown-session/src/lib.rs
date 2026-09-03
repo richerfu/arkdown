@@ -121,6 +121,7 @@ pub use plan_input::{
 pub use sdk::{
     HvigorSdkComponentMetadata, HvigorSdkDetailsError, HvigorSdkDetailsInventory,
     HvigorSdkDetailsRequest, HvigorSdkDetailsSnapshot, SdkEs2abcOptionSnapshot,
+    SdkSystemCapabilityError, SdkSystemCapabilityInventory, SdkSystemCapabilitySelection,
 };
 
 // profiles

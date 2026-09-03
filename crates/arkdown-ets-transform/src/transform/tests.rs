@@ -2653,6 +2653,7 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
     let options = TransformOptions {
         arkts_language_version: ArktsLanguageVersion::default(),
         api_available: ApiAvailableTransformOptions::default(),
+        system_api: SystemApiCheckOptions::default(),
         bundle_name: Some("com.example.arkdown.test".to_string()),
         module_name: Some("phone".to_string()),
         project_root: Some(PathBuf::from("/project")),
@@ -2741,6 +2742,7 @@ export struct SecureModePage {
     let options = TransformOptions {
         arkts_language_version: ArktsLanguageVersion::default(),
         api_available: ApiAvailableTransformOptions::default(),
+        system_api: SystemApiCheckOptions::default(),
         bundle_name: Some("com.sankuai.hmeituan".to_string()),
         module_name: Some("meituan".to_string()),
         project_root: Some(PathBuf::from("/project")),
@@ -2864,6 +2866,7 @@ export struct SecureModePage {
     let options = TransformOptions {
         arkts_language_version: ArktsLanguageVersion::default(),
         api_available: ApiAvailableTransformOptions::default(),
+        system_api: SystemApiCheckOptions::default(),
         bundle_name: Some("com.sankuai.hmeituan".to_string()),
         module_name: Some("meituan".to_string()),
         project_root: Some(project_root.clone()),
@@ -4918,6 +4921,7 @@ struct WidgetCard {
         &TransformOptions {
             arkts_language_version: ArktsLanguageVersion::default(),
             api_available: ApiAvailableTransformOptions::default(),
+            system_api: SystemApiCheckOptions::default(),
             bundle_name: Some("com.example.hmosworld".to_string()),
             module_name: Some("phone".to_string()),
             project_root: Some(PathBuf::from("/project")),
@@ -5069,6 +5073,7 @@ struct ModalPage {
         &TransformOptions {
             arkts_language_version: ArktsLanguageVersion::default(),
             api_available: ApiAvailableTransformOptions::default(),
+            system_api: SystemApiCheckOptions::default(),
             bundle_name: Some("com.sankuai.hmeituan".to_string()),
             module_name: Some("meituan".to_string()),
             project_root: Some(PathBuf::from("/project")),

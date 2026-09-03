@@ -12,6 +12,7 @@ use crate::sdk_schemas::{SdkSchemaKind, SdkSchemaPath, SdkSchemaResolver};
 use crate::sdk_tools::{SdkToolKind, SdkToolPath, SdkToolResolver};
 
 use super::SdkEs2abcOptionSnapshot;
+use super::{SdkSystemCapabilityError, SdkSystemCapabilityInventory};
 
 /// Errors when building the SDK snapshot.
 #[derive(Debug, Error)]
@@ -21,6 +22,9 @@ pub enum SdkSnapshotError {
 
     #[error("SDK component root not found: {0}")]
     SdkRootNotFound(PathBuf),
+
+    #[error("SDK system-capability inventory error: {0}")]
+    SystemCapability(#[from] SdkSystemCapabilityError),
 }
 
 /// SDK metadata loaded once at session startup.
@@ -38,6 +42,8 @@ pub struct SdkSnapshot {
     pub compile_plugin: SdkCompilePluginSnapshot,
     /// Actual `es2abc --help` option inventory, probed once at startup.
     pub es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
+    /// Device system-capability declarations parsed once at session startup.
+    pub system_capabilities: Arc<SdkSystemCapabilityInventory>,
 }
 
 impl SdkSnapshot {
@@ -68,6 +74,9 @@ impl SdkSnapshot {
             config.compile_sdk_version.clone(),
         );
         snapshot.es2abc_options = Arc::new(SdkEs2abcOptionSnapshot::inspect(&config.es2abc_path));
+        snapshot.system_capabilities = Arc::new(SdkSystemCapabilityInventory::from_api_roots(
+            &config.ets_api_dirs(),
+        )?);
         Ok(snapshot)
     }
 
@@ -91,6 +100,7 @@ impl SdkSnapshot {
             compile_sdk_version,
             compile_plugin,
             es2abc_options: Arc::new(SdkEs2abcOptionSnapshot::default()),
+            system_capabilities: Arc::new(SdkSystemCapabilityInventory::default()),
         }
     }
 

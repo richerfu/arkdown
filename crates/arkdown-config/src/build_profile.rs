@@ -654,6 +654,8 @@ pub struct RawStrictMode {
     pub no_external_import_by_path: Option<bool>,
     #[serde(rename = "duplicateDependencyCheck", default)]
     pub duplicate_dependency_check: bool,
+    #[serde(rename = "apiCompatibilityCheck", default)]
+    pub api_compatibility_check: Option<arkdown_core::ApiCompatibilityCheckLevel>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -774,12 +776,14 @@ impl<'a> BuildOptionDecoder<'a> {
                 use_normalized_ohm_url: strict.use_normalized_ohm_url,
                 no_external_import_by_path: strict.no_external_import_by_path,
                 duplicate_dependency_check: strict.duplicate_dependency_check,
+                api_compatibility_check: strict.api_compatibility_check,
             })
             .unwrap_or(arkdown_core::StrictModeConfig {
                 case_sensitive_check: false,
                 use_normalized_ohm_url: false,
                 no_external_import_by_path: None,
                 duplicate_dependency_check: false,
+                api_compatibility_check: None,
             });
         let raw_ark_options = self.raw.and_then(|option| option.ark_options.as_ref());
         let ark_options = raw_ark_options.map(|options| arkdown_core::ArkOptions {

@@ -28,7 +28,8 @@ use crate::source_map;
 use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::{
-    self, CheckerMode, ModuleExportIndex, NavigationRouteMap, TransformOptions,
+    self, CheckerMode, ModuleExportIndex, NavigationRouteMap, SystemApiCheckOptions,
+    TransformOptions,
 };
 use crate::typescript_emit::{
     ConstEnumExportCache, ImportedConstEnumRewriter, TypeScriptDirectiveFlags,
@@ -46,6 +47,7 @@ use arkdown_core::{ArkTscTarget, ArktsLanguageVersion, ModuleSource, ModuleType,
 pub struct RolldownEtsTransformPlan {
     pub arkts_language_version: ArktsLanguageVersion,
     api_available: ApiAvailableTransformOptions,
+    system_api: SystemApiCheckOptions,
     pub bundle_name: String,
     pub module_name: String,
     pub project_root: PathBuf,
@@ -105,6 +107,7 @@ impl RolldownEtsTransformPlan {
         Self {
             arkts_language_version: ArktsLanguageVersion::default(),
             api_available: ApiAvailableTransformOptions::default(),
+            system_api: SystemApiCheckOptions::default(),
             bundle_name: bundle_name.into(),
             module_name: module_name.into(),
             project_root,
@@ -196,6 +199,15 @@ impl RolldownEtsTransformPlan {
     ) -> Self {
         self.api_available =
             ApiAvailableTransformOptions::from_build_context(compatible_sdk_version, runtime_os);
+        self.system_api = self
+            .system_api
+            .clone()
+            .with_compatible_sdk_version(compatible_sdk_version);
+        self
+    }
+
+    pub fn with_system_api_context(mut self, context: SystemApiCheckOptions) -> Self {
+        self.system_api = context;
         self
     }
 
@@ -252,6 +264,7 @@ impl RolldownEtsTransformPlan {
         TransformOptions {
             arkts_language_version: self.arkts_language_version,
             api_available: self.api_available,
+            system_api: self.system_api.clone(),
             bundle_name: Some(self.bundle_name.clone()),
             module_name: Some(self.module_name.clone()),
             project_root: Some(self.project_root.clone()),

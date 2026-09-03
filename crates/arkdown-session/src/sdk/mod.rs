@@ -3,6 +3,7 @@
 mod es2abc_options;
 mod hvigor_details;
 pub mod snapshot;
+pub mod system_capabilities;
 
 pub use es2abc_options::SdkEs2abcOptionSnapshot;
 pub use hvigor_details::{
@@ -10,3 +11,6 @@ pub use hvigor_details::{
     HvigorSdkDetailsRequest, HvigorSdkDetailsSnapshot,
 };
 pub use snapshot::SdkSnapshot;
+pub use system_capabilities::{
+    SdkSystemCapabilityError, SdkSystemCapabilityInventory, SdkSystemCapabilitySelection,
+};

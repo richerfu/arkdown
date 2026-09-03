@@ -24,6 +24,7 @@ fn config(project_root: &std::path::Path, build_version: Option<&str>) -> Arkdow
                     use_normalized_ohm_url: true,
                     no_external_import_by_path: None,
                     duplicate_dependency_check: false,
+                    api_compatibility_check: None,
                 },
                 ark_options: None,
                 res_options: None,
