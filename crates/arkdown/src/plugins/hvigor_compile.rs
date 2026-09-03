@@ -11,6 +11,7 @@ use oxc_index::{Idx, IndexVec};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Module-scoped `this.share.projectConfig` snapshot supplied to JavaScript
 /// compile plugins. Rust owns the build model and passes this typed snapshot
@@ -19,6 +20,29 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct HvigorCompilePluginShare {
     pub project_config: HvigorCompilePluginProjectConfig,
+    /// Remaining source-defined `projectConfig` fields that are naturally
+    /// represented by loader/config JSON. The Node adapter merges this map
+    /// into the typed core object without owning any build derivation logic.
+    pub project_config_fields: Arc<serde_json::Map<String, serde_json::Value>>,
+    /// Immutable source metadata captured by `BuildSession` before hooks run.
+    pub source_files: Arc<FxHashMap<PathBuf, HvigorCompilePluginSourceFile>>,
+    /// Declared package aliases used by Hvigor's synchronous `importResolver`.
+    pub import_resolver_entries: Arc<[HvigorCompilePluginImportEntry]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HvigorCompilePluginSourceFile {
+    pub content_hash: String,
+    pub size: u64,
+    pub modified_millis: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HvigorCompilePluginImportEntry {
+    pub alias: String,
+    pub package_name: String,
+    pub package_root: PathBuf,
+    pub entry_path: Option<PathBuf>,
 }
 
 /// Latest-hvigor project configuration fields observed by compile plugins.
@@ -36,6 +60,7 @@ pub struct HvigorCompilePluginProjectConfig {
     pub module_name: Option<String>,
     pub module_path: Option<PathBuf>,
     pub project_top_dir: Option<PathBuf>,
+    pub watch_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -284,8 +309,10 @@ pub struct HvigorPluginValidationOutcome {
 pub struct HvigorPluginShapeValidator;
 
 impl HvigorPluginShapeValidator {
-    const COMPILE_HOOKS: [&'static str; 8] = [
+    const COMPILE_HOOKS: [&'static str; 13] = [
+        "beforeBuild",
         "buildStart",
+        "afterBuildStart",
         "resolveId",
         "load",
         "transform",
@@ -293,11 +320,16 @@ impl HvigorPluginShapeValidator {
         "moduleParsed",
         "beforeBuildEnd",
         "buildEnd",
+        "afterBuildEnd",
+        "bundleEnd",
+        "cleanUp",
     ];
-    const PACKAGE_ATTRIBUTES: [&'static str; 11] = [
+    const PACKAGE_ATTRIBUTES: [&'static str; 16] = [
         "name",
         "order",
+        "beforeBuild",
         "buildStart",
+        "afterBuildStart",
         "resolveId",
         "load",
         "transform",
@@ -305,6 +337,9 @@ impl HvigorPluginShapeValidator {
         "buildEnd",
         "resolveDynamicImport",
         "beforeBuildEnd",
+        "afterBuildEnd",
+        "bundleEnd",
+        "cleanUp",
         "shouldInvalidCache",
     ];
 
@@ -355,12 +390,16 @@ impl HvigorPluginShapeValidator {
                 continue;
             }
             if Self::COMPILE_HOOKS.contains(&attribute.name.as_str()) {
-                if attribute.value.truthy && attribute.value.kind != HvigorPluginValueKind::Function
+                if attribute.value.truthy
+                    && !matches!(
+                        attribute.value.kind,
+                        HvigorPluginValueKind::Function | HvigorPluginValueKind::Object
+                    )
                 {
                     outcome.error = Some(HvigorCompilePluginDiagnostic {
                         code: "PLUGIN_NAME_WITH_UNKNOWN_HOOK",
                         message: format!(
-                            "Plugin \"{plugin_name}\": hook \"{}\" must be a function",
+                            "Plugin \"{plugin_name}\": hook \"{}\" must be a function or ordered handler object",
                             attribute.name
                         ),
                         plugin_name: Some(plugin_name.to_string()),

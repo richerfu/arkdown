@@ -12,7 +12,8 @@
 //! | `factory` | `PluginFactory` — assembles the ordered plugin set for a module build |
 //! | `json5` | JSON/JSON5 import transform (was `arkdown-plugin-json5`) |
 //! | `duplicate_check` | Filename uniqueness check (was `arkdown-plugin-duplicate-check`) |
-//! | `module_meta` | Per-module OHOS metadata (was `arkdown-plugin-module-meta`) |
+//! Module/package metadata is materialized from the immutable package plan and
+//! Rolldown scan output; it does not require a stateful hook adapter.
 //! | `ohos_resolve` | Resolve plugin wrapping the OHOS resolver (was `arkdown-plugin-ohos-resolve`) |
 //! | `har_dedup` | HAR deduplication for HSP builds (was `arkdown-plugin-har-dedup`) |
 //! | `ets_transform` | ArkTS transform replacing SDK JS plugins (was `arkdown-plugin-ets-transform`) |
@@ -39,5 +40,4 @@ pub mod hvigor_compile;
 mod hvigor_compile_tests;
 pub mod import_check;
 pub mod json5;
-pub mod module_meta;
 pub mod ohos_resolve;

@@ -6,6 +6,11 @@ pub(crate) struct HvigorCompilePluginShareBuilder<'a> {
   pub(crate) config: &'a ArkdownConfig,
   pub(crate) args: &'a BuildArgs,
   pub(crate) module: Option<&'a ModuleConfig>,
+  pub(crate) source_store: &'a arkdown_session::SourceStore,
+  pub(crate) package_resolution: &'a PackageResolutionPlan,
+  pub(crate) loader_json: &'a LoaderJson,
+  pub(crate) loader_json_path: &'a Path,
+  pub(crate) arkts_language_version: ArktsLanguageVersion,
 }
 
 impl<'a> HvigorCompilePluginShareBuilder<'a> {
@@ -13,18 +18,153 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
     config: &'a ArkdownConfig,
     args: &'a BuildArgs,
     module: Option<&'a ModuleConfig>,
+    source_store: &'a arkdown_session::SourceStore,
+    package_resolution: &'a PackageResolutionPlan,
+    loader_json: &'a LoaderJson,
+    loader_json_path: &'a Path,
+    arkts_language_version: ArktsLanguageVersion,
   ) -> Self {
     Self {
       config,
       args,
       module,
+      source_store,
+      package_resolution,
+      loader_json,
+      loader_json_path,
+      arkts_language_version,
     }
   }
 
   /// Build the module-scoped `this.share` snapshot used by latest-hvigor
   /// compile plugins. Paths remain typed until the N-API display boundary.
-  pub(crate) fn build(self) -> HvigorCompilePluginShare {
-    HvigorCompilePluginShare {
+  pub(crate) fn build(self) -> Result<HvigorCompilePluginShare> {
+    let source_files = self
+      .source_store
+      .source_files()
+      .into_iter()
+      .map(|source| {
+        (
+          source.path.clone(),
+          HvigorCompilePluginSourceFile {
+            content_hash: source.fingerprint.content_hash.clone(),
+            size: source.fingerprint.size,
+            modified_millis: source.modified_millis,
+          },
+        )
+      })
+      .collect::<FxHashMap<_, _>>();
+    let import_resolver_entries = self
+      .package_resolution
+      .sorted_entries()
+      .into_iter()
+      .map(|(alias, info)| HvigorCompilePluginImportEntry {
+        alias: alias.to_string(),
+        package_name: info.pkg_name.clone(),
+        package_root: info.pkg_root.clone(),
+        entry_path: info
+          .manifest
+          .exports_import_field()
+          .or_else(|| info.manifest.hvigor_main_field().map(str::to_string))
+          .map(PathBuf::from),
+      })
+      .collect::<Vec<_>>();
+    let mut project_config_fields = serde_json::to_value(self.loader_json)?
+      .as_object()
+      .cloned()
+      .ok_or_else(|| anyhow::anyhow!("loader.json must serialize as an object"))?;
+    let module_path = self.module.map(|module| module.src_path.clone());
+    let module_type = self.module.map(|module| &module.module_type);
+    let path_value = |path: &Path| serde_json::Value::String(path.to_string_lossy().into_owned());
+    project_config_fields.insert(
+      "compileMode".into(),
+      self.loader_json.compile_mode.clone().into(),
+    );
+    project_config_fields.insert(
+      "projectRootPath".into(),
+      path_value(&self.config.project_root),
+    );
+    project_config_fields.insert(
+      "projectTopDir".into(),
+      path_value(&self.config.project_root),
+    );
+    project_config_fields.insert(
+      "projectPath".into(),
+      module_path
+        .as_deref()
+        .map(path_value)
+        .unwrap_or(serde_json::Value::Null),
+    );
+    project_config_fields.insert(
+      "moduleRootPath".into(),
+      self.loader_json.module_root_path.clone().into(),
+    );
+    project_config_fields.insert(
+      "cachePath".into(),
+      self.loader_json.cache_path.clone().into(),
+    );
+    project_config_fields.insert(
+      "aceModuleBuild".into(),
+      self.loader_json.ace_module_build.clone().into(),
+    );
+    project_config_fields.insert(
+      "buildPath".into(),
+      self.loader_json.ace_module_build.clone().into(),
+    );
+    project_config_fields.insert("aceBuildJson".into(), path_value(self.loader_json_path));
+    project_config_fields.insert(
+      "aceModuleJsonPath".into(),
+      module_path
+        .as_deref()
+        .map(|path| path_value(&path.join("src/main/module.json5")))
+        .unwrap_or(serde_json::Value::Null),
+    );
+    project_config_fields.insert(
+      "runtimeOS".into(),
+      self.config.product.runtime_os.clone().into(),
+    );
+    project_config_fields.insert("buildMode".into(), self.config.build_mode.as_str().into());
+    project_config_fields.insert(
+      "buildArkMode".into(),
+      self.config.build_mode.as_str().into(),
+    );
+    project_config_fields.insert("isPreview".into(), self.args.preview.into());
+    project_config_fields.insert(
+      "compileHar".into(),
+      matches!(self.config.output_target, OutputTarget::Har).into(),
+    );
+    project_config_fields.insert(
+      "compileShared".into(),
+      module_type
+        .is_some_and(|module_type| matches!(module_type, OhosModuleType::Shared))
+        .into(),
+    );
+    project_config_fields.insert(
+      "byteCodeHar".into(),
+      (matches!(self.config.output_target, OutputTarget::Har)
+        && self.config.product.build_option.har_artifact_type == HarArtifactType::Bytecode)
+        .into(),
+    );
+    project_config_fields.insert(
+      "targetName".into(),
+      self
+        .args
+        .build_target_name
+        .clone()
+        .unwrap_or_else(|| "default".into())
+        .into(),
+    );
+    project_config_fields.insert("watchMode".into(), self.args.watch.to_string().into());
+    project_config_fields.insert(
+      "arkTSVersion".into(),
+      self.arkts_language_version.to_string().into(),
+    );
+    project_config_fields.insert(
+      "isOhosTest".into(),
+      (self.args.target == "test" || self.args.build_target_name.as_deref() == Some("ohosTest"))
+        .into(),
+    );
+    Ok(HvigorCompilePluginShare {
       project_config: HvigorCompilePluginProjectConfig {
         bundle_name: self.config.product.bundle_name.clone(),
         build_mode: self.config.build_mode.as_str().to_string(),
@@ -42,8 +182,12 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
         module_name: self.module.map(|module| module.name.clone()),
         module_path: self.module.map(|module| module.src_path.clone()),
         project_top_dir: self.args.project.clone(),
+        watch_mode: self.args.watch,
       },
-    }
+      project_config_fields: Arc::new(project_config_fields),
+      source_files: Arc::new(source_files),
+      import_resolver_entries: Arc::from(import_resolver_entries),
+    })
   }
 }
 

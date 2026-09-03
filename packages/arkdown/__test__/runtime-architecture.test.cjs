@@ -27,7 +27,9 @@ test('handwritten JavaScript is limited to entry, CLI, checker bridge, and plugi
   assert.deepEqual(manifest.bin, { arkdown: 'js/arkdown-cli.js' })
   assert.equal(manifest.dependencies, undefined)
   assert.ok(Buffer.byteLength(sources['runtime-entry.js']) < 500)
-  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 25_000)
+  // The adapter owns the complete TS/JS plugin ABI, including the Hvigor
+  // share/cache/logger compatibility objects. Build orchestration stays native.
+  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 28_000)
 
   for (const removed of [
     'runtime.js',
@@ -48,7 +50,9 @@ test('plugin adapter exposes the complete supported lifecycle through one typed 
   const compiler = fs.readFileSync(path.join(root, 'crates/arkdown/src/plugin_module.rs'), 'utf8')
 
   for (const hook of [
+    'beforeBuild',
     'buildStart',
+    'afterBuildStart',
     'resolveId',
     'load',
     'transform',
@@ -56,6 +60,9 @@ test('plugin adapter exposes the complete supported lifecycle through one typed 
     'resolveDynamicImport',
     'beforeBuildEnd',
     'buildEnd',
+    'afterBuildEnd',
+    'bundleEnd',
+    'cleanUp',
     'shouldInvalidCache',
   ]) {
     assert.match(adapter, new RegExp(`'${hook}'`))

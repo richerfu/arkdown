@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use arkdown_ets_transform::TransformSourceSnapshot;
 use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
 use rolldown_plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
@@ -9,7 +10,15 @@ use rolldown_plugin::{
 
 use super::module_emit::JsonModuleEmitter;
 
-pub struct Json5Plugin;
+pub struct Json5Plugin {
+    sources: TransformSourceSnapshot,
+}
+
+impl Json5Plugin {
+    pub fn new(sources: TransformSourceSnapshot) -> Self {
+        Self { sources }
+    }
+}
 
 impl std::fmt::Debug for Json5Plugin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -54,17 +63,19 @@ impl Plugin for Json5Plugin {
         args: &HookLoadArgs<'_>,
     ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
         let id = args.id.to_owned();
-        async move { JsonModuleLoader::new(&id).load() }
+        let sources = self.sources.clone();
+        async move { JsonModuleLoader::new(&id, &sources).load() }
     }
 }
 
 struct JsonModuleLoader<'a> {
     id: &'a str,
+    sources: &'a TransformSourceSnapshot,
 }
 
 impl<'a> JsonModuleLoader<'a> {
-    fn new(id: &'a str) -> Self {
-        Self { id }
+    fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
+        Self { id, sources }
     }
 
     fn load(&self) -> HookLoadReturn {
@@ -72,13 +83,18 @@ impl<'a> JsonModuleLoader<'a> {
         if !specifier.is_json_module() {
             return Ok(None);
         }
-        let raw = fs_err::read_to_string(self.id)
-            .map_err(|e| anyhow::anyhow!("json5 plugin: failed to read {}: {e}", self.id))?;
+        let path = Path::new(self.id);
+        let raw = self.sources.source_text(path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "json5 plugin: {} is missing from the immutable startup source snapshot",
+                self.id
+            )
+        })?;
         let value: serde_json::Value = if specifier.is_json5() {
-            json5::from_str(&raw)
+            json5::from_str(raw.as_ref())
                 .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {}: {e}", self.id))?
         } else {
-            serde_json::from_str(&raw)
+            serde_json::from_str(raw.as_ref())
                 .map_err(|e| anyhow::anyhow!("json5 plugin: parse error in {}: {e}", self.id))?
         };
         let code = JsonModuleEmitter::new(&value).emit();
@@ -144,6 +160,12 @@ mod tests {
     use oxc_ast::ast::{Declaration, Statement};
     use oxc_parser::Parser;
     use oxc_span::SourceType;
+
+    fn source_snapshot(path: &Path, source: &str) -> TransformSourceSnapshot {
+        let mut files = rustc_hash::FxHashMap::default();
+        files.insert(path.to_path_buf(), std::sync::Arc::<str>::from(source));
+        TransformSourceSnapshot::new(files)
+    }
 
     struct JsonModuleAssertion<'a> {
         code: &'a str,
@@ -226,8 +248,9 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::with_suffix(".json").unwrap();
         writeln!(tmp, r#"{{"hello": "world"}}"#).unwrap();
         let path = tmp.path().to_string_lossy().to_string();
+        let sources = source_snapshot(tmp.path(), r#"{"hello": "world"}"#);
 
-        let result = JsonModuleLoader::new(&path).load().unwrap();
+        let result = JsonModuleLoader::new(&path, &sources).load().unwrap();
         let out = result.unwrap();
         assert!(JsonModuleAssertion::new(&out.code).has_named_var_export("hello"));
     }
@@ -246,8 +269,12 @@ mod tests {
         )
         .unwrap();
         let path = tmp.path().to_string_lossy().to_string();
+        let sources = source_snapshot(
+            tmp.path(),
+            "{ // this is a comment\n\"name\": \"arkdown\",\n\"version\": \"1.0\",\n}",
+        );
 
-        let result = JsonModuleLoader::new(&path).load();
+        let result = JsonModuleLoader::new(&path, &sources).load();
         assert!(
             result.is_ok(),
             "JSON5 with comments/trailing commas must not error"
@@ -260,7 +287,8 @@ mod tests {
 
     #[test]
     fn test_load_returns_none_for_non_json_id() {
-        let result = JsonModuleLoader::new("/some/path/module.ts")
+        let sources = TransformSourceSnapshot::default();
+        let result = JsonModuleLoader::new("/some/path/module.ts", &sources)
             .load()
             .unwrap();
         assert!(

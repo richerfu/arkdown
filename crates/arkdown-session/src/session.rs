@@ -14,6 +14,7 @@ use crate::profiles::store::ProfileStore;
 use crate::project::snapshot::ProjectSnapshot;
 use crate::resources::plan::ResourcePlan;
 use crate::sdk::snapshot::SdkSnapshot;
+use crate::source_store::SourceStore;
 use crate::WatchPlanInput;
 
 /// The immutable build session, constructed once at startup and shared across
@@ -40,6 +41,8 @@ pub struct BuildSession {
     pub custom_config: Arc<ArkdownCustomConfig>,
     /// Typed source, resource, dependency, and configuration watch inventory.
     pub watch_inputs: Arc<Vec<WatchPlanInput>>,
+    /// Source contents and fingerprints captured once during session startup.
+    pub source_store: Arc<SourceStore>,
     /// Explicit ArkTS language selected for this immutable build session.
     pub arkts_language_version: ArktsLanguageVersion,
 }

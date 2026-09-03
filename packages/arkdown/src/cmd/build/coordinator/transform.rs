@@ -56,6 +56,8 @@ pub(crate) struct TransformSourceSnapshotBuilder<'a> {
   /// Local unit-test source roots (`<module>/.test/testability`,
   /// `<module>/src/test`) — compiler inputs of the `hvigorw test` chain.
   pub(crate) test_source_roots: &'a [PathBuf],
+  /// Immutable project/package source inventory captured by BuildSession.
+  pub(crate) source_store: Option<&'a arkdown_session::SourceStore>,
 }
 
 impl<'a> TransformSourceSnapshotBuilder<'a> {
@@ -74,7 +76,16 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
       source_set_overlays,
       package_roots: &[],
       test_source_roots: &[],
+      source_store: None,
     }
+  }
+
+  pub(crate) fn with_source_store(
+    mut self,
+    source_store: &'a arkdown_session::SourceStore,
+  ) -> Self {
+    self.source_store = Some(source_store);
+    self
   }
 
   pub(crate) fn with_test_source_roots(mut self, roots: &'a [PathBuf]) -> Self {
@@ -247,6 +258,31 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
       return Ok(());
     }
 
+    if let Some(source_store) = self.source_store.filter(|store| store.covers(&root)) {
+      for (path, source) in source_store.text_sources_under(&root) {
+        let kind = SourceClassifier::classify_path(path);
+        if matches!(mode, SourceRootMode::TransformAndDeclarations) && kind.is_javascript_runtime()
+        {
+          runtime_source_paths.insert(path.to_path_buf());
+        }
+        let accepts = match mode {
+          SourceRootMode::TransformAndDeclarations => {
+            kind.is_ets_transform_input()
+              || kind.is_declaration()
+              || matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("json" | "json5")
+              )
+          }
+          SourceRootMode::DeclarationsOnly => kind.is_declaration(),
+        };
+        if accepts {
+          files.insert(path.to_path_buf(), source);
+        }
+      }
+      return Ok(());
+    }
+
     let mut paths = Vec::new();
     for entry in walkdir::WalkDir::new(&root)
       .into_iter()
@@ -262,7 +298,15 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
       }
       let accepts = match mode {
         SourceRootMode::TransformAndDeclarations => {
-          kind.is_ets_transform_input() || kind.is_declaration()
+          kind.is_ets_transform_input()
+            || kind.is_declaration()
+            || matches!(
+              entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str()),
+              Some("json" | "json5")
+            )
         }
         SourceRootMode::DeclarationsOnly => kind.is_declaration(),
       };

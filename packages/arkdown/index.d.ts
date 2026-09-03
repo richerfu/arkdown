@@ -8,6 +8,13 @@
  * preserves Rolldown's `getFileName` ownership and diagnostics verbatim.
  */
 export declare class ArkdownRolldownPluginContext {
+  resolve(specifier: string, importer?: string | undefined | null, options?: JsPluginContextResolveOptions | undefined | null): Promise<JsResolveIdOutput | null>
+  load(options: JsPluginContextLoadOptions): Promise<HvigorModuleInfo | null>
+  emitFile(file: JsEmittedFile): string
+  addWatchFile(id: string): void
+  info(message: string): void
+  warn(message: string): void
+  debug(message: string): void
   getModuleIds(): Array<string>
   getModuleInfo(id: string): HvigorModuleInfo | null
   getFileName(referenceId: string): string
@@ -36,15 +43,20 @@ export declare class RuntimeProcessMonitor {
 export interface ArkdownPlugin {
   name?: string
   order?: 'first' | 'last' | ((nameToIndex: Record<string, number>) => number)
-  buildStart?: (this: HvigorPluginContext) => void | Promise<void>
-  resolveId?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
-  load?: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>
-  transform?: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
-  moduleParsed?: (moduleInfo: HvigorModuleInfo) => void | Promise<void>
-  resolveDynamicImport?: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>
-  beforeBuildEnd?: (this: HvigorPluginContext, input?: unknown) => unknown
-  buildEnd?: (this: HvigorPluginContext, error?: Error) => void | Promise<void>
-  shouldInvalidCache?: (request: PluginCacheRequest) => boolean | Promise<boolean>
+beforeBuild?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+buildStart?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+afterBuildStart?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+resolveId?: ((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }
+load?: ((id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined> }
+transform?: ((code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined> }
+moduleParsed?: ((moduleInfo: HvigorModuleInfo) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (moduleInfo: HvigorModuleInfo) => void | Promise<void> }
+resolveDynamicImport?: ((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }
+beforeBuildEnd?: ((this: HvigorPluginContext, input?: unknown) => unknown) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, input?: unknown) => unknown }
+buildEnd?: ((this: HvigorPluginContext, error?: Error) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, error?: Error) => void | Promise<void> }
+afterBuildEnd?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+bundleEnd?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+cleanUp?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+shouldInvalidCache?: ((request: PluginCacheRequest) => boolean | Promise<boolean>) | { order?: 'pre' | 'post'; handler: (request: PluginCacheRequest) => boolean | Promise<boolean> }
 }
 
 /**
@@ -110,7 +122,6 @@ export interface BuildConfig {
   disableAbcCache?: boolean
   cacheFile?: string
   checker?: string
-  moduleAnalyzer?: 'oxc' | 'yuku'
   cache?: boolean
   compilePluginPath?: string | string[]
   hvigorPluginFile?: string | string[]
@@ -137,6 +148,20 @@ export declare function compilePluginModuleSync(file: string, sourceMap?: boolea
 export declare function emitRuntimeLog(record: RuntimeLogRecord): void
 
 export declare function finishRuntimeObservability(): void
+
+export interface HvigorCachedFileInfo {
+  exists: boolean
+  isFile: boolean
+  isDirectory: boolean
+  mtimeMs?: number
+  size: number
+}
+
+export interface HvigorImportResolution {
+  normalizedPath: string
+  packageName: string
+  packagePath: string
+}
 
 /** Dependency info returned by `this.getModuleInfo(id)` inside plugin hooks. */
 export interface HvigorModuleInfo {
@@ -165,10 +190,23 @@ export interface HvigorModuleInfo {
  */
 export interface HvigorPluginContext {
   share?: HvigorShareContext
-  getModuleIds?: () => IterableIterator<string>
-  getModuleInfo?: (id: string) => HvigorModuleInfo | null
-  parse?: (source: string, options?: unknown) => unknown
-  getFileName?: (moduleRef: string) => string
+  cache?: Map<string, unknown>
+meta?: { rollupVersion: string; rolldownVersion: string; watchMode: boolean }
+resolve?: (source: string, importer?: string, options?: JsPluginContextResolveOptions) => Promise<JsResolveIdOutput | null>
+load?: (options: JsPluginContextLoadOptions) => Promise<HvigorModuleInfo | null>
+emitFile?: (file: JsEmittedFile) => string
+addWatchFile?: (id: string) => void
+getModuleIds?: () => IterableIterator<string>
+getModuleInfo?: (id: string) => HvigorModuleInfo | null
+parse?: (source: string, options?: unknown) => unknown
+getFileName?: (moduleRef: string) => string
+info?: (value: unknown) => void
+warn?: (value: unknown) => void
+debug?: (value: unknown) => void
+error?: (value: unknown) => never
+async?: (operation: (...args: any[]) => unknown, ...args: any[]) => unknown
+signal?: () => void
+block?: () => Promise<void>
 }
 
 /**
@@ -180,7 +218,10 @@ export interface HvigorPluginContext {
 export interface HvigorProjectConfig {
   bundleName?: string
   buildMode?: string
+  buildArkMode?: string
+  compileMode?: string
   target?: string
+  targetName?: string
   useNormalizedOHMUrl?: boolean
   compileSdkVersion?: string
   compatibleSdkVersion?: string
@@ -189,11 +230,50 @@ export interface HvigorProjectConfig {
   moduleName?: string
   modulePath?: string
   projectTopDir?: string
+  projectRootPath?: string
+  projectPath?: string
+  moduleRootPath?: string
+  cachePath?: string
+  aceModuleBuild?: string
+  aceBuildJson?: string
+  aceModuleJsonPath?: string
+  runtimeOS?: string
+  watchMode?: string
+  arkTSVersion?: string
+  isPreview?: boolean
+  isOhosTest?: boolean
+  compileHar?: boolean
+  compileShared?: boolean
+  byteCodeHar?: boolean
+  modulePathMap?: Record<string, string>
+  byteCodeHarInfo?: Record<string, unknown>
+  hspNameOhmMap?: Record<string, string>
+  harNameOhmMap?: Record<string, string>
+  otherCompileFiles?: Array<string>
 }
 
-/** Compile plugin share object available as `this.share`. */
+/**
+ * Compile plugin share object available as `this.share`.
+ *
+ * The source and package indices stay in Rust. JavaScript receives this live
+ * object once per module build, so `getHashByFilePath`,
+ * `getCachedFileInfo`, and `importResolver` do not serialize a project-wide
+ * source table or perform hook-time filesystem reads.
+ */
 export interface HvigorShareContext {
   projectConfig?: HvigorProjectConfig
+  cache?: Map<string, unknown>
+  commonCache?: Map<string, unknown>
+cacheStoreManager?: { keys(): IterableIterator<string>; unmount(key: string): void; mount(key: string): { getCache(cacheKey: string): unknown; setCache(cacheKey: string, value: unknown): void } }
+getHashByFilePath?: (path: string) => string
+setHashValueByFilePath?: (path: string, hash: string) => void
+getCachedFileInfo?: (path: string) => HvigorCachedFileInfo | undefined
+getSourceFiles?: () => string[]
+importResolver?: (request: string) => HvigorImportResolution | undefined
+getLogger?: (prefix: string) => unknown
+getHvigorConsoleLogger?: (prefix: string) => unknown
+throwArkTsCompilerError?: (error: unknown) => never
+recordErrorFileId?: (id: string) => void
 }
 
 export declare function installRuntimeObservability(options: ObservabilityInstallOptions): string
@@ -208,6 +288,17 @@ export interface JsBuildStartOptions {
   platform: string
   shimMissingExports: boolean
   context: string
+}
+
+export interface JsEmittedFile {
+  type: string
+  name?: string
+  fileName?: string
+  originalFileName?: string
+  source?: string | Uint8Array
+  id?: string
+  importer?: string
+  preserveSignature?: 'strict' | 'allow-extension' | 'exports-only' | false
 }
 
 export type JsHookSideEffects =
@@ -255,6 +346,18 @@ export interface JsPluginAstParseOptions {
   hasProgram?: boolean
 }
 
+export interface JsPluginContextLoadOptions {
+  id: string
+  moduleSideEffects?: boolean | 'no-treeshake'
+}
+
+export interface JsPluginContextResolveOptions {
+  kind?: 'import-statement' | 'dynamic-import' | 'require-call' | 'import-rule' | 'url-token' | 'new-url' | 'hot-accept'
+  isEntry?: boolean
+  skipSelf?: boolean
+  custom?: any
+}
+
 export interface JsPluginDispatchRequest {
   hookName: string
   context?: ArkdownRolldownPluginContext
@@ -282,6 +385,11 @@ export interface JsPluginError {
   plugin?: string
 }
 
+export interface JsPluginHookMetaInput {
+  name: string
+  order: string
+}
+
 export interface JsProcessMemoryUsage {
   rss: number
   heapTotal: number
@@ -296,6 +404,8 @@ export type JsResolvedExternal =
 export interface JsResolveIdOptions {
   attributes: Record<string, string>
   isEntry: boolean
+  kind?: string
+  custom?: any
 }
 
 export interface JsResolveIdOutput {

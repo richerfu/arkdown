@@ -103,8 +103,6 @@ Options:
   --disable-abc-cache Disable CompileArkTS cache.
   --cache-file <path> Override es2abc cache file.
   --checker <mode>    Checker mode: oxc or off. Defaults to oxc.
-  --module-analyzer <mode>
-                      Module analyzer: oxc or yuku. Defaults to oxc.
   --hvigor-plugin-file <path>
                       Load a compatible TS/JS compile-plugin module.
   --compile-plugin-path <path>

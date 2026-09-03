@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arkdown_config::RuntimeContextOverrides;
 use arkdown_core::OhosModuleType;
 use arkdown_path::canonicalize_or_owned;
 use rustc_hash::FxHashMap;
@@ -135,49 +134,19 @@ impl DependencySnapshotInventory {
     fn read_package(
         &mut self,
         package_root: &Path,
-        project_root: &Path,
-        runtime_overrides: Option<&RuntimeContextOverrides>,
         package_manager: DependencyPackageManager,
     ) -> Option<Arc<PackageSnapshot>> {
         if let Some(package) = self.packages.get(package_root) {
             return package.clone();
         }
 
-        let package = if let Some(runtime_overrides) = runtime_overrides {
-            let value =
-                if canonicalize_or_owned(package_root) == canonicalize_or_owned(project_root) {
-                    runtime_overrides.project.package.as_ref()
-                } else {
-                    runtime_overrides
-                        .module_for_root(package_root)
-                        .and_then(|module| module.package.as_ref())
-                };
-            if let Some(value) = value {
-                PackageSnapshot::from_runtime_manifest_value(
-                    package_root,
-                    &package_root.join(package_manager.manifest_name()),
-                    value,
-                )
-                .ok()
-                .map(Arc::new)
-            } else {
-                PackageSnapshot::from_manifest(
-                    package_root,
-                    &package_root.join(package_manager.manifest_name()),
-                )
-                .ok()
-                .flatten()
-                .map(Arc::new)
-            }
-        } else {
-            PackageSnapshot::from_manifest(
-                package_root,
-                &package_root.join(package_manager.manifest_name()),
-            )
-            .ok()
-            .flatten()
-            .map(Arc::new)
-        };
+        let package = PackageSnapshot::from_manifest(
+            package_root,
+            &package_root.join(package_manager.manifest_name()),
+        )
+        .ok()
+        .flatten()
+        .map(Arc::new);
         self.packages
             .insert(package_root.to_path_buf(), package.clone());
         package
@@ -257,7 +226,6 @@ pub struct DependencyGraphBuilder {
     host_module: String,
     project_root: PathBuf,
     host_root: PathBuf,
-    runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
     parameter_file_override: Option<PathBuf>,
     dependency_parameters: Option<DependencyParameterSnapshot>,
     package_manager: DependencyPackageManager,
@@ -273,7 +241,6 @@ impl DependencyGraphBuilder {
             host_module: host_module.into(),
             project_root: project_root.into(),
             host_root: host_root.into(),
-            runtime_overrides: None,
             parameter_file_override: None,
             dependency_parameters: None,
             package_manager: DependencyPackageManager::Ohpm,
@@ -282,16 +249,6 @@ impl DependencyGraphBuilder {
 
     pub(crate) fn with_package_manager(mut self, use_ohpm: bool) -> Self {
         self.package_manager = DependencyPackageManager::from_ohpm_project(use_ohpm);
-        self
-    }
-
-    /// Apply the loader objects mutated by OHOS plugin contexts while keeping
-    /// dependency traversal and classification in Rust.
-    pub fn with_runtime_overrides(
-        mut self,
-        runtime_overrides: Arc<RuntimeContextOverrides>,
-    ) -> Self {
-        self.runtime_overrides = Some(runtime_overrides);
         self
     }
 
@@ -325,12 +282,7 @@ impl DependencyGraphBuilder {
         inventory: &mut DependencySnapshotInventory,
     ) -> DependencyGraphSnapshot {
         let dependency_parameters = self.dependency_parameters.clone().unwrap_or_else(|| {
-            let project_package = inventory.read_package(
-                &self.project_root,
-                &self.project_root,
-                self.runtime_overrides.as_deref(),
-                self.package_manager,
-            );
+            let project_package = inventory.read_package(&self.project_root, self.package_manager);
             match self.package_manager {
                 DependencyPackageManager::Ohpm => {
                     DependencyParameterSnapshot::from_project_deferred(
@@ -365,12 +317,7 @@ impl DependencyGraphBuilder {
         }
 
         while let Some((package_root, depth)) = queue.pop_front() {
-            let Some(package) = inventory.read_package(
-                &package_root,
-                &self.project_root,
-                self.runtime_overrides.as_deref(),
-                self.package_manager,
-            ) else {
+            let Some(package) = inventory.read_package(&package_root, self.package_manager) else {
                 continue;
             };
             for (dependencies, edge_kind, is_dynamic) in [
@@ -399,12 +346,7 @@ impl DependencyGraphBuilder {
                     ) else {
                         continue;
                     };
-                    let dep_package = inventory.read_package(
-                        &dep_root,
-                        &self.project_root,
-                        self.runtime_overrides.as_deref(),
-                        self.package_manager,
-                    );
+                    let dep_package = inventory.read_package(&dep_root, self.package_manager);
                     let traversal = DependencyTraversalState {
                         kind: edge_kind,
                         is_transitive: depth > 0,

@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arkdown_config::RuntimeModuleContextOverrides;
 use arkdown_core::ModuleJson5;
 use thiserror::Error;
 
@@ -83,12 +82,6 @@ pub struct ModuleSnapshot {
     /// Parsed `module.json5` content.
     pub module_json: Option<ModuleJson5>,
     /// Complete `module.json5` value from the same immutable snapshot read.
-    ///
-    /// The typed model intentionally exposes only build fields owned by core,
-    /// while Hvigor consumers such as `MakePackInfo` also project schema fields
-    /// including ability `visible`/`forms`. Keeping the raw value prevents a
-    /// later filesystem re-read and preserves values replaced through the JS
-    /// `OhosModuleContext` setter.
     pub module_json_value: Option<Arc<serde_json::Value>>,
     /// Optional `src/ohosTest/module.json5` source-set value captured with the
     /// main module snapshot. Hvigor switches the complete source-set model for
@@ -114,28 +107,16 @@ pub struct ModuleSnapshot {
 impl ModuleSnapshot {
     /// Build a module snapshot from its root directory.
     pub fn from_root(root: &std::path::Path, name: &str) -> Result<Self, ModuleSnapshotError> {
-        Self::from_root_with_runtime_override(root, name, None)
-    }
-
-    /// Build a module snapshot using complete loader objects replaced through
-    /// `OhosModuleContext` setters.
-    pub fn from_root_with_runtime_override(
-        root: &std::path::Path,
-        name: &str,
-        runtime_override: Option<&RuntimeModuleContextOverrides>,
-    ) -> Result<Self, ModuleSnapshotError> {
-        Self::from_root_with_runtime_override_and_package_manifest(
+        Self::from_root_with_package_manifest(
             root,
             name,
-            runtime_override,
             &ModulePathLayout::new(root).oh_package_json5(),
         )
     }
 
-    pub(crate) fn from_root_with_runtime_override_and_package_manifest(
+    pub(crate) fn from_root_with_package_manifest(
         root: &std::path::Path,
         name: &str,
-        runtime_override: Option<&RuntimeModuleContextOverrides>,
         package_path: &std::path::Path,
     ) -> Result<Self, ModuleSnapshotError> {
         let layout = ModulePathLayout::new(root);
@@ -144,24 +125,7 @@ impl ModuleSnapshot {
         // Read module.json5.
         let module_json_path = layout.module_json5();
         let (module_json_path_opt, module_json, module_json_value, module_type) =
-            if let Some(value) =
-                runtime_override.and_then(|overrides| overrides.module_json.as_ref())
-            {
-                let parsed: ModuleJson5 =
-                    serde_json::from_value(value.clone()).map_err(|error| {
-                        ModuleSnapshotError::ModuleJsonParse {
-                            path: module_json_path.clone(),
-                            message: error.to_string(),
-                        }
-                    })?;
-                let module_type = OhosModuleType::parse(&parsed.module.type_);
-                (
-                    Some(module_json_path),
-                    Some(parsed),
-                    Some(Arc::new(value.clone())),
-                    module_type,
-                )
-            } else if module_json_path.is_file() {
+            if module_json_path.is_file() {
                 let content = std::fs::read_to_string(&module_json_path).map_err(|source| {
                     ModuleSnapshotError::Io {
                         path: module_json_path.clone(),
@@ -214,13 +178,7 @@ impl ModuleSnapshot {
         // Read the project-selected OHPM/npm manifest. Hvigor makes this
         // decision once at project scope and applies it to every module.
         let package_path = package_path.to_path_buf();
-        let (package_path_opt, package) = if let Some(value) =
-            runtime_override.and_then(|overrides| overrides.package.as_ref())
-        {
-            let snapshot = PackageSnapshot::from_runtime_manifest_value(root, &package_path, value)
-                .map_err(Self::package_snapshot_error)?;
-            (Some(package_path), Some(Arc::new(snapshot)))
-        } else if package_path.is_file() {
+        let (package_path_opt, package) = if package_path.is_file() {
             let snapshot = PackageSnapshot::from_manifest(root, &package_path)
                 .map_err(Self::package_snapshot_error)?
                 .map(Arc::new);

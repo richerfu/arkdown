@@ -72,8 +72,6 @@ pub struct ArkdownBuildCliConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub checker: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub module_analyzer: Option<String>,
-  #[serde(skip_serializing_if = "Option::is_none")]
   pub hvigor_plugin_file: Option<CliPathList>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub compile_plugin_path: Option<CliPathList>,
@@ -214,9 +212,6 @@ impl<'a> ArkdownBuildArgsParser<'a> {
         "--disable-abc-cache" => self.config.disable_abc_cache = Some(true),
         "--cache-file" => self.config.cache_file = Some(self.required_value(&mut index, arg)?),
         "--checker" => self.config.checker = Some(self.required_value(&mut index, arg)?),
-        "--module-analyzer" => {
-          self.config.module_analyzer = Some(self.required_value(&mut index, arg)?)
-        }
         "--hvigor-plugin-file" => {
           let value = self.required_value(&mut index, arg)?;
           Self::append_path(&mut self.config.hvigor_plugin_file, value);

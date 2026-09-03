@@ -192,11 +192,28 @@ impl BuildCoordinator {
         .filter(|plugin| plugin.applies_to_module_target(&module.src_path, module_target_name))
         .cloned()
         .collect::<Vec<_>>();
+      let module_package_resolution =
+        package_resolution_plans.get(&module.name).ok_or_else(|| {
+          anyhow::anyhow!(
+            "missing package resolution plan for module '{}'",
+            module.name
+          )
+        })?;
       // `this.share.projectConfig` is module-specific in latest hvigor. Seed
       // only the plugins participating in this module before cache hooks or
       // Rolldown hooks execute.
-      let share =
-        HvigorCompilePluginShareBuilder::new(module_config.as_ref(), args, Some(module)).build();
+      let loader_json_path = module_layout.loader_json();
+      let share = HvigorCompilePluginShareBuilder::new(
+        module_config.as_ref(),
+        args,
+        Some(module),
+        &session.source_store,
+        module_package_resolution.as_ref(),
+        loader_json,
+        &loader_json_path,
+        session.arkts_language_version,
+      )
+      .build()?;
       for plugin in &module_package_plugins {
         plugin.seed_hvigor_context(&share).await?;
       }
@@ -633,6 +650,7 @@ impl BuildCoordinator {
         &native_declaration_roots,
         &source_set_overlays,
       )
+      .with_source_store(&session.source_store)
       .with_test_source_roots(&test_source_roots)
       .with_package_roots(&dependency_package_roots)
       .with_sdk_declaration_roots(&sdk_declaration_roots)

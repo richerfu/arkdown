@@ -17,7 +17,6 @@
 //!   → InputFingerprintSet     (content hashes for cache invalidation)
 //!   → ArtifactLayout          (output paths)
 //!   → SourceStore             (source file inventory and fingerprints)
-//!   → BuildScriptSnapshot[]   (hvigorfile.ts / hvigorconfig.ts declarative effects)
 //!   → BuildSession            (all of the above, Arc-shared)
 //! ```
 //!
@@ -32,7 +31,6 @@
 //! ```
 
 pub mod artifacts;
-pub mod build_script;
 pub mod builder;
 pub mod context;
 pub mod dependency_graph;
@@ -40,7 +38,6 @@ pub mod dependency_views;
 pub mod diagnostics;
 pub mod duplicate_dependency;
 pub mod fingerprint;
-pub mod hvigor_context;
 pub mod mode_inventory;
 pub mod module;
 pub mod native_inventory;
@@ -65,22 +62,6 @@ pub mod source_store;
 
 // artifacts
 pub use artifacts::layout::ArtifactLayout;
-
-// build_script
-pub use build_script::{
-    BuildScriptCompilePluginPathError, BuildScriptEffect, BuildScriptFileInventory,
-    BuildScriptFileInventoryRequest, BuildScriptFingerprint, BuildScriptKind,
-    BuildScriptModuleModelLoader, BuildScriptModuleModelRequest, BuildScriptOverrideError,
-    BuildScriptOverrideInventory, BuildScriptParser, BuildScriptProjectCacheIdentity,
-    BuildScriptProjectCacheIdentityError, BuildScriptRuntimeCleanSnapshot,
-    BuildScriptRuntimeCommandSnapshot, BuildScriptRuntimeExecutionSnapshotError,
-    BuildScriptRuntimeModelError, BuildScriptRuntimeModelLoader, BuildScriptRuntimeModelRequest,
-    BuildScriptRuntimeModelSnapshot, BuildScriptRuntimePathPlan, BuildScriptRuntimePlanUpdate,
-    BuildScriptRuntimeSdkConfig, BuildScriptRuntimeSdkDetails, BuildScriptRuntimeSession,
-    BuildScriptRuntimeSyncModule, BuildScriptRuntimeSyncSnapshot,
-    BuildScriptRuntimeSyncSnapshotError, BuildScriptRuntimeSyncTarget, BuildScriptSnapshot,
-    ParseBuildScriptError,
-};
 
 // builder
 pub use builder::BuildSessionBuilder;
@@ -150,13 +131,6 @@ pub use dependency_views::{
     ByteCodeHarDependencyView, DynamicDependencyView, HarDependencyView, HspDependencyView,
     NativeSoDependencyView, RemoteHspDependencyView,
 };
-pub use hvigor_context::{
-    HvigorContextInspectError, HvigorContextInspector, HvigorContextModuleState,
-    HvigorContextMutation, HvigorContextMutationDiagnostic, HvigorContextPathOptions,
-    HvigorContextSession, HvigorContextSnapshot, HvigorDependencyContextSnapshot,
-    HvigorModuleTargetContextPaths, HvigorProjectContextPaths, OhpmDependencyInfo,
-};
-
 pub use remote_hsp::{
     RemoteHspObject, RemoteHspObjectError, RemoteHspObjectInventory, RemoteHspObjectRequest,
 };

@@ -56,7 +56,16 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   )
 
   const firstTrace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
-  assert.deepEqual(firstTrace.events, ['buildStart', 'beforeBuildEnd', 'buildEnd'])
+  assert.deepEqual(firstTrace.events, [
+    'beforeBuild',
+    'buildStart',
+    'afterBuildStart',
+    'beforeBuildEnd',
+    'buildEnd',
+    'afterBuildEnd',
+    'bundleEnd',
+    'cleanUp',
+  ])
   assert.equal(firstTrace.buildStartArgumentCount, 0)
   assert.equal(firstTrace.beforeBuildEndArgumentCount, 1)
   assert.equal(firstTrace.buildEndArgumentCount, 1)
@@ -68,6 +77,16 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(firstTrace.moduleInfoCount, firstTrace.moduleIds.length)
   assert.equal(firstTrace.parsedType, 'Program')
   assert.equal(firstTrace.projectConfig.moduleName, 'entry')
+  assert.equal(firstTrace.projectConfig.compileMode, 'esmodule')
+  assert.equal(firstTrace.projectConfig.arkTSVersion, '1.1')
+  assert.equal(firstTrace.projectConfig.watchMode, 'false')
+  assert.equal(path.isAbsolute(firstTrace.projectConfig.cachePath), true)
+  assert.equal(firstTrace.projectConfig.aceBuildJson.endsWith('/loader.json'), true)
+  assert.equal(firstTrace.sourceFileCount > 0, true)
+  assert.match(firstTrace.sourceHash, /^[0-9a-f]{16}$/)
+  assert.equal(Number.isFinite(firstTrace.sourceMtimeMs), true)
+  assert.equal(firstTrace.shareCacheBuildCount, 1)
+  assert.equal(firstTrace.importPackageName, 'entry')
 
   process.env.ARKDOWN_PLUGIN_FORCE_INVALIDATE = '1'
   await build(config)
@@ -76,6 +95,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(typeof secondTrace.cacheRequest.id, 'string')
   assert.equal(secondTrace.cacheRequest.code.length > 0, true)
   assert.equal(secondTrace.cacheRequest.astType, 'Program')
+  assert.equal(secondTrace.shareCacheBuildCount, 2)
 })
 
 test('explicit JS plugins execute through the same native dispatcher', { skip: !enabled }, async (context) => {
@@ -115,4 +135,41 @@ test('explicit JS plugins execute through the same native dispatcher', { skip: !
     true,
   )
   assert.deepEqual(events, ['buildStart', 'buildEnd'])
+})
+
+test('compile-plugin cleanUp runs after a transform failure', { skip: !enabled }, async (context) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-plugin-cleanup-'))
+  const project = path.join(tempRoot, 'minimal-hap')
+  const tracePath = path.join(tempRoot, 'plugin-trace.json')
+  context.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }))
+  prepareCompilePluginProject(project)
+
+  const priorTrace = process.env.ARKDOWN_PLUGIN_TRACE
+  const priorThrow = process.env.ARKDOWN_PLUGIN_THROW_TRANSFORM
+  process.env.ARKDOWN_PLUGIN_TRACE = tracePath
+  process.env.ARKDOWN_PLUGIN_THROW_TRANSFORM = '1'
+  context.after(() => {
+    if (priorTrace === undefined) delete process.env.ARKDOWN_PLUGIN_TRACE
+    else process.env.ARKDOWN_PLUGIN_TRACE = priorTrace
+    if (priorThrow === undefined) delete process.env.ARKDOWN_PLUGIN_THROW_TRANSFORM
+    else process.env.ARKDOWN_PLUGIN_THROW_TRANSFORM = priorThrow
+  })
+
+  await assert.rejects(
+    build({
+      project,
+      target: 'hap',
+      mode: 'debug',
+      module: 'entry',
+      product: 'default',
+      buildTargetName: 'default',
+      compilePluginPath: 'entry/compile-plugins/lifecycle.ts',
+      cache: false,
+    }),
+    /intentional transform failure/,
+  )
+  const trace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
+  assert.equal(trace.events.at(-1), 'cleanUp')
+  assert.equal(trace.events.includes('afterBuildEnd'), false)
+  assert.equal(trace.events.includes('bundleEnd'), false)
 })
