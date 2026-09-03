@@ -922,7 +922,7 @@ impl BuildCoordinator {
       // Persist cache-group hashes so the next build can diff against them.
       // This matches hvigor's `buildEnd` + `beforeBuildEnd` cache writes in
       // `invalid-cache-plugin.ts`.
-      if let Err(e) = cache_bridge.commit_rollup_cache("", &group_snapshots) {
+      if let Err(e) = cache_bridge.commit_group_snapshots(&group_snapshots) {
         tracing::debug!(error = %e, "failed to persist cache group hashes (non-fatal)");
       }
 

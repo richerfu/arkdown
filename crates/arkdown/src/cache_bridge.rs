@@ -1,13 +1,13 @@
 //! Bundle cache bridge.
 //!
-//! [`BundleCacheBridge`] connects the rolldown bundle stage to the rollup
-//! cache service and the `shouldInvalidCache` plugin hook aggregation.
+//! [`BundleCacheBridge`] connects the Rolldown bundle stage to cache-group
+//! invalidation and `shouldInvalidCache` plugin hook aggregation.
 //!
 //! # Upstream correspondence
 //!
 //! | Type | hvigor/SDK equivalent |
 //! |------|-----------------------|
-//! | `BundleCacheBridge` | `invalid-cache-plugin.js` + `rollup-cache-service.js` |
+//! | `BundleCacheBridge` | `invalid-cache-plugin.js` |
 //! | `ShouldInvalidCacheRequest` | `wrapperShouldInvalidCache` input |
 //! | `ShouldInvalidCacheResult` | `wrapperShouldInvalidCache` output |
 //!
@@ -278,13 +278,11 @@ impl ShouldInvalidCacheResult {
 // BundleCacheBridge
 // ---------------------------------------------------------------------------
 
-/// Connects the bundle stage to the rollup cache service.
+/// Connects the bundle stage to cache invalidation state.
 ///
 /// `BundleCacheBridge` orchestrates:
 /// 1. The `shouldInvalidCache` hook aggregation before each bundle run.
-/// 2. Rollup cache restoration (reading the bundle cache from disk).
-/// 3. Rollup cache commit (writing the bundle cache after a successful run).
-/// 4. Group-level cache invalidation: comparing current group snapshots
+/// 2. Group-level cache invalidation: comparing current group snapshots
 ///    against the persisted `group_keys.json` and marking affected modules.
 ///
 /// # Upstream correspondence
@@ -395,31 +393,18 @@ impl BundleCacheBridge {
         ShouldInvalidCacheResult::keep()
     }
 
-    /// Restore the rollup cache from disk.
+    /// Commit the current group snapshots to disk.
     ///
-    /// Returns the rollup cache JSON string if a valid cache exists.
-    ///
-    /// # Upstream correspondence
-    ///
-    /// Corresponds to `rollup-cache-service.js::readCacheWithEvent`.
-    pub fn restore_rollup_cache(&self) -> Option<String> {
-        let dir = self.cache_dir.as_deref()?;
-        let cache_path = dir.join("rollup_cache.json");
-        std::fs::read_to_string(&cache_path).ok()
-    }
-
-    /// Commit the current rollup cache and group snapshots to disk.
-    ///
-    /// Writes both `rollup_cache.json` and `group_keys.json` so subsequent
-    /// builds can diff against the current group snapshots.
+    /// Writes `group_keys.json` so subsequent builds can diff against the
+    /// current group snapshots.
     ///
     /// # Upstream correspondence
     ///
-    /// Corresponds to `rollup-cache-service.js::writeCache` + the per-hook
-    /// `this.cache.set(…)` calls that persist group state in hvigor.
-    pub fn commit_rollup_cache(
+    /// Corresponds to the per-hook `this.cache.set(…)` calls that persist
+    /// invalidation group state in hvigor. Rolldown graph cache persistence is
+    /// a separate concern and must not be represented by an empty cache file.
+    pub fn commit_group_snapshots(
         &self,
-        cache_json: &str,
         group_snapshots: &[CacheGroupSnapshot],
     ) -> Result<(), std::io::Error> {
         let dir = match &self.cache_dir {
@@ -427,7 +412,6 @@ impl BundleCacheBridge {
             None => return Ok(()),
         };
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("rollup_cache.json"), cache_json)?;
 
         if !group_snapshots.is_empty() {
             let mut store = CacheGroupsStore::load(dir);
@@ -605,7 +589,7 @@ mod tests {
         let bridge = BundleCacheBridge::from_plan("env_v1", Some(tmp.path().to_path_buf()), vec![]);
 
         let snap = CacheGroupSnapshot::from_value(CacheGroupKey::HarNameOhmMap, "har-v1");
-        bridge.commit_rollup_cache("{}", &[snap.clone()]).unwrap();
+        bridge.commit_group_snapshots(&[snap.clone()]).unwrap();
 
         // Reload and verify
         let store = CacheGroupsStore::load(tmp.path());
