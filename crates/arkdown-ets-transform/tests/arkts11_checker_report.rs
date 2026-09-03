@@ -361,7 +361,8 @@ fn arkts11_system_api_permission_and_syscap_use_native_build_context() {
     let guarded = checker.check(
         "/project/Page.ets",
         "import { capture } from '@ohos.demo';\n\
-         if (canIUse('SystemCapability.Camera.Core')) { capture(); }\n",
+         const capability = 'SystemCapability.Camera.Core';\n\
+         if (canIUse(capability)) { capture(); }\n",
     );
     assert!(guarded.diagnostics().iter().all(|diagnostic| {
         !matches!(
@@ -406,10 +407,112 @@ fn arkts11_system_api_inventory_follows_sdk_barrels_and_validates_guard_identity
         "/project/Page.ets",
         "import { newer as guarded } from '@kit.DemoKit';\n\
          import deviceInfo from '@ohos.deviceInfo';\n\
-         if (deviceInfo.sdkApiVersion >= 13) { guarded(); }\n",
+         const minimum = 13;\n\
+         if (deviceInfo.sdkApiVersion >= minimum) { guarded(); }\n",
     );
     assert_eq!(sdk_guard.error_count(), 0);
     assert!(sdk_guard.diagnostics().iter().all(|diagnostic| {
         !matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+    }));
+}
+
+#[test]
+fn arkts11_available_usage_is_resolved_across_project_exports() {
+    let feature_path = PathBuf::from("/project/Feature.ets");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        feature_path,
+        Arc::<str>::from(
+            "import { Available } from '@ohos.annotation';\n\
+             @Available({ minApiVersion: '13' })\n\
+             export function modern(): void {}\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files),
+            vec![("entry".to_string(), PathBuf::from("/project"))],
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { modern } from './Feature';\n\
+         try { modern(); } catch (_) {}\n\
+         modern();\n",
+    );
+    let available = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706012")
+        })
+        .count();
+
+    // `available_warning_suppressor.ts` intentionally does not accept a
+    // try/catch guard, unlike the @since suppressor.
+    assert_eq!(available, 2);
+}
+
+#[test]
+fn arkts11_system_api_enforces_stage_form_atomic_and_test_tags() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "/**\n\
+             * @form\n\
+             * @atomicservice\n\
+             */ export declare function supported(): void;\n\
+             export declare function unsupported(): void;\n\
+             /** @famodelonly */ export declare function faOnly(): void;\n\
+             /** @test */ export declare function testOnly(): void;\n",
+        ),
+    );
+    let sources = TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]);
+    let context = SystemApiCheckOptions::default()
+        .with_compatible_sdk_version("12")
+        .with_compile_sdk_version("12")
+        .with_form_source(true)
+        .with_atomic_service(true);
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(sources, Vec::new())
+        .with_system_api_context(context);
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { supported, unsupported, faOnly, testOnly } from '@ohos.demo';\n\
+         supported(); unsupported(); faOnly(); testOnly();\n",
+    );
+    let codes = report
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            EtsTransformError::CodedDiagnostic { code, .. } => Some(code.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        codes,
+        ["11706006", "11706010", "11706006", "11706010", "11706008", "11706006", "11706010",]
+    );
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            EtsTransformError::Diagnostic { message, .. }
+                if message.contains("testing directories")
+        )
+    }));
+
+    let test_report = checker.check(
+        "/project/src/ohosTest/Test.ets",
+        "import { testOnly } from '@ohos.demo';\ntestOnly();\n",
+    );
+    assert!(test_report.diagnostics().iter().all(|diagnostic| {
+        !matches!(
+            diagnostic,
+            EtsTransformError::Diagnostic { message, .. }
+                if message.contains("testing directories")
+        )
     }));
 }

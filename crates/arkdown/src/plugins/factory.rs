@@ -200,7 +200,8 @@ impl PluginFactoryInput {
             component_metadata: ComponentMetadata::default(),
             system_api: SystemApiCheckOptions::default()
                 .with_compatible_sdk_version(plan.compatible_sdk_version.clone())
-                .with_compile_sdk_version(plan.target_api_version.to_string()),
+                .with_compile_sdk_version(plan.target_api_version.to_string())
+                .with_runtime_os(plan.runtime_os.clone()),
             transform_sources: TransformSourceSnapshot::default(),
             navigation_routes: NavigationRouteMap::default(),
             package_resolution: Arc::new(PackageResolutionPlan::default()),

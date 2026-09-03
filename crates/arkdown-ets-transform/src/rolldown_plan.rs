@@ -202,7 +202,8 @@ impl RolldownEtsTransformPlan {
         self.system_api = self
             .system_api
             .clone()
-            .with_compatible_sdk_version(compatible_sdk_version);
+            .with_compatible_sdk_version(compatible_sdk_version)
+            .with_runtime_os(runtime_os);
         self
     }
 
@@ -261,10 +262,11 @@ impl RolldownEtsTransformPlan {
     }
 
     pub fn transform_options_for(&self, id: &str) -> TransformOptions {
+        let form_entry = self.is_form_entry(id);
         TransformOptions {
             arkts_language_version: self.arkts_language_version,
             api_available: self.api_available,
-            system_api: self.system_api.clone(),
+            system_api: self.system_api.clone().with_form_source(form_entry),
             bundle_name: Some(self.bundle_name.clone()),
             module_name: Some(self.module_name.clone()),
             project_root: Some(self.project_root.clone()),
@@ -274,7 +276,7 @@ impl RolldownEtsTransformPlan {
             sources: self.sources.clone(),
             module_exports: self.module_exports.clone(),
             navigation_routes: self.navigation_routes.clone(),
-            form_entry: self.is_form_entry(id),
+            form_entry,
             entry_source: self.is_entry_source(id),
             preview_mode: self.preview_mode,
             check_entry: self.check_entry,

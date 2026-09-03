@@ -589,6 +589,9 @@ impl BuildCoordinator {
       let mut system_api = SystemApiCheckOptions::default()
         .with_compatible_sdk_version(module_config.product.compatible_sdk_version.clone())
         .with_compile_sdk_version(config.sdk_config.compile_api_version.to_string())
+        .with_runtime_os(module_config.product.runtime_os.clone())
+        .with_atomic_service(session.project.bundle_type == "atomicService")
+        .with_ohos_test_source(module_target_name == "ohosTest")
         .with_strict_api_compatibility(matches!(
           module_build_option.strict_mode.api_compatibility_check,
           Some(arkdown_core::ApiCompatibilityCheckLevel::Error)
