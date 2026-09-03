@@ -18,6 +18,9 @@ use crate::transform::build_fn::{
     CustomComponentGeneration, CustomComponentInfo, CustomComponentUpdateProps,
 };
 use crate::transform::component_meta::SdkComponentInfo;
+use crate::transform::system_api::{
+    ExportedSystemApiSymbols, SystemApiModuleFacts, SystemApiSymbol,
+};
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 
 #[derive(Clone, Debug, Default)]
@@ -1517,6 +1520,16 @@ impl ModuleExportIndex {
             .unwrap_or_default()
     }
 
+    pub(super) fn system_api_exports(&self, path: &Path) -> Option<&ExportedSystemApiSymbols> {
+        self.entries.get(path).map(|entry| &entry.system_apis)
+    }
+
+    pub(crate) fn has_system_api_exports(&self) -> bool {
+        self.entries
+            .values()
+            .any(|entry| !entry.system_apis.is_empty())
+    }
+
     pub(crate) fn imported_class_observations(
         &self,
         program: &Program<'_>,
@@ -1581,6 +1594,7 @@ struct ModuleExportEntry {
     builders: FxHashSet<String>,
     components: ExportedComponentNames,
     classes: ExportedClassObservations,
+    system_apis: ExportedSystemApiSymbols,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1669,6 +1683,8 @@ struct ModuleExportFacts {
     local_simple_type_aliases: FxHashSet<String>,
     local_components: CustomComponentUpdateProps,
     local_classes: FxHashMap<String, ClassObservation>,
+    local_system_apis: FxHashMap<Box<str>, SystemApiSymbol>,
+    direct_system_api_bindings: Vec<(Box<str>, Box<str>)>,
     imports: Vec<ModuleImportFact>,
     exports: Vec<ModuleExportFact>,
 }
@@ -1697,9 +1713,17 @@ impl ModuleExportFacts {
         sources: &crate::source::TransformSourceSnapshot,
         module_roots: &[(String, PathBuf)],
     ) -> Self {
+        let system_api =
+            SystemApiModuleFacts::from_program(path, program, sources.is_sdk_declaration(path));
         let mut facts = Self {
             local_enums: LocalEnumNamesCollector::new(program).collect(),
             local_simple_type_aliases: LocalSimpleTypeAliasCollector::new(program).collect(),
+            local_system_apis: system_api.local,
+            direct_system_api_bindings: system_api.direct_bindings,
+            direct: ModuleExportEntry {
+                system_apis: system_api.direct,
+                ..ModuleExportEntry::default()
+            },
             ..Self::default()
         };
         for statement in &program.body {
@@ -1819,8 +1843,13 @@ impl ModuleExportFacts {
                             ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
                                 fact.default_components
                                     .push(specifier.local.name.to_string());
+                                fact.default_system_apis
+                                    .push(specifier.local.name.to_string());
                             }
-                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                                fact.namespace_system_apis
+                                    .push(specifier.local.name.to_string());
+                            }
                         }
                     }
                     facts.imports.push(fact);
@@ -1889,6 +1918,8 @@ struct ModuleImportFact {
     target: PathBuf,
     named: Vec<ModuleImportBindingFact>,
     default_components: Vec<String>,
+    default_system_apis: Vec<String>,
+    namespace_system_apis: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1957,6 +1988,7 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
         let local_simple_type_aliases = facts.local_simple_type_aliases.clone();
         let mut local_components = facts.local_components.clone();
         let mut local_classes = facts.local_classes.clone();
+        let mut local_system_apis = facts.local_system_apis.clone();
 
         for import in &facts.imports {
             let target_entry = self.export_entry(&import.target);
@@ -1977,6 +2009,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 if let Some(observation) = target_entry.classes.get(&binding.imported) {
                     local_classes.insert(binding.local.clone(), observation);
                 }
+                if let Some(symbol) = target_entry.system_apis.get(&binding.imported) {
+                    local_system_apis.insert(binding.local.clone().into(), symbol.clone());
+                }
             }
             for local in &import.default_components {
                 if target_entry.components.has_default {
@@ -1992,6 +2027,22 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 if let Some(observation) = target_entry.classes.default {
                     local_classes.insert(local.clone(), observation);
                 }
+            }
+            for local in &import.default_system_apis {
+                if let Some(symbol) = target_entry.system_apis.default.as_ref() {
+                    local_system_apis.insert(local.clone().into(), symbol.clone());
+                }
+            }
+            for local in &import.namespace_system_apis {
+                local_system_apis
+                    .insert(local.clone().into(), target_entry.system_apis.namespace());
+            }
+        }
+
+        SystemApiModuleFacts::resolve_local_references(&mut local_system_apis);
+        for (local, exported) in &facts.direct_system_api_bindings {
+            if let Some(symbol) = local_system_apis.get(local) {
+                entry.system_apis.insert(exported.clone(), symbol.clone());
             }
         }
 
@@ -2018,6 +2069,11 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                                     .named
                                     .insert(binding.exported.clone(), observation);
                             }
+                        }
+                        if let Some(symbol) = target_entry.system_apis.get(&binding.local) {
+                            entry
+                                .system_apis
+                                .insert(binding.exported.clone(), symbol.clone());
                         }
                         let props = if binding.local == ComponentModuleExportName::DEFAULT
                             && target_entry.components.has_default
@@ -2070,6 +2126,11 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                                     .insert(binding.exported.clone(), observation);
                             }
                         }
+                        if let Some(symbol) = local_system_apis.get(binding.local.as_str()) {
+                            entry
+                                .system_apis
+                                .insert(binding.exported.clone(), symbol.clone());
+                        }
                     }
                 }
                 ModuleExportFact::DefaultLocal { local } => {
@@ -2079,6 +2140,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     }
                     if let Some(observation) = local_classes.get(local).copied() {
                         entry.classes.default = Some(observation);
+                    }
+                    if let Some(symbol) = local_system_apis.get(local.as_str()) {
+                        entry.system_apis.insert("default", symbol.clone());
                     }
                 }
                 ModuleExportFact::AllFrom { target } => {
@@ -2090,6 +2154,7 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     entry.builders.extend(target_entry.builders);
                     entry.components.extend(target_entry.components);
                     entry.classes.extend_named(&target_entry.classes);
+                    entry.system_apis.extend_named(&target_entry.system_apis);
                 }
             }
         }
@@ -2175,14 +2240,14 @@ impl ComponentExportRules {
     }
 }
 
-struct ImportTargetResolver<'a> {
+pub(super) struct ImportTargetResolver<'a> {
     importer: &'a Path,
     sources: &'a crate::source::TransformSourceSnapshot,
     module_roots: &'a [(String, PathBuf)],
 }
 
 impl<'a> ImportTargetResolver<'a> {
-    fn new(
+    pub(super) fn new(
         importer: &'a Path,
         sources: &'a crate::source::TransformSourceSnapshot,
         module_roots: &'a [(String, PathBuf)],
@@ -2194,7 +2259,7 @@ impl<'a> ImportTargetResolver<'a> {
         }
     }
 
-    fn resolve(&self, specifier: &str) -> Option<TransformSourceFile> {
+    pub(super) fn resolve(&self, specifier: &str) -> Option<TransformSourceFile> {
         if ModuleSpecifierText::new(specifier).is_relative() {
             return self
                 .sources

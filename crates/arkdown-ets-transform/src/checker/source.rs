@@ -9,6 +9,7 @@ use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::system_api::Arkts11SystemApiValidator;
 use crate::transform::ModuleExportIndex;
+use crate::transform::SystemApiCheckOptions;
 use crate::TransformSourceSnapshot;
 
 use super::{EtsCheckReport, EtsChecker};
@@ -22,6 +23,7 @@ pub struct ArktsSourceChecker {
     component_metadata: Arc<ComponentMetadata>,
     arkts_language_version: ArktsLanguageVersion,
     api_available: ApiAvailableTransformOptions,
+    system_api: SystemApiCheckOptions,
     page_context: Option<ArktsSourcePageContext>,
     project_semantics: Option<ArktsProjectSemantics>,
 }
@@ -32,6 +34,7 @@ impl ArktsSourceChecker {
             component_metadata,
             arkts_language_version: ArktsLanguageVersion::default(),
             api_available: ApiAvailableTransformOptions::default(),
+            system_api: SystemApiCheckOptions::default(),
             page_context: None,
             project_semantics: None,
         }
@@ -81,6 +84,15 @@ impl ArktsSourceChecker {
     ) -> Self {
         self.api_available =
             ApiAvailableTransformOptions::from_build_context(compatible_sdk_version, runtime_os);
+        self.system_api = self
+            .system_api
+            .clone()
+            .with_compatible_sdk_version(compatible_sdk_version);
+        self
+    }
+
+    pub fn with_system_api_context(mut self, context: SystemApiCheckOptions) -> Self {
+        self.system_api = context;
         self
     }
 
@@ -140,9 +152,35 @@ impl ArktsSourceChecker {
             );
         }
         let mut report = checker.check();
+        let (module_exports, sources, module_roots) = if let Some(project) = &self.project_semantics
+        {
+            (
+                &project.module_exports,
+                &project.sources,
+                project.module_roots.as_slice(),
+            )
+        } else {
+            static EMPTY_EXPORTS: std::sync::LazyLock<ModuleExportIndex> =
+                std::sync::LazyLock::new(ModuleExportIndex::default);
+            static EMPTY_SOURCES: std::sync::LazyLock<TransformSourceSnapshot> =
+                std::sync::LazyLock::new(TransformSourceSnapshot::default);
+            (
+                &*EMPTY_EXPORTS,
+                &*EMPTY_SOURCES,
+                &[] as &[(String, std::path::PathBuf)],
+            )
+        };
         report.extend(
-            Arkts11SystemApiValidator::new(source_id, content, self.api_available)
-                .diagnostics(&parsed.program),
+            Arkts11SystemApiValidator::new(
+                source_id,
+                content,
+                self.api_available,
+                &self.system_api,
+                module_exports,
+                sources,
+                module_roots,
+            )
+            .diagnostics(&parsed.program),
         );
         report
     }

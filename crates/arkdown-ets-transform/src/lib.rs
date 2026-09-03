@@ -51,7 +51,8 @@ pub use source::{
 };
 pub use sys_resource::SystemResourceReferenceLoader;
 pub use transform::{
-    ArktsTransformer, ArkuiComponentNameCollector, CheckerMode, NavigationRoute, NavigationRouteMap,
+    ArktsTransformer, ArkuiComponentNameCollector, CheckerMode, NavigationRoute,
+    NavigationRouteMap, SystemApiCheckOptions,
 };
 pub use typescript_emit::TypeScriptDirectiveFlags;
 pub use visual::VisualGeneratedSource;

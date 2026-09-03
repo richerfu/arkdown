@@ -14,12 +14,13 @@ use clap::Args;
 use walkdir::WalkDir;
 
 use arkdown::plugins::ets_transform::{
-  ArktsSourceChecker, ComponentMetadata, TransformSourceSnapshot,
+  ArktsSourceChecker, ComponentMetadata, SystemApiCheckOptions,
 };
 use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
 use arkdown_path::{ArtifactPathSerializer, HostPlatform};
 use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
 
+use super::build::coordinator::TransformSourceSnapshotBuilder;
 use super::ets_checker::{
   SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder, SdkEtsCheckerRunner,
 };
@@ -248,38 +249,71 @@ impl<'a> CheckModuleRunner<'a> {
     let component_metadata = Arc::new(ComponentMetadata::from_ets_loader_path(
       &self.config.sdk_config.ets_loader_path,
     )?);
-    let mut source_texts = rustc_hash::FxHashMap::default();
     let mut errors = 0usize;
-    for path in sources
-      .iter()
-      .filter(|path| CheckSourceInventory::is_arkts_source(path))
-    {
-      match std::fs::read_to_string(path) {
-        Ok(source) => {
-          source_texts.insert(
-            arkdown_path::canonicalize_or_owned(path),
-            Arc::<str>::from(source),
-          );
-        }
-        Err(error) => {
-          tracing::error!(path = %path.display(), error = %error, "check cannot read source");
-          errors += 1;
-        }
-      }
-    }
-    let project_sources = TransformSourceSnapshot::new(source_texts);
-    let module_roots = self
+    let module_roots: Vec<(String, PathBuf)> = self
       .config
       .modules
       .iter()
       .map(|module| (module.name.clone(), module.src_path.clone()))
       .collect();
+    let sdk_declaration_roots = self
+      .config
+      .sdk_config
+      .ets_api_dirs()
+      .into_iter()
+      .chain(self.config.sdk_config.ets_kits_dirs())
+      .chain(self.config.sdk_config.ets_arkts_dirs())
+      .collect::<Vec<_>>();
+    let project_sources = TransformSourceSnapshotBuilder::new(&module_roots, &[], &[], &[])
+      .with_sdk_declaration_roots(&sdk_declaration_roots)
+      .build()?;
+    let mut system_api = SystemApiCheckOptions::default()
+      .with_compatible_sdk_version(self.config.product.compatible_sdk_version.clone())
+      .with_compile_sdk_version(self.config.sdk_config.compile_api_version.to_string())
+      .with_strict_api_compatibility(matches!(
+        self
+          .config
+          .product
+          .build_option
+          .strict_mode
+          .api_compatibility_check,
+        Some(arkdown_core::ApiCompatibilityCheckLevel::Error)
+      ))
+      .with_request_permissions(
+        self
+          .module_context
+          .module
+          .module_json
+          .as_ref()
+          .into_iter()
+          .flat_map(|manifest| manifest.module.request_permissions.iter())
+          .filter_map(|permission| permission.get("name").and_then(serde_json::Value::as_str))
+          .map(str::to_string),
+      );
+    if let Some(capabilities) =
+      self
+        .module_context
+        .module
+        .module_json
+        .as_ref()
+        .and_then(|manifest| {
+          self
+            .session
+            .sdk
+            .system_capabilities
+            .select(&manifest.module.device_types)
+        })
+    {
+      system_api =
+        system_api.with_system_capabilities(capabilities.intersection, capabilities.union);
+    }
     let checker = ArktsSourceChecker::new(component_metadata)
       .with_project_sources(project_sources.clone(), module_roots)
       .with_api_available_context(
         &self.config.product.compatible_sdk_version,
         &self.config.product.runtime_os,
-      );
+      )
+      .with_system_api_context(system_api);
     for path in sources
       .iter()
       .filter(|path| CheckSourceInventory::is_arkts_source(path))

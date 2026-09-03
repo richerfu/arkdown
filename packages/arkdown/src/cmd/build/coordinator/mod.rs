@@ -113,8 +113,8 @@ use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 
 use arkdown::plugins::ets_transform::{
   CheckerMode, ComponentMetadata, ModuleAnalyzerKind, NavigationRouteMap, ResourceReference,
-  ResourceTransformContext, SystemResourceReferenceLoader, TransformResolvedStaticModule,
-  TransformSourceSnapshot,
+  ResourceTransformContext, SystemApiCheckOptions, SystemResourceReferenceLoader,
+  TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
@@ -2124,6 +2124,7 @@ mod target_build_execution_plan_tests {
             use_normalized_ohm_url: true,
             no_external_import_by_path: None,
             duplicate_dependency_check: false,
+            api_compatibility_check: None,
           },
           ark_options: None,
           res_options: None,

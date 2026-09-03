@@ -450,6 +450,14 @@ pub struct NativeLibPackageSelection {
     pub exclude_pattern: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiCompatibilityCheckLevel {
+    #[default]
+    Warn,
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrictModeConfig {
     pub case_sensitive_check: bool,
@@ -462,6 +470,9 @@ pub struct StrictModeConfig {
     /// `DuplicateDependencyCheck.doTaskAction`.
     #[serde(default)]
     pub duplicate_dependency_check: bool,
+    /// Source checker compatibility diagnostic level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_compatibility_check: Option<ApiCompatibilityCheckLevel>,
 }
 
 impl StrictModeConfig {
@@ -484,6 +495,7 @@ mod strict_mode_tests {
             use_normalized_ohm_url: true,
             no_external_import_by_path: None,
             duplicate_dependency_check: false,
+            api_compatibility_check: None,
         };
         assert!(normalized.is_no_external_import_by_path());
 

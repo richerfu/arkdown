@@ -586,6 +586,37 @@ impl BuildCoordinator {
         .as_ref()
         .and_then(|options| options.integrated_hsp)
         .unwrap_or(false);
+      let mut system_api = SystemApiCheckOptions::default()
+        .with_compatible_sdk_version(module_config.product.compatible_sdk_version.clone())
+        .with_compile_sdk_version(config.sdk_config.compile_api_version.to_string())
+        .with_strict_api_compatibility(matches!(
+          module_build_option.strict_mode.api_compatibility_check,
+          Some(arkdown_core::ApiCompatibilityCheckLevel::Error)
+        ))
+        .with_request_permissions(
+          module_context
+            .module
+            .module_json
+            .as_ref()
+            .into_iter()
+            .flat_map(|manifest| manifest.module.request_permissions.iter())
+            .filter_map(|permission| permission.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_string),
+        );
+      if let Some(capabilities) = module_context
+        .module
+        .module_json
+        .as_ref()
+        .and_then(|manifest| {
+          session
+            .sdk
+            .system_capabilities
+            .select(&manifest.module.device_types)
+        })
+      {
+        system_api =
+          system_api.with_system_capabilities(capabilities.intersection, capabilities.union);
+      }
       let mut factory_input = PluginFactoryInput {
         target_name: module_target_name.clone(),
         sdk_api_dirs: config.sdk_config.ets_api_dirs(),
@@ -623,6 +654,7 @@ impl BuildCoordinator {
           module_name: loader_json.module_name.clone(),
         },
         component_metadata: component_metadata.clone(),
+        system_api,
         transform_sources,
         navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
         package_resolution,

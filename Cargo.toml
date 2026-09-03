@@ -51,7 +51,7 @@ oxc = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0d
 oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
 oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
 oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db", features = ["jsdoc"] }
 oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
 oxc_str = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
 oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }

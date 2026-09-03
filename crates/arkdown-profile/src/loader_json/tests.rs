@@ -45,6 +45,7 @@ fn make_config(use_normalized_ohm_url: bool) -> ArkdownConfig {
                     use_normalized_ohm_url,
                     no_external_import_by_path: None,
                     duplicate_dependency_check: false,
+                    api_compatibility_check: None,
                 },
                 ark_options: None,
                 res_options: None,
