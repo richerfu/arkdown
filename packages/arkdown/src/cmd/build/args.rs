@@ -161,7 +161,7 @@ pub struct BuildArgs {
   pub fast_build_app: bool,
   /// Hvigor `enableSignTask`; false keeps signing tasks in the graph but makes
   /// their actions no-op and leaves unsigned package outputs selected.
-  #[arg(long = "enable-sign-task", default_value = "true")]
+  #[arg(long = "enable-sign-task", default_value_t = true, action = clap::ArgAction::Set)]
   pub enable_sign_task: bool,
   /// Build mode: debug, release, test
   #[arg(long, default_value = "debug")]
