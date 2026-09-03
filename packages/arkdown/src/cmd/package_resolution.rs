@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arkdown_path::{canonicalize_or_owned, classify::PathClassifier};
-use arkdown_resolver::{PackageResolutionPlan, PackageResolutionPlanBuilder, PkgBriefInfo};
+use arkdown_resolver::{
+  PackageManifestSnapshot, PackageResolutionPlan, PackageResolutionPlanBuilder, PkgBriefInfo,
+};
 use arkdown_session::ModuleCompileContext;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -86,6 +88,10 @@ impl<'a> ModulePackageResolutionPlanner<'a> {
         PkgBriefInfo {
           pkg_root: package_root,
           pkg_name: edge.package_name.clone(),
+          manifest: node
+            .and_then(|node| node.package.as_deref())
+            .map(Self::manifest_snapshot)
+            .unwrap_or_else(|| Arc::new(PackageManifestSnapshot::default())),
           local_source,
           source_roots,
         },
@@ -107,10 +113,41 @@ impl<'a> ModulePackageResolutionPlanner<'a> {
     builder.insert_current(PkgBriefInfo {
       pkg_root: current_root,
       pkg_name: current.name.clone(),
+      manifest: Self::manifest_snapshot(current),
       local_source: true,
       source_roots,
     });
     Ok(builder.build())
+  }
+
+  fn manifest_snapshot(package: &arkdown_session::PackageSnapshot) -> Arc<PackageManifestSnapshot> {
+    let metadata = package.package_json.extra.get("metadata");
+    Arc::new(PackageManifestSnapshot {
+      version: package.version.clone(),
+      main: package.package_json.main.clone(),
+      types: package.package_json.types.clone(),
+      exports: package.package_json.extra.get("exports").cloned(),
+      module: package
+        .package_json
+        .extra
+        .get("module")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string),
+      jsnext_main: package
+        .package_json
+        .extra
+        .get("jsnext:main")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string),
+      byte_code_har: metadata
+        .and_then(|metadata| metadata.get("byteCodeHar"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false),
+      abc_path: metadata
+        .and_then(|metadata| metadata.get("abcPath"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string),
+    })
   }
 
   fn metadata_source_roots(

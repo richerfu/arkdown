@@ -13,7 +13,7 @@
 //! | # | hvigor name | Rust plugin | Always active |
 //! |---|-------------|-------------|---------------|
 //! | 1 | `checkDuplicatedFileNames` | `DuplicateCheckPlugin` | yes |
-//! | 2 | `moduleMetaInfo` (ESMODULE) | `ModuleMetaPlugin` | yes |
+//! | 2 | `moduleMetaInfo` (ESMODULE) | — (session/package plan + scan output) | n/a |
 //! | 3 | `resolve` | `OhosResolvePlugin` | yes |
 //! | 4 | `sensitiveCheck` | `ImportCheckPlugin` | yes |
 //! | 5 | `json` | `Json5Plugin` | yes |
@@ -52,8 +52,8 @@ use arkdown_path::{
 };
 use arkdown_resolver::{OhosResolver, PackageResolutionPlan, ResolverConfig};
 use rolldown_plugin::{
-    __inner::SharedPluginable, HookBuildEndArgs, HookNoopReturn, HookUsage, Plugin, PluginContext,
-    PluginHookMeta, PluginOrder as RolldownPluginOrder,
+    __inner::SharedPluginable, HookBuildEndArgs, HookBuildStartArgs, HookNoopReturn, HookUsage,
+    Plugin, PluginContext, PluginHookMeta, PluginOrder as RolldownPluginOrder,
 };
 
 use crate::plan::BundlePlan;
@@ -68,7 +68,6 @@ use crate::plugins::har_dedup::HarDedupPlugin;
 use crate::plugins::hvigor_compile::{HvigorCompilePluginShare, HvigorNativePluginSlot};
 use crate::plugins::import_check::ImportCheckPlugin;
 use crate::plugins::json5::Json5Plugin;
-use crate::plugins::module_meta::ModuleMetaPlugin;
 use crate::plugins::ohos_resolve::OhosResolvePlugin;
 use crate::PluginCacheModule;
 
@@ -389,8 +388,7 @@ impl PackagePlugin {
 /// Standard hooks are deliberately not represented here: the wrapped plugin
 /// implements [`rolldown_plugin::Plugin`] and Rolldown owns their scheduling,
 /// context, diagnostics, and errors. Latest hvigor adds only two public custom
-/// compile-plugin hooks that Rolldown lacks: `shouldInvalidCache` and
-/// `beforeBuildEnd`. `seed_hvigor_context` supplies the latest-hvigor `share`
+/// compile-plugin hooks that Rolldown lacks. `seed_hvigor_context` supplies the latest-hvigor `share`
 /// object before Rolldown starts and is not user-visible lifecycle behavior.
 /// Future returned by [`HvigorPluginGapHooks`] async methods.
 ///
@@ -399,6 +397,45 @@ impl PackagePlugin {
 /// and RPITIT methods are not dyn-compatible. Implementors wrap their bodies
 /// in `Box::pin(async { .. })`.
 pub type HvigorHookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HvigorLifecycleHook {
+    BeforeBuild,
+    AfterBuildStart,
+    BeforeBuildEnd,
+    AfterBuildEnd,
+    BundleEnd,
+    CleanUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HvigorHookOrder {
+    Pre,
+    Normal,
+    Post,
+}
+
+impl HvigorLifecycleHook {
+    pub const ALL: [Self; 6] = [
+        Self::BeforeBuild,
+        Self::AfterBuildStart,
+        Self::BeforeBuildEnd,
+        Self::AfterBuildEnd,
+        Self::BundleEnd,
+        Self::CleanUp,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeBuild => "beforeBuild",
+            Self::AfterBuildStart => "afterBuildStart",
+            Self::BeforeBuildEnd => "beforeBuildEnd",
+            Self::AfterBuildEnd => "afterBuildEnd",
+            Self::BundleEnd => "bundleEnd",
+            Self::CleanUp => "cleanUp",
+        }
+    }
+}
 
 pub trait HvigorPluginGapHooks: Send + Sync {
     fn seed_hvigor_context<'a>(
@@ -419,16 +456,21 @@ pub trait HvigorPluginGapHooks: Send + Sync {
         false
     }
 
-    /// `beforeBuildEnd` with Rolldown's live post-scan plugin context.
-    fn before_build_end_with_context(
+    /// A latest-hvigor lifecycle hook with Rolldown's live plugin context.
+    fn lifecycle_hook_with_context(
         &self,
+        _hook: HvigorLifecycleHook,
         _context: PluginContext,
     ) -> HvigorHookFuture<'_, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
-    fn has_before_build_end(&self) -> bool {
+    fn has_lifecycle_hook(&self, _hook: HvigorLifecycleHook) -> bool {
         false
+    }
+
+    fn lifecycle_hook_order(&self, _hook: HvigorLifecycleHook) -> HvigorHookOrder {
+        HvigorHookOrder::Normal
     }
 
     fn runtime_cache_identity(&self) -> Option<String> {
@@ -467,20 +509,78 @@ impl PluginFactoryEntry {
     }
 }
 
-struct HvigorBeforeBuildEndPlugin {
-    entries: Vec<HvigorPluginGapEntry>,
+#[derive(Clone, Copy)]
+enum HvigorLifecycleBoundary {
+    BeforeBuild,
+    AfterBuildStart,
+    BeforeBuildEnd,
+    AfterBuildEnd,
 }
 
-impl HvigorBeforeBuildEndPlugin {
-    fn new(entries: Vec<HvigorPluginGapEntry>) -> Self {
-        Self { entries }
+impl HvigorLifecycleBoundary {
+    fn hooks(self) -> &'static [HvigorLifecycleHook] {
+        match self {
+            Self::BeforeBuild => &[HvigorLifecycleHook::BeforeBuild],
+            Self::AfterBuildStart => &[HvigorLifecycleHook::AfterBuildStart],
+            Self::BeforeBuildEnd => &[HvigorLifecycleHook::BeforeBuildEnd],
+            Self::AfterBuildEnd => &[
+                HvigorLifecycleHook::AfterBuildEnd,
+                HvigorLifecycleHook::BundleEnd,
+                HvigorLifecycleHook::CleanUp,
+            ],
+        }
     }
 }
 
-impl std::fmt::Debug for HvigorBeforeBuildEndPlugin {
+struct HvigorLifecyclePlugin {
+    entries: Vec<HvigorPluginGapEntry>,
+    boundary: HvigorLifecycleBoundary,
+}
+
+impl HvigorLifecyclePlugin {
+    fn new(entries: Vec<HvigorPluginGapEntry>, boundary: HvigorLifecycleBoundary) -> Self {
+        Self { entries, boundary }
+    }
+
+    async fn dispatch(
+        entries: Vec<HvigorPluginGapEntry>,
+        hooks: &[HvigorLifecycleHook],
+        context: PluginContext,
+    ) -> anyhow::Result<()> {
+        for hook in hooks {
+            for order in [
+                HvigorHookOrder::Pre,
+                HvigorHookOrder::Normal,
+                HvigorHookOrder::Post,
+            ] {
+                for entry in &entries {
+                    if !entry.hooks.has_lifecycle_hook(*hook)
+                        || entry.hooks.lifecycle_hook_order(*hook) != order
+                    {
+                        continue;
+                    }
+                    entry
+                        .hooks
+                        .lifecycle_hook_with_context(*hook, context.clone())
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "{} hook for plugin '{}' failed: {error}",
+                                hook.as_str(),
+                                entry.name
+                            )
+                        })?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for HvigorLifecyclePlugin {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("HvigorBeforeBuildEndPlugin")
+            .debug_struct("HvigorLifecyclePlugin")
             .field(
                 "plugins",
                 &self
@@ -493,13 +593,57 @@ impl std::fmt::Debug for HvigorBeforeBuildEndPlugin {
     }
 }
 
-impl Plugin for HvigorBeforeBuildEndPlugin {
+impl Plugin for HvigorLifecyclePlugin {
     fn name(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("arkdown:hvigor-before-build-end")
+        std::borrow::Cow::Borrowed(match self.boundary {
+            HvigorLifecycleBoundary::BeforeBuild => "arkdown:hvigor-before-build",
+            HvigorLifecycleBoundary::AfterBuildStart => "arkdown:hvigor-after-build-start",
+            HvigorLifecycleBoundary::BeforeBuildEnd => "arkdown:hvigor-before-build-end",
+            HvigorLifecycleBoundary::AfterBuildEnd => "arkdown:hvigor-after-build-end",
+        })
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::BuildEnd
+        match self.boundary {
+            HvigorLifecycleBoundary::BeforeBuild | HvigorLifecycleBoundary::AfterBuildStart => {
+                HookUsage::BuildStart
+            }
+            HvigorLifecycleBoundary::BeforeBuildEnd | HvigorLifecycleBoundary::AfterBuildEnd => {
+                HookUsage::BuildEnd
+            }
+        }
+    }
+
+    fn build_start(
+        &self,
+        context: &PluginContext,
+        _args: &HookBuildStartArgs<'_>,
+    ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
+        let hook = match self.boundary {
+            HvigorLifecycleBoundary::BeforeBuild => Some(HvigorLifecycleHook::BeforeBuild),
+            HvigorLifecycleBoundary::AfterBuildStart => Some(HvigorLifecycleHook::AfterBuildStart),
+            _ => None,
+        };
+        let entries = self.entries.clone();
+        let context = context.clone();
+        async move {
+            let Some(hook) = hook else {
+                return Ok(());
+            };
+            Self::dispatch(entries, &[hook], context).await
+        }
+    }
+
+    fn build_start_meta(&self) -> Option<PluginHookMeta> {
+        match self.boundary {
+            HvigorLifecycleBoundary::BeforeBuild => Some(PluginHookMeta {
+                order: Some(RolldownPluginOrder::Pre),
+            }),
+            HvigorLifecycleBoundary::AfterBuildStart => Some(PluginHookMeta {
+                order: Some(RolldownPluginOrder::Post),
+            }),
+            _ => None,
+        }
     }
 
     fn build_end(
@@ -507,37 +651,36 @@ impl Plugin for HvigorBeforeBuildEndPlugin {
         context: &PluginContext,
         args: Option<&HookBuildEndArgs<'_>>,
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
-        // Latest hvigor does not enter beforeBuildEnd/buildEnd/afterBuildEnd
-        // when graph.build() throws. Rolldown reports that path by supplying
-        // HookBuildEndArgs, so do not manufacture a success lifecycle here.
-        let plugin_context = args.is_none().then(|| context.clone());
+        let succeeded = args.is_none();
+        let plugin_context = context.clone();
         let entries = self.entries.clone();
+        let boundary = self.boundary;
         async move {
-            let Some(plugin_context) = plugin_context else {
-                return Ok(());
-            };
-            // `beforeBuildEnd` is hookSeq in the latest IDE fork: preserve the
-            // resolved compile-plugin pipeline order and await each hook.
-            for entry in entries {
-                entry
-                    .hooks
-                    .before_build_end_with_context(plugin_context.clone())
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "beforeBuildEnd hook for plugin '{}' failed: {error}",
-                            entry.name
-                        )
-                    })?;
+            match boundary {
+                HvigorLifecycleBoundary::BeforeBuildEnd if succeeded => {
+                    Self::dispatch(entries, boundary.hooks(), plugin_context).await
+                }
+                HvigorLifecycleBoundary::AfterBuildEnd if succeeded => {
+                    Self::dispatch(entries, boundary.hooks(), plugin_context).await
+                }
+                HvigorLifecycleBoundary::AfterBuildEnd => {
+                    Self::dispatch(entries, &[HvigorLifecycleHook::CleanUp], plugin_context).await
+                }
+                _ => Ok(()),
             }
-            Ok(())
         }
     }
 
     fn build_end_meta(&self) -> Option<PluginHookMeta> {
-        Some(PluginHookMeta {
-            order: Some(RolldownPluginOrder::Pre),
-        })
+        match self.boundary {
+            HvigorLifecycleBoundary::BeforeBuildEnd => Some(PluginHookMeta {
+                order: Some(RolldownPluginOrder::Pre),
+            }),
+            HvigorLifecycleBoundary::AfterBuildEnd => Some(PluginHookMeta {
+                order: Some(RolldownPluginOrder::PinPost),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -704,10 +847,6 @@ impl<'a> PluginFactory<'a> {
         // ── 1. DuplicateCheckPlugin (hvigor: checkDuplicatedFileNames) ──────────
         let duplicate_check_plugin: SharedPluginable = Arc::new(DuplicateCheckPlugin::new());
 
-        // ── 2. ModuleMetaPlugin (hvigor: moduleMetaInfo, ESMODULE only) ──────
-        let module_meta_plugin: SharedPluginable =
-            Arc::new(ModuleMetaPlugin::new(project_root.clone(), module_name));
-
         // ── 3. OhosResolvePlugin (hvigor: resolve + newOhmUrl) ───────────────
         let resolver_config = ResolverConfig {
             project_root: project_root.clone(),
@@ -741,7 +880,8 @@ impl<'a> PluginFactory<'a> {
         ));
 
         // ── 5. Json5Plugin (hvigor: json) ────────────────────────────────────
-        let json5_plugin: SharedPluginable = Arc::new(Json5Plugin);
+        let json5_plugin: SharedPluginable =
+            Arc::new(Json5Plugin::new(self.input.transform_sources.clone()));
 
         // ── 6. wrapperChunk ─────────────────────────────────────────────────
         // No native adapter: `render_chunk` is unreachable on the scan-only
@@ -809,7 +949,6 @@ impl<'a> PluginFactory<'a> {
                 duplicate_check_plugin,
                 HvigorNativePluginSlot::DuplicateCheck,
             ),
-            PluginFactoryEntry::native(module_meta_plugin, HvigorNativePluginSlot::ModuleMeta),
             PluginFactoryEntry::native(ohos_resolve_plugin, HvigorNativePluginSlot::OhosResolve),
             PluginFactoryEntry::native(import_check_plugin, HvigorNativePluginSlot::ImportCheck),
             PluginFactoryEntry::native(json5_plugin, HvigorNativePluginSlot::Json),
@@ -884,7 +1023,11 @@ impl<'a> PluginFactory<'a> {
             } = package_plugin;
             let gap_entry = gap_hooks
                 .as_ref()
-                .filter(|hooks| hooks.has_before_build_end())
+                .filter(|hooks| {
+                    HvigorLifecycleHook::ALL
+                        .iter()
+                        .any(|hook| hooks.has_lifecycle_hook(*hook))
+                })
                 .map(|hooks| HvigorPluginGapEntry {
                     name: plugin.call_name().to_string(),
                     hooks: Arc::clone(hooks),
@@ -924,10 +1067,44 @@ impl<'a> PluginFactory<'a> {
             .map(|entry| entry.plugin)
             .collect::<Vec<_>>();
         if !gap_entries.is_empty() {
-            // This is an ordinary Rolldown plugin. Its `pre` buildEnd metadata
-            // supplies only hvigor's missing beforeBuildEnd boundary while all
-            // standard compile hooks stay in Rolldown's own driver.
-            plugins.insert(0, Arc::new(HvigorBeforeBuildEndPlugin::new(gap_entries)));
+            // Ordinary Rolldown plugins supply the four fork lifecycle
+            // boundaries. Standard hooks remain owned by Rolldown itself.
+            let boundaries = [
+                HvigorLifecycleBoundary::BeforeBuild,
+                HvigorLifecycleBoundary::AfterBuildStart,
+                HvigorLifecycleBoundary::BeforeBuildEnd,
+                HvigorLifecycleBoundary::AfterBuildEnd,
+            ];
+            let mut lifecycle_plugins = Vec::new();
+            for boundary in boundaries {
+                let entries = gap_entries
+                    .iter()
+                    .filter(|entry| {
+                        boundary
+                            .hooks()
+                            .iter()
+                            .any(|hook| entry.hooks.has_lifecycle_hook(*hook))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !entries.is_empty() {
+                    lifecycle_plugins.push((boundary, entries));
+                }
+            }
+            for (boundary, entries) in lifecycle_plugins.iter().rev() {
+                if !matches!(boundary, HvigorLifecycleBoundary::AfterBuildEnd) {
+                    plugins.insert(
+                        0,
+                        Arc::new(HvigorLifecyclePlugin::new(entries.clone(), *boundary)),
+                    );
+                }
+            }
+            if let Some((boundary, entries)) = lifecycle_plugins
+                .into_iter()
+                .find(|(boundary, _)| matches!(boundary, HvigorLifecycleBoundary::AfterBuildEnd))
+            {
+                plugins.push(Arc::new(HvigorLifecyclePlugin::new(entries, boundary)));
+            }
         }
 
         Ok(PluginFactoryOutput {
@@ -967,8 +1144,8 @@ mod tests {
     struct EmptyGapHooks;
 
     impl HvigorPluginGapHooks for EmptyGapHooks {
-        fn has_before_build_end(&self) -> bool {
-            true
+        fn has_lifecycle_hook(&self, hook: HvigorLifecycleHook) -> bool {
+            hook == HvigorLifecycleHook::BeforeBuildEnd
         }
     }
 
@@ -1070,8 +1247,8 @@ mod tests {
                 HvigorPluginOrder::Position(0),
             ),
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("after-module-meta")),
-                HvigorPluginOrder::Position(3),
+                Arc::new(NamedTestPlugin("after-duplicate-check")),
+                HvigorPluginOrder::Position(2),
             ),
         ];
 
@@ -1084,8 +1261,7 @@ mod tests {
             .collect();
 
         assert_eq!(names[0], "before-all");
-        assert_eq!(names[2], "module-meta");
-        assert_eq!(names[3], "after-module-meta");
+        assert_eq!(names[2], "after-duplicate-check");
     }
 
     #[test]
@@ -1153,12 +1329,11 @@ mod tests {
     }
 
     #[test]
-    fn native_anchor_falls_forward_when_a_builtin_is_disabled() {
+    fn native_anchor_falls_forward_when_adapter_behavior_is_owned_by_scan() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().to_path_buf();
         let plan = make_plan(&root);
         let mut input = PluginFactoryInput::from_plan(&plan);
-        input.disabled_plugins = vec!["module-meta".to_string()];
         input.package_plugins = vec![PackagePlugin::new(
             Arc::new(NamedTestPlugin("module-meta-anchor")),
             HvigorPluginOrder::Anchor {
@@ -1173,7 +1348,6 @@ mod tests {
             .into_iter()
             .map(|plugin| plugin.call_name().to_string())
             .collect::<Vec<_>>();
-        assert!(!names.iter().any(|name| name == "module-meta"));
         let custom = names
             .iter()
             .position(|name| name == "module-meta-anchor")

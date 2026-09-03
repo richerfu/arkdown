@@ -1,21 +1,24 @@
 //! [`BuildSessionBuilder`] — orchestrates all startup reads and constructs
 //! the immutable [`BuildSession`].
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use thiserror::Error;
 
 use arkdown_config::build_profile::BuildOptionProfileInventory;
-use arkdown_config::{ArkdownCustomConfigLoader, RuntimeContextOverrides};
+use arkdown_config::ArkdownCustomConfigLoader;
 use arkdown_core::{ArkdownConfig, ArktsLanguageVersion};
 
+use crate::dependency_graph::snapshot::DependencyNodeType;
 use crate::fingerprint::{FingerprintError, InputFingerprintSet};
 use crate::paths::PathResolver;
 use crate::profiles::store::{ProfileStore, ProfileStoreError};
 use crate::project::snapshot::ProjectSnapshot;
 use crate::sdk::snapshot::{SdkSnapshot, SdkSnapshotError};
 use crate::session::BuildSession;
+use crate::source_store::SourceStore;
 use crate::WatchPlanInput;
 
 /// Errors produced during session construction.
@@ -63,8 +66,6 @@ pub struct BuildSessionBuilder {
     pub config: Arc<ArkdownConfig>,
     /// OHPM resolution mode (offline/prefer-offline/online).
     pub ohpm_mode: crate::package::acquisition::AcquisitionMode,
-    /// Complete in-memory model replacements made by hvigor OHOS contexts.
-    pub runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
     /// Hvigor CLI `parameterFile` extra-parameter override.
     pub parameter_file_override: Option<PathBuf>,
     /// Explicit ArkTS language selected by the arkdown invocation.
@@ -77,7 +78,6 @@ impl BuildSessionBuilder {
         Self {
             config,
             ohpm_mode: crate::package::acquisition::AcquisitionMode::Online,
-            runtime_overrides: None,
             parameter_file_override: None,
             arkts_language_version: ArktsLanguageVersion::default(),
         }
@@ -86,15 +86,6 @@ impl BuildSessionBuilder {
     /// Set the OHPM resolution mode.
     pub fn with_ohpm_mode(mut self, mode: crate::package::acquisition::AcquisitionMode) -> Self {
         self.ohpm_mode = mode;
-        self
-    }
-
-    /// Forward plugin context model mutations into every startup inventory.
-    pub fn with_runtime_overrides(
-        mut self,
-        runtime_overrides: Arc<RuntimeContextOverrides>,
-    ) -> Self {
-        self.runtime_overrides = Some(runtime_overrides);
         self
     }
 
@@ -127,9 +118,8 @@ impl BuildSessionBuilder {
         }
 
         // Phase 1: Build project and module snapshots.
-        let project = ProjectSnapshot::from_config_with_runtime_overrides(
+        let project = ProjectSnapshot::from_config_with_parameter_file(
             &self.config,
-            self.runtime_overrides.clone(),
             self.parameter_file_override.clone(),
         )
         .map_err(|e| BuildSessionError::Config(e.to_string()))?;
@@ -153,18 +143,27 @@ impl BuildSessionBuilder {
         let build_options = BuildOptionProfileInventory::load_with_custom_config(
             &self.config.project_root,
             &self.config.modules,
-            self.runtime_overrides.as_deref(),
             &custom_config,
         )
         .map_err(|error| BuildSessionError::Config(error.to_string()))?;
 
-        // Phase 7: Build input fingerprints.
+        // Phase 7: Capture source contents once. Transform snapshots and
+        // built-in Rolldown adapters borrow this immutable inventory instead
+        // of walking or re-reading project/package source trees.
+        let source_inventory_roots = self.source_inventory_roots(&project);
+        let source_store = SourceStore::discover(&source_inventory_roots).map_err(|source| {
+            BuildSessionError::Io {
+                path: self.config.project_root.clone(),
+                source,
+            }
+        })?;
+
+        // Phase 8: Build input fingerprints.
         let fingerprints = InputFingerprintSet::build_with_custom_config_and_arkts_version(
             &self.config,
             &project,
             &profiles,
             &sdk,
-            self.runtime_overrides.as_deref(),
             &custom_config,
             self.arkts_language_version,
         )?;
@@ -181,7 +180,31 @@ impl BuildSessionBuilder {
             profiles: Arc::new(profiles),
             build_options: Arc::new(build_options),
             custom_config: Arc::new(custom_config),
+            source_store: Arc::new(source_store),
             arkts_language_version: self.arkts_language_version,
         })
+    }
+
+    fn source_inventory_roots(&self, project: &ProjectSnapshot) -> Vec<PathBuf> {
+        let mut roots = BTreeSet::new();
+        for module in project.modules.values() {
+            // Capture every source set below `src/` once. The active target
+            // overlay is selected later without another directory walk.
+            roots.insert(module.root.join("src"));
+        }
+        for graph in project.dependency_graphs.values() {
+            for node in graph.nodes.values() {
+                if matches!(
+                    node.node_type,
+                    DependencyNodeType::SourceHar
+                        | DependencyNodeType::OhpmSource
+                        | DependencyNodeType::IntegratedHsp
+                        | DependencyNodeType::NativeSo
+                ) {
+                    roots.extend(node.package_root.iter().cloned());
+                }
+            }
+        }
+        roots.into_iter().collect()
     }
 }

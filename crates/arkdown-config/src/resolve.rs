@@ -11,18 +11,15 @@ use crate::build_profile::{
 use crate::error::ConfigError;
 use crate::module_json::RawModuleJson;
 use crate::sdk::{discover_sdk_with_selection, SdkSelection};
-use crate::RuntimeContextOverrides;
 use serde::Deserialize;
 
-/// Owns one complete configuration load, including optional in-memory model
-/// replacements produced by hvigor OHOS plugin contexts.
+/// Owns one complete configuration load from the project model on disk.
 pub struct ArkdownConfigLoader<'a> {
     root: &'a Path,
     mode: BuildMode,
     target: OutputTarget,
     product_name: Option<&'a str>,
     module_name: Option<&'a str>,
-    runtime_overrides: Option<&'a RuntimeContextOverrides>,
 }
 
 /// Resolves signing material at the same project boundary as Hvigor.
@@ -76,16 +73,7 @@ impl<'a> ArkdownConfigLoader<'a> {
             target,
             product_name,
             module_name,
-            runtime_overrides: None,
         }
-    }
-
-    pub fn with_runtime_overrides(
-        mut self,
-        runtime_overrides: &'a RuntimeContextOverrides,
-    ) -> Self {
-        self.runtime_overrides = Some(runtime_overrides);
-        self
     }
 
     /// Parse and resolve the complete project configuration.
@@ -96,7 +84,6 @@ impl<'a> ArkdownConfigLoader<'a> {
             target,
             product_name,
             module_name,
-            runtime_overrides,
         } = self;
         if !root.is_dir() {
             return Err(ConfigError::FileNotFound(root.join("build-profile.json5")));
@@ -107,22 +94,8 @@ impl<'a> ArkdownConfigLoader<'a> {
         // -----------------------------------------------------------------------
         // 1. Parse build-profile.json5 and AppScope/app.json5
         // -----------------------------------------------------------------------
-        let profile_path = root.join("build-profile.json5");
-        let profile = if let Some(value) =
-            runtime_overrides.and_then(|overrides| overrides.project.build_profile.as_ref())
-        {
-            RawBuildProfile::from_value(value, &profile_path)?
-        } else {
-            RawBuildProfile::load(root)?
-        };
-        let app_json_path = root.join("AppScope").join("app.json5");
-        let app_json5 = if let Some(value) =
-            runtime_overrides.and_then(|overrides| overrides.project.app_json.as_ref())
-        {
-            RawAppJson5::from_value(value, &app_json_path)?
-        } else {
-            RawAppJson5::load(root)?
-        };
+        let profile = RawBuildProfile::load(root)?;
+        let app_json5 = RawAppJson5::load(root)?;
 
         // -----------------------------------------------------------------------
         // 2. Destructure app-level fields before consuming products
@@ -238,14 +211,7 @@ impl<'a> ArkdownConfigLoader<'a> {
             let module_root = root.join(&raw_mod.src_path);
 
             // module.json5 is optional — if absent we fall back to Entry.
-            let module_json_path = module_root.join("src").join("main").join("module.json5");
-            let runtime_module_json = runtime_overrides
-                .and_then(|overrides| overrides.module_for_root(&module_root))
-                .and_then(|overrides| overrides.module_json.as_ref());
-            let module_type = match runtime_module_json.map_or_else(
-                || RawModuleJson::load(&module_root),
-                |value| RawModuleJson::from_value(value, &module_json_path),
-            ) {
+            let module_type = match RawModuleJson::load(&module_root) {
                 Ok(mj) => OhosModuleType::from_type_str(&mj.module.module_type),
                 Err(ConfigError::FileNotFound(_)) => arkdown_core::OhosModuleType::Entry,
                 Err(e) => return Err(e),

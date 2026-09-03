@@ -31,29 +31,15 @@ use crate::source::{
 use crate::transform::source_emit::CodegenSourceText;
 use crate::ModuleExportNameText;
 
-#[cfg(arkdown_yuku_native)]
-mod yuku_module_analysis;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModuleAnalyzerKind {
     #[default]
     Oxc,
-    Yuku,
 }
 
 impl ModuleAnalyzerKind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Oxc => "oxc",
-            Self::Yuku => "yuku",
-        }
-    }
-
-    pub fn is_available(self) -> bool {
-        match self {
-            Self::Oxc => true,
-            Self::Yuku => cfg!(arkdown_yuku_native),
-        }
+        "oxc"
     }
 }
 
@@ -882,20 +868,14 @@ impl ModuleBindingKind {
 
 struct ModuleBindingClassifier<'a> {
     sources: &'a TransformSourceSnapshot,
-    module_analyzer: ModuleAnalyzerKind,
     exports: FxHashMap<PathBuf, Option<FxHashMap<String, ModuleBindingKind>>>,
-    #[cfg(arkdown_yuku_native)]
-    yuku_classifier: Option<yuku_module_analysis::YukuModuleExportClassifier<'a>>,
 }
 
 impl<'a> ModuleBindingClassifier<'a> {
-    fn new(sources: &'a TransformSourceSnapshot, module_analyzer: ModuleAnalyzerKind) -> Self {
+    fn new(sources: &'a TransformSourceSnapshot, _module_analyzer: ModuleAnalyzerKind) -> Self {
         Self {
             sources,
-            module_analyzer,
             exports: FxHashMap::default(),
-            #[cfg(arkdown_yuku_native)]
-            yuku_classifier: None,
         }
     }
 
@@ -964,19 +944,6 @@ impl<'a> ModuleBindingClassifier<'a> {
         &mut self,
         source: TransformSourceFile,
     ) -> Option<FxHashMap<String, ModuleBindingKind>> {
-        #[cfg(not(arkdown_yuku_native))]
-        let _ = self.module_analyzer;
-
-        #[cfg(arkdown_yuku_native)]
-        if self.module_analyzer == ModuleAnalyzerKind::Yuku {
-            let classifier = self.yuku_classifier.get_or_insert_with(|| {
-                yuku_module_analysis::YukuModuleExportClassifier::new(self.sources)
-            });
-            if let Some(exports) = classifier.analyze(source.clone()) {
-                return Some(exports);
-            }
-        }
-
         ModuleExportClassifier::new(source)
             .with_sources(self.sources)
             .analyze()
@@ -1781,10 +1748,7 @@ mod tests {
     }
 
     fn available_module_analyzers() -> Vec<ModuleAnalyzerKind> {
-        [ModuleAnalyzerKind::Oxc, ModuleAnalyzerKind::Yuku]
-            .into_iter()
-            .filter(|analyzer| analyzer.is_available())
-            .collect()
+        vec![ModuleAnalyzerKind::Oxc]
     }
 
     #[test]

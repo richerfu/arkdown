@@ -13,7 +13,6 @@
 //!    - Cold → full pipeline rebuild.
 //! 4. Calls `BuildCommand::execute` with the appropriate `skip_*` flags set.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -27,7 +26,7 @@ use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalida
 
 use arkdown::plugins::factory::PackagePlugin;
 
-use super::args::{AbcBackendChoice, BuildArgs, BuildCommand, ModuleAnalyzerChoice};
+use super::args::{AbcBackendChoice, BuildArgs, BuildCommand};
 use super::layout::ModuleBuildLayout;
 
 /// Input for the watch stage.
@@ -61,13 +60,9 @@ pub(super) struct WatchStageInput {
   pub(super) disable_abc_cache: bool,
   pub(super) cache_file: Option<PathBuf>,
   pub(super) checker: Option<String>,
-  pub(super) module_analyzer: ModuleAnalyzerChoice,
   pub(super) cache: bool,
   pub(super) package_plugins: Vec<PackagePlugin>,
-  pub(super) project_hvigor_overrides: Option<arkdown_config::ProjectHvigorOverrides>,
-  pub(super) module_hvigor_overrides: BTreeMap<String, serde_json::Value>,
   pub(super) node_executable: Option<PathBuf>,
-  pub(super) runtime_context_overrides: Option<Arc<arkdown_config::RuntimeContextOverrides>>,
   pub(super) custom_task_input_paths: Vec<PathBuf>,
   pub(super) pack_compress_level: Option<u32>,
   pub(super) align_device_types: Vec<String>,
@@ -125,13 +120,9 @@ impl WatchStageInput {
       disable_abc_cache,
       cache_file,
       checker: args.checker.clone(),
-      module_analyzer: args.module_analyzer,
       cache: args.cache,
       package_plugins,
-      project_hvigor_overrides: args.project_hvigor_overrides.clone(),
-      module_hvigor_overrides: args.module_hvigor_overrides.clone(),
       node_executable: args.node_executable.clone(),
-      runtime_context_overrides: args.runtime_context_overrides.clone(),
       custom_task_input_paths: args.custom_task_input_paths.clone(),
       pack_compress_level: args.pack_compress_level,
       align_device_types: args.align_device_types.clone(),
@@ -185,13 +176,9 @@ impl WatchStage {
     let disable_abc_cache = input.disable_abc_cache;
     let cache_file = input.cache_file;
     let checker = input.checker;
-    let module_analyzer = input.module_analyzer;
     let cache = input.cache;
     let package_plugins = input.package_plugins;
-    let project_hvigor_overrides = input.project_hvigor_overrides;
-    let module_hvigor_overrides = input.module_hvigor_overrides;
     let node_executable = input.node_executable;
-    let runtime_context_overrides = input.runtime_context_overrides;
     let custom_task_input_paths = input.custom_task_input_paths;
     let pack_compress_level = input.pack_compress_level;
     let align_device_types = input.align_device_types;
@@ -359,14 +346,10 @@ impl WatchStage {
           cache_file: cache_file.clone(),
           abc_backend,
           checker: checker.clone(),
-          module_analyzer,
           cache,
           skip_resource: is_hot,
           skip_profile: is_hot,
           watch_invalidation: Some(invalidation),
-          project_hvigor_overrides: project_hvigor_overrides.clone(),
-          module_hvigor_overrides: module_hvigor_overrides.clone(),
-          runtime_context_overrides: runtime_context_overrides.clone(),
           custom_task_input_paths: custom_task_input_paths.clone(),
           pack_compress_level,
           align_device_types: align_device_types.clone(),

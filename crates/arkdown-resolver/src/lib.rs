@@ -28,6 +28,8 @@ pub use case_check::{CaseCheckPolicy, CaseCheckResult};
 pub use error::ResolveError;
 pub use oh_modules::{OhModulesLayout, OhPackage};
 pub use ohm_url::{OhmUrlBuilder, OhmUrlParseResult};
-pub use plan::{PackageResolutionPlan, PackageResolutionPlanBuilder, PkgBriefInfo};
+pub use plan::{
+    PackageManifestSnapshot, PackageResolutionPlan, PackageResolutionPlanBuilder, PkgBriefInfo,
+};
 pub use resolver::{OhosResolver, ResolveImportKind, ResolverConfig};
 pub use specifier::SpecifierClass;

@@ -29,16 +29,37 @@ const state = {
   moduleInfoCount: 0,
   parsedType: "",
   projectConfig: undefined as unknown,
+  sourceFileCount: 0,
+  sourceHash: undefined as string | undefined,
+  sourceMtimeMs: undefined as number | undefined,
+  shareCacheBuildCount: 0,
+  importPackageName: undefined as string | undefined,
   buildEndError: undefined as undefined | string,
 };
 
 export default {
   name: "arkdown-latest-hvigor-lifecycle-fixture",
 
+  beforeBuild() {
+    state.events.push("beforeBuild");
+  },
+
   buildStart(this: any) {
     state.events.push("buildStart");
     state.buildStartArgumentCount = arguments.length;
     state.projectConfig = this.share?.projectConfig;
+    const sourceFiles: string[] = this.share.getSourceFiles();
+    const entry = sourceFiles.find((file) => file.endsWith("/Index.ets"));
+    state.sourceFileCount = sourceFiles.length;
+    state.sourceHash = entry ? this.share.getHashByFilePath(entry) : undefined;
+    state.sourceMtimeMs = entry ? this.share.getCachedFileInfo(entry)?.mtimeMs : undefined;
+    state.shareCacheBuildCount = (this.share.cache.get("buildCount") ?? 0) + 1;
+    this.share.cache.set("buildCount", state.shareCacheBuildCount);
+    state.importPackageName = this.share.importResolver(this.share.projectConfig.moduleName)?.packageName;
+  },
+
+  afterBuildStart() {
+    state.events.push("afterBuildStart");
   },
 
   resolveId() {
@@ -53,6 +74,9 @@ export default {
 
   transform() {
     state.transformCount++;
+    if (process.env.ARKDOWN_PLUGIN_THROW_TRANSFORM === "1") {
+      throw new Error("intentional transform failure");
+    }
     return null;
   },
 
@@ -73,20 +97,35 @@ export default {
     state.moduleParsedCount++;
   },
 
-  beforeBuildEnd(this: any) {
-    state.events.push("beforeBuildEnd");
-    state.beforeBuildEndArgumentCount = arguments.length;
-    state.moduleIds = Array.from(this.getModuleIds());
-    state.moduleInfoCount = state.moduleIds.filter(
-      (id) => this.getModuleInfo(id) !== null,
-    ).length;
-    state.parsedType = this.parse("export const parsed = true").type;
+  beforeBuildEnd: {
+    order: "pre",
+    handler(this: any) {
+      state.events.push("beforeBuildEnd");
+      state.beforeBuildEndArgumentCount = arguments.length;
+      state.moduleIds = Array.from(this.getModuleIds());
+      state.moduleInfoCount = state.moduleIds.filter(
+        (id) => this.getModuleInfo(id) !== null,
+      ).length;
+      state.parsedType = this.parse("export const parsed = true").type;
+    },
   },
 
   buildEnd(this: any, error?: Error) {
     state.events.push("buildEnd");
     state.buildEndArgumentCount = arguments.length;
     state.buildEndError = error?.message;
+  },
+
+  afterBuildEnd() {
+    state.events.push("afterBuildEnd");
+  },
+
+  bundleEnd() {
+    state.events.push("bundleEnd");
+  },
+
+  cleanUp() {
+    state.events.push("cleanUp");
     fs.writeFileSync(tracePath, JSON.stringify(state, null, 2));
   },
 };

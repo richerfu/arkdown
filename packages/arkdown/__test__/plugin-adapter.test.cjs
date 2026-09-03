@@ -55,9 +55,16 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   const normalized = normalizePlugin(plugin, fakeBinding())
   const share = { projectConfig: { moduleName: 'entry' } }
   await dispatch(normalized, 'seedContext', { share })
+  share.setHashValueByFilePath('/tmp/Index.ets', 'source-hash')
 
   assert.deepEqual(normalized.__arkdownPluginHooks, PLUGIN_HOOKS)
+  assert.equal(share.getHashByFilePath('/tmp/Index.ets'), 'source-hash')
+  assert.equal(share.cache instanceof Map, true)
+  assert.equal(share.commonCache instanceof Map, true)
+  assert.equal(typeof share.getLogger('fixture').printErrorAndExit, 'function')
+  assert.deepEqual(await dispatch(normalized, 'beforeBuild'), {})
   assert.deepEqual((await dispatch(normalized, 'buildStart', { buildStartOptions: { input: 'index.ets' } })), {})
+  assert.deepEqual(await dispatch(normalized, 'afterBuildStart'), {})
   assert.deepEqual(dispatch(normalized, 'resolveId', { id: 'dep', importer: 'index.ets', resolveOptions: {} }), {
     resolveId: './resolved.js',
   })
@@ -71,6 +78,9 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   assert.deepEqual(dispatch(normalized, 'moduleParsed', { moduleInfo: { id: 'index.ets' } }), {})
   assert.deepEqual(dispatch(normalized, 'beforeBuildEnd'), {})
   assert.deepEqual(dispatch(normalized, 'buildEnd', { buildEndContext: { errors: [] } }), {})
+  assert.deepEqual(dispatch(normalized, 'afterBuildEnd'), {})
+  assert.deepEqual(await dispatch(normalized, 'bundleEnd'), {})
+  assert.deepEqual(dispatch(normalized, 'cleanUp'), {})
   assert.deepEqual(
     dispatch(normalized, 'shouldInvalidCache', {
       cacheRequest: { id: 'index.ets', code: 'let a = 1', __arkdownOxcAst: { node: { type: 'Program' } } },
@@ -79,6 +89,126 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   )
   assert.equal(calls.length, PLUGIN_HOOKS.length)
   assert.equal(calls.every((call) => call.share === share), true)
+})
+
+test('ordered hook objects retain handler receiver and native order metadata', () => {
+  const calls = []
+  const plugin = normalizePlugin(
+    {
+      name: 'ordered-hooks',
+      transform: {
+        order: 'post',
+        handler(code, id) {
+          calls.push({ name: this.share.projectConfig.moduleName, id })
+          return `${code}\n// ordered`
+        },
+      },
+      beforeBuildEnd: {
+        order: 'pre',
+        handler() {
+          calls.push({ name: 'beforeBuildEnd' })
+        },
+      },
+    },
+    fakeBinding(),
+  )
+  dispatch(plugin, 'seedContext', { share: { projectConfig: { moduleName: 'entry' } } })
+
+  assert.deepEqual(plugin.__arkdownPluginHookMeta, [
+    { name: 'transform', order: 'post' },
+    { name: 'beforeBuildEnd', order: 'pre' },
+  ])
+  assert.deepEqual(dispatch(plugin, 'transform', { code: 'export {}', id: 'Index.ets' }), {
+    transform: 'export {}\n// ordered',
+  })
+  assert.deepEqual(dispatch(plugin, 'beforeBuildEnd'), {})
+  assert.deepEqual(calls, [
+    { name: 'entry', id: 'Index.ets' },
+    { name: 'beforeBuildEnd' },
+  ])
+})
+
+test('plugin context delegates graph operations to Rolldown and retains hvigor cache/async state', async () => {
+  const calls = []
+  let observed
+  const nativeContext = {
+    resolve: async (source, importer, options) => {
+      calls.push(['resolve', source, importer, options])
+      return { id: '/project/dep.ts', external: false }
+    },
+    load: async (options) => {
+      calls.push(['load', options])
+      return { id: options.id }
+    },
+    emitFile: (file) => {
+      calls.push(['emitFile', file])
+      return 'asset-reference'
+    },
+    addWatchFile: (id) => calls.push(['addWatchFile', id]),
+    getModuleIds: () => ['/project/index.ts'],
+    getModuleInfo: (id) => ({ id }),
+    getFileName: (id) => `${id}.json`,
+    parse: () => ({ ast: { node: { type: 'Program', body: [] }, fixes: [] }, comments: [] }),
+    info: (message) => calls.push(['info', message]),
+    warn: (message) => calls.push(['warn', message]),
+    debug: (message) => calls.push(['debug', message]),
+  }
+  const plugin = normalizePlugin(
+    {
+      name: 'context-plugin',
+      async buildStart() {
+        this.cache.set('answer', 42)
+        const resolved = await this.resolve('./dep', '/project/index.ts', {
+          kind: 'import-statement',
+          custom: { owner: 'context-plugin' },
+        })
+        const loaded = await this.load({ id: resolved.id })
+        const reference = this.emitFile({ type: 'asset', name: 'meta', source: '{}' })
+        this.addWatchFile('/project/config.json')
+        this.info({ message: 'context ready' })
+        observed = {
+          cache: this.cache.get('answer'),
+          resolved: resolved.id,
+          loaded: loaded.id,
+          reference,
+          fileName: this.getFileName(reference),
+          watchMode: this.meta.watchMode,
+        }
+      },
+      transform(code) {
+        const pluginContext = this
+        this.async(() => setImmediate(() => {
+          calls.push(['async-complete'])
+          pluginContext.signal()
+        }))
+        return code
+      },
+    },
+    fakeBinding(),
+    { compilePlugin: true },
+  )
+  dispatch(plugin, 'seedContext', { share: { projectConfig: { watchMode: true } } })
+
+  await dispatch(plugin, 'buildStart', { context: nativeContext })
+  dispatch(plugin, 'transform', { context: nativeContext, code: 'export {}', id: '/project/index.ts' })
+  await dispatch(plugin, 'bundleEnd', { context: nativeContext })
+
+  assert.deepEqual(observed, {
+    cache: 42,
+    resolved: '/project/dep.ts',
+    loaded: '/project/dep.ts',
+    reference: 'asset-reference',
+    fileName: 'asset-reference.json',
+    watchMode: true,
+  })
+  assert.deepEqual(calls, [
+    ['resolve', './dep', '/project/index.ts', { kind: 'import-statement', custom: { owner: 'context-plugin' } }],
+    ['load', { id: '/project/dep.ts' }],
+    ['emitFile', { type: 'asset', name: 'meta', source: '{}' }],
+    ['addWatchFile', '/project/config.json'],
+    ['info', 'context ready'],
+    ['async-complete'],
+  ])
 })
 
 test('explicit plugin factories and nested arrays retain deterministic native order', () => {

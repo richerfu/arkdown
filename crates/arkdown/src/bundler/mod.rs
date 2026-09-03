@@ -70,7 +70,6 @@ use crate::diagnostics::RolldownBuildDiagnostics;
 use crate::manual_chunks::{ChunkName, ManualChunkPolicy};
 use crate::output;
 use crate::plan::{BundlePlan, SourceMapPolicy};
-use crate::plugins::module_meta::ModuleMetaPlugin;
 
 /// The top-level bundler for one OHOS module build.
 ///
@@ -535,31 +534,12 @@ impl Bundler {
 
     fn source_map_package_versions(
         plan: &BundlePlan,
-        module_graph_facts: &ModuleGraphFacts,
+        _module_graph_facts: &ModuleGraphFacts,
     ) -> FxHashMap<String, String> {
-        let mut package_versions = plan
-            .input
+        plan.input
             .source_map_packages
             .dependency_package_versions
-            .clone();
-        for module_id in &module_graph_facts.full_module_ids {
-            let meta = ModuleMetaPlugin::compute_meta(
-                module_id,
-                &plan.input.project_root,
-                &plan.input.module_name,
-            );
-            let Some(package_name) = meta.pkg_name.filter(|name| !name.is_empty()) else {
-                continue;
-            };
-            let Some(package_version) = meta.pkg_version.filter(|version| !version.is_empty())
-            else {
-                continue;
-            };
-            package_versions
-                .entry(package_name)
-                .or_insert(package_version);
-        }
-        package_versions
+            .clone()
     }
 
     fn source_map_javascript_paths(

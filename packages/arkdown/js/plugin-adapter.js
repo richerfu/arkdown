@@ -7,10 +7,12 @@ const { pathToFileURL } = require('node:url')
 const nativeBinding = require('../index.js')
 
 // This is the complete user-authored compile-plugin surface consumed by the
-// ArkTS 1.1 module pipeline. The standard hooks run inside Rolldown; the two
-// custom lifecycle hooks are scheduled by Rust at their source-defined stage.
+// ArkTS 1.1 module pipeline. The standard hooks run inside Rolldown; the fork
+// lifecycle hooks are scheduled by Rust at their source-defined stages.
 const PLUGIN_HOOKS = Object.freeze([
+  'beforeBuild',
   'buildStart',
+  'afterBuildStart',
   'resolveId',
   'load',
   'transform',
@@ -18,6 +20,9 @@ const PLUGIN_HOOKS = Object.freeze([
   'resolveDynamicImport',
   'beforeBuildEnd',
   'buildEnd',
+  'afterBuildEnd',
+  'bundleEnd',
+  'cleanUp',
   'shouldInvalidCache',
 ])
 
@@ -67,6 +72,7 @@ const REMOVED_HVIGOR_CONFIG_KEYS = new Set([
 ])
 
 let esmLoadSequence = 0
+const hvigorShareStateByScope = new Map()
 
 function arkdownError(code, message, details = {}) {
   const error = new Error(message)
@@ -120,14 +126,25 @@ function validateHookSurface(plugin, hookNames, pluginFile) {
   for (const hookName of hookNames) {
     const hook = plugin[hookName]
     if (hook === undefined || hook === null) continue
-    if (typeof hook !== 'function') {
+    if (typeof hook !== 'function' && !(typeof hook === 'object' && typeof hook.handler === 'function')) {
       throw arkdownError(
         'ARKDOWN_PLUGIN_HOOK_INVALID',
-        `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" must be a function`,
+        `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" must be a function or an object with a handler function`,
+        { hookName, pluginFile },
+      )
+    }
+    if (typeof hook === 'object' && hook.order !== undefined && hook.order !== 'pre' && hook.order !== 'post') {
+      throw arkdownError(
+        'ARKDOWN_PLUGIN_HOOK_ORDER_INVALID',
+        `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" order must be "pre" or "post"`,
         { hookName, pluginFile },
       )
     }
   }
+}
+
+function hookHandler(hook) {
+  return typeof hook === 'function' ? hook : hook.handler
 }
 
 function reviveOxcAst(envelope) {
@@ -206,11 +223,217 @@ function parsePluginAst(source, options, context, binding) {
   return reviveOxcAst(result.ast)
 }
 
-function pluginContext(request, share, binding) {
+function pluginLogMessage(value) {
+  if (typeof value === 'string') return value
+  if (value instanceof Error) return value.stack || value.message
+  if (value && typeof value === 'object' && typeof value.message === 'string') return value.message
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function createAsyncTracker() {
+  let pending = 0
+  let waiters = []
+  return {
+    run(operation, ...args) {
+      if (typeof operation !== 'function') throw new TypeError('this.async expects a function')
+      pending += 1
+      try {
+        return operation(...args)
+      } catch (error) {
+        this.signal()
+        throw error
+      }
+    },
+    signal() {
+      if (pending === 0) return
+      pending -= 1
+      if (pending !== 0) return
+      const completed = waiters
+      waiters = []
+      for (const resolve of completed) resolve()
+    },
+    block() {
+      return pending === 0 ? Promise.resolve() : new Promise((resolve) => waiters.push(resolve))
+    },
+  }
+}
+
+function hvigorShareScope(projectConfig) {
+  return [
+    projectConfig.projectTopDir || '',
+    projectConfig.modulePath || '',
+    projectConfig.moduleName || '',
+    projectConfig.target || '',
+    projectConfig.buildMode || '',
+  ].join('\0')
+}
+
+function createHvigorLogger(prefix, errorFileIds) {
+  const write = (method, values) => {
+    const message = values.map(pluginLogMessage).join(' ')
+    if (method === 'warn') process.emitWarning(`[${prefix}] ${message}`, { type: 'ArkdownWarning' })
+    else if (method === 'error') process.stderr.write(`[${prefix}] ${message}\n`)
+    else if (method !== 'debug' || process.env.ARKDOWN_LOG === 'debug' || process.env.ARKDOWN_LOG === 'trace') {
+      process.stdout.write(`[${prefix}] ${message}\n`)
+    }
+  }
+  const logger = {
+    printErrorAndExit(value) {
+      const error = value instanceof Error ? value : new Error(pluginLogMessage(value))
+      error.code ||= 'ARKTS_COMPILER_ERROR'
+      throw error
+    },
+    recordErrorFileId(id) {
+      if (id) errorFileIds.add(String(id))
+    },
+  }
+  for (const level of ['debug', 'info', 'warn', 'error']) {
+    logger[level] = (...values) => write(level, values)
+    logger[`print${level[0].toUpperCase()}${level.slice(1)}`] = (value) => write(level, [value])
+  }
+  return logger
+}
+
+function createCacheStoreManager(stores) {
+  return {
+    keys() {
+      return stores.keys()
+    },
+    unmount(key) {
+      stores.delete(key)
+    },
+    mount(key) {
+      if (!stores.has(key)) stores.set(key, new Map())
+      const cache = stores.get(key)
+      return {
+        getCache: (cacheKey) => cache.get(cacheKey),
+        setCache: (cacheKey, value) => cache.set(cacheKey, value),
+      }
+    },
+  }
+}
+
+function hydrateHvigorShare(rawShare, binding) {
+  const share = rawShare && typeof rawShare === 'object' ? rawShare : {}
+  const projectConfig = share.projectConfig && typeof share.projectConfig === 'object' ? share.projectConfig : {}
+  if (share.__arkdownProjectConfig && typeof share.__arkdownProjectConfig === 'object') {
+    Object.assign(projectConfig, share.__arkdownProjectConfig)
+  }
+  if (typeof projectConfig.watchMode === 'boolean') projectConfig.watchMode = String(projectConfig.watchMode)
+  const scope = hvigorShareScope(projectConfig)
+  let state = hvigorShareStateByScope.get(scope)
+  if (!state) {
+    state = {
+      cache: new Map(),
+      commonCache: new Map(),
+      cacheStores: new Map(),
+      errorFileIds: new Set(),
+      hashOverrides: new Map(),
+      arkProjectConfig: {},
+    }
+    hvigorShareStateByScope.set(scope, state)
+  }
+  const handle = share.__arkdownNativeShare
+  const nativeGetHash =
+    typeof share.getHashByFilePath === 'function'
+      ? share.getHashByFilePath.bind(share)
+      : handle
+        ? (file) => binding.hvigorShareGetHashByFilePath(handle, file)
+        : undefined
+  const nativeGetFileInfo =
+    typeof share.getCachedFileInfo === 'function'
+      ? share.getCachedFileInfo.bind(share)
+      : handle
+        ? (file) => binding.hvigorShareGetCachedFileInfo(handle, file)
+        : undefined
+  const nativeGetSourceFiles =
+    typeof share.getSourceFiles === 'function'
+      ? share.getSourceFiles.bind(share)
+      : handle
+        ? () => binding.hvigorShareGetSourceFiles(handle)
+        : () => []
+  const nativeImportResolver =
+    typeof share.importResolver === 'function'
+      ? share.importResolver.bind(share)
+      : handle
+        ? (request) => binding.hvigorShareImportResolver(handle, request)
+        : () => undefined
+  const pathKey = (value) => path.resolve(String(value)).split(path.sep).join('/')
+  Object.defineProperty(share, 'projectConfig', { value: projectConfig, enumerable: true, configurable: true })
+  Object.assign(share, {
+    arkProjectConfig: state.arkProjectConfig,
+    cache: state.cache,
+    commonCache: state.commonCache,
+    cacheStoreManager: createCacheStoreManager(state.cacheStores),
+    allFiles: new Set(nativeGetSourceFiles()),
+    getCachedFileInfo: nativeGetFileInfo,
+    getSourceFiles: nativeGetSourceFiles,
+    importResolver: nativeImportResolver,
+    getHashByFilePath(file) {
+      const key = pathKey(file)
+      return state.hashOverrides.get(key) ?? nativeGetHash?.(file) ?? ''
+    },
+    setHashValueByFilePath(file, hash) {
+      state.hashOverrides.set(pathKey(file), String(hash))
+    },
+    getLogger(prefix) {
+      return createHvigorLogger(String(prefix), state.errorFileIds)
+    },
+    getHvigorConsoleLogger(prefix) {
+      return createHvigorLogger(String(prefix), state.errorFileIds)
+    },
+    throwArkTsCompilerError(value) {
+      const error = value instanceof Error ? value : new Error(pluginLogMessage(value))
+      error.code ||= 'ARKTS_COMPILER_ERROR'
+      throw error
+    },
+    recordErrorFileId(id) {
+      if (id) state.errorFileIds.add(String(id))
+    },
+    depInfo: { enableIncre: projectConfig.watchMode === 'true', changedDeps: [] },
+  })
+  return share
+}
+
+function pluginContext(request, share, binding, cache, asyncTracker, pluginName) {
   const context = request.context
   const moduleInfo = request.moduleInfo
   return {
     share,
+    cache,
+    meta: {
+      rollupVersion: '4.23.0',
+      rolldownVersion: 'arkdown-native',
+      watchMode: share?.projectConfig?.watchMode === true || share?.projectConfig?.watchMode === 'true',
+    },
+    async(operation, ...args) {
+      return asyncTracker.run(operation, ...args)
+    },
+    signal() {
+      asyncTracker.signal()
+    },
+    block() {
+      return asyncTracker.block()
+    },
+    resolve(source, importer, options) {
+      if (context) return context.resolve(source, importer, options)
+      return Promise.resolve(null)
+    },
+    load(options) {
+      if (context) return context.load(options)
+      return Promise.resolve(moduleInfo?.id === options?.id ? moduleInfo : null)
+    },
+    emitFile(file) {
+      if (context) return context.emitFile(file)
+      throw arkdownError('PLUGIN_CONTEXT_UNAVAILABLE', 'emitFile requires a live Rolldown plugin context')
+    },
+    addWatchFile(id) {
+      if (context) context.addWatchFile(id)
+    },
     getModuleIds() {
       if (context) return context.getModuleIds().values()
       return moduleInfo?.id ? [moduleInfo.id].values() : [][Symbol.iterator]()
@@ -225,6 +448,30 @@ function pluginContext(request, share, binding) {
     getFileName(referenceId) {
       if (context) return context.getFileName(referenceId)
       throw arkdownError('FILE_NAME_NOT_FOUND', `Unable to get file name for unknown reference ID "${referenceId}"`)
+    },
+    info(value) {
+      const message = pluginLogMessage(value)
+      if (context) context.info(message)
+      else process.stdout.write(`${message}\n`)
+    },
+    warn(value) {
+      const message = pluginLogMessage(value)
+      if (context) context.warn(message)
+      else process.emitWarning(message, { code: 'PLUGIN_WARNING', type: 'ArkdownWarning' })
+    },
+    debug(value) {
+      if (process.env.ARKDOWN_LOG === 'debug' || process.env.ARKDOWN_LOG === 'trace') {
+        const message = pluginLogMessage(value)
+        if (context) context.debug(message)
+        else process.stderr.write(`${message}\n`)
+      }
+    },
+    error(value) {
+      const error = value instanceof Error ? value : new Error(pluginLogMessage(value))
+      if (value && typeof value === 'object' && !(value instanceof Error)) Object.assign(error, value)
+      error.code ||= 'PLUGIN_ERROR'
+      error.plugin ||= pluginName
+      throw error
     },
   }
 }
@@ -242,6 +489,12 @@ function hookArguments(hookName, request, compilePlugin) {
   switch (hookName) {
     case 'buildStart':
       return compilePlugin ? [] : [request.buildStartOptions]
+    case 'beforeBuild':
+    case 'afterBuildStart':
+    case 'afterBuildEnd':
+    case 'bundleEnd':
+    case 'cleanUp':
+      return []
     case 'resolveId':
     case 'resolveDynamicImport':
       return [request.id, request.importer, request.resolveOptions]
@@ -275,17 +528,33 @@ function normalizePlugin(plugin, binding, options = {}) {
   validateHookSurface(plugin, allowedHooks, pluginFile)
 
   const normalized = compilePlugin ? { name: plugin.name } : { ...plugin }
-  const hookNames = allowedHooks.filter((name) => typeof plugin[name] === 'function')
+  const hookNames = allowedHooks.filter((name) => {
+    const hook = plugin[name]
+    return typeof hook === 'function' || (hook && typeof hook === 'object' && typeof hook.handler === 'function')
+  })
+  // Hvigor's waitAsyncPlugin always participates in compile-plugin builds.
+  // Keep an internal bundleEnd boundary even when a plugin does not declare
+  // one so `this.async`/`this.signal` operations are drained before cleanUp.
+  if (compilePlugin && !hookNames.includes('bundleEnd')) hookNames.push('bundleEnd')
+  const hookMeta = hookNames.flatMap((name) => {
+    const hook = plugin[name]
+    return typeof hook === 'object' && hook.order ? [{ name, order: hook.order }] : []
+  })
   for (const hookName of PLUGIN_HOOKS) delete normalized[hookName]
   let share = {}
+  const cache = new Map()
+  const asyncTracker = createAsyncTracker()
 
   const dispatch = (request = {}) => {
     if (request.hookName === 'seedContext') {
-      share = request.share && typeof request.share === 'object' ? request.share : {}
+      share = hydrateHvigorShare(request.share, binding)
       return {}
     }
     const hookName = request.hookName
-    const result = plugin[hookName].apply(pluginContext(request, share, binding), hookArguments(hookName, request, compilePlugin))
+    const context = pluginContext(request, share, binding, cache, asyncTracker, plugin.name || '<anonymous>')
+    const handler = plugin[hookName] && hookHandler(plugin[hookName])
+    const invoke = () => handler?.apply(context, hookArguments(hookName, request, compilePlugin))
+    const result = hookName === 'bundleEnd' ? asyncTracker.block().then(invoke) : invoke()
     const field = RESULT_FIELDS[hookName]
     if (!field) return result && typeof result.then === 'function' ? Promise.resolve(result).then(() => ({})) : {}
     const wrap = (value) => (value === undefined || value === null ? {} : { [field]: value })
@@ -294,6 +563,7 @@ function normalizePlugin(plugin, binding, options = {}) {
 
   Object.defineProperties(normalized, {
     __arkdownPluginHooks: { value: hookNames },
+    __arkdownPluginHookMeta: { value: hookMeta },
     __arkdownDispatchPluginHook: { value: dispatch },
   })
   if (compilePlugin) {
@@ -324,7 +594,10 @@ function normalizePluginList(value, binding = nativeBinding) {
       throw arkdownError('ARKDOWN_PLUGIN_EXPORT_INVALID', `Expected a plugin object, got ${typeof plugin}`)
     }
     validateHookSurface(plugin, PLUGIN_HOOKS)
-    if (!PLUGIN_HOOKS.some((name) => typeof plugin[name] === 'function')) {
+    if (!PLUGIN_HOOKS.some((name) => {
+      const hook = plugin[name]
+      return typeof hook === 'function' || (hook && typeof hook === 'object' && typeof hook.handler === 'function')
+    })) {
       throw arkdownError(
         'ARKDOWN_PLUGIN_EXPORT_INVALID',
         `Plugin "${String(plugin.name || '<anonymous>')}" does not declare a supported hook`,

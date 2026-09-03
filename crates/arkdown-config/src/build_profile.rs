@@ -1246,11 +1246,7 @@ struct ModuleBuildProfileSnapshot {
     profile: Option<BuildProfileValue>,
 }
 
-/// Lossless in-memory module profile supplied by the build-script runtime.
-///
-/// This is the zero-reread counterpart to [`arkdown_core::ModuleConfig`]: the
-/// startup session has already parsed the JSON5 file and passes its immutable
-/// value into the build-option resolver.
+/// Lossless in-memory module profile supplied by an owning Rust caller.
 #[derive(Debug, Clone)]
 pub struct BuildOptionProfileModuleValue {
     pub name: String,
@@ -1264,18 +1260,8 @@ impl BuildOptionProfileInventory {
         project_root: &Path,
         modules: &[arkdown_core::ModuleConfig],
     ) -> Result<Self, ConfigError> {
-        Self::load_with_runtime_overrides(project_root, modules, None)
-    }
-
-    /// Load project and module build profiles once, replacing loader values
-    /// changed through `OhosProjectContext` / `OhosModuleContext`.
-    pub fn load_with_runtime_overrides(
-        project_root: &Path,
-        modules: &[arkdown_core::ModuleConfig],
-        runtime_overrides: Option<&crate::RuntimeContextOverrides>,
-    ) -> Result<Self, ConfigError> {
         let custom_config = crate::ArkdownCustomConfigLoader::new(project_root).load()?;
-        Self::load_with_custom_config(project_root, modules, runtime_overrides, &custom_config)
+        Self::load_with_custom_config(project_root, modules, &custom_config)
     }
 
     /// Load build profiles from startup inputs while reusing the already
@@ -1283,36 +1269,19 @@ impl BuildOptionProfileInventory {
     pub fn load_with_custom_config(
         project_root: &Path,
         modules: &[arkdown_core::ModuleConfig],
-        runtime_overrides: Option<&crate::RuntimeContextOverrides>,
         custom_config: &crate::ArkdownCustomConfig,
     ) -> Result<Self, ConfigError> {
         let project_path = project_root.join("build-profile.json5");
-        let project_override =
-            runtime_overrides.and_then(|overrides| overrides.project.build_profile.as_ref());
-        let (project, raw_project) = if let Some(value) = project_override {
-            (
-                BuildProfileValue::from_value(value.clone()),
-                RawBuildProfile::from_value(value, &project_path)?,
-            )
-        } else {
-            if !project_path.is_file() {
-                return Err(ConfigError::FileNotFound(project_path));
-            }
-            let project_content = fs_err::read_to_string(&project_path)?;
-            (
-                BuildProfileValue::parse(&project_content, &project_path)?,
-                RawBuildProfile::parse(&project_content, &project_path)?,
-            )
-        };
+        if !project_path.is_file() {
+            return Err(ConfigError::FileNotFound(project_path));
+        }
+        let project_content = fs_err::read_to_string(&project_path)?;
+        let project = BuildProfileValue::parse(&project_content, &project_path)?;
+        let raw_project = RawBuildProfile::parse(&project_content, &project_path)?;
         let mut module_profiles = BTreeMap::new();
         for module in modules {
             let path = module.src_path.join("build-profile.json5");
-            let profile = if let Some(value) = runtime_overrides
-                .and_then(|overrides| overrides.module_for_root(&module.src_path))
-                .and_then(|overrides| overrides.build_profile.as_ref())
-            {
-                Some(BuildProfileValue::from_value(value.clone()))
-            } else if path.is_file() {
+            let profile = if path.is_file() {
                 let content = fs_err::read_to_string(&path)?;
                 Some(BuildProfileValue::parse(&content, &path)?)
             } else {
@@ -1489,7 +1458,6 @@ pub struct EffectiveModuleBuildOptionResolver<'a> {
     product_name: &'a str,
     build_mode_name: &'a str,
     target_name: &'a str,
-    build_script_override: Option<serde_json::Value>,
 }
 
 impl<'a> EffectiveModuleBuildOptionResolver<'a> {
@@ -1506,16 +1474,7 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
             product_name,
             build_mode_name,
             target_name,
-            build_script_override: None,
         }
-    }
-
-    /// Apply statically extracted `hvigorfile.ts` overrides at hvigor's
-    /// highest-precedence layer. Arkdown-owned BuildProfile fields are applied
-    /// afterward so `arkdown.config.toml` can intentionally override them.
-    pub fn with_build_script_override(mut self, override_value: serde_json::Value) -> Self {
-        self.build_script_override = Some(override_value);
-        self
     }
 
     pub fn resolve(&self) -> Result<arkdown_core::BuildOption, ConfigError> {
@@ -1559,7 +1518,6 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
                 &module_snapshot.root,
             );
         }
-        effective.merge_layer(self.build_script_override.as_ref(), &module_snapshot.root);
         let fields = &self.inventory.build_profile_fields_override;
         if !fields.is_empty() {
             let override_value = serde_json::json!({
@@ -1605,7 +1563,6 @@ impl<'a> EffectiveModuleBuildOptionResolver<'a> {
             }
             effective.merge_display_layer(module.target_build_option(self.target_name));
         }
-        effective.merge_display_layer(self.build_script_override.as_ref());
         let fields = &self.inventory.build_profile_fields_override;
         if !fields.is_empty() {
             let override_value = serde_json::json!({

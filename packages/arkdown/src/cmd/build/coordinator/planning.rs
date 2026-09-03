@@ -250,7 +250,6 @@ impl ModuleBuildConfiguration {
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
     requested_target: Option<&str>,
-    build_script_override: Option<&serde_json::Value>,
     properties: &HvigorRuntimeProperties,
   ) -> Result<Self> {
     let target = ModuleTargetSelection::resolve_build(
@@ -261,7 +260,7 @@ impl ModuleBuildConfiguration {
       properties,
     )
     .target;
-    Self::resolve_for_target(config, build_options, module, target, build_script_override)
+    Self::resolve_for_target(config, build_options, module, target)
   }
 
   pub(super) fn resolve_dependency(
@@ -269,7 +268,6 @@ impl ModuleBuildConfiguration {
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
     super_target: Option<&str>,
-    build_script_override: Option<&serde_json::Value>,
     properties: &HvigorRuntimeProperties,
   ) -> Result<Self> {
     let target = ModuleTargetSelection::resolve_dependency(
@@ -280,7 +278,7 @@ impl ModuleBuildConfiguration {
       properties,
     )
     .target;
-    Self::resolve_for_target(config, build_options, module, target, build_script_override)
+    Self::resolve_for_target(config, build_options, module, target)
   }
 
   pub(super) fn resolve_for_target(
@@ -288,19 +286,15 @@ impl ModuleBuildConfiguration {
     build_options: &BuildOptionProfileInventory,
     module: &ModuleConfig,
     mut target: EffectiveTargetConfig,
-    build_script_override: Option<&serde_json::Value>,
   ) -> Result<Self> {
     let target_name = target.name.clone();
-    let mut resolver = EffectiveModuleBuildOptionResolver::new(
+    let resolver = EffectiveModuleBuildOptionResolver::new(
       build_options,
       &module.name,
       &config.product.name,
       config.build_mode.as_str(),
       &target_name,
     );
-    if let Some(build_script_override) = build_script_override {
-      resolver = resolver.with_build_script_override(build_script_override.clone());
-    }
     let build_option = resolver.resolve().with_context(|| {
       format!(
         "resolve effective build option for module '{}' target '{}'",
@@ -381,7 +375,6 @@ impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
         self.session.build_options.as_ref(),
         module,
         Some(self.target_name),
-        self.args.module_hvigor_overrides.get(&module.name),
         &self.args.hvigor_properties,
       )?;
       let native = arkdown_config::build_profile::EffectiveNativeBuildOption::from_build_option(
@@ -478,7 +471,6 @@ impl<'a> NativeDependencyStagePlanBuilder<'a> {
       self.session.build_options.as_ref(),
       module,
       Some(super_target),
-      self.args.module_hvigor_overrides.get(&module.name),
       &self.args.hvigor_properties,
     )?;
     let key = (
@@ -600,7 +592,6 @@ pub(super) struct DependencyCustomTypeInputBuilder<'a> {
   pub(super) config: &'a ArkdownConfig,
   pub(super) build_options: &'a BuildOptionProfileInventory,
   pub(super) target_name: &'a str,
-  pub(super) module_overrides: &'a BTreeMap<String, serde_json::Value>,
   pub(super) properties: &'a HvigorRuntimeProperties,
 }
 
@@ -610,7 +601,6 @@ impl<'a> DependencyCustomTypeInputBuilder<'a> {
     config: &'a ArkdownConfig,
     build_options: &'a BuildOptionProfileInventory,
     target_name: &'a str,
-    module_overrides: &'a BTreeMap<String, serde_json::Value>,
     properties: &'a HvigorRuntimeProperties,
   ) -> Self {
     Self {
@@ -618,7 +608,6 @@ impl<'a> DependencyCustomTypeInputBuilder<'a> {
       config,
       build_options,
       target_name,
-      module_overrides,
       properties,
     }
   }
@@ -649,7 +638,6 @@ impl<'a> DependencyCustomTypeInputBuilder<'a> {
           self.build_options,
           module,
           Some(self.target_name),
-          self.module_overrides.get(&module.name),
           self.properties,
         )?
         .config

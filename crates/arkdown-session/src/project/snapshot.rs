@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arkdown_config::RuntimeContextOverrides;
 use arkdown_core::ArkdownConfig;
 use indexmap::IndexMap;
 use thiserror::Error;
@@ -77,14 +76,13 @@ pub struct ProjectSnapshot {
 impl ProjectSnapshot {
     /// Build a snapshot from the normalized build config.
     pub fn from_config(config: &ArkdownConfig) -> Result<Self, ProjectSnapshotError> {
-        Self::from_config_with_runtime_overrides(config, None, None)
+        Self::from_config_with_parameter_file(config, None)
     }
 
-    /// Build the immutable project model from disk plus the complete loader
-    /// objects replaced by hvigor plugin context setters.
-    pub fn from_config_with_runtime_overrides(
+    /// Build the immutable project model from disk with an optional explicit
+    /// OHPM parameter-file path supplied by the command line.
+    pub fn from_config_with_parameter_file(
         config: &ArkdownConfig,
-        runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
         parameter_file_override: Option<PathBuf>,
     ) -> Result<Self, ProjectSnapshotError> {
         let root = &config.project_root;
@@ -96,24 +94,7 @@ impl ProjectSnapshot {
             app_build_version,
             app_min_compatible_version_code,
             app_bundle_type,
-        ) = if let Some(value) = runtime_overrides
-            .as_ref()
-            .and_then(|overrides| overrides.project.app_json.as_ref())
-        {
-            let app: arkdown_ohos_schema::RawAppJson5 = serde_json::from_value(value.clone())
-                .map_err(|error| ProjectSnapshotError::Parse {
-                    file: app_json_path.clone(),
-                    message: error.to_string(),
-                })?;
-            (
-                app.app.bundle_name,
-                app.app.version_code,
-                app.app.version_name,
-                app.app.build_version,
-                app.app.min_compatible_version_code,
-                app.app.bundle_type.unwrap_or_else(|| "app".to_string()),
-            )
-        } else if app_json_path.is_file() {
+        ) = if app_json_path.is_file() {
             let content = std::fs::read_to_string(&app_json_path)?;
             let app: arkdown_ohos_schema::RawAppJson5 =
                 json5::from_str(&content).map_err(|e| ProjectSnapshotError::Parse {
@@ -174,30 +155,17 @@ impl ProjectSnapshot {
         let mut module_order = Vec::with_capacity(config.modules.len());
         let mut modules = IndexMap::with_capacity(config.modules.len());
         for module in &config.modules {
-            let snap = ModuleSnapshot::from_root_with_runtime_override_and_package_manifest(
+            let snap = ModuleSnapshot::from_root_with_package_manifest(
                 &module.src_path,
                 &module.name,
-                runtime_overrides
-                    .as_ref()
-                    .and_then(|overrides| overrides.module_for_root(&module.src_path)),
                 &module.src_path.join(package_file_name),
             )?;
             module_order.push(module.name.clone());
             modules.insert(module.name.clone(), Arc::new(snap));
         }
 
-        let root_package = if let Some(value) = runtime_overrides
-            .as_ref()
-            .and_then(|overrides| overrides.project.package.as_ref())
-        {
-            Some(Arc::new(PackageSnapshot::from_runtime_manifest_value(
-                root,
-                &root.join(package_file_name),
-                value,
-            )?))
-        } else {
-            PackageSnapshot::from_manifest(root, &root.join(package_file_name))?.map(Arc::new)
-        };
+        let root_package =
+            PackageSnapshot::from_manifest(root, &root.join(package_file_name))?.map(Arc::new);
         let dependency_parameters = if use_ohpm {
             DependencyParameterSnapshot::from_project(
                 root,
@@ -219,21 +187,17 @@ impl ProjectSnapshot {
             dependency_graphs.insert(
                 module_name.clone(),
                 Arc::new({
-                    let mut builder = DependencyGraphBuilder::new(
+                    DependencyGraphBuilder::new(
                         module_name.clone(),
                         root.clone(),
                         modules
                             .get(module_name)
                             .map(|module| module.root.clone())
                             .unwrap_or_else(|| root.clone()),
-                    );
-                    if let Some(runtime_overrides) = runtime_overrides.as_ref() {
-                        builder = builder.with_runtime_overrides(Arc::clone(runtime_overrides));
-                    }
-                    builder
-                        .with_package_manager(use_ohpm)
-                        .with_dependency_parameters(dependency_parameters.clone())
-                        .build_with_inventory(&mut dependency_inventory)
+                    )
+                    .with_package_manager(use_ohpm)
+                    .with_dependency_parameters(dependency_parameters.clone())
+                    .build_with_inventory(&mut dependency_inventory)
                 }),
             );
         }

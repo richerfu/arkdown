@@ -63,7 +63,7 @@ impl BuildCoordinator {
     let cli_cache_file = args.cache_file.clone();
     let abc_backend = args.abc_backend;
     let named_target = args.build_target_name.clone();
-    let module_analyzer = ModuleAnalyzerKind::from(args.module_analyzer);
+    let module_analyzer = ModuleAnalyzerKind::Oxc;
 
     let checker_selection = ArkTsCheckerSelection::parse(args.checker.as_deref())?;
     let checker_mode = checker_selection.oxc_mode();
@@ -113,7 +113,6 @@ impl BuildCoordinator {
           session.build_options.as_ref(),
           module,
           named_target.as_deref(),
-          args.module_hvigor_overrides.get(&module.name),
           &args.hvigor_properties,
         )
       })
@@ -1272,7 +1271,6 @@ impl BuildCoordinator {
               config.as_ref(),
               session.build_options.as_ref(),
               &module_target_name,
-              &args.module_hvigor_overrides,
               &args.hvigor_properties,
             )
             .collect()
@@ -1825,7 +1823,6 @@ impl BuildCoordinator {
             session.build_options.as_ref(),
             resource_module,
             Some(&module_target_name),
-            args.module_hvigor_overrides.get(&resource_module.name),
             &args.hvigor_properties,
           )?;
           for module_res_dir in ResourceDirSelector::new(

@@ -565,6 +565,7 @@ mod tests {
             PkgBriefInfo {
                 pkg_root: pkg_dir.clone(),
                 pkg_name: "decl-only".to_string(),
+                manifest: Arc::new(arkdown_resolver::PackageManifestSnapshot::default()),
                 local_source: false,
                 source_roots: vec![],
             },

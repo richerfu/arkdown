@@ -165,9 +165,8 @@ pub fn build_info_value(
     None,
     None,
   )?;
-  let inventory =
-    BuildOptionProfileInventory::load_with_runtime_overrides(project_root, &config.modules, None)
-      .map_err(|error| anyhow::anyhow!("build-info failed: {error}"))?;
+  let inventory = BuildOptionProfileInventory::load(project_root, &config.modules)
+    .map_err(|error| anyhow::anyhow!("build-info failed: {error}"))?;
 
   let build_modes = profile
     .app

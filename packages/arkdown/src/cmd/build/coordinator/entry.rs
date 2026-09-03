@@ -365,7 +365,6 @@ impl BuildCoordinator {
         session.build_options.as_ref(),
         entry_module,
         Some(target_name),
-        args.module_hvigor_overrides.get(entry_name),
         &args.hvigor_properties,
       )?;
       let mut entry_declared_device_types = entry_context

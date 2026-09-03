@@ -92,8 +92,102 @@ pub struct PkgBriefInfo {
     pub pkg_root: PathBuf,
     /// Package name from `oh-package.json5`.
     pub pkg_name: String,
+    /// Manifest fields required by package entry and bytecode-HAR resolution.
+    pub manifest: Arc<PackageManifestSnapshot>,
     /// Whether this package is a selected local project module.
     pub local_source: bool,
     /// Absolute source roots in hvigor lookup order.
     pub source_roots: Vec<PathBuf>,
+}
+
+/// Resolver-owned projection of package manifest data captured by BuildSession.
+///
+/// Keeping this projection on the package plan prevents resolve hooks from
+/// parsing `oh-package.json5` for every import.
+#[derive(Debug, Clone, Default)]
+pub struct PackageManifestSnapshot {
+    pub version: String,
+    pub main: Option<String>,
+    pub types: Option<String>,
+    pub exports: Option<serde_json::Value>,
+    pub module: Option<String>,
+    pub jsnext_main: Option<String>,
+    pub byte_code_har: bool,
+    pub abc_path: Option<String>,
+}
+
+impl PackageManifestSnapshot {
+    pub fn hvigor_main_field(&self) -> Option<&str> {
+        self.module
+            .as_deref()
+            .or(self.jsnext_main.as_deref())
+            .or(self.main.as_deref())
+    }
+
+    pub fn exports_import_field(&self) -> Option<String> {
+        let exports = self.exports.as_ref()?;
+        if let Some(root) = exports.get(".") {
+            if let Some(value) = root.get("import").and_then(serde_json::Value::as_str) {
+                return Some(value.to_string());
+            }
+            if let Some(value) = root.get("default").and_then(serde_json::Value::as_str) {
+                return Some(value.to_string());
+            }
+        }
+        exports.as_str().map(str::to_string)
+    }
+
+    pub fn exports_require_field(&self) -> Option<String> {
+        self.exports
+            .as_ref()?
+            .get(".")?
+            .get("require")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    pub fn bytecode_abc_path(&self, package_root: &std::path::Path) -> Option<PathBuf> {
+        if self.byte_code_har {
+            let path = package_root.join("ets/modules.abc");
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        if let Some(path) = self.abc_path.as_deref() {
+            let path = package_root.join(path);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        if let Some(main) = self.main.as_deref().filter(|main| main.ends_with(".abc")) {
+            let path = package_root.join(main);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        let path = package_root.join("index.abc");
+        path.is_file().then_some(path)
+    }
+
+    pub fn declaration_entry(&self, package_root: &std::path::Path) -> PathBuf {
+        self.types
+            .as_deref()
+            .map(|types| package_root.join(types))
+            .unwrap_or_else(|| package_root.join("index.d.ets"))
+    }
+}
+
+impl From<&crate::oh_modules::OhPackage> for PackageManifestSnapshot {
+    fn from(package: &crate::oh_modules::OhPackage) -> Self {
+        Self {
+            version: package.version().to_string(),
+            main: package.main.clone(),
+            types: package.types.clone(),
+            exports: package.exports.clone(),
+            module: package.module.clone(),
+            jsnext_main: package.jsnext_main.clone(),
+            byte_code_har: package.metadata.byte_code_har,
+            abc_path: package.metadata.abc_path.clone(),
+        }
+    }
 }

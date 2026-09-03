@@ -31,8 +31,8 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::{
-  ArkdownConfig, BuildMode, HapManifest, HarArtifactType, ModuleConfig, ObfuscationConfig,
-  OhosModuleType, OutputTarget,
+  ArkdownConfig, ArktsLanguageVersion, BuildMode, HapManifest, HarArtifactType, ModuleConfig,
+  ObfuscationConfig, OhosModuleType, OutputTarget,
 };
 use arkdown_path::{
   canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, HvigorSourceFileFilter,
@@ -90,7 +90,8 @@ use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
 };
 use arkdown::plugins::hvigor_compile::{
-  HvigorCompilePluginProjectConfig, HvigorCompilePluginShare,
+  HvigorCompilePluginImportEntry, HvigorCompilePluginProjectConfig, HvigorCompilePluginShare,
+  HvigorCompilePluginSourceFile,
 };
 use arkdown::{
   BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo, PluginCacheModuleInventory,
@@ -1040,6 +1041,26 @@ impl<'a> WidgetCompileArktsPass<'a> {
 mod transform_source_snapshot_builder_tests {
   use super::*;
   use arkdown_ets_transform::{RolldownEtsTransformPlan, RolldownEtsTransformer};
+
+  #[test]
+  fn json_modules_are_preloaded_before_rolldown_hooks_run() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    let source_root = module_root.join("src/main/ets");
+    let json = source_root.join("configuration.json5");
+    fs_err::create_dir_all(&source_root).expect("source root");
+    fs_err::write(&json, "{ featureEnabled: true }\n").expect("json source");
+
+    let module_roots = vec![("entry".to_string(), module_root)];
+    let sources = TransformSourceSnapshotBuilder::new(&module_roots, &[], &[], &[])
+      .build()
+      .expect("source snapshot");
+
+    assert_eq!(
+      sources.source_text(&json).as_deref(),
+      Some("{ featureEnabled: true }\n")
+    );
+  }
 
   #[test]
   fn custom_type_file_outside_source_roots_is_loaded_into_transform_snapshot() {

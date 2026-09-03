@@ -48,24 +48,29 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeCallContext;
 use napi_derive::napi;
+use rustc_hash::FxHashMap;
 
 use js_callback::{MaybeAsyncJsCallback, MaybeAsyncJsCallbackExt, MaybeAsyncJsReturn};
 
 use rolldown_common::{
-  side_effects::HookSideEffects, ModuleInfo, ModuleType, NormalModule, ResolvedExternal,
+  side_effects::HookSideEffects, EmittedAsset, EmittedChunk, LogWithoutPlugin, ModuleDefFormat,
+  ModuleInfo, ModuleType, NormalModule, PreserveEntrySignatures, ResolvedExternal, StrOrBytes,
 };
 use rolldown_plugin::{
-  HookBuildEndArgs, HookBuildStartArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn,
-  HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs,
-  HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin,
-  PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
+  typedmap::TypedMapKey, CustomField, HookBuildEndArgs, HookBuildStartArgs, HookLoadArgs,
+  HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn,
+  HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
+  Plugin, PluginContext, PluginContextResolveOptions, PluginHookMeta,
+  PluginOrder as RolldownPluginOrder, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 
 use arkdown::plugins::factory::{
-  HvigorHookFuture, HvigorPluginGapHooks, HvigorPluginOrder, PackagePlugin,
+  HvigorHookFuture, HvigorHookOrder, HvigorLifecycleHook, HvigorPluginGapHooks, HvigorPluginOrder,
+  PackagePlugin,
 };
 use arkdown::plugins::hvigor_compile::{
-  HvigorCompilePluginPlanConfig, HvigorCompilePluginShare, HvigorNativePluginSlot,
+  HvigorCompilePluginImportEntry, HvigorCompilePluginPlanConfig, HvigorCompilePluginShare,
+  HvigorCompilePluginSourceFile, HvigorNativePluginSlot,
 };
 use arkdown::PluginCacheModule;
 
@@ -193,6 +198,8 @@ impl TryFrom<JsResolvedExternal> for ResolvedExternal {
 pub struct JsResolveIdOptions {
   pub attributes: HashMap<String, String>,
   pub is_entry: bool,
+  pub kind: Option<String>,
+  pub custom: Option<serde_json::Value>,
 }
 
 #[napi(object)]
@@ -218,6 +225,26 @@ impl TryFrom<JsResolveIdOutput> for HookResolveIdOutput {
         .map(TryInto::try_into)
         .transpose()?,
       package_json_path: value.package_json_path,
+    })
+  }
+}
+
+impl From<ResolvedExternal> for JsResolvedExternal {
+  fn from(value: ResolvedExternal) -> Self {
+    Self(match value {
+      ResolvedExternal::Bool(value) => Either::A(value),
+      ResolvedExternal::Absolute => Either::B("absolute".to_string()),
+      ResolvedExternal::Relative => Either::B("relative".to_string()),
+    })
+  }
+}
+
+impl From<HookSideEffects> for JsHookSideEffects {
+  fn from(value: HookSideEffects) -> Self {
+    Self(match value {
+      HookSideEffects::True => Either::A(true),
+      HookSideEffects::False => Either::A(false),
+      HookSideEffects::NoTreeshake => Either::B("no-treeshake".to_string()),
     })
   }
 }
@@ -344,6 +371,95 @@ pub struct ArkdownRolldownPluginContext {
   inner: PluginContext,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ArkdownJsPluginResolveCustom;
+
+impl TypedMapKey for ArkdownJsPluginResolveCustom {
+  type Value = serde_json::Value;
+}
+
+#[napi(object)]
+pub struct JsPluginContextResolveOptions {
+  #[napi(
+    ts_type = "'import-statement' | 'dynamic-import' | 'require-call' | 'import-rule' | 'url-token' | 'new-url' | 'hot-accept'"
+  )]
+  pub kind: Option<String>,
+  pub is_entry: Option<bool>,
+  pub skip_self: Option<bool>,
+  pub custom: Option<serde_json::Value>,
+}
+
+#[napi(object)]
+pub struct JsPluginContextLoadOptions {
+  pub id: String,
+  #[napi(ts_type = "boolean | 'no-treeshake'")]
+  pub module_side_effects: Option<JsHookSideEffects>,
+}
+
+#[napi(object)]
+pub struct JsEmittedFile {
+  pub r#type: String,
+  pub name: Option<String>,
+  pub file_name: Option<String>,
+  pub original_file_name: Option<String>,
+  #[napi(ts_type = "string | Uint8Array")]
+  pub source: Option<Either<String, Buffer>>,
+  pub id: Option<String>,
+  pub importer: Option<String>,
+  #[napi(ts_type = "'strict' | 'allow-extension' | 'exports-only' | false")]
+  pub preserve_signature: Option<Either<String, bool>>,
+}
+
+impl JsEmittedFile {
+  fn into_asset(self) -> napi::Result<EmittedAsset> {
+    let source = self.source.ok_or_else(|| {
+      napi::Error::from_reason("emitFile asset requires a string or Uint8Array source")
+    })?;
+    Ok(EmittedAsset {
+      name: self.name,
+      original_file_name: self.original_file_name,
+      file_name: self.file_name.map(Into::into),
+      source: match source {
+        Either::A(source) => StrOrBytes::Str(source),
+        Either::B(source) => StrOrBytes::Bytes(source.to_vec()),
+      },
+    })
+  }
+
+  fn into_chunk(self) -> napi::Result<EmittedChunk> {
+    let preserve_entry_signatures = match self.preserve_signature {
+      Some(Either::A(value)) if value == "strict" => Some(PreserveEntrySignatures::Strict),
+      Some(Either::A(value)) if value == "allow-extension" => {
+        Some(PreserveEntrySignatures::AllowExtension)
+      }
+      Some(Either::A(value)) if value == "exports-only" => {
+        Some(PreserveEntrySignatures::ExportsOnly)
+      }
+      Some(Either::A(value)) => {
+        return Err(napi::Error::from_reason(format!(
+          "invalid emitted chunk preserveSignature '{value}'"
+        )))
+      }
+      Some(Either::B(false)) => Some(PreserveEntrySignatures::False),
+      Some(Either::B(true)) => {
+        return Err(napi::Error::from_reason(
+          "emitted chunk preserveSignature only accepts false or a supported string",
+        ))
+      }
+      None => None,
+    };
+    Ok(EmittedChunk {
+      name: self.name.map(Into::into),
+      file_name: self.file_name.map(Into::into),
+      id: self
+        .id
+        .ok_or_else(|| napi::Error::from_reason("emitFile chunk requires an id"))?,
+      importer: self.importer,
+      preserve_entry_signatures,
+    })
+  }
+}
+
 #[napi(object)]
 pub struct JsPluginAstParseOptions {
   pub source_type: Option<String>,
@@ -406,6 +522,131 @@ impl ArkdownPluginAstBridge {
 
 #[napi]
 impl ArkdownRolldownPluginContext {
+  #[napi]
+  pub async fn resolve(
+    &self,
+    specifier: String,
+    importer: Option<String>,
+    options: Option<JsPluginContextResolveOptions>,
+  ) -> napi::Result<Option<JsResolveIdOutput>> {
+    let options = options.unwrap_or(JsPluginContextResolveOptions {
+      kind: None,
+      is_entry: None,
+      skip_self: None,
+      custom: None,
+    });
+    let mut custom = CustomField::new();
+    if let Some(value) = options.custom {
+      custom.insert(ArkdownJsPluginResolveCustom, value);
+    }
+    let import_kind = options
+      .kind
+      .as_deref()
+      .unwrap_or("import-statement")
+      .try_into()
+      .map_err(napi::Error::from_reason)?;
+    let result = self
+      .inner
+      .resolve(
+        &specifier,
+        importer.as_deref(),
+        Some(PluginContextResolveOptions {
+          import_kind,
+          is_entry: options.is_entry.unwrap_or(importer.is_none()),
+          skip_self: options.skip_self.unwrap_or(true),
+          custom: Arc::new(custom),
+        }),
+      )
+      .await
+      .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(result.ok().map(|resolved| {
+      JsResolveIdOutput {
+        id: resolved.id.to_string(),
+        external: Some(resolved.external.into()),
+        normalize_external_id: resolved.normalize_external_id,
+        module_side_effects: resolved.side_effects.map(Into::into),
+        package_json_path: resolved
+          .package_json
+          .map(|package| package.realpath().to_string_lossy().into_owned()),
+      }
+    }))
+  }
+
+  #[napi]
+  pub async fn load(
+    &self,
+    options: JsPluginContextLoadOptions,
+  ) -> napi::Result<Option<HvigorModuleInfo>> {
+    let id = options.id;
+    self
+      .inner
+      .load(
+        &id,
+        options
+          .module_side_effects
+          .map(TryInto::try_into)
+          .transpose()
+          .map_err(|error: anyhow::Error| napi::Error::from_reason(error.to_string()))?,
+        ModuleDefFormat::Unknown,
+      )
+      .await
+      .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(
+      self
+        .inner
+        .get_module_info(&id)
+        .map(|info| HvigorModuleInfo::from_rolldown(&info)),
+    )
+  }
+
+  #[napi]
+  pub fn emit_file(&self, file: JsEmittedFile) -> napi::Result<String> {
+    let file_type = file.r#type.clone();
+    let reference_id = match file_type.as_str() {
+      "asset" => self.inner.emit_file(file.into_asset()?, None, None),
+      "chunk" => self.inner.emit_chunk(file.into_chunk()?),
+      _ => {
+        return Err(napi::Error::from_reason(format!(
+          "emitFile type must be 'asset' or 'chunk', got '{file_type}'"
+        )))
+      }
+    }
+    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(reference_id.to_string())
+  }
+
+  #[napi]
+  pub fn add_watch_file(&self, id: String) {
+    self.inner.add_watch_file(&id);
+  }
+
+  #[napi]
+  pub fn info(&self, message: String) {
+    self.inner.info(LogWithoutPlugin {
+      message,
+      code: Some("PLUGIN_LOG".to_string()),
+      ..Default::default()
+    });
+  }
+
+  #[napi]
+  pub fn warn(&self, message: String) {
+    self.inner.warn(LogWithoutPlugin {
+      message,
+      code: Some("PLUGIN_WARNING".to_string()),
+      ..Default::default()
+    });
+  }
+
+  #[napi]
+  pub fn debug(&self, message: String) {
+    self.inner.debug(LogWithoutPlugin {
+      message,
+      code: Some("PLUGIN_LOG".to_string()),
+      ..Default::default()
+    });
+  }
+
   #[napi]
   pub fn get_module_ids(&self) -> Vec<String> {
     self
@@ -507,6 +748,12 @@ pub struct JsPluginDispatchResult {
   pub should_invalid_cache: Option<bool>,
 }
 
+#[napi(object)]
+pub struct JsPluginHookMetaInput {
+  pub name: String,
+  pub order: String,
+}
+
 type PluginDispatchTsfn = MaybeAsyncJsCallback<
   JsPluginDispatchRequest,
   FnArgs<(JsPluginDispatchRequest,)>,
@@ -529,7 +776,14 @@ pub struct JsPlugin {
   target_name: Option<String>,
   dispatch_fn: PluginDispatchTsfn,
   hook_names: Vec<String>,
+  hook_orders: HashMap<String, JsHookOrder>,
   usage: HookUsage,
+}
+
+#[derive(Clone, Copy)]
+enum JsHookOrder {
+  Pre,
+  Post,
 }
 
 impl std::fmt::Debug for JsPlugin {
@@ -543,6 +797,15 @@ impl std::fmt::Debug for JsPlugin {
 impl JsPlugin {
   fn has_hook(&self, hook_name: &str) -> bool {
     self.hook_names.iter().any(|name| name == hook_name)
+  }
+
+  fn hook_meta(&self, hook_name: &str) -> Option<PluginHookMeta> {
+    self.hook_orders.get(hook_name).map(|order| PluginHookMeta {
+      order: Some(match order {
+        JsHookOrder::Pre => RolldownPluginOrder::Pre,
+        JsHookOrder::Post => RolldownPluginOrder::Post,
+      }),
+    })
   }
 
   fn resolve_output(
@@ -644,6 +907,23 @@ impl JsPlugin {
     let hook_names = obj
       .get::<Vec<String>>("__arkdownPluginHooks")?
       .ok_or_else(|| napi::Error::from_reason(format!("plugin '{name}' has no Rust hook plan")))?;
+    let hook_meta = obj
+      .get::<Vec<JsPluginHookMetaInput>>("__arkdownPluginHookMeta")?
+      .unwrap_or_default();
+    let mut hook_orders = HashMap::new();
+    for hook in hook_meta {
+      let order = match hook.order.as_str() {
+        "pre" => JsHookOrder::Pre,
+        "post" => JsHookOrder::Post,
+        other => {
+          return Err(napi::Error::from_reason(format!(
+            "plugin '{name}' hook '{}' has unsupported order '{other}'",
+            hook.name
+          )))
+        }
+      };
+      hook_orders.insert(hook.name, order);
+    }
     let mut usage = HookUsage::empty();
     for hook_name in &hook_names {
       usage |= match hook_name.as_str() {
@@ -654,7 +934,8 @@ impl JsPlugin {
         "transform" => HookUsage::Transform,
         "moduleParsed" => HookUsage::ModuleParsed,
         "buildEnd" => HookUsage::BuildEnd,
-        "beforeBuildEnd" | "shouldInvalidCache" => HookUsage::empty(),
+        "beforeBuild" | "afterBuildStart" | "beforeBuildEnd" | "afterBuildEnd" | "bundleEnd"
+        | "cleanUp" | "shouldInvalidCache" => HookUsage::empty(),
         other => {
           return Err(napi::Error::from_reason(format!(
             "plugin '{name}' has unsupported hook '{other}'"
@@ -692,6 +973,7 @@ impl JsPlugin {
         target_name,
         dispatch_fn,
         hook_names,
+        hook_orders,
         usage,
       }),
       order,
@@ -729,6 +1011,10 @@ impl Plugin for JsPlugin {
     }
   }
 
+  fn build_start_meta(&self) -> Option<PluginHookMeta> {
+    self.hook_meta("buildStart")
+  }
+
   fn resolve_id(
     &self,
     ctx: &PluginContext,
@@ -739,6 +1025,11 @@ impl Plugin for JsPlugin {
     let options = JsResolveIdOptions {
       attributes: HashMap::new(),
       is_entry: args.is_entry,
+      kind: Some(args.kind.to_string()),
+      custom: args
+        .custom
+        .get::<ArkdownJsPluginResolveCustom>(&ArkdownJsPluginResolveCustom)
+        .cloned(),
     };
     let mut request = JsPluginDispatchRequest::new("resolveId", Some(ctx.clone().into()));
     request.id = Some(specifier.clone());
@@ -756,6 +1047,10 @@ impl Plugin for JsPlugin {
     }
   }
 
+  fn resolve_id_meta(&self) -> Option<PluginHookMeta> {
+    self.hook_meta("resolveId")
+  }
+
   /// `resolveDynamicImport` — bridges dynamic import resolution to JS.
   ///
   /// Same dispatcher envelope as `resolveId`. Latest Hvigor excludes this
@@ -771,6 +1066,11 @@ impl Plugin for JsPlugin {
     let options = JsResolveIdOptions {
       attributes: HashMap::new(),
       is_entry: args.is_entry,
+      kind: Some(args.kind.to_string()),
+      custom: args
+        .custom
+        .get::<ArkdownJsPluginResolveCustom>(&ArkdownJsPluginResolveCustom)
+        .cloned(),
     };
     let mut request =
       JsPluginDispatchRequest::new("resolveDynamicImport", Some(ctx.clone().into()));
@@ -787,6 +1087,10 @@ impl Plugin for JsPlugin {
         Err(error) => Err(anyhow::anyhow!("resolveDynamicImport JS error: {error}")),
       }
     }
+  }
+
+  fn resolve_dynamic_import_meta(&self) -> Option<PluginHookMeta> {
+    self.hook_meta("resolveDynamicImport")
   }
 
   fn load(
@@ -813,6 +1117,10 @@ impl Plugin for JsPlugin {
     }
   }
 
+  fn load_meta(&self) -> Option<PluginHookMeta> {
+    self.hook_meta("load")
+  }
+
   fn transform(
     &self,
     ctx: SharedTransformPluginContext,
@@ -837,6 +1145,10 @@ impl Plugin for JsPlugin {
     }
   }
 
+  fn transform_meta(&self) -> Option<PluginHookMeta> {
+    self.hook_meta("transform")
+  }
+
   fn module_parsed(
     &self,
     ctx: &PluginContext,
@@ -853,6 +1165,10 @@ impl Plugin for JsPlugin {
         .map_err(|error| anyhow::anyhow!("moduleParsed JS error: {error}"))?;
       Ok(())
     }
+  }
+
+  fn module_parsed_meta(&self) -> Option<PluginHookMeta> {
+    self.hook_meta("moduleParsed")
   }
 
   fn build_end(
@@ -891,6 +1207,10 @@ impl Plugin for JsPlugin {
         .map_err(|error| anyhow::anyhow!("buildEnd JS error: {error}"))?;
       Ok(())
     }
+  }
+
+  fn build_end_meta(&self) -> Option<PluginHookMeta> {
+    self.hook_meta("buildEnd")
   }
 }
 
@@ -937,26 +1257,36 @@ impl HvigorPluginGapHooks for JsPlugin {
     self.has_hook("shouldInvalidCache")
   }
 
-  fn before_build_end_with_context(
+  fn lifecycle_hook_with_context(
     &self,
+    hook: HvigorLifecycleHook,
     context: PluginContext,
   ) -> HvigorHookFuture<'_, anyhow::Result<()>> {
-    Box::pin(async {
-      if !self.has_hook("beforeBuildEnd") {
+    Box::pin(async move {
+      let hook_name = hook.as_str();
+      if !self.has_hook(hook_name) {
         return Ok(());
       }
-      let request = JsPluginDispatchRequest::new("beforeBuildEnd", Some(context.into()));
+      let request = JsPluginDispatchRequest::new(hook_name, Some(context.into()));
       self
         .dispatch_fn
         .await_call(request)
         .await
-        .map_err(|error| anyhow::anyhow!("beforeBuildEnd JS error: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("{hook_name} JS error: {error}"))?;
       Ok(())
     })
   }
 
-  fn has_before_build_end(&self) -> bool {
-    self.has_hook("beforeBuildEnd")
+  fn has_lifecycle_hook(&self, hook: HvigorLifecycleHook) -> bool {
+    self.has_hook(hook.as_str())
+  }
+
+  fn lifecycle_hook_order(&self, hook: HvigorLifecycleHook) -> HvigorHookOrder {
+    match self.hook_orders.get(hook.as_str()) {
+      Some(JsHookOrder::Pre) => HvigorHookOrder::Pre,
+      Some(JsHookOrder::Post) => HvigorHookOrder::Post,
+      None => HvigorHookOrder::Normal,
+    }
   }
 
   fn runtime_cache_identity(&self) -> Option<String> {
@@ -972,11 +1302,15 @@ impl HvigorPluginGapHooks for JsPlugin {
 ///
 /// This corresponds to the subset of hvigor's `projectConfig` that arkdown
 /// serializes from the Rust build coordinator and passes through `js/runtime.js`.
+#[derive(Clone)]
 #[napi(object)]
 pub struct HvigorProjectConfig {
   pub bundle_name: Option<String>,
   pub build_mode: Option<String>,
+  pub build_ark_mode: Option<String>,
+  pub compile_mode: Option<String>,
   pub target: Option<String>,
+  pub target_name: Option<String>,
   #[napi(js_name = "useNormalizedOHMUrl")]
   pub use_normalized_ohm_url: Option<bool>,
   pub compile_sdk_version: Option<String>,
@@ -986,12 +1320,78 @@ pub struct HvigorProjectConfig {
   pub module_name: Option<String>,
   pub module_path: Option<String>,
   pub project_top_dir: Option<String>,
+  pub project_root_path: Option<String>,
+  pub project_path: Option<String>,
+  pub module_root_path: Option<String>,
+  pub cache_path: Option<String>,
+  pub ace_module_build: Option<String>,
+  pub ace_build_json: Option<String>,
+  pub ace_module_json_path: Option<String>,
+  #[napi(js_name = "runtimeOS")]
+  pub runtime_os: Option<String>,
+  pub watch_mode: Option<String>,
+  #[napi(js_name = "arkTSVersion")]
+  pub ark_ts_version: Option<String>,
+  pub is_preview: Option<bool>,
+  pub is_ohos_test: Option<bool>,
+  pub compile_har: Option<bool>,
+  pub compile_shared: Option<bool>,
+  pub byte_code_har: Option<bool>,
+  #[napi(ts_type = "Record<string, string>")]
+  pub module_path_map: Option<serde_json::Value>,
+  #[napi(ts_type = "Record<string, unknown>")]
+  pub byte_code_har_info: Option<serde_json::Value>,
+  #[napi(ts_type = "Record<string, string>")]
+  pub hsp_name_ohm_map: Option<serde_json::Value>,
+  #[napi(ts_type = "Record<string, string>")]
+  pub har_name_ohm_map: Option<serde_json::Value>,
+  pub other_compile_files: Option<Vec<String>>,
 }
 
 /// Compile plugin share object available as `this.share`.
-#[napi(object)]
+///
+/// The source and package indices stay in Rust. JavaScript receives this live
+/// object once per module build, so `getHashByFilePath`,
+/// `getCachedFileInfo`, and `importResolver` do not serialize a project-wide
+/// source table or perform hook-time filesystem reads.
+#[napi(object, object_from_js = false)]
 pub struct HvigorShareContext {
   pub project_config: Option<HvigorProjectConfig>,
+  #[napi(js_name = "__arkdownProjectConfig", skip_typescript)]
+  pub project_config_fields: serde_json::Value,
+  #[napi(js_name = "__arkdownNativeShare", skip_typescript)]
+  pub native_share: External<HvigorNativeShareContext>,
+  #[napi(ts_type = "Map<string, unknown>")]
+  pub cache: Option<String>,
+  #[napi(ts_type = "Map<string, unknown>")]
+  pub common_cache: Option<String>,
+  #[napi(
+    ts_type = "{ keys(): IterableIterator<string>; unmount(key: string): void; mount(key: string): { getCache(cacheKey: string): unknown; setCache(cacheKey: string, value: unknown): void } }"
+  )]
+  pub cache_store_manager: Option<String>,
+  #[napi(ts_type = "(path: string) => string")]
+  pub get_hash_by_file_path: Option<String>,
+  #[napi(ts_type = "(path: string, hash: string) => void")]
+  pub set_hash_value_by_file_path: Option<String>,
+  #[napi(ts_type = "(path: string) => HvigorCachedFileInfo | undefined")]
+  pub get_cached_file_info: Option<String>,
+  #[napi(ts_type = "() => string[]")]
+  pub get_source_files: Option<String>,
+  #[napi(ts_type = "(request: string) => HvigorImportResolution | undefined")]
+  pub import_resolver: Option<String>,
+  #[napi(ts_type = "(prefix: string) => unknown")]
+  pub get_logger: Option<String>,
+  #[napi(ts_type = "(prefix: string) => unknown")]
+  pub get_hvigor_console_logger: Option<String>,
+  #[napi(ts_type = "(error: unknown) => never")]
+  pub throw_ark_ts_compiler_error: Option<String>,
+  #[napi(ts_type = "(id: string) => void")]
+  pub record_error_file_id: Option<String>,
+}
+
+pub struct HvigorNativeShareContext {
+  source_files: Arc<FxHashMap<PathBuf, HvigorCompilePluginSourceFile>>,
+  import_resolver_entries: Arc<[HvigorCompilePluginImportEntry]>,
 }
 
 impl From<&HvigorCompilePluginShare> for HvigorShareContext {
@@ -1001,7 +1401,10 @@ impl From<&HvigorCompilePluginShare> for HvigorShareContext {
       project_config: Some(HvigorProjectConfig {
         bundle_name: Some(config.bundle_name.clone()),
         build_mode: Some(config.build_mode.clone()),
+        build_ark_mode: None,
+        compile_mode: None,
         target: Some(config.target.clone()),
+        target_name: None,
         use_normalized_ohm_url: Some(config.use_normalized_ohm_url),
         compile_sdk_version: Some(config.compile_sdk_version.clone()),
         compatible_sdk_version: Some(config.compatible_sdk_version.clone()),
@@ -1016,9 +1419,223 @@ impl From<&HvigorCompilePluginShare> for HvigorShareContext {
           .project_top_dir
           .as_ref()
           .map(|path| path.to_string_lossy().into_owned()),
+        project_root_path: None,
+        project_path: None,
+        module_root_path: None,
+        cache_path: None,
+        ace_module_build: None,
+        ace_build_json: None,
+        ace_module_json_path: None,
+        runtime_os: None,
+        watch_mode: Some(config.watch_mode.to_string()),
+        ark_ts_version: None,
+        is_preview: None,
+        is_ohos_test: None,
+        compile_har: None,
+        compile_shared: None,
+        byte_code_har: None,
+        module_path_map: None,
+        byte_code_har_info: None,
+        hsp_name_ohm_map: None,
+        har_name_ohm_map: None,
+        other_compile_files: None,
       }),
+      project_config_fields: serde_json::Value::Object(
+        share.project_config_fields.as_ref().clone(),
+      ),
+      native_share: External::new(HvigorNativeShareContext {
+        source_files: Arc::clone(&share.source_files),
+        import_resolver_entries: Arc::clone(&share.import_resolver_entries),
+      }),
+      cache: None,
+      common_cache: None,
+      cache_store_manager: None,
+      get_hash_by_file_path: None,
+      set_hash_value_by_file_path: None,
+      get_cached_file_info: None,
+      get_source_files: None,
+      import_resolver: None,
+      get_logger: None,
+      get_hvigor_console_logger: None,
+      throw_ark_ts_compiler_error: None,
+      record_error_file_id: None,
     }
   }
+}
+
+#[napi(object)]
+pub struct HvigorCachedFileInfo {
+  pub exists: bool,
+  pub is_file: bool,
+  pub is_directory: bool,
+  pub mtime_ms: Option<f64>,
+  pub size: i64,
+}
+
+#[napi(object)]
+pub struct HvigorImportResolution {
+  pub normalized_path: String,
+  pub package_name: String,
+  pub package_path: String,
+}
+
+impl HvigorNativeShareContext {
+  fn get_hash_by_file_path(&self, path: String) -> Option<String> {
+    self
+      .source_file(PathBuf::from(path).as_path())
+      .map(|source| source.content_hash.clone())
+  }
+
+  fn get_cached_file_info(&self, path: String) -> Option<HvigorCachedFileInfo> {
+    self
+      .source_file(PathBuf::from(path).as_path())
+      .map(|source| HvigorCachedFileInfo {
+        exists: true,
+        is_file: true,
+        is_directory: false,
+        mtime_ms: source.modified_millis.map(|value| value as f64),
+        size: source.size.min(i64::MAX as u64) as i64,
+      })
+  }
+
+  fn get_source_files(&self) -> napi::Result<Vec<String>> {
+    let mut paths = self
+      .source_files
+      .keys()
+      .map(|path| arkdown_path::ArtifactPathSerializer::path_to_slash_string(path))
+      .collect::<std::result::Result<Vec<_>, _>>()
+      .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    paths.sort_unstable();
+    Ok(paths)
+  }
+
+  fn import_resolver(&self, request: String) -> napi::Result<Option<HvigorImportResolution>> {
+    let normalized_request = request.replace('\\', "/");
+    let normalized_request = normalized_request.trim_end_matches('/');
+    let entry = self
+      .import_resolver_entries
+      .iter()
+      .filter(|entry| {
+        normalized_request == entry.alias
+          || normalized_request
+            .strip_prefix(entry.alias.as_str())
+            .is_some_and(|suffix| suffix.starts_with('/'))
+      })
+      .max_by_key(|entry| entry.alias.len());
+    let Some(entry) = entry else {
+      return Ok(None);
+    };
+    let suffix = normalized_request
+      .strip_prefix(entry.alias.as_str())
+      .unwrap_or_default()
+      .trim_start_matches('/');
+    let requested_path = if suffix.is_empty() {
+      entry.entry_path.clone().unwrap_or_default()
+    } else {
+      PathBuf::from(suffix)
+    };
+    let resolved_path = self.resolve_package_source(&entry.package_root, &requested_path);
+    let relative = resolved_path
+      .strip_prefix(&entry.package_root)
+      .unwrap_or(resolved_path.as_path());
+    let normalized_relative = arkdown_path::ArtifactPathSerializer::path_to_slash_string(relative)
+      .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let normalized_path = if normalized_relative.is_empty() {
+      entry.package_name.clone()
+    } else {
+      format!(
+        "{}/{}",
+        entry.package_name,
+        Self::without_source_extension(&normalized_relative)
+      )
+    };
+    Ok(Some(HvigorImportResolution {
+      normalized_path,
+      package_name: entry.package_name.clone(),
+      package_path: arkdown_path::ArtifactPathSerializer::path_to_slash_string(&entry.package_root)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+    }))
+  }
+
+  fn source_file(&self, path: &std::path::Path) -> Option<&HvigorCompilePluginSourceFile> {
+    let path = arkdown_path::lexical_normalize(path);
+    self.source_files.get(&path).or_else(|| {
+      let path_text = path.to_string_lossy();
+      let alternate = if let Some(suffix) = path_text.strip_prefix("/private/") {
+        PathBuf::from(format!("/{suffix}"))
+      } else if path_text.starts_with("/var/") || path_text.starts_with("/tmp/") {
+        PathBuf::from(format!("/private{path_text}"))
+      } else {
+        return None;
+      };
+      self.source_files.get(&alternate)
+    })
+  }
+
+  fn resolve_package_source(
+    &self,
+    package_root: &std::path::Path,
+    path: &std::path::Path,
+  ) -> PathBuf {
+    let candidate = arkdown_path::lexical_normalize(&package_root.join(path));
+    if self.source_files.contains_key(&candidate) {
+      return candidate;
+    }
+    let path_text = candidate.to_string_lossy();
+    for extension in ["ets", "ts", "js", "mjs", "cjs", "d.ets", "d.ts"] {
+      let with_extension = PathBuf::from(format!("{path_text}.{extension}"));
+      if self.source_files.contains_key(&with_extension) {
+        return with_extension;
+      }
+    }
+    for file_name in ["Index.ets", "index.ets", "Index.ts", "index.ts", "index.js"] {
+      let index = candidate.join(file_name);
+      if self.source_files.contains_key(&index) {
+        return index;
+      }
+    }
+    candidate
+  }
+
+  fn without_source_extension(path: &str) -> &str {
+    for extension in [".d.ets", ".d.ts", ".ets", ".ts", ".mjs", ".cjs", ".js"] {
+      if let Some(path) = path.strip_suffix(extension) {
+        return path;
+      }
+    }
+    path
+  }
+}
+
+#[napi(skip_typescript)]
+pub fn hvigor_share_get_hash_by_file_path(
+  share: &External<HvigorNativeShareContext>,
+  path: String,
+) -> Option<String> {
+  share.get_hash_by_file_path(path)
+}
+
+#[napi(skip_typescript)]
+pub fn hvigor_share_get_cached_file_info(
+  share: &External<HvigorNativeShareContext>,
+  path: String,
+) -> Option<HvigorCachedFileInfo> {
+  share.get_cached_file_info(path)
+}
+
+#[napi(skip_typescript)]
+pub fn hvigor_share_get_source_files(
+  share: &External<HvigorNativeShareContext>,
+) -> napi::Result<Vec<String>> {
+  share.get_source_files()
+}
+
+#[napi(skip_typescript)]
+pub fn hvigor_share_import_resolver(
+  share: &External<HvigorNativeShareContext>,
+  request: String,
+) -> napi::Result<Option<HvigorImportResolution>> {
+  share.import_resolver(request)
 }
 
 /// Dependency info returned by `this.getModuleInfo(id)` inside plugin hooks.
@@ -1092,7 +1709,22 @@ impl HvigorModuleInfo {
 /// the actual method implementations live in `js/plugin-adapter.js`.
 #[napi(object)]
 pub struct HvigorPluginContext {
-  pub share: Option<HvigorShareContext>,
+  #[napi(ts_type = "HvigorShareContext")]
+  pub share: Option<String>,
+  #[napi(ts_type = "Map<string, unknown>")]
+  pub cache: Option<String>,
+  #[napi(ts_type = "{ rollupVersion: string; rolldownVersion: string; watchMode: boolean }")]
+  pub meta: Option<String>,
+  #[napi(
+    ts_type = "(source: string, importer?: string, options?: JsPluginContextResolveOptions) => Promise<JsResolveIdOutput | null>"
+  )]
+  pub resolve: Option<String>,
+  #[napi(ts_type = "(options: JsPluginContextLoadOptions) => Promise<HvigorModuleInfo | null>")]
+  pub load: Option<String>,
+  #[napi(ts_type = "(file: JsEmittedFile) => string")]
+  pub emit_file: Option<String>,
+  #[napi(ts_type = "(id: string) => void")]
+  pub add_watch_file: Option<String>,
   #[napi(ts_type = "() => IterableIterator<string>")]
   pub get_module_ids: Option<String>,
   #[napi(ts_type = "(id: string) => HvigorModuleInfo | null")]
@@ -1101,6 +1733,20 @@ pub struct HvigorPluginContext {
   pub parse: Option<String>,
   #[napi(ts_type = "(moduleRef: string) => string")]
   pub get_file_name: Option<String>,
+  #[napi(ts_type = "(value: unknown) => void")]
+  pub info: Option<String>,
+  #[napi(ts_type = "(value: unknown) => void")]
+  pub warn: Option<String>,
+  #[napi(ts_type = "(value: unknown) => void")]
+  pub debug: Option<String>,
+  #[napi(ts_type = "(value: unknown) => never")]
+  pub error: Option<String>,
+  #[napi(ts_type = "(operation: (...args: any[]) => unknown, ...args: any[]) => unknown")]
+  pub r#async: Option<String>,
+  #[napi(ts_type = "() => void")]
+  pub signal: Option<String>,
+  #[napi(ts_type = "() => Promise<void>")]
+  pub block: Option<String>,
 }
 
 /// Latest-hvigor cache invalidation input.
@@ -1122,31 +1768,61 @@ pub struct ArkdownPlugin {
   pub name: Option<String>,
   #[napi(ts_type = "'first' | 'last' | ((nameToIndex: Record<string, number>) => number)")]
   pub order: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext) => void | Promise<void>")]
+  #[napi(
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
+  pub before_build: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
   pub build_start: Option<String>,
   #[napi(
-    ts_type = "(id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>"
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
+  pub after_build_start: Option<String>,
+  #[napi(
+    ts_type = "((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }"
   )]
   pub resolve_id: Option<String>,
   #[napi(
-    ts_type = "(id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>"
+    ts_type = "((id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined> }"
   )]
   pub load: Option<String>,
   #[napi(
-    ts_type = "(code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>"
+    ts_type = "((code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined> }"
   )]
   pub transform: Option<String>,
-  #[napi(ts_type = "(moduleInfo: HvigorModuleInfo) => void | Promise<void>")]
+  #[napi(
+    ts_type = "((moduleInfo: HvigorModuleInfo) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (moduleInfo: HvigorModuleInfo) => void | Promise<void> }"
+  )]
   pub module_parsed: Option<String>,
   #[napi(
-    ts_type = "(id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>"
+    ts_type = "((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }"
   )]
   pub resolve_dynamic_import: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, input?: unknown) => unknown")]
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, input?: unknown) => unknown) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, input?: unknown) => unknown }"
+  )]
   pub before_build_end: Option<String>,
-  #[napi(ts_type = "(this: HvigorPluginContext, error?: Error) => void | Promise<void>")]
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, error?: Error) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, error?: Error) => void | Promise<void> }"
+  )]
   pub build_end: Option<String>,
-  #[napi(ts_type = "(request: PluginCacheRequest) => boolean | Promise<boolean>")]
+  #[napi(
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
+  pub after_build_end: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
+  pub bundle_end: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
+  pub clean_up: Option<String>,
+  #[napi(
+    ts_type = "((request: PluginCacheRequest) => boolean | Promise<boolean>) | { order?: 'pre' | 'post'; handler: (request: PluginCacheRequest) => boolean | Promise<boolean> }"
+  )]
   pub should_invalid_cache: Option<String>,
 }
 
@@ -1182,8 +1858,6 @@ pub struct BuildConfig {
   pub disable_abc_cache: Option<bool>,
   pub cache_file: Option<String>,
   pub checker: Option<String>,
-  #[napi(ts_type = "'oxc' | 'yuku'")]
-  pub module_analyzer: Option<String>,
   pub cache: Option<bool>,
   #[napi(ts_type = "string | string[]")]
   pub compile_plugin_path: Option<String>,
@@ -1294,7 +1968,6 @@ pub fn build<'a>(
     disable_abc_cache,
     cache_file,
     checker,
-    module_analyzer,
     cache,
     compile_plugin_path: _,
     hvigor_plugin_file: _,
@@ -1328,7 +2001,6 @@ pub fn build<'a>(
     disable_abc_cache: disable_abc_cache.unwrap_or(false),
     cache_file,
     checker,
-    module_analyzer,
     cache: cache.unwrap_or(true),
   };
 
@@ -1393,7 +2065,6 @@ struct PackageBuildArgs {
   disable_abc_cache: bool,
   cache_file: Option<String>,
   checker: Option<String>,
-  module_analyzer: Option<String>,
   cache: bool,
 }
 
@@ -1406,7 +2077,7 @@ async fn run_build(
   package_args: PackageBuildArgs,
   js_plugins: Vec<PackagePlugin>,
 ) -> anyhow::Result<Vec<String>> {
-  use crate::cmd::build::args::{AbcBackendChoice, ModuleAnalyzerChoice};
+  use crate::cmd::build::args::AbcBackendChoice;
   use crate::cmd::build::BuildArgs;
   use arkdown_config::ArkdownConfigLoader;
   use arkdown_core::{BuildMode, OutputTarget};
@@ -1417,12 +2088,6 @@ async fn run_build(
       anyhow::bail!("unsupported checker '{checker}'; expected 'sdk', 'oxc', or 'off'");
     }
   }
-  let module_analyzer = match package_args.module_analyzer.as_deref().unwrap_or("oxc") {
-    "oxc" => ModuleAnalyzerChoice::Oxc,
-    "yuku" => ModuleAnalyzerChoice::Yuku,
-    other => anyhow::bail!("unsupported module analyzer '{other}'; expected 'oxc' or 'yuku'"),
-  };
-
   let project_path = std::path::PathBuf::from(&project);
   let is_app_build = target == "app";
   let output_target = match target.as_str() {
@@ -1503,16 +2168,12 @@ async fn run_build(
     cache_file: package_args.cache_file.map(std::path::PathBuf::from),
     abc_backend: AbcBackendChoice::Sdk,
     checker: package_args.checker.or_else(|| Some("oxc".to_string())),
-    module_analyzer,
     cache: package_args.cache,
     // Hot-rebuild flags are always false when invoked via the Node.js API
     // — only the watch stage sets them for incremental rebuilds.
     skip_resource: false,
     skip_profile: false,
     watch_invalidation: None,
-    project_hvigor_overrides: None,
-    module_hvigor_overrides: Default::default(),
-    runtime_context_overrides: None,
     custom_task_input_paths: Vec::new(),
     pack_compress_level: None,
     align_device_types: Vec::new(),

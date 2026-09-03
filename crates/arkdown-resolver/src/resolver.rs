@@ -13,7 +13,7 @@ use oxc_resolver::{
 
 use crate::error::ResolveError;
 use crate::oh_modules::OhPackage;
-use crate::plan::PackageResolutionPlan;
+use crate::plan::{PackageManifestSnapshot, PackageResolutionPlan};
 
 /// Configuration for the OHOS module resolver.
 pub struct ResolverConfig {
@@ -78,6 +78,7 @@ pub enum ResolveImportKind {
 struct PackageRoot {
     path: PathBuf,
     package_name: String,
+    manifest: Arc<PackageManifestSnapshot>,
     local_source: bool,
     source_roots: Vec<PathBuf>,
 }
@@ -421,12 +422,17 @@ impl OhosResolver {
             return None;
         }
         let package_root = arkdown_path::canonicalize_or_owned(&package_root);
+        let manifest = OhPackage::load_from_root(&package_root)
+            .as_ref()
+            .map(PackageManifestSnapshot::from)
+            .unwrap_or_default();
         self.resolve_package_entry(
             package_name,
             subpath,
             &PackageRoot {
                 path: package_root,
                 package_name: package_name.to_string(),
+                manifest: Arc::new(manifest),
                 local_source: false,
                 source_roots: Vec::new(),
             },
@@ -498,6 +504,12 @@ impl OhosResolver {
             PackageRoot {
                 path: package_root,
                 package_name: package_name.clone(),
+                manifest: Arc::new(
+                    package
+                        .as_ref()
+                        .map(PackageManifestSnapshot::from)
+                        .unwrap_or_default(),
+                ),
                 local_source: false,
                 source_roots: Vec::new(),
             }
@@ -512,32 +524,23 @@ impl OhosResolver {
         pkg_root: &PackageRoot,
         import_kind: ResolveImportKind,
     ) -> Option<OhosResolvedModule> {
-        let pkg = OhPackage::load_from_root(&pkg_root.path);
-
-        if let Some(ref pkg) = pkg {
-            if pkg.is_bytecode_har() {
-                let abc_path = pkg.bytecode_abc_path()?;
-                let declaration_path = pkg.declaration_entry()?;
-                return Some(OhosResolvedModule::BytecodeHar {
-                    abc_path,
-                    declaration_path,
-                    pkg_name: package_name.to_string(),
-                    ohm_url: OhmUrl::bundle_package(package_name).into_string(),
-                });
-            }
+        if let Some(abc_path) = pkg_root.manifest.bytecode_abc_path(&pkg_root.path) {
+            let declaration_path = pkg_root.manifest.declaration_entry(&pkg_root.path);
+            return Some(OhosResolvedModule::BytecodeHar {
+                abc_path,
+                declaration_path,
+                pkg_name: package_name.to_string(),
+                ohm_url: OhmUrl::bundle_package(package_name).into_string(),
+            });
         }
 
         let requested = if subpath.is_empty() {
-            pkg.as_ref()
-                .and_then(|p| match import_kind {
-                    ResolveImportKind::Import => p.exports_import_field(),
-                    ResolveImportKind::Require => p.exports_require_field(),
-                })
-                .or_else(|| {
-                    pkg.as_ref()
-                        .and_then(|p| p.hvigor_main_field().map(str::to_string))
-                })
-                .unwrap_or_else(|| "index".to_string())
+            match import_kind {
+                ResolveImportKind::Import => pkg_root.manifest.exports_import_field(),
+                ResolveImportKind::Require => pkg_root.manifest.exports_require_field(),
+            }
+            .or_else(|| pkg_root.manifest.hvigor_main_field().map(str::to_string))
+            .unwrap_or_else(|| "index".to_string())
         } else {
             subpath.to_string()
         };
@@ -695,9 +698,7 @@ impl PackageRoot {
                     package_name: self.package_name.clone(),
                     bundle_name: String::new(),
                     module_name: String::new(),
-                    version: OhPackage::load_from_root(&self.path)
-                        .map(|p| p.version().to_string())
-                        .unwrap_or_default(),
+                    version: self.manifest.version.clone(),
                     pkg_path: self.path.clone(),
                     entry_path: None,
                 }),
@@ -708,9 +709,7 @@ impl PackageRoot {
             path,
             module_type,
             pkg_name: package_name.to_string(),
-            pkg_version: OhPackage::load_from_root(&self.path)
-                .map(|p| p.version().to_string())
-                .unwrap_or_default(),
+            pkg_version: self.manifest.version.clone(),
             ohm_url: None,
         }
     }
@@ -745,6 +744,7 @@ impl PackageRootIndex {
                     .collect(),
                 path: package_root,
                 package_name: info.pkg_name.clone(),
+                manifest: Arc::clone(&info.manifest),
                 local_source: info.local_source,
             });
             index
@@ -868,6 +868,12 @@ mod tests {
             PkgBriefInfo {
                 pkg_root: root.to_path_buf(),
                 pkg_name: name.to_string(),
+                manifest: Arc::new(
+                    OhPackage::load_from_root(root)
+                        .as_ref()
+                        .map(PackageManifestSnapshot::from)
+                        .unwrap_or_default(),
+                ),
                 local_source,
                 source_roots: vec![],
             },
@@ -979,6 +985,42 @@ mod tests {
             OhosResolvedModule::RemotePackage { path, pkg_name, .. } => {
                 assert_eq!(pkg_name, "@ohos/utils");
                 assert_eq!(path, arkdown_path::canonicalize_or_owned(&entry));
+            }
+            _ => panic!("expected RemotePackage"),
+        }
+    }
+
+    #[test]
+    fn declared_package_manifest_is_frozen_before_resolver_hooks_run() {
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("oh_modules/frozen-package");
+        fs::create_dir_all(pkg_dir.join("src/main/ets")).unwrap();
+        let original_entry = pkg_dir.join("src/main/ets/original.ets");
+        let mutated_entry = pkg_dir.join("src/main/ets/mutated.ets");
+        fs::write(&original_entry, "export const value = 'original';").unwrap();
+        fs::write(&mutated_entry, "export const value = 'mutated';").unwrap();
+        fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{ name: "frozen-package", main: "src/main/ets/original.ets" }"#,
+        )
+        .unwrap();
+
+        // BuildSession projects the manifest into PackageResolutionPlan once.
+        // A later disk mutation must not alter resolver-hook behavior.
+        let package_plan = pkg_index("frozen-package", &pkg_dir, false);
+        fs::write(
+            pkg_dir.join("oh-package.json5"),
+            r#"{ name: "frozen-package", main: "src/main/ets/mutated.ets" }"#,
+        )
+        .unwrap();
+
+        let resolver = make_resolver(dir.path().to_path_buf(), vec![], vec![], package_plan);
+        let result = resolver
+            .resolve("frozen-package", &dir.path().join("src/main.ets"))
+            .unwrap();
+        match result {
+            OhosResolvedModule::RemotePackage { path, .. } => {
+                assert_eq!(path, arkdown_path::canonicalize_or_owned(&original_entry));
             }
             _ => panic!("expected RemotePackage"),
         }
@@ -1556,6 +1598,11 @@ mod tests {
             PkgBriefInfo {
                 pkg_root: installed_root,
                 pkg_name: "@msi/runtime".to_string(),
+                manifest: Arc::new(PackageManifestSnapshot {
+                    version: "0.9.0".to_string(),
+                    main: Some("Index.ets".to_string()),
+                    ..PackageManifestSnapshot::default()
+                }),
                 local_source: false,
                 source_roots: vec![],
             },
@@ -1563,6 +1610,11 @@ mod tests {
         builder.insert_current(PkgBriefInfo {
             pkg_root: current_root.clone(),
             pkg_name: "@msi/runtime".to_string(),
+            manifest: Arc::new(PackageManifestSnapshot {
+                version: "1.0.0".to_string(),
+                main: Some("Index.ets".to_string()),
+                ..PackageManifestSnapshot::default()
+            }),
             local_source: true,
             source_roots: vec![current_root.join("src/main")],
         });
@@ -1610,6 +1662,10 @@ mod tests {
         builder.insert_current(PkgBriefInfo {
             pkg_root: package_root.clone(),
             pkg_name: "@msi/runtime".to_string(),
+            manifest: Arc::new(PackageManifestSnapshot {
+                main: Some("Index.ets".to_string()),
+                ..PackageManifestSnapshot::default()
+            }),
             local_source: true,
             source_roots: vec![source_root],
         });

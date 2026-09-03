@@ -118,9 +118,8 @@ fn project_parameter_file_matches_latest_hvigor_missing_file_and_cli_override_pr
         r#"{ "versions.lib": "1.0.0" }"#,
     )
     .expect("write CLI parameter file");
-    ProjectSnapshot::from_config_with_runtime_overrides(
+    ProjectSnapshot::from_config_with_parameter_file(
         &config(temp.path(), None),
-        None,
         Some("params.json5".into()),
     )
     .expect("CLI parameterFile overrides the project declaration");
