@@ -53,7 +53,8 @@ use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, StylesMethodInfo,
 };
 pub(crate) use crate::transform::build_fn::{
-    CustomComponentGeneration, CustomComponentInfo, CustomComponentUpdateProps,
+    CustomComponentGeneration, CustomComponentInfo, CustomComponentPropertyKind,
+    CustomComponentUpdateProps,
 };
 use crate::transform::builder_factory::BuilderFactoryValidator;
 use crate::transform::component::{

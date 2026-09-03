@@ -11,8 +11,8 @@ use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::{
-    CustomComponentGeneration, CustomComponentInfo, CustomComponentUpdateProps,
-    ImportedClassObservations,
+    CustomComponentGeneration, CustomComponentInfo, CustomComponentPropertyKind,
+    CustomComponentUpdateProps, ImportedClassObservations,
 };
 
 use super::arkts11_monitor::Arkts11MonitorValidator;
@@ -33,6 +33,8 @@ pub(super) struct Arkts11StructValidator<'statement, 'errors> {
     component_reuse: Option<&'statement FxHashMap<String, bool>>,
     class_observations: Option<&'statement ImportedClassObservations>,
     custom_component_info: Option<&'statement CustomComponentUpdateProps>,
+    parent_v1_property_kinds: FxHashMap<String, CustomComponentPropertyKind>,
+    parent_env_props: FxHashSet<String>,
 }
 
 impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
@@ -41,6 +43,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         file: &'errors str,
         errors: &'errors mut Vec<EtsTransformError>,
     ) -> Self {
+        let (parent_v1_property_kinds, parent_env_props) = Self::parent_property_facts(statement);
         Self {
             statement,
             file,
@@ -50,6 +53,61 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             component_reuse: None,
             class_observations: None,
             custom_component_info: None,
+            parent_v1_property_kinds,
+            parent_env_props,
+        }
+    }
+
+    fn parent_property_facts(
+        statement: &StructStatement<'_>,
+    ) -> (
+        FxHashMap<String, CustomComponentPropertyKind>,
+        FxHashSet<String>,
+    ) {
+        let mut property_kinds = FxHashMap::default();
+        let mut env_props = FxHashSet::default();
+        for element in &statement.body.body {
+            let StructElement::PropertyDefinition(property) = element else {
+                continue;
+            };
+            let Some(name) = property.key.static_name() else {
+                continue;
+            };
+            let mut kind = None;
+            for decorator in &property.decorators {
+                let decorator = ArkuiDecorator::new(decorator).name();
+                if decorator == ArkuiDecoratorName::ENV {
+                    env_props.insert(name.to_string());
+                }
+                kind = kind.or_else(|| Self::component_property_kind(decorator));
+            }
+            property_kinds.insert(
+                name.into_owned(),
+                kind.unwrap_or(CustomComponentPropertyKind::Regular),
+            );
+        }
+        (property_kinds, env_props)
+    }
+
+    fn component_property_kind(decorator: &str) -> Option<CustomComponentPropertyKind> {
+        match decorator {
+            ArkuiDecoratorName::STATE => Some(CustomComponentPropertyKind::State),
+            ArkuiDecoratorName::PROP => Some(CustomComponentPropertyKind::Prop),
+            ArkuiDecoratorName::LINK => Some(CustomComponentPropertyKind::Link),
+            ArkuiDecoratorName::PROVIDE => Some(CustomComponentPropertyKind::Provide),
+            ArkuiDecoratorName::OBJECT_LINK => Some(CustomComponentPropertyKind::ObjectLink),
+            ArkuiDecoratorName::STORAGE_LINK => Some(CustomComponentPropertyKind::StorageLink),
+            ArkuiDecoratorName::STORAGE_PROP => Some(CustomComponentPropertyKind::StorageProp),
+            ArkuiDecoratorName::LOCAL_STORAGE_LINK => {
+                Some(CustomComponentPropertyKind::LocalStorageLink)
+            }
+            ArkuiDecoratorName::LOCAL_STORAGE_PROP => {
+                Some(CustomComponentPropertyKind::LocalStorageProp)
+            }
+            ArkuiDecoratorName::CONSUME => Some(CustomComponentPropertyKind::Consume),
+            ArkuiDecoratorName::BUILDER_PARAM => Some(CustomComponentPropertyKind::BuilderParam),
+            ArkuiDecoratorName::ENV => Some(CustomComponentPropertyKind::Env),
+            _ => None,
         }
     }
 
@@ -863,15 +921,45 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                     &[],
                 );
             }
-        } else if self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
-            && !info.link_props.is_empty()
-        {
-            self.error(
-                "10905213",
-                "A V2 component cannot be used with any member property decorated by '@Link' in a V1 component.",
-                span,
-                &[],
-            );
+        } else {
+            for required in &info.v1_required_props {
+                if supplied.contains(required) {
+                    continue;
+                }
+                self.error(
+                    "10905359",
+                    format!(
+                        "'@Require' decorated '{required}' must be initialized through the component constructor."
+                    ),
+                    span,
+                    &[],
+                );
+            }
+            let parent_v2 = self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2);
+            for required in &info.v1_mandatory_props {
+                if parent_v2 && info.link_props.contains(required) {
+                    continue;
+                }
+                if supplied.contains(required) {
+                    continue;
+                }
+                self.error(
+                    "10905316",
+                    format!(
+                        "The property '{required}' in the custom component '{component_name}' is missing (mandatory to specify)."
+                    ),
+                    span,
+                    &[],
+                );
+            }
+            if parent_v2 && !info.link_props.is_empty() {
+                self.error(
+                    "10905213",
+                    "A V2 component cannot be used with any member property decorated by '@Link' in a V1 component.",
+                    span,
+                    &[],
+                );
+            }
         }
     }
 
@@ -883,6 +971,17 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         span: Span,
         info: &CustomComponentInfo,
     ) {
+        self.check_component_env_assignment(property_name, initializer, span, info);
+        if info.generation == CustomComponentGeneration::V1 {
+            self.check_component_v1_property(
+                component_name,
+                property_name,
+                initializer,
+                span,
+                info,
+            );
+            return;
+        }
         if info.custom_env_props.contains(property_name) {
             self.error(
                 "10905375",
@@ -920,6 +1019,204 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             span,
             &[],
         );
+    }
+
+    fn check_component_env_assignment(
+        &mut self,
+        property_name: &str,
+        initializer: &Expression<'_>,
+        span: Span,
+        info: &CustomComponentInfo,
+    ) {
+        let Some(initializer_name) = Self::parent_initializer_name(initializer) else {
+            return;
+        };
+        if !self.parent_env_props.contains(initializer_name) {
+            return;
+        }
+        if info.generation == CustomComponentGeneration::V2 {
+            if !info.param_props.contains(property_name)
+                || info.builder_params.contains(property_name)
+            {
+                self.error(
+                    "10905252",
+                    "Within structs decorated with '@ComponentV2', '@Env' can only initialize variables decorated with '@Param'.",
+                    span,
+                    &[],
+                );
+            }
+        } else if !info.regular_props.contains(property_name) {
+            self.error(
+                "10905253",
+                "Within structs decorated with '@Component', '@Env' can only initialize regular(non-decorated) variables.",
+                span,
+                &[],
+            );
+        }
+    }
+
+    fn parent_initializer_name<'node>(initializer: &'node Expression<'_>) -> Option<&'node str> {
+        match initializer {
+            Expression::StaticMemberExpression(member)
+                if matches!(&member.object, Expression::ThisExpression(_)) =>
+            {
+                Some(member.property.name.as_str())
+            }
+            Expression::Identifier(identifier) => identifier.name.strip_prefix('$'),
+            _ => None,
+        }
+    }
+
+    fn check_component_v1_property(
+        &mut self,
+        component_name: &str,
+        property_name: &str,
+        initializer: &Expression<'_>,
+        span: Span,
+        info: &CustomComponentInfo,
+    ) {
+        if info.custom_env_props.contains(property_name) {
+            self.error(
+                "10905375",
+                format!(
+                    "The '@CustomEnv' property '{property_name}' in the custom component '{component_name}' cannot be initialized by parent component."
+                ),
+                span,
+                &[],
+            );
+            return;
+        }
+        if let Some(kind) = info.v1_forbidden_init_props.get(property_name).copied() {
+            self.error(
+                "10905317",
+                format!(
+                    "The '{}' property '{property_name}' in the custom component '{component_name}' cannot be initialized here (forbidden to specify).",
+                    kind.source_name()
+                ),
+                span,
+                &[],
+            );
+            return;
+        }
+        let Some(child_kind) = info.v1_property_kinds.get(property_name).copied() else {
+            return;
+        };
+        if child_kind != CustomComponentPropertyKind::Link
+            && matches!(initializer, Expression::Identifier(identifier) if identifier.name.starts_with('$'))
+        {
+            self.error(
+                "10905314",
+                format!(
+                    "Property '{property_name}' cannot initialize using '$' to create a reference to a variable."
+                ),
+                initializer.span(),
+                &[],
+            );
+        }
+        if !self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2) {
+            if let Some((parent_name, parent_kind)) = self.parent_property_reference(initializer) {
+                if !Self::v1_assignment_is_allowed(parent_kind, child_kind) {
+                    self.error(
+                        "10905315",
+                        format!(
+                            "The '{}' property '{parent_name}' cannot be assigned to the '{}' property '{property_name}'.",
+                            parent_kind.source_name(),
+                            child_kind.source_name()
+                        ),
+                        initializer.span(),
+                        &[],
+                    );
+                }
+            }
+        }
+        if child_kind == CustomComponentPropertyKind::Link
+            && Self::link_source_nesting(initializer) >= 2
+        {
+            self.error(
+                "10905364",
+                format!(
+                    "The type of the parent component's state variable initializing the '@Link' variable '{property_name}' must match the '@Link' variable's declared type."
+                ),
+                span,
+                &[],
+            );
+        }
+    }
+
+    fn parent_property_reference(
+        &self,
+        initializer: &Expression<'_>,
+    ) -> Option<(String, CustomComponentPropertyKind)> {
+        match initializer {
+            Expression::StaticMemberExpression(member)
+                if matches!(&member.object, Expression::ThisExpression(_)) =>
+            {
+                let name = member.property.name.as_str();
+                self.parent_v1_property_kinds
+                    .get(name)
+                    .copied()
+                    .map(|kind| (name.to_string(), kind))
+            }
+            Expression::Identifier(identifier) => {
+                if let Some(name) = identifier.name.strip_prefix('$') {
+                    self.parent_v1_property_kinds
+                        .get(name)
+                        .copied()
+                        .map(|kind| (name.to_string(), kind))
+                } else {
+                    Some((
+                        identifier.name.to_string(),
+                        CustomComponentPropertyKind::Regular,
+                    ))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn v1_assignment_is_allowed(
+        parent: CustomComponentPropertyKind,
+        child: CustomComponentPropertyKind,
+    ) -> bool {
+        match child {
+            CustomComponentPropertyKind::State
+            | CustomComponentPropertyKind::Prop
+            | CustomComponentPropertyKind::Provide => true,
+            CustomComponentPropertyKind::Regular => matches!(
+                parent,
+                CustomComponentPropertyKind::Regular
+                    | CustomComponentPropertyKind::State
+                    | CustomComponentPropertyKind::Link
+                    | CustomComponentPropertyKind::Prop
+                    | CustomComponentPropertyKind::ObjectLink
+                    | CustomComponentPropertyKind::StorageLink
+                    | CustomComponentPropertyKind::Env
+            ),
+            CustomComponentPropertyKind::Link | CustomComponentPropertyKind::ObjectLink => {
+                parent != CustomComponentPropertyKind::Regular
+            }
+            _ => true,
+        }
+    }
+
+    fn link_source_nesting(initializer: &Expression<'_>) -> usize {
+        let mut current = initializer;
+        let mut nesting = 0;
+        loop {
+            match current {
+                Expression::StaticMemberExpression(member) => {
+                    nesting += 1;
+                    current = &member.object;
+                }
+                Expression::ComputedMemberExpression(member) => {
+                    nesting += 1;
+                    current = &member.object;
+                }
+                Expression::TSNonNullExpression(non_null) => current = &non_null.expression,
+                Expression::ThisExpression(_) => return nesting,
+                _ => return 0,
+            }
+        }
     }
 
     fn check_component_v2_two_way_binding(

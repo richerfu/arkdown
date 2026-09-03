@@ -126,6 +126,33 @@ fn arkts11_custom_component_contracts_follow_imported_exports() {
 }
 
 #[test]
+fn arkts11_v1_custom_component_contracts_follow_imported_exports() {
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        PathBuf::from("/project/Child.ets"),
+        Arc::<str>::from(
+            "@Component\nexport struct Child {\n  @StorageProp('stored') stored: number = 0\n  @Require @Prop required: number\n  @Link linked: number\n  build() {}\n}\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(TransformSourceSnapshot::new(files), Vec::new());
+    let report = checker.check(
+        "/project/Parent.ets",
+        "import { Child } from './Child';\n@Component struct Parent { build() { Child({ stored: 1 }) } }",
+    );
+    let codes = report
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            EtsTransformError::CodedDiagnostic { code, .. } => Some(code.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(codes, ["10905317", "10905359", "10905316"]);
+}
+
+#[test]
 fn arkts11_v1_to_v2_assignment_uses_parent_property_type_identity() {
     let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
     let report = checker.check(
