@@ -19,6 +19,7 @@ pub(crate) mod source_emit;
 mod source_text;
 mod static_graph;
 mod syntax;
+pub(crate) mod system_api;
 pub(crate) mod viewpu_emit;
 mod viewpu_finalize;
 mod viewv2;
@@ -47,10 +48,7 @@ use oxc_span::{GetSpan, SPAN};
 
 use crate::error::EtsTransformError;
 use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
-use crate::transform::api_available::{
-    ApiAvailableLowerer, ApiAvailableTransformOptions, ApiAvailableValidator,
-};
-use crate::transform::available_annotation::AvailableAnnotationValidator;
+use crate::transform::api_available::{ApiAvailableLowerer, ApiAvailableTransformOptions};
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, CustomComponentUpdateProps,
     StylesMethodInfo,
@@ -82,6 +80,7 @@ use crate::transform::navigation::NavigationBuilderRegistrationBlock;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
 use crate::transform::static_graph::StaticArktsGraphProjection;
+use crate::transform::system_api::Arkts11SystemApiValidator;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
@@ -354,11 +353,13 @@ impl<'a> ArktsTransformer<'a> {
             false
         };
         let needs_api_available = options.api_available.should_transform_source(content);
-        let needs_available_annotation = options.api_available.should_validate_annotation(content);
+        let system_api_validator =
+            Arkts11SystemApiValidator::new(&source.id.id, content, options.api_available);
+        let needs_system_api_validation = system_api_validator.is_required();
         let syntax_detector = ArktsTransformSyntaxDetector::new();
         if !mock_setup_decorators_lowered
             && !needs_api_available
-            && !needs_available_annotation
+            && !needs_system_api_validation
             && !syntax_detector.program(&parsed.program)
         {
             return Ok(ArktsTransformOutput {
@@ -369,20 +370,14 @@ impl<'a> ArktsTransformer<'a> {
         }
 
         if matches!(options.checker_mode, CheckerMode::Oxc) {
-            if needs_available_annotation {
-                let diagnostics =
-                    AvailableAnnotationValidator::new(&source.id.id, options.api_available)
-                        .diagnostics(&parsed.program);
+            if needs_system_api_validation {
+                let diagnostics = system_api_validator.diagnostics(&parsed.program);
                 for diagnostic in &diagnostics {
-                    tracing::debug!(file = %source.id.id, diagnostic = ?diagnostic, "available annotation diagnostic");
+                    tracing::debug!(file = %source.id.id, diagnostic = ?diagnostic, "system API diagnostic");
                 }
                 if let Some(error) = diagnostics.iter().find(|diagnostic| diagnostic.is_error()) {
                     return Err(error.clone());
                 }
-            }
-            if needs_api_available {
-                ApiAvailableValidator::new(&source.id.id, options.api_available)
-                    .validate(&parsed.program)?;
             }
             let report = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
                 .with_component_metadata(&options.component_metadata)

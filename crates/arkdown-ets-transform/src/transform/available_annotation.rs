@@ -1,6 +1,6 @@
 use oxc_ast::{ast::*, AstKind};
 use oxc_ast_visit::Visit;
-use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_semantic::Scoping;
 use oxc_span::Span;
 use oxc_syntax::symbol::SymbolId;
 use rustc_hash::FxHashSet;
@@ -27,12 +27,11 @@ impl<'a> AvailableAnnotationValidator<'a> {
         Self { source_id, options }
     }
 
-    pub(crate) fn diagnostics<'program>(
+    pub(crate) fn diagnostics_with_scoping<'program>(
         &self,
         program: &'program Program<'program>,
+        scoping: &Scoping,
     ) -> Vec<EtsTransformError> {
-        let semantic = SemanticBuilder::new().build(program).semantic;
-        let scoping = semantic.into_scoping();
         let bindings = AvailableSdkBindings::from_program(program);
         if bindings.is_empty() {
             return Vec::new();
@@ -41,7 +40,7 @@ impl<'a> AvailableAnnotationValidator<'a> {
             source_id: self.source_id,
             runtime_os: self.options.runtime_os(),
             bindings,
-            scoping: &scoping,
+            scoping,
             parent_versions: Vec::new(),
             diagnostics: Vec::new(),
         };

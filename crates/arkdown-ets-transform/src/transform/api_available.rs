@@ -14,7 +14,7 @@ use oxc_ast::ast::{
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_parser::Parser;
-use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_semantic::Scoping;
 use oxc_span::{SourceType, SPAN};
 use oxc_syntax::{operator::UnaryOperator, symbol::SymbolId};
 use rustc_hash::FxHashSet;
@@ -52,6 +52,10 @@ impl ApiAvailableTransformOptions {
         source.contains("Available")
     }
 
+    pub(crate) fn should_validate_source(self, source: &str) -> bool {
+        self.should_validate_annotation(source) || self.should_transform_source(source)
+    }
+
     pub(crate) fn runtime_os(self) -> &'static str {
         if self.open_harmony_runtime {
             "OpenHarmony"
@@ -79,29 +83,21 @@ impl<'a> ApiAvailableValidator<'a> {
         Self { source_id, options }
     }
 
-    pub(crate) fn validate(&self, program: &Program<'_>) -> Result<(), EtsTransformError> {
-        match self.diagnostics(program).into_iter().next() {
-            Some(diagnostic) => Err(diagnostic),
-            None => Ok(()),
-        }
-    }
-
-    pub(crate) fn diagnostics<'program>(
+    pub(crate) fn diagnostics_with_scoping<'program>(
         &self,
         program: &'program Program<'program>,
+        scoping: &Scoping,
     ) -> Vec<EtsTransformError> {
         if !self.options.enabled {
             return Vec::new();
         }
-        let semantic = SemanticBuilder::new().build(program).semantic;
-        let scoping = semantic.into_scoping();
         let bindings = ApiAvailableSdkBindings::from_program(program);
         if bindings.is_empty() {
             return Vec::new();
         }
         let mut visitor = ApiAvailableCallValidator {
             bindings: &bindings,
-            scoping: &scoping,
+            scoping,
             source_id: self.source_id,
             open_harmony_runtime: self.options.open_harmony_runtime,
             issues: Vec::new(),
