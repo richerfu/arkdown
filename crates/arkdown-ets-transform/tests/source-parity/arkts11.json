@@ -611,6 +611,69 @@
       "expect": { "contains": [] }
     },
     {
+      "id": "component-v2-require-must-be-supplied",
+      "owner": "compiler/src/process_custom_component.ts::validateInitParam",
+      "file": "RequiredChildV2.ets",
+      "source": "@ComponentV2 struct RequiredChild { @Require @Param value: string; build() {} } @Component struct Parent { build() { RequiredChild() } }",
+      "expect": { "errorCode": "10905321" }
+    },
+    {
+      "id": "component-v2-local-cannot-be-supplied",
+      "owner": "compiler/src/process_custom_component.ts::validateChildProperty",
+      "file": "LocalChildV2.ets",
+      "source": "@ComponentV2 struct LocalChild { @Local value: string = ''; build() {} } @Component struct Parent { build() { LocalChild({ value: 'override' }) } }",
+      "expect": { "errorCode": "10905324" }
+    },
+    {
+      "id": "component-v2-regular-cannot-be-supplied",
+      "owner": "compiler/src/process_custom_component.ts::validateChildProperty",
+      "file": "RegularChildV2.ets",
+      "source": "@ComponentV2 struct RegularChild { value: string = ''; build() {} } @Component struct Parent { build() { RegularChild({ value: 'override' }) } }",
+      "expect": { "errorCode": "10905324" }
+    },
+    {
+      "id": "component-v2-custom-env-cannot-be-supplied",
+      "owner": "compiler/src/process_custom_component.ts::validateAssignCustomEnv",
+      "file": "CustomEnvChildV2.ets",
+      "source": "const KEY = CustomEnvKey.create<string>('value'); @ComponentV2 struct CustomEnvChild { @CustomEnv(KEY) value: string; build() {} } @Component struct Parent { build() { CustomEnvChild({ value: 'override' }) } }",
+      "expect": { "errorCode": "10905375" }
+    },
+    {
+      "id": "component-v2-parent-rejects-v1-link-child",
+      "owner": "compiler/src/process_custom_component.ts::validateInitParam",
+      "file": "V1LinkChild.ets",
+      "source": "@Component struct LinkChild { @Link value: number; build() {} } @ComponentV2 struct Parent { @Local value: number = 1; build() { LinkChild({ value: this.value }) } }",
+      "expect": { "errorCode": "10905213" }
+    },
+    {
+      "id": "component-v2-two-way-requires-variable",
+      "owner": "compiler/src/process_custom_component.ts::updatePropertyAssignment",
+      "file": "TwoWayExpressionV2.ets",
+      "source": "@ComponentV2 struct Child { @Param value: number = 0; @Event $value: (value: number) => void = () => {}; build() {} } @ComponentV2 struct Parent { @Local value: number = 1; build() { Child({ value: (this.value + 1)!! }) } }",
+      "expect": { "errorCode": "10905318" }
+    },
+    {
+      "id": "component-v2-two-way-requires-param-event-pair",
+      "owner": "compiler/src/process_custom_component.ts::updatePropertyAssignment",
+      "file": "TwoWayEventV2.ets",
+      "source": "@ComponentV2 struct Child { @Param value: number = 0; build() {} } @ComponentV2 struct Parent { @Local value: number = 1; build() { Child({ value: this.value!! }) } }",
+      "expect": { "errorCode": "10905319" }
+    },
+    {
+      "id": "component-v2-two-way-rejects-optional-chain",
+      "owner": "compiler/src/process_custom_component.ts::updatePropertyAssignment",
+      "file": "TwoWayOptionalV2.ets",
+      "source": "class Model { value: number = 0 } @ComponentV2 struct Child { @Param value: number = 0; @Event $value: (value: number) => void = () => {}; build() {} } @ComponentV2 struct Parent { @Local model: Model = new Model(); build() { Child({ value: this.model?.value!! }) } }",
+      "expect": { "errorCode": "10905320" }
+    },
+    {
+      "id": "component-v2-two-way-appends-event-callback",
+      "owner": "compiler/src/process_custom_component.ts::createUpdateTwoWayNode",
+      "file": "TwoWayCallbackV2.ets",
+      "source": "@ComponentV2 struct Child { @Param value: number = 0; @Event $value: (value: number) => void = () => {}; build() {} } @ComponentV2 struct Parent { @Local value: number = 1; build() { Child({ value: this.value!! }) } }",
+      "expect": { "contains": ["$value: (value) => {", "this.value = value"] }
+    },
+    {
       "id": "default-dynamic-viewpu-lowering",
       "owner": "compiler/src/fast_build/ets_ui/rollup-plugin-ets-typescript.ts::etsTransform",
       "file": "DynamicPage.ets",

@@ -16,7 +16,7 @@ use crate::transform::viewpu_emit::{GeneratedViewpuName, ViewpuStatementAstEmitt
 use super::raw_object::RawObjectArgumentTransform;
 use super::{
     ArkuiCallName, BuildContext, BuildSourceMetadata, ComponentCallStatementEmitter,
-    CustomComponentInfo, LeafAttribute, LeafAttributeStatementEmitter,
+    CustomComponentGeneration, CustomComponentInfo, LeafAttribute, LeafAttributeStatementEmitter,
 };
 
 pub(super) struct CustomComponentStatementEmitter;
@@ -1781,12 +1781,149 @@ impl<'a, 'ast> CustomComponentObjectEmitter<'a, 'ast> {
         context: &BuildContext,
     ) -> OxcVec<'a, ObjectPropertyKind<'a>> {
         let mut properties = OxcVec::new_in(&self.allocator);
+        let mut two_way_callbacks = OxcVec::new_in(&self.allocator);
         for property in &object.properties {
             if let Some(property) = self.property(property, component_info, mode, context) {
                 properties.push(property);
             }
+            if let Some(callback) = self.two_way_callback(property, component_info, mode) {
+                two_way_callbacks.push(callback);
+            }
         }
+        properties.extend(two_way_callbacks);
         properties
+    }
+
+    fn two_way_callback(
+        &self,
+        property: &ObjectPropertyKind<'_>,
+        component_info: Option<&CustomComponentInfo>,
+        mode: ParamMode,
+    ) -> Option<ObjectPropertyKind<'a>> {
+        if mode != ParamMode::Ctor {
+            return None;
+        }
+        let info =
+            component_info.filter(|info| info.generation == CustomComponentGeneration::V2)?;
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return None;
+        };
+        let PropertyKey::StaticIdentifier(key) = &property.key else {
+            return None;
+        };
+        let property_name = key.name.as_str();
+        let mut event_name = String::with_capacity(property_name.len() + 1);
+        event_name.push('$');
+        event_name.push_str(property_name);
+        if !info.param_props.contains(property_name) || !info.event_props.contains(&event_name) {
+            return None;
+        }
+        let target = Self::double_non_null_target(&property.value)?;
+        if Self::contains_optional_chain(target) {
+            return None;
+        }
+        let target = target.clone_in(self.allocator);
+        let assignment_target = match target {
+            Expression::Identifier(identifier) => {
+                AssignmentTarget::new_assignment_target_identifier(
+                    identifier.span,
+                    identifier.name,
+                    self.ast,
+                )
+            }
+            Expression::StaticMemberExpression(member) => {
+                AssignmentTarget::from(MemberExpression::StaticMemberExpression(member))
+            }
+            _ => return None,
+        };
+        let value_name = self.allocator.alloc_str("value");
+        let assignment = Expression::new_assignment_expression(
+            property.span,
+            AssignmentOperator::Assign,
+            assignment_target,
+            Expression::new_identifier(property.span, value_name, self.ast),
+            self.ast,
+        );
+        let body = FunctionBody::new(
+            property.span,
+            OxcVec::new_in(self.ast),
+            OxcVec::from_value_in(
+                Statement::new_expression_statement(property.span, assignment, self.ast),
+                self.ast,
+            ),
+            self.ast,
+        );
+        let mut parameters = FormalParameters::new(
+            property.span,
+            oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
+            OxcVec::with_capacity_in(1, self.ast),
+            None,
+            self.ast,
+        );
+        parameters.items.push(FormalParameter::new(
+            property.span,
+            OxcVec::new_in(self.ast),
+            BindingPattern::new_binding_identifier(property.span, value_name, self.ast),
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+            self.ast,
+        ));
+        let callback = Expression::new_arrow_function_expression(
+            property.span,
+            false,
+            None,
+            ArenaBox::new_in(parameters, self.ast),
+            None,
+            ArrowFunctionBody::FunctionBody(ArenaBox::new_in(body, self.ast)),
+            self.ast,
+        );
+        Some(ObjectPropertyKind::new_object_property(
+            property.span,
+            PropertyKind::Init,
+            PropertyKey::new_static_identifier(
+                property.span,
+                self.allocator.alloc_str(&event_name),
+                self.ast,
+            ),
+            callback,
+            false,
+            false,
+            false,
+            self.ast,
+        ))
+    }
+
+    fn double_non_null_target<'node, 'source>(
+        expression: &'node Expression<'source>,
+    ) -> Option<&'node Expression<'source>> {
+        let Expression::TSNonNullExpression(outer) = expression else {
+            return None;
+        };
+        let Expression::TSNonNullExpression(inner) = &outer.expression else {
+            return None;
+        };
+        if matches!(inner.expression, Expression::TSNonNullExpression(_)) {
+            return None;
+        }
+        matches!(
+            inner.expression,
+            Expression::Identifier(_) | Expression::StaticMemberExpression(_)
+        )
+        .then_some(&inner.expression)
+    }
+
+    fn contains_optional_chain(expression: &Expression<'_>) -> bool {
+        match expression {
+            Expression::ChainExpression(_) => true,
+            Expression::StaticMemberExpression(member) => {
+                member.optional || Self::contains_optional_chain(&member.object)
+            }
+            _ => false,
+        }
     }
 
     fn property(

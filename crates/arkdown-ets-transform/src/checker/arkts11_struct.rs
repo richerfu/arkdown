@@ -1,7 +1,7 @@
 use oxc_ast::ast::{
-    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, Expression, FunctionBody,
-    MethodDefinitionKind, ObjectPropertyKind, PropertyKey, Statement, StructElement,
-    StructStatement, TSType, TSTypeName,
+    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, ChainElement, Expression,
+    FunctionBody, MethodDefinitionKind, ObjectPropertyKind, PropertyKey, Statement, StructElement,
+    StructStatement, TSNonNullExpression, TSType, TSTypeName,
 };
 use oxc_span::{GetSpan, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -10,7 +10,10 @@ use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::viewpu_emit::GeneratedViewpuName;
-use crate::transform::ImportedClassObservations;
+use crate::transform::{
+    CustomComponentGeneration, CustomComponentInfo, CustomComponentUpdateProps,
+    ImportedClassObservations,
+};
 
 use super::arkts11_monitor::Arkts11MonitorValidator;
 
@@ -29,6 +32,7 @@ pub(super) struct Arkts11StructValidator<'statement, 'errors> {
     component_metadata: Option<&'statement ComponentMetadata>,
     component_reuse: Option<&'statement FxHashMap<String, bool>>,
     class_observations: Option<&'statement ImportedClassObservations>,
+    custom_component_info: Option<&'statement CustomComponentUpdateProps>,
 }
 
 impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
@@ -45,6 +49,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             component_metadata: None,
             component_reuse: None,
             class_observations: None,
+            custom_component_info: None,
         }
     }
 
@@ -72,6 +77,14 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         self
     }
 
+    pub(super) fn with_custom_component_info(
+        mut self,
+        custom_component_info: Option<&'statement CustomComponentUpdateProps>,
+    ) -> Self {
+        self.custom_component_info = custom_component_info;
+        self
+    }
+
     pub(super) fn with_exported(mut self, exported: bool) -> Self {
         self.exported = exported;
         self
@@ -81,9 +94,27 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         self.check_decorators();
         self.check_global_reuse_pool();
         self.check_heritage();
+        self.check_pre_transform_property_types();
         self.check_methods();
         self.check_properties();
         self.check_custom_dialog_controller();
+    }
+
+    fn check_pre_transform_property_types(&mut self) {
+        if self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2) {
+            return;
+        }
+        for element in &self.statement.body.body {
+            let StructElement::PropertyDefinition(property) = element else {
+                continue;
+            };
+            let decorators = property
+                .decorators
+                .iter()
+                .map(|decorator| ArkuiDecorator::new(decorator).name())
+                .collect::<Vec<_>>();
+            self.check_observed_v2_property_type(property, &decorators);
+        }
     }
 
     fn check_global_reuse_pool(&mut self) {
@@ -689,11 +720,11 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             Statement::ExpressionStatement(expression) => {
                 if let Expression::ArkUIComponentExpression(component) = &expression.expression {
                     self.check_ui_component_children(component, parent);
+                } else if let Expression::CallExpression(call) = &expression.expression {
+                    self.check_custom_component_call(call);
                 } else if !matches!(
                     expression.expression,
-                    Expression::CallExpression(_)
-                        | Expression::ChainExpression(_)
-                        | Expression::TSNonNullExpression(_)
+                    Expression::ChainExpression(_) | Expression::TSNonNullExpression(_)
                 ) {
                     self.error(
                         "10905204",
@@ -731,6 +762,13 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         self.check_component_parent_contract(component, parent);
         self.check_component_child_contract(component);
         let component_name = Self::component_expression_name(component);
+        if let Some(component_name) = component_name {
+            self.check_custom_component_arguments(
+                component_name,
+                &component.arguments,
+                component.span,
+            );
+        }
         if Self::is_iteration_component(component) {
             for argument in &component.arguments {
                 self.check_iteration_argument(argument, parent);
@@ -748,6 +786,347 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                     self.check_ui_expression(expression, component_name);
                 }
             }
+        }
+    }
+
+    fn check_custom_component_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+        let Some((name, arguments, span)) = Self::custom_component_base_call(call) else {
+            return;
+        };
+        self.check_custom_component_arguments(name, arguments, span);
+    }
+
+    fn custom_component_base_call<'node>(
+        call: &'node oxc_ast::ast::CallExpression<'node>,
+    ) -> Option<(&'node str, &'node [Argument<'node>], Span)> {
+        match &call.callee {
+            Expression::Identifier(identifier) => Some((
+                identifier.name.as_str(),
+                call.arguments.as_slice(),
+                call.span,
+            )),
+            Expression::StaticMemberExpression(member) => {
+                let Expression::CallExpression(inner) = &member.object else {
+                    return None;
+                };
+                Self::custom_component_base_call(inner)
+            }
+            _ => None,
+        }
+    }
+
+    fn check_custom_component_arguments(
+        &mut self,
+        component_name: &str,
+        arguments: &[Argument<'_>],
+        span: Span,
+    ) {
+        let Some(info) = self
+            .custom_component_info
+            .and_then(|components| components.get(component_name))
+            .cloned()
+        else {
+            return;
+        };
+        let mut supplied = FxHashSet::default();
+        if let Some(Argument::ObjectExpression(object)) = arguments.first() {
+            for property in &object.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    continue;
+                };
+                let PropertyKey::StaticIdentifier(name) = &property.key else {
+                    continue;
+                };
+                let name = name.name.as_str();
+                supplied.insert(name.to_string());
+                self.check_custom_component_property(
+                    component_name,
+                    name,
+                    &property.value,
+                    property.span,
+                    &info,
+                );
+            }
+        }
+
+        if info.generation == CustomComponentGeneration::V2 {
+            for required in &info.required_props {
+                if supplied.contains(required) {
+                    continue;
+                }
+                self.error(
+                    "10905321",
+                    format!(
+                        "'@Require' decorated '{required}' must be initialized through the component constructor."
+                    ),
+                    span,
+                    &[],
+                );
+            }
+        } else if self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
+            && !info.link_props.is_empty()
+        {
+            self.error(
+                "10905213",
+                "A V2 component cannot be used with any member property decorated by '@Link' in a V1 component.",
+                span,
+                &[],
+            );
+        }
+    }
+
+    fn check_custom_component_property(
+        &mut self,
+        component_name: &str,
+        property_name: &str,
+        initializer: &Expression<'_>,
+        span: Span,
+        info: &CustomComponentInfo,
+    ) {
+        if info.custom_env_props.contains(property_name) {
+            self.error(
+                "10905375",
+                format!(
+                    "The '@CustomEnv' property '{property_name}' in the custom component '{component_name}' cannot be initialized by parent component."
+                ),
+                span,
+                &[],
+            );
+            return;
+        }
+        let Some(kind) = info.forbidden_init_props.get(property_name).copied() else {
+            self.check_component_v2_assignment(
+                component_name,
+                property_name,
+                initializer,
+                span,
+                info,
+            );
+            self.check_component_v2_two_way_binding(
+                component_name,
+                property_name,
+                initializer,
+                span,
+                info,
+            );
+            return;
+        };
+        self.error(
+            "10905324",
+            format!(
+                "The '{}' property '{property_name}' in the custom component '{component_name}' cannot be initialized here (forbidden to specify).",
+                kind.source_name()
+            ),
+            span,
+            &[],
+        );
+    }
+
+    fn check_component_v2_two_way_binding(
+        &mut self,
+        component_name: &str,
+        property_name: &str,
+        initializer: &Expression<'_>,
+        span: Span,
+        info: &CustomComponentInfo,
+    ) {
+        if info.generation != CustomComponentGeneration::V2 {
+            return;
+        }
+        let Some(value) = Self::double_non_null_value(initializer) else {
+            return;
+        };
+        if !matches!(
+            value,
+            Expression::Identifier(_) | Expression::StaticMemberExpression(_)
+        ) {
+            self.error(
+                "10905318",
+                format!(
+                    "When the two-way binding syntax is used, the initial value of property '{property_name}' must be a variable."
+                ),
+                span,
+                &[],
+            );
+            return;
+        }
+        if Self::contains_optional_chain(value) {
+            self.error(
+                "10905320",
+                format!(
+                    "The optional character can not be used in the initial value of property '{property_name}'."
+                ),
+                span,
+                &[],
+            );
+            return;
+        }
+        let mut event_name = String::with_capacity(property_name.len() + 1);
+        event_name.push('$');
+        event_name.push_str(property_name);
+        if info.param_props.contains(property_name) && info.event_props.contains(&event_name) {
+            return;
+        }
+        self.error(
+            "10905319",
+            format!(
+                "When the two-way binding syntax is used, the variable '{property_name}' must be decorated with '@Param', and the '@Event' variable '${property_name}' must be defined in the {component_name}."
+            ),
+            span,
+            &[],
+        );
+    }
+
+    fn double_non_null_value<'node, 'ast>(
+        expression: &'node Expression<'ast>,
+    ) -> Option<&'node Expression<'ast>> {
+        match expression {
+            Expression::TSNonNullExpression(outer) => Self::double_non_null_inner(outer),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::TSNonNullExpression(outer) => Self::double_non_null_inner(outer),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn double_non_null_inner<'node, 'ast>(
+        outer: &'node TSNonNullExpression<'ast>,
+    ) -> Option<&'node Expression<'ast>> {
+        let Expression::TSNonNullExpression(inner) = &outer.expression else {
+            return None;
+        };
+        (!matches!(inner.expression, Expression::TSNonNullExpression(_)))
+            .then_some(&inner.expression)
+    }
+
+    fn contains_optional_chain(expression: &Expression<'_>) -> bool {
+        match expression {
+            Expression::ChainExpression(_) => true,
+            Expression::StaticMemberExpression(member) => {
+                member.optional || Self::contains_optional_chain(&member.object)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                member.optional
+                    || Self::contains_optional_chain(&member.object)
+                    || Self::contains_optional_chain(&member.expression)
+            }
+            Expression::CallExpression(call) => {
+                call.optional || Self::contains_optional_chain(&call.callee)
+            }
+            Expression::ParenthesizedExpression(parenthesized) => {
+                Self::contains_optional_chain(&parenthesized.expression)
+            }
+            _ => false,
+        }
+    }
+
+    fn check_component_v2_assignment(
+        &mut self,
+        component_name: &str,
+        property_name: &str,
+        initializer: &Expression<'_>,
+        span: Span,
+        info: &CustomComponentInfo,
+    ) {
+        if self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
+            || info.generation != CustomComponentGeneration::V2
+            || !info.update_props.contains(property_name)
+        {
+            return;
+        }
+        let Expression::StaticMemberExpression(member) = initializer else {
+            return;
+        };
+        if !matches!(&member.object, Expression::ThisExpression(_)) {
+            return;
+        }
+        let parent_property_name = member.property.name.as_str();
+        let Some(parent_property) = self.parent_update_property(parent_property_name) else {
+            return;
+        };
+        let Some(annotation) = parent_property.type_annotation.as_ref() else {
+            return;
+        };
+        if !self.is_forbidden_component_v2_assignment_type(&annotation.type_annotation) {
+            return;
+        }
+        self.error(
+            "10905323",
+            format!(
+                "Property '{property_name}' in the '@ComponentV2' component '{component_name}' is not allowed to be assigned value here."
+            ),
+            span,
+            &[],
+        );
+    }
+
+    fn parent_update_property(&self, name: &str) -> Option<&oxc_ast::ast::PropertyDefinition<'_>> {
+        self.statement.body.body.iter().find_map(|element| {
+            let StructElement::PropertyDefinition(property) = element else {
+                return None;
+            };
+            if property.key.static_name().as_deref() != Some(name)
+                || !property.decorators.iter().any(|decorator| {
+                    Self::is_v1_update_source_decorator(ArkuiDecorator::new(decorator).name())
+                })
+            {
+                return None;
+            }
+            Some(property.as_ref())
+        })
+    }
+
+    fn is_forbidden_component_v2_assignment_type(&self, ty: &TSType<'_>) -> bool {
+        match ty {
+            TSType::TSParenthesizedType(parenthesized) => {
+                self.is_forbidden_component_v2_assignment_type(&parenthesized.type_annotation)
+            }
+            TSType::TSUnionType(union) => {
+                if union.types.iter().any(Self::is_basic_assignment_type) {
+                    return false;
+                }
+                union.types.iter().all(Self::is_function_assignment_type)
+            }
+            _ if Self::is_basic_assignment_type(ty) => false,
+            TSType::TSTypeReference(reference)
+                if matches!(
+                    &reference.type_name,
+                    TSTypeName::IdentifierReference(identifier)
+                        if matches!(identifier.name.as_str(), "Set" | "Map" | "Date" | "Array")
+                ) =>
+            {
+                false
+            }
+            _ => Self::is_function_assignment_type(ty) || self.type_contains_observed_v2(ty),
+        }
+    }
+
+    fn is_basic_assignment_type(ty: &TSType<'_>) -> bool {
+        matches!(
+            ty,
+            TSType::TSStringKeyword(_)
+                | TSType::TSNumberKeyword(_)
+                | TSType::TSBooleanKeyword(_)
+                | TSType::TSBigIntKeyword(_)
+                | TSType::TSNullKeyword(_)
+                | TSType::TSUndefinedKeyword(_)
+                | TSType::TSLiteralType(_)
+        )
+    }
+
+    fn is_function_assignment_type(ty: &TSType<'_>) -> bool {
+        match ty {
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::is_function_assignment_type(&parenthesized.type_annotation)
+            }
+            TSType::TSUnionType(union) => union.types.iter().all(Self::is_function_assignment_type),
+            TSType::TSFunctionType(_) => true,
+            TSType::TSTypeReference(reference) => matches!(
+                &reference.type_name,
+                TSTypeName::IdentifierReference(identifier) if identifier.name == "Function"
+            ),
+            _ => false,
         }
     }
 
@@ -1192,7 +1571,6 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             if !component_v2 {
                 self.check_custom_decorator_conflict(property, &decorators);
                 self.check_forbidden_state_type(property, name, &decorators);
-                self.check_observed_v2_property_type(property, &decorators);
             }
 
             for decorator in &property.decorators {
@@ -1830,6 +2208,22 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 | ArkuiDecoratorName::PROVIDE
                 | ArkuiDecoratorName::CONSUME
                 | ArkuiDecoratorName::WATCH
+                | ArkuiDecoratorName::STORAGE_LINK
+                | ArkuiDecoratorName::STORAGE_PROP
+                | ArkuiDecoratorName::LOCAL_STORAGE_LINK
+                | ArkuiDecoratorName::LOCAL_STORAGE_PROP
+                | ArkuiDecoratorName::OBJECT_LINK
+        )
+    }
+
+    fn is_v1_update_source_decorator(name: &str) -> bool {
+        matches!(
+            name,
+            ArkuiDecoratorName::STATE
+                | ArkuiDecoratorName::PROP
+                | ArkuiDecoratorName::LINK
+                | ArkuiDecoratorName::PROVIDE
+                | ArkuiDecoratorName::CONSUME
                 | ArkuiDecoratorName::STORAGE_LINK
                 | ArkuiDecoratorName::STORAGE_PROP
                 | ArkuiDecoratorName::LOCAL_STORAGE_LINK

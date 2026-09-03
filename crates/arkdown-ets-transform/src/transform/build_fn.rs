@@ -90,6 +90,25 @@ pub enum CustomComponentGeneration {
     V2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CustomComponentPropertyKind {
+    Local,
+    Consumer,
+    Provider,
+    Regular,
+}
+
+impl CustomComponentPropertyKind {
+    pub(crate) fn source_name(self) -> &'static str {
+        match self {
+            Self::Local => "@Local",
+            Self::Consumer => "@Consumer",
+            Self::Provider => "@Provider",
+            Self::Regular => "regular",
+        }
+    }
+}
+
 impl CustomComponentGeneration {
     fn runtime_base_name(self) -> &'static str {
         match self {
@@ -104,6 +123,11 @@ pub struct CustomComponentInfo {
     pub update_props: FxHashSet<String>,
     pub link_props: FxHashSet<String>,
     pub builder_params: FxHashSet<String>,
+    pub(crate) param_props: FxHashSet<String>,
+    pub(crate) event_props: FxHashSet<String>,
+    pub(crate) required_props: Vec<String>,
+    pub(crate) forbidden_init_props: FxHashMap<String, CustomComponentPropertyKind>,
+    pub(crate) custom_env_props: FxHashSet<String>,
     pub reusable: bool,
     pub reusable_v2: bool,
     pub is_custom_dialog: bool,

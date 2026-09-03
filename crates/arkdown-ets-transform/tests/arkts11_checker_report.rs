@@ -72,6 +72,89 @@ struct ComponentV2Contracts {
 }
 
 #[test]
+fn arkts11_custom_component_arguments_use_the_shared_component_inventory() {
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
+    let report = checker.check(
+        "CustomComponentArguments.ets",
+        r#"
+@ComponentV2
+struct Child {
+  @Require @Param required: string
+  @Local local: string = ''
+  build() {}
+}
+@Component
+struct Parent {
+  build() { Child({ local: 'override' }) }
+}
+"#,
+    );
+    let codes = report
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            EtsTransformError::CodedDiagnostic { code, .. } => Some(code.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(codes, ["10905324", "10905321"]);
+}
+
+#[test]
+fn arkts11_custom_component_contracts_follow_imported_exports() {
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        PathBuf::from("/project/Child.ets"),
+        Arc::<str>::from(
+            "@ComponentV2\nexport struct Child {\n  @Require @Param value: string\n  build() {}\n}\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(TransformSourceSnapshot::new(files), Vec::new());
+    let report = checker.check(
+        "/project/Parent.ets",
+        "import { Child } from './Child';\n@Component struct Parent { build() { Child() } }",
+    );
+
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. } if code == "10905321"
+        )
+    }));
+}
+
+#[test]
+fn arkts11_v1_to_v2_assignment_uses_parent_property_type_identity() {
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
+    let report = checker.check(
+        "V1ToV2Assignment.ets",
+        r#"
+@ObservedV2
+class Model { @Trace value: number = 0 }
+@ComponentV2
+struct Child { @Param data: Model = new Model(); build() {} }
+@Component
+struct Parent {
+  @State data: Model = new Model()
+  build() { Child({ data: this.data }) }
+}
+"#,
+    );
+    let codes = report
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            EtsTransformError::CodedDiagnostic { code, .. } => Some(code.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(codes, ["10905348", "10905323"]);
+}
+
+#[test]
 fn arkts11_source_checker_aggregates_sdk_api_diagnostics_without_transforming() {
     let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
     let report = checker.check(

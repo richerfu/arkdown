@@ -50,8 +50,10 @@ use crate::error::EtsTransformError;
 use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
 use crate::transform::api_available::{ApiAvailableLowerer, ApiAvailableTransformOptions};
 use crate::transform::build_fn::{
-    BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, CustomComponentUpdateProps,
-    StylesMethodInfo,
+    BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, StylesMethodInfo,
+};
+pub(crate) use crate::transform::build_fn::{
+    CustomComponentGeneration, CustomComponentInfo, CustomComponentUpdateProps,
 };
 use crate::transform::builder_factory::BuilderFactoryValidator;
 use crate::transform::component::{
@@ -61,10 +63,9 @@ use crate::transform::component::{
 };
 use crate::transform::component_analysis::{
     BuilderFunctionNameCollector, CustomComponentNameCollector, ExtendAttributeIndex,
-    ImportedComponentNamesCollector, ImportedCustomComponentNamesCollector,
-    LocalBuilderFileInventory, LocalComponentUpdatePropsCollector, PreviewComponentNameCollector,
-    SimpleTypeContext, StructBuilderMethodNames, StructBuilderParamNames,
-    StructMutableBuilderProperties,
+    ImportedCustomComponentNamesCollector, LocalBuilderFileInventory,
+    PreviewComponentNameCollector, SimpleTypeContext, StructBuilderMethodNames,
+    StructBuilderParamNames, StructMutableBuilderProperties,
 };
 use crate::transform::component_collection::ComponentNameCollector;
 use crate::transform::component_meta::ComponentMetadata;
@@ -86,7 +87,8 @@ use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
 pub(crate) use component_analysis::{
-    ClassObservation, ImportedClassObservations, ModuleExportIndex,
+    ClassObservation, CustomComponentSemanticInventory, ImportedClassObservations,
+    ModuleExportIndex,
 };
 pub use navigation::{NavigationRoute, NavigationRouteMap};
 
@@ -379,6 +381,11 @@ impl<'a> ArktsTransformer<'a> {
             });
         }
 
+        let custom_component_inventory =
+            CustomComponentSemanticInventory::collect(&parsed.program, &source.id.id, options);
+        let mut custom_components = custom_component_inventory.names;
+        let mut custom_component_update_props = custom_component_inventory.info;
+
         if matches!(options.checker_mode, CheckerMode::Oxc) {
             if needs_system_api_validation {
                 let diagnostics = system_api_validator.diagnostics(&parsed.program);
@@ -391,6 +398,7 @@ impl<'a> ArktsTransformer<'a> {
             }
             let report = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
                 .with_component_metadata(&options.component_metadata)
+                .with_custom_component_info(&custom_component_update_props)
                 .with_imported_class_observations(
                     options.module_exports.imported_class_observations(
                         &parsed.program,
@@ -419,23 +427,6 @@ impl<'a> ArktsTransformer<'a> {
         let simple_type_context =
             SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
         let hvigor_source_id = TransformSourcePath::new(&source.id.id).hvigor_source_path(options);
-        let mut custom_components = FxHashSet::default();
-        let mut custom_component_update_props = CustomComponentUpdateProps::default();
-        let mut component_collector = CustomComponentNameCollector::new(&mut custom_components);
-        let mut update_props_collector =
-            LocalComponentUpdatePropsCollector::new(&mut custom_component_update_props);
-        for statement in &parsed.program.body {
-            component_collector.collect_statement(statement);
-            update_props_collector.collect_statement(statement);
-        }
-        ImportedComponentNamesCollector::new(
-            &parsed.program,
-            &source.id.id,
-            options,
-            &mut custom_components,
-            &mut custom_component_update_props,
-        )
-        .collect();
         let builder_function_names =
             BuilderFunctionNameCollector::new(&parsed.program, &source.id.id, options).collect();
         let local_builder_functions = builder_function_names.local;

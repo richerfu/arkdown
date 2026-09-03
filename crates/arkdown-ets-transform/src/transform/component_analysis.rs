@@ -15,7 +15,8 @@ use rayon::prelude::*;
 use super::{ArkuiDecorator, ArkuiDecoratorName, ArkuiDecoratorRules, TransformOptions};
 use crate::source::{CompileArktsSourceType, TransformSourceFile};
 use crate::transform::build_fn::{
-    CustomComponentGeneration, CustomComponentInfo, CustomComponentUpdateProps,
+    CustomComponentGeneration, CustomComponentInfo, CustomComponentPropertyKind,
+    CustomComponentUpdateProps,
 };
 use crate::transform::component_meta::SdkComponentInfo;
 use crate::transform::system_api::{
@@ -124,6 +125,26 @@ impl<'a> CustomComponentNameCollector<'a> {
 
 pub(super) struct LocalComponentUpdatePropsCollector<'a> {
     update_props: &'a mut CustomComponentUpdateProps,
+}
+
+pub(crate) struct CustomComponentSemanticInventory {
+    pub(crate) names: FxHashSet<String>,
+    pub(crate) info: CustomComponentUpdateProps,
+}
+
+impl CustomComponentSemanticInventory {
+    pub(crate) fn collect(program: &Program<'_>, id: &str, options: &TransformOptions) -> Self {
+        let mut names = FxHashSet::default();
+        let mut info = CustomComponentUpdateProps::default();
+        let mut component_collector = CustomComponentNameCollector::new(&mut names);
+        let mut info_collector = LocalComponentUpdatePropsCollector::new(&mut info);
+        for statement in &program.body {
+            component_collector.collect_statement(statement);
+            info_collector.collect_statement(statement);
+        }
+        ImportedComponentNamesCollector::new(program, id, options, &mut names, &mut info).collect();
+        Self { names, info }
+    }
 }
 
 impl<'a> LocalComponentUpdatePropsCollector<'a> {
@@ -605,6 +626,11 @@ impl From<&SdkComponentInfo> for CustomComponentInfo {
             update_props: info.update_props.clone(),
             link_props: info.link_props.clone(),
             builder_params: FxHashSet::default(),
+            param_props: FxHashSet::default(),
+            event_props: FxHashSet::default(),
+            required_props: Vec::new(),
+            forbidden_init_props: FxHashMap::default(),
+            custom_env_props: FxHashSet::default(),
             reusable: info.reusable,
             reusable_v2: false,
             is_custom_dialog: info.is_custom_dialog,
@@ -760,6 +786,11 @@ impl<'a> ComponentInfoCollector<'a> {
             update_props: self.update_prop_names(),
             link_props: self.link_prop_names(),
             builder_params: StructBuilderParamNames::new(self.statement).collect(),
+            param_props: self.decorated_property_names(ArkuiDecoratorName::PARAM),
+            event_props: self.decorated_property_names(ArkuiDecoratorName::EVENT),
+            required_props: self.required_prop_names(),
+            forbidden_init_props: self.forbidden_init_props(),
+            custom_env_props: self.decorated_property_names(ArkuiDecoratorName::CUSTOM_ENV),
             reusable: self.statement.decorators.iter().any(|decorator| {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REUSABLE
             }),
@@ -783,11 +814,23 @@ impl<'a> ComponentInfoCollector<'a> {
             let StructElement::PropertyDefinition(property) = element else {
                 continue;
             };
-            if !property.decorators.iter().any(|decorator| {
-                ArkuiDecoratorName::is_custom_component_update_prop(
-                    ArkuiDecorator::new(decorator).name(),
-                )
-            }) {
+            let update_prop = if ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+                property.decorators.iter().any(|decorator| {
+                    matches!(
+                        ArkuiDecorator::new(decorator).name(),
+                        ArkuiDecoratorName::PARAM
+                            | ArkuiDecoratorName::ONCE
+                            | ArkuiDecoratorName::EVENT
+                    )
+                })
+            } else {
+                property.decorators.iter().any(|decorator| {
+                    ArkuiDecoratorName::is_custom_component_update_prop(
+                        ArkuiDecorator::new(decorator).name(),
+                    )
+                })
+            };
+            if !update_prop {
                 continue;
             }
             if let Some(name) = property.key.static_name() {
@@ -795,6 +838,97 @@ impl<'a> ComponentInfoCollector<'a> {
             }
         }
         names
+    }
+
+    fn required_prop_names(&self) -> Vec<String> {
+        if !ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return Vec::new();
+        }
+        self.statement
+            .body
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                StructElement::PropertyDefinition(property) => Some(property),
+                _ => None,
+            })
+            .filter(|property| {
+                let decorators = property
+                    .decorators
+                    .iter()
+                    .map(|decorator| ArkuiDecorator::new(decorator).name())
+                    .collect::<Vec<_>>();
+                decorators.contains(&ArkuiDecoratorName::REQUIRE)
+                    && (decorators.contains(&ArkuiDecoratorName::PARAM)
+                        || decorators.contains(&ArkuiDecoratorName::BUILDER_PARAM))
+            })
+            .filter_map(|property| property.key.static_name().map(|name| name.into_owned()))
+            .collect()
+    }
+
+    fn forbidden_init_props(&self) -> FxHashMap<String, CustomComponentPropertyKind> {
+        if !ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return FxHashMap::default();
+        }
+        let mut properties = FxHashMap::default();
+        for element in &self.statement.body.body {
+            let StructElement::PropertyDefinition(property) = element else {
+                continue;
+            };
+            let Some(name) = property.key.static_name() else {
+                continue;
+            };
+            let decorators = property
+                .decorators
+                .iter()
+                .map(|decorator| ArkuiDecorator::new(decorator).name())
+                .collect::<Vec<_>>();
+            let kind = if decorators.contains(&ArkuiDecoratorName::LOCAL) {
+                Some(CustomComponentPropertyKind::Local)
+            } else if decorators.contains(&ArkuiDecoratorName::CONSUMER) {
+                Some(CustomComponentPropertyKind::Consumer)
+            } else if decorators.contains(&ArkuiDecoratorName::PROVIDER) {
+                Some(CustomComponentPropertyKind::Provider)
+            } else if !decorators.iter().any(|decorator| {
+                matches!(
+                    *decorator,
+                    ArkuiDecoratorName::LOCAL
+                        | ArkuiDecoratorName::PARAM
+                        | ArkuiDecoratorName::ONCE
+                        | ArkuiDecoratorName::EVENT
+                        | ArkuiDecoratorName::PROVIDER
+                        | ArkuiDecoratorName::CONSUMER
+                        | ArkuiDecoratorName::BUILDER_PARAM
+                        | ArkuiDecoratorName::ENV
+                )
+            }) {
+                Some(CustomComponentPropertyKind::Regular)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                properties.insert(name.into_owned(), kind);
+            }
+        }
+        properties
+    }
+
+    fn decorated_property_names(&self, decorator_name: &str) -> FxHashSet<String> {
+        self.statement
+            .body
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                StructElement::PropertyDefinition(property)
+                    if property.decorators.iter().any(|decorator| {
+                        ArkuiDecorator::new(decorator).name() == decorator_name
+                    }) =>
+                {
+                    property.key.static_name().map(|name| name.into_owned())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn link_prop_names(&self) -> FxHashSet<String> {

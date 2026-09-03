@@ -6,7 +6,7 @@ use oxc_ast::ast::{
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
-use crate::transform::{ClassObservation, ImportedClassObservations};
+use crate::transform::{ClassObservation, CustomComponentUpdateProps, ImportedClassObservations};
 use crate::ModuleExportNameText;
 use rustc_hash::FxHashMap;
 
@@ -59,6 +59,7 @@ pub struct EtsChecker<'program, 'alloc, 'file> {
     page_context: Option<PageValidationContext>,
     component_metadata: Option<&'program ComponentMetadata>,
     imported_class_observations: ImportedClassObservations,
+    custom_component_info: Option<&'program CustomComponentUpdateProps>,
 }
 
 impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
@@ -69,6 +70,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             page_context: None,
             component_metadata: None,
             imported_class_observations: ImportedClassObservations::default(),
+            custom_component_info: None,
         }
     }
 
@@ -99,6 +101,14 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
         observations: ImportedClassObservations,
     ) -> Self {
         self.imported_class_observations = observations;
+        self
+    }
+
+    pub(crate) fn with_custom_component_info(
+        mut self,
+        custom_component_info: &'program CustomComponentUpdateProps,
+    ) -> Self {
+        self.custom_component_info = Some(custom_component_info);
         self
     }
 
@@ -232,6 +242,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             .with_component_metadata(self.component_metadata)
             .with_component_reuse_inventory(component_reuse)
             .with_class_observation_inventory(class_observations)
+            .with_custom_component_info(self.custom_component_info)
             .check();
     }
 
