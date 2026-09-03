@@ -4,20 +4,22 @@ use crate::transform::{ClassObservation, ImportedClassObservations};
 
 use super::arkts11_monitor::Arkts11MonitorValidator;
 use oxc_ast::ast::{Class, ClassElement, MethodDefinitionKind};
+use rustc_hash::FxHashSet;
 
 /// Rejects struct-only ArkUI decorators on ordinary classes.
 ///
 /// The source owner is `validate_ui_syntax.ts::validateStructDecorator` and
 /// `validateMethodDecorator`. Data-model decorators such as `@Observed`,
 /// `@ObservedV2`, `@Track`, and `@Trace` deliberately remain valid on classes.
-pub(super) struct Arkts11ClassValidator<'class, 'errors> {
+pub(super) struct Arkts11ClassValidator<'class, 'context, 'errors> {
     class: &'class Class<'class>,
     file: &'errors str,
     errors: &'errors mut Vec<EtsTransformError>,
     class_observations: Option<&'class ImportedClassObservations>,
+    sdk_type_bindings: Option<&'context FxHashSet<String>>,
 }
 
-impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
+impl<'class, 'context, 'errors> Arkts11ClassValidator<'class, 'context, 'errors> {
     pub(super) fn new(
         class: &'class Class<'class>,
         file: &'errors str,
@@ -28,6 +30,7 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
             file,
             errors,
             class_observations: None,
+            sdk_type_bindings: None,
         }
     }
 
@@ -36,6 +39,11 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
         class_observations: &'class ImportedClassObservations,
     ) -> Self {
         self.class_observations = Some(class_observations);
+        self
+    }
+
+    pub(super) fn with_sdk_type_bindings(mut self, bindings: &'context FxHashSet<String>) -> Self {
+        self.sdk_type_bindings = Some(bindings);
         self
     }
 
@@ -60,7 +68,16 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
 
         for decorator in &self.class.decorators {
             let name = ArkuiDecorator::new(decorator).name();
-            if Self::is_struct_decorator(name) {
+            if self.is_sdk_type_decorator(name) {
+                self.errors.push(Self::diagnostic(
+                    self.file,
+                    "10905345",
+                    format!(
+                        "The '@{name}' decorator can decorate only member variables of a class."
+                    ),
+                    decorator.span,
+                ));
+            } else if Self::is_struct_decorator(name) {
                 self.errors.push(Self::diagnostic(
                     self.file,
                     "10905337",
@@ -75,7 +92,26 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
                 ClassElement::PropertyDefinition(property) => {
                     for decorator in &property.decorators {
                         let name = ArkuiDecorator::new(decorator).name();
-                        if Self::is_struct_member_decorator(name) {
+                        if self.is_sdk_type_decorator(name) {
+                            if observed_v1 {
+                                self.errors.push(Self::type_owner_diagnostic(
+                                    self.file,
+                                    name,
+                                    "Observed",
+                                    decorator.span,
+                                    "10905341",
+                                ));
+                            }
+                            if self.is_sendable() {
+                                self.errors.push(Self::type_owner_diagnostic(
+                                    self.file,
+                                    name,
+                                    "Sendable",
+                                    decorator.span,
+                                    "10905342",
+                                ));
+                            }
+                        } else if Self::is_struct_member_decorator(name) {
                             self.errors.push(Self::diagnostic(
                                 self.file,
                                 "10905337",
@@ -115,6 +151,35 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
                 ClassElement::MethodDefinition(method) => {
                     for decorator in &method.decorators {
                         let name = ArkuiDecorator::new(decorator).name();
+                        if self.is_sdk_type_decorator(name) {
+                            if observed_v1 {
+                                self.errors.push(Self::type_owner_diagnostic(
+                                    self.file,
+                                    name,
+                                    "Observed",
+                                    decorator.span,
+                                    "10905341",
+                                ));
+                            }
+                            if self.is_sendable() {
+                                self.errors.push(Self::type_owner_diagnostic(
+                                    self.file,
+                                    name,
+                                    "Sendable",
+                                    decorator.span,
+                                    "10905342",
+                                ));
+                            }
+                            self.errors.push(Self::diagnostic(
+                                self.file,
+                                "10905340",
+                                format!(
+                                    "The '@{name}' can decorate only member variables in a 'class'."
+                                ),
+                                decorator.span,
+                            ));
+                            continue;
+                        }
                         if observed_v2
                             && matches!(
                                 name,
@@ -271,6 +336,35 @@ impl<'class, 'errors> Arkts11ClassValidator<'class, 'errors> {
             ),
             span,
         )
+    }
+
+    fn type_owner_diagnostic(
+        file: &str,
+        name: &str,
+        owner: &str,
+        span: oxc_span::Span,
+        code: &str,
+    ) -> EtsTransformError {
+        Self::diagnostic(
+            file,
+            code,
+            format!(
+                "The '@{name}' decorator can not be used in a 'class' decorated with '@{owner}'."
+            ),
+            span,
+        )
+    }
+
+    fn is_sendable(&self) -> bool {
+        self.class
+            .decorators
+            .iter()
+            .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::SENDABLE)
+    }
+
+    fn is_sdk_type_decorator(&self, name: &str) -> bool {
+        self.sdk_type_bindings
+            .is_some_and(|bindings| bindings.contains(name))
     }
 
     fn is_struct_decorator(name: &str) -> bool {

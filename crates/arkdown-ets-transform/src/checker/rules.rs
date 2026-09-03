@@ -1,11 +1,13 @@
 use oxc_ast::ast::{
-    Declaration, ExportDefaultDeclarationKind, Program, Statement, StructStatement,
+    Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier, Program, Statement,
+    StructStatement,
 };
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::{ClassObservation, ImportedClassObservations};
+use crate::ModuleExportNameText;
 use rustc_hash::FxHashMap;
 
 use super::arkts11_class::Arkts11ClassValidator;
@@ -105,6 +107,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
         let mut page_decorators = PageDecoratorCounts::default();
         let component_reuse = self.component_reuse_inventory();
         let class_observations = self.class_observation_inventory();
+        let sdk_type_bindings = self.sdk_type_bindings();
 
         for statement in &self.program.body {
             match statement {
@@ -121,6 +124,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                 Statement::ClassDeclaration(class) => {
                     Arkts11ClassValidator::new(class, self.file, &mut report.diagnostics)
                         .with_class_observation_inventory(&class_observations)
+                        .with_sdk_type_bindings(&sdk_type_bindings)
                         .check();
                 }
                 Statement::FunctionDeclaration(function) => {
@@ -141,6 +145,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                     Declaration::ClassDeclaration(class) => {
                         Arkts11ClassValidator::new(class, self.file, &mut report.diagnostics)
                             .with_class_observation_inventory(&class_observations)
+                            .with_sdk_type_bindings(&sdk_type_bindings)
                             .check();
                     }
                     Declaration::FunctionDeclaration(function) => {
@@ -163,6 +168,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                     ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                         Arkts11ClassValidator::new(class, self.file, &mut report.diagnostics)
                             .with_class_observation_inventory(&class_observations)
+                            .with_sdk_type_bindings(&sdk_type_bindings)
                             .check();
                     }
                     ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
@@ -179,6 +185,35 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             page_decorators.validate(context, self.file, &mut report.diagnostics);
         }
         report
+    }
+
+    fn sdk_type_bindings(&self) -> rustc_hash::FxHashSet<String> {
+        let mut bindings = rustc_hash::FxHashSet::default();
+        for statement in &self.program.body {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            if !matches!(
+                import.source.value.as_str(),
+                "@ohos.arkui.StateManagement" | "@ohos:arkui.StateManagement" | "@kit.ArkUI"
+            ) {
+                continue;
+            }
+            let Some(specifiers) = import.specifiers.as_ref() else {
+                continue;
+            };
+            for specifier in specifiers {
+                let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                    continue;
+                };
+                if ModuleExportNameText::new(&specifier.imported).binding_name()
+                    == ArkuiDecoratorName::TYPE
+                {
+                    bindings.insert(specifier.local.name.to_string());
+                }
+            }
+        }
+        bindings
     }
 
     fn check_struct(

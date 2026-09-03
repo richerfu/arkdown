@@ -24,6 +24,13 @@
       "expect": { "errorCode": "10905110" }
     },
     {
+      "id": "extend-decorator-argument-count",
+      "owner": "compiler/src/process_ui_syntax.ts::parseExtendNode",
+      "file": "ExtendArguments.ets",
+      "source": "@Extend(Text, Button) function extendedStyle() {}",
+      "expect": { "errorCode": "10905108" }
+    },
+    {
       "id": "exported-global-styles-function-arguments",
       "owner": "compiler/src/process_ui_syntax.ts::processAllNodes",
       "file": "ExportedStylesFunctionArguments.ets",
@@ -36,6 +43,13 @@
       "file": "GlobalLocalBuilder.ets",
       "source": "@LocalBuilder function content() {}",
       "expect": { "errorCode": "10905117" }
+    },
+    {
+      "id": "local-builder-static-method",
+      "owner": "compiler/src/process_component_class.ts::checkDecoratorMethod",
+      "file": "StaticLocalBuilder.ets",
+      "source": "@Component struct StaticLocalBuilder { @LocalBuilder static content() {} build() {} }",
+      "expect": { "errorCode": "10905104" }
     },
     {
       "id": "multiple-global-function-decorators",
@@ -248,6 +262,20 @@
       "expect": { "errorCode": "10905363" }
     },
     {
+      "id": "env-decorator-owner",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkEnvDecorator",
+      "file": "EnvOwner.ets",
+      "source": "@CustomDialog struct EnvOwner { @Env value: string; controller: CustomDialogController; build() {} }",
+      "expect": { "errorCode": "10905250" }
+    },
+    {
+      "id": "property-decorator-style-collision",
+      "owner": "compiler/src/process_component_member.ts::checkDecoratorIsDuplicated",
+      "file": "DecoratorStyleCollision.ets",
+      "source": "@Component struct DecoratorStyleCollision { @width value: number = 0; build() {} }",
+      "expect": { "errorCode": "10905309" }
+    },
+    {
       "id": "sync-monitor-constant-argument",
       "owner": "compiler/src/validate_ui_syntax.ts::checkMonitorDecoratorsArg",
       "file": "SyncMonitorConstant.ets",
@@ -295,6 +323,41 @@
       "file": "TrackInObservedV2.ets",
       "source": "@ObservedV2 class TrackInObservedV2 { @Track value: number = 0; }",
       "expect": { "errorCode": "10905344" }
+    },
+    {
+      "id": "sdk-type-on-class",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateClassDecorator",
+      "file": "TypeOnClass.ets",
+      "source": "import { Type } from '@ohos.arkui.StateManagement'; @Type(Model) class TypeOnClass {} class Model {}",
+      "expect": { "errorCode": "10905345" }
+    },
+    {
+      "id": "sdk-type-on-method",
+      "owner": "compiler/src/validate_ui_syntax.ts::validType",
+      "file": "TypeOnMethod.ets",
+      "source": "import { Type } from '@kit.ArkUI'; class Model {} @ObservedV2 class TypeOnMethod { @Type(Model) value(): void {} }",
+      "expect": { "errorCode": "10905340" }
+    },
+    {
+      "id": "sdk-type-in-observed-class",
+      "owner": "compiler/src/validate_ui_syntax.ts::validType",
+      "file": "TypeInObserved.ets",
+      "source": "import { Type as PersistedType } from '@ohos.arkui.StateManagement'; class Model {} @Observed class TypeInObserved { @PersistedType(Model) value: Model = new Model(); }",
+      "expect": { "errorCode": "10905341" }
+    },
+    {
+      "id": "sdk-type-in-sendable-class",
+      "owner": "compiler/src/validate_ui_syntax.ts::validType",
+      "file": "TypeInSendable.ets",
+      "source": "import { Type } from '@ohos.arkui.StateManagement'; class Model {} @Sendable class TypeInSendable { @Type(Model) value: Model = new Model(); }",
+      "expect": { "errorCode": "10905342" }
+    },
+    {
+      "id": "user-type-decorator-collision",
+      "owner": "compiler/src/validate_ui_syntax.ts::validTypeCallback",
+      "file": "UserTypeDecorator.ets",
+      "source": "function Type(value: object): PropertyDecorator { return () => {}; } class Model {} @Observed class UserTypeDecorator { @Type(Model) value: Model = new Model(); }",
+      "expect": { "contains": [] }
     },
     {
       "id": "trace-outside-observed-v2",

@@ -26,6 +26,7 @@ impl ArkuiDecoratorName {
     pub(crate) const STYLES: &'static str = "Styles";
     pub(crate) const PREVIEW: &'static str = "Preview";
     pub(crate) const TRACK: &'static str = "Track";
+    pub(crate) const TYPE: &'static str = "Type";
     pub(crate) const WATCH: &'static str = "Watch";
 
     pub(crate) const STATE: &'static str = "State";
