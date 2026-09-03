@@ -19,6 +19,7 @@ use crate::transform::build_fn::{
     CustomComponentUpdateProps,
 };
 use crate::transform::component_meta::SdkComponentInfo;
+use crate::transform::decorator::ArkuiStateDecorator;
 use crate::transform::system_api::{
     ExportedSystemApiSymbols, SystemApiModuleFacts, SystemApiSymbol,
 };
@@ -631,6 +632,11 @@ impl From<&SdkComponentInfo> for CustomComponentInfo {
             required_props: Vec::new(),
             forbidden_init_props: FxHashMap::default(),
             custom_env_props: FxHashSet::default(),
+            regular_props: FxHashSet::default(),
+            v1_required_props: Vec::new(),
+            v1_mandatory_props: Vec::new(),
+            v1_property_kinds: FxHashMap::default(),
+            v1_forbidden_init_props: FxHashMap::default(),
             reusable: info.reusable,
             reusable_v2: false,
             is_custom_dialog: info.is_custom_dialog,
@@ -791,6 +797,11 @@ impl<'a> ComponentInfoCollector<'a> {
             required_props: self.required_prop_names(),
             forbidden_init_props: self.forbidden_init_props(),
             custom_env_props: self.decorated_property_names(ArkuiDecoratorName::CUSTOM_ENV),
+            regular_props: self.regular_property_names(),
+            v1_required_props: self.v1_required_prop_names(),
+            v1_mandatory_props: self.v1_mandatory_prop_names(),
+            v1_property_kinds: self.v1_property_kinds(),
+            v1_forbidden_init_props: self.v1_forbidden_init_props(),
             reusable: self.statement.decorators.iter().any(|decorator| {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REUSABLE
             }),
@@ -906,6 +917,175 @@ impl<'a> ComponentInfoCollector<'a> {
             } else {
                 None
             };
+            if let Some(kind) = kind {
+                properties.insert(name.into_owned(), kind);
+            }
+        }
+        properties
+    }
+
+    fn regular_property_names(&self) -> FxHashSet<String> {
+        if ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return FxHashSet::default();
+        }
+        self.statement
+            .body
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                StructElement::PropertyDefinition(property)
+                    if property.decorators.iter().all(|decorator| {
+                        !ArkuiStateDecorator::new(ArkuiDecorator::new(decorator).name()).is_state()
+                    }) =>
+                {
+                    property.key.static_name().map(|name| name.into_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn v1_required_prop_names(&self) -> Vec<String> {
+        if ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return Vec::new();
+        }
+        self.statement
+            .body
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                StructElement::PropertyDefinition(property)
+                    if property.decorators.iter().any(|decorator| {
+                        ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REQUIRE
+                    }) =>
+                {
+                    Some(property)
+                }
+                _ => None,
+            })
+            .filter(|property| {
+                let decorators = property
+                    .decorators
+                    .iter()
+                    .map(|decorator| ArkuiDecorator::new(decorator).name())
+                    .collect::<Vec<_>>();
+                decorators.iter().any(|decorator| {
+                    matches!(
+                        *decorator,
+                        ArkuiDecoratorName::BUILDER_PARAM
+                            | ArkuiDecoratorName::PROP
+                            | ArkuiDecoratorName::STATE
+                            | ArkuiDecoratorName::PROVIDE
+                    )
+                }) || decorators
+                    .iter()
+                    .all(|decorator| !ArkuiStateDecorator::new(decorator).is_state())
+            })
+            .filter_map(|property| property.key.static_name().map(|name| name.into_owned()))
+            .collect()
+    }
+
+    fn v1_mandatory_prop_names(&self) -> Vec<String> {
+        if ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return Vec::new();
+        }
+        let mut names = Vec::new();
+        for required_decorator in [ArkuiDecoratorName::LINK, ArkuiDecoratorName::OBJECT_LINK] {
+            names.extend(
+                self.statement
+                    .body
+                    .body
+                    .iter()
+                    .filter_map(|element| match element {
+                        StructElement::PropertyDefinition(property)
+                            if property.decorators.iter().any(|decorator| {
+                                ArkuiDecorator::new(decorator).name() == required_decorator
+                            }) =>
+                        {
+                            property.key.static_name().map(|name| name.into_owned())
+                        }
+                        _ => None,
+                    }),
+            );
+        }
+        names
+    }
+
+    fn v1_property_kinds(&self) -> FxHashMap<String, CustomComponentPropertyKind> {
+        if ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return FxHashMap::default();
+        }
+        let mut properties = FxHashMap::default();
+        for element in &self.statement.body.body {
+            let StructElement::PropertyDefinition(property) = element else {
+                continue;
+            };
+            let Some(name) = property.key.static_name() else {
+                continue;
+            };
+            let kind = property
+                .decorators
+                .iter()
+                .find_map(|decorator| Self::v1_transfer_kind(ArkuiDecorator::new(decorator).name()))
+                .or_else(|| {
+                    property
+                        .decorators
+                        .iter()
+                        .all(|decorator| {
+                            !ArkuiStateDecorator::new(ArkuiDecorator::new(decorator).name())
+                                .is_state()
+                        })
+                        .then_some(CustomComponentPropertyKind::Regular)
+                });
+            if let Some(kind) = kind {
+                properties.insert(name.into_owned(), kind);
+            }
+        }
+        properties
+    }
+
+    fn v1_transfer_kind(decorator: &str) -> Option<CustomComponentPropertyKind> {
+        match decorator {
+            ArkuiDecoratorName::STATE => Some(CustomComponentPropertyKind::State),
+            ArkuiDecoratorName::LINK => Some(CustomComponentPropertyKind::Link),
+            ArkuiDecoratorName::PROP => Some(CustomComponentPropertyKind::Prop),
+            ArkuiDecoratorName::PROVIDE => Some(CustomComponentPropertyKind::Provide),
+            ArkuiDecoratorName::OBJECT_LINK => Some(CustomComponentPropertyKind::ObjectLink),
+            _ => None,
+        }
+    }
+
+    fn v1_forbidden_init_props(&self) -> FxHashMap<String, CustomComponentPropertyKind> {
+        if ArkuiDecoratorRules::is_component_v2_struct(self.statement) {
+            return FxHashMap::default();
+        }
+        let mut properties = FxHashMap::default();
+        for element in &self.statement.body.body {
+            let StructElement::PropertyDefinition(property) = element else {
+                continue;
+            };
+            let Some(name) = property.key.static_name() else {
+                continue;
+            };
+            let kind = property
+                .decorators
+                .iter()
+                .find_map(|decorator| match ArkuiDecorator::new(decorator).name() {
+                    ArkuiDecoratorName::STORAGE_LINK => {
+                        Some(CustomComponentPropertyKind::StorageLink)
+                    }
+                    ArkuiDecoratorName::STORAGE_PROP => {
+                        Some(CustomComponentPropertyKind::StorageProp)
+                    }
+                    ArkuiDecoratorName::LOCAL_STORAGE_LINK => {
+                        Some(CustomComponentPropertyKind::LocalStorageLink)
+                    }
+                    ArkuiDecoratorName::LOCAL_STORAGE_PROP => {
+                        Some(CustomComponentPropertyKind::LocalStorageProp)
+                    }
+                    ArkuiDecoratorName::CONSUME => Some(CustomComponentPropertyKind::Consume),
+                    _ => None,
+                });
             if let Some(kind) = kind {
                 properties.insert(name.into_owned(), kind);
             }

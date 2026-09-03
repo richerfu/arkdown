@@ -674,6 +674,76 @@
       "expect": { "contains": ["$value: (value) => {", "this.value = value"] }
     },
     {
+      "id": "component-v1-require-property-is-mandatory",
+      "owner": "compiler/src/process_custom_component.ts::validateInitDecorator",
+      "file": "RequiredChildV1.ets",
+      "source": "@Component struct Child { @Require @Prop value: number; build() {} } @Component struct Parent { build() { Child() } }",
+      "expect": { "errorCode": "10905359" }
+    },
+    {
+      "id": "component-v1-link-property-is-mandatory",
+      "owner": "compiler/src/process_custom_component.ts::validateMandatoryToInitViaParam",
+      "file": "LinkChildV1.ets",
+      "source": "@Component struct Child { @Link value: number; build() {} } @Component struct Parent { @State value: number = 0; build() { Child() } }",
+      "expect": { "errorCode": "10905316" }
+    },
+    {
+      "id": "component-v1-storage-property-cannot-be-supplied",
+      "owner": "compiler/src/process_custom_component.ts::validateForbiddenToInitViaParam",
+      "file": "StorageChildV1.ets",
+      "source": "@Component struct Child { @StorageLink('count') count: number = 0; build() {} } @Component struct Parent { build() { Child({ count: 1 }) } }",
+      "expect": { "errorCode": "10905317" }
+    },
+    {
+      "id": "component-v1-env-cannot-initialize-decorated-child-property",
+      "owner": "compiler/src/process_custom_component.ts::validateAssignEnvV1",
+      "file": "EnvChildV1.ets",
+      "source": "@Component struct Child { @Prop value: WindowSizeLayoutBreakpointInfo = new WindowSizeLayoutBreakpointInfo(); build() {} } @Component struct Parent { @Env(SystemProperties.BREAK_POINT) env: WindowSizeLayoutBreakpointInfo; build() { Child({ value: this.env }) } }",
+      "expect": { "errorCode": "10905253" }
+    },
+    {
+      "id": "component-v2-env-can-only-initialize-param",
+      "owner": "compiler/src/process_custom_component.ts::validateAssignEnvV2",
+      "file": "EnvChildV2.ets",
+      "source": "@ComponentV2 struct Child { @Local value: WindowSizeLayoutBreakpointInfo = new WindowSizeLayoutBreakpointInfo(); build() {} } @ComponentV2 struct Parent { @Env(SystemProperties.BREAK_POINT) env: WindowSizeLayoutBreakpointInfo; build() { Child({ value: this.env }) } }",
+      "expect": { "errorCode": "10905252" }
+    },
+    {
+      "id": "component-v1-env-initializes-regular-child-property",
+      "owner": "compiler/src/process_custom_component.ts::checkAssignEnv",
+      "file": "EnvRegularChildV1.ets",
+      "source": "@Component struct Child { value: WindowSizeLayoutBreakpointInfo = new WindowSizeLayoutBreakpointInfo(); build() {} } @Component struct Parent { @Env(SystemProperties.BREAK_POINT) env: WindowSizeLayoutBreakpointInfo; build() { Child({ value: this.env }) } }",
+      "expect": { "contains": ["new Child("] }
+    },
+    {
+      "id": "component-v2-env-initializes-param-child-property",
+      "owner": "compiler/src/process_custom_component.ts::checkAssignEnv",
+      "file": "EnvParamChildV2.ets",
+      "source": "@ComponentV2 struct Child { @Param value: WindowSizeLayoutBreakpointInfo = new WindowSizeLayoutBreakpointInfo(); build() {} } @ComponentV2 struct Parent { @Env(SystemProperties.BREAK_POINT) env: WindowSizeLayoutBreakpointInfo; build() { Child({ value: this.env }) } }",
+      "expect": { "contains": ["new Child("] }
+    },
+    {
+      "id": "component-v1-non-link-rejects-dollar-reference",
+      "owner": "compiler/src/process_custom_component.ts::validateNonLinkWithDollar",
+      "file": "DollarChildV1.ets",
+      "source": "@Component struct Child { @Prop value: number = 0; build() {} } @Component struct Parent { @State value: number = 1; build() { Child({ value: $value }) } }",
+      "expect": { "errorCode": "10905314" }
+    },
+    {
+      "id": "component-v1-link-rejects-regular-parent-property",
+      "owner": "compiler/src/process_custom_component.ts::validateIllegalInitFromParent",
+      "file": "InvalidLinkParentV1.ets",
+      "source": "@Component struct Child { @Link value: number; build() {} } @Component struct Parent { value: number = 1; build() { Child({ value: this.value }) } }",
+      "expect": { "errorCode": "10905315" }
+    },
+    {
+      "id": "component-v1-link-rejects-deep-source-data",
+      "owner": "compiler/src/process_custom_component.ts::validateLinkVariableSourceData",
+      "file": "DeepLinkChildV1.ets",
+      "source": "class Model { value: number = 1 } @Component struct Child { @Link value: number; build() {} } @Component struct Parent { @State model: Model = new Model(); build() { Child({ value: this.model.value }) } }",
+      "expect": { "errorCode": "10905364" }
+    },
+    {
       "id": "default-dynamic-viewpu-lowering",
       "owner": "compiler/src/fast_build/ets_ui/rollup-plugin-ets-typescript.ts::etsTransform",
       "file": "DynamicPage.ets",
