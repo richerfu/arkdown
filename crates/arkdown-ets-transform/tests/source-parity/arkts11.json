@@ -339,6 +339,13 @@
       "expect": { "errorCode": "10905367" }
     },
     {
+      "id": "sync-monitor-wildcard-before-root-check",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkSyncMonitorDecoratorArgContent",
+      "file": "SyncMonitorWildcardOrder.ets",
+      "source": "@ObservedV2 class SyncMonitorWildcardOrder { @SyncMonitor('missing.*.name') changed() {} }",
+      "expect": { "errorCode": "10905367" }
+    },
+    {
       "id": "sync-monitor-nonexistent-root",
       "owner": "compiler/src/validate_ui_syntax.ts::validateSyncMonitorArgExist",
       "file": "SyncMonitorMissing.ets",
