@@ -103,10 +103,6 @@ impl ArkuiDecoratorName {
         matches!(name, Self::PROP | Self::OBJECT_LINK)
     }
 
-    pub(crate) fn is_component_v2_meta(name: &str) -> bool {
-        matches!(name, Self::WATCH | Self::REQUIRE)
-    }
-
     pub(crate) fn contributes_update_state_vars(name: &str) -> bool {
         matches!(
             name,

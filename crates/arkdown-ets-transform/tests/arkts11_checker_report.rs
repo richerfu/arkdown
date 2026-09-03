@@ -16,7 +16,6 @@ fn arkts11_checker_report_preserves_all_source_order_diagnostics() {
 struct First {
   @Link value: number = 0
 }
-
 @Observed
 class Model {
   @Trace value: number = 0
@@ -38,6 +37,38 @@ class Model {
     assert_eq!(codes, ["10905103", "10905304", "10905343"]);
     assert_eq!(report.error_count(), 3);
     assert_eq!(report.into_diagnostics().len(), 3);
+}
+
+#[test]
+fn arkts11_component_v2_property_contracts_keep_source_codes_and_order() {
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
+    let report = checker.check(
+        "ComponentV2Contracts.ets",
+        r#"
+@ComponentV2
+struct ComponentV2Contracts {
+  @Param param: string
+  @Require @Local required: string = ''
+  @Once @Local once: string = ''
+  @Env(SystemProperties.BREAK_POINT) env: WindowSizeLayoutBreakpointInfo = new WindowSizeLayoutBreakpointInfo()
+  @Local inferred = 1
+  build() {}
+}
+"#,
+    );
+    let codes = report
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            EtsTransformError::CodedDiagnostic { code, .. } => Some(code.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        codes,
+        ["10905327", "10905325", "10905326", "10905362", "10905328"]
+    );
 }
 
 #[test]

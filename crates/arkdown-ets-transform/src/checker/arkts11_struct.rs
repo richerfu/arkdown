@@ -1251,29 +1251,49 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 }
             }
 
-            if property.type_annotation.is_none() {
-                self.error(
-                    "10905305",
-                    format!("The property '{name}' must specify a type."),
-                    property.span,
-                    &[],
-                );
+            if component_v2 {
+                self.check_component_v2_property_contract(property, name, &decorators);
             }
 
-            let member_decorators = decorators
-                .iter()
-                .copied()
-                .filter(|decorator| Self::counts_as_state_management_decorator(decorator))
-                .collect::<Vec<_>>();
-            if Self::has_invalid_multiple_decorators(&member_decorators) {
-                self.error(
-                    "10905302",
-                    format!(
-                        "The property '{name}' cannot have multiple state management decorators."
-                    ),
-                    property.span,
-                    &[],
-                );
+            if property.type_annotation.is_none() {
+                if component_v2 {
+                    if decorators
+                        .iter()
+                        .any(|decorator| Self::requires_component_v2_member_type(decorator))
+                    {
+                        self.error(
+                            "10905328",
+                            format!("The property '{name}' must specify a type."),
+                            property.span,
+                            &[],
+                        );
+                    }
+                } else {
+                    self.error(
+                        "10905305",
+                        format!("The property '{name}' must specify a type."),
+                        property.span,
+                        &[],
+                    );
+                }
+            }
+
+            if !component_v2 {
+                let member_decorators = decorators
+                    .iter()
+                    .copied()
+                    .filter(|decorator| Self::counts_as_state_management_decorator(decorator))
+                    .collect::<Vec<_>>();
+                if Self::has_invalid_multiple_decorators(&member_decorators) {
+                    self.error(
+                        "10905302",
+                        format!(
+                            "The property '{name}' cannot have multiple state management decorators."
+                        ),
+                        property.span,
+                        &[],
+                    );
+                }
             }
 
             let has_require = decorators.contains(&ArkuiDecoratorName::REQUIRE);
@@ -1330,7 +1350,10 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                         &[],
                     );
                 }
-                if Self::forbids_default_value(decorator) && property.value.is_some() {
+                if Self::forbids_default_value(decorator)
+                    && property.value.is_some()
+                    && !(component_v2 && *decorator == ArkuiDecoratorName::ENV)
+                {
                     self.error(
                         "10905304",
                         format!("The '@{decorator}' property cannot be specified a default value."),
@@ -1368,6 +1391,89 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             if decorators.contains(&ArkuiDecoratorName::WATCH) {
                 self.check_watch(property, name, &decorators, &method_names);
             }
+        }
+    }
+
+    fn check_component_v2_property_contract(
+        &mut self,
+        property: &oxc_ast::ast::PropertyDefinition<'_>,
+        _name: &str,
+        decorators: &[&str],
+    ) {
+        let counted = decorators
+            .iter()
+            .copied()
+            .filter(|decorator| Self::counts_for_component_v2_conflict(decorator))
+            .collect::<Vec<_>>();
+        let mut seen = FxHashSet::default();
+        let mut distinct = Vec::new();
+        let mut duplicate_seen = FxHashSet::default();
+        let mut duplicates = Vec::new();
+        for decorator in &counted {
+            if seen.insert(*decorator) {
+                distinct.push(*decorator);
+            } else if duplicate_seen.insert(*decorator) {
+                duplicates.push(*decorator);
+            }
+        }
+        if distinct.len() > 1 {
+            self.error(
+                "10905121",
+                "The member property or method can not be decorated by multiple built-in decorators.",
+                property.span,
+                &[],
+            );
+        }
+        if !duplicates.is_empty() {
+            self.error(
+                "10905119",
+                format!(
+                    "Duplicate '{}' decorators for method are not allowed.",
+                    duplicates
+                        .iter()
+                        .map(|decorator| format!("@{decorator}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                property.span,
+                &[],
+            );
+        }
+
+        let has_param = decorators.contains(&ArkuiDecoratorName::PARAM);
+        let has_require = decorators.contains(&ArkuiDecoratorName::REQUIRE);
+        let has_builder_param = decorators.contains(&ArkuiDecoratorName::BUILDER_PARAM);
+        if has_param && property.value.is_none() && !has_require {
+            self.error(
+                "10905327",
+                "When a variable decorated with '@Param' is not assigned a default value, it must also be decorated with '@Require'.",
+                property.span,
+                &[],
+            );
+        }
+        if decorators.contains(&ArkuiDecoratorName::ONCE) && !has_param {
+            self.error(
+                "10905326",
+                "When a variable decorated with '@Once', it must also be decorated with '@Param'.",
+                property.span,
+                &[],
+            );
+        }
+        if has_require && !has_param && !has_builder_param {
+            self.error(
+                "10905325",
+                "In a struct decorated with '@ComponentV2', '@Require' can only be used with '@Param' and '@BuilderParam'.",
+                property.span,
+                &[],
+            );
+        }
+        if decorators.contains(&ArkuiDecoratorName::ENV) && property.value.is_some() {
+            self.error(
+                "10905362",
+                "The '@Env' property cannot be specified a default value.",
+                property.span,
+                &[],
+            );
         }
     }
 
@@ -1762,6 +1868,25 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 ArkuiDecoratorName::MONITOR
                     | ArkuiDecoratorName::COMPUTED
                     | ArkuiDecoratorName::SYNC_MONITOR
+            )
+    }
+
+    fn counts_for_component_v2_conflict(name: &str) -> bool {
+        name != ArkuiDecoratorName::ONCE
+            && (Self::is_v2_decorator(name)
+                || matches!(
+                    name,
+                    ArkuiDecoratorName::BUILDER_PARAM
+                        | ArkuiDecoratorName::ENV
+                        | ArkuiDecoratorName::CUSTOM_ENV
+                ))
+    }
+
+    fn requires_component_v2_member_type(name: &str) -> bool {
+        Self::is_v2_component_member_decorator(name)
+            || matches!(
+                name,
+                ArkuiDecoratorName::BUILDER_PARAM | ArkuiDecoratorName::ENV
             )
     }
 

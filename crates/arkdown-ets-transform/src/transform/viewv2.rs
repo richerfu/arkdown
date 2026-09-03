@@ -37,15 +37,6 @@ use crate::transform::viewpu_emit::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ComponentV2Error {
-    #[error(
-        "@ComponentV2 struct '{name}': unsupported decorator '@{decorator}' on field '{field}'"
-    )]
-    UnsupportedDecorator {
-        name: String,
-        decorator: String,
-        field: String,
-    },
-
     #[error("@ComponentV2 struct '{name}': missing build() method")]
     MissingBuildMethod { name: String },
 
@@ -144,19 +135,6 @@ impl V2FieldKind {
         } else {
             Self::Regular
         }
-    }
-
-    fn is_supported_decorator(name: &str) -> bool {
-        matches!(
-            name,
-            ArkuiDecoratorName::LOCAL
-                | ArkuiDecoratorName::PARAM
-                | ArkuiDecoratorName::ONCE
-                | ArkuiDecoratorName::EVENT
-                | ArkuiDecoratorName::PROVIDER
-                | ArkuiDecoratorName::CONSUMER
-                | ArkuiDecoratorName::BUILDER_PARAM
-        )
     }
 
     fn contributes_param_update(self) -> bool {
@@ -697,18 +675,6 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         decorator_names: &[&str],
         visible_builder_methods: &FxHashSet<String>,
     ) -> Result<(), ComponentV2Error> {
-        for decorator_name in decorator_names {
-            if ArkuiDecoratorName::is_component_v2_meta(decorator_name)
-                || V2FieldKind::is_supported_decorator(decorator_name)
-            {
-                continue;
-            }
-            return Err(ComponentV2Error::UnsupportedDecorator {
-                name: component_name.to_string(),
-                decorator: (*decorator_name).to_string(),
-                field: field_name.to_string(),
-            });
-        }
         let has_param = decorator_names.contains(&ArkuiDecoratorName::PARAM);
         let has_require = decorator_names.contains(&ArkuiDecoratorName::REQUIRE);
         let has_builder_param = decorator_names.contains(&ArkuiDecoratorName::BUILDER_PARAM);

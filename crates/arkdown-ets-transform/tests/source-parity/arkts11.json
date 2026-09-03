@@ -569,6 +569,48 @@
       "expect": { "errorCode": "10905109" }
     },
     {
+      "id": "component-v2-param-requires-default-or-require",
+      "owner": "compiler/src/process_struct_componentV2.ts::checkParamDecorator",
+      "file": "ParamV2.ets",
+      "source": "@ComponentV2 struct ParamV2 { @Param value: string; build() {} }",
+      "expect": { "errorCode": "10905327" }
+    },
+    {
+      "id": "component-v2-require-target",
+      "owner": "compiler/src/process_struct_componentV2.ts::checkRequireDecoratorV2",
+      "file": "RequireV2.ets",
+      "source": "@ComponentV2 struct RequireV2 { @Require @Local value: string = ''; build() {} }",
+      "expect": { "errorCode": "10905325" }
+    },
+    {
+      "id": "component-v2-once-requires-param",
+      "owner": "compiler/src/process_struct_componentV2.ts::checkParamDecorator",
+      "file": "OnceV2.ets",
+      "source": "@ComponentV2 struct OnceV2 { @Once @Local value: string = ''; build() {} }",
+      "expect": { "errorCode": "10905326" }
+    },
+    {
+      "id": "component-v2-env-forbids-initializer",
+      "owner": "compiler/src/process_struct_componentV2.ts::checkEnvInitializerV2",
+      "file": "EnvInitializerV2.ets",
+      "source": "@ComponentV2 struct EnvInitializerV2 { @Env(SystemProperties.BREAK_POINT) value: WindowSizeLayoutBreakpointInfo = new WindowSizeLayoutBreakpointInfo(); build() {} }",
+      "expect": { "errorCode": "10905362" }
+    },
+    {
+      "id": "component-v2-managed-member-requires-type",
+      "owner": "compiler/src/process_struct_componentV2.ts::checkV2ComponentMemberType",
+      "file": "MemberTypeV2.ets",
+      "source": "@ComponentV2 struct MemberTypeV2 { @Local value = 1; build() {} }",
+      "expect": { "errorCode": "10905328" }
+    },
+    {
+      "id": "component-v2-custom-decorator-remains-regular",
+      "owner": "compiler/src/process_struct_componentV2.ts::parsePropertyDecorator",
+      "file": "CustomDecoratorV2.ets",
+      "source": "function Custom(target: object, property: string): void {} @ComponentV2 struct CustomDecoratorV2 { @Custom value = 1; build() {} }",
+      "expect": { "contains": [] }
+    },
+    {
       "id": "default-dynamic-viewpu-lowering",
       "owner": "compiler/src/fast_build/ets_ui/rollup-plugin-ets-typescript.ts::etsTransform",
       "file": "DynamicPage.ets",
