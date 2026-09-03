@@ -14,6 +14,7 @@ use std::{borrow::Cow, future::ready, sync::Arc};
 #[cfg(feature = "memory-diagnostics")]
 use arkdown_ets_transform::RolldownEtsTransformOutput;
 use arkdown_ets_transform::RolldownEtsTransformer;
+use rolldown_common::LogWithoutPlugin;
 use rolldown_plugin::{
     HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
     Plugin, SharedTransformPluginContext,
@@ -24,10 +25,10 @@ pub use arkdown_ets_transform::error::{DiagnosticSeverity, EtsTransformError};
 pub use arkdown_ets_transform::transform;
 pub use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
 pub use arkdown_ets_transform::{
-    ArktsSourceChecker, CheckerMode, ModuleAnalyzerKind, NavigationRouteMap, ResourceReference,
-    ResourceTransformContext, RolldownEtsTransformPlan, StaticModuleSpecifierRewrite,
-    SystemApiCheckOptions, SystemResourceReferenceLoader, TransformEntrySourceId,
-    TransformResolvedStaticModule, TransformSourceSnapshot,
+    ArktsSourceChecker, CheckerMode, ModuleAnalyzerKind, NavigationRouteMap,
+    ResourceModuleReference, ResourceReference, ResourceTransformContext, RolldownEtsTransformPlan,
+    StaticModuleSpecifierRewrite, SystemApiCheckOptions, SystemResourceReferenceLoader,
+    TransformEntrySourceId, TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 
 /// ArkTS transform plugin adapter.
@@ -118,6 +119,9 @@ impl EtsTransformPlugin {
         let Some(output) = result? else {
             return Ok(None);
         };
+        for warning in &output.warnings {
+            Self::emit_warning(&ctx, warning);
+        }
         let has_source_map = output.source_map.is_some();
         let map = output
             .source_map
@@ -145,6 +149,30 @@ impl EtsTransformPlugin {
             map,
             ..Default::default()
         }))
+    }
+
+    fn emit_warning(ctx: &SharedTransformPluginContext, warning: &EtsTransformError) {
+        let (message, code, file) = match warning {
+            EtsTransformError::CodedDiagnostic {
+                file,
+                code,
+                message,
+                severity: DiagnosticSeverity::Warning,
+                ..
+            } => (message.clone(), Some(code.clone()), file.clone()),
+            EtsTransformError::Diagnostic {
+                file,
+                message,
+                severity: DiagnosticSeverity::Warning,
+            } => (message.clone(), None, file.clone()),
+            _ => return,
+        };
+        ctx.warn(LogWithoutPlugin {
+            message,
+            code,
+            ids: Some(vec![file]),
+            ..Default::default()
+        });
     }
 }
 

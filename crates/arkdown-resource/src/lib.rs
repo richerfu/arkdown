@@ -32,6 +32,7 @@ pub mod id_defined;
 pub mod plan;
 
 mod model;
+mod reference_inventory;
 mod runtime_key;
 
 // Re-export the primary public API at crate root.
@@ -43,3 +44,4 @@ pub use plan::{
     ResourceCompileOptions, ResourceCompilePlan, ResourceDependencyInput, ResourceInputRoot,
     ResourceOutputPaths, RestoolConfigInput, RestoolHarEntry,
 };
+pub use reference_inventory::ResourceReferenceInventory;

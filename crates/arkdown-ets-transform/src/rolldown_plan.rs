@@ -19,7 +19,7 @@ use crate::module_rewrite::{
     ModuleAnalyzerKind, TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
 };
 use crate::resource_transform::{
-    ResourceReference, ResourceReferenceRewriter, ResourceTransformContext,
+    ResourceReference, ResourceReferenceIndex, ResourceReferenceRewriter, ResourceTransformContext,
 };
 use crate::source::{
     CompileArktsSourceType, SourceClassifier, SourceFileKind, TransformSourceSnapshot,
@@ -55,6 +55,7 @@ pub struct RolldownEtsTransformPlan {
     pub module_roots: Vec<(String, PathBuf)>,
     pub api_version: u32,
     pub resource_refs: Arc<FxHashMap<String, ResourceReference>>,
+    resource_reference_index: Arc<ResourceReferenceIndex>,
     resource_context: ResourceTransformContext,
     pub component_metadata: Arc<transform::component_meta::ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
@@ -104,6 +105,7 @@ impl RolldownEtsTransformPlan {
     ) -> Self {
         let module_exports = ModuleExportIndex::build(&sources, &module_roots, &component_metadata);
         let const_enum_exports = Arc::new(ConstEnumExportCache::new(sources.clone()));
+        let resource_reference_index = Arc::new(ResourceReferenceIndex::new(&resource_refs));
         Self {
             arkts_language_version: ArktsLanguageVersion::default(),
             api_available: ApiAvailableTransformOptions::default(),
@@ -115,6 +117,7 @@ impl RolldownEtsTransformPlan {
             module_roots,
             api_version,
             resource_refs: Arc::new(resource_refs),
+            resource_reference_index,
             resource_context: ResourceTransformContext::default(),
             component_metadata: Arc::new(component_metadata),
             sources,
@@ -311,6 +314,8 @@ impl RolldownEtsTransformPlan {
 #[derive(Debug, Clone)]
 pub struct RolldownEtsTransformOutput {
     pub code: String,
+    /// Non-fatal source-compiler diagnostics emitted by transform-time checks.
+    pub warnings: Vec<EtsTransformError>,
     /// Hvigor-compatible CompileArkTS source snapshot. When Rolldown needs a
     /// parser-only adaptation such as lowering `import lazy` to a standard
     /// import, this retains the pre-adaptation ArkTS form. It is shared with
@@ -347,10 +352,11 @@ impl RolldownEtsTransformer {
         if !source_kind.is_ets_transform_input() {
             let pipeline = HvigorSourcePipeline::new(self, id);
             if pipeline.should_finalize_unclassified_source(code) {
-                let final_code = pipeline.finalize_source(code);
-                if final_code != code {
+                let finalization = pipeline.finalize_source(code)?;
+                if finalization.code != code || !finalization.warnings.is_empty() {
                     return Ok(Some(RolldownEtsTransformOutput {
-                        code: final_code.into_owned(),
+                        code: finalization.code.into_owned(),
+                        warnings: finalization.warnings,
                         module_source_code: None,
                         source_map: None,
                         record_module_source_code: false,
@@ -385,11 +391,11 @@ impl RolldownEtsTransformer {
         let code = pipeline.prepare_source(visual_source.as_deref().unwrap_or(original_source));
 
         if !is_ets && !self.plan.arkts_language_version.is_static() {
-            let final_code = pipeline.finalize_source(code.as_ref());
+            let finalization = pipeline.finalize_source(code.as_ref())?;
             // SDK genAbc lazy transform runs on every compile input after the
             // regular transform; TS/JS files are covered too.
             let final_code = crate::transform::apply_auto_lazy_import(
-                final_code.as_ref(),
+                finalization.code.as_ref(),
                 id,
                 &self.plan.transform_options_for(id),
             );
@@ -410,6 +416,7 @@ impl RolldownEtsTransformer {
             };
             return Ok(Some(RolldownEtsTransformOutput {
                 code: emitted.code,
+                warnings: finalization.warnings,
                 module_source_code: None,
                 source_map,
                 record_module_source_code: false,
@@ -436,9 +443,10 @@ impl RolldownEtsTransformer {
             .transform_with_source_map()?;
 
         if let Some(projection) = transformed.rolldown_projection.as_deref() {
-            let projection = pipeline.finalize_source(projection);
+            let projection = pipeline.finalize_source(projection)?;
             return Ok(Some(RolldownEtsTransformOutput {
-                code: projection.into_owned(),
+                code: projection.code.into_owned(),
+                warnings: projection.warnings,
                 module_source_code: Some(Arc::from(transformed.code)),
                 source_map: None,
                 record_module_source_code: false,
@@ -459,17 +467,19 @@ impl RolldownEtsTransformer {
         // imports into `import lazy` in genAbc. The expander now runs inside
         // the transform pipeline (before codegen) so the source map covers
         // the expanded imports.
-        let finalization = pipeline.finalize_source_with_source_map(&transformed.code);
+        let finalization = pipeline.finalize_source_with_source_map(&transformed.code)?;
+        let HvigorSourceFinalization {
+            code: finalized_code,
+            source_map: finalization_source_map,
+            warnings,
+        } = finalization;
         let final_source = match crate::transform::apply_auto_lazy_import(
-            finalization.code.as_ref(),
+            finalized_code.as_ref(),
             id,
             &self.plan.transform_options_for(id),
         ) {
-            Cow::Owned(lowered) => {
-                let _ = finalization;
-                Cow::Owned(lowered)
-            }
-            Cow::Borrowed(_) => finalization.code,
+            Cow::Owned(lowered) => Cow::Owned(lowered),
+            Cow::Borrowed(_) => finalized_code,
         };
         let final_source = final_source.as_ref();
 
@@ -496,6 +506,7 @@ impl RolldownEtsTransformer {
             };
             return Ok(Some(RolldownEtsTransformOutput {
                 code: emitted.code,
+                warnings,
                 module_source_code: None,
                 source_map,
                 record_module_source_code: false,
@@ -506,7 +517,7 @@ impl RolldownEtsTransformer {
         }
 
         let emitted = self.emit_javascript_if_required(final_source, id, directive_flags)?;
-        let transformed_source_map = match (transformed.source_map, finalization.source_map) {
+        let transformed_source_map = match (transformed.source_map, finalization_source_map) {
             (Some(transform_map), Some(finalization_map)) => {
                 Some(self.collapse_source_maps(id, &transform_map, &finalization_map)?)
             }
@@ -540,6 +551,7 @@ impl RolldownEtsTransformer {
             .transpose()?;
         Ok(Some(RolldownEtsTransformOutput {
             code: emitted.code,
+            warnings,
             module_source_code: None,
             source_map,
             record_module_source_code: false,
@@ -669,11 +681,17 @@ impl<'a> HvigorSourcePipeline<'a> {
         HvigorPrepareSourcePass::new(self).run(source)
     }
 
-    fn finalize_source<'s>(&self, source: &'s str) -> Cow<'s, str> {
+    fn finalize_source<'s>(
+        &self,
+        source: &'s str,
+    ) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
         HvigorFinalizeSourcePass::new(self).run(source)
     }
 
-    fn finalize_source_with_source_map<'s>(&self, source: &'s str) -> HvigorSourceFinalization<'s> {
+    fn finalize_source_with_source_map<'s>(
+        &self,
+        source: &'s str,
+    ) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
         HvigorFinalizeSourcePass::new(self).run_with_source_map(source)
     }
 
@@ -763,6 +781,7 @@ struct HvigorFinalizeSourcePass<'a, 'pipeline> {
 struct HvigorSourceFinalization<'s> {
     code: Cow<'s, str>,
     source_map: Option<String>,
+    warnings: Vec<EtsTransformError>,
 }
 
 /// Applies the source-map ownership that the latest ets-loader's TypeScript
@@ -1249,13 +1268,23 @@ impl<'s> HvigorSourceFinalization<'s> {
         Self {
             code: Cow::Borrowed(source),
             source_map: None,
+            warnings: Vec::new(),
         }
     }
 
-    fn changed(code: String, source_map: Option<String>) -> Self {
+    fn changed(code: String, source_map: Option<String>, warnings: Vec<EtsTransformError>) -> Self {
         Self {
             code: Cow::Owned(code),
             source_map,
+            warnings,
+        }
+    }
+
+    fn unchanged_with_warnings(source: &'s str, warnings: Vec<EtsTransformError>) -> Self {
+        Self {
+            code: Cow::Borrowed(source),
+            source_map: None,
+            warnings,
         }
     }
 }
@@ -1265,16 +1294,19 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         Self { pipeline }
     }
 
-    fn run<'s>(&self, source: &'s str) -> Cow<'s, str> {
-        self.run_with_source_map(source).code
+    fn run<'s>(&self, source: &'s str) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
+        self.run_with_source_map(source)
     }
 
-    fn run_with_source_map<'s>(&self, source: &'s str) -> HvigorSourceFinalization<'s> {
+    fn run_with_source_map<'s>(
+        &self,
+        source: &'s str,
+    ) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
         let allocator = Allocator::default();
         let source_type = self.source_type();
         let mut parsed = Parser::new(&allocator, source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
-            return HvigorSourceFinalization::unchanged(source);
+            return Ok(HvigorSourceFinalization::unchanged(source));
         }
 
         // The SDK transformer resolves local enum member values through the
@@ -1285,7 +1317,7 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             .with_enum_eval(true)
             .build(&parsed.program);
         if !semantic_ret.diagnostics.is_empty() {
-            return HvigorSourceFinalization::unchanged(source);
+            return Ok(HvigorSourceFinalization::unchanged(source));
         }
         let scoping = semantic_ret.semantic.into_scoping();
 
@@ -1387,18 +1419,27 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         )
         .rewrite_program(&allocator, &mut parsed.program);
 
-        changed |= ResourceReferenceRewriter::new(
+        let resource_rewrite = ResourceReferenceRewriter::new(
             source,
             self.pipeline.id,
             self.pipeline.transformer.plan.resource_refs.as_ref(),
+            self.pipeline
+                .transformer
+                .plan
+                .resource_reference_index
+                .as_ref(),
             &self.pipeline.transformer.plan.bundle_name,
             Some(&self.pipeline.transformer.plan.module_name),
         )
         .with_context(self.pipeline.transformer.plan.resource_context.clone())
-        .rewrite_program(&allocator, &mut parsed.program);
+        .rewrite_program(&allocator, &mut parsed.program)?;
+        changed |= resource_rewrite.changed;
 
         if !changed {
-            return HvigorSourceFinalization::unchanged(source);
+            return Ok(HvigorSourceFinalization::unchanged_with_warnings(
+                source,
+                resource_rewrite.warnings,
+            ));
         }
         let generated = HvigorTypescriptPrinter::print_with_source_map(
             &parsed.program,
@@ -1410,7 +1451,11 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             },
             source,
         );
-        HvigorSourceFinalization::changed(generated.code, generated.source_map)
+        Ok(HvigorSourceFinalization::changed(
+            generated.code,
+            generated.source_map,
+            resource_rewrite.warnings,
+        ))
     }
 
     fn source_type(&self) -> SourceType {

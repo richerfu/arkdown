@@ -40,7 +40,9 @@ mod visual;
 // Narrow re-exports per spec (lib.rs only re-exports, no new business functions).
 pub use checker::{ArktsSourceChecker, EtsCheckReport, EtsChecker};
 pub use module_rewrite::{ModuleAnalyzerKind, StaticModuleSpecifierRewrite};
-pub use resource_transform::{ResourceReference, ResourceTransformContext};
+pub use resource_transform::{
+    ResourceModuleReference, ResourceReference, ResourceTransformContext,
+};
 pub use rolldown_plan::{
     RolldownEtsTransformOutput, RolldownEtsTransformPlan, RolldownEtsTransformer,
     TransformEntrySourceId,

@@ -358,9 +358,43 @@ impl ResourceRuntimeTypeClassifier {
             "color" => 10001,
             "float" => 10002,
             "string" => 10003,
-            "integer" | "intarray" => 10007,
+            "plural" => 10004,
+            "boolean" => 10005,
+            "intarray" => 10006,
+            "integer" => 10007,
+            "pattern" => 10008,
+            "strarray" => 10009,
             "media" => 20000,
+            "rawfile" => 30000,
+            "symbol" => 40000,
             _ => 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod runtime_type_tests {
+    use super::ResourceRuntimeTypeClassifier;
+
+    #[test]
+    fn matches_source_compiler_resource_type_ids() {
+        let classifier = ResourceRuntimeTypeClassifier::new();
+        let expected = [
+            ("color.value", 10001),
+            ("float.value", 10002),
+            ("string.value", 10003),
+            ("plural.value", 10004),
+            ("boolean.value", 10005),
+            ("intarray.value", 10006),
+            ("integer.value", 10007),
+            ("pattern.value", 10008),
+            ("strarray.value", 10009),
+            ("media.value", 20000),
+            ("rawfile.value", 30000),
+            ("symbol.value", 40000),
+        ];
+        for (key, runtime_type) in expected {
+            assert_eq!(classifier.runtime_type_from_key(key), runtime_type, "{key}");
         }
     }
 }
