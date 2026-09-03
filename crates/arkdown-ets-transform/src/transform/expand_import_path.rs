@@ -174,13 +174,9 @@ impl<'a> ImportPathExpander<'a> {
         for import_specifier in import_specifiers {
             match import_specifier {
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
-                    let Some((decl_file, export_name, is_default)) = self.resolve_symbol(
-                        &entry_path,
-                        "default",
-                        true,
-                        &package_name,
-                        &package_root,
-                    ) else {
+                    let Some((decl_file, export_name, is_default)) =
+                        self.resolve_symbol(&entry_path, "default", true)
+                    else {
                         continue;
                     };
                     let request = self.module_request(&decl_file, &package_name, &package_root);
@@ -212,13 +208,9 @@ impl<'a> ImportPathExpander<'a> {
                 }
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
                     let imported_name = specifier.imported.name().as_str();
-                    let Some((decl_file, _export_name, is_default)) = self.resolve_symbol(
-                        &entry_path,
-                        imported_name,
-                        false,
-                        &package_name,
-                        &package_root,
-                    ) else {
+                    let Some((decl_file, _export_name, is_default)) =
+                        self.resolve_symbol(&entry_path, imported_name, false)
+                    else {
                         continue;
                     };
                     let request = self.module_request(&decl_file, &package_name, &package_root);
@@ -336,18 +328,9 @@ impl<'a> ImportPathExpander<'a> {
         entry: &Path,
         symbol: &str,
         is_default: bool,
-        package_name: &str,
-        package_root: &Path,
     ) -> Option<(PathBuf, String, bool)> {
         let mut seen = FxHashSet::default();
-        self.trace_export(
-            entry,
-            symbol,
-            is_default,
-            package_name,
-            package_root,
-            &mut seen,
-        )
+        self.trace_export(entry, symbol, is_default, &mut seen)
     }
 
     fn trace_export(
@@ -355,8 +338,6 @@ impl<'a> ImportPathExpander<'a> {
         file: &Path,
         symbol: &str,
         is_default: bool,
-        package_name: &str,
-        package_root: &Path,
         seen: &mut FxHashSet<PathBuf>,
     ) -> Option<(PathBuf, String, bool)> {
         if !seen.insert(file.to_path_buf()) {
@@ -394,14 +375,7 @@ impl<'a> ImportPathExpander<'a> {
                         let local_name = element.local.name().as_str();
                         let exported_name = element.exported.name().as_str();
                         if exported_name == symbol {
-                            return self.trace_export(
-                                &resolved.path,
-                                local_name,
-                                false,
-                                package_name,
-                                package_root,
-                                seen,
-                            );
+                            return self.trace_export(&resolved.path, local_name, false, seen);
                         }
                     }
                 }
@@ -413,14 +387,7 @@ impl<'a> ImportPathExpander<'a> {
                     else {
                         continue;
                     };
-                    if let Some(result) = self.trace_export(
-                        &resolved.path,
-                        symbol,
-                        false,
-                        package_name,
-                        package_root,
-                        seen,
-                    ) {
+                    if let Some(result) = self.trace_export(&resolved.path, symbol, false, seen) {
                         return Some(result);
                     }
                 }

@@ -7,6 +7,7 @@ use oxc_ast::builder::AstBuilder;
 use oxc_span::Span;
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
+use crate::transform::local_builder::LocalBuilderRuntimeEmitter;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 
 /// Applies the final ViewPU statement ordering and compatibility shim to the
@@ -19,15 +20,26 @@ use crate::transform::viewpu_emit::GeneratedViewpuName;
 pub(super) struct ViewpuProgramFinalizer<'a, 'program> {
     allocator: &'a Allocator,
     program: &'program mut Program<'a>,
+    local_builder_context: bool,
 }
 
 impl<'a, 'program> ViewpuProgramFinalizer<'a, 'program> {
     pub(super) fn new(allocator: &'a Allocator, program: &'program mut Program<'a>) -> Self {
-        Self { allocator, program }
+        Self {
+            allocator,
+            program,
+            local_builder_context: false,
+        }
+    }
+
+    pub(super) fn with_local_builder_context(mut self, enabled: bool) -> Self {
+        self.local_builder_context = enabled;
+        self
     }
 
     pub(super) fn finalize(self) {
-        let mut pass = ViewpuFinalizePass::new(self.allocator, self.program);
+        let mut pass =
+            ViewpuFinalizePass::new(self.allocator, self.program, self.local_builder_context);
         pass.run();
     }
 }
@@ -35,11 +47,20 @@ impl<'a, 'program> ViewpuProgramFinalizer<'a, 'program> {
 struct ViewpuFinalizePass<'a, 'program> {
     allocator: &'a Allocator,
     program: &'program mut Program<'a>,
+    local_builder_context: bool,
 }
 
 impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
-    fn new(allocator: &'a Allocator, program: &'program mut Program<'a>) -> Self {
-        Self { allocator, program }
+    fn new(
+        allocator: &'a Allocator,
+        program: &'program mut Program<'a>,
+        local_builder_context: bool,
+    ) -> Self {
+        Self {
+            allocator,
+            program,
+            local_builder_context,
+        }
     }
 
     fn run(&mut self) {
@@ -50,7 +71,7 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
         let needs_shim = !self.has_finalize_construction_probe();
         let has_leading_shim = !needs_shim && self.leading_finalize_shim_end().is_some();
         let params_interfaces = self.params_interface_indices();
-        if needs_shim || !params_interfaces.is_empty() {
+        if needs_shim || self.local_builder_context || !params_interfaces.is_empty() {
             self.rebuild_body(needs_shim, has_leading_shim, &params_interfaces);
         }
     }
@@ -77,6 +98,7 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
 
         if needs_shim {
             final_body.push(FinalizeConstructionShim::new().statement(&ast));
+            self.push_local_builder_context(&mut final_body, &ast);
             self.push_params_interfaces(&mut final_body, params);
             for (_, statement) in rest {
                 final_body.push(statement);
@@ -86,11 +108,13 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
             if let Some((_, statement)) = rest_iter.next() {
                 final_body.push(statement);
             }
+            self.push_local_builder_context(&mut final_body, &ast);
             self.push_params_interfaces(&mut final_body, params);
             for (_, statement) in rest_iter {
                 final_body.push(statement);
             }
         } else {
+            self.push_local_builder_context(&mut final_body, &ast);
             self.push_params_interfaces(&mut final_body, params);
             for (_, statement) in rest {
                 final_body.push(statement);
@@ -98,6 +122,16 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
         }
 
         self.program.body = final_body;
+    }
+
+    fn push_local_builder_context(
+        &self,
+        body: &mut OxcVec<'a, Statement<'a>>,
+        ast: &AstBuilder<'a>,
+    ) {
+        if self.local_builder_context {
+            body.push(LocalBuilderRuntimeEmitter::new().guard_statement(ast));
+        }
     }
 
     fn push_params_interfaces(

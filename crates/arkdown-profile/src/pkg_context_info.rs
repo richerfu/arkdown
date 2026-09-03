@@ -388,7 +388,7 @@ impl PkgContextInfoGenerator {
         current: &PkgContextCurrentInput,
         dependency: &PkgContextDependencyInput,
     ) -> Result<String, ArkdownError> {
-        let current_shared = Self::is_bundle_type_shared_or_app_plugin(&current.bundle_type);
+        let current_shared = Self::requires_bundle_record_identity(&current.bundle_type);
         if current_shared {
             if dependency.kind != PkgContextDependencyKind::Hsp {
                 return Ok(current.bundle_name.clone());
@@ -410,7 +410,7 @@ impl PkgContextInfoGenerator {
 
     fn current_module_bundle_name(&self, current: &PkgContextCurrentInput) -> String {
         if current.module_kind == PkgContextModuleKind::Hsp
-            && Self::is_bundle_type_shared_or_app_plugin(&current.bundle_type)
+            && Self::requires_bundle_record_identity(&current.bundle_type)
         {
             current.bundle_name.clone()
         } else {
@@ -423,11 +423,11 @@ impl PkgContextInfoGenerator {
             && dependency
                 .bundle_type
                 .as_deref()
-                .is_some_and(Self::is_bundle_type_shared_or_app_plugin)
+                .is_some_and(Self::requires_bundle_record_identity)
     }
 
-    fn is_bundle_type_shared_or_app_plugin(bundle_type: &str) -> bool {
-        bundle_type == "shared" || bundle_type == "appPlugin"
+    fn requires_bundle_record_identity(bundle_type: &str) -> bool {
+        matches!(bundle_type, "shared" | "appPlugin" | "appService")
     }
 
     fn trim_declaration_suffix(path: &str) -> String {
@@ -652,5 +652,22 @@ mod tests {
         let value = serde_json::to_value(entries).unwrap();
 
         assert_eq!(value["phone"]["oh-exports"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn app_service_hsp_uses_its_bundle_as_record_identity() {
+        let mut current = current_hap();
+        current.module_kind = PkgContextModuleKind::Hsp;
+        current.bundle_type = "appService".to_string();
+        current.bundle_name = "com.example.service".to_string();
+        let entries = PkgContextInfoGenerator::new()
+            .generate(&PkgContextInfoInput {
+                current,
+                dependencies: Vec::new(),
+                native_libraries: Vec::new(),
+            })
+            .expect("appService package context");
+
+        assert_eq!(entries["phone"].bundle_name, "com.example.service");
     }
 }

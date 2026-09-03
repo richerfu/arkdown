@@ -515,6 +515,16 @@ impl<'a> TopLevelFunctionAstEmitter<'a> {
 
 // ─── Public helpers for class-level code generation ──────────────────────────
 
+struct ViewpuClassDeclaration<'a> {
+    name: &'a str,
+    name_span: Span,
+    super_class_name: &'a str,
+    elements: OxcVec<'a, ClassElement<'a>>,
+    decorators: OxcVec<'a, Decorator<'a>>,
+    is_exported: bool,
+    is_default_export: bool,
+}
+
 pub(crate) struct ViewpuAstBuilder<'a> {
     allocator: &'a Allocator,
     ast: AstBuilder<'a>,
@@ -1442,15 +1452,15 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         is_exported: bool,
         is_default_export: bool,
     ) -> Statement<'a> {
-        self.class_declaration_statement_with_decorators_and_name_span(
+        self.class_declaration_statement(ViewpuClassDeclaration {
             name,
             name_span,
             super_class_name,
             elements,
-            OxcVec::new_in(&self.ast),
+            decorators: OxcVec::new_in(&self.ast),
             is_exported,
             is_default_export,
-        )
+        })
     }
 
     pub(crate) fn class_declaration_statement_with_decorators(
@@ -1462,38 +1472,36 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         is_exported: bool,
         is_default_export: bool,
     ) -> Statement<'a> {
-        self.class_declaration_statement_with_decorators_and_name_span(
+        self.class_declaration_statement(ViewpuClassDeclaration {
             name,
-            SPAN,
+            name_span: SPAN,
             super_class_name,
             elements,
             decorators,
             is_exported,
             is_default_export,
-        )
+        })
     }
 
-    fn class_declaration_statement_with_decorators_and_name_span(
+    fn class_declaration_statement(
         &self,
-        name: &'a str,
-        name_span: Span,
-        super_class_name: &'a str,
-        elements: OxcVec<'a, ClassElement<'a>>,
-        decorators: OxcVec<'a, Decorator<'a>>,
-        is_exported: bool,
-        is_default_export: bool,
+        declaration: ViewpuClassDeclaration<'a>,
     ) -> Statement<'a> {
         let heritage = Some(ClassHeritage::new(
-            Expression::new_identifier(SPAN, super_class_name, &self.ast),
+            Expression::new_identifier(SPAN, declaration.super_class_name, &self.ast),
             None,
             &self.ast,
         ));
-        let body = ClassBody::boxed(SPAN, elements, &self.ast);
+        let body = ClassBody::boxed(SPAN, declaration.elements, &self.ast);
         let class = Class::boxed(
             SPAN,
             ClassType::ClassDeclaration,
-            decorators,
-            Some(BindingIdentifier::new(name_span, name, &self.ast)),
+            declaration.decorators,
+            Some(BindingIdentifier::new(
+                declaration.name_span,
+                declaration.name,
+                &self.ast,
+            )),
             None,
             heritage,
             OxcVec::new_in(&self.ast),
@@ -1503,14 +1511,14 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
             &self.ast,
         );
 
-        if is_default_export {
+        if declaration.is_default_export {
             let decl = oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class);
             let export = ArenaBox::new_in(
                 ExportDefaultDeclaration::new(SPAN, decl, &self.ast),
                 &self.ast,
             );
             Statement::ExportDefaultDeclaration(export)
-        } else if is_exported {
+        } else if declaration.is_exported {
             let decl = oxc_ast::ast::Declaration::ClassDeclaration(class);
             let export = ArenaBox::new_in(ExportDeclaration::new(SPAN, decl, &self.ast), &self.ast);
             Statement::ExportDeclaration(export)

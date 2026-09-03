@@ -39,10 +39,12 @@ mod quickfix;
 #[cfg(test)]
 mod quickfix_tests;
 mod remote_hsp_sign;
+mod static_arkts;
 mod syscap;
 #[cfg(test)]
 mod tests;
 mod unit_test;
+mod visual_codegen;
 mod watch_stage;
 
 pub use args::{BuildArgs, BuildCommand, HvigorRuntimeProperties};

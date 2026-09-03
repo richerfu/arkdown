@@ -19,7 +19,7 @@ use arkdown::{
   LoaderResourceJoin, PreloadSystemSoTask, SourceMapPolicy,
 };
 use arkdown_config::{build_profile::parse_api_version, ArkdownCustomConfig};
-use arkdown_core::ArkdownConfig;
+use arkdown_core::{ArkdownConfig, ArktsLanguageVersion};
 use arkdown_path::{ArtifactPathSerializer, NormalizedOhmUrl};
 use arkdown_profile::{LoaderJson, PkgContextInfoOpt};
 use arkdown_session::PackageSnapshot;
@@ -91,6 +91,7 @@ pub(super) fn make_bundle_plan(
   module_target_name: &str,
   custom_cfg: Option<&ArkdownCustomConfig>,
   module_analyzer: ModuleAnalyzerKind,
+  arkts_language_version: ArktsLanguageVersion,
   package_info: BundlePlanPackageInfo,
 ) -> BundlePlan {
   let BundlePlanPackageInfo {
@@ -155,6 +156,7 @@ pub(super) fn make_bundle_plan(
       entries,
       form_entry_sources: loader_json.form_entry_sources.clone(),
       runtime_entry_sources: loader_json.runtime_entry_sources.clone(),
+      page_entry_sources: loader_json.page_entry_sources.clone(),
       support_chunks: loader_json.support_chunks,
       source_map_packages: source_map,
       runtime_packages: runtime,
@@ -180,12 +182,17 @@ pub(super) fn make_bundle_plan(
     },
     plugins: BundlePluginSet::default(),
     build_mode: config.build_mode.clone(),
+    arkts_language_version,
     target_api_version: compile_target.api_version(),
+    compatible_sdk_version: config.product.compatible_sdk_version.clone(),
+    runtime_os: config.product.runtime_os.clone(),
     bundle_name: config.product.bundle_name.clone(),
     use_normalized_ohm_url: loader_json.use_normalized_ohm_url,
     should_emit_js: true,
     module_analyzer,
     output_target: config.output_target.clone(),
+    preview_mode: matches!(config.output_target, arkdown_core::OutputTarget::Preview),
+    check_entry: false,
     shim_missing_exports_override: custom_cfg.and_then(|c| c.shim_missing_exports),
     treeshake_override: custom_cfg.and_then(|c| c.treeshake),
     context_override: custom_cfg.and_then(|c| c.context.clone()),

@@ -1151,7 +1151,7 @@ impl<'a, 'ast, 'b> ReusableCustomComponentAstEmitter<'a, 'ast, 'b> {
             ),
             method,
         );
-        let method_for_typeof = method_expression.clone_in(&self.allocator);
+        let method_for_typeof = method_expression.clone_in(self.allocator);
         let typeof_method = Expression::new_unary_expression(
             SPAN,
             UnaryOperator::Typeof,

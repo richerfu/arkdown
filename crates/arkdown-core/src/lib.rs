@@ -22,6 +22,7 @@
 //! | `config.rs`     | Build config types → `arkdown-config` (Phase 3+)       |
 //! | `paths.rs`      | `lexical_normalize` → `arkdown-path::normalize`         |
 
+pub mod arkts;
 pub mod artifact;
 pub mod chunk;
 pub mod config;
@@ -46,6 +47,9 @@ pub mod source_maps;
 // artifact
 pub use artifact::{ArtifactKind, ArtifactMeta, StageOutputKind, StageOutputMeta};
 
+// arkts — explicit compiler language selection.
+pub use arkts::{ArktsLanguageVersion, ParseArktsLanguageVersionError};
+
 // chunk — Bundler chunk / graph types used by bundler and plugins.
 pub use chunk::{ArkChunk, ChunkGraph, ChunkIdx, ChunkSourceFile, CrossChunkImportItem};
 
@@ -58,7 +62,8 @@ pub use config::{
     ExternalNativeOptions, HarArtifactType, ModuleConfig, NativeDebugSymbolOption,
     NativeLibFilterOption, NativeLibOption, NativeLibPackageSelection, NativeLibraryInfo,
     ObfuscationConfig, OhosModuleType, OutputTarget, ProductConfig, ResOptions, RuntimeOnlyConfig,
-    SdkConfig, SigningConfig, SourceOption, StrictModeConfig, WidgetArkOptions,
+    SdkConfig, SigningConfig, SourceOption, StaticArktsSdkLayout, StrictModeConfig,
+    WidgetArkOptions,
 };
 
 // diagnostic

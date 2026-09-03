@@ -1,6 +1,7 @@
 //! Bundling stage implementation.
 
 use super::*;
+use crate::cmd::build::visual_codegen::VisualCodegenAdapter;
 
 pub(super) struct CoordinatorBundleStageInput<'a> {
   pub(super) args: &'a BuildArgs,
@@ -179,11 +180,21 @@ impl BuildCoordinator {
         module_obfuscation.is_enabled(&config.build_mode),
         module_target_name,
         args.hvigor_properties.rollup_cache_use_source_hash,
+        self.session.arkts_language_version,
       )
+      .with_preview_mode(
+        args.preview
+          || args.preview_transform_mode
+          || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
+      )
+      .with_check_entry(args.check_entry)
+      .with_ui_transform_optimization(args.ui_transform_optimization)
+      .with_use_get_current_bundle_name(args.integrated_hsp_use_get_current_bundle_name)
       .build()?;
       let task_inputs =
         TaskInputs::compute(module_config.as_ref(), loader_json, &task_input_snapshot)
           .with_module_analyzer(module_analyzer)
+          .with_arkts_language_version(self.session.arkts_language_version)
           .with_effective_obfuscation(module_obfuscation.config.as_ref(), &config.build_mode)
           .with_compile_env(bundle_compile_env.clone())
           .with_plugin_hash(task_plugin_hash)
@@ -383,11 +394,14 @@ impl BuildCoordinator {
         module_target_name,
         Some(custom_cfg),
         module_analyzer,
+        self.session.arkts_language_version,
         BundlePlanPackageInfo {
           source_map: source_map_packages,
           runtime: runtime_packages,
         },
       );
+      bundle_plan.preview_mode |= args.preview || args.preview_transform_mode;
+      bundle_plan.check_entry = args.check_entry;
       if ohos_test_templates_after_migration {
         // The ohosTest module's ets root is the generated template tree
         // (`.test/<product>/intermediates/src/ohosTest/ets`); entry page
@@ -537,6 +551,17 @@ impl BuildCoordinator {
       } else {
         Vec::new()
       };
+      let visual_sources = if is_incremental_watch && !session.arkts_language_version.is_static() {
+        VisualCodegenAdapter::new(
+          &args.resolved_node_executable(),
+          &config.sdk_config.ets_loader_path,
+          &all_module_roots,
+          &dependency_source_roots,
+        )
+        .generate()?
+      } else {
+        FxHashMap::default()
+      };
       let transform_sources = TransformSourceSnapshotBuilder::new(
         &all_module_roots,
         &dependency_source_roots,
@@ -547,7 +572,8 @@ impl BuildCoordinator {
       .with_package_roots(&dependency_package_roots)
       .with_sdk_declaration_roots(&sdk_declaration_roots)
       .with_custom_type_declaration_inputs(&loader_json.compiler_type_declaration_inputs)
-      .build()?;
+      .build()?
+      .with_visual_sources(visual_sources);
       tracing::info!(
         module = %module.name,
         elapsed_ms = transform_snapshot_start.elapsed().as_millis(),
@@ -555,6 +581,11 @@ impl BuildCoordinator {
       );
 
       let plugin_factory_start = Instant::now();
+      let integrated_hsp = module_build_option
+        .ark_options
+        .as_ref()
+        .and_then(|options| options.integrated_hsp)
+        .unwrap_or(false);
       let mut factory_input = PluginFactoryInput {
         target_name: module_target_name.clone(),
         sdk_api_dirs: config.sdk_config.ets_api_dirs(),
@@ -578,6 +609,19 @@ impl BuildCoordinator {
         ],
         all_module_roots,
         resource_refs: resource_refs.clone(),
+        resource_context: ResourceTransformContext {
+          min_api_version: parse_api_version(&module_config.product.compatible_sdk_version)
+            .unwrap_or(loader_json.api_version),
+          compile_har: matches!(module.module_type, OhosModuleType::Har),
+          byte_code_har: loader_json.byte_code_har.unwrap_or(false),
+          integrated_hsp,
+          use_get_current_bundle_name: args.integrated_hsp_use_get_current_bundle_name,
+          ui_transform_optimization: args.ui_transform_optimization,
+          reset_bundle_name: integrated_hsp,
+          allow_empty_bundle_name: false,
+          bundle_name: module_config.product.bundle_name.clone(),
+          module_name: loader_json.module_name.clone(),
+        },
         component_metadata: component_metadata.clone(),
         transform_sources,
         navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
@@ -802,6 +846,7 @@ impl BuildCoordinator {
           &module_layout.source().ets(),
           &module.name,
         )
+        .with_arkts_language_version(self.session.arkts_language_version)
         .generate()
         .map_err(|error| anyhow::anyhow!("generate HSP declarations failed: {error}"))?;
       }
@@ -827,12 +872,21 @@ impl BuildCoordinator {
         let bundle_cache_dir = module_layout.default_cache_dir("bundle");
         let bundle_cache = BuildCache::new(bundle_cache_dir);
         let bundle_config_hash = {
+          let page_entries = serde_json::to_string(&loader_json.page_entry_sources)
+            .context("serialize page entry sources for bundle cache")?;
           let key_str = format!(
-            "{}#{}#{:?}#{}#preloadSystemSo={}",
+            "{}#{}#{:?}#{}#arkts={}#preview={}#checkEntry={}#uiTransformOptimization={}#pageEntries={}#preloadSystemSo={}",
             config.sdk_config.compile_sdk_version,
             config.build_mode.as_str(),
             config.output_target,
             module_analyzer.as_str(),
+            self.session.arkts_language_version,
+            args.preview
+              || args.preview_transform_mode
+              || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
+            args.check_entry,
+            args.ui_transform_optimization,
+            page_entries,
             module_build_option.preload_system_so
           );
           arkdown_cache::CacheKeyMaterial::hash_u64(&key_str)

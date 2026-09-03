@@ -23,6 +23,8 @@ use crate::project::snapshot::ProjectSnapshot;
 pub struct WatchPlanInput {
     /// Source root directories to watch for `.ets`/`.ts` changes.
     pub source_roots: Vec<PathBuf>,
+    /// Visual/SuperVisual roots watched in both normal and Preview modes.
+    pub visual_roots: Vec<PathBuf>,
     /// Resource directories to watch for resource changes.
     pub resource_roots: Vec<PathBuf>,
     /// Config files to watch for invalidation (e.g., `module.json5`).
@@ -43,6 +45,7 @@ impl WatchPlanInput {
     ) -> Self {
         Self {
             source_roots,
+            visual_roots: Vec::new(),
             resource_roots,
             config_files,
             module_name: module_name.into(),
@@ -63,6 +66,8 @@ impl WatchPlanInput {
             .filter_map(|module_name| {
                 let module = project.modules.get(module_name)?;
                 let mut source_roots = module.source_roots.clone();
+                let mut visual_roots = Vec::new();
+                Self::push_dir(&mut visual_roots, module.src_main.join("supervisual"));
                 let mut resource_roots = module.resource_roots.clone();
                 let mut config_files = Self::project_config_files(project);
                 if let Some(path) = custom_config_path {
@@ -101,6 +106,10 @@ impl WatchPlanInput {
                                 &mut source_roots,
                                 package_root.join("src").join("main"),
                             );
+                            Self::push_dir(
+                                &mut visual_roots,
+                                package_root.join("src").join("main").join("supervisual"),
+                            );
                         }
                         if matches!(
                             node.node_type,
@@ -118,6 +127,8 @@ impl WatchPlanInput {
 
                 source_roots.sort();
                 source_roots.dedup();
+                visual_roots.sort();
+                visual_roots.dedup();
                 resource_roots.sort();
                 resource_roots.dedup();
                 config_files.sort();
@@ -125,6 +136,7 @@ impl WatchPlanInput {
 
                 Some(Self {
                     source_roots,
+                    visual_roots,
                     resource_roots,
                     config_files,
                     module_name: module_name.clone(),

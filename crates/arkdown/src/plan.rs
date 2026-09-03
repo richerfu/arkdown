@@ -26,7 +26,7 @@
 
 use std::path::PathBuf;
 
-use arkdown_core::{ArkdownError, BuildMode, OutputTarget};
+use arkdown_core::{ArkdownError, ArktsLanguageVersion, BuildMode, OutputTarget};
 use arkdown_ets_transform::ModuleAnalyzerKind;
 use rustc_hash::FxHashMap;
 
@@ -83,6 +83,9 @@ pub struct BundleInput {
     pub form_entry_sources: Vec<String>,
     /// Runtime entries loaded directly by OHOS from `module.json`.
     pub runtime_entry_sources: Vec<String>,
+    /// UI page entries from the module pages profile. Unlike abilities, these
+    /// receive the upstream compiler's `fileQuery === '?entry'` validation.
+    pub page_entry_sources: Vec<String>,
     /// Whether hvigor `supportChunks` is enabled for this module.
     pub support_chunks: bool,
     /// Package metadata used by hvigor-format source map keys and
@@ -375,8 +378,15 @@ pub struct BundlePlan {
     pub plugins: BundlePluginSet,
     /// Build mode (affects source maps, optimization, tree-shaking).
     pub build_mode: BuildMode,
+    /// Explicit ArkTS compiler language for every ArkTS transform in this plan.
+    pub arkts_language_version: ArktsLanguageVersion,
     /// Target API version (from `compatibleSdkVersion`).
     pub target_api_version: u32,
+    /// Original compatible-SDK spelling used by source transforms whose
+    /// behavior differs for point releases such as `26.0.0`.
+    pub compatible_sdk_version: String,
+    /// Runtime OS used by generated compatibility helpers.
+    pub runtime_os: String,
     /// Bundle name (from `AppScope/app.json5`).
     pub bundle_name: String,
     /// Whether `useNormalizedOHMUrl` is active.
@@ -393,6 +403,12 @@ pub struct BundlePlan {
     /// Used by the plugin factory to decide whether to activate
     /// `HarDeduplicatePlugin` (HSP builds only).
     pub output_target: OutputTarget,
+    /// Whether the source transform is running for the IDE Previewer.
+    /// This is independent from the package output target: `--preview` may
+    /// still build a HAP-shaped artifact.
+    pub preview_mode: bool,
+    /// Preview validation override matching source `projectConfig.checkEntry`.
+    pub check_entry: bool,
     /// Override `shimMissingExports` from `arkdown.config.toml` (or its legacy
     /// JSON fallback).
     ///
@@ -486,6 +502,7 @@ mod tests {
                 entries: vec!["./ets/pages/Index.ets".to_string()],
                 form_entry_sources: Vec::new(),
                 runtime_entry_sources: Vec::new(),
+                page_entry_sources: Vec::new(),
                 support_chunks: false,
                 source_map_packages: BundleSourceMapPackageInfo {
                     entry_package_name: "entry".to_string(),
@@ -507,12 +524,17 @@ mod tests {
             },
             plugins: BundlePluginSet::default(),
             build_mode: BuildMode::Debug,
+            arkts_language_version: ArktsLanguageVersion::default(),
             target_api_version: 12,
+            compatible_sdk_version: "12".to_string(),
+            runtime_os: "OpenHarmony".to_string(),
             bundle_name: "com.example.app".to_string(),
             use_normalized_ohm_url: true,
             should_emit_js: true,
             module_analyzer: ModuleAnalyzerKind::default(),
             output_target: OutputTarget::Hap,
+            preview_mode: false,
+            check_entry: false,
             shim_missing_exports_override: None,
             treeshake_override: None,
             context_override: None,

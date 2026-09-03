@@ -2,6 +2,11 @@
 
 use super::*;
 
+struct RuntimeEntrySources {
+    all: Vec<String>,
+    pages: Vec<String>,
+}
+
 impl LoaderJson {
     /// Apply the validated current-package `oh-exports` file snapshot.
     ///
@@ -204,12 +209,12 @@ impl LoaderJson {
         path
     }
 
-    pub(super) fn collect_runtime_entry_sources(
+    fn collect_runtime_entry_sources(
         config: &ArkdownConfig,
         manifest: &HapManifest,
         module_layout: &ProfileModuleLayout<'_>,
         target_name: &str,
-    ) -> Result<Vec<String>, ArkdownError> {
+    ) -> Result<RuntimeEntrySources, ArkdownError> {
         let mut runtime_entry_sources: Vec<String> = manifest
             .abilities
             .iter()
@@ -229,14 +234,21 @@ impl LoaderJson {
         // inputs). The `ohosTest` target similarly compiles the generated
         // `src/ohosTest` pages (`$profile:test_pages` lives in the template
         // tree, not `src/main/resources`). Preview keeps the normal pages.
-        if let Some(pages_ref) = &manifest.pages {
+        let page_entry_sources = if let Some(pages_ref) = &manifest.pages {
             if !matches!(config.output_target, OutputTarget::Test) && target_name != "ohosTest" {
-                runtime_entry_sources
-                    .extend(Self::read_main_page_entries(module_layout, pages_ref)?);
+                Self::read_main_page_entries(module_layout, pages_ref)?
+            } else {
+                Vec::new()
             }
-        }
+        } else {
+            Vec::new()
+        };
+        runtime_entry_sources.extend(page_entry_sources.iter().cloned());
 
-        Ok(runtime_entry_sources)
+        Ok(RuntimeEntrySources {
+            all: runtime_entry_sources,
+            pages: page_entry_sources,
+        })
     }
 
     pub(super) fn read_main_page_entries(
@@ -353,10 +365,12 @@ impl LoaderJson {
         } else {
             ProfileModuleLayout::for_product(&module_cfg.src_path, &config.product.name)
         };
-        let runtime_entry_sources = {
+        let runtime_entries = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "runtime_entry_sources");
             Self::collect_runtime_entry_sources(config, manifest, &module_layout, target_name)?
         };
+        let runtime_entry_sources = runtime_entries.all;
+        let page_entry_sources = runtime_entries.pages;
 
         // Collect compile_entry from runtime srcEntry values.
         let mut compile_entry = Vec::new();
@@ -934,6 +948,7 @@ impl LoaderJson {
             compile_entry,
             form_entry_sources,
             runtime_entry_sources,
+            page_entry_sources,
             module_root_path: src_main.clone(),
             cache_path,
             ace_module_build,

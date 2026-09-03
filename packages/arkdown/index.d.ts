@@ -468,12 +468,15 @@ export interface BuildConfig {
   project?: string
   target?: string
   mode?: string
+  /** ArkTS 1.2 is opt-in; omitted builds use ArkTS 1.1. */
+  arktsVersion?: '1.1' | '1.2'
   module?: string
   product?: string
   buildTargetName?: string
   buildVersion?: string
   watch?: boolean
   preview?: boolean
+  checkEntry?: boolean
   coverage?: boolean
   scope?: string
   ohosTestCoverage?: boolean

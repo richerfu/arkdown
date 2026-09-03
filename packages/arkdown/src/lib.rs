@@ -1204,12 +1204,16 @@ pub struct BuildConfig {
   pub project: Option<String>,
   pub target: Option<String>,
   pub mode: Option<String>,
+  /// Explicit ArkTS compiler language. Omitted means ArkTS 1.1.
+  #[napi(ts_type = "'1.1' | '1.2'")]
+  pub arkts_version: Option<String>,
   pub module: Option<String>,
   pub product: Option<String>,
   pub build_target_name: Option<String>,
   pub build_version: Option<String>,
   pub watch: Option<bool>,
   pub preview: Option<bool>,
+  pub check_entry: Option<bool>,
   pub coverage: Option<bool>,
   pub scope: Option<String>,
   pub ohos_test_coverage: Option<bool>,
@@ -1379,12 +1383,14 @@ pub fn build<'a>(
     project,
     target,
     mode,
+    arkts_version,
     module,
     product,
     build_target_name,
     build_version,
     watch,
     preview,
+    check_entry,
     coverage,
     scope,
     ohos_test_coverage,
@@ -1427,10 +1433,16 @@ pub fn build<'a>(
   let target = target.unwrap_or_else(|| "hap".to_string());
   let mode = mode.unwrap_or_else(|| "debug".to_string());
   let package_args = PackageBuildArgs {
+    arkts_language_version: arkts_version.as_deref().unwrap_or("1.1").parse().map_err(
+      |error: arkdown_core::ParseArktsLanguageVersionError| {
+        napi::Error::from_reason(error.to_string())
+      },
+    )?,
     build_target_name,
     build_version,
     watch: watch.unwrap_or(false),
     preview: preview.unwrap_or(false),
+    check_entry: check_entry.unwrap_or(false),
     coverage: coverage.unwrap_or(false),
     scope,
     ohos_test_coverage,
@@ -1549,10 +1561,12 @@ pub fn parse_plugin_ast(
 
 #[derive(Debug, Clone, Default)]
 struct PackageBuildArgs {
+  arkts_language_version: arkdown_core::ArktsLanguageVersion,
   build_target_name: Option<String>,
   build_version: Option<String>,
   watch: bool,
   preview: bool,
+  check_entry: bool,
   coverage: bool,
   scope: Option<String>,
   ohos_test_coverage: Option<bool>,
@@ -1712,6 +1726,8 @@ async fn run_build(
     .unwrap_or_default();
   let config = std::sync::Arc::new(config);
   let mut session_builder = BuildSessionBuilder::new(config.clone());
+  session_builder =
+    session_builder.with_arkts_language_version(package_args.arkts_language_version);
   if let Some(runtime_overrides) = runtime_context_overrides.clone() {
     session_builder = session_builder.with_runtime_overrides(runtime_overrides);
   }
@@ -1728,6 +1744,7 @@ async fn run_build(
   let args = BuildArgs {
     target,
     mode,
+    arkts_version: package_args.arkts_language_version,
     module,
     product,
     project: Some(project_path),
@@ -1749,6 +1766,8 @@ async fn run_build(
     ohos_enable_binxo: package_args.ohos_enable_binxo,
     enable_zig: package_args.enable_zig,
     preview: package_args.preview,
+    check_entry: package_args.check_entry,
+    preview_transform_mode: false,
     disable_abc_cache: package_args.disable_abc_cache || !package_args.cache,
     cache_file: package_args.cache_file.map(std::path::PathBuf::from),
     abc_backend: AbcBackendChoice::Sdk,

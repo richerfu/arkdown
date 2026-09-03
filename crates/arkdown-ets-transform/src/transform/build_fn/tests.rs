@@ -97,14 +97,16 @@ fn lower_build_body_with_component_context_and_module(
 ) -> Result<String, BuildLoweringError> {
     let plan = BuildBodyPlan::component_with_shared_inputs(
         body,
-        Arc::from(source_text),
-        Arc::from(source_id),
-        custom_components,
-        builder_methods,
-        custom_component_update_props,
-        Arc::new(component_metadata.clone()),
-        raw_object_fields,
-        module_name.map(Arc::from),
+        BuildBodySharedInputs {
+            source_text: Arc::from(source_text),
+            source_id: Arc::from(source_id),
+            custom_components,
+            builder_methods,
+            custom_component_update_props,
+            component_metadata: Arc::new(component_metadata.clone()),
+            raw_object_fields,
+            module_name: module_name.map(Arc::from),
+        },
         current_component_reusable,
         GeneratedViewpuName::VIEWPU_BASE,
     );
@@ -857,6 +859,30 @@ struct Foo {
 }
 
 #[test]
+fn lowers_create_object_double_exclamation_to_value_and_dollar_property() {
+    let source = r#"@ComponentV2
+struct Foo {
+  @Local value: string = ""
+
+  build() {
+    TextInput({ text: this.value!! })
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        out.contains("TextInput.create({")
+            && out.contains("text: this.value,")
+            && out.contains("$text: (newValue) => {"),
+        "create object !! must emit the paired $property callback; got:\n{out}"
+    );
+    assert!(out.contains("this.value = newValue;"), "got:\n{out}");
+    assert!(
+        !out.contains("this.value!!"),
+        "!! marker must not leak into generated TypeScript; got:\n{out}"
+    );
+}
+
+#[test]
 fn lowers_attribute_double_dollar_to_value_and_change_event_arguments() {
     let source = r#"@Component
 struct Foo {
@@ -912,6 +938,36 @@ struct Foo {
     assert!(
         out.contains("{ builder: this.SheetBuilder.bind(this) }"),
         "bindSheet builder arg must still be hvigor builder object after $$ rewrite; got:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_style_double_exclamation_to_value_and_dollar_value_object() {
+    let source = r#"@ComponentV2
+struct Foo {
+  @Local show: boolean = false
+
+  @Builder MenuBuilder() {}
+
+  build() {
+    Button("menu").bindMenu(this.show!!, this.MenuBuilder)
+  }
+}"#;
+    let out = parse_and_lower_with_visible_builder_methods(
+        source,
+        &FxHashSet::default(),
+        false,
+        &FxHashSet::from_iter(["MenuBuilder".to_string()]),
+        &FxHashSet::default(),
+    )
+    .unwrap();
+    assert!(out.contains("Button.bindMenu({"), "got:\n{out}");
+    assert!(out.contains("value: this.show"), "got:\n{out}");
+    assert!(out.contains("$value: (newValue) => {"), "got:\n{out}");
+    assert!(out.contains("this.show = newValue;"), "got:\n{out}");
+    assert!(
+        out.contains("this.MenuBuilder.bind(this)"),
+        "builder argument must retain its binding rewrite; got:\n{out}"
     );
 }
 

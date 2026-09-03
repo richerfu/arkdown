@@ -132,8 +132,11 @@ Options:
                       Named build-profile target.
   --build-version <value>
                       Override buildVersion for this invocation.
+  --arkts-version <version>
+                      Compile as ArkTS 1.1 or 1.2. Defaults to 1.1.
   --watch             Rebuild on changes.
   --preview           Preview resource rebuild mode.
+  --check-entry       Require exactly one @Entry on the previewed page.
   --coverage          Instrument generated JavaScript for coverage.
   --ohos-debug-asan   Enable AddressSanitizer for the generated package.
   --ohos-enable-hwasan

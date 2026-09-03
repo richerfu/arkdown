@@ -794,6 +794,39 @@ pub struct SdkConfig {
     pub compile_sdk_version: String,
 }
 
+/// Installed ArkTS 1.2 SDK tool and declaration layout.
+///
+/// The current source tree packages the static frontend under
+/// `ets/static/`, independently from the legacy `ets/build-tools/ets-loader`
+/// directory. Keeping the derived layout typed prevents compiler stages from
+/// inventing paths or passing dynamic-frontend tools to a static build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticArktsSdkLayout {
+    pub root: PathBuf,
+    pub driver_entry: PathBuf,
+    pub panda_sdk: PathBuf,
+    pub es2panda: PathBuf,
+    pub abc_linker: PathBuf,
+    pub dependency_analyzer: PathBuf,
+    pub ui_syntax_plugin: PathBuf,
+    pub ui_plugin: PathBuf,
+    pub memo_plugin: PathBuf,
+    pub interop_plugin: PathBuf,
+    pub api: PathBuf,
+    pub kits: PathBuf,
+    pub arkts: PathBuf,
+}
+
+impl StaticArktsSdkLayout {
+    fn executable_name(stem: &str) -> String {
+        if cfg!(windows) {
+            format!("{stem}.exe")
+        } else {
+            stem.to_string()
+        }
+    }
+}
+
 fn default_compile_sdk_version() -> String {
     "6.0.0.47".to_string()
 }
@@ -817,6 +850,36 @@ impl SdkConfig {
     /// component root is three levels up: `<sdk>`.
     fn component_root(&self) -> Option<&std::path::Path> {
         self.ets_root()?.parent()
+    }
+
+    /// Derive the ArkTS 1.2 static SDK layout selected by the explicit
+    /// `--arkts-version 1.2` build mode.
+    pub fn static_arkts_layout(&self) -> Option<StaticArktsSdkLayout> {
+        let root = self.ets_root()?.join("static");
+        let build_tools = root.join("build-tools");
+        let panda_sdk = build_tools.join("ets2panda");
+        let panda_bin = panda_sdk.join("bin");
+        let ui_plugins = build_tools.join("ui-plugins").join("lib");
+        Some(StaticArktsSdkLayout {
+            root: root.clone(),
+            driver_entry: build_tools
+                .join("driver")
+                .join("build-system")
+                .join("dist")
+                .join("entry.js"),
+            panda_sdk,
+            es2panda: panda_bin.join(StaticArktsSdkLayout::executable_name("es2panda")),
+            abc_linker: panda_bin.join(StaticArktsSdkLayout::executable_name("ark_link")),
+            dependency_analyzer: panda_bin
+                .join(StaticArktsSdkLayout::executable_name("dependency_analyzer")),
+            ui_syntax_plugin: ui_plugins.join("ui-syntax-plugins").join("index"),
+            ui_plugin: ui_plugins.join("ui-plugins").join("index"),
+            memo_plugin: ui_plugins.join("memo-plugins").join("index"),
+            interop_plugin: ui_plugins.join("interop-plugins").join("index"),
+            api: root.join("api"),
+            kits: root.join("kits"),
+            arkts: root.join("arkts"),
+        })
     }
 
     /// Return the SDK PAC schema path when this SDK provides one.

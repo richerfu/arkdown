@@ -4,7 +4,7 @@
 //! when source files change.  This is a thin coordinator that:
 //!
 //! 1. Determines which directories to watch based on the build mode
-//!    (full watch vs preview/resource-only).
+//!    (full watch vs preview resources plus SuperVisual inputs).
 //! 2. Computes an importer map snapshot from the previous build's
 //!    `importer_map.json` files for M2 hot-reload delta gating.
 //! 3. Classifies each change batch as **hot** (ETS/TS source only) or **cold**
@@ -84,6 +84,7 @@ pub(super) struct WatchStageInput {
   pub(super) native_task_roots: Vec<super::args::NativeTaskRoot>,
   /// When `true`, only `src/main/resources/` directories are watched.
   pub(super) preview_mode: bool,
+  pub(super) check_entry: bool,
   /// Persistent Hvigor HotReloadArkTS worker semantics.
   pub(super) hot_reload_mode: bool,
 }
@@ -146,6 +147,7 @@ impl WatchStageInput {
       hvigor_cache_dir: args.hvigor_cache_dir.clone(),
       native_task_roots: args.native_task_roots.clone(),
       preview_mode,
+      check_entry: args.check_entry,
       hot_reload_mode,
     }
   }
@@ -161,8 +163,10 @@ impl WatchStage {
   /// encounters a fatal error.
   pub(super) async fn run(input: WatchStageInput) -> Result<()> {
     let config_for_watch = input.config.clone();
+    let arkts_version = input.session.arkts_language_version;
     let session = input.session;
     let preview_mode = input.preview_mode;
+    let check_entry = input.check_entry;
     let target = input.target;
     let mode = input.mode;
     let module_filter = input.module_filter;
@@ -218,7 +222,7 @@ impl WatchStage {
 
     tracing::info!("watching for changes");
     if preview_mode {
-      tracing::info!("preview watch enabled for resource-only recompilation");
+      tracing::info!("preview watch enabled for resources and SuperVisual inputs");
     } else if hot_reload_mode {
       tracing::info!("Hvigor HotReloadArkTS persistent worker enabled");
     }
@@ -327,6 +331,7 @@ impl WatchStage {
         let rebuild_args = BuildArgs {
           target: target.clone(),
           mode: mode.clone(),
+          arkts_version,
           module: module_filter.clone(),
           product: product_filter.clone(),
           project: Some(project_root.clone()),
@@ -348,6 +353,8 @@ impl WatchStage {
           ohos_enable_binxo,
           enable_zig,
           preview: false,
+          check_entry,
+          preview_transform_mode: preview_mode,
           disable_abc_cache,
           cache_file: cache_file.clone(),
           abc_backend,
@@ -413,8 +420,10 @@ impl WatchSessionPlan {
     for plan in session.watch_inputs.iter() {
       if preview_mode {
         watch_dirs.extend(plan.resource_roots.iter().cloned());
+        watch_dirs.extend(plan.visual_roots.iter().cloned());
       } else {
         watch_dirs.extend(plan.source_roots.iter().cloned());
+        watch_dirs.extend(plan.visual_roots.iter().cloned());
         if !hot_reload_mode {
           watch_dirs.extend(plan.resource_roots.iter().cloned());
           watch_files.extend(plan.config_files.iter().cloned());

@@ -163,6 +163,14 @@ pub struct LoaderJson {
     /// Source entries that the OHOS runtime loads directly from `module.json`.
     #[serde(skip)]
     pub runtime_entry_sources: Vec<String>,
+    /// UI page entries originating from the module `pages` profile.
+    ///
+    /// The upstream compiler appends `?entry` to both page and ability Rollup
+    /// inputs, but excludes `abilityPagesFullPath` before applying page-only
+    /// `@Entry`/`@Preview` checks. Keep the page set separately so this
+    /// distinction survives the Rust profile-to-bundler handoff.
+    #[serde(skip)]
+    pub page_entry_sources: Vec<String>,
     /// Absolute path to the module source root directory (e.g. `<project>/entry/src/main`).
     #[serde(skip)]
     pub module_root_path: String,

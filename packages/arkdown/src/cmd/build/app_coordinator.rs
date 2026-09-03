@@ -215,7 +215,6 @@ impl AppBuildCoordinator {
       }
       lifecycle.after(&project_name, None, "PackageApp").await?;
       drop(staged);
-    } else {
     }
 
     if lifecycle

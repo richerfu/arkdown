@@ -156,9 +156,13 @@ pub struct ArkdownBuildCliConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub build_version: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub arkts_version: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub watch: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub preview: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub check_entry: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub coverage: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -692,8 +696,19 @@ impl<'a> ArkdownBuildArgsParser<'a> {
         "--build-version" => {
           self.config.build_version = Some(self.required_value(&mut index, arg)?)
         }
+        "--arkts-version" => {
+          let value = self.required_value(&mut index, arg)?;
+          if !matches!(value.as_str(), "1.1" | "1.2") {
+            return Err(CliDiagnostic::new(
+              "INVALID_ARKTS_LANGUAGE_VERSION",
+              format!("{arg} must be 1.1 or 1.2: {value}"),
+            ));
+          }
+          self.config.arkts_version = Some(value);
+        }
         "--watch" => self.config.watch = Some(true),
         "--preview" => self.config.preview = Some(true),
+        "--check-entry" => self.config.check_entry = Some(true),
         "--coverage" => self.config.coverage = Some(true),
         "--scope" => self.config.scope = Some(self.required_value(&mut index, arg)?),
         "--ohos-test-coverage" => {

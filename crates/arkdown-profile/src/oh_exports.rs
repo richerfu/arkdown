@@ -164,6 +164,7 @@ mod tests {
             compile_entry: Vec::new(),
             form_entry_sources: Vec::new(),
             runtime_entry_sources: Vec::new(),
+            page_entry_sources: Vec::new(),
             module_root_path: crate::loader_json::to_absolute_path_string(
                 &module_root.join("src/main"),
             ),

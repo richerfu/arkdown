@@ -1,6 +1,8 @@
+pub(crate) mod api_available;
 mod auto_lazy_import;
 pub(crate) use auto_lazy_import::apply as apply_auto_lazy_import;
 mod build_fn;
+mod builder_factory;
 mod component;
 mod component_analysis;
 mod component_collection;
@@ -10,9 +12,11 @@ pub(crate) mod decorator;
 mod entry;
 mod expand_import_path;
 mod global_rewrite;
+mod local_builder;
 mod navigation;
 pub(crate) mod source_emit;
 mod source_text;
+mod static_graph;
 mod syntax;
 pub(crate) mod viewpu_emit;
 mod viewpu_finalize;
@@ -24,15 +28,16 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 
-use arkdown_core::{AutoLazyFilter, ExpandImportPath, ModuleSource};
+use arkdown_core::{ArktsLanguageVersion, AutoLazyFilter, ExpandImportPath, ModuleSource};
 use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, HvigorModulePath};
 use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
     Argument, BindingPattern, BindingRestElement, Class, ClassElement, Declaration, Decorator,
     Directive, ExportDefaultDeclarationKind, Expression, FormalParameter, FormalParameterKind,
     FormalParameterRest, FormalParameters, Function, FunctionBody, FunctionType, MethodDefinition,
-    MethodDefinitionKind, MethodDefinitionType, Program, PropertyDefinition, PropertyKey,
-    Statement, StringLiteral, StructElement, StructStatement, TSNamespaceDeclarationBody, TSType,
+    MethodDefinitionKind, MethodDefinitionType, ObjectPropertyKind, Program, PropertyDefinition,
+    PropertyKey, Statement, StringLiteral, StructElement, StructStatement,
+    TSNamespaceDeclarationBody, TSType,
 };
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_codegen::{CodegenOptions, CommentOptions, IndentChar};
@@ -41,28 +46,36 @@ use oxc_span::{GetSpan, SPAN};
 
 use crate::error::EtsTransformError;
 use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
+use crate::transform::api_available::{ApiAvailableLowerer, ApiAvailableTransformOptions};
 use crate::transform::build_fn::{
-    BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps, StylesMethodInfo,
+    BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, CustomComponentUpdateProps,
+    StylesMethodInfo,
 };
+use crate::transform::builder_factory::BuilderFactoryValidator;
 use crate::transform::component::{
-    BuilderMethodInfo, ComponentInfo, ComponentSourceMember, CustomDialogControllerLowerer,
-    FieldExpression, ParamField, RegularField, RegularMember, StateField, ViewPuClassEmitter,
+    BuilderMethodInfo, BuilderMethodKind, ComponentInfo, ComponentSourceMember,
+    CustomDialogControllerLowerer, FieldExpression, GlobalReusePoolConfig, ParamField,
+    RegularField, RegularMember, StateField, ViewPuClassEmitter,
 };
 use crate::transform::component_analysis::{
     BuilderFunctionNameCollector, CustomComponentNameCollector, ExtendAttributeIndex,
     ImportedComponentNamesCollector, ImportedCustomComponentNamesCollector,
-    LocalComponentUpdatePropsCollector, SimpleTypeContext, StructBuilderMethodNames,
-    StructBuilderParamNames,
+    LocalBuilderFileInventory, LocalComponentUpdatePropsCollector, PreviewComponentNameCollector,
+    SimpleTypeContext, StructBuilderMethodNames, StructBuilderParamNames,
+    StructMutableBuilderProperties,
 };
 use crate::transform::component_collection::ComponentNameCollector;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::declaration_emit::{ParamsInterfaceEmitter, TopLevelFunctionEmitter};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
-use crate::transform::entry::{EntryOptions, EntryRegistrationBlock, EntryRegistrationInfo};
+use crate::transform::entry::{
+    EntryOptions, EntryRegistrationBlock, EntryRegistrationInfo, PreviewRegistrationBlock,
+};
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
 use crate::transform::navigation::NavigationBuilderRegistrationBlock;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
+use crate::transform::static_graph::StaticArktsGraphProjection;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
@@ -77,6 +90,9 @@ pub enum CheckerMode {
 
 #[derive(Debug, Clone)]
 pub struct TransformOptions {
+    /// Explicit build-wide ArkTS language. The default remains ArkTS 1.1.
+    pub arkts_language_version: ArktsLanguageVersion,
+    pub(crate) api_available: ApiAvailableTransformOptions,
     pub bundle_name: Option<String>,
     pub module_name: Option<String>,
     pub project_root: Option<PathBuf>,
@@ -99,6 +115,14 @@ pub struct TransformOptions {
     ///
     /// Mirrors SDK `projectConfig.cardObj[resourceFileName]`.
     pub form_entry: bool,
+    /// Whether Rolldown loaded this source through an entry query. This is the
+    /// Rust equivalent of the source compiler's `fileQuery === '?entry'`.
+    pub entry_source: bool,
+    /// Source compiler preview mode (`projectConfig.isPreview`).
+    pub preview_mode: bool,
+    /// Preview's `projectConfig.checkEntry` override. Kept explicit because it
+    /// changes entry/preview validation independently of preview mode.
+    pub check_entry: bool,
     /// Whether Stage model partial update is enabled (API >= 9).
     ///
     /// Defaults to `true`; set to `false` only for FA model / JSBUNDLE builds,
@@ -130,6 +154,8 @@ pub struct TransformOptions {
 impl Default for TransformOptions {
     fn default() -> Self {
         Self {
+            arkts_language_version: ArktsLanguageVersion::default(),
+            api_available: ApiAvailableTransformOptions::default(),
             bundle_name: None,
             module_name: None,
             project_root: None,
@@ -140,6 +166,9 @@ impl Default for TransformOptions {
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
+            entry_source: false,
+            preview_mode: false,
+            check_entry: false,
             partial_update: true,
             checker_mode: CheckerMode::Oxc,
             auto_lazy_import: false,
@@ -153,6 +182,11 @@ impl Default for TransformOptions {
 }
 
 impl TransformOptions {
+    pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
+        self.arkts_language_version = version;
+        self
+    }
+
     /// Whether Stage model partial update is enabled (API >= 9).
     pub fn supports_partial_update(&self) -> bool {
         self.partial_update
@@ -189,7 +223,12 @@ impl<'a> ArkuiComponentNameCollector<'a> {
     /// component expressions rather than source-text matching.
     pub fn collect(&self) -> Result<Vec<String>, EtsTransformError> {
         let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_id(self.id);
+        let source_type = CompileArktsSourceType::from_id_with_version(
+            self.id,
+            self.options
+                .map(|options| options.arkts_language_version)
+                .unwrap_or_default(),
+        );
         let parsed = match self.options {
             Some(options) => {
                 options
@@ -231,17 +270,18 @@ pub struct ArktsTransformer<'a> {
 pub struct ArktsTransformOutput {
     pub code: String,
     pub source_map: Option<String>,
+    pub(crate) rolldown_projection: Option<String>,
 }
 
 enum ArktsTransformerOptions<'a> {
-    Owned(TransformOptions),
+    Owned(Box<TransformOptions>),
     Borrowed(&'a TransformOptions),
 }
 
 impl ArktsTransformerOptions<'_> {
     fn as_ref(&self) -> &TransformOptions {
         match self {
-            Self::Owned(options) => options,
+            Self::Owned(options) => options.as_ref(),
             Self::Borrowed(options) => options,
         }
     }
@@ -251,12 +291,12 @@ impl<'a> ArktsTransformer<'a> {
     /// Transform an ArkTS `.ets` source file into TypeScript.
     ///
     /// ArkUI parsing is handled by the workspace-pinned ohos-rs/oxc fork using
-    /// `SourceType::ets()`, so component extraction uses real AST nodes instead
-    /// of source text matching.
+    /// `SourceType::ets()` for the default language and
+    /// `SourceType::ets_static()` for explicit ArkTS 1.2 plans.
     pub fn new(source: &'a ModuleSource) -> Self {
         Self {
             source,
-            options: ArktsTransformerOptions::Owned(TransformOptions::default()),
+            options: ArktsTransformerOptions::Owned(Box::default()),
         }
     }
 
@@ -277,7 +317,10 @@ impl<'a> ArktsTransformer<'a> {
         let content = source.content.as_str();
 
         let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_id(&source.id.id);
+        let source_type = CompileArktsSourceType::from_id_with_version(
+            &source.id.id,
+            options.arkts_language_version,
+        );
         let mut parsed = options
             .component_metadata
             .parse_ets(&allocator, content, source_type);
@@ -288,22 +331,36 @@ impl<'a> ArktsTransformer<'a> {
             });
         }
 
+        if options.arkts_language_version.is_static() {
+            return self.transform_static(&allocator, &mut parsed.program);
+        }
+
         let mock_setup_decorators_lowered = if options.disable_mock_setup_decorator {
             MockSetupDecoratorLowerer::new().program(&mut parsed.program)
         } else {
             false
         };
+        let needs_api_available = options.api_available.should_transform_source(content);
         let syntax_detector = ArktsTransformSyntaxDetector::new();
-        if !mock_setup_decorators_lowered && !syntax_detector.program(&parsed.program) {
+        if !mock_setup_decorators_lowered
+            && !needs_api_available
+            && !syntax_detector.program(&parsed.program)
+        {
             return Ok(ArktsTransformOutput {
                 code: source.content.clone(),
                 source_map: None,
+                rolldown_projection: None,
             });
         }
 
         if matches!(options.checker_mode, CheckerMode::Oxc) {
-            let diagnostics =
-                crate::checker::EtsChecker::new(&parsed.program, &source.id.id).check();
+            let diagnostics = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
+                .with_page_context(
+                    options.entry_source,
+                    options.preview_mode,
+                    options.check_entry,
+                )
+                .check();
             for diag in &diagnostics {
                 tracing::debug!(file = %source.id.id, diagnostic = ?diag, "ets checker diagnostic");
             }
@@ -348,6 +405,16 @@ impl<'a> ArktsTransformer<'a> {
             BuilderFunctionNameCollector::new(&parsed.program, &source.id.id, options).collect();
         let local_builder_functions = builder_function_names.local;
         let builder_functions = builder_function_names.all;
+        let validator_builder_functions = match options.arkts_language_version {
+            ArktsLanguageVersion::V1_1 => &builder_functions,
+            ArktsLanguageVersion::V1_2 => &local_builder_functions,
+        };
+        BuilderFactoryValidator::new(
+            validator_builder_functions,
+            &source.id.id,
+            options.arkts_language_version,
+        )
+        .validate(&parsed.program)?;
         let navigation_registrations = NavigationBuilderRegistrationBlock::for_source(
             options.navigation_routes.routes_for_source(&source.id.id),
             &local_builder_functions,
@@ -365,25 +432,34 @@ impl<'a> ArktsTransformer<'a> {
         custom_component_update_props.retain(|name, _| !builder_functions.contains(name));
         let custom_dialog_components = custom_component_update_props
             .iter()
-            .filter_map(|(name, info)| info.is_custom_dialog.then(|| name.clone()))
+            .filter(|(_, info)| info.is_custom_dialog)
+            .map(|(name, _)| name.clone())
             .collect::<FxHashSet<_>>();
         let extend_attributes = Arc::new(ExtendAttributeIndex::from_program(&parsed.program));
         let global_styles =
             TopLevelStylesInventory::new(&parsed.program, &source.id.id).collect(&allocator)?;
+        let preview_components = PreviewComponentNameCollector::new(&parsed.program).collect();
+        let has_local_builder_in_file =
+            LocalBuilderFileInventory::new(&parsed.program).has_local_builder();
+        let preview_runtime = options.preview_mode
+            && options.arkts_language_version == ArktsLanguageVersion::V1_1
+            && !preview_components.is_empty();
 
-        let statement_transformer = ArktsStatementTransformer::new(
-            &allocator,
-            content,
-            &source.id.id,
-            options,
-            &simple_type_context,
-            &custom_components,
-            &custom_component_update_props,
-            &builder_functions,
-            &hvigor_source_id,
-            extend_attributes,
-            global_styles,
-        );
+        let statement_transformer =
+            ArktsStatementTransformer::new(ArktsStatementTransformerInput {
+                allocator: &allocator,
+                source_text: content,
+                id: &source.id.id,
+                options,
+                simple_type_context: &simple_type_context,
+                custom_components: &custom_components,
+                custom_component_update_props: &custom_component_update_props,
+                builder_functions: &builder_functions,
+                hvigor_source_id: &hvigor_source_id,
+                extend_attributes,
+                global_styles,
+                has_local_builder_in_file,
+            });
         let concurrent_directives_lowered =
             ConcurrentDirectiveLowerer::new(&allocator).program(&mut parsed.program);
         let global_context_calls_lowered =
@@ -397,7 +473,12 @@ impl<'a> ArktsTransformer<'a> {
             &hvigor_source_id,
         )
         .program(&mut parsed.program);
+        let api_available_lowered = needs_api_available
+            && ApiAvailableLowerer::new(&allocator, options.api_available)
+                .program(&mut parsed.program);
         let mut entry_registrations = EntryRegistrationBlock::default();
+        let mut preview_registrations =
+            preview_runtime.then(|| PreviewRegistrationBlock::new(preview_components));
         let mut reusable_v2_helper_emitted = false;
         let replacement_plans = parsed
             .program
@@ -414,14 +495,23 @@ impl<'a> ArktsTransformer<'a> {
                     if let Some((name, info)) =
                         statement_transformer.component_v2_entry_registration(statement)?
                     {
-                        entry_registrations.push(&name, Some(&info));
+                        if let Some(preview) = &mut preview_registrations {
+                            preview.set_entry(&name, Some(&info));
+                        } else {
+                            entry_registrations.push(&name, Some(&info));
+                        }
                     }
                     reusable_v2_helper_emitted |= emit_reusable_v2_helper;
                     Ok(Some(StatementReplacementPlan::AstStatements(replacement)))
                 } else if let Some(component) = statement_transformer.component(statement)? {
                     if component.is_entry {
-                        entry_registrations
-                            .push(&component.name, component.entry_registration.as_ref());
+                        if let Some(preview) = &mut preview_registrations {
+                            preview
+                                .set_entry(&component.name, component.entry_registration.as_ref());
+                        } else {
+                            entry_registrations
+                                .push(&component.name, component.entry_registration.as_ref());
+                        }
                     }
                     let statements = ViewPuClassEmitter::new(
                         &component,
@@ -443,6 +533,7 @@ impl<'a> ArktsTransformer<'a> {
             || concurrent_directives_lowered
             || global_context_calls_lowered
             || custom_dialog_controllers_lowered
+            || api_available_lowered
             || !navigation_registrations.is_empty()
             || replacement_plans.iter().any(Option::is_some)
         {
@@ -452,6 +543,13 @@ impl<'a> ArktsTransformer<'a> {
                 options.component_metadata.runtime_names(),
             );
             drop(entry_registrations);
+            let preview_registration_statement = preview_registrations.map(|preview| {
+                preview.statement(
+                    oxc_ast::builder::AstBuilder::new(&allocator),
+                    &allocator,
+                    options.component_metadata.runtime_names(),
+                )
+            });
 
             let mut body = OxcVec::new_in(&&allocator);
             let old_body = std::mem::replace(&mut parsed.program.body, OxcVec::new_in(&&allocator));
@@ -469,12 +567,17 @@ impl<'a> ArktsTransformer<'a> {
                 }
             }
             body.extend(entry_registration_statements);
+            if let Some(statement) = preview_registration_statement {
+                body.push(statement);
+            }
             body.extend(
                 navigation_registrations
                     .statements(&oxc_ast::builder::AstBuilder::new(&allocator), &allocator),
             );
             parsed.program.body = body;
-            ViewpuProgramFinalizer::new(&allocator, &mut parsed.program).finalize();
+            ViewpuProgramFinalizer::new(&allocator, &mut parsed.program)
+                .with_local_builder_context(has_local_builder_in_file)
+                .finalize();
             // hvigor runs `expandAllImportPaths` inside the TS emit
             // transformer chain; expanding before codegen keeps the emitted
             // source map in sync with the expanded imports.
@@ -500,13 +603,45 @@ impl<'a> ArktsTransformer<'a> {
             Ok(ArktsTransformOutput {
                 code: out,
                 source_map: generated.source_map,
+                rolldown_projection: None,
             })
         } else {
             Ok(ArktsTransformOutput {
                 code: content.to_string(),
                 source_map: None,
+                rolldown_projection: None,
             })
         }
+    }
+
+    /// Execute the ArkTS 1.2 frontend boundary without routing its AST through
+    /// the legacy ViewPU/ViewV2 emitter.
+    ///
+    /// The source compiler runs UI, interop, syntax and memo plugins inside
+    /// the static compiler's parsed/checked states. OXC owns parsing and the
+    /// dependency projection here; the resulting static source remains the
+    /// input of that backend while Rolldown receives standard ESM only.
+    fn transform_static<'alloc>(
+        &self,
+        allocator: &'alloc Allocator,
+        program: &mut Program<'alloc>,
+    ) -> Result<ArktsTransformOutput, EtsTransformError> {
+        let options = self.options.as_ref();
+        let builder_functions =
+            BuilderFunctionNameCollector::new(program, &self.source.id.id, options).collect();
+        BuilderFactoryValidator::new(
+            &builder_functions.local,
+            &self.source.id.id,
+            ArktsLanguageVersion::V1_2,
+        )
+        .validate(program)?;
+
+        let projection = StaticArktsGraphProjection::new(program).project(allocator);
+        Ok(ArktsTransformOutput {
+            code: self.source.content.clone(),
+            source_map: None,
+            rolldown_projection: Some(projection),
+        })
     }
 }
 
@@ -664,35 +799,40 @@ struct ArktsStatementTransformer<'a, 'b> {
     global_styles: Vec<StylesMethodInfo<'b>>,
     hvigor_source_id: Arc<str>,
     module_name: Option<Arc<str>>,
+    has_local_builder_in_file: bool,
+}
+
+struct ArktsStatementTransformerInput<'a, 'b> {
+    allocator: &'b Allocator,
+    source_text: &'a str,
+    id: &'a str,
+    options: &'a TransformOptions,
+    simple_type_context: &'a SimpleTypeContext,
+    custom_components: &'a FxHashSet<String>,
+    custom_component_update_props: &'a CustomComponentUpdateProps,
+    builder_functions: &'a FxHashSet<String>,
+    hvigor_source_id: &'a str,
+    extend_attributes: Arc<ExtendAttributeIndex>,
+    global_styles: Vec<StylesMethodInfo<'b>>,
+    has_local_builder_in_file: bool,
 }
 
 impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
-    fn new(
-        allocator: &'b Allocator,
-        source_text: &'a str,
-        id: &'a str,
-        options: &'a TransformOptions,
-        simple_type_context: &'a SimpleTypeContext,
-        custom_components: &'a FxHashSet<String>,
-        custom_component_update_props: &'a CustomComponentUpdateProps,
-        builder_functions: &'a FxHashSet<String>,
-        hvigor_source_id: &'a str,
-        extend_attributes: Arc<ExtendAttributeIndex>,
-        global_styles: Vec<StylesMethodInfo<'b>>,
-    ) -> Self {
+    fn new(input: ArktsStatementTransformerInput<'a, 'b>) -> Self {
         Self {
-            allocator,
-            source_text: Arc::from(source_text),
-            id,
-            options,
-            simple_type_context,
-            custom_components,
-            custom_component_update_props,
-            builder_functions,
-            extend_attributes,
-            global_styles,
-            hvigor_source_id: Arc::from(hvigor_source_id),
-            module_name: options.module_name.as_deref().map(Arc::from),
+            allocator: input.allocator,
+            source_text: Arc::from(input.source_text),
+            id: input.id,
+            options: input.options,
+            simple_type_context: input.simple_type_context,
+            custom_components: input.custom_components,
+            custom_component_update_props: input.custom_component_update_props,
+            builder_functions: input.builder_functions,
+            extend_attributes: input.extend_attributes,
+            global_styles: input.global_styles,
+            hvigor_source_id: Arc::from(input.hvigor_source_id),
+            module_name: input.options.module_name.as_deref().map(Arc::from),
+            has_local_builder_in_file: input.has_local_builder_in_file,
         }
     }
 
@@ -717,6 +857,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         if !ArkuiDecoratorRules::is_component_v2_struct(struct_stmt) {
             return Ok(None);
         }
+        let global_reuse_pool = self.global_reuse_pool(struct_stmt)?;
 
         match ComponentV2Lowerer::new(
             struct_stmt,
@@ -737,6 +878,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY
             }),
             emit_reusable_v2_helper,
+            global_reuse_pool,
+            self.has_local_builder_in_file,
         )
         .lower()
         {
@@ -962,14 +1105,16 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 };
                 let body = BuildBodyPlan::global_builder_with_shared_inputs(
                     function.body.as_deref(),
-                    Arc::clone(&self.source_text),
-                    Arc::clone(&self.hvigor_source_id),
-                    self.custom_components,
-                    self.builder_functions,
-                    self.custom_component_update_props,
-                    Arc::clone(&self.options.component_metadata),
-                    &raw_object_fields,
-                    None,
+                    BuildBodySharedInputs {
+                        source_text: Arc::clone(&self.source_text),
+                        source_id: Arc::clone(&self.hvigor_source_id),
+                        custom_components: self.custom_components,
+                        builder_methods: self.builder_functions,
+                        custom_component_update_props: self.custom_component_update_props,
+                        component_metadata: Arc::clone(&self.options.component_metadata),
+                        raw_object_fields: &raw_object_fields,
+                        module_name: None,
+                    },
                     GeneratedViewpuName::VIEWPU_BASE,
                     first_parameter,
                 )
@@ -989,7 +1134,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     &function.params,
                     append_parent,
                     return_annotation,
-                    &BuildBodyInfo::Plan(body),
+                    &BuildBodyInfo::plan(body),
                 )
                 .map_err(|err| EtsTransformError::Fatal {
                     file: self.id.to_string(),
@@ -1027,12 +1172,12 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             .decorators
             .iter()
             .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REUSABLE);
+        let global_reuse_pool = self.global_reuse_pool(statement)?;
         let mut state_fields = Vec::new();
         let mut initial_render_body = BuildBodyInfo::default();
         let mut initial_render_method_span = SPAN;
         let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
-        let mut styles_methods: Vec<StylesMethodInfo<'s>> =
-            self.global_styles.iter().cloned().collect();
+        let mut styles_methods: Vec<StylesMethodInfo<'s>> = self.global_styles.to_vec();
         for element in &statement.body.body {
             let StructElement::MethodDefinition(method) = element else {
                 continue;
@@ -1058,8 +1203,11 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         }
         let builder_method_names = StructBuilderMethodNames::new(statement).collect();
         let builder_param_names = StructBuilderParamNames::new(statement).collect();
-        let mut visible_builder_methods = self.builder_functions.clone();
-        visible_builder_methods.extend(builder_method_names.iter().cloned());
+        let mutable_builder_properties =
+            Arc::new(StructMutableBuilderProperties::new(statement).collect());
+        let mut builder_initializer_names = self.builder_functions.clone();
+        builder_initializer_names.extend(builder_method_names.iter().cloned());
+        let mut visible_builder_methods = builder_initializer_names.clone();
         visible_builder_methods.extend(builder_param_names.iter().cloned());
         let raw_object_fields =
             ComponentRawObjectFields::new(statement, self.simple_type_context).collect();
@@ -1068,6 +1216,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         let mut params_fields: Vec<ParamField> = Vec::new();
         let mut property_order: Vec<String> = Vec::new();
         let mut regular_fields: Vec<RegularField> = Vec::new();
+        let mut runtime_decorated_fields = Vec::new();
 
         for element in &statement.body.body {
             match element {
@@ -1084,16 +1233,29 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         continue;
                     }
 
+                    let is_custom_env = property.decorators.iter().any(|decorator| {
+                        ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::CUSTOM_ENV
+                    });
                     if let Some(name) = property.key.static_name() {
                         let name = name.into_owned();
                         property_order.push(name.clone());
-                        source_members.push(ComponentSourceMember::Property(name.clone()));
+                        if !is_custom_env {
+                            source_members.push(ComponentSourceMember::Property(name.clone()));
+                        }
                         params_fields.push(ParamField {
                             name,
                             source_span: property.span,
                             name_span: property.key.span(),
                             type_annotation_ast: property.type_annotation.as_deref(),
                         });
+                    }
+
+                    if is_custom_env {
+                        runtime_decorated_fields.push(property.as_ref());
+                        source_members.push(ComponentSourceMember::RuntimeDecorated(
+                            runtime_decorated_fields.len() - 1,
+                        ));
+                        continue;
                     }
 
                     let decorator_names: Vec<&str> = property
@@ -1132,6 +1294,20 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         .value
                         .as_ref()
                         .map(FieldExpression::from_expression);
+                    if decorator == ArkuiDecoratorName::BUILDER_PARAM
+                        && property.value.as_ref().is_some_and(|initializer| {
+                            !self.builder_param_initializer_is_builder(
+                                initializer,
+                                &builder_initializer_names,
+                                &mutable_builder_properties,
+                            )
+                        })
+                    {
+                        return Err(EtsTransformError::Fatal {
+                            file: self.id.to_string(),
+                            message: "'@BuilderParam' property can only initialized by '@Builder' function or '@LocalBuilder' method in struct.".to_string(),
+                        });
+                    }
                     let watch_handler = property
                         .decorators
                         .iter()
@@ -1175,14 +1351,16 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     let build_method_span = method.span;
                     let plan = BuildBodyPlan::component_with_shared_inputs(
                         method.value.body.as_deref(),
-                        Arc::clone(&self.source_text),
-                        Arc::clone(&self.hvigor_source_id),
-                        self.custom_components,
-                        &visible_builder_methods,
-                        self.custom_component_update_props,
-                        Arc::clone(&self.options.component_metadata),
-                        &raw_object_fields,
-                        self.module_name.as_ref().map(Arc::clone),
+                        BuildBodySharedInputs {
+                            source_text: Arc::clone(&self.source_text),
+                            source_id: Arc::clone(&self.hvigor_source_id),
+                            custom_components: self.custom_components,
+                            builder_methods: &visible_builder_methods,
+                            custom_component_update_props: self.custom_component_update_props,
+                            component_metadata: Arc::clone(&self.options.component_metadata),
+                            raw_object_fields: &raw_object_fields,
+                            module_name: self.module_name.as_ref().map(Arc::clone),
+                        },
                         is_reusable,
                         GeneratedViewpuName::VIEWPU_BASE,
                     )
@@ -1191,8 +1369,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         self.module_name.as_deref(),
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
                     .with_styles_methods(&styles_methods);
-                    initial_render_body = BuildBodyInfo::Plan(plan);
+                    initial_render_body = BuildBodyInfo::plan(plan);
                     // Preserve the original build method range on the generated
                     // initialRender method for TypeScript-printer source maps.
                     // There is only one valid build method per component.
@@ -1200,24 +1379,47 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     source_members.push(ComponentSourceMember::InitialRender);
                 }
                 StructElement::MethodDefinition(method)
-                    if method
-                        .decorators
-                        .iter()
-                        .any(|d| ArkuiDecorator::new(d).name() == ArkuiDecoratorName::BUILDER) =>
+                    if method.decorators.iter().any(|d| {
+                        matches!(
+                            ArkuiDecorator::new(d).name(),
+                            ArkuiDecoratorName::BUILDER | ArkuiDecoratorName::LOCAL_BUILDER
+                        )
+                    }) =>
                 {
                     let Some(name) = method.key.static_name() else {
                         continue;
                     };
-                    let body = BuildBodyPlan::builder_with_shared_inputs(
+                    let kind = if method.decorators.iter().any(|decorator| {
+                        ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::LOCAL_BUILDER
+                    }) {
+                        if method.r#static {
+                            return Err(EtsTransformError::Fatal {
+                                file: self.id.to_string(),
+                                message: "Static methods in custom components cannot be decorated by '@LocalBuilder'.".to_string(),
+                            });
+                        }
+                        BuilderMethodKind::LocalBuilder
+                    } else {
+                        BuilderMethodKind::Builder
+                    };
+                    let body_factory = match kind {
+                        BuilderMethodKind::Builder => BuildBodyPlan::builder_with_shared_inputs,
+                        BuilderMethodKind::LocalBuilder => {
+                            BuildBodyPlan::local_builder_with_shared_inputs
+                        }
+                    };
+                    let body = body_factory(
                         method.value.body.as_deref(),
-                        Arc::clone(&self.source_text),
-                        Arc::clone(&self.hvigor_source_id),
-                        self.custom_components,
-                        &visible_builder_methods,
-                        self.custom_component_update_props,
-                        Arc::clone(&self.options.component_metadata),
-                        &raw_object_fields,
-                        self.module_name.as_ref().map(Arc::clone),
+                        BuildBodySharedInputs {
+                            source_text: Arc::clone(&self.source_text),
+                            source_id: Arc::clone(&self.hvigor_source_id),
+                            custom_components: self.custom_components,
+                            builder_methods: &visible_builder_methods,
+                            custom_component_update_props: self.custom_component_update_props,
+                            component_metadata: Arc::clone(&self.options.component_metadata),
+                            raw_object_fields: &raw_object_fields,
+                            module_name: self.module_name.as_ref().map(Arc::clone),
+                        },
                         GeneratedViewpuName::VIEWPU_BASE,
                     )
                     .with_xcomponent_module_identity(
@@ -1225,12 +1427,14 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         self.module_name.as_deref(),
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
                     .with_styles_methods(&styles_methods);
                     builder_methods.push(BuilderMethodInfo {
                         name: name.into_owned(),
                         params: &method.value.params,
                         return_annotation: method.value.return_type.as_deref(),
-                        body: BuildBodyInfo::Plan(body),
+                        body: BuildBodyInfo::plan(body),
+                        kind,
                     });
                     source_members.push(ComponentSourceMember::Builder(builder_methods.len() - 1));
                 }
@@ -1285,6 +1489,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             is_exported,
             is_default_export,
             is_reusable,
+            has_local_builder_in_file: self.has_local_builder_in_file,
+            global_reuse_pool,
             is_custom_dialog: statement.decorators.iter().any(|decorator| {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::CUSTOM_DIALOG
             }),
@@ -1292,6 +1498,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             params_fields,
             property_order,
             regular_fields,
+            runtime_decorated_fields,
             regular_members,
             source_members,
             initial_render_body,
@@ -1307,6 +1514,156 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 .transpose()?,
             builder_methods,
         }))
+    }
+
+    fn global_reuse_pool<'s>(
+        &self,
+        component: &'s StructStatement<'s>,
+    ) -> Result<Option<GlobalReusePoolConfig<'s>>, EtsTransformError> {
+        let Some(decorator) = component.decorators.iter().find(|decorator| {
+            matches!(
+                ArkuiDecorator::new(decorator).name(),
+                ArkuiDecoratorName::COMPONENT | ArkuiDecoratorName::COMPONENT_V2
+            )
+        }) else {
+            return Ok(None);
+        };
+        let Expression::CallExpression(call) = &decorator.expression else {
+            return Ok(None);
+        };
+        let Some(Argument::ObjectExpression(options)) = call.arguments.first() else {
+            return Ok(None);
+        };
+        if options.properties.len() < 2 {
+            return Ok(None);
+        }
+
+        let mut ownership = None;
+        let mut accepted_components = None;
+        for property in &options.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                return Ok(None);
+            };
+            let PropertyKey::StaticIdentifier(name) = &property.key else {
+                return Ok(None);
+            };
+            match name.name.as_str() {
+                "reusePool" => ownership = Some(&property.value),
+                "poolAccepts" => {
+                    if let Expression::ArrayExpression(accepted) = &property.value {
+                        accepted_components = Some(accepted.as_ref());
+                    } else {
+                        // `process_component_class.ts::processGlobalReusePool`
+                        // silently skips non-array values. The UI checker owns
+                        // any source diagnostic; this transform must not invent
+                        // a stricter one.
+                        return Ok(None);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (Some(ownership), Some(accepted_components)) = (ownership, accepted_components) else {
+            return Err(self.global_reuse_pool_error(
+                &component.id.name,
+                &format!(
+                    "'{}' must provide both reusePool and poolAccepts. Neither can be omitted when using the global reuse pool.",
+                    component.id.name
+                ),
+            ));
+        };
+        let Expression::StringLiteral(ownership_literal) = ownership else {
+            return Err(self.global_reuse_pool_error(
+                &component.id.name,
+                "ReusePool can only accept string literal.",
+            ));
+        };
+        if !matches!(ownership_literal.value.as_str(), "shared" | "perInstance") {
+            return Err(self.global_reuse_pool_error(
+                &component.id.name,
+                &format!(
+                    "ReusePool must be either 'shared' or 'perInstance'. The value '{}' is not valid.",
+                    ownership_literal.value
+                ),
+            ));
+        }
+        if accepted_components.elements.is_empty() {
+            return Err(self.global_reuse_pool_error(
+                &component.id.name,
+                "PoolAccepts cannot be an empty array. Provide at least one '@Reusable' or '@ReusableV2' component.",
+            ));
+        }
+        for accepted in &accepted_components.elements {
+            let Some(Expression::Identifier(name)) = accepted.as_expression() else {
+                continue;
+            };
+            if name.name == component.id.name {
+                return Err(self.global_reuse_pool_error(
+                    &component.id.name,
+                    &format!(
+                        "'{}' cannot list itself in poolAccepts. The pool is not yet ready when '{}' is being constructed.",
+                        name.name, name.name
+                    ),
+                ));
+            }
+            if !self
+                .custom_component_update_props
+                .get(name.name.as_str())
+                .is_some_and(|info| info.reusable || info.reusable_v2)
+            {
+                return Err(self.global_reuse_pool_error(
+                    &component.id.name,
+                    &format!(
+                        "'{}' is not a '@Reusable' or '@ReusableV2' component and cannot be added to poolAccepts.",
+                        name.name
+                    ),
+                ));
+            }
+        }
+
+        Ok(Some(GlobalReusePoolConfig {
+            ownership,
+            accepted_components,
+        }))
+    }
+
+    fn builder_param_initializer_is_builder(
+        &self,
+        initializer: &Expression<'_>,
+        builder_names: &FxHashSet<String>,
+        mutable_builder_properties: &FxHashSet<String>,
+    ) -> bool {
+        match initializer {
+            Expression::Identifier(identifier) => builder_names.contains(identifier.name.as_str()),
+            Expression::StaticMemberExpression(member) => {
+                if builder_names.contains(member.property.name.as_str()) {
+                    return true;
+                }
+                if member.property.name != "builder" {
+                    return false;
+                }
+                match &member.object {
+                    Expression::CallExpression(call) => matches!(
+                        &call.callee,
+                        Expression::Identifier(identifier)
+                            if matches!(identifier.name.as_str(), "wrapBuilder" | "mutableBuilder")
+                    ),
+                    Expression::StaticMemberExpression(receiver) => {
+                        matches!(&receiver.object, Expression::ThisExpression(_))
+                            && mutable_builder_properties.contains(receiver.property.name.as_str())
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn global_reuse_pool_error(&self, component: &str, message: &str) -> EtsTransformError {
+        EtsTransformError::Fatal {
+            file: self.id.to_string(),
+            message: format!("@Component '{component}': {message}"),
+        }
     }
 
     fn validate_form_entry_argument(

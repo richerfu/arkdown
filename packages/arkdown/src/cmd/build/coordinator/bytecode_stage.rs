@@ -234,7 +234,44 @@ impl BuildCoordinator {
       } else {
         None
       };
-      let bytecode_result = if let Some(reload_plan) = hot_reload_compile_plan.as_ref() {
+      let bytecode_result = if session.arkts_language_version.is_static() {
+        if hot_reload_task_plan.is_some() || quickfix_task_plan.is_some() {
+          anyhow::bail!(
+            "ARKDOWN_ARKTS12_RELOAD_UNSUPPORTED: the static SDK driver does not expose the 1.1 hot/cold reload protocol"
+          );
+        }
+        if widget_bundle_outs
+          .get(bundle_index)
+          .and_then(Option::as_ref)
+          .is_some()
+        {
+          anyhow::bail!(
+            "ARKDOWN_ARKTS12_WIDGET_UNSUPPORTED: a separate static widget compilation plan is required"
+          );
+        }
+        let module_context = session
+          .module_context(&module.name)
+          .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
+        let loader_json_path = module_layout.loader_json();
+        StaticArktsCompiler::new(StaticArktsCompileInput {
+          config: module_config.as_ref(),
+          module,
+          manifest,
+          loader_json,
+          module_context: &module_context,
+          module_layout: &module_layout,
+          loader_json_path: &loader_json_path,
+          node_executable: args.resolved_node_executable(),
+          output_abc: &bundle_out.bundle_output.modules_abc_path,
+          preview_mode: args.preview
+            || args.preview_transform_mode
+            || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
+          check_entry: args.check_entry,
+          ui_transform_optimization: args.ui_transform_optimization,
+          bundle_type: &session.project.bundle_type,
+        })?
+        .compile()
+      } else if let Some(reload_plan) = hot_reload_compile_plan.as_ref() {
         let initial = reload_plan.phase == HotReloadCompilePhase::Initial;
         BytecodeStage::run(BytecodeStageInput {
           compiler: RolldownBytecodeCompiler::new(
@@ -522,11 +559,21 @@ impl BuildCoordinator {
         module_obfuscation.is_enabled(&config.build_mode),
         module_target_name,
         args.hvigor_properties.rollup_cache_use_source_hash,
+        self.session.arkts_language_version,
       )
+      .with_preview_mode(
+        args.preview
+          || args.preview_transform_mode
+          || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
+      )
+      .with_check_entry(args.check_entry)
+      .with_ui_transform_optimization(args.ui_transform_optimization)
+      .with_use_get_current_bundle_name(args.integrated_hsp_use_get_current_bundle_name)
       .build()?;
       let task_inputs =
         TaskInputs::compute(module_config.as_ref(), loader_json, &task_input_snapshot)
           .with_module_analyzer(module_analyzer)
+          .with_arkts_language_version(self.session.arkts_language_version)
           .with_effective_obfuscation(module_obfuscation.config.as_ref(), &config.build_mode)
           .with_compile_env(task_compile_env)
           .with_plugin_hash(task_plugin_hash)

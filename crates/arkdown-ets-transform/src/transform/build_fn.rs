@@ -22,6 +22,7 @@ use crate::transform::component_meta::{
     ArkuiRuntimeComponentKind, ArkuiRuntimeNames, ComponentMetadata,
 };
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
+use crate::transform::local_builder::LocalBuilderRuntimeEmitter;
 use crate::transform::viewpu_emit::{GeneratedViewpuName, ViewpuStatementAstEmitter};
 
 mod custom_component;
@@ -126,6 +127,7 @@ struct BuildContext {
     inside_lazy_for_each: bool,
     inside_repeat: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
+    mutable_builder_properties: Arc<FxHashSet<String>>,
     component_metadata: Arc<ComponentMetadata>,
     extend_attributes: Arc<ExtendAttributeIndex>,
     module_name: Arc<str>,
@@ -143,6 +145,7 @@ impl Default for BuildContext {
             inside_lazy_for_each: false,
             inside_repeat: false,
             raw_object_fields: Arc::default(),
+            mutable_builder_properties: Arc::default(),
             component_metadata: Arc::new(ComponentMetadata::default()),
             extend_attributes: Arc::new(ExtendAttributeIndex::default()),
             module_name: Arc::from(""),
@@ -189,27 +192,31 @@ impl<'a> BuildSourceMetadata<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum BuildBodyInfo<'a> {
-    Empty,
-    Plan(BuildBodyPlan<'a>),
-}
-
-impl Default for BuildBodyInfo<'_> {
-    fn default() -> Self {
-        Self::Empty
-    }
+#[derive(Clone, Debug, Default)]
+pub struct BuildBodyInfo<'a> {
+    plan: Option<BuildBodyPlan<'a>>,
 }
 
 impl<'a> BuildBodyInfo<'a> {
+    pub(crate) fn plan(plan: BuildBodyPlan<'a>) -> Self {
+        Self { plan: Some(plan) }
+    }
+
     pub(crate) fn statements<'b>(
         &self,
         allocator: &'b Allocator,
     ) -> Result<OxcVec<'b, Statement<'b>>, BuildLoweringError> {
-        match self {
-            Self::Empty => Ok(OxcVec::new_in(&allocator)),
-            Self::Plan(plan) => plan.statements(allocator),
+        match &self.plan {
+            None => Ok(OxcVec::new_in(&allocator)),
+            Some(plan) => plan.statements(allocator),
         }
+    }
+
+    pub(crate) fn has_source_statements(&self) -> bool {
+        self.plan
+            .as_ref()
+            .and_then(|plan| plan.body)
+            .is_some_and(|body| !body.statements.is_empty())
     }
 }
 
@@ -225,11 +232,23 @@ pub struct BuildBodyPlan<'a> {
     extend_attributes: Arc<ExtendAttributeIndex>,
     styles: StylesAttributeIndex<'a>,
     raw_object_fields: FxHashSet<String>,
+    mutable_builder_properties: Arc<FxHashSet<String>>,
     module_name: Option<Arc<str>>,
     xcomponent_module_identity: Option<Arc<str>>,
     context_kind: BuildBodyContextKind,
     current_component_reusable: bool,
     custom_component_base_name: &'static str,
+}
+
+pub(crate) struct BuildBodySharedInputs<'a> {
+    pub(crate) source_text: Arc<str>,
+    pub(crate) source_id: Arc<str>,
+    pub(crate) custom_components: &'a FxHashSet<String>,
+    pub(crate) builder_methods: &'a FxHashSet<String>,
+    pub(crate) custom_component_update_props: &'a CustomComponentUpdateProps,
+    pub(crate) component_metadata: Arc<ComponentMetadata>,
+    pub(crate) raw_object_fields: &'a FxHashSet<String>,
+    pub(crate) module_name: Option<Arc<str>>,
 }
 
 impl<'a> BuildBodyPlan<'a> {
@@ -248,14 +267,16 @@ impl<'a> BuildBodyPlan<'a> {
     ) -> Self {
         Self::component_with_shared_inputs(
             body,
-            Arc::from(source_text),
-            Arc::from(source_id),
-            custom_components,
-            builder_methods,
-            custom_component_update_props,
-            Arc::new(component_metadata.clone()),
-            raw_object_fields,
-            module_name.map(Arc::from),
+            BuildBodySharedInputs {
+                source_text: Arc::from(source_text),
+                source_id: Arc::from(source_id),
+                custom_components,
+                builder_methods,
+                custom_component_update_props,
+                component_metadata: Arc::new(component_metadata.clone()),
+                raw_object_fields,
+                module_name: module_name.map(Arc::from),
+            },
             current_component_reusable,
             GeneratedViewpuName::VIEW_V2_BASE,
         )
@@ -263,27 +284,13 @@ impl<'a> BuildBodyPlan<'a> {
 
     pub(crate) fn component_with_shared_inputs(
         body: Option<&'a FunctionBody<'a>>,
-        source_text: Arc<str>,
-        source_id: Arc<str>,
-        custom_components: &FxHashSet<String>,
-        builder_methods: &FxHashSet<String>,
-        custom_component_update_props: &CustomComponentUpdateProps,
-        component_metadata: Arc<ComponentMetadata>,
-        raw_object_fields: &FxHashSet<String>,
-        module_name: Option<Arc<str>>,
+        inputs: BuildBodySharedInputs<'_>,
         current_component_reusable: bool,
         custom_component_base_name: &'static str,
     ) -> Self {
         Self::new(
             body,
-            source_text,
-            source_id,
-            custom_components,
-            builder_methods,
-            custom_component_update_props,
-            component_metadata,
-            raw_object_fields,
-            module_name,
+            inputs,
             BuildBodyContextKind::Component,
             current_component_reusable,
             custom_component_base_name,
@@ -304,41 +311,43 @@ impl<'a> BuildBodyPlan<'a> {
     ) -> Self {
         Self::builder_with_shared_inputs(
             body,
-            Arc::from(source_text),
-            Arc::from(source_id),
-            custom_components,
-            builder_methods,
-            custom_component_update_props,
-            Arc::new(component_metadata.clone()),
-            raw_object_fields,
-            module_name.map(Arc::from),
+            BuildBodySharedInputs {
+                source_text: Arc::from(source_text),
+                source_id: Arc::from(source_id),
+                custom_components,
+                builder_methods,
+                custom_component_update_props,
+                component_metadata: Arc::new(component_metadata.clone()),
+                raw_object_fields,
+                module_name: module_name.map(Arc::from),
+            },
             GeneratedViewpuName::VIEW_V2_BASE,
         )
     }
 
     pub(crate) fn builder_with_shared_inputs(
         body: Option<&'a FunctionBody<'a>>,
-        source_text: Arc<str>,
-        source_id: Arc<str>,
-        custom_components: &FxHashSet<String>,
-        builder_methods: &FxHashSet<String>,
-        custom_component_update_props: &CustomComponentUpdateProps,
-        component_metadata: Arc<ComponentMetadata>,
-        raw_object_fields: &FxHashSet<String>,
-        module_name: Option<Arc<str>>,
+        inputs: BuildBodySharedInputs<'_>,
         custom_component_base_name: &'static str,
     ) -> Self {
         Self::new(
             body,
-            source_text,
-            source_id,
-            custom_components,
-            builder_methods,
-            custom_component_update_props,
-            component_metadata,
-            raw_object_fields,
-            module_name,
+            inputs,
             BuildBodyContextKind::Builder,
+            false,
+            custom_component_base_name,
+        )
+    }
+
+    pub(crate) fn local_builder_with_shared_inputs(
+        body: Option<&'a FunctionBody<'a>>,
+        inputs: BuildBodySharedInputs<'_>,
+        custom_component_base_name: &'static str,
+    ) -> Self {
+        Self::new(
+            body,
+            inputs,
+            BuildBodyContextKind::LocalBuilder,
             false,
             custom_component_base_name,
         )
@@ -347,27 +356,13 @@ impl<'a> BuildBodyPlan<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn global_builder_with_shared_inputs(
         body: Option<&'a FunctionBody<'a>>,
-        source_text: Arc<str>,
-        source_id: Arc<str>,
-        custom_components: &FxHashSet<String>,
-        builder_methods: &FxHashSet<String>,
-        custom_component_update_props: &CustomComponentUpdateProps,
-        component_metadata: Arc<ComponentMetadata>,
-        raw_object_fields: &FxHashSet<String>,
-        module_name: Option<Arc<str>>,
+        inputs: BuildBodySharedInputs<'_>,
         custom_component_base_name: &'static str,
         first_parameter: Option<Arc<str>>,
     ) -> Self {
         Self::new(
             body,
-            source_text,
-            source_id,
-            custom_components,
-            builder_methods,
-            custom_component_update_props,
-            component_metadata,
-            raw_object_fields,
-            module_name,
+            inputs,
             BuildBodyContextKind::GlobalBuilder { first_parameter },
             false,
             custom_component_base_name,
@@ -376,30 +371,24 @@ impl<'a> BuildBodyPlan<'a> {
 
     fn new(
         body: Option<&'a FunctionBody<'a>>,
-        source_text: Arc<str>,
-        source_id: Arc<str>,
-        custom_components: &FxHashSet<String>,
-        builder_methods: &FxHashSet<String>,
-        custom_component_update_props: &CustomComponentUpdateProps,
-        component_metadata: Arc<ComponentMetadata>,
-        raw_object_fields: &FxHashSet<String>,
-        module_name: Option<Arc<str>>,
+        inputs: BuildBodySharedInputs<'_>,
         context_kind: BuildBodyContextKind,
         current_component_reusable: bool,
         custom_component_base_name: &'static str,
     ) -> Self {
         Self {
             body,
-            source_text,
-            source_id,
-            custom_components: custom_components.clone(),
-            builder_methods: builder_methods.clone(),
-            custom_component_update_props: custom_component_update_props.clone(),
-            component_metadata,
+            source_text: inputs.source_text,
+            source_id: inputs.source_id,
+            custom_components: inputs.custom_components.clone(),
+            builder_methods: inputs.builder_methods.clone(),
+            custom_component_update_props: inputs.custom_component_update_props.clone(),
+            component_metadata: inputs.component_metadata,
             extend_attributes: Arc::new(ExtendAttributeIndex::default()),
             styles: StylesAttributeIndex::default(),
-            raw_object_fields: raw_object_fields.clone(),
-            module_name,
+            raw_object_fields: inputs.raw_object_fields.clone(),
+            mutable_builder_properties: Arc::default(),
+            module_name: inputs.module_name,
             xcomponent_module_identity: None,
             context_kind,
             current_component_reusable,
@@ -411,7 +400,16 @@ impl<'a> BuildBodyPlan<'a> {
         &self,
         allocator: &'b Allocator,
     ) -> Result<OxcVec<'b, Statement<'b>>, BuildLoweringError> {
-        BuildBodyAstLowerer::new(self).statements(allocator)
+        let mut statements = BuildBodyAstLowerer::new(self).statements(allocator)?;
+        if matches!(self.context_kind, BuildBodyContextKind::LocalBuilder)
+            && self.body.is_some_and(|body| !body.statements.is_empty())
+        {
+            statements.insert(
+                0,
+                LocalBuilderRuntimeEmitter::new().parent_statement(allocator),
+            );
+        }
+        Ok(statements)
     }
 
     pub(crate) fn with_shared_extend_attributes(
@@ -424,6 +422,14 @@ impl<'a> BuildBodyPlan<'a> {
 
     pub(crate) fn with_styles_methods(mut self, methods: &[StylesMethodInfo<'a>]) -> Self {
         self.styles = StylesAttributeIndex::from_methods(methods);
+        self
+    }
+
+    pub(crate) fn with_shared_mutable_builder_properties(
+        mut self,
+        properties: Arc<FxHashSet<String>>,
+    ) -> Self {
+        self.mutable_builder_properties = properties;
         self
     }
 
@@ -444,11 +450,14 @@ impl<'a> BuildBodyPlan<'a> {
             BuildBodyContextKind::Component => BuildContext::default()
                 .with_current_component_reusable(self.current_component_reusable),
             BuildBodyContextKind::Builder => BuildContext::builder(),
+            BuildBodyContextKind::LocalBuilder => BuildContext::local_builder(),
             BuildBodyContextKind::GlobalBuilder { first_parameter } => {
                 BuildContext::global_builder(first_parameter.clone())
             }
         }
         .with_raw_object_fields(&self.raw_object_fields);
+        context = context
+            .with_shared_mutable_builder_properties(Arc::clone(&self.mutable_builder_properties));
         if let Some(module_name) = &self.module_name {
             context = context.with_module_name(module_name);
         }
@@ -470,6 +479,7 @@ impl<'a> BuildBodyPlan<'a> {
 enum BuildBodyContextKind {
     Component,
     Builder,
+    LocalBuilder,
     GlobalBuilder { first_parameter: Option<Arc<str>> },
 }
 
@@ -503,13 +513,13 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 Expression::new_identifier(SPAN, ast.allocator().alloc_str(parameter), ast);
             let declarator =
                 VariableDeclarator::new(SPAN, binding, None, Some(initializer), false, ast);
-            statements.push(Statement::from(Statement::new_variable_declaration(
+            statements.push(Statement::new_variable_declaration(
                 SPAN,
                 VariableDeclarationKind::Const,
                 OxcVec::from_value_in(declarator, ast),
                 false,
                 ast,
-            )));
+            ));
         }
         for statement in &body.statements {
             self.push_statement(&mut statements, statement, allocator, &context)?;
@@ -795,7 +805,6 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let mut creation_stmts = OxcVec::new_in(&allocator);
         creation_stmts.push(ComponentCallStatementEmitter::create(
             ast,
-            allocator,
             &name,
             context.create_method_name(component_kind, !component.children.is_empty()),
             &component.arguments,
@@ -2089,9 +2098,43 @@ impl BuildContext {
         }
     }
 
+    fn local_builder() -> Self {
+        Self {
+            use_parent_context: true,
+            builder_proxy_scope: BuilderProxyScope::Builder,
+            ..Default::default()
+        }
+    }
+
     fn with_raw_object_fields(mut self, raw_object_fields: &FxHashSet<String>) -> Self {
         self.raw_object_fields = Arc::new(raw_object_fields.clone());
         self
+    }
+
+    fn with_shared_mutable_builder_properties(
+        mut self,
+        properties: Arc<FxHashSet<String>>,
+    ) -> Self {
+        self.mutable_builder_properties = properties;
+        self
+    }
+
+    fn is_mutable_builder_receiver(&self, expression: &Expression<'_>) -> bool {
+        match expression {
+            Expression::CallExpression(call) => {
+                matches!(
+                    &call.callee,
+                    Expression::Identifier(identifier) if identifier.name == "mutableBuilder"
+                )
+            }
+            Expression::StaticMemberExpression(member) => {
+                matches!(&member.object, Expression::ThisExpression(_))
+                    && self
+                        .mutable_builder_properties
+                        .contains(member.property.name.as_str())
+            }
+            _ => false,
+        }
     }
 
     fn with_shared_component_metadata(
@@ -2142,6 +2185,17 @@ impl BuildContext {
         self
     }
 
+    fn with_mutable_builder_proxy_scope(mut self) -> Self {
+        if self.builder_proxy_scope != BuilderProxyScope::GlobalBuilder {
+            // `transferMutableBuilderCall` invokes
+            // `traverseBuilderParams(object, true)`, which enables backing
+            // property lookup for both `this.foo` and `$$.foo` outside a
+            // global builder.
+            self.builder_proxy_scope = BuilderProxyScope::Builder;
+        }
+        self
+    }
+
     fn with_custom_component_base_name(mut self, base_name: &'static str) -> Self {
         self.custom_component_base_name = base_name;
         self
@@ -2186,6 +2240,20 @@ impl BuildContext {
     ) -> bool {
         self.component_metadata
             .is_component_double_dollar_property_name(component_name, property_name)
+    }
+
+    fn is_style_double_exclamation_attr(&self, attr_name: &str) -> bool {
+        self.component_metadata
+            .is_style_double_exclamation_attr(attr_name)
+    }
+
+    fn is_component_double_exclamation_property(
+        &self,
+        component_name: &str,
+        property_name: &str,
+    ) -> bool {
+        self.component_metadata
+            .is_component_double_exclamation_property(component_name, property_name)
     }
 
     fn is_bind_popup_attr(&self, attr_name: &str) -> bool {

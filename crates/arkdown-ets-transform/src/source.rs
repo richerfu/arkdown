@@ -7,9 +7,12 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use arkdown_core::ArktsLanguageVersion;
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, ModuleSpecifierText, SourceFileName};
 use oxc_span::SourceType;
 use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::VisualGeneratedSource;
 
 /// The kind of source file, used to select the right OXC parser mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +87,18 @@ impl CompileArktsSourceType {
     }
 
     pub fn from_path(path: &Path) -> SourceType {
+        Self::from_path_with_version(path, ArktsLanguageVersion::default())
+    }
+
+    pub fn from_id_with_version(id: &str, version: ArktsLanguageVersion) -> SourceType {
+        Self::from_path_with_version(Path::new(id), version)
+    }
+
+    pub fn from_path_with_version(path: &Path, version: ArktsLanguageVersion) -> SourceType {
         match SourceClassifier::classify_path(path) {
+            SourceFileKind::Ets | SourceFileKind::Ts if version.is_static() => {
+                SourceType::ets_static()
+            }
             SourceFileKind::Ets | SourceFileKind::Ts => SourceType::ets(),
             SourceFileKind::Declaration | SourceFileKind::Js | SourceFileKind::Other => {
                 SourceType::from_path(path).unwrap_or_else(|_| SourceType::ts().with_module(true))
@@ -101,6 +115,7 @@ pub struct TransformSourceSnapshot {
     package_roots: Arc<FxHashMap<String, PathBuf>>,
     resolved_static_modules: Arc<Vec<TransformResolvedStaticModuleScope>>,
     sdk_declaration_roots: Arc<Vec<PathBuf>>,
+    visual_sources: Arc<FxHashMap<PathBuf, VisualGeneratedSource>>,
 }
 
 impl TransformSourceSnapshot {
@@ -139,7 +154,31 @@ impl TransformSourceSnapshot {
             package_roots: Arc::new(package_roots),
             resolved_static_modules: Arc::new(resolved_static_modules),
             sdk_declaration_roots: Arc::default(),
+            visual_sources: Arc::default(),
         }
+    }
+
+    /// Attach the Visual/SuperVisual fragments generated once before
+    /// Rolldown starts. Transform hooks only perform OXC AST insertion and do
+    /// not launch Node or read `.visual` files.
+    pub fn with_visual_sources(
+        mut self,
+        sources: FxHashMap<PathBuf, VisualGeneratedSource>,
+    ) -> Self {
+        self.visual_sources = Arc::new(
+            sources
+                .into_iter()
+                .map(|(path, source)| (canonicalize_or_owned(&lexical_normalize(&path)), source))
+                .collect(),
+        );
+        self
+    }
+
+    pub(crate) fn visual_source(&self, path: &Path) -> Option<&VisualGeneratedSource> {
+        self.visual_sources
+            .get(path)
+            .or_else(|| self.visual_sources.get(&lexical_normalize(path)))
+            .or_else(|| self.visual_sources.get(&canonicalize_or_owned(path)))
     }
 
     /// Attach the ordered SDK declaration roots inventoried by the build

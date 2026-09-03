@@ -74,6 +74,30 @@ fn direct_build_enables_the_typed_zig_native_toolchain() {
 }
 
 #[test]
+fn direct_build_selects_arkts_1_2_only_from_the_explicit_flag() {
+  let defaults = PackageCliParser::parse_build(&args(&[])).expect("default build args");
+  assert_eq!(defaults.arkts_version, None);
+
+  let selected = PackageCliParser::parse_build(&args(&["--arkts-version", "1.2"]))
+    .expect("explicit ArkTS 1.2 should parse");
+  assert_eq!(selected.arkts_version.as_deref(), Some("1.2"));
+
+  let error = PackageCliParser::parse_build(&args(&["--arkts-version", "latest"]))
+    .expect_err("implicit or symbolic language versions must be rejected");
+  assert_eq!(error.code, "INVALID_ARKTS_LANGUAGE_VERSION");
+}
+
+#[test]
+fn direct_build_forwards_the_preview_check_entry_override() {
+  let defaults = PackageCliParser::parse_build(&args(&[])).expect("default build args");
+  assert_eq!(defaults.check_entry, None);
+
+  let selected =
+    PackageCliParser::parse_build(&args(&["--check-entry"])).expect("check-entry should parse");
+  assert_eq!(selected.check_entry, Some(true));
+}
+
+#[test]
 fn hvigor_test_injects_exact_default_properties_and_module_mode() {
   let config = PackageCliParser::parse_hvigor(&args(&["test"]))
     .expect("hvigor local-test command should parse");

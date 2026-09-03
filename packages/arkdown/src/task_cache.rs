@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use arkdown_core::{ArkdownConfig, BuildMode, ObfuscationConfig};
+use arkdown_core::{ArkdownConfig, ArktsLanguageVersion, BuildMode, ObfuscationConfig};
 use arkdown_ets_transform::ModuleAnalyzerKind;
 use arkdown_path::{ArtifactPathSerializer, SourceFileName};
 use arkdown_profile::LoaderJson;
@@ -54,6 +54,7 @@ pub struct TaskInputs {
   pub sdk_version: String,
   pub compile_env: String,
   pub module_analyzer: String,
+  pub arkts_language_version: ArktsLanguageVersion,
   pub plugin_hash: u64,
   pub resource_hash: String,
   pub dependency_content_hash: String,
@@ -68,7 +69,7 @@ pub struct TaskInputs {
 }
 
 const TASK_INPUTS_FILE: &str = ".task_inputs";
-const TASK_INPUTS_SCHEMA_VERSION: u32 = 5;
+const TASK_INPUTS_SCHEMA_VERSION: u32 = 6;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
@@ -134,6 +135,7 @@ impl TaskInputs {
       sdk_version,
       compile_env,
       module_analyzer: ModuleAnalyzerKind::default().as_str().to_string(),
+      arkts_language_version: ArktsLanguageVersion::default(),
       plugin_hash: 0,
       resource_hash: snapshot.resource_hash.clone(),
       dependency_content_hash: snapshot.dependency_content_hash.clone(),
@@ -153,6 +155,11 @@ impl TaskInputs {
 
   pub fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
     self.module_analyzer = module_analyzer.as_str().to_string();
+    self
+  }
+
+  pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
+    self.arkts_language_version = version;
     self
   }
 
@@ -272,6 +279,7 @@ impl TaskInputs {
       && stored.sdk_version == self.sdk_version
       && stored.compile_env == self.compile_env
       && stored.module_analyzer == self.module_analyzer
+      && stored.arkts_language_version == self.arkts_language_version
       && stored.plugin_hash == self.plugin_hash
       && stored.resource_hash == self.resource_hash
       && stored.dependency_content_hash == self.dependency_content_hash
@@ -292,6 +300,7 @@ impl TaskInputs {
       sdk_version: self.sdk_version.clone(),
       compile_env: self.compile_env.clone(),
       module_analyzer: self.module_analyzer.clone(),
+      arkts_language_version: self.arkts_language_version,
       plugin_hash: self.plugin_hash,
       resource_hash: self.resource_hash.clone(),
       dependency_content_hash: self.dependency_content_hash.clone(),
@@ -317,6 +326,8 @@ struct StoredTaskInputs {
   compile_env: String,
   #[serde(default = "StoredTaskInputs::default_module_analyzer")]
   module_analyzer: String,
+  #[serde(default)]
+  arkts_language_version: ArktsLanguageVersion,
   #[serde(default)]
   plugin_hash: u64,
   #[serde(default)]
@@ -444,6 +455,7 @@ mod tests {
       compile_entry,
       form_entry_sources: vec![],
       runtime_entry_sources: vec![],
+      page_entry_sources: vec![],
       module_root_path: String::new(),
       cache_path: cache_path.to_string(),
       ace_module_build: String::new(),
@@ -558,6 +570,28 @@ mod tests {
 
     inputs.save(&tmp).unwrap();
     assert!(inputs.matches_cached(&tmp), "after save → cache hit");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn task_inputs_do_not_reuse_cache_across_arkts_languages() {
+    let tmp = std::env::temp_dir().join("arkdown_task_cache_arkts_language_miss");
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let config = make_config();
+    let loader = make_loader(vec!["./ets/Index.ets".to_string()], "/tmp/cache");
+    let snapshot = make_snapshot("entry source");
+    let arkts_1_1 = TaskInputs::compute(&config, &loader, &snapshot)
+      .with_arkts_language_version(ArktsLanguageVersion::V1_1);
+    arkts_1_1.save(&tmp).expect("save ArkTS 1.1 inputs");
+
+    let arkts_1_2 = TaskInputs::compute(&config, &loader, &snapshot)
+      .with_arkts_language_version(ArktsLanguageVersion::V1_2);
+    assert!(
+      !arkts_1_2.matches_cached(&tmp),
+      "ArkTS 1.2 must not reuse an ArkTS 1.1 task cache"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
   }

@@ -1,7 +1,7 @@
 use super::*;
 use oxc_span::SourceType;
 
-use arkdown_core::{ModuleType, ResolvedId};
+use arkdown_core::{ArktsLanguageVersion, ModuleType, ResolvedId};
 
 fn make_source(id: &str, content: &str) -> ModuleSource {
     ModuleSource {
@@ -48,6 +48,483 @@ fn test_non_component_passthrough() {
     let src = "import { something } from '@ohos/hilog';\nconst x = 1;";
     let result = TransformHarness::transform(&make_source("test.ets", src)).unwrap();
     assert_eq!(result, src);
+}
+
+#[test]
+fn api_available_calls_and_references_match_reference_compiler_lowering() {
+    let src = r#"import deviceInfo from '@ohos.deviceInfo'
+const direct = deviceInfo.apiAvailable(25)
+const available = deviceInfo.apiAvailable
+const collisionSafe = v.apiAvailable
+const guarded = typeof deviceInfo.apiAvailable
+deviceInfo.apiAvailable = replacement
+"#;
+    let result = TransformHarness::transform(&make_source("Index.ets", src))
+        .expect("apiAvailable source must transform");
+
+    assert!(
+        result.contains("const direct = __mockApiAvailable(deviceInfo, 25);"),
+        "direct calls must pass the SDK module as the first helper argument:\n{result}"
+    );
+    assert!(
+        result.contains("const available = (v) => __mockApiAvailable(deviceInfo, v);"),
+        "references must become closures:\n{result}"
+    );
+    assert!(
+        result.contains("const collisionSafe = (v0) => __mockApiAvailable(v, v0);"),
+        "closure parameters must avoid receiver identifier collisions:\n{result}"
+    );
+    assert!(
+        result.contains("typeof deviceInfo.apiAvailable"),
+        "typeof references must remain untouched:\n{result}"
+    );
+    assert!(
+        result.contains("deviceInfo.apiAvailable = replacement"),
+        "assignment targets must remain untouched:\n{result}"
+    );
+    assert_eq!(result.matches("function __mockApiAvailable").count(), 1);
+}
+
+#[test]
+fn point_compatible_sdk_keeps_native_api_available_behavior() {
+    let src = "const direct = deviceInfo.apiAvailable('26.0.0')";
+    let mut options = TransformOptions::default();
+    options.api_available =
+        ApiAvailableTransformOptions::from_build_context("26.0.0", "OpenHarmony");
+    let result = TransformHarness::transform_with_options(&make_source("Index.ets", src), &options)
+        .expect("point compatible SDK source");
+    assert_eq!(result, src);
+}
+
+#[test]
+fn custom_env_remains_backend_owned_and_is_not_initialized_from_parent_params() {
+    let src = r#"const KEY = CustomEnvKey.create<string>('probe')
+@Component
+struct Probe {
+  @CustomEnv(KEY) @Watch('changed') value: string = 'local'
+  changed() {}
+  build() { Text(this.value) }
+}"#;
+    let result = TransformHarness::transform(&make_source("Probe.ets", src))
+        .expect("@CustomEnv component source must transform");
+
+    assert!(result.contains("@CustomEnv(KEY)"), "{result}");
+    assert!(result.contains("value: string = 'local';"), "{result}");
+    assert!(
+        !result.contains("@Watch"),
+        "@Watch is consumed by the UI transform: {result}"
+    );
+    assert!(
+        !result.contains("this.value = params.value") && !result.contains("this.value = 'local'"),
+        "@CustomEnv initialization remains owned by the ArkTS backend: {result}"
+    );
+}
+
+#[test]
+fn component_v2_preserves_active_and_inactive_backend_annotations() {
+    let src = r#"@ComponentV2
+struct Probe {
+  @ComponentActive onActive(): void {}
+  @ComponentInactive onInactive(): void {}
+  build() { Text('lifecycle') }
+}"#;
+    let result = TransformHarness::transform(&make_source("Probe.ets", src))
+        .expect("component lifecycle source must transform");
+    assert!(result.contains("@ComponentActive"), "{result}");
+    assert!(result.contains("onActive(): void"), "{result}");
+    assert!(result.contains("@ComponentInactive"), "{result}");
+    assert!(result.contains("onInactive(): void"), "{result}");
+}
+
+#[test]
+fn mutable_builder_dispatch_uses_runtime_dispatch_and_receiver_supplier() {
+    let src = r#"@Builder
+function Content() {
+  Text('content')
+}
+
+@Component
+struct Probe {
+  value: string = 'value'
+  content: MutableBuilder<[object]> = mutableBuilder(Content)
+
+  build() {
+    this.content.builder({ value: this.value })
+  }
+}"#;
+    let result = TransformHarness::transform(&make_source("Probe.ets", src))
+        .expect("MutableBuilder source must transform");
+
+    assert!(
+        result.contains("this.content._dispatchBuilder.bind(this)(() => this.content"),
+        "MutableBuilder must use the source compiler's dispatch entry point:\n{result}"
+    );
+    assert!(
+        result.contains("makeBuilderParameterProxy(\"builder\", { value: () =>"),
+        "the sole object argument must retain transferMutableBuilderCall proxy semantics:\n{result}"
+    );
+    assert!(
+        !result.contains("this.content.builder.bind(this)"),
+        "MutableBuilder must not take the WrappedBuilder branch:\n{result}"
+    );
+}
+
+#[test]
+fn mutable_builder_requires_a_visible_builder_identifier() {
+    let src = r#"function Content() {}
+const content = mutableBuilder(Content)
+"#;
+    let error = TransformHarness::transform(&make_source("Probe.ets", src))
+        .expect_err("non-@Builder factory argument must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("The mutableBuilder's parameter should be '@Builder' function."),
+        "{error}"
+    );
+}
+
+#[test]
+fn local_builder_uses_arrow_property_and_context_stack_parent() {
+    let src = r#"@Component
+struct Child { build() { Text('child') } }
+
+@Component
+struct Parent {
+  @LocalBuilder
+  content() { Child() }
+
+  build() { this.content() }
+}"#;
+    let result = TransformHarness::transform(&make_source("Parent.ets", src))
+        .expect("LocalBuilder component must transform");
+
+    assert!(result.contains("content = () => {"), "{result}");
+    assert!(
+        result.contains("if (PUV2ViewBase.contextStack === undefined)"),
+        "LocalBuilder files must install the source compiler's context-stack guard: {result}"
+    );
+    assert!(
+        result.contains(
+            "const parent = PUV2ViewBase.contextStack && PUV2ViewBase.contextStack.length ? PUV2ViewBase.contextStack[PUV2ViewBase.contextStack.length - 1] : null;"
+        ),
+        "{result}"
+    );
+    assert!(
+        result.contains("new Child(parent ? parent : this, {}, undefined, elmtId"),
+        "LocalBuilder custom components must use the context-stack parent: {result}"
+    );
+    assert!(
+        result.contains("PUV2ViewBase.contextStack && PUV2ViewBase.contextStack.push(this);"),
+        "initialRender/rerender must establish LocalBuilder context: {result}"
+    );
+    assert_eq!(
+        result
+            .matches("PUV2ViewBase.contextStack && PUV2ViewBase.contextStack.push(this);")
+            .count(),
+        4,
+        "hasLocalBuilderInFile applies to every component initialRender/rerender: {result}"
+    );
+    assert!(
+        result.contains("PUV2ViewBase.contextStack && PUV2ViewBase.contextStack.pop();"),
+        "initialRender/rerender must restore LocalBuilder context: {result}"
+    );
+    assert!(
+        result.contains("this.content.bind(this)();"),
+        "LocalBuilder invocation still follows transferBuilderCall: {result}"
+    );
+}
+
+#[test]
+fn local_builder_rejects_static_component_methods() {
+    let src = r#"@Component
+struct Parent {
+  @LocalBuilder static content() { Text('invalid') }
+  build() { this.content() }
+}"#;
+    let error = TransformHarness::transform(&make_source("Parent.ets", src))
+        .expect_err("static LocalBuilder must be rejected");
+    assert!(
+        error.to_string().contains(
+            "Static methods in custom components cannot be decorated by '@LocalBuilder'."
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn component_v2_local_builder_uses_the_same_context_stack_contract() {
+    let src = r#"@ComponentV2
+struct Child { build() { Text('child') } }
+
+@ComponentV2
+struct Parent {
+  @LocalBuilder content() { Child() }
+  build() { this.content() }
+}"#;
+    let result = TransformHarness::transform(&make_source("Parent.ets", src))
+        .expect("ComponentV2 LocalBuilder must transform");
+    assert!(result.contains("content = () => {"), "{result}");
+    assert!(
+        result.contains("const parent = PUV2ViewBase.contextStack"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new Child(parent ? parent : this, {}, undefined, elmtId"),
+        "{result}"
+    );
+    assert_eq!(
+        result
+            .matches("PUV2ViewBase.contextStack && PUV2ViewBase.contextStack.push(this);")
+            .count(),
+        4,
+        "the file-scoped LocalBuilder fact must wrap both V2 components: {result}"
+    );
+}
+
+#[test]
+fn component_v1_builder_param_accepts_local_builder_and_rejects_arbitrary_initializer() {
+    let valid = r#"@Component
+struct Parent {
+  @BuilderParam content: () => void = this.localContent
+  @LocalBuilder localContent() { Text('local') }
+  build() { this.content() }
+}"#;
+    let result = TransformHarness::transform(&make_source("Parent.ets", valid))
+        .expect("V1 BuilderParam may use a LocalBuilder method");
+    assert!(
+        result.contains("this.content = this.localContent;")
+            && result.contains("this.content = params.content;"),
+        "{result}"
+    );
+
+    let invalid = r#"@Component
+struct Parent {
+  @BuilderParam content: () => void = () => {}
+  build() { this.content() }
+}"#;
+    let error = TransformHarness::transform_with_options(
+        &make_source("Parent.ets", invalid),
+        &TransformOptions {
+            checker_mode: CheckerMode::Off,
+            ..TransformOptions::default()
+        },
+    )
+    .expect_err("V1 BuilderParam arbitrary initializers must be rejected");
+    assert!(
+        error.to_string().contains(
+            "'@BuilderParam' property can only initialized by '@Builder' function or '@LocalBuilder' method in struct."
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn static_arkts_uses_the_source_ui_syntax_wrap_builder_rule_only() {
+    let invalid_wrap = r#"function Content(): void {}
+const wrapped = wrapBuilder(Content)
+"#;
+    let options =
+        TransformOptions::default().with_arkts_language_version(ArktsLanguageVersion::V1_2);
+    let error = TransformHarness::transform_with_options(
+        &make_source("StaticProbe.ets", invalid_wrap),
+        &options,
+    )
+    .expect_err("static wrapBuilder requires a local @Builder function");
+    assert!(
+        error
+            .to_string()
+            .contains("The wrapBuilder's parameter should be @Builder function."),
+        "{error}"
+    );
+
+    let mutable = r#"function Content(): void {}
+const wrapped = mutableBuilder(Content)
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source("StaticProbe.ets", mutable),
+        &options,
+    )
+    .expect("the ArkTS 1.2 UI syntax plugin does not apply the legacy mutableBuilder rule");
+    assert_eq!(result, mutable);
+}
+
+#[test]
+fn static_arkts_never_routes_components_through_the_legacy_view_lowerers() {
+    let source = r#"@Entry
+@Component
+struct StaticPage {
+  build() { Text("static") }
+}
+"#;
+    let options =
+        TransformOptions::default().with_arkts_language_version(ArktsLanguageVersion::V1_2);
+    let result =
+        TransformHarness::transform_with_options(&make_source("StaticPage.ets", source), &options)
+            .expect("OXC static ArkTS input must use the independent static frontend boundary");
+
+    assert_eq!(result, source);
+    assert!(!result.contains("ViewPU"));
+    assert!(!result.contains("ViewV2"));
+}
+
+#[test]
+fn preview_mode_registers_preview_components_behind_the_runtime_flag() {
+    let src = r#"@Preview @Component
+struct FirstPreview { build() { Text('first') } }
+
+@Preview @Component
+struct SecondPreview { build() { Text('second') } }
+"#;
+    let options = TransformOptions {
+        entry_source: true,
+        preview_mode: true,
+        ..TransformOptions::default()
+    };
+    let result =
+        TransformHarness::transform_with_options(&make_source("Preview.ets", src), &options)
+            .expect("preview components must transform");
+
+    assert!(
+        result.contains("if (getPreviewComponentFlag())"),
+        "{result}"
+    );
+    assert!(
+        result.contains(
+            "storePreviewComponents(2, \"FirstPreview\", new FirstPreview(undefined, {}), \"SecondPreview\", new SecondPreview(undefined, {}))"
+        ),
+        "{result}"
+    );
+    assert!(result.contains("previewComponent();"), "{result}");
+}
+
+#[test]
+fn preview_mode_preserves_entry_storage_and_normal_entry_fallback() {
+    let src = r#"const previewStorage = new LocalStorage()
+@Entry({ storage: previewStorage }) @Preview @Component
+struct EntryPreview { build() { Text('entry') } }
+
+@Preview @Component
+struct OtherPreview { build() { Text('other') } }
+"#;
+    let options = TransformOptions {
+        bundle_name: Some("com.example.preview".to_string()),
+        module_name: Some("entry".to_string()),
+        project_root: Some(PathBuf::from("/project")),
+        project_path: Some(PathBuf::from("/project/entry/src/main/ets")),
+        entry_source: true,
+        preview_mode: true,
+        ..TransformOptions::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source("/project/entry/src/main/ets/pages/Preview.ets", src),
+        &options,
+    )
+    .expect("preview entry storage must transform");
+
+    assert!(
+        result.contains("let storageNode = previewStorage;"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new EntryPreview(undefined, {}, storageNode)"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new OtherPreview(undefined, {})"),
+        "{result}"
+    );
+    assert!(
+        result.contains("registerNamedRoute(() => new EntryPreview(undefined, {}, previewStorage)"),
+        "the alternate branch must preserve ordinary entry startup: {result}"
+    );
+}
+
+#[test]
+fn preview_mode_resolves_identifier_entry_storage_at_runtime() {
+    let src = r#"const pageOptions = getPageOptions()
+@Entry(pageOptions) @Preview @Component
+struct EntryPreview { build() { Text('entry') } }
+"#;
+    let options = TransformOptions {
+        bundle_name: Some("com.example.preview".to_string()),
+        module_name: Some("entry".to_string()),
+        project_root: Some(PathBuf::from("/project")),
+        project_path: Some(PathBuf::from("/project/entry/src/main/ets")),
+        entry_source: true,
+        preview_mode: true,
+        ..TransformOptions::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source("/project/entry/src/main/ets/pages/Preview.ets", src),
+        &options,
+    )
+    .expect("identifier preview options must transform");
+
+    assert!(
+        result.contains("if (pageOptions && pageOptions.storage != undefined)"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new EntryPreview(undefined, {}, pageOptions.storage)"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new EntryPreview(undefined, {}, pageOptions)"),
+        "{result}"
+    );
+}
+
+#[test]
+fn component_global_reuse_pool_emits_owned_runtime_field() {
+    let src = r#"@Reusable
+@Component
+struct ReusableChild { build() { Text('child') } }
+
+@Component({ reusePool: 'shared', poolAccepts: [ReusableChild] })
+struct Parent { build() { ReusableChild() } }
+"#;
+    let result = TransformHarness::transform(&make_source("Parent.ets", src))
+        .expect("valid global reuse pool");
+    assert!(
+        result
+            .contains("protected readonly __reusePool__Internal = __ReusePool__Internal.create({"),
+        "{result}"
+    );
+    assert!(result.contains("reusePool: 'shared'"), "{result}");
+    assert!(result.contains("poolAccepts: [ReusableChild]"), "{result}");
+    assert!(result.contains("owner: this"), "{result}");
+}
+
+#[test]
+fn component_v2_global_reuse_pool_uses_the_same_runtime_contract() {
+    let src = r#"@ReusableV2
+@ComponentV2
+struct ReusableChild { build() { Text('child') } }
+
+@ComponentV2({ reusePool: 'perInstance', poolAccepts: [ReusableChild] })
+struct Parent { build() { ReusableChild() } }
+"#;
+    let result = TransformHarness::transform(&make_source("Parent.ets", src))
+        .expect("valid ComponentV2 global reuse pool");
+    assert!(result.contains("reusePool: 'perInstance'"), "{result}");
+    assert!(result.contains("poolAccepts: [ReusableChild]"), "{result}");
+    assert!(result.contains("owner: this"), "{result}");
+}
+
+#[test]
+fn global_reuse_pool_rejects_non_reusable_components() {
+    let src = r#"@Component
+struct OrdinaryChild { build() { Text('child') } }
+
+@Component({ reusePool: 'shared', poolAccepts: [OrdinaryChild] })
+struct Parent { build() { OrdinaryChild() } }
+"#;
+    let error = TransformHarness::transform(&make_source("Parent.ets", src))
+        .expect_err("non-reusable pool member must be rejected");
+    assert!(error
+        .to_string()
+        .contains("is not a '@Reusable' or '@ReusableV2' component"));
 }
 
 #[test]
@@ -2030,6 +2507,8 @@ export function PhotoConfirmBuilder() {
 fn test_transforms_entry_component_with_hvigor_route_registration() {
     let src = "@Entry\n@Component\nstruct Page {\n  build() {}\n}";
     let options = TransformOptions {
+        arkts_language_version: ArktsLanguageVersion::default(),
+        api_available: ApiAvailableTransformOptions::default(),
         bundle_name: Some("com.example.arkdown.test".to_string()),
         module_name: Some("phone".to_string()),
         project_root: Some(PathBuf::from("/project")),
@@ -2040,6 +2519,9 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         module_exports: ModuleExportIndex::default(),
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
+        entry_source: true,
+        preview_mode: false,
+        check_entry: false,
         partial_update: true,
         auto_lazy_import: false,
         auto_lazy_filter: None,
@@ -2113,6 +2595,8 @@ export struct SecureModePage {
 }
 "#;
     let options = TransformOptions {
+        arkts_language_version: ArktsLanguageVersion::default(),
+        api_available: ApiAvailableTransformOptions::default(),
         bundle_name: Some("com.example.hexample".to_string()),
         module_name: Some("example".to_string()),
         project_root: Some(PathBuf::from("/project")),
@@ -2123,6 +2607,9 @@ export struct SecureModePage {
         module_exports: ModuleExportIndex::default(),
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
+        entry_source: true,
+        preview_mode: false,
+        check_entry: false,
         partial_update: true,
         auto_lazy_import: false,
         auto_lazy_filter: None,
@@ -2231,6 +2718,8 @@ export struct SecureModePage {
     );
     let sources = crate::source::TransformSourceSnapshot::new(sources);
     let options = TransformOptions {
+        arkts_language_version: ArktsLanguageVersion::default(),
+        api_available: ApiAvailableTransformOptions::default(),
         bundle_name: Some("com.example.hexample".to_string()),
         module_name: Some("example".to_string()),
         project_root: Some(project_root.clone()),
@@ -2241,6 +2730,9 @@ export struct SecureModePage {
         sources,
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
+        entry_source: true,
+        preview_mode: false,
+        check_entry: false,
         partial_update: true,
         auto_lazy_import: false,
         auto_lazy_filter: None,
@@ -4277,6 +4769,8 @@ struct WidgetCard {
     let result = TransformHarness::transform_with_options(
         &make_source("phone/src/main/ets/widget/pages/WidgetCard.ets", src),
         &TransformOptions {
+            arkts_language_version: ArktsLanguageVersion::default(),
+            api_available: ApiAvailableTransformOptions::default(),
             bundle_name: Some("com.example.hmosworld".to_string()),
             module_name: Some("phone".to_string()),
             project_root: Some(PathBuf::from("/project")),
@@ -4287,6 +4781,9 @@ struct WidgetCard {
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: true,
+            entry_source: true,
+            preview_mode: false,
+            check_entry: false,
             partial_update: true,
             auto_lazy_import: false,
             auto_lazy_filter: None,
@@ -4423,6 +4920,8 @@ struct ModalPage {
     let result = TransformHarness::transform_with_options(
         &make_source("example/src/main/ets/page/ModalPage.ets", src),
         &TransformOptions {
+            arkts_language_version: ArktsLanguageVersion::default(),
+            api_available: ApiAvailableTransformOptions::default(),
             bundle_name: Some("com.example.hexample".to_string()),
             module_name: Some("example".to_string()),
             project_root: Some(PathBuf::from("/project")),
@@ -4433,6 +4932,9 @@ struct ModalPage {
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
+            entry_source: true,
+            preview_mode: false,
+            check_entry: false,
             partial_update: true,
             auto_lazy_import: false,
             auto_lazy_filter: None,

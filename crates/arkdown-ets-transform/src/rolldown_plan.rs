@@ -18,11 +18,14 @@ use crate::lazy_import::LazyImportRolldownAdapter;
 use crate::module_rewrite::{
     ModuleAnalyzerKind, TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
 };
-use crate::resource_transform::{ResourceReference, ResourceReferenceRewriter};
+use crate::resource_transform::{
+    ResourceReference, ResourceReferenceRewriter, ResourceTransformContext,
+};
 use crate::source::{
     CompileArktsSourceType, SourceClassifier, SourceFileKind, TransformSourceSnapshot,
 };
 use crate::source_map;
+use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::{
     self, CheckerMode, ModuleExportIndex, NavigationRouteMap, TransformOptions,
@@ -31,7 +34,8 @@ use crate::typescript_emit::{
     ConstEnumExportCache, ImportedConstEnumRewriter, TypeScriptDirectiveFlags,
     TypeScriptEnumValueRewriter, TypeScriptJavascriptEmitOutput, TypeScriptJavascriptEmitter,
 };
-use arkdown_core::{ArkTscTarget, ModuleSource, ModuleType, ResolvedId};
+use crate::visual::VisualSourceInjector;
+use arkdown_core::{ArkTscTarget, ArktsLanguageVersion, ModuleSource, ModuleType, ResolvedId};
 
 /// Narrow transform plan consumed by the Rolldown ETS transform adapter.
 ///
@@ -40,6 +44,8 @@ use arkdown_core::{ArkTscTarget, ModuleSource, ModuleType, ResolvedId};
 /// metadata.
 #[derive(Debug, Clone)]
 pub struct RolldownEtsTransformPlan {
+    pub arkts_language_version: ArktsLanguageVersion,
+    api_available: ApiAvailableTransformOptions,
     pub bundle_name: String,
     pub module_name: String,
     pub project_root: PathBuf,
@@ -47,12 +53,16 @@ pub struct RolldownEtsTransformPlan {
     pub module_roots: Vec<(String, PathBuf)>,
     pub api_version: u32,
     pub resource_refs: Arc<FxHashMap<String, ResourceReference>>,
+    resource_context: ResourceTransformContext,
     pub component_metadata: Arc<transform::component_meta::ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
     const_enum_exports: Arc<ConstEnumExportCache>,
     pub(crate) module_exports: ModuleExportIndex,
     form_entry_source_ids: Arc<FxHashSet<String>>,
+    entry_source_ids: Arc<FxHashSet<String>>,
     navigation_routes: NavigationRouteMap,
+    preview_mode: bool,
+    check_entry: bool,
     pub checker_mode: CheckerMode,
     pub should_emit_js: bool,
     /// `arkOptions.tscConfig.targetESVersion` selected by the latest SDK
@@ -75,6 +85,10 @@ pub struct RolldownEtsTransformPlan {
 }
 
 impl RolldownEtsTransformPlan {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "stable crate boundary; optional behavior is configured through typed with_* methods"
+    )]
     pub fn new(
         bundle_name: impl Into<String>,
         module_name: impl Into<String>,
@@ -89,6 +103,8 @@ impl RolldownEtsTransformPlan {
         let module_exports = ModuleExportIndex::build(&sources, &module_roots, &component_metadata);
         let const_enum_exports = Arc::new(ConstEnumExportCache::new(sources.clone()));
         Self {
+            arkts_language_version: ArktsLanguageVersion::default(),
+            api_available: ApiAvailableTransformOptions::default(),
             bundle_name: bundle_name.into(),
             module_name: module_name.into(),
             project_root,
@@ -96,12 +112,16 @@ impl RolldownEtsTransformPlan {
             module_roots,
             api_version,
             resource_refs: Arc::new(resource_refs),
+            resource_context: ResourceTransformContext::default(),
             component_metadata: Arc::new(component_metadata),
             sources,
             const_enum_exports,
             module_exports,
             form_entry_source_ids: Arc::default(),
+            entry_source_ids: Arc::default(),
             navigation_routes: NavigationRouteMap::default(),
+            preview_mode: false,
+            check_entry: false,
             checker_mode: CheckerMode::Oxc,
             should_emit_js: true,
             tsc_target: ArkTscTarget::default(),
@@ -153,6 +173,34 @@ impl RolldownEtsTransformPlan {
         self
     }
 
+    /// Select the explicitly requested ArkTS compiler language and rebuild the
+    /// cross-file export index with the matching OXC parser mode.
+    pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
+        self.arkts_language_version = version;
+        self.module_exports = ModuleExportIndex::build_with_version(
+            &self.sources,
+            &self.module_roots,
+            &self.component_metadata,
+            version,
+        );
+        self
+    }
+
+    pub fn with_api_available_context(
+        mut self,
+        compatible_sdk_version: &str,
+        runtime_os: &str,
+    ) -> Self {
+        self.api_available =
+            ApiAvailableTransformOptions::from_build_context(compatible_sdk_version, runtime_os);
+        self
+    }
+
+    pub fn with_resource_context(mut self, context: ResourceTransformContext) -> Self {
+        self.resource_context = context;
+        self
+    }
+
     pub fn with_should_emit_js(mut self, should_emit_js: bool) -> Self {
         self.should_emit_js = should_emit_js;
         self
@@ -174,6 +222,21 @@ impl RolldownEtsTransformPlan {
         self
     }
 
+    pub fn with_entry_source_ids(mut self, entry_source_ids: FxHashSet<String>) -> Self {
+        self.entry_source_ids = Arc::new(entry_source_ids);
+        self
+    }
+
+    pub fn with_preview_mode(mut self, preview_mode: bool) -> Self {
+        self.preview_mode = preview_mode;
+        self
+    }
+
+    pub fn with_check_entry(mut self, check_entry: bool) -> Self {
+        self.check_entry = check_entry;
+        self
+    }
+
     /// Attach router-map metadata prepared by the coordinator before Rolldown
     /// starts. This preserves the SDK `createNavigationInit` lifecycle without
     /// allowing transform hooks to read profile artifacts.
@@ -184,6 +247,8 @@ impl RolldownEtsTransformPlan {
 
     pub fn transform_options_for(&self, id: &str) -> TransformOptions {
         TransformOptions {
+            arkts_language_version: self.arkts_language_version,
+            api_available: self.api_available,
             bundle_name: Some(self.bundle_name.clone()),
             module_name: Some(self.module_name.clone()),
             project_root: Some(self.project_root.clone()),
@@ -194,6 +259,9 @@ impl RolldownEtsTransformPlan {
             module_exports: self.module_exports.clone(),
             navigation_routes: self.navigation_routes.clone(),
             form_entry: self.is_form_entry(id),
+            entry_source: self.is_entry_source(id),
+            preview_mode: self.preview_mode,
+            check_entry: self.check_entry,
             partial_update: true,
             checker_mode: self.checker_mode,
             auto_lazy_import: self.auto_lazy_import,
@@ -211,6 +279,14 @@ impl RolldownEtsTransformPlan {
         }
         let normalized = TransformEntrySourceId::new(id).normalized();
         self.form_entry_source_ids.contains(normalized.as_str())
+    }
+
+    fn is_entry_source(&self, id: &str) -> bool {
+        if self.entry_source_ids.contains(id) {
+            return true;
+        }
+        let normalized = TransformEntrySourceId::new(id).normalized();
+        self.entry_source_ids.contains(normalized.as_str())
     }
 }
 
@@ -276,9 +352,21 @@ impl RolldownEtsTransformer {
         let is_comment_only_javascript = emits_javascript && directive_flags.is_comment_only();
         let is_shared_module = directive_flags.is_shared_module();
         let pipeline = HvigorSourcePipeline::new(self, id);
-        let code = pipeline.prepare_source(original_source);
+        let visual_source = if is_ets && !self.plan.arkts_language_version.is_static() {
+            self.plan
+                .sources
+                .visual_source(Path::new(id))
+                .map(|generated| {
+                    VisualSourceInjector::new(original_source, id, generated).transform()
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let code = pipeline.prepare_source(visual_source.as_deref().unwrap_or(original_source));
 
-        if !is_ets {
+        if !is_ets && !self.plan.arkts_language_version.is_static() {
             let final_code = pipeline.finalize_source(code.as_ref());
             // SDK genAbc lazy transform runs on every compile input after the
             // regular transform; TS/JS files are covered too.
@@ -328,6 +416,19 @@ impl RolldownEtsTransformer {
 
         let transformed = transform::ArktsTransformer::with_options(&source, &options)
             .transform_with_source_map()?;
+
+        if let Some(projection) = transformed.rolldown_projection.as_deref() {
+            let projection = pipeline.finalize_source(projection);
+            return Ok(Some(RolldownEtsTransformOutput {
+                code: projection.into_owned(),
+                module_source_code: Some(Arc::from(transformed.code)),
+                source_map: None,
+                record_module_source_code: false,
+                emits_javascript: false,
+                is_comment_only_javascript: false,
+                is_shared_module,
+            }));
+        }
 
         // `ModuleSourceFile` runs after ArkTS lowering and can replace one
         // source statement with several statements (notably `@kit.*` imports).
@@ -488,8 +589,10 @@ impl RolldownEtsTransformer {
             return Ok(None);
         };
         output.record_module_source_code = SourceClassifier::classify(id).is_ets_transform_input();
-        if output.record_module_source_code {
-            let rolldown_source = LazyImportRolldownAdapter::new(&output.code, id).lower();
+        if output.record_module_source_code && output.module_source_code.is_none() {
+            let rolldown_source =
+                LazyImportRolldownAdapter::new(&output.code, id, self.plan.arkts_language_version)
+                    .lower();
             // ModuleMode writes the code produced by etsTransform, then
             // `ModuleSourceFile` rewrites its static requests. Rolldown's
             // internal TypeScript scan is allowed to normalize syntax for its
@@ -558,7 +661,10 @@ impl<'a> HvigorSourcePipeline<'a> {
 
     fn format_source(&self, source: &str) -> String {
         let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_id(self.id);
+        let source_type = CompileArktsSourceType::from_id_with_version(
+            self.id,
+            self.transformer.plan.arkts_language_version,
+        );
         let parsed = Parser::new(&allocator, source, source_type).parse();
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             return source.to_string();
@@ -613,7 +719,10 @@ impl<'a, 'pipeline> HvigorPrepareSourcePass<'a, 'pipeline> {
     }
 
     fn source_type(&self) -> SourceType {
-        CompileArktsSourceType::from_id(self.pipeline.id)
+        CompileArktsSourceType::from_id_with_version(
+            self.pipeline.id,
+            self.pipeline.transformer.plan.arkts_language_version,
+        )
     }
 
     fn finish<'s>(
@@ -1267,6 +1376,7 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             &self.pipeline.transformer.plan.bundle_name,
             Some(&self.pipeline.transformer.plan.module_name),
         )
+        .with_context(self.pipeline.transformer.plan.resource_context.clone())
         .rewrite_program(&allocator, &mut parsed.program);
 
         if !changed {
@@ -1286,7 +1396,10 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
     }
 
     fn source_type(&self) -> SourceType {
-        CompileArktsSourceType::from_id(self.pipeline.id)
+        CompileArktsSourceType::from_id_with_version(
+            self.pipeline.id,
+            self.pipeline.transformer.plan.arkts_language_version,
+        )
     }
 }
 
@@ -1304,6 +1417,41 @@ fn hvigor_stage_codegen(program: &oxc_ast::ast::Program<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_visual_fragments_enter_the_default_arkts_transform_before_arkui_lowering() {
+        let id = PathBuf::from("/tmp/project/entry/src/main/ets/pages/Index.ets");
+        let mut visual_sources = FxHashMap::default();
+        visual_sources.insert(
+            id.clone(),
+            crate::VisualGeneratedSource {
+                build: "    Column()".to_string(),
+                ..crate::VisualGeneratedSource::default()
+            },
+        );
+        let sources = TransformSourceSnapshot::default().with_visual_sources(visual_sources);
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            20,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            sources,
+        )
+        .with_checker_mode(CheckerMode::Off);
+        let output = RolldownEtsTransformer::new(Arc::new(plan))
+            .transform(
+                "@Entry\n@Component\nstruct Index {\n  build() {}\n}\n",
+                id.to_str().unwrap(),
+            )
+            .expect("visual transform")
+            .expect("ETS output");
+
+        assert!(output.code.contains("Column.create()"), "{}", output.code);
+    }
 
     #[test]
     fn unclassified_ohm_source_finalizes_kit_imports() {
@@ -1340,6 +1488,154 @@ preferences.getPreferencesSync(undefined, { name: "x" });"#,
             "got: {}",
             output.code
         );
+    }
+
+    #[test]
+    fn api22_resource_modules_and_dynamic_resources_use_runtime_id_getters() {
+        let context = ResourceTransformContext {
+            min_api_version: 22,
+            bundle_name: "com.example".to_string(),
+            module_name: "entry".to_string(),
+            ..ResourceTransformContext::default()
+        };
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            22,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_resource_context(context);
+        let output = RolldownEtsTransformer::new(Arc::new(plan))
+            .transform(
+                concat!(
+                    "export const shared = $r('[feature].string.title', 'fallback');\n",
+                    "export const dynamic = $r(resourceName);\n",
+                    "export const templateFallback = $r(`app.unsupported.missing`);\n"
+                ),
+                "/tmp/project/entry/src/main/ets/Resources.ets",
+            )
+            .expect("resource transform")
+            .expect("resource output");
+
+        assert_eq!(
+            output.code.matches("get id()").count(),
+            3,
+            "{}",
+            output.code
+        );
+        assert!(output
+            .code
+            .contains("typeof __getResourceId__ === \"function\""));
+        assert!(output.code.contains("\"moduleName\": \"feature\""));
+        assert!(output
+            .code
+            .contains("params: ['[feature].string.title', 'fallback']"));
+    }
+
+    #[test]
+    fn api23_har_uses_resource_id_har_for_app_but_preserves_system_ids() {
+        let mut references = FxHashMap::default();
+        references.insert(
+            "app.string.title".to_string(),
+            ResourceReference {
+                id: 0x0100_0001,
+                runtime_type: 10003,
+                bundle_name: "com.example".to_string(),
+                module_name: "library".to_string(),
+            },
+        );
+        references.insert(
+            "sys.string.ok".to_string(),
+            ResourceReference {
+                id: 0x0700_0001,
+                runtime_type: 10003,
+                bundle_name: "com.example".to_string(),
+                module_name: "library".to_string(),
+            },
+        );
+        let context = ResourceTransformContext {
+            min_api_version: 23,
+            compile_har: true,
+            bundle_name: "com.example".to_string(),
+            module_name: "library".to_string(),
+            ..ResourceTransformContext::default()
+        };
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "library",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/library/src/main/ets"),
+            Vec::new(),
+            23,
+            references,
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_resource_context(context);
+        let output = RolldownEtsTransformer::new(Arc::new(plan))
+            .transform(
+                concat!(
+                    "export const appValue = $r('app.string.title', 'fallback');\n",
+                    "export const sysValue = $r('sys.string.ok');\n"
+                ),
+                "/tmp/project/library/src/main/ets/Resources.ets",
+            )
+            .expect("HAR resource transform")
+            .expect("HAR output");
+
+        assert!(output.code.contains("get id()"), "{}", output.code);
+        assert!(
+            output.code.contains("__resourceIdHar__(this)"),
+            "{}",
+            output.code
+        );
+        assert!(output.code.contains("id: 117440513") || output.code.contains("\"id\": 117440513"));
+        assert!(output.code.contains("'app.string.title', 'fallback'"));
+        assert!(output
+            .code
+            .contains("\"bundleName\": \"__harDefaultBundleName__\""));
+        assert!(output
+            .code
+            .contains("\"moduleName\": \"__harDefaultModuleName__\""));
+    }
+
+    #[test]
+    fn dynamic_resource_names_import_generated_module_info_once() {
+        let context = ResourceTransformContext {
+            min_api_version: 22,
+            ui_transform_optimization: true,
+            bundle_name: "com.example".to_string(),
+            module_name: "entry".to_string(),
+            ..ResourceTransformContext::default()
+        };
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            22,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_resource_context(context);
+        let output = RolldownEtsTransformer::new(Arc::new(plan))
+            .transform(
+                "export const value = $r(resourceName);\n",
+                "/tmp/project/entry/src/main/ets/Resources.ets",
+            )
+            .expect("dynamic resource transform")
+            .expect("dynamic resource output");
+
+        assert_eq!(output.code.matches("from \"ModuleInfo\"").count(), 1);
+        assert!(output.code.contains("\"bundleName\": __BUNDLE_NAME__"));
+        assert!(output.code.contains("\"moduleName\": __MODULE_NAME__"));
     }
 
     #[test]
@@ -2246,6 +2542,90 @@ struct Index {
             "sidecar must not pass raw ArkUI decorators to es2abc:\n{}",
             output.code
         );
+    }
+
+    #[test]
+    fn static_arkts_gives_rolldown_only_a_graph_projection() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            20,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_arkts_language_version(ArktsLanguageVersion::V1_2)
+        .with_checker_mode(CheckerMode::Off);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let source = r#"import { value } from "./value"
+@Entry @Component struct StaticPage {
+  build() { Text(value); Text($r(resourceName)) }
+}
+"#;
+        let output = transformer
+            .compile_transform(
+                source,
+                "/tmp/project/entry/src/main/ets/pages/StaticPage.ets",
+            )
+            .unwrap()
+            .expect("static ArkTS must produce a Rolldown graph projection");
+
+        assert!(
+            output.code.contains("import \"./value\";"),
+            "{}",
+            output.code
+        );
+        assert!(
+            !output.code.contains("struct StaticPage"),
+            "{}",
+            output.code
+        );
+        let module_source = output
+            .module_source_code
+            .as_deref()
+            .expect("the static compiler source must be retained separately");
+        assert!(
+            module_source.contains("struct StaticPage"),
+            "{module_source}"
+        );
+        assert!(
+            module_source.contains("$r(resourceName)"),
+            "{module_source}"
+        );
+        assert!(!module_source.contains("\"id\": -1"), "{module_source}");
+        assert!(!module_source.contains("ViewPU"), "{module_source}");
+    }
+
+    #[test]
+    fn static_arkts_ts_sources_use_the_static_frontend_and_graph_projection() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            20,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_arkts_language_version(ArktsLanguageVersion::V1_2)
+        .with_checker_mode(CheckerMode::Off);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let source =
+            "import { value } from './value'\nexport function read(): number { return value }\n";
+        let output = transformer
+            .compile_transform(source, "/tmp/project/entry/src/main/ets/value.ts")
+            .unwrap()
+            .expect("static TypeScript must produce a Rolldown graph projection");
+
+        assert_eq!(output.code, "import \"./value\";\nexport {};\n");
+        assert_eq!(output.module_source_code.as_deref(), Some(source));
+        assert!(!output.emits_javascript);
+        assert!(output.record_module_source_code);
     }
 
     #[test]

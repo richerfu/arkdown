@@ -10,7 +10,10 @@ use oxc_ast::ast::{
     TSEnumDeclaration,
 };
 use oxc_ast_visit::Visit;
-use oxc_parser::{ArkTsAttributeCallback, ArkTsOptions, Parser, ParserReturn};
+use oxc_parser::{
+    ArkTsAttributeCallback, ArkTsOptions, EtsStaticArkUiAttributeCallback, EtsStaticArkUiOptions,
+    Parser, ParserReturn,
+};
 use oxc_span::SourceType;
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,6 +35,8 @@ pub struct ComponentMetadata {
     custom_builder_properties_without_key: FxHashSet<String>,
     style_double_dollar_attrs: FxHashSet<String>,
     component_double_dollar_properties: FxHashMap<String, FxHashSet<String>>,
+    style_double_exclamation_attrs: FxHashSet<String>,
+    component_double_exclamation_properties: FxHashMap<String, FxHashSet<String>>,
     bind_popup_attrs: FxHashSet<String>,
     bind_drag_attrs: FxHashSet<String>,
     gesture_attr_names: FxHashSet<String>,
@@ -124,6 +129,20 @@ impl ComponentMetadata {
         self.is_component_double_dollar_property(component_name, property_name)
     }
 
+    pub fn is_style_double_exclamation_attr(&self, attr_name: &str) -> bool {
+        self.style_double_exclamation_attrs.contains(attr_name)
+    }
+
+    pub fn is_component_double_exclamation_property(
+        &self,
+        component_name: &str,
+        property_name: &str,
+    ) -> bool {
+        self.component_double_exclamation_properties
+            .get(component_name)
+            .is_some_and(|properties| properties.contains(property_name))
+    }
+
     pub fn is_bind_popup_attr(&self, attr_name: &str) -> bool {
         self.bind_popup_attrs.contains(attr_name)
     }
@@ -179,13 +198,32 @@ impl ComponentMetadata {
 
 #[derive(Debug, Clone, Default)]
 struct ArkTsParserConfig {
-    options: Option<ArkTsOptions>,
+    legacy_options: Option<ArkTsOptions>,
+    static_options: Option<EtsStaticArkUiOptions>,
 }
 
 impl ArkTsParserConfig {
     fn from_sdk(options: ArkTsOptions) -> Self {
+        let static_options = EtsStaticArkUiOptions {
+            components: options.components.clone(),
+            render_methods: options.render_methods.clone(),
+            render_decorators: options.render_decorators.clone(),
+            extend_decorators: options.extend_decorators.clone(),
+            styles_decorator: options.styles_decorator.clone(),
+            parameter_ui_callbacks: options.parameter_ui_callbacks.clone(),
+            attribute_ui_callbacks: options
+                .attribute_ui_callbacks
+                .iter()
+                .map(|callback| EtsStaticArkUiAttributeCallback {
+                    component: callback.component.clone(),
+                    attributes: callback.attributes.clone(),
+                })
+                .collect(),
+            annotations: options.annotations,
+        };
         Self {
-            options: Some(options),
+            legacy_options: Some(options),
+            static_options: Some(static_options),
         }
     }
 
@@ -196,9 +234,18 @@ impl ArkTsParserConfig {
         source_type: SourceType,
     ) -> ParserReturn<'a> {
         let parser = Parser::new(allocator, source, source_type);
-        match &self.options {
-            Some(options) => parser.with_arkts_options(options.clone()).parse(),
-            None => parser.parse(),
+        if source_type.is_ets_static() {
+            match &self.static_options {
+                Some(options) => parser
+                    .with_ets_static_arkui_options(options.clone())
+                    .parse(),
+                None => parser.parse(),
+            }
+        } else {
+            match &self.legacy_options {
+                Some(options) => parser.with_arkts_options(options.clone()).parse(),
+                None => parser.parse(),
+            }
         }
     }
 }
@@ -254,6 +301,7 @@ pub struct ArkuiRuntimeNames {
     pub double_dollar_new_value: String,
     pub double_dollar_value: String,
     pub double_dollar_change_event: String,
+    pub double_exclamation_change_value: String,
     pub custom_dialog_controller_builder: String,
     pub header: String,
     pub indicator_builder: String,
@@ -299,6 +347,7 @@ pub struct ArkuiRuntimeNames {
     pub page_path: String,
     pub is_user_create_stack: String,
     pub builder_property: String,
+    pub mutable_builder_dispatch: String,
     pub reuse_id: String,
 }
 
@@ -396,6 +445,7 @@ impl Default for ArkuiRuntimeNames {
             double_dollar_new_value: "newValue".to_string(),
             double_dollar_value: "value".to_string(),
             double_dollar_change_event: "changeEvent".to_string(),
+            double_exclamation_change_value: "$value".to_string(),
             custom_dialog_controller_builder: "builder".to_string(),
             header: "header".to_string(),
             indicator_builder: "indicatorBuilder".to_string(),
@@ -441,6 +491,7 @@ impl Default for ArkuiRuntimeNames {
             page_path: "pagePath".to_string(),
             is_user_create_stack: "isUserCreateStack".to_string(),
             builder_property: "builder".to_string(),
+            mutable_builder_dispatch: "_dispatchBuilder".to_string(),
             reuse_id: "reuseId".to_string(),
         }
     }
@@ -546,6 +597,9 @@ impl<'a> ComponentMetadataLoader<'a> {
             custom_builder_properties_without_key: semantics.custom_builder_properties_without_key,
             style_double_dollar_attrs: semantics.style_double_dollar_attrs,
             component_double_dollar_properties: semantics.component_double_dollar_properties,
+            style_double_exclamation_attrs: semantics.style_double_exclamation_attrs,
+            component_double_exclamation_properties: semantics
+                .component_double_exclamation_properties,
             bind_popup_attrs: semantics.bind_popup_attrs,
             bind_drag_attrs: semantics.bind_drag_attrs,
             gesture_attr_names: semantics.gesture_attr_names,
@@ -749,7 +803,7 @@ impl<'a> SdkComponentLoader<'a> {
         declarations: &mut SdkDeclarationMetadata,
     ) -> anyhow::Result<()> {
         let mut paths = Vec::new();
-        self.collect_declaration_files(&api_root, &mut paths)?;
+        self.collect_declaration_files(api_root, &mut paths)?;
         paths.sort();
 
         for path in paths {
@@ -1217,6 +1271,41 @@ impl<'a> SdkEnumDeclarationCollector<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_grammar_options_use_the_dedicated_static_arkui_api() {
+        let parser = ArkTsParserConfig::from_sdk(ArkTsOptions {
+            components: vec!["lowercaseComponent".to_string()],
+            ..ArkTsOptions::default()
+        });
+        let allocator = Allocator::default();
+        let parsed = parser.parse(
+            &allocator,
+            "@Component struct Probe { build() { lowercaseComponent() } }",
+            SourceType::ets_static(),
+        );
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "static ArkUI parse failed: {:?}",
+            parsed.diagnostics
+        );
+        let Statement::StructStatement(component) = &parsed.program.body[0] else {
+            panic!("expected static component struct");
+        };
+        let StructElement::MethodDefinition(build) = &component.body.body[0] else {
+            panic!("expected build method");
+        };
+        let Statement::ExpressionStatement(expression) =
+            &build.value.body.as_ref().expect("build body").statements[0]
+        else {
+            panic!("expected component expression statement");
+        };
+        assert!(matches!(
+            expression.expression,
+            oxc_ast::ast::Expression::ArkUIComponentExpression(_)
+        ));
+    }
+
     #[test]
     fn loads_sdk_declarations_with_bundled_arkui_semantics() {
         let metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
@@ -1258,6 +1347,12 @@ mod tests {
         assert!(metadata.is_style_double_dollar_attr("bindSheet"));
         assert!(metadata.is_component_double_dollar_property("TextInput", "text"));
         assert!(metadata.is_component_double_dollar_property("TextTimer", "isCountDown"));
+        assert!(metadata.is_component_double_dollar_property("Picker", "selectedIndex"));
+        assert!(metadata.is_style_double_exclamation_attr("bindContextMenu"));
+        assert!(metadata.is_component_double_exclamation_property("TextInput", "text"));
+        assert!(metadata.is_component_double_exclamation_property("ContainerReader", "size"));
+        assert!(metadata.is_builder_attribute_method("Text", "bindContextMenuByResponseType"));
+        assert!(metadata.is_builder_attribute_without_key("subMenuBuilder"));
         assert!(metadata.is_bind_popup_attr("bindPopup"));
         assert!(metadata.is_bind_drag_attr("onDragStart"));
         assert!(metadata.is_builder_attribute_without_key("create"));
@@ -1269,6 +1364,10 @@ mod tests {
             "isUserCreateStack"
         );
         assert_eq!(metadata.runtime_names().builder_property, "builder");
+        assert_eq!(
+            metadata.runtime_names().mutable_builder_dispatch,
+            "_dispatchBuilder"
+        );
         assert_eq!(
             metadata.runtime_names().observe_component_creation2,
             "observeComponentCreation2"

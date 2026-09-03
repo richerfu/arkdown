@@ -1,5 +1,6 @@
 use super::generate_har_declarations::HarDeclarationGenerator;
 use super::layout::ModuleBuildLayout;
+use arkdown_core::ArktsLanguageVersion;
 
 #[test]
 fn source_har_declarations_preserve_public_signatures_and_tree() {
@@ -81,6 +82,45 @@ fn hsp_declarations_preserve_module_source_tree_for_package_shared_har() {
     .declarations_dir()
     .join("shared/src/main/ets/Index.d.ets")
     .is_file());
+}
+
+#[test]
+fn static_arkts_har_declarations_use_oxc_static_struct_emission() {
+  let temp = tempfile::tempdir().expect("create module root");
+  let source_dir = temp.path().join("src/main/ets");
+  std::fs::create_dir_all(&source_dir).expect("create source tree");
+  std::fs::write(
+    source_dir.join("StaticCard.ets"),
+    r#"
+      import { Component, Param, Text } from '@ohos.arkui.component'
+      @Component
+      export struct StaticCard {
+        @Param title: string = ''
+        build(): void { Text(this.title) }
+      }
+    "#,
+  )
+  .expect("write static ArkTS source");
+
+  HarDeclarationGenerator::new_har(temp.path(), "default", &source_dir, "library")
+    .with_arkts_language_version(ArktsLanguageVersion::V1_2)
+    .generate()
+    .expect("generate static declarations");
+
+  let declaration = std::fs::read_to_string(
+    ModuleBuildLayout::new(temp.path())
+      .declarations_dir()
+      .join("library/src/main/ets/StaticCard.d.ets"),
+  )
+  .expect("read static declaration");
+  assert!(declaration.contains("@Component"), "{declaration}");
+  assert!(
+    declaration.contains("declare struct StaticCard"),
+    "{declaration}"
+  );
+  assert!(declaration.contains("@Param"), "{declaration}");
+  assert!(declaration.contains("title: string"), "{declaration}");
+  assert!(!declaration.contains("Text(this.title)"), "{declaration}");
 }
 
 /// Latest IDE `ets-loader::generateSourceFilesInHar` sends both source and

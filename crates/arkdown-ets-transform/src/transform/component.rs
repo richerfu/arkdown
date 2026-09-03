@@ -2,11 +2,12 @@ use rustc_hash::FxHashSet;
 
 use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, FromIn};
 use oxc_ast::ast::{
-    AccessorProperty, Argument, ArrowFunctionBody, AssignmentExpression, AssignmentTarget,
-    BindingPattern, ClassElement, Expression, FormalParameterKind, FormalParameters, FunctionBody,
-    IdentifierName, MemberExpression, MethodDefinition, NumberBase, ObjectPropertyKind, Program,
-    PropertyDefinition, PropertyKey, PropertyKind, Statement, StaticBlock, TSIndexSignature,
-    TSType, TSTypeAnnotation, TSTypeName, VariableDeclarationKind, VariableDeclarator,
+    AccessorProperty, Argument, ArrayExpression, ArrowFunctionBody, AssignmentExpression,
+    AssignmentTarget, BindingPattern, ClassElement, Expression, FormalParameterKind,
+    FormalParameters, FunctionBody, IdentifierName, MemberExpression, MethodDefinition, NumberBase,
+    ObjectPropertyKind, Program, PropertyDefinition, PropertyDefinitionType, PropertyKey,
+    PropertyKind, Statement, StaticBlock, TSAccessibility, TSIndexSignature, TSType,
+    TSTypeAnnotation, TSTypeName, VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
@@ -21,6 +22,7 @@ use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::decorator::{ArkuiDecoratorName, ArkuiStateDecorator, ConstructorInitKind};
 use crate::transform::entry::EntryRegistrationInfo;
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
+use crate::transform::local_builder::LocalBuilderRuntimeEmitter;
 use crate::transform::viewpu_emit::{
     GeneratedViewpuName, ParamsInterfaceAstEmitter, ParamsInterfaceField, ParamsInterfaceFieldType,
     ViewpuAstBuilder, ViewpuMemberAstEmitter,
@@ -42,6 +44,13 @@ pub struct BuilderMethodInfo<'a> {
     /// ArkUI DSL body plan. The final class emitter lowers it into OXC
     /// statements with the allocator that owns the generated class.
     pub body: BuildBodyInfo<'a>,
+    pub kind: BuilderMethodKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderMethodKind {
+    Builder,
+    LocalBuilder,
 }
 
 /// A state/prop/link field extracted from a `@Component` struct.
@@ -92,6 +101,108 @@ pub struct RegularField<'a> {
     pub type_annotation_ast: Option<&'a TSTypeAnnotation<'a>>,
     pub initializer: Option<FieldExpression<'a>>,
     pub optional: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalReusePoolConfig<'a> {
+    pub ownership: &'a Expression<'a>,
+    pub accepted_components: &'a ArrayExpression<'a>,
+}
+
+pub(crate) struct GlobalReusePoolPropertyEmitter<'a> {
+    config: GlobalReusePoolConfig<'a>,
+}
+
+impl<'a> GlobalReusePoolPropertyEmitter<'a> {
+    pub(crate) fn new(config: GlobalReusePoolConfig<'a>) -> Self {
+        Self { config }
+    }
+
+    pub(crate) fn element<'b>(&self, allocator: &'b Allocator) -> ClassElement<'b> {
+        let ast = AstBuilder::new(allocator);
+        let options = Expression::new_object_expression(
+            SPAN,
+            ArenaVec::from_iter_in(
+                [
+                    ObjectPropertyKind::new_object_property(
+                        SPAN,
+                        PropertyKind::Init,
+                        PropertyKey::new_static_identifier(SPAN, "reusePool", &ast),
+                        self.config.ownership.clone_in(allocator),
+                        false,
+                        false,
+                        false,
+                        &ast,
+                    ),
+                    ObjectPropertyKind::new_object_property(
+                        SPAN,
+                        PropertyKind::Init,
+                        PropertyKey::new_static_identifier(SPAN, "poolAccepts", &ast),
+                        Expression::new_array_expression(
+                            SPAN,
+                            ArenaVec::from_iter_in(
+                                self.config
+                                    .accepted_components
+                                    .elements
+                                    .iter()
+                                    .map(|element| element.clone_in(allocator)),
+                                &ast,
+                            ),
+                            &ast,
+                        ),
+                        false,
+                        false,
+                        false,
+                        &ast,
+                    ),
+                    ObjectPropertyKind::new_object_property(
+                        SPAN,
+                        PropertyKind::Init,
+                        PropertyKey::new_static_identifier(SPAN, "owner", &ast),
+                        Expression::new_this_expression(SPAN, &ast),
+                        false,
+                        false,
+                        false,
+                        &ast,
+                    ),
+                ],
+                &ast,
+            ),
+            &ast,
+        );
+        let callee = Expression::from(MemberExpression::new_static_member_expression(
+            SPAN,
+            Expression::new_identifier(SPAN, "__ReusePool__Internal", &ast),
+            IdentifierName::new(SPAN, "create", &ast),
+            false,
+            &ast,
+        ));
+        let initializer = Expression::new_call_expression(
+            SPAN,
+            callee,
+            None,
+            ArenaVec::from_value_in(Argument::from(options), &ast),
+            false,
+            &ast,
+        );
+        ClassElement::new_property_definition(
+            SPAN,
+            PropertyDefinitionType::PropertyDefinition,
+            ArenaVec::new_in(&ast),
+            PropertyKey::new_static_identifier(SPAN, "__reusePool__Internal", &ast),
+            None,
+            Some(initializer),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            Some(TSAccessibility::Protected),
+            &ast,
+        )
+    }
 }
 
 impl<'a> RegularField<'a> {
@@ -201,10 +312,10 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             let ObjectPropertyKind::ObjectProperty(property) = property else {
                 continue;
             };
-            if !property
+            if property
                 .key
                 .static_name()
-                .is_some_and(|name| name == "builder")
+                .is_none_or(|name| name != "builder")
             {
                 continue;
             }
@@ -664,6 +775,10 @@ pub struct ComponentInfo<'a> {
     pub is_exported: bool,
     pub is_default_export: bool,
     pub is_reusable: bool,
+    /// Source compiler `storedFileInfo.hasLocalBuilderInFile`. This is
+    /// intentionally file-scoped rather than component-scoped.
+    pub has_local_builder_in_file: bool,
+    pub global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
     /// True when the struct is decorated with `@CustomDialog`.
     ///
     /// When set, the emitter generates a `setController(ctr: CustomDialogController)` method
@@ -681,6 +796,10 @@ pub struct ComponentInfo<'a> {
     /// Non-decorated struct fields. hvigor still routes them through params and
     /// emits private class fields initialized in the constructor.
     pub regular_fields: Vec<RegularField<'a>>,
+    /// Fields whose decorators remain compiler-owned after the UI struct is
+    /// converted into a class. `@CustomEnv` is lowered by the ArkTS backend,
+    /// not by the ViewPU observed-property wrappers.
+    pub runtime_decorated_fields: Vec<&'a PropertyDefinition<'a>>,
     /// Struct members that are not ArkUI state/decorator fields and are not
     /// build/@Builder/@Styles methods. hvigor keeps these as class members.
     pub regular_members: Vec<RegularMember<'a>>,
@@ -707,13 +826,14 @@ pub enum RegularMember<'a> {
 #[derive(Debug, Clone)]
 pub enum ComponentSourceMember {
     Property(String),
+    RuntimeDecorated(usize),
     Regular(usize),
     InitialRender,
     Builder(usize),
 }
 
 impl<'a> RegularMember<'a> {
-    fn to_class_element<'b>(&self, allocator: &'b Allocator) -> ClassElement<'b> {
+    fn to_class_element<'b>(self, allocator: &'b Allocator) -> ClassElement<'b> {
         match self {
             Self::Method(method) => {
                 GlobalContextCallRewriter::new(allocator).method_definition(method)
@@ -751,11 +871,14 @@ impl Default for ComponentInfo<'_> {
             is_exported: Default::default(),
             is_default_export: Default::default(),
             is_reusable: Default::default(),
+            has_local_builder_in_file: Default::default(),
+            global_reuse_pool: Default::default(),
             is_custom_dialog: Default::default(),
             state_fields: Default::default(),
             params_fields: Default::default(),
             property_order: Default::default(),
             regular_fields: Default::default(),
+            runtime_decorated_fields: Default::default(),
             regular_members: Default::default(),
             source_members: Default::default(),
             initial_render_body: Default::default(),
@@ -881,6 +1004,9 @@ impl<'a> ViewPuClassEmitter<'a> {
         let mut elements: oxc_allocator::Vec<'b, oxc_ast::ast::ClassElement<'b>> =
             ArenaVec::new_in(&allocator);
 
+        if let Some(reuse_pool) = self.info.global_reuse_pool {
+            elements.push(GlobalReusePoolPropertyEmitter::new(reuse_pool).element(allocator));
+        }
         // constructor
         elements.push(self.build_constructor(allocator));
         // setInitiallyProvidedValue
@@ -948,6 +1074,18 @@ impl<'a> ViewPuClassEmitter<'a> {
                 ComponentSourceMember::Regular(index) => {
                     if let Some(member) = self.info.regular_members.get(*index) {
                         elements.push(member.to_class_element(allocator));
+                    }
+                }
+                ComponentSourceMember::RuntimeDecorated(index) => {
+                    if let Some(property) = self.info.runtime_decorated_fields.get(*index) {
+                        let mut property = (*property).clone_in(allocator);
+                        property.decorators.retain(|decorator| {
+                            crate::transform::decorator::ArkuiDecorator::new(decorator).name()
+                                != ArkuiDecoratorName::WATCH
+                        });
+                        elements.push(ClassElement::PropertyDefinition(ArenaBox::new_in(
+                            property, &allocator,
+                        )));
                     }
                 }
                 ComponentSourceMember::InitialRender => {
@@ -1320,7 +1458,16 @@ impl<'a> ViewPuClassEmitter<'a> {
         &self,
         allocator: &'b Allocator,
     ) -> Result<oxc_ast::ast::ClassElement<'b>, BuildLoweringError> {
-        let stmts = self.info.initial_render_body.statements(allocator)?;
+        let mut stmts = self.info.initial_render_body.statements(allocator)?;
+        if self.info.has_local_builder_in_file
+            && self.info.initial_render_body.has_source_statements()
+        {
+            stmts.insert(
+                0,
+                LocalBuilderRuntimeEmitter::new().push_statement(allocator),
+            );
+            stmts.push(LocalBuilderRuntimeEmitter::new().pop_statement(allocator));
+        }
         let method_name = if self.info.partial_update {
             GeneratedViewpuName::INITIAL_RENDER
         } else {
@@ -1359,6 +1506,29 @@ impl<'a> ViewPuClassEmitter<'a> {
         let name = allocator.alloc_str(&method.name);
         let stmts = method.body.statements(allocator)?;
         let builder = ViewpuAstBuilder::new(allocator);
+        if method.kind == BuilderMethodKind::LocalBuilder {
+            let ast = AstBuilder::new(allocator);
+            let params = builder.clone_formal_parameters(method.params);
+            let body = FunctionBody::new(SPAN, ArenaVec::new_in(&ast), stmts, &ast);
+            let arrow = Expression::new_arrow_function_expression(
+                SPAN,
+                false,
+                None,
+                params,
+                None,
+                ArrowFunctionBody::FunctionBody(ArenaBox::new_in(body, &ast)),
+                &ast,
+            );
+            return Ok(
+                ViewpuMemberAstEmitter::new(allocator).property_with_type_annotation(
+                    name,
+                    None,
+                    Some(arrow),
+                    false,
+                    false,
+                ),
+            );
+        }
         let params = builder.clone_formal_parameters_with_parent(method.params);
         let return_type = method
             .return_annotation
@@ -1382,6 +1552,13 @@ impl<'a> ViewPuClassEmitter<'a> {
             GeneratedViewpuName::UPDATE_DIRTY_ELEMENTS,
             builder.expressions(),
         ));
+        if self.info.has_local_builder_in_file {
+            stmts.insert(
+                0,
+                LocalBuilderRuntimeEmitter::new().push_statement(allocator),
+            );
+            stmts.push(LocalBuilderRuntimeEmitter::new().pop_statement(allocator));
+        }
         ViewpuMemberAstEmitter::new(allocator).method_with_params(
             GeneratedViewpuName::RERENDER,
             builder.formal_parameters(),
@@ -1527,7 +1704,7 @@ impl<'a> ViewPuClassEmitter<'a> {
         let state_decorator = ArkuiStateDecorator::new(&field.decorator);
         let backing = state_decorator.class_for(field.is_simple_type);
         match state_decorator.constructor_init_kind() {
-            ConstructorInitKind::NewWithLocalInit => {
+            ConstructorInitKind::Local => {
                 let value = builder.new_expression(
                     backing,
                     builder.expressions_from_iter([
@@ -1540,7 +1717,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                     builder.this_assign_statement(builder.backing_field_name(&field.name), value),
                 );
             }
-            ConstructorInitKind::NewWithParamInit => {
+            ConstructorInitKind::Param => {
                 let value = builder.new_expression(
                     backing,
                     builder.expressions_from_iter([
@@ -1553,7 +1730,7 @@ impl<'a> ViewPuClassEmitter<'a> {
                     builder.this_assign_statement(builder.backing_field_name(&field.name), value),
                 );
             }
-            ConstructorInitKind::ConsumeInit => {
+            ConstructorInitKind::Consume => {
                 let key = field.alias.as_deref().unwrap_or(field.name.as_str());
                 let mut args = builder.expressions_from_iter([
                     builder.string_expression(key),
@@ -1568,13 +1745,13 @@ impl<'a> ViewPuClassEmitter<'a> {
                     builder.this_assign_statement(builder.backing_field_name(&field.name), value),
                 );
             }
-            ConstructorInitKind::BuilderParamInit => {
+            ConstructorInitKind::BuilderParam => {
                 stmts.push(builder.this_assign_statement(
                     &field.name,
                     self.field_initializer_expression(builder, field),
                 ));
             }
-            ConstructorInitKind::StorageInit => {
+            ConstructorInitKind::Storage => {
                 if Self::uses_local_storage(field) {
                     return;
                 }

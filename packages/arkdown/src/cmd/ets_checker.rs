@@ -191,6 +191,9 @@ pub(crate) struct SdkEtsCheckerInput<'a> {
   pub(crate) coverage_path_filter: Option<&'a str>,
   pub(crate) coverage_mode: Option<&'a str>,
   pub(crate) debug_line: bool,
+  pub(crate) preview_mode: bool,
+  pub(crate) check_entry: bool,
+  pub(crate) watch_mode: bool,
   pub(crate) byte_code_har_integrated_optimization: bool,
   pub(crate) single_file_emit: bool,
   pub(crate) rollup_cache_use_source_hash: bool,
@@ -797,14 +800,15 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       target_name: format!(".{0}", self.input.target_name),
       package_manager_type,
       local_properties_path: self.path(&self.input.config.project_root.join("local.properties"))?,
-      is_preview: false,
+      is_preview: self.input.preview_mode,
+      check_entry: self.input.check_entry,
       is_ohos_test: self.input.target_name == "ohosTest",
       is_local_test: matches!(
         self.input.config.output_target,
         arkdown_core::OutputTarget::Test
       ),
       build_mode,
-      watch_mode: "false".to_string(),
+      watch_mode: self.input.watch_mode.to_string(),
       ace_profile_path: self.path(&self.input.paths.ace_profile_path)?,
       ets_loader_path: self.path(&self.input.config.sdk_config.ets_loader_path)?,
       module_path: self.path(&module_root)?,
@@ -901,8 +905,9 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     Ok(SdkEtsCheckerLoaderEnvironment {
       runtime_os: self.input.config.product.runtime_os.clone(),
       sdk_info: self.sdk_info()?,
-      watch_mode: "false".to_string(),
-      is_preview: None,
+      watch_mode: self.input.watch_mode.to_string(),
+      is_preview: self.input.preview_mode.then(|| "true".to_string()),
+      check_entry: self.input.check_entry.then(|| "true".to_string()),
       ace_manifest_path: None,
       app_resource: self.path(&self.input.paths.app_resource_path)?,
       raw_file_resource: self.path(&self.input.paths.raw_file_resource_path)?,
@@ -1539,6 +1544,7 @@ struct SdkEtsCheckerProjectConfig {
   package_manager_type: String,
   local_properties_path: String,
   is_preview: bool,
+  check_entry: bool,
   is_ohos_test: bool,
   is_local_test: bool,
   build_mode: String,
@@ -1586,6 +1592,8 @@ struct SdkEtsCheckerLoaderEnvironment {
   watch_mode: String,
   #[serde(skip_serializing_if = "Option::is_none")]
   is_preview: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  check_entry: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   ace_manifest_path: Option<String>,
   app_resource: String,
