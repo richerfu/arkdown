@@ -293,9 +293,8 @@ impl ModulePackageArtifact {
 
 /// Selected ArkTS diagnostic policy.
 ///
-/// `sdk` is the parity default: it runs the installed ets-loader semantic
-/// checker before Rolldown while retaining Rust/OXC structural diagnostics in
-/// the transform adapter. `oxc` is an explicit fast structural-only mode.
+/// `oxc` is the native default. `sdk` remains an explicit comparison backend
+/// until the last TypeScript semantic corpus has moved into the OXC pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArkTsCheckerSelection {
   Sdk,
@@ -305,7 +304,7 @@ enum ArkTsCheckerSelection {
 
 impl ArkTsCheckerSelection {
   fn parse(value: Option<&str>) -> Result<Self> {
-    match value.unwrap_or("sdk") {
+    match value.unwrap_or("oxc") {
       "sdk" => Ok(Self::Sdk),
       "oxc" => Ok(Self::Oxc),
       "off" => Ok(Self::Off),

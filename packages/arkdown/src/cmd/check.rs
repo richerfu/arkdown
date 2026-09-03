@@ -1,10 +1,4 @@
-//! SDK-backed standalone ArkTS checking.
-//!
-//! `arkdown check` keeps the Rust/OXC structural validator and additionally
-//! invokes the installed SDK's `etsStandaloneChecker` for TypeScript semantic
-//! diagnostics. This is the same semantic owner used by Hvigor's ArkLint
-//! worker: `ets-loader/lib/ets_checker.js::etsStandaloneChecker`. Normal
-//! builds use the separate `etsChecker.buildStart` CompileArkTS entry.
+//! Native OXC-backed standalone ArkTS checking.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,9 +34,9 @@ pub struct CheckArgs {
   /// Node executable used to invoke the SDK semantic checker.
   #[arg(long)]
   pub node_executable: Option<PathBuf>,
-  /// ArkTS checker backend. `sdk` keeps the SDK semantic checker plus native
-  /// source rules; `oxc` runs the Rust/OXC checker without Node.
-  #[arg(long, default_value = "sdk")]
+  /// ArkTS checker backend. `oxc` runs without Node. `sdk` is an explicit
+  /// comparison backend while the remaining TypeScript semantic corpus moves.
+  #[arg(long, default_value = "oxc")]
   pub checker: String,
 }
 

@@ -1,4 +1,4 @@
-//! Regression coverage for the SDK-owned TypeScript semantic phase.
+//! Regression coverage for the explicit SDK comparison backend.
 //!
 //! Hvigor's ArkLint worker delegates this work to
 //! `ets-loader/lib/ets_checker.js::etsStandaloneChecker`. The fixture is
@@ -32,6 +32,7 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
   let output = Command::new(env!("CARGO_BIN_EXE_arkdown"))
     .args(["check", "--project"])
     .arg(temp.path())
+    .args(["--checker", "sdk"])
     .output()
     .expect("run arkdown check");
   let diagnostics = format!(
@@ -53,6 +54,27 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
       || diagnostics.contains("not assignable to type \"number\"")
       || diagnostics.contains("Type 'string'"),
     "failure must originate from the SDK TypeScript checker; output:\n{diagnostics}"
+  );
+}
+
+#[test]
+fn check_defaults_to_native_oxc_without_a_node_runtime() {
+  let fixture = repo_root().join("tests/fixtures/minimal-hap");
+  let output = Command::new(env!("CARGO_BIN_EXE_arkdown"))
+    .args(["check", "--project"])
+    .arg(&fixture)
+    .env("NODE_HOME", fixture.join("missing-node-runtime"))
+    .output()
+    .expect("run native arkdown check");
+  let diagnostics = format!(
+    "{}{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  assert!(
+    output.status.success(),
+    "default OXC check must not require Node: {diagnostics}"
   );
 }
 
