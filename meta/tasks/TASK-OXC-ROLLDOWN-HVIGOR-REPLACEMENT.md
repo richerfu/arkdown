@@ -8,7 +8,7 @@
 
 ### 1.1 2026-09-03 ArkTS 1.1 第一批实施进度
 
-- 已建立可执行的 `arkts11.json` 源码契约清单，当前 73 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期；system API 已覆盖 `apiAvailable` 参数和 SDK 身份安全的 `@Available` 内容、OS、父作用域契约，UI checker 新增 Extend/LocalBuilder/Env、SDK `Type` 身份、BuilderParam 字面量、Button label、组件 parent/child grammar 和属性装饰器冲突规则。
+- 已建立可执行的 `arkts11.json` 源码契约清单，当前 79 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期；system API 已覆盖 `apiAvailable` 参数和 SDK 身份安全的 `@Available` 内容、OS、父作用域契约，UI checker 新增 Extend/LocalBuilder/Env、SDK `Type` 身份、BuilderParam、ObjectLink、Monitor 根状态、Button label、组件 parent/child grammar 和属性装饰器冲突规则。
 - 已删除旧 OXC checker 中约千行没有新源码错误码/函数证据的猜测式规则，改为结构化、多诊断、稳定顺序的 `EtsCheckReport`；`arkdown check --checker oxc` 可在不启动 Node checker 的情况下运行该路径。
 - 已对齐首批高频规则：struct/class/function decorator target、build/Styles、成员初始化、Watch、Observed V1/V2、生命周期、全局复用池、SDK 组件/容器命名与根节点约束、`apiAvailable`。
 - 已补动态 ArkTS 的 `worker.Worker('*.ts') -> '*.js'` 和 `ESObject -> any` 全程序 OXC 变换，并把 Builder factory/global reuse pool 错误改为源码错误码。

@@ -361,6 +361,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
 
     fn check_methods(&mut self) {
         let mut build_count = 0usize;
+        let observable_roots = self.observable_roots();
         for element in &self.statement.body.body {
             let StructElement::MethodDefinition(method) = element else {
                 continue;
@@ -381,7 +382,9 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                         ArkuiDecoratorName::MONITOR | ArkuiDecoratorName::SYNC_MONITOR
                     )
                 {
-                    Arkts11MonitorValidator::new(decorator, self.file, self.errors).check();
+                    Arkts11MonitorValidator::new(decorator, self.file, self.errors)
+                        .with_observable_roots(&observable_roots)
+                        .check();
                 }
                 if Self::is_v1_component_member_decorator(name)
                     || matches!(
@@ -1288,6 +1291,18 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                         &[],
                     );
                 }
+                if *decorator == ArkuiDecoratorName::OBJECT_LINK
+                    && property.type_annotation.as_ref().is_some_and(|annotation| {
+                        Self::is_object_link_forbidden_type(&annotation.type_annotation)
+                    })
+                {
+                    self.error(
+                        "10905307",
+                        "'@ObjectLink' cannot be used with this type. Apply it only to classes decorated by '@ObservedV2' or initialized using the return value of 'makeV1Observed'.",
+                        property.span,
+                        &[],
+                    );
+                }
                 if Self::forbids_function_type(decorator)
                     && property.type_annotation.as_ref().is_some_and(|annotation| {
                         Self::is_function_type(&annotation.type_annotation)
@@ -1606,6 +1621,42 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             .collect()
     }
 
+    fn observable_roots(&self) -> FxHashSet<String> {
+        let mut roots = FxHashSet::default();
+        for element in &self.statement.body.body {
+            match element {
+                StructElement::PropertyDefinition(property)
+                    if property.decorators.iter().any(|decorator| {
+                        matches!(
+                            ArkuiDecorator::new(decorator).name(),
+                            ArkuiDecoratorName::LOCAL
+                                | ArkuiDecoratorName::PARAM
+                                | ArkuiDecoratorName::PROVIDER
+                                | ArkuiDecoratorName::CONSUMER
+                                | ArkuiDecoratorName::ONCE
+                        )
+                    }) =>
+                {
+                    if let Some(name) = Self::property_name(&property.key) {
+                        roots.insert(name.to_string());
+                    }
+                }
+                StructElement::MethodDefinition(method)
+                    if method.kind == MethodDefinitionKind::Get
+                        && method.decorators.iter().any(|decorator| {
+                            ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::COMPUTED
+                        }) =>
+                {
+                    if let Some(name) = Self::property_name(&method.key) {
+                        roots.insert(name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        roots
+    }
+
     fn has_struct_decorator(&self, name: &str) -> bool {
         self.statement
             .decorators
@@ -1851,6 +1902,37 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 | Expression::ObjectExpression(_)
                 | Expression::ArrayExpression(_)
         )
+    }
+
+    fn is_object_link_forbidden_type(ty: &TSType<'_>) -> bool {
+        match ty {
+            TSType::TSUnionType(union) => union
+                .types
+                .iter()
+                .any(|member| Self::is_object_link_forbidden_type(member)),
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::is_object_link_forbidden_type(&parenthesized.type_annotation)
+            }
+            TSType::TSFunctionType(_) => true,
+            TSType::TSTypeReference(reference) => matches!(
+                &reference.type_name,
+                TSTypeName::IdentifierReference(identifier)
+                    if identifier.name == "Function"
+            ),
+            TSType::TSAnyKeyword(_)
+            | TSType::TSBigIntKeyword(_)
+            | TSType::TSBooleanKeyword(_)
+            | TSType::TSIntrinsicKeyword(_)
+            | TSType::TSNeverKeyword(_)
+            | TSType::TSNullKeyword(_)
+            | TSType::TSNumberKeyword(_)
+            | TSType::TSStringKeyword(_)
+            | TSType::TSSymbolKeyword(_)
+            | TSType::TSUndefinedKeyword(_)
+            | TSType::TSUnknownKeyword(_)
+            | TSType::TSVoidKeyword(_) => true,
+            _ => false,
+        }
     }
 
     fn error(&mut self, code: &str, message: impl Into<String>, span: Span, solutions: &[&str]) {

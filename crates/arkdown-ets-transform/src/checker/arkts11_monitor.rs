@@ -3,20 +3,22 @@ use oxc_span::GetSpan;
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::decorator::ArkuiDecorator;
+use rustc_hash::FxHashSet;
 
 /// Checks the syntax-only monitor contracts from
 /// `validate_ui_syntax.ts::checkMonitorDecorators`.
 ///
-/// Property-chain existence remains project type-analysis behavior. This pass
-/// owns the complete argument-shape contract, which depends only on the OXC
-/// AST and therefore runs identically in transform and standalone checking.
-pub(super) struct Arkts11MonitorValidator<'decorator, 'errors> {
+/// Root state-property existence and the complete argument-shape contract run
+/// directly on the OXC AST. Nested property-chain existence remains project
+/// type-analysis behavior.
+pub(super) struct Arkts11MonitorValidator<'decorator, 'context, 'errors> {
     decorator: &'decorator Decorator<'decorator>,
     file: &'errors str,
     errors: &'errors mut Vec<EtsTransformError>,
+    observable_roots: Option<&'context FxHashSet<String>>,
 }
 
-impl<'decorator, 'errors> Arkts11MonitorValidator<'decorator, 'errors> {
+impl<'decorator, 'context, 'errors> Arkts11MonitorValidator<'decorator, 'context, 'errors> {
     pub(super) fn new(
         decorator: &'decorator Decorator<'decorator>,
         file: &'errors str,
@@ -26,7 +28,13 @@ impl<'decorator, 'errors> Arkts11MonitorValidator<'decorator, 'errors> {
             decorator,
             file,
             errors,
+            observable_roots: None,
         }
+    }
+
+    pub(super) fn with_observable_roots(mut self, roots: &'context FxHashSet<String>) -> Self {
+        self.observable_roots = Some(roots);
+        self
     }
 
     pub(super) fn check(mut self) {
@@ -59,6 +67,7 @@ impl<'decorator, 'errors> Arkts11MonitorValidator<'decorator, 'errors> {
                 }
                 continue;
             };
+            self.check_observable_root(name, literal.value.as_str(), literal.span);
             if (!is_monitor || (wildcard.is_enabled() && index > 0))
                 && !MonitorWildcardPattern::new(literal.value.as_str()).is_valid()
             {
@@ -70,6 +79,28 @@ impl<'decorator, 'errors> Arkts11MonitorValidator<'decorator, 'errors> {
                     literal.span,
                 );
             }
+        }
+    }
+
+    fn check_observable_root(&mut self, name: &str, path: &str, span: oxc_span::Span) {
+        let Some(roots) = self.observable_roots else {
+            return;
+        };
+        let root = path.trim().split('.').next().unwrap_or_default();
+        if !root.is_empty() && roots.contains(root) {
+            return;
+        }
+        if name == "SyncMonitor" {
+            self.error(
+                "10905366",
+                "'@SyncMonitor' cannot observe non-existent variables or non-state variables, except in wildcard-based monitoring scenarios.",
+                span,
+            );
+        } else {
+            self.warning(
+                "The '@Monitor' decorator needs to monitor the state variables that exist."
+                    .to_string(),
+            );
         }
     }
 

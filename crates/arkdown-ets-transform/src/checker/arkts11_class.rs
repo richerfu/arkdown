@@ -48,6 +48,7 @@ impl<'class, 'context, 'errors> Arkts11ClassValidator<'class, 'context, 'errors>
     }
 
     pub(super) fn check(mut self) {
+        let observable_roots = self.observable_roots();
         let observed_v2 = self.class.decorators.iter().any(|decorator| {
             ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::OBSERVED_V2
         });
@@ -186,7 +187,9 @@ impl<'class, 'context, 'errors> Arkts11ClassValidator<'class, 'context, 'errors>
                                 ArkuiDecoratorName::MONITOR | ArkuiDecoratorName::SYNC_MONITOR
                             )
                         {
-                            Arkts11MonitorValidator::new(decorator, self.file, self.errors).check();
+                            Arkts11MonitorValidator::new(decorator, self.file, self.errors)
+                                .with_observable_roots(&observable_roots)
+                                .check();
                         }
                         let (code, message) = if matches!(
                             name,
@@ -365,6 +368,35 @@ impl<'class, 'context, 'errors> Arkts11ClassValidator<'class, 'context, 'errors>
     fn is_sdk_type_decorator(&self, name: &str) -> bool {
         self.sdk_type_bindings
             .is_some_and(|bindings| bindings.contains(name))
+    }
+
+    fn observable_roots(&self) -> FxHashSet<String> {
+        let mut roots = FxHashSet::default();
+        for element in &self.class.body.body {
+            match element {
+                ClassElement::PropertyDefinition(property)
+                    if property.decorators.iter().any(|decorator| {
+                        ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::TRACE
+                    }) =>
+                {
+                    if let Some(name) = property.key.static_name() {
+                        roots.insert(name.to_string());
+                    }
+                }
+                ClassElement::MethodDefinition(method)
+                    if method.kind == MethodDefinitionKind::Get
+                        && method.decorators.iter().any(|decorator| {
+                            ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::COMPUTED
+                        }) =>
+                {
+                    if let Some(name) = method.key.static_name() {
+                        roots.insert(name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        roots
     }
 
     fn is_struct_decorator(name: &str) -> bool {
