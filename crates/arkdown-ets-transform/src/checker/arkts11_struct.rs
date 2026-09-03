@@ -35,6 +35,7 @@ pub(super) struct Arkts11StructValidator<'statement, 'errors> {
     custom_component_info: Option<&'statement CustomComponentUpdateProps>,
     parent_v1_property_kinds: FxHashMap<String, CustomComponentPropertyKind>,
     parent_env_props: FxHashSet<String>,
+    parent_computed_props: FxHashSet<String>,
 }
 
 impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
@@ -43,7 +44,8 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         file: &'errors str,
         errors: &'errors mut Vec<EtsTransformError>,
     ) -> Self {
-        let (parent_v1_property_kinds, parent_env_props) = Self::parent_property_facts(statement);
+        let (parent_v1_property_kinds, parent_env_props, parent_computed_props) =
+            Self::parent_member_facts(statement);
         Self {
             statement,
             file,
@@ -55,38 +57,53 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             custom_component_info: None,
             parent_v1_property_kinds,
             parent_env_props,
+            parent_computed_props,
         }
     }
 
-    fn parent_property_facts(
+    fn parent_member_facts(
         statement: &StructStatement<'_>,
     ) -> (
         FxHashMap<String, CustomComponentPropertyKind>,
         FxHashSet<String>,
+        FxHashSet<String>,
     ) {
         let mut property_kinds = FxHashMap::default();
         let mut env_props = FxHashSet::default();
+        let mut computed_props = FxHashSet::default();
         for element in &statement.body.body {
-            let StructElement::PropertyDefinition(property) = element else {
-                continue;
-            };
-            let Some(name) = property.key.static_name() else {
-                continue;
-            };
-            let mut kind = None;
-            for decorator in &property.decorators {
-                let decorator = ArkuiDecorator::new(decorator).name();
-                if decorator == ArkuiDecoratorName::ENV {
-                    env_props.insert(name.to_string());
+            match element {
+                StructElement::PropertyDefinition(property) => {
+                    let Some(name) = property.key.static_name() else {
+                        continue;
+                    };
+                    let mut kind = None;
+                    for decorator in &property.decorators {
+                        let decorator = ArkuiDecorator::new(decorator).name();
+                        if decorator == ArkuiDecoratorName::ENV {
+                            env_props.insert(name.to_string());
+                        }
+                        kind = kind.or_else(|| Self::component_property_kind(decorator));
+                    }
+                    property_kinds.insert(
+                        name.into_owned(),
+                        kind.unwrap_or(CustomComponentPropertyKind::Regular),
+                    );
                 }
-                kind = kind.or_else(|| Self::component_property_kind(decorator));
+                StructElement::MethodDefinition(method)
+                    if method.kind == MethodDefinitionKind::Get
+                        && method.decorators.iter().any(|decorator| {
+                            ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::COMPUTED
+                        }) =>
+                {
+                    if let Some(name) = method.key.static_name() {
+                        computed_props.insert(name.into_owned());
+                    }
+                }
+                _ => {}
             }
-            property_kinds.insert(
-                name.into_owned(),
-                kind.unwrap_or(CustomComponentPropertyKind::Regular),
-            );
         }
-        (property_kinds, env_props)
+        (property_kinds, env_props, computed_props)
     }
 
     fn component_property_kind(decorator: &str) -> Option<CustomComponentPropertyKind> {
@@ -456,12 +473,32 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 continue;
             };
             let method_name = Self::property_name(&method.key);
+            if method.kind == MethodDefinitionKind::Set
+                && method_name.is_some_and(|name| self.parent_computed_props.contains(name))
+            {
+                self.error(
+                    "10905130",
+                    "A property decorated by '@Computed' cannot define a set method.",
+                    method.span,
+                    &[],
+                );
+            }
             let decorators = method
                 .decorators
                 .iter()
                 .map(|decorator| ArkuiDecorator::new(decorator).name())
                 .filter(|name| Self::is_method_decorator(name))
                 .collect::<Vec<_>>();
+            if decorators.contains(&ArkuiDecoratorName::LOCAL_BUILDER)
+                && method.decorators.len() > 1
+            {
+                self.error(
+                    "10905125",
+                    "The member property or method can not be decorated by multiple decorators.",
+                    method.span,
+                    &[],
+                );
+            }
             self.check_lifecycle_method(method);
             for decorator in &method.decorators {
                 let name = ArkuiDecorator::new(decorator).name();
@@ -508,7 +545,11 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                     );
                 }
             }
-            let distinct = decorators.iter().copied().collect::<FxHashSet<_>>();
+            let distinct = decorators
+                .iter()
+                .copied()
+                .filter(|decorator| *decorator != ArkuiDecoratorName::LOCAL_BUILDER)
+                .collect::<FxHashSet<_>>();
             if distinct.len() > 1 {
                 self.error(
                     "10905121",
@@ -780,6 +821,16 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                     self.check_ui_component_children(component, parent);
                 } else if let Expression::CallExpression(call) = &expression.expression {
                     self.check_custom_component_call(call);
+                } else if let Expression::StaticMemberExpression(member) = &expression.expression {
+                    self.error(
+                        "10905206",
+                        format!(
+                            "'{}' does not meet UI component syntax.",
+                            Self::static_member_source_name(member)
+                        ),
+                        expression.span,
+                        &[],
+                    );
                 } else if !matches!(
                     expression.expression,
                     Expression::ChainExpression(_) | Expression::TSNonNullExpression(_)
@@ -812,6 +863,16 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         }
     }
 
+    fn static_member_source_name(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> String {
+        let object = match &member.object {
+            Expression::ThisExpression(_) => "this".to_string(),
+            Expression::Identifier(identifier) => identifier.name.to_string(),
+            Expression::StaticMemberExpression(parent) => Self::static_member_source_name(parent),
+            _ => "<expression>".to_string(),
+        };
+        format!("{object}.{}", member.property.name)
+    }
+
     fn check_ui_component_children(
         &mut self,
         component: &oxc_ast::ast::ArkUIComponentExpression<'_>,
@@ -826,6 +887,10 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 &component.arguments,
                 component.span,
             );
+            self.check_custom_component_reuse_usage(component_name, component);
+        }
+        if component_name == Some("Repeat") {
+            self.check_repeat_template_reusable_v2(component);
         }
         if Self::is_iteration_component(component) {
             for argument in &component.arguments {
@@ -847,11 +912,243 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         }
     }
 
+    fn check_repeat_template_reusable_v2(&mut self, component: &ArkUIComponentExpression<'_>) {
+        for chain in &component.chain_expressions {
+            let Expression::StaticMemberExpression(member) = &chain.callee else {
+                continue;
+            };
+            if member.property.name != "template" {
+                continue;
+            }
+            for argument in &chain.arguments {
+                if let Some(expression) = argument.as_expression() {
+                    self.check_repeat_template_expression(expression);
+                }
+            }
+        }
+    }
+
+    fn check_repeat_template_statement(&mut self, statement: &Statement<'_>) {
+        match statement {
+            Statement::ExpressionStatement(statement) => {
+                self.check_repeat_template_expression(&statement.expression);
+            }
+            Statement::BlockStatement(block) => {
+                for statement in &block.body {
+                    self.check_repeat_template_statement(statement);
+                }
+            }
+            Statement::IfStatement(statement) => {
+                self.check_repeat_template_statement(&statement.consequent);
+                if let Some(alternate) = statement.alternate.as_ref() {
+                    self.check_repeat_template_statement(alternate);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_repeat_template_expression(&mut self, expression: &Expression<'_>) {
+        match expression {
+            Expression::ArrowFunctionExpression(arrow) => match &arrow.body {
+                ArrowFunctionBody::FunctionBody(body) => {
+                    for statement in &body.statements {
+                        self.check_repeat_template_statement(statement);
+                    }
+                }
+                body => {
+                    if let Some(expression) = body.as_expression() {
+                        self.check_repeat_template_expression(expression);
+                    }
+                }
+            },
+            Expression::ArkUIComponentExpression(component) => {
+                self.check_repeat_template_component(component);
+            }
+            Expression::CallExpression(call) => {
+                if let Some((name, _, span)) = Self::custom_component_base_call(call) {
+                    self.report_reusable_v2_in_repeat_template(name, span);
+                }
+                for argument in &call.arguments {
+                    if let Some(expression) = argument.as_expression() {
+                        self.check_repeat_template_expression(expression);
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(parenthesized) => {
+                self.check_repeat_template_expression(&parenthesized.expression);
+            }
+            _ => {}
+        }
+    }
+
+    fn check_repeat_template_component(&mut self, component: &ArkUIComponentExpression<'_>) {
+        if let Some(name) = Self::component_expression_name(component) {
+            self.report_reusable_v2_in_repeat_template(name, component.span);
+        }
+        for argument in &component.arguments {
+            if let Some(expression) = argument.as_expression() {
+                self.check_repeat_template_expression(expression);
+            }
+        }
+        for chain in &component.chain_expressions {
+            for argument in &chain.arguments {
+                if let Some(expression) = argument.as_expression() {
+                    self.check_repeat_template_expression(expression);
+                }
+            }
+        }
+        for child in &component.children {
+            match child {
+                ArkUIChild::Component(component) => self.check_repeat_template_component(component),
+                ArkUIChild::Statement(statement) => {
+                    self.check_repeat_template_statement(statement);
+                }
+                ArkUIChild::Expression(expression) => {
+                    self.check_repeat_template_expression(expression);
+                }
+            }
+        }
+    }
+
+    fn report_reusable_v2_in_repeat_template(&mut self, component_name: &str, span: Span) {
+        if !self
+            .custom_component_info
+            .and_then(|components| components.get(component_name))
+            .is_some_and(|info| info.reusable_v2)
+        {
+            return;
+        }
+        self.error(
+            "10905247",
+            "The template attribute of the Repeat component cannot contain any custom component decorated with '@ReusableV2'.",
+            span,
+            &[],
+        );
+    }
+
+    fn check_custom_component_reuse_usage(
+        &mut self,
+        component_name: &str,
+        component: &ArkUIComponentExpression<'_>,
+    ) {
+        let attributes = component
+            .chain_expressions
+            .iter()
+            .filter_map(|chain| {
+                let Expression::StaticMemberExpression(member) = &chain.callee else {
+                    return None;
+                };
+                Some((member.property.name.as_str(), chain.span))
+            })
+            .collect::<Vec<_>>();
+        self.check_custom_component_reuse(component_name, component.span, attributes.as_slice());
+    }
+
+    fn check_custom_component_reuse(
+        &mut self,
+        component_name: &str,
+        span: Span,
+        attributes: &[(&str, Span)],
+    ) {
+        let Some(info) = self
+            .custom_component_info
+            .and_then(|components| components.get(component_name))
+            .cloned()
+        else {
+            return;
+        };
+        let parent_v2 = self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2);
+        let parent_reusable = self.has_struct_decorator(ArkuiDecoratorName::REUSABLE);
+        let parent_reusable_v2 = self.has_struct_decorator(ArkuiDecoratorName::REUSABLE_V2);
+        if !parent_v2 && !parent_reusable && info.reusable_v2 {
+            self.error(
+                "10905244",
+                "A custom component decorated with '@Component' cannot contain child components decorated with '@ReusableV2'.",
+                span,
+                &[],
+            );
+        } else if !parent_v2 && parent_reusable && info.reusable_v2 {
+            self.error(
+                "10905245",
+                "A custom component decorated with '@Reusable' cannot contain child components decorated with '@ReusableV2'.",
+                span,
+                &[],
+            );
+        } else if parent_reusable_v2 && info.reusable {
+            self.error(
+                "10905246",
+                "A custom component decorated with '@ReusableV2' cannot contain child components decorated with '@Reusable'.",
+                span,
+                &[],
+            );
+        } else if parent_v2 && !parent_reusable_v2 && info.reusable {
+            self.warning(
+                "When a custom component is decorated with '@ComponentV2' and contains a child decorated with '@Reusable', the child component will not create.",
+                span,
+            );
+        }
+
+        let reusable_v2 = info.generation == CustomComponentGeneration::V2 && info.reusable_v2;
+        for (attribute, span) in attributes {
+            match *attribute {
+                "reuse" if !reusable_v2 => self.error(
+                    "10905248",
+                    "The reuse attribute is only applicable to custom components decorated with both '@ComponentV2' and '@ReusableV2'.",
+                    *span,
+                    &[],
+                ),
+                "reuseId" if reusable_v2 => self.error(
+                    "10905249",
+                    "The reuseId attribute is not applicable to custom components decorated with both '@ComponentV2' and '@ReusableV2'.",
+                    *span,
+                    &[],
+                ),
+                _ => {}
+            }
+        }
+    }
+
     fn check_custom_component_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
         let Some((name, arguments, span)) = Self::custom_component_base_call(call) else {
             return;
         };
+        if name == "Repeat" {
+            self.check_repeat_template_call(call);
+        }
         self.check_custom_component_arguments(name, arguments, span);
+        let attributes = Self::custom_component_call_attributes(call);
+        self.check_custom_component_reuse(name, span, attributes.as_slice());
+    }
+
+    fn check_repeat_template_call(&mut self, mut call: &oxc_ast::ast::CallExpression<'_>) {
+        while let Expression::StaticMemberExpression(member) = &call.callee {
+            if member.property.name == "template" {
+                for argument in &call.arguments {
+                    if let Some(expression) = argument.as_expression() {
+                        self.check_repeat_template_expression(expression);
+                    }
+                }
+            }
+            let Expression::CallExpression(inner) = &member.object else {
+                break;
+            };
+            call = inner;
+        }
+    }
+
+    fn custom_component_call_attributes<'node>(
+        mut call: &'node oxc_ast::ast::CallExpression<'node>,
+    ) -> Vec<(&'node str, Span)> {
+        let mut attributes = Vec::new();
+        while let Expression::StaticMemberExpression(member) = &call.callee {
+            attributes.push((member.property.name.as_str(), call.span));
+            let Expression::CallExpression(inner) = &member.object else {
+                break;
+            };
+            call = inner;
+        }
+        attributes
     }
 
     fn custom_component_base_call<'node>(
@@ -887,6 +1184,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             return;
         };
         let mut supplied = FxHashSet::default();
+        let mut two_way_props = Vec::new();
         if let Some(Argument::ObjectExpression(object)) = arguments.first() {
             for property in &object.properties {
                 let ObjectPropertyKind::ObjectProperty(property) = property else {
@@ -897,12 +1195,38 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 };
                 let name = name.name.as_str();
                 supplied.insert(name.to_string());
+                if self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
+                    && Self::double_non_null_value(&property.value).is_some_and(|value| {
+                        matches!(
+                            value,
+                            Expression::Identifier(_) | Expression::StaticMemberExpression(_)
+                        )
+                    })
+                {
+                    two_way_props.push(name.to_string());
+                }
                 self.check_custom_component_property(
                     component_name,
                     name,
                     &property.value,
                     property.span,
                     &info,
+                );
+            }
+        }
+
+        for property_name in two_way_props {
+            let mut event_name = String::with_capacity(property_name.len() + 1);
+            event_name.push('$');
+            event_name.push_str(&property_name);
+            if supplied.contains(&event_name) {
+                self.error(
+                    "10905358",
+                    format!(
+                        "When the two-way binding syntax is used, do not assign a value to '@Event' variable '{event_name}' because the framework generates the default assignment."
+                    ),
+                    span,
+                    &[],
                 );
             }
         }
@@ -1257,6 +1581,21 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 &[],
             );
             return;
+        }
+        if self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
+            && matches!(
+                value,
+                Expression::StaticMemberExpression(member)
+                    if matches!(&member.object, Expression::ThisExpression(_))
+                        && self.parent_computed_props.contains(member.property.name.as_str())
+            )
+        {
+            self.error(
+                "10905129",
+                "A property decorated by '@Computed' cannot be used with two-bind syntax.",
+                value.span(),
+                &[],
+            );
         }
         let mut event_name = String::with_capacity(property_name.len() + 1);
         event_name.push('$');
@@ -1853,6 +2192,17 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 .map(|decorator| ArkuiDecorator::new(decorator).name())
                 .collect::<Vec<_>>();
 
+            if decorators.contains(&ArkuiDecoratorName::LOCAL_BUILDER)
+                && property.decorators.len() > 1
+            {
+                self.error(
+                    "10905125",
+                    "The member property or method can not be decorated by multiple decorators.",
+                    property.span,
+                    &[],
+                );
+            }
+
             if decorators.contains(&ArkuiDecoratorName::ENV)
                 && !self.has_struct_decorator(ArkuiDecoratorName::COMPONENT)
                 && !self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
@@ -1864,6 +2214,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                     &[],
                 );
             }
+            self.check_env_decorator_contract(property, &decorators);
 
             if !component_v2 {
                 self.check_custom_decorator_conflict(property, &decorators);
@@ -1979,12 +2330,18 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                         .as_ref()
                         .is_some_and(Self::is_non_builder_literal)
                 {
-                    self.error(
-                        "10905101",
-                        "'@BuilderParam' property can only initialized by '@Builder' function or '@LocalBuilder' method in struct.",
-                        property.span,
-                        &[],
-                    );
+                    let (code, message) = if component_v2 {
+                        (
+                            "10905107",
+                            "'@BuilderParam' property can only initialized by '@Builder' function.",
+                        )
+                    } else {
+                        (
+                            "10905101",
+                            "'@BuilderParam' property can only initialized by '@Builder' function or '@LocalBuilder' method in struct.",
+                        )
+                    };
+                    self.error(code, message, property.span, &[]);
                 }
                 if *decorator == ArkuiDecoratorName::OBJECT_LINK
                     && property.type_annotation.as_ref().is_some_and(|annotation| {
@@ -2066,6 +2423,191 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             if decorators.contains(&ArkuiDecoratorName::WATCH) {
                 self.check_watch(property, name, &decorators, &method_names);
             }
+        }
+    }
+
+    fn check_env_decorator_contract(
+        &mut self,
+        property: &oxc_ast::ast::PropertyDefinition<'_>,
+        decorators: &[&str],
+    ) {
+        let Some(annotation) = property.type_annotation.as_ref() else {
+            return;
+        };
+        if decorators.contains(&ArkuiDecoratorName::ENV) {
+            let Some(type_name) = Self::single_type_name(&annotation.type_annotation) else {
+                self.invalid_env_type(property.span);
+                return;
+            };
+            let Some(expected_arguments) = Self::env_expected_arguments(type_name.as_str()) else {
+                self.invalid_env_type(property.span);
+                return;
+            };
+            let Some(decorator) = property
+                .decorators
+                .iter()
+                .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENV)
+            else {
+                return;
+            };
+            let Some(argument) = ArkuiDecorator::new(decorator).arg_expression() else {
+                return;
+            };
+            if Self::non_system_env_argument(argument) {
+                return;
+            }
+            let actual = Self::static_member_argument_name(argument);
+            if !actual.is_some_and(|actual| expected_arguments.contains(&actual.as_str())) {
+                self.error(
+                    "10905368",
+                    format!(
+                        "Invalid parameter. State variables decorated with '@Env' of type '{type_name}' can only accept {}.",
+                        expected_arguments.join(", ")
+                    ),
+                    argument.span(),
+                    &[],
+                );
+            }
+        }
+        if decorators.contains(&ArkuiDecoratorName::CUSTOM_ENV) {
+            self.check_custom_env_key(property, &annotation.type_annotation);
+        }
+    }
+
+    fn check_custom_env_key(
+        &mut self,
+        property: &oxc_ast::ast::PropertyDefinition<'_>,
+        property_type: &TSType<'_>,
+    ) {
+        let Some(decorator) = property.decorators.iter().find(|decorator| {
+            ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::CUSTOM_ENV
+        }) else {
+            return;
+        };
+        let Some(argument) = ArkuiDecorator::new(decorator).arg_expression() else {
+            return;
+        };
+        if matches!(argument, Expression::Identifier(_)) {
+            return;
+        }
+        let Expression::CallExpression(call) = argument else {
+            self.invalid_custom_env_key(argument.span());
+            return;
+        };
+        let Expression::StaticMemberExpression(member) = &call.callee else {
+            self.invalid_custom_env_key(argument.span());
+            return;
+        };
+        if !matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "CustomEnvKey")
+            || member.property.name != "create"
+        {
+            self.invalid_custom_env_key(argument.span());
+            return;
+        }
+        let Some(type_arguments) = call.type_arguments.as_ref() else {
+            self.invalid_custom_env_key(argument.span());
+            return;
+        };
+        if type_arguments.params.is_empty() {
+            self.invalid_custom_env_key(argument.span());
+            return;
+        }
+        let property_types = Self::flatten_type_names(property_type);
+        let key_types = Self::flatten_type_names(&type_arguments.params[0]);
+        if property_types.len() != key_types.len()
+            || property_types.iter().any(|name| !key_types.contains(name))
+        {
+            self.error(
+                "10905381",
+                "The type of the property decorated with '@CustomEnv' must be consistent with the generic type of the key.",
+                argument.span(),
+                &[],
+            );
+        }
+    }
+
+    fn invalid_env_type(&mut self, span: Span) {
+        self.error(
+            "10905251",
+            "The '@Env' decorator can only decorate 'WindowSizeLayoutBreakpointInfo', 'SizeInVP', 'Size', 'UIEnvWindowAvoidAreaInfoPX', 'UIEnvWindowAvoidAreaInfoVP' classes or their child classes.",
+            span,
+            &[],
+        );
+    }
+
+    fn invalid_custom_env_key(&mut self, span: Span) {
+        self.error(
+            "10905382",
+            "Invalid key for '@CustomEnv', '@CustomEnv' key must be global const and created from CustomEnvKey.create<T>().",
+            span,
+            &[],
+        );
+    }
+
+    fn env_expected_arguments(type_name: &str) -> Option<&'static [&'static str]> {
+        match type_name {
+            "WindowSizeLayoutBreakpointInfo" => Some(&["SystemProperties.BREAK_POINT"]),
+            "UIEnvWindowAvoidAreaInfoVP" => Some(&["SystemProperties.WINDOW_AVOID_AREA"]),
+            "UIEnvWindowAvoidAreaInfoPX" => Some(&["SystemProperties.WINDOW_AVOID_AREA_PX"]),
+            "SizeInVP" => Some(&["SystemProperties.WINDOW_SIZE"]),
+            "Size" => Some(&["SystemProperties.WINDOW_SIZE_PX"]),
+            "number" => Some(&[
+                "SystemProperties.WINDOW_DISPLAY_ID",
+                "SystemProperties.WINDOW_SYSTEM_DENSITY",
+            ]),
+            "boolean" => Some(&[
+                "SystemProperties.WINDOW_IS_FOCUSED",
+                "SystemProperties.WINDOW_IS_HIGHLIGHTED",
+            ]),
+            _ => None,
+        }
+    }
+
+    fn non_system_env_argument(argument: &Expression<'_>) -> bool {
+        matches!(
+            argument,
+            Expression::StaticMemberExpression(member)
+                if matches!(
+                    &member.object,
+                    Expression::Identifier(identifier)
+                        if matches!(identifier.name.as_str(), "WritableEnvKey" | "ReadonlyEnvKey")
+                )
+        )
+    }
+
+    fn static_member_argument_name(argument: &Expression<'_>) -> Option<String> {
+        let Expression::StaticMemberExpression(member) = argument else {
+            return None;
+        };
+        let Expression::Identifier(object) = &member.object else {
+            return None;
+        };
+        Some(format!("{}.{}", object.name, member.property.name))
+    }
+
+    fn single_type_name(ty: &TSType<'_>) -> Option<String> {
+        let names = Self::flatten_type_names(ty);
+        (names.len() == 1).then(|| names[0].clone())
+    }
+
+    fn flatten_type_names(ty: &TSType<'_>) -> Vec<String> {
+        match ty {
+            TSType::TSUnionType(union) => union
+                .types
+                .iter()
+                .filter_map(Self::single_type_name)
+                .collect(),
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::flatten_type_names(&parenthesized.type_annotation)
+            }
+            TSType::TSTypeReference(reference) => match &reference.type_name {
+                TSTypeName::IdentifierReference(identifier) => vec![identifier.name.to_string()],
+                _ => Vec::new(),
+            },
+            TSType::TSNumberKeyword(_) => vec!["number".to_string()],
+            TSType::TSBooleanKeyword(_) => vec!["boolean".to_string()],
+            TSType::TSStringKeyword(_) => vec!["string".to_string()],
+            _ => Vec::new(),
         }
     }
 
@@ -2717,6 +3259,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 | Expression::NullLiteral(_)
                 | Expression::ObjectExpression(_)
                 | Expression::ArrayExpression(_)
+                | Expression::ArrowFunctionExpression(_)
         )
     }
 

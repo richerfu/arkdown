@@ -16,6 +16,7 @@ use oxc_syntax::operator::{AssignmentOperator, UnaryOperator};
 
 use arkdown_path::HvigorModulePath;
 
+use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::source_map::offset_to_line_col;
 use crate::transform::component_analysis::ExtendAttributeIndex;
 use crate::transform::component_meta::{
@@ -58,12 +59,33 @@ impl BuildLoweringError {
             Self::UnsupportedChild => "Unsupported ArkUI child syntax.",
             Self::UnsupportedCallee => "Unsupported ArkUI component callee.",
             Self::UnsupportedChain => "Unsupported ArkUI attribute chain.",
-            Self::InvalidStateStyles => {
-                "The stateStyles attribute requires an object whose values are @Styles references or inline style objects."
-            }
+            Self::InvalidStateStyles => "'.stateStyles' doesn't conform standard.",
             Self::InvalidTrailingLambda { .. } => {
                 "A custom component trailing lambda requires exactly one @BuilderParam property."
             }
+        }
+    }
+
+    pub(crate) fn into_transform_error(self, file: &str, context: &str) -> EtsTransformError {
+        let code = match &self {
+            Self::InvalidStateStyles => Some("10905203"),
+            Self::InvalidTrailingLambda { .. } => Some("10905102"),
+            _ => None,
+        };
+        let message = self.to_string();
+        if let Some(code) = code {
+            return EtsTransformError::CodedDiagnostic {
+                file: file.to_string(),
+                code: code.to_string(),
+                message,
+                severity: DiagnosticSeverity::Error,
+                span: None,
+                solutions: Vec::new(),
+            };
+        }
+        EtsTransformError::Fatal {
+            file: file.to_string(),
+            message: format!("{context}: {message}"),
         }
     }
 }

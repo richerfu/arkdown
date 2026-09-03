@@ -66,11 +66,25 @@ impl<'function, 'context, 'errors> Arkts11FunctionValidator<'function, 'context,
                 solutions: Vec::new(),
             });
         }
+        if distinct.contains(ArkuiDecoratorName::EXTEND)
+            && distinct.contains(ArkuiDecoratorName::ANIMATABLE_EXTEND)
+        {
+            self.errors.push(EtsTransformError::CodedDiagnostic {
+                file: self.file.to_string(),
+                code: "10905111".to_string(),
+                message:
+                    "The function can not be decorated by '@Extend' and '@AnimatableExtend' at the same time."
+                        .to_string(),
+                severity: DiagnosticSeverity::Error,
+                span: Some(self.function.span),
+                solutions: Vec::new(),
+            });
+        }
 
-        for decorator in distinct {
+        for decorator in &distinct {
             let count = decorators
                 .iter()
-                .filter(|candidate| **candidate == decorator)
+                .filter(|candidate| **candidate == *decorator)
                 .count();
             if count > 1 {
                 self.errors.push(EtsTransformError::Diagnostic {

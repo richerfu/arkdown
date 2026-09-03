@@ -121,6 +121,9 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
 
         for statement in &self.program.body {
             match statement {
+                Statement::ImportDeclaration(import) => {
+                    self.check_import_names(import, &mut report.diagnostics);
+                }
                 Statement::StructStatement(structure) => {
                     self.check_struct(
                         structure,
@@ -198,6 +201,38 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             page_decorators.validate(context, self.file, &mut report.diagnostics);
         }
         report
+    }
+
+    fn check_import_names(
+        &self,
+        import: &oxc_ast::ast::ImportDeclaration<'_>,
+        diagnostics: &mut Vec<EtsTransformError>,
+    ) {
+        let Some(metadata) = self.component_metadata else {
+            return;
+        };
+        let Some(specifiers) = import.specifiers.as_ref() else {
+            return;
+        };
+        for specifier in specifiers {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                continue;
+            };
+            let name = specifier.local.name.as_str();
+            if !metadata.is_builtin_component_name(name) {
+                continue;
+            }
+            diagnostics.push(EtsTransformError::CodedDiagnostic {
+                file: self.file.to_string(),
+                code: "10905235".to_string(),
+                message: format!(
+                    "The module name '{name}' can not be the same as the inner component name."
+                ),
+                severity: DiagnosticSeverity::Error,
+                span: Some(specifier.local.span),
+                solutions: Vec::new(),
+            });
+        }
     }
 
     fn sdk_type_bindings(&self) -> rustc_hash::FxHashSet<String> {

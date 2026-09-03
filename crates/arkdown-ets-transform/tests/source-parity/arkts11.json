@@ -185,6 +185,13 @@
       "expect": { "errorCode": "10905101" }
     },
     {
+      "id": "component-v2-builder-param-rejects-arrow-initializer",
+      "owner": "compiler/src/process_struct_componentV2.ts::processBuilderParamProperty",
+      "file": "BuilderParamArrowV2.ets",
+      "source": "@ComponentV2 struct BuilderParamArrowV2 { @BuilderParam content: () => void = () => {}; build() {} }",
+      "expect": { "errorCode": "10905107" }
+    },
+    {
       "id": "custom-and-inner-property-decorator",
       "owner": "compiler/src/process_component_member.ts::validateCustomDecorator",
       "file": "MixedPropertyDecorator.ets",
@@ -742,6 +749,139 @@
       "file": "DeepLinkChildV1.ets",
       "source": "class Model { value: number = 1 } @Component struct Child { @Link value: number; build() {} } @Component struct Parent { @State model: Model = new Model(); build() { Child({ value: this.model.value }) } }",
       "expect": { "errorCode": "10905364" }
+    },
+    {
+      "id": "component-v2-two-way-rejects-computed-property",
+      "owner": "compiler/src/log_message_collection.ts::checkTwoWayComputed",
+      "file": "ComputedTwoWayV2.ets",
+      "source": "@ComponentV2 struct Child { @Param value: number = 0; @Event $value: (value: number) => void = () => {}; build() {} } @ComponentV2 struct Parent { @Computed get value(): number { return 1 } build() { Child({ value: this.value!! }) } }",
+      "expect": { "errorCode": "10905129" }
+    },
+    {
+      "id": "component-v2-computed-property-rejects-setter",
+      "owner": "compiler/src/log_message_collection.ts::checkComputedGetter",
+      "file": "ComputedSetterV2.ets",
+      "source": "@ComponentV2 struct Parent { @Computed get value(): number { return 1 } set value(next: number) {} build() {} }",
+      "expect": { "errorCode": "10905130" }
+    },
+    {
+      "id": "component-v2-two-way-rejects-explicit-event-assignment",
+      "owner": "compiler/src/log_message_collection.ts::checkIfNeedDollarEvent",
+      "file": "ExplicitEventTwoWayV2.ets",
+      "source": "@ComponentV2 struct Child { @Param value: number = 0; @Event $value: (value: number) => void = () => {}; build() {} } @ComponentV2 struct Parent { @Local value: number = 1; build() { Child({ value: this.value!!, $value: () => {} }) } }",
+      "expect": { "errorCode": "10905358" }
+    },
+    {
+      "id": "component-v1-rejects-reusable-v2-child",
+      "owner": "compiler/src/log_message_collection.ts::checkNestedComponents",
+      "file": "ReusableV2ChildOfV1.ets",
+      "source": "@ReusableV2 @ComponentV2 struct Child { build() {} } @Component struct Parent { build() { Child() } }",
+      "expect": { "errorCode": "10905244" }
+    },
+    {
+      "id": "reusable-v1-rejects-reusable-v2-child",
+      "owner": "compiler/src/log_message_collection.ts::checkNestedComponents",
+      "file": "ReusableV2ChildOfReusableV1.ets",
+      "source": "@ReusableV2 @ComponentV2 struct Child { build() {} } @Reusable @Component struct Parent { build() { Child() } }",
+      "expect": { "errorCode": "10905245" }
+    },
+    {
+      "id": "reusable-v2-rejects-reusable-v1-child",
+      "owner": "compiler/src/log_message_collection.ts::checkNestedComponents",
+      "file": "ReusableV1ChildOfReusableV2.ets",
+      "source": "@Reusable @Component struct Child { build() {} } @ReusableV2 @ComponentV2 struct Parent { build() { Child() } }",
+      "expect": { "errorCode": "10905246" }
+    },
+    {
+      "id": "reuse-attribute-requires-reusable-v2-component",
+      "owner": "compiler/src/log_message_collection.ts::checkUsageOfReuseAttribute",
+      "file": "InvalidReuseAttribute.ets",
+      "source": "@Component struct Child { build() {} } @Component struct Parent { build() { Child().reuse({}) } }",
+      "expect": { "errorCode": "10905248" }
+    },
+    {
+      "id": "reuse-id-attribute-rejects-reusable-v2-component",
+      "owner": "compiler/src/log_message_collection.ts::checkUsageOfReuseIdAttribute",
+      "file": "InvalidReuseIdAttribute.ets",
+      "source": "@ReusableV2 @ComponentV2 struct Child { build() {} } @ComponentV2 struct Parent { build() { Child().reuseId('child') } }",
+      "expect": { "errorCode": "10905249" }
+    },
+    {
+      "id": "repeat-template-rejects-reusable-v2-component",
+      "owner": "compiler/src/log_message_collection.ts::checkIfReuseV2InRepeatTemplate",
+      "file": "ReusableV2InRepeatTemplate.ets",
+      "source": "@ReusableV2 @ComponentV2 struct Child { build() {} } @ComponentV2 struct Parent { @Local items: string[] = []; build() { Repeat<string>(this.items).each((item: RepeatItem<string>) => {}).template('item', (item: RepeatItem<string>) => { Child() }) } }",
+      "expect": { "errorCode": "10905247" }
+    },
+    {
+      "id": "local-builder-rejects-additional-decorator",
+      "owner": "compiler/src/log_message_collection.ts::checkLocalBuilderDecoratorCount",
+      "file": "LocalBuilderDecoratorCount.ets",
+      "source": "@Component struct Parent { @LocalBuilder @Builder content() {} build() { this.content() } }",
+      "expect": { "errorCode": "10905125" }
+    },
+    {
+      "id": "property-access-is-not-ui-component-syntax",
+      "owner": "compiler/src/process_component_build.ts::bindComponentAttr",
+      "file": "InvalidPropertyAccessUi.ets",
+      "source": "@Component struct Parent { value: number = 1; build() { this.value } }",
+      "expect": { "errorCode": "10905206" }
+    },
+    {
+      "id": "named-import-cannot-shadow-builtin-component",
+      "owner": "compiler/src/process_import.ts::validateModuleName",
+      "file": "BuiltinImportCollision.ets",
+      "source": "import { helper as Text } from './helper'; @Component struct Parent { build() {} }",
+      "expect": { "errorCode": "10905235" }
+    },
+    {
+      "id": "state-styles-rejects-nonstandard-value",
+      "owner": "compiler/src/process_component_build.ts::validateStateStyleSyntax",
+      "file": "InvalidStateStyles.ets",
+      "source": "@Component struct Parent { build() { Text('value').stateStyles(1) } }",
+      "expect": { "errorCode": "10905203" }
+    },
+    {
+      "id": "trailing-lambda-requires-one-builder-param",
+      "owner": "compiler/src/process_component_build.ts::processExpressionStatementChange",
+      "file": "InvalidTrailingLambda.ets",
+      "source": "@Component struct Child { build() {} } @Component struct Parent { build() { Child() { Text('value') } } }",
+      "expect": { "errorCode": "10905102" }
+    },
+    {
+      "id": "env-rejects-unsupported-property-type",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateEnvType",
+      "file": "InvalidEnvType.ets",
+      "source": "@Component struct Parent { @Env(SystemProperties.BREAK_POINT) value: string; build() {} }",
+      "expect": { "errorCode": "10905251" }
+    },
+    {
+      "id": "env-rejects-argument-for-different-property-type",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateEnvDecoratorExp",
+      "file": "InvalidEnvArgument.ets",
+      "source": "@Component struct Parent { @Env(SystemProperties.WINDOW_SIZE) value: WindowSizeLayoutBreakpointInfo; build() {} }",
+      "expect": { "errorCode": "10905368" }
+    },
+    {
+      "id": "custom-env-rejects-invalid-key-factory",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateInvalidCustomEnvCreation",
+      "file": "InvalidCustomEnvFactory.ets",
+      "source": "@ComponentV2 struct Parent { @CustomEnv(OtherKey.create<string>()) value: string; build() {} }",
+      "expect": { "errorCode": "10905382" }
+    },
+    {
+      "id": "custom-env-key-type-must-match-property",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateCustomEnvArgType",
+      "file": "InvalidCustomEnvType.ets",
+      "source": "@ComponentV2 struct Parent { @CustomEnv(CustomEnvKey.create<number>()) value: string; build() {} }",
+      "expect": { "errorCode": "10905381" }
+    },
+    {
+      "id": "custom-env-inline-key-matches-property-type",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkCustomEnvDecoratorExp",
+      "file": "ValidCustomEnvType.ets",
+      "source": "@ComponentV2 struct Parent { @CustomEnv(CustomEnvKey.create<string>()) value: string; build() {} }",
+      "expect": { "contains": ["class Parent extends ViewV2"] }
     },
     {
       "id": "default-dynamic-viewpu-lowering",
