@@ -270,6 +270,8 @@ impl<'a> CheckModuleRunner<'a> {
     let mut system_api = SystemApiCheckOptions::default()
       .with_compatible_sdk_version(self.config.product.compatible_sdk_version.clone())
       .with_compile_sdk_version(self.config.sdk_config.compile_api_version.to_string())
+      .with_runtime_os(self.config.product.runtime_os.clone())
+      .with_atomic_service(self.session.project.bundle_type == "atomicService")
       .with_strict_api_compatibility(matches!(
         self
           .config

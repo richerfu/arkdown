@@ -87,7 +87,8 @@ impl ArktsSourceChecker {
         self.system_api = self
             .system_api
             .clone()
-            .with_compatible_sdk_version(compatible_sdk_version);
+            .with_compatible_sdk_version(compatible_sdk_version)
+            .with_runtime_os(runtime_os);
         self
     }
 
@@ -175,7 +176,9 @@ impl ArktsSourceChecker {
                 source_id,
                 content,
                 self.api_available,
-                &self.system_api,
+                &self.system_api.clone().with_ohos_test_source(
+                    ArktsSourceCheckPath::new(std::path::Path::new(source_id)).is_ohos_test(),
+                ),
                 module_exports,
                 sources,
                 module_roots,
@@ -197,4 +200,20 @@ struct ArktsProjectSemantics {
     sources: TransformSourceSnapshot,
     module_roots: Vec<(String, std::path::PathBuf)>,
     module_exports: ModuleExportIndex,
+}
+
+struct ArktsSourceCheckPath<'a> {
+    path: &'a std::path::Path,
+}
+
+impl<'a> ArktsSourceCheckPath<'a> {
+    fn new(path: &'a std::path::Path) -> Self {
+        Self { path }
+    }
+
+    fn is_ohos_test(&self) -> bool {
+        self.path
+            .components()
+            .any(|component| component.as_os_str() == "ohosTest")
+    }
 }

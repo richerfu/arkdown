@@ -8,13 +8,13 @@
 
 ### 1.1 2026-09-03 ArkTS 1.1 第一批实施进度
 
-- 已建立可执行的 `arkts11.json` 源码契约清单，当前 80 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期；system API 已覆盖 `apiAvailable` 参数和 SDK 身份安全的 `@Available` 内容、OS、父作用域契约，UI checker 新增 Extend/LocalBuilder/Env、SDK `Type` 身份、BuilderParam、ObjectLink、Monitor 根状态、Button label、组件 parent/child grammar 和属性装饰器冲突规则。
+- 已建立可执行的 `arkts11.json` 源码契约清单，当前 80 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期；独立 checker 回归还覆盖 SDK JSDoc/export inventory、`@since`/`@Available` 使用点、permission/syscap、Stage/Form/Atomic/Test 标签和 warning suppressor。UI checker 新增 Extend/LocalBuilder/Env、SDK `Type` 身份、BuilderParam、ObjectLink、Monitor 根状态、Button label、组件 parent/child grammar 和属性装饰器冲突规则。
 - 已删除旧 OXC checker 中约千行没有新源码错误码/函数证据的猜测式规则，改为结构化、多诊断、稳定顺序的 `EtsCheckReport`；`arkdown check --checker oxc` 可在不启动 Node checker 的情况下运行该路径。
 - 已对齐首批高频规则：struct/class/function decorator target、build/Styles、成员初始化、Watch、Observed V1/V2、生命周期、全局复用池、SDK 组件/容器命名与根节点约束、`apiAvailable`。
 - 已补动态 ArkTS 的 `worker.Worker('*.ts') -> '*.js'` 和 `ESObject -> any` 全程序 OXC 变换，并把 Builder factory/global reuse pool 错误改为源码错误码。
 - 已把 `@Observed/@ObservedV2` 类事实并入并行构建的 `ModuleExportIndex`，named/default/namespace import 与 barrel re-export 的继承和 V1 property 类型检查不再退化为单文件名称判断；standalone check 也复用一次性 source snapshot。
 - 已从 SDK `components/*.json` 一次性加载 atomic/single/specific-child/style/systemApi grammar，补齐 10905219–10905223、10905228、10905348、10905363、10905365、10905367、10905372，并通过无 cache 的真实 ArkTS 1.1 OXC/Rolldown HAP 构建。
-- 默认 checker 仍保持 `sdk`，尚未提前切换。切换和删除 `ets-checker-bridge.cjs` 的剩余阻断项是完整 system API/permission/syscap、其余跨文件类型推导、warning suppressor，以及剩余 UI rule corpus；这些完成前不得宣称 ArkTS 1.1 已完全替换。
+- 默认 checker 仍保持 `sdk`，尚未提前切换。system API 已以 SDK declaration JSDoc、OXC `SymbolId` 和 import/export 闭包接入生产 build/check，并从 `SdkSnapshot` 消费一次读取的 device capability inventory；剩余阻断项是重载/返回值类型流、crossplatform 外部依赖收集、其余跨文件类型推导和剩余 UI rule corpus。这些完成前不得宣称 ArkTS 1.1 已完全替换。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
 
@@ -153,7 +153,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | Resolver/Rolldown 图 | 基本可用但热路径不合格 | 已有 OHM URL、kit、native/json/commonjs、duplicate/module meta；`ModuleMetaPlugin` 每模块向上找包，JSON5 hook 读盘，若干 collector 用 `Arc<Mutex>` | session 预载全部 metadata/source；plugin 只读 snapshot 并返回事实；确定性归并 |
 | ArkTS 1.1 UI transform | 主干可用，未完全覆盖 | 已覆盖 V1/V2、state、Builder/Styles/Extend、WrapBuilder/MutableBuilder、ForEach/Repeat、常见组件和 source map；仍缺 InsightIntent、worker 专用变换、declaration merger、部分 interop/边界 | 直接移植源码测试语料；按 OXC pass 补齐，不以名称或行数判断完成 |
 | ArkTS checker | 部分且默认错误 | OXC checker 仅覆盖一部分 decorator/build 规则；默认仍是 SDK Node checker | 默认改为完整 OXC checker；移除 `sdk` 模式和 `ets-checker-bridge.cjs`；`off` 仅保留为显式调试选项 |
-| System API/syscap/permission | 大部分缺失 | 当前 `api_transform` 主要做 Kit import rewrite 和少量 `apiAvailable`；没有源码中 version/permission/syscap/device/cross-platform 校验体系 | 建立 `SystemApiInventory` 和 OXC semantic pass，保持 warning suppression、错误位置及 API 版本行为 |
+| System API/syscap/permission | 主干完成，深层类型流待补 | 已建立 `SystemApiInventory`，解析 SDK JSDoc、namespace/class/interface/type 引用和 barrel export；生产链路已接入 version/permission/syscap/device 及 suppressor。尚缺基于重载签名和调用返回值的完整类型流，以及 crossplatform 外部依赖配置 | 扩展 OXC typed semantic API 后补重载/返回值链；接入 external SDK crossplatform config；以源码诊断顺序做 corpus 金标 |
 | Visual/SuperVisual | JS 托管 | Rust 只做发现、验证和 OXC 插入，生成片段由 Node 调 `codegen_ets.js` | 把 `.visual` parser/codegen 和 deterministic insertion 全部迁入 Rust/OXC；删除 Node generator |
 | ArkTS 1.2 | Rust 行为基本缺失 | OXC 使用 `SourceType::ets_static()` 并生成图投影，但生产编译仍由 Node static driver 加载 UI/syntax/memo 插件；interop 未完整接入，多个 config 字段为空 | 按源码固定阶段在 OXC 实现 interop parsed/checked、UI parsed/checked、UI syntax checked、memo checked+recheck；Rust 直接调用原生后端 |
 | ABC/AOT/中间文件 | 基本可用但散落 | dynamic es2abc、filesInfo、sourceMaps、AOT/quickfix 有较多实现，static 仍被 JS driver 包住，代码位于 N-API crate | 抽出 `arkdown-abc`；统一动态/静态/preview/reload command plan 和缓存键 |

@@ -1713,8 +1713,12 @@ impl ModuleExportFacts {
         sources: &crate::source::TransformSourceSnapshot,
         module_roots: &[(String, PathBuf)],
     ) -> Self {
-        let system_api =
-            SystemApiModuleFacts::from_program(path, program, sources.is_sdk_declaration(path));
+        let system_api = SystemApiModuleFacts::from_program(
+            path,
+            program,
+            sources.is_sdk_declaration(path),
+            module_roots.iter().any(|(_, root)| path.starts_with(root)),
+        );
         let mut facts = Self {
             local_enums: LocalEnumNamesCollector::new(program).collect(),
             local_simple_type_aliases: LocalSimpleTypeAliasCollector::new(program).collect(),

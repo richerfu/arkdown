@@ -25,7 +25,7 @@ use crate::{
 
 use super::{
     api_available::{ApiAvailableSdkBindings, ApiAvailableTransformOptions, ApiAvailableValidator},
-    available_annotation::AvailableAnnotationValidator,
+    available_annotation::{AvailableAnnotationValidator, AvailableSdkBindings},
     component_analysis::ImportTargetResolver,
     ModuleExportIndex,
 };
@@ -40,11 +40,15 @@ use super::{
 pub struct SystemApiCheckOptions {
     compatible_sdk_version: Box<str>,
     compile_sdk_version: Box<str>,
+    runtime_os: Box<str>,
     strict_api_compatibility: bool,
     request_permissions: FxHashSet<Box<str>>,
     syscap_intersection: FxHashSet<Box<str>>,
     syscap_union: FxHashSet<Box<str>>,
     check_syscap: bool,
+    form_source: bool,
+    atomic_service: bool,
+    ohos_test_source: bool,
 }
 
 impl Default for SystemApiCheckOptions {
@@ -52,11 +56,15 @@ impl Default for SystemApiCheckOptions {
         Self {
             compatible_sdk_version: "0".into(),
             compile_sdk_version: "0".into(),
+            runtime_os: "OpenHarmony".into(),
             strict_api_compatibility: false,
             request_permissions: FxHashSet::default(),
             syscap_intersection: FxHashSet::default(),
             syscap_union: FxHashSet::default(),
             check_syscap: false,
+            form_source: false,
+            atomic_service: false,
+            ohos_test_source: false,
         }
     }
 }
@@ -74,6 +82,11 @@ impl SystemApiCheckOptions {
 
     pub fn with_compile_sdk_version(mut self, version: impl Into<Box<str>>) -> Self {
         self.compile_sdk_version = version.into();
+        self
+    }
+
+    pub fn with_runtime_os(mut self, runtime_os: impl Into<Box<str>>) -> Self {
+        self.runtime_os = runtime_os.into();
         self
     }
 
@@ -98,6 +111,21 @@ impl SystemApiCheckOptions {
         self
     }
 
+    pub fn with_form_source(mut self, form_source: bool) -> Self {
+        self.form_source = form_source;
+        self
+    }
+
+    pub fn with_atomic_service(mut self, atomic_service: bool) -> Self {
+        self.atomic_service = atomic_service;
+        self
+    }
+
+    pub fn with_ohos_test_source(mut self, ohos_test_source: bool) -> Self {
+        self.ohos_test_source = ohos_test_source;
+        self
+    }
+
     fn severity(&self) -> DiagnosticSeverity {
         if self.strict_api_compatibility {
             DiagnosticSeverity::Error
@@ -110,26 +138,42 @@ impl SystemApiCheckOptions {
 /// Owned JSDoc contract attached to one SDK declaration symbol.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct SystemApiContract {
+    sdk_declaration: bool,
     since: Option<Box<str>>,
+    available: Option<Box<str>>,
     permissions: Vec<Box<str>>,
     syscap: Option<Box<str>>,
-    system_api: bool,
+    system_api: Option<Box<str>>,
     deprecated: bool,
     since_whitelisted: bool,
+    form: Option<Box<str>>,
+    atomic_service: Option<Box<str>>,
+    fa_model_only: Option<Box<str>>,
+    test_only: Option<Box<str>>,
 }
 
 impl SystemApiContract {
     fn is_empty(&self) -> bool {
-        self.since.is_none()
+        !self.sdk_declaration
+            && self.since.is_none()
+            && self.available.is_none()
             && self.permissions.is_empty()
             && self.syscap.is_none()
-            && !self.system_api
+            && self.system_api.is_none()
             && !self.deprecated
+            && self.form.is_none()
+            && self.atomic_service.is_none()
+            && self.fa_model_only.is_none()
+            && self.test_only.is_none()
     }
 
     fn merge(&mut self, other: &Self) {
+        self.sdk_declaration |= other.sdk_declaration;
         if self.since.is_none() {
             self.since.clone_from(&other.since);
+        }
+        if self.available.is_none() {
+            self.available.clone_from(&other.available);
         }
         for permission in &other.permissions {
             if !self.permissions.contains(permission) {
@@ -139,9 +183,23 @@ impl SystemApiContract {
         if self.syscap.is_none() {
             self.syscap.clone_from(&other.syscap);
         }
-        self.system_api |= other.system_api;
+        if self.system_api.is_none() {
+            self.system_api.clone_from(&other.system_api);
+        }
         self.deprecated |= other.deprecated;
         self.since_whitelisted |= other.since_whitelisted;
+        if self.form.is_none() {
+            self.form.clone_from(&other.form);
+        }
+        if self.atomic_service.is_none() {
+            self.atomic_service.clone_from(&other.atomic_service);
+        }
+        if self.fa_model_only.is_none() {
+            self.fa_model_only.clone_from(&other.fa_model_only);
+        }
+        if self.test_only.is_none() {
+            self.test_only.clone_from(&other.test_only);
+        }
     }
 }
 
@@ -235,12 +293,26 @@ pub(super) struct SystemApiModuleFacts {
 }
 
 impl SystemApiModuleFacts {
-    pub(super) fn from_program(path: &Path, program: &Program<'_>, is_sdk: bool) -> Self {
-        if !is_sdk {
+    pub(super) fn from_program(
+        path: &Path,
+        program: &Program<'_>,
+        is_sdk: bool,
+        is_project: bool,
+    ) -> Self {
+        if !is_sdk && (!is_project || !program.source_text.contains("Available")) {
             return Self::default();
         }
         let semantic = SemanticBuilder::new().build(program).semantic;
-        let mut collector = SystemApiDeclarationCollector::new(path, semantic.jsdoc());
+        let available_contracts = if is_project {
+            ProjectAvailableContractInventory::new(program, semantic.scoping()).collect()
+        } else {
+            FxHashMap::default()
+        };
+        let mut collector = SystemApiDeclarationCollector::new(
+            path,
+            is_sdk.then(|| semantic.jsdoc()),
+            available_contracts,
+        );
         collector.collect_program(program);
         collector.finish()
     }
@@ -260,17 +332,90 @@ impl SystemApiModuleFacts {
     }
 }
 
+struct ProjectAvailableContractInventory<'a, 'program> {
+    program: &'program Program<'program>,
+    scoping: &'a Scoping,
+    bindings: AvailableSdkBindings,
+    by_span: FxHashMap<u32, Box<str>>,
+}
+
+impl<'a, 'program> ProjectAvailableContractInventory<'a, 'program> {
+    fn new(program: &'program Program<'program>, scoping: &'a Scoping) -> Self {
+        Self {
+            program,
+            scoping,
+            bindings: AvailableSdkBindings::from_program(program),
+            by_span: FxHashMap::default(),
+        }
+    }
+
+    fn collect(mut self) -> FxHashMap<u32, Box<str>> {
+        if !self.bindings.is_empty() {
+            self.visit_program(self.program);
+        }
+        self.by_span
+    }
+
+    fn decorator_version(&self, decorator: &Decorator<'program>) -> Option<Box<str>> {
+        let Expression::CallExpression(call) = &decorator.expression else {
+            return None;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            return None;
+        };
+        if !self.bindings.contains(callee, self.scoping) {
+            return None;
+        }
+        let Expression::ObjectExpression(object) = call
+            .arguments
+            .first()
+            .and_then(|argument| argument.as_expression())?
+        else {
+            return None;
+        };
+        for property in &object.properties {
+            let property = property.as_property()?;
+            if property.key.static_name().as_deref() != Some("minApiVersion") {
+                continue;
+            }
+            return match &property.value {
+                Expression::StringLiteral(value) => Some(value.value.as_str().into()),
+                Expression::NumericLiteral(value) => Some(value.value.to_string().into()),
+                _ => None,
+            };
+        }
+        None
+    }
+}
+
+impl<'program> Visit<'program> for ProjectAvailableContractInventory<'_, 'program> {
+    fn enter_node(&mut self, kind: AstKind<'program>) {
+        let version = SystemApiAncestorDecorators::new(kind)
+            .iter()
+            .find_map(|decorator| self.decorator_version(decorator));
+        if let Some(version) = version {
+            self.by_span.entry(kind.span().start).or_insert(version);
+        }
+    }
+}
+
 struct SystemApiDeclarationCollector<'a, 'program> {
     declaration_path: &'a Path,
-    jsdoc: &'a JSDocFinder<'program>,
+    jsdoc: Option<&'a JSDocFinder<'program>>,
+    available_contracts: FxHashMap<u32, Box<str>>,
     facts: SystemApiModuleFacts,
 }
 
 impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
-    fn new(declaration_path: &'a Path, jsdoc: &'a JSDocFinder<'program>) -> Self {
+    fn new(
+        declaration_path: &'a Path,
+        jsdoc: Option<&'a JSDocFinder<'program>>,
+        available_contracts: FxHashMap<u32, Box<str>>,
+    ) -> Self {
         Self {
             declaration_path,
             jsdoc,
+            available_contracts,
             facts: SystemApiModuleFacts::default(),
         }
     }
@@ -451,6 +596,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         let mut nested = Self {
             declaration_path: self.declaration_path,
             jsdoc: self.jsdoc,
+            available_contracts: self.available_contracts.clone(),
             facts: SystemApiModuleFacts::default(),
         };
         match &namespace.body {
@@ -599,33 +745,46 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
     }
 
     fn contract_for_spans<const N: usize>(&self, spans: [Option<Span>; N]) -> SystemApiContract {
-        let mut contract = SystemApiContract::default();
+        let mut contract = SystemApiContract {
+            sdk_declaration: self.jsdoc.is_some(),
+            ..SystemApiContract::default()
+        };
         for span in spans.into_iter().flatten() {
-            let Some(documents) = self.jsdoc.get_all_by_span(span) else {
-                continue;
-            };
-            for document in documents {
-                for tag in document.tags() {
-                    let value = tag.comment().parsed();
-                    match tag.kind.parsed().to_ascii_lowercase().as_str() {
-                        "since"
-                            if contract.since.is_none()
-                                && SystemApiVersion::is_valid_since(&value) =>
-                        {
-                            contract.since = Some(value.trim().into());
-                        }
-                        "permission" if !value.trim().is_empty() => {
-                            let value: Box<str> = value.trim().into();
-                            if !contract.permissions.contains(&value) {
-                                contract.permissions.push(value);
+            if contract.available.is_none() {
+                contract.available = self.available_contracts.get(&span.start).cloned();
+            }
+            if let Some(documents) = self.jsdoc.and_then(|jsdoc| jsdoc.get_all_by_span(span)) {
+                for document in documents {
+                    for tag in document.tags() {
+                        let value = tag.comment().parsed();
+                        match tag.kind.parsed().to_ascii_lowercase().as_str() {
+                            "since"
+                                if contract.since.is_none()
+                                    && SystemApiVersion::is_valid_since(&value) =>
+                            {
+                                contract.since = Some(value.trim().into());
                             }
+                            "permission" if !value.trim().is_empty() => {
+                                let value: Box<str> = value.trim().into();
+                                if !contract.permissions.contains(&value) {
+                                    contract.permissions.push(value);
+                                }
+                            }
+                            "syscap" if contract.syscap.is_none() && !value.trim().is_empty() => {
+                                contract.syscap = Some(value.trim().into());
+                            }
+                            "systemapi" => contract.system_api = Some(value.trim().into()),
+                            "deprecated" => contract.deprecated = true,
+                            "form" => contract.form = Some(value.trim().into()),
+                            "atomicservice" => {
+                                contract.atomic_service = Some(value.trim().into());
+                            }
+                            "famodelonly" => {
+                                contract.fa_model_only = Some(value.trim().into());
+                            }
+                            "test" => contract.test_only = Some(value.trim().into()),
+                            _ => {}
                         }
-                        "syscap" if contract.syscap.is_none() && !value.trim().is_empty() => {
-                            contract.syscap = Some(value.trim().into());
-                        }
-                        "systemapi" => contract.system_api = true,
-                        "deprecated" => contract.deprecated = true,
-                        _ => {}
                     }
                 }
             }
@@ -936,15 +1095,16 @@ impl<'a> Arkts11SystemApiValidator<'a> {
             self.module_exports,
         );
         if !bindings.is_empty() {
-            let mut validator = SystemApiUseValidator::new(
-                self.source_id,
-                self.source,
+            let mut validator = SystemApiUseValidator::new(SystemApiUseValidatorInput {
+                source_id: self.source_id,
+                source: self.source,
                 program,
                 scoping,
-                &bindings,
-                ApiAvailableSdkBindings::from_program(program),
-                self.options,
-            );
+                bindings: &bindings,
+                device_info_bindings: ApiAvailableSdkBindings::from_program(program),
+                constants: SystemApiConstantInventory::from_program(program),
+                options: self.options,
+            });
             validator.visit_program(program);
             diagnostics.extend(validator.finish());
         }
@@ -959,29 +1119,34 @@ struct SystemApiUseValidator<'a, 'program> {
     scoping: &'a Scoping,
     bindings: &'a ImportedSystemApiBindings,
     device_info_bindings: ApiAvailableSdkBindings,
+    constants: SystemApiConstantInventory,
     options: &'a SystemApiCheckOptions,
     ancestors: Vec<AstKind<'program>>,
     diagnostics: Vec<EtsTransformError>,
 }
 
+struct SystemApiUseValidatorInput<'a, 'program> {
+    source_id: &'a str,
+    source: &'a str,
+    program: &'program Program<'program>,
+    scoping: &'a Scoping,
+    bindings: &'a ImportedSystemApiBindings,
+    device_info_bindings: ApiAvailableSdkBindings,
+    constants: SystemApiConstantInventory,
+    options: &'a SystemApiCheckOptions,
+}
+
 impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
-    fn new(
-        source_id: &'a str,
-        source: &'a str,
-        program: &'program Program<'program>,
-        scoping: &'a Scoping,
-        bindings: &'a ImportedSystemApiBindings,
-        device_info_bindings: ApiAvailableSdkBindings,
-        options: &'a SystemApiCheckOptions,
-    ) -> Self {
+    fn new(input: SystemApiUseValidatorInput<'a, 'program>) -> Self {
         Self {
-            source_id,
-            source,
-            program,
-            scoping,
-            bindings,
-            device_info_bindings,
-            options,
+            source_id: input.source_id,
+            source: input.source,
+            program: input.program,
+            scoping: input.scoping,
+            bindings: input.bindings,
+            device_info_bindings: input.device_info_bindings,
+            constants: input.constants,
+            options: input.options,
             ancestors: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -1000,15 +1165,16 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
     }
 
     fn validate_contract(&mut self, contract: &SystemApiContract, api_name: &str, span: Span) {
-        let suppression = SystemApiWarningSuppression::new(
-            self.source,
-            self.program,
-            &self.ancestors,
-            self.scoping,
-            &self.device_info_bindings,
+        let suppression = SystemApiWarningSuppression::new(SystemApiWarningSuppressionInput {
+            source: self.source,
+            program: self.program,
+            ancestors: &self.ancestors,
+            scoping: self.scoping,
+            device_info_bindings: &self.device_info_bindings,
+            constants: &self.constants,
             api_name,
             span,
-        );
+        });
         if let Some(since) = contract.since.as_deref() {
             if !contract.since_whitelisted
                 && SystemApiVersion::new(&self.options.compatible_sdk_version)
@@ -1021,6 +1187,30 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
                     message: format!(
                         "The '{api_name}' API is supported since SDK version {since}. However, the current compatible SDK version is {}. It is recommended to use apiAvailable to safeguard API compatibility.",
                         self.options.compatible_sdk_version
+                    ),
+                    severity: self.options.severity(),
+                    span: Some(span),
+                    solutions: vec![
+                        "Check the official API reference documentation, and switch to the supported interfaces."
+                            .to_string(),
+                    ],
+                });
+            }
+        }
+
+        if let Some(available) = contract.available.as_deref() {
+            let available = SystemApiAvailableVersion::new(available);
+            if available.matches_runtime(&self.options.runtime_os)
+                && SystemApiVersion::new(&self.options.compatible_sdk_version)
+                    .is_less_than(&SystemApiVersion::new(available.version))
+                && !suppression.suppresses_available(available.version)
+            {
+                self.diagnostics.push(EtsTransformError::CodedDiagnostic {
+                    file: self.source_id.to_string(),
+                    code: "11706012".to_string(),
+                    message: format!(
+                        "The '{api_name}' API is available since SDK version {}. However, the current compatible SDK version is {}. It is recommended to use apiAvailable to safeguard API compatibility.",
+                        available.version, self.options.compatible_sdk_version
                     ),
                     severity: self.options.severity(),
                     span: Some(span),
@@ -1081,7 +1271,56 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
             }
         }
 
-        if contract.system_api {
+        if contract.sdk_declaration {
+            if self.options.form_source
+                && !SystemApiVersionedTag::new(contract.form.as_deref())
+                    .supports(&self.options.compile_sdk_version)
+            {
+                self.push_profile_error(
+                    "11706006",
+                    format!("'{api_name}' can't support form application."),
+                    span,
+                    "Check the official API reference documentation, and switch to the supported interfaces.",
+                );
+            }
+            if self.options.atomic_service
+                && SystemApiVersion::new(&self.options.compile_sdk_version)
+                    .at_least(&SystemApiVersion::new("11"))
+                && !SystemApiVersionedTag::new(contract.atomic_service.as_deref())
+                    .supports(&self.options.compile_sdk_version)
+            {
+                self.push_profile_error(
+                    "11706010",
+                    format!("'{api_name}' can't support atomicservice application."),
+                    span,
+                    "Check the official API reference documentation, and switch to the supported interfaces.",
+                );
+            }
+            if SystemApiVersionedTag::new(contract.fa_model_only.as_deref())
+                .is_active(&self.options.compile_sdk_version)
+            {
+                self.push_profile_error(
+                    "11706008",
+                    "This API is used only in FA Mode, but the current Mode is Stage.".to_string(),
+                    span,
+                    "Check the official API reference documentation, and switch to the supported Stage model interfaces.",
+                );
+            }
+            if !self.options.ohos_test_source
+                && SystemApiVersionedTag::new(contract.test_only.as_deref())
+                    .is_active(&self.options.compile_sdk_version)
+            {
+                self.diagnostics.push(EtsTransformError::Diagnostic {
+                    file: self.source_id.to_string(),
+                    message: format!("'{api_name}' can only be used for testing directories "),
+                    severity: DiagnosticSeverity::Warning,
+                });
+            }
+        }
+
+        if SystemApiVersionedTag::new(contract.system_api.as_deref())
+            .is_active(&self.options.compile_sdk_version)
+        {
             self.diagnostics.push(EtsTransformError::Diagnostic {
                 file: self.source_id.to_string(),
                 message: format!("'{api_name}' is system api"),
@@ -1099,6 +1338,17 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
 
     fn finish(self) -> Vec<EtsTransformError> {
         self.diagnostics
+    }
+
+    fn push_profile_error(&mut self, code: &str, message: String, span: Span, solution: &str) {
+        self.diagnostics.push(EtsTransformError::CodedDiagnostic {
+            file: self.source_id.to_string(),
+            code: code.to_string(),
+            message,
+            severity: DiagnosticSeverity::Error,
+            span: Some(span),
+            solutions: vec![solution.to_string()],
+        });
     }
 }
 
@@ -1161,28 +1411,33 @@ struct SystemApiWarningSuppression<'a, 'program> {
     ancestors: &'a [AstKind<'program>],
     scoping: &'a Scoping,
     device_info_bindings: &'a ApiAvailableSdkBindings,
+    constants: &'a SystemApiConstantInventory,
+    api_name: &'a str,
+    span: Span,
+}
+
+struct SystemApiWarningSuppressionInput<'a, 'program> {
+    source: &'a str,
+    program: &'program Program<'program>,
+    ancestors: &'a [AstKind<'program>],
+    scoping: &'a Scoping,
+    device_info_bindings: &'a ApiAvailableSdkBindings,
+    constants: &'a SystemApiConstantInventory,
     api_name: &'a str,
     span: Span,
 }
 
 impl<'a, 'program> SystemApiWarningSuppression<'a, 'program> {
-    fn new(
-        source: &'a str,
-        program: &'program Program<'program>,
-        ancestors: &'a [AstKind<'program>],
-        scoping: &'a Scoping,
-        device_info_bindings: &'a ApiAvailableSdkBindings,
-        api_name: &'a str,
-        span: Span,
-    ) -> Self {
+    fn new(input: SystemApiWarningSuppressionInput<'a, 'program>) -> Self {
         Self {
-            source,
-            program,
-            ancestors,
-            scoping,
-            device_info_bindings,
-            api_name,
-            span,
+            source: input.source,
+            program: input.program,
+            ancestors: input.ancestors,
+            scoping: input.scoping,
+            device_info_bindings: input.device_info_bindings,
+            constants: input.constants,
+            api_name: input.api_name,
+            span: input.span,
         }
     }
 
@@ -1197,13 +1452,20 @@ impl<'a, 'program> SystemApiWarningSuppression<'a, 'program> {
             || self.has_sdk_guard(since)
     }
 
+    fn suppresses_available(&self, since: &str) -> bool {
+        self.suppresses("compatibility")
+            || self.has_available_guard(since)
+            || self.has_sdk_guard(since)
+    }
+
     fn suppresses_syscap(&self, syscap: &str) -> bool {
         self.suppresses("syscap")
             || self.ancestors.iter().any(|ancestor| {
                 let AstKind::IfStatement(statement) = ancestor else {
                     return false;
                 };
-                SystemApiCanIUseGuard::new(&statement.test).matches(syscap)
+                SystemApiCanIUseGuard::new(&statement.test, self.scoping, self.constants)
+                    .matches(syscap)
             })
     }
 
@@ -1296,8 +1558,13 @@ impl<'a, 'program> SystemApiWarningSuppression<'a, 'program> {
             {
                 return false;
             }
-            SystemApiSdkVersionGuard::new(&statement.test, self.scoping, self.device_info_bindings)
-                .supports(since)
+            SystemApiSdkVersionGuard::new(
+                &statement.test,
+                self.scoping,
+                self.device_info_bindings,
+                self.constants,
+            )
+            .supports(since)
         })
     }
 }
@@ -1446,6 +1713,7 @@ struct SystemApiSdkVersionGuard<'a> {
     expression: &'a Expression<'a>,
     scoping: &'a Scoping,
     device_info_bindings: &'a ApiAvailableSdkBindings,
+    constants: &'a SystemApiConstantInventory,
 }
 
 impl<'a> SystemApiSdkVersionGuard<'a> {
@@ -1453,11 +1721,13 @@ impl<'a> SystemApiSdkVersionGuard<'a> {
         expression: &'a Expression<'a>,
         scoping: &'a Scoping,
         device_info_bindings: &'a ApiAvailableSdkBindings,
+        constants: &'a SystemApiConstantInventory,
     ) -> Self {
         Self {
             expression,
             scoping,
             device_info_bindings,
+            constants,
         }
     }
 
@@ -1474,7 +1744,9 @@ impl<'a> SystemApiSdkVersionGuard<'a> {
                         .arguments
                         .first()
                         .and_then(|argument| argument.as_expression())
-                        .and_then(SystemApiLiteralValue::parse)
+                        .and_then(|expression| {
+                            SystemApiLiteralValue::parse(expression, self.scoping, self.constants)
+                        })
                         .is_some_and(|version| {
                             !SystemApiVersion::new(&version)
                                 .is_less_than(&SystemApiVersion::new(since))
@@ -1500,7 +1772,8 @@ impl<'a> SystemApiSdkVersionGuard<'a> {
         }) {
             return false;
         }
-        let Some(value) = SystemApiLiteralValue::parse(value_side) else {
+        let Some(value) = SystemApiLiteralValue::parse(value_side, self.scoping, self.constants)
+        else {
             return false;
         };
         let Some(number) = value.parse::<f64>().ok().map(f64::ceil) else {
@@ -1520,11 +1793,21 @@ impl<'a> SystemApiSdkVersionGuard<'a> {
 
 struct SystemApiCanIUseGuard<'a> {
     expression: &'a Expression<'a>,
+    scoping: &'a Scoping,
+    constants: &'a SystemApiConstantInventory,
 }
 
 impl<'a> SystemApiCanIUseGuard<'a> {
-    fn new(expression: &'a Expression<'a>) -> Self {
-        Self { expression }
+    fn new(
+        expression: &'a Expression<'a>,
+        scoping: &'a Scoping,
+        constants: &'a SystemApiConstantInventory,
+    ) -> Self {
+        Self {
+            expression,
+            scoping,
+            constants,
+        }
     }
 
     fn matches(&self, syscap: &str) -> bool {
@@ -1540,18 +1823,73 @@ impl<'a> SystemApiCanIUseGuard<'a> {
                 .arguments
                 .first()
                 .and_then(|argument| argument.as_expression())
-                .and_then(SystemApiLiteralValue::parse)
+                .and_then(|expression| {
+                    SystemApiLiteralValue::parse(expression, self.scoping, self.constants)
+                })
                 .is_some_and(|value| value == syscap)
     }
 }
 
 struct SystemApiLiteralValue;
 
-impl SystemApiLiteralValue {
-    fn parse(expression: &Expression<'_>) -> Option<String> {
+#[derive(Default)]
+struct SystemApiConstantInventory {
+    values: FxHashMap<SymbolId, String>,
+}
+
+impl SystemApiConstantInventory {
+    fn from_program(program: &Program<'_>) -> Self {
+        let mut inventory = Self::default();
+        inventory.visit_program(program);
+        inventory
+    }
+
+    fn value<'a>(
+        &'a self,
+        identifier: &oxc_ast::ast::IdentifierReference<'_>,
+        scoping: &Scoping,
+    ) -> Option<&'a String> {
+        let symbol_id = identifier
+            .reference_id
+            .get()
+            .and_then(|reference_id| scoping.get_reference(reference_id).symbol_id())?;
+        self.values.get(&symbol_id)
+    }
+
+    fn literal(expression: &Expression<'_>) -> Option<String> {
         match expression {
             Expression::StringLiteral(value) => Some(value.value.to_string()),
             Expression::NumericLiteral(value) => Some(value.value.to_string()),
+            _ => None,
+        }
+    }
+}
+
+impl<'program> Visit<'program> for SystemApiConstantInventory {
+    fn visit_variable_declarator(
+        &mut self,
+        declaration: &oxc_ast::ast::VariableDeclarator<'program>,
+    ) {
+        if let (Some(identifier), Some(value)) = (
+            declaration.id.get_binding_identifier(),
+            declaration.init.as_ref().and_then(Self::literal),
+        ) {
+            self.values.insert(identifier.symbol_id(), value);
+        }
+        walk::walk_variable_declarator(self, declaration);
+    }
+}
+
+impl SystemApiLiteralValue {
+    fn parse(
+        expression: &Expression<'_>,
+        scoping: &Scoping,
+        constants: &SystemApiConstantInventory,
+    ) -> Option<String> {
+        match expression {
+            Expression::StringLiteral(value) => Some(value.value.to_string()),
+            Expression::NumericLiteral(value) => Some(value.value.to_string()),
+            Expression::Identifier(identifier) => constants.value(identifier, scoping).cloned(),
             _ => None,
         }
     }
@@ -1591,6 +1929,40 @@ impl<'a> SystemApiPermissionExpression<'a> {
 
 struct SystemApiVersionedComment<'a> {
     comment: &'a str,
+}
+
+struct SystemApiVersionedTag<'a> {
+    comment: Option<&'a str>,
+}
+
+impl<'a> SystemApiVersionedTag<'a> {
+    fn new(comment: Option<&'a str>) -> Self {
+        Self { comment }
+    }
+
+    fn supports(&self, compile_sdk_version: &str) -> bool {
+        self.comment
+            .is_some_and(|comment| Self::range_is_active(comment, compile_sdk_version))
+    }
+
+    fn is_active(&self, compile_sdk_version: &str) -> bool {
+        self.supports(compile_sdk_version)
+    }
+
+    fn range_is_active(comment: &str, compile_sdk_version: &str) -> bool {
+        let Some(range_start) = comment.find("[since ") else {
+            return true;
+        };
+        let range_content_start = range_start + "[since ".len();
+        let Some(relative_end) = comment[range_content_start..].find(']') else {
+            return true;
+        };
+        let range_end = range_content_start + relative_end;
+        let Some((start, end)) = comment[range_content_start..range_end].split_once(" - ") else {
+            return true;
+        };
+        SystemApiVersionRange::new(start, end).contains(compile_sdk_version)
+    }
 }
 
 impl<'a> SystemApiVersionedComment<'a> {
@@ -1711,6 +2083,33 @@ struct SystemApiVersion<'a> {
     raw: &'a str,
 }
 
+struct SystemApiAvailableVersion<'a> {
+    os: &'a str,
+    version: &'a str,
+}
+
+impl<'a> SystemApiAvailableVersion<'a> {
+    fn new(raw: &'a str) -> Self {
+        let mut parts = raw.split_whitespace();
+        let first = parts.next().unwrap_or_default();
+        if let Some(second) = parts.next() {
+            Self {
+                os: first,
+                version: second,
+            }
+        } else {
+            Self {
+                os: "OpenHarmony",
+                version: first,
+            }
+        }
+    }
+
+    fn matches_runtime(&self, runtime_os: &str) -> bool {
+        self.os == "OpenHarmony" || self.os.eq_ignore_ascii_case(runtime_os)
+    }
+}
+
 impl<'a> SystemApiVersion<'a> {
     fn new(raw: &'a str) -> Self {
         Self { raw }
@@ -1747,6 +2146,10 @@ impl<'a> SystemApiVersion<'a> {
 
     fn is_less_than(&self, other: &Self) -> bool {
         self.parts() < other.parts()
+    }
+
+    fn at_least(&self, other: &Self) -> bool {
+        !self.is_less_than(other)
     }
 
     fn parts(&self) -> [u32; 3] {

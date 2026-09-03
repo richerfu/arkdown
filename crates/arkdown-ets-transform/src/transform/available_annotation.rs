@@ -50,12 +50,12 @@ impl<'a> AvailableAnnotationValidator<'a> {
 }
 
 #[derive(Default)]
-struct AvailableSdkBindings {
+pub(super) struct AvailableSdkBindings {
     symbols: FxHashSet<SymbolId>,
 }
 
 impl AvailableSdkBindings {
-    fn from_program(program: &Program<'_>) -> Self {
+    pub(super) fn from_program(program: &Program<'_>) -> Self {
         let mut bindings = Self::default();
         for statement in &program.body {
             let Statement::ImportDeclaration(import) = statement else {
@@ -82,11 +82,11 @@ impl AvailableSdkBindings {
         bindings
     }
 
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.symbols.is_empty()
     }
 
-    fn contains(&self, reference: &IdentifierReference<'_>, scoping: &Scoping) -> bool {
+    pub(super) fn contains(&self, reference: &IdentifierReference<'_>, scoping: &Scoping) -> bool {
         reference
             .reference_id
             .get()
