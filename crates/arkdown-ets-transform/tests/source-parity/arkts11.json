@@ -31,6 +31,20 @@
       "expect": { "errorCode": "10905108" }
     },
     {
+      "id": "extend-name-collides-with-style",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateFunction",
+      "file": "ExtendNameCollision.ets",
+      "source": "@Extend(Text) function width() { .width(100) }",
+      "expect": { "errorCode": "10905360" }
+    },
+    {
+      "id": "extend-name-collision-without-self-call",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkNameAttrCalled",
+      "file": "ExtendNameWarning.ets",
+      "source": "@Extend(Text) function width() { .height(100) }",
+      "expect": { "contains": [] }
+    },
+    {
       "id": "exported-global-styles-function-arguments",
       "owner": "compiler/src/process_ui_syntax.ts::processAllNodes",
       "file": "ExportedStylesFunctionArguments.ets",
@@ -155,6 +169,13 @@
       "file": "LinkDefault.ets",
       "source": "@Component struct LinkDefault { @Link value: number = 0; build() {} }",
       "expect": { "errorCode": "10905304" }
+    },
+    {
+      "id": "object-link-basic-type",
+      "owner": "compiler/src/process_component_member.ts::updateSynchedPropertyNesedObjectPU",
+      "file": "ObjectLinkBasic.ets",
+      "source": "@Component struct ObjectLinkBasic { @ObjectLink value: number; build() {} }",
+      "expect": { "errorCode": "10905307" }
     },
     {
       "id": "builder-param-literal-initializer",
@@ -316,6 +337,27 @@
       "file": "SyncMonitorWildcard.ets",
       "source": "@ObservedV2 class SyncMonitorWildcard { @Trace value: object = {}; @SyncMonitor('value.*.name') changed() {} }",
       "expect": { "errorCode": "10905367" }
+    },
+    {
+      "id": "sync-monitor-nonexistent-root",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateSyncMonitorArgExist",
+      "file": "SyncMonitorMissing.ets",
+      "source": "@ComponentV2 struct SyncMonitorMissing { @Local value: number = 0; @SyncMonitor('missing') changed() {} build() {} }",
+      "expect": { "errorCode": "10905366" }
+    },
+    {
+      "id": "sync-monitor-nonstate-root",
+      "owner": "compiler/src/validate_ui_syntax.ts::findPropertyInStruct",
+      "file": "SyncMonitorRegular.ets",
+      "source": "@ComponentV2 struct SyncMonitorRegular { value: number = 0; @SyncMonitor('value') changed() {} build() {} }",
+      "expect": { "errorCode": "10905366" }
+    },
+    {
+      "id": "sync-monitor-computed-root",
+      "owner": "compiler/src/validate_ui_syntax.ts::findPropertyInStruct",
+      "file": "SyncMonitorComputed.ets",
+      "source": "@ComponentV2 struct SyncMonitorComputed { @Computed get value(): number { return 0; } @SyncMonitor('value') changed() {} build() {} }",
+      "expect": { "contains": [] }
     },
     {
       "id": "monitor-enable-wildcard-boolean",

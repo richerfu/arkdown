@@ -1,18 +1,20 @@
-use oxc_ast::ast::{Decorator, Expression, Function};
+use oxc_ast::ast::{Decorator, Expression, Function, Statement};
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
+use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 
 /// Checks source-level ArkTS 1.1 function decorator contracts from
 /// `validate_ui_syntax.ts::validateDifferentFunction` and
 /// `process_ui_syntax.ts`.
-pub(super) struct Arkts11FunctionValidator<'function, 'errors> {
+pub(super) struct Arkts11FunctionValidator<'function, 'context, 'errors> {
     function: &'function Function<'function>,
     file: &'errors str,
     errors: &'errors mut Vec<EtsTransformError>,
+    component_metadata: Option<&'context ComponentMetadata>,
 }
 
-impl<'function, 'errors> Arkts11FunctionValidator<'function, 'errors> {
+impl<'function, 'context, 'errors> Arkts11FunctionValidator<'function, 'context, 'errors> {
     pub(super) fn new(
         function: &'function Function<'function>,
         file: &'errors str,
@@ -22,19 +24,31 @@ impl<'function, 'errors> Arkts11FunctionValidator<'function, 'errors> {
             function,
             file,
             errors,
+            component_metadata: None,
         }
+    }
+
+    pub(super) fn with_component_metadata(
+        mut self,
+        metadata: Option<&'context ComponentMetadata>,
+    ) -> Self {
+        self.component_metadata = metadata;
+        self
     }
 
     pub(super) fn check(self) {
         self.check_with_extra_decorators(&[]);
     }
 
-    pub(super) fn check_with_extra_decorators(self, extra_decorators: &[Decorator<'_>]) {
-        let decorators = self
+    pub(super) fn check_with_extra_decorators(mut self, extra_decorators: &[Decorator<'_>]) {
+        let all_decorators = self
             .function
             .decorators
             .iter()
             .chain(extra_decorators)
+            .collect::<Vec<_>>();
+        let decorators = all_decorators
+            .iter()
             .map(|decorator| ArkuiDecorator::new(decorator).name())
             .collect::<Vec<_>>();
 
@@ -101,7 +115,7 @@ impl<'function, 'errors> Arkts11FunctionValidator<'function, 'errors> {
             });
         }
 
-        for decorator in &self.function.decorators {
+        for decorator in all_decorators {
             let name = ArkuiDecorator::new(decorator).name();
             if !matches!(
                 name,
@@ -121,7 +135,79 @@ impl<'function, 'errors> Arkts11FunctionValidator<'function, 'errors> {
                     span: Some(call.span),
                     solutions: Vec::new(),
                 });
+                continue;
             }
+            if name == ArkuiDecoratorName::EXTEND {
+                self.check_extend_name_collision(decorator, call);
+            }
+        }
+    }
+
+    fn check_extend_name_collision(
+        &mut self,
+        decorator: &Decorator<'_>,
+        call: &oxc_ast::ast::CallExpression<'_>,
+    ) {
+        let Some(function_name) = self.function.id.as_ref().map(|id| id.name.as_str()) else {
+            return;
+        };
+        let Some(Expression::Identifier(component)) = call
+            .arguments
+            .first()
+            .and_then(|argument| argument.as_expression())
+        else {
+            return;
+        };
+        if !self.component_metadata.is_some_and(|metadata| {
+            metadata.is_component_style_name(component.name.as_str(), function_name)
+        }) {
+            return;
+        }
+        let message = format!(
+            "The '@Extend' function cannot have the same name as the built-in style attribute '{function_name}' of the component '{}'.",
+            component.name
+        );
+        let self_call = self
+            .function
+            .body
+            .as_ref()
+            .and_then(|body| body.statements.first())
+            .and_then(|statement| match statement {
+                Statement::ExpressionStatement(statement) => Some(&statement.expression),
+                _ => None,
+            })
+            .and_then(|expression| match expression {
+                Expression::LeadingDotExpression(expression) => Some(&expression.expression),
+                _ => None,
+            })
+            .and_then(Self::outer_call_name)
+            == Some(function_name);
+        if self_call {
+            self.errors.push(EtsTransformError::CodedDiagnostic {
+                file: self.file.to_string(),
+                code: "10905360".to_string(),
+                message,
+                severity: DiagnosticSeverity::Error,
+                span: Some(decorator.span),
+                solutions: Vec::new(),
+            });
+        } else {
+            self.errors.push(EtsTransformError::Diagnostic {
+                file: self.file.to_string(),
+                message,
+                severity: DiagnosticSeverity::Warning,
+            });
+        }
+    }
+
+    fn outer_call_name<'node>(expression: &'node Expression<'_>) -> Option<&'node str> {
+        let Expression::CallExpression(call) = expression else {
+            return None;
+        };
+        match &call.callee {
+            Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+            Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+            _ => None,
         }
     }
 }

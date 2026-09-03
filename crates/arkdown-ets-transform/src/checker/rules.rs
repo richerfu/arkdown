@@ -129,6 +129,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                 }
                 Statement::FunctionDeclaration(function) => {
                     Arkts11FunctionValidator::new(function, self.file, &mut report.diagnostics)
+                        .with_component_metadata(self.component_metadata)
                         .check();
                 }
                 Statement::ExportDeclaration(export) => match &export.declaration {
@@ -150,6 +151,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                     }
                     Declaration::FunctionDeclaration(function) => {
                         Arkts11FunctionValidator::new(function, self.file, &mut report.diagnostics)
+                            .with_component_metadata(self.component_metadata)
                             .check_with_extra_decorators(&export.decorators);
                     }
                     _ => {}
@@ -173,6 +175,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                     }
                     ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                         Arkts11FunctionValidator::new(function, self.file, &mut report.diagnostics)
+                            .with_component_metadata(self.component_metadata)
                             .check();
                     }
                     _ => {}

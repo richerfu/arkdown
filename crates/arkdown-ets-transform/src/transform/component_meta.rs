@@ -34,6 +34,8 @@ pub struct ComponentMetadata {
     specific_child_components: FxHashMap<String, Vec<String>>,
     specific_parent_components: FxHashMap<String, Vec<String>>,
     builtin_style_names: FxHashSet<String>,
+    common_style_names: FxHashSet<String>,
+    component_style_names: FxHashMap<String, FxHashSet<String>>,
     system_api_style_names: FxHashSet<String>,
     need_pop_components: FxHashSet<String>,
     bind_object_properties: FxHashMap<String, FxHashSet<String>>,
@@ -126,6 +128,15 @@ impl ComponentMetadata {
 
     pub(crate) fn is_builtin_style_name(&self, name: &str) -> bool {
         self.builtin_style_names.contains(name)
+    }
+
+    pub(crate) fn is_component_style_name(&self, component: &str, name: &str) -> bool {
+        self.is_builtin_component_name(component)
+            && (self.common_style_names.contains(name)
+                || self
+                    .component_style_names
+                    .get(component)
+                    .is_some_and(|attrs| attrs.contains(name)))
     }
 
     pub(crate) fn is_system_api_style_name(&self, name: &str) -> bool {
@@ -645,6 +656,8 @@ impl<'a> ComponentMetadataLoader<'a> {
             specific_child_components: component_grammar.children,
             specific_parent_components: component_grammar.parents,
             builtin_style_names: component_grammar.attrs,
+            common_style_names: component_grammar.common_attrs,
+            component_style_names: component_grammar.component_attrs,
             system_api_style_names: component_grammar.system_api_attrs,
             need_pop_components: semantics.need_pop_components,
             bind_object_properties,
@@ -679,6 +692,13 @@ impl<'a> ComponentMetadataLoader<'a> {
                 paths.push(path);
             }
         }
+        let form_common_attrs = self
+            .ets_loader_path
+            .join("form_components")
+            .join("common_attrs.json");
+        if form_common_attrs.is_file() {
+            paths.push(form_common_attrs);
+        }
         paths.sort();
         let components = paths
             .par_iter()
@@ -692,6 +712,7 @@ impl<'a> ComponentMetadataLoader<'a> {
         for component in components {
             inventory.insert(component?);
         }
+        inventory.finish();
         Ok(inventory)
     }
 }
@@ -721,12 +742,15 @@ struct SdkComponentGrammarInventory {
     children: FxHashMap<String, Vec<String>>,
     parents: FxHashMap<String, Vec<String>>,
     attrs: FxHashSet<String>,
+    common_attrs: FxHashSet<String>,
+    component_attrs: FxHashMap<String, FxHashSet<String>>,
     system_api_attrs: FxHashSet<String>,
 }
 
 impl SdkComponentGrammarInventory {
     fn insert(&mut self, component: SdkComponentGrammar) {
         let Some(name) = component.name else {
+            self.common_attrs = component.attrs.into_iter().collect();
             return;
         };
         if component.atomic {
@@ -741,10 +765,29 @@ impl SdkComponentGrammarInventory {
         if !component.parents.is_empty() {
             self.parents.insert(name.clone(), component.parents);
         }
+        self.component_attrs
+            .insert(name.clone(), component.attrs.iter().cloned().collect());
         self.attrs.extend(component.attrs.iter().cloned());
         if component.system_api {
             self.system_api_attrs.extend(component.attrs);
         }
+    }
+
+    fn finish(&mut self) {
+        self.common_attrs.extend(
+            [
+                "gesture",
+                "parallelGesture",
+                "priorityGesture",
+                "slide",
+                "translate",
+                "scale",
+                "opacity",
+                "onMove",
+            ]
+            .map(str::to_string),
+        );
+        self.attrs.extend(self.common_attrs.iter().cloned());
     }
 }
 
