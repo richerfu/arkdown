@@ -29,4 +29,5 @@ pub use acquisition::{
     PackageAcquisitionSource,
 };
 pub use error::OhpmError;
+pub use lockfile::OhPackageLockfile;
 pub use package_name::PackageName;

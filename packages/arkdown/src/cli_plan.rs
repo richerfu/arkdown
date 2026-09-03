@@ -36,6 +36,8 @@ pub struct ArkdownBuildCliConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub arkts_version: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub ohpm_mode: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub watch: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub preview: Option<bool>,
@@ -177,6 +179,16 @@ impl<'a> ArkdownBuildArgsParser<'a> {
             ));
           }
           self.config.arkts_version = Some(value);
+        }
+        "--ohpm-mode" => {
+          let value = self.required_value(&mut index, arg)?;
+          if !matches!(value.as_str(), "offline" | "prefer-offline" | "online") {
+            return Err(CliDiagnostic::new(
+              "INVALID_OHPM_ACQUISITION_MODE",
+              format!("{arg} must be offline, prefer-offline, or online: {value}"),
+            ));
+          }
+          self.config.ohpm_mode = Some(value);
         }
         "--watch" => self.config.watch = Some(true),
         "--preview" => self.config.preview = Some(true),

@@ -14,6 +14,7 @@ use crate::dependency_graph::snapshot::{
     DependencyModuleProfileSnapshot, DependencyNodeSnapshot, DependencyNodeType,
     DependencyParameterSnapshot,
 };
+use crate::package::acquisition::PackageAcquisitionInventory;
 use crate::package::snapshot::PackageSnapshot;
 use crate::paths::ModulePathLayout;
 
@@ -29,6 +30,7 @@ pub(crate) struct DependencySnapshotInventory {
     packages: FxHashMap<PathBuf, Option<Arc<PackageSnapshot>>>,
     module_profiles: FxHashMap<PathBuf, Option<DependencyModuleProfileSnapshot>>,
     resolved_roots: FxHashMap<(PathBuf, PathBuf, String), Option<PathBuf>>,
+    acquired_roots: FxHashMap<(PathBuf, String), PathBuf>,
     canonical_roots: FxHashMap<PathBuf, PathBuf>,
 }
 
@@ -70,6 +72,14 @@ impl DependencyPackageManager {
 }
 
 impl DependencySnapshotInventory {
+    pub(crate) fn with_acquisitions(acquisitions: &PackageAcquisitionInventory) -> Self {
+        Self {
+            packages: acquisitions.packages.clone(),
+            acquired_roots: acquisitions.resolved_roots.clone(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn insert_package(
         &mut self,
         package_root: &Path,
@@ -102,6 +112,16 @@ impl DependencySnapshotInventory {
         );
         if let Some(root) = self.resolved_roots.get(&key) {
             return root.clone();
+        }
+
+        let canonical_issuer = self.canonical_root(issuer_root);
+        if let Some(root) = self
+            .acquired_roots
+            .get(&(canonical_issuer, alias.to_string()))
+            .cloned()
+        {
+            self.resolved_roots.insert(key, Some(root.clone()));
+            return Some(root);
         }
 
         // Hvigor's `BasePackageResolver.resolvePackagePath()` walks from the
@@ -518,6 +538,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::package::acquisition::{AcquisitionMode, PackageAcquisitionPlanner};
 
     struct DependencyGraphFixture {
         temp: tempfile::TempDir,
@@ -803,6 +824,48 @@ mod tests {
         );
         let graph_with_install = fixture.build_for("entry");
         assert!(graph_with_install.nodes.contains_key("native-types.so"));
+    }
+
+    #[test]
+    fn startup_acquisition_feeds_local_path_roots_into_the_frozen_graph() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "native-types.so": "file:./types/native" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/types/native",
+            r#"{ "name": "native-types.so", "version": "1.0.0", "types": "Index.d.ts" }"#,
+        );
+
+        let acquisitions = PackageAcquisitionPlanner::new(
+            fixture.root(),
+            [fixture.root().join("entry")],
+            AcquisitionMode::Offline,
+        )
+        .acquire()
+        .expect("resolve startup packages");
+        let mut inventory = DependencySnapshotInventory::with_acquisitions(&acquisitions);
+        let graph =
+            DependencyGraphBuilder::new("entry", fixture.root(), fixture.root().join("entry"))
+                .build_with_inventory(&mut inventory);
+
+        let dependency = graph
+            .nodes
+            .get("native-types.so")
+            .expect("acquired package must enter dependency graph");
+        assert_eq!(dependency.node_type, DependencyNodeType::NativeSo);
+        assert_eq!(
+            dependency.package_root,
+            Some(canonicalize_or_owned(
+                &fixture.root().join("entry/types/native")
+            ))
+        );
     }
 
     #[test]

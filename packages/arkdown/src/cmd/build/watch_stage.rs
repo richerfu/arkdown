@@ -26,7 +26,7 @@ use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalida
 
 use arkdown::plugins::factory::PackagePlugin;
 
-use super::args::{AbcBackendChoice, BuildArgs, BuildCommand};
+use super::args::{AbcBackendChoice, BuildArgs, BuildCommand, OhpmModeChoice};
 use super::layout::ModuleBuildLayout;
 
 /// Input for the watch stage.
@@ -40,6 +40,7 @@ pub(super) struct WatchStageInput {
   pub(super) target: String,
   /// Build mode string (e.g. "debug", "release").
   pub(super) mode: String,
+  pub(super) ohpm_mode: OhpmModeChoice,
   /// Optional module filter.
   pub(super) module_filter: Option<String>,
   /// Optional product filter.
@@ -104,6 +105,7 @@ impl WatchStageInput {
       session,
       target: args.target.clone(),
       mode: args.mode.clone(),
+      ohpm_mode: args.ohpm_mode,
       module_filter: args.module.clone(),
       product_filter: args.product.clone(),
       project_root,
@@ -160,6 +162,7 @@ impl WatchStage {
     let check_entry = input.check_entry;
     let target = input.target;
     let mode = input.mode;
+    let ohpm_mode = input.ohpm_mode;
     let module_filter = input.module_filter;
     let product_filter = input.product_filter;
     let project_root = input.project_root;
@@ -316,6 +319,7 @@ impl WatchStage {
         // rerun the bundle → bytecode → package pipeline.
         let is_hot = hot_reload_mode || matches!(change_kind, WatchChangeKind::Hot);
         let rebuild_args = BuildArgs {
+          ohpm_mode,
           target: target.clone(),
           mode: mode.clone(),
           arkts_version,

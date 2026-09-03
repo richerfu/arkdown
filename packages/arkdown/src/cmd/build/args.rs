@@ -81,6 +81,24 @@ pub enum AbcBackendChoice {
   Sdk,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum OhpmModeChoice {
+  Offline,
+  PreferOffline,
+  #[default]
+  Online,
+}
+
+impl From<OhpmModeChoice> for arkdown_session::package::acquisition::AcquisitionMode {
+  fn from(value: OhpmModeChoice) -> Self {
+    match value {
+      OhpmModeChoice::Offline => Self::Offline,
+      OhpmModeChoice::PreferOffline => Self::PreferOffline,
+      OhpmModeChoice::Online => Self::Online,
+    }
+  }
+}
+
 /// One selected native hvigor command root.
 ///
 /// The Node task graph serializes only explicit partial-task roots here. The
@@ -143,6 +161,10 @@ pub struct BuildArgs {
   /// existing ArkTS 1.1 parser and transform pipeline.
   #[arg(long = "arkts-version", default_value_t = ArktsLanguageVersion::default())]
   pub arkts_version: ArktsLanguageVersion,
+  /// OHPM dependency acquisition policy used before the build session freezes
+  /// package roots. Online matches the normal hvigor wrapper invocation.
+  #[arg(long = "ohpm-mode", value_enum, default_value = "online")]
+  pub ohpm_mode: OhpmModeChoice,
   /// Scope to a specific module
   #[arg(long)]
   pub module: Option<String>,
@@ -384,7 +406,9 @@ impl BuildCommand {
     }
     let config = std::sync::Arc::new(config);
     let mut session_builder = BuildSessionBuilder::new(config.clone());
-    session_builder = session_builder.with_arkts_language_version(args.arkts_version);
+    session_builder = session_builder
+      .with_arkts_language_version(args.arkts_version)
+      .with_ohpm_mode(args.ohpm_mode.into());
     if let Some(parameter_file_override) = args.parameter_file_override.clone() {
       session_builder = session_builder.with_parameter_file_override(parameter_file_override);
     }

@@ -1834,6 +1834,9 @@ pub struct BuildConfig {
   /// Explicit ArkTS compiler language. Omitted means ArkTS 1.1.
   #[napi(ts_type = "'1.1' | '1.2'")]
   pub arkts_version: Option<String>,
+  /// OHPM package acquisition policy. Omitted matches hvigor's online wrapper.
+  #[napi(ts_type = "'offline' | 'prefer-offline' | 'online'")]
+  pub ohpm_mode: Option<String>,
   pub module: Option<String>,
   pub product: Option<String>,
   pub build_target_name: Option<String>,
@@ -1946,6 +1949,7 @@ pub fn build<'a>(
     target,
     mode,
     arkts_version,
+    ohpm_mode,
     module,
     product,
     build_target_name,
@@ -1981,6 +1985,16 @@ pub fn build<'a>(
         napi::Error::from_reason(error.to_string())
       },
     )?,
+    ohpm_mode: match ohpm_mode.as_deref().unwrap_or("online") {
+      "offline" => arkdown_session::package::acquisition::AcquisitionMode::Offline,
+      "prefer-offline" => arkdown_session::package::acquisition::AcquisitionMode::PreferOffline,
+      "online" => arkdown_session::package::acquisition::AcquisitionMode::Online,
+      value => {
+        return Err(napi::Error::from_reason(format!(
+          "invalid OHPM acquisition mode '{value}'; expected offline, prefer-offline, or online"
+        )))
+      }
+    },
     build_target_name,
     build_version,
     watch: watch.unwrap_or(false),
@@ -2045,6 +2059,7 @@ pub fn parse_plugin_ast(
 #[derive(Debug, Clone, Default)]
 struct PackageBuildArgs {
   arkts_language_version: arkdown_core::ArktsLanguageVersion,
+  ohpm_mode: arkdown_session::package::acquisition::AcquisitionMode,
   build_target_name: Option<String>,
   build_version: Option<String>,
   watch: bool,
@@ -2130,7 +2145,8 @@ async fn run_build(
   }
   let config = std::sync::Arc::new(config);
   let session_builder = BuildSessionBuilder::new(config.clone())
-    .with_arkts_language_version(package_args.arkts_language_version);
+    .with_arkts_language_version(package_args.arkts_language_version)
+    .with_ohpm_mode(package_args.ohpm_mode);
   let session = std::sync::Arc::new(
     session_builder
       .build()
@@ -2141,6 +2157,17 @@ async fn run_build(
     target,
     mode,
     arkts_version: package_args.arkts_language_version,
+    ohpm_mode: match package_args.ohpm_mode {
+      arkdown_session::package::acquisition::AcquisitionMode::Offline => {
+        crate::cmd::build::args::OhpmModeChoice::Offline
+      }
+      arkdown_session::package::acquisition::AcquisitionMode::PreferOffline => {
+        crate::cmd::build::args::OhpmModeChoice::PreferOffline
+      }
+      arkdown_session::package::acquisition::AcquisitionMode::Online => {
+        crate::cmd::build::args::OhpmModeChoice::Online
+      }
+    },
     module,
     product,
     project: Some(project_path),

@@ -119,6 +119,23 @@ impl ModuleSnapshot {
         name: &str,
         package_path: &std::path::Path,
     ) -> Result<Self, ModuleSnapshotError> {
+        let (package_path, package) = if package_path.is_file() {
+            let snapshot = PackageSnapshot::from_manifest(root, package_path)
+                .map_err(Self::package_snapshot_error)?
+                .map(Arc::new);
+            (Some(package_path.to_path_buf()), snapshot)
+        } else {
+            (None, None)
+        };
+        Self::from_root_with_package_snapshot(root, name, package_path, package)
+    }
+
+    pub(crate) fn from_root_with_package_snapshot(
+        root: &std::path::Path,
+        name: &str,
+        package_path: Option<PathBuf>,
+        package: Option<Arc<PackageSnapshot>>,
+    ) -> Result<Self, ModuleSnapshotError> {
         let layout = ModulePathLayout::new(root);
         let src_main = layout.src_main();
 
@@ -175,18 +192,6 @@ impl ModuleSnapshot {
             None
         };
 
-        // Read the project-selected OHPM/npm manifest. Hvigor makes this
-        // decision once at project scope and applies it to every module.
-        let package_path = package_path.to_path_buf();
-        let (package_path_opt, package) = if package_path.is_file() {
-            let snapshot = PackageSnapshot::from_manifest(root, &package_path)
-                .map_err(Self::package_snapshot_error)?
-                .map(Arc::new);
-            (Some(package_path), snapshot)
-        } else {
-            (None, None)
-        };
-
         // Default source roots: src/main/ets or src/main/js.
         let mut source_roots = Vec::new();
         let ets_root = layout.ets_source_root();
@@ -215,7 +220,7 @@ impl ModuleSnapshot {
             module_json_value,
             ohos_test_module_json_value,
             module_type,
-            package_path: package_path_opt,
+            package_path,
             package,
             source_roots,
             resource_roots,

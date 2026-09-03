@@ -3,6 +3,7 @@
 //! Fetches package metadata and tarballs from the OHPM registry using the
 //! standard npm registry protocol.
 
+use semver::{Version, VersionReq};
 use serde::Deserialize;
 
 use crate::error::OhpmError;
@@ -96,13 +97,14 @@ impl OhpmRegistryClient {
 
         let meta: RawPackageMeta = response.json().map_err(OhpmError::RegistryHttp)?;
 
-        // Resolve version: use explicit version or resolve `latest` dist-tag.
-        let resolved_version = version
-            .map(|v| v.to_string())
-            .or_else(|| meta.dist_tags.get("latest").cloned())
+        let resolved_version = RegistryVersionSelector::new(&meta, version)
+            .resolve()
             .ok_or_else(|| OhpmError::RegistryNotFound {
                 name: name.to_string(),
-                message: "no version or latest dist-tag found".into(),
+                message: format!(
+                    "no registry version satisfies {}",
+                    version.unwrap_or("latest")
+                ),
             })?;
 
         let entry =
@@ -155,7 +157,103 @@ impl<'a> OhpmRegistryPackageUrl<'a> {
         let mut url = String::with_capacity(self.registry_url.len() + 1 + package_name.len());
         url.push_str(self.registry_url);
         url.push('/');
-        url.push_str(package_name);
+        // npm-compatible registries address scoped packages with the slash in
+        // the package identifier percent-encoded. Plain package identifiers
+        // contain no slash and remain byte-for-byte unchanged.
+        url.push_str(&package_name.replace('/', "%2F"));
         url
+    }
+}
+
+struct RegistryVersionSelector<'a> {
+    metadata: &'a RawPackageMeta,
+    requested: Option<&'a str>,
+}
+
+impl<'a> RegistryVersionSelector<'a> {
+    fn new(metadata: &'a RawPackageMeta, requested: Option<&'a str>) -> Self {
+        Self {
+            metadata,
+            requested,
+        }
+    }
+
+    fn resolve(&self) -> Option<String> {
+        let requested = self.requested.unwrap_or("latest");
+        if let Some(tagged) = self.metadata.dist_tags.get(requested) {
+            return Some(tagged.clone());
+        }
+        if self.metadata.versions.contains_key(requested) {
+            return Some(requested.to_string());
+        }
+        let requirement = VersionReq::parse(requested).ok()?;
+        self.metadata
+            .versions
+            .keys()
+            .filter_map(|candidate| {
+                let version = Version::parse(candidate).ok()?;
+                requirement
+                    .matches(&version)
+                    .then_some((version, candidate))
+            })
+            .max_by(|(left, _), (right, _)| left.cmp(right))
+            .map(|(_, candidate)| candidate.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata() -> RawPackageMeta {
+        RawPackageMeta {
+            versions: ["1.0.0", "1.5.0", "2.0.0"]
+                .into_iter()
+                .map(|version| {
+                    (
+                        version.to_string(),
+                        RawVersionEntry {
+                            version: version.to_string(),
+                            dist: RawDist::default(),
+                        },
+                    )
+                })
+                .collect(),
+            dist_tags: [("latest".to_string(), "2.0.0".to_string())]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn registry_selector_supports_tags_exact_versions_and_semver_ranges() {
+        let metadata = metadata();
+        assert_eq!(
+            RegistryVersionSelector::new(&metadata, None)
+                .resolve()
+                .as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            RegistryVersionSelector::new(&metadata, Some("1.0.0"))
+                .resolve()
+                .as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            RegistryVersionSelector::new(&metadata, Some("^1.0.0"))
+                .resolve()
+                .as_deref(),
+            Some("1.5.0")
+        );
+    }
+
+    #[test]
+    fn scoped_registry_url_encodes_the_package_separator() {
+        let name = PackageName::new("@ohos/hypium").unwrap();
+        assert_eq!(
+            OhpmRegistryPackageUrl::new("https://registry.example", &name).string(),
+            "https://registry.example/@ohos%2Fhypium"
+        );
     }
 }
