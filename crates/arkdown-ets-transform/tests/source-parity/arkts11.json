@@ -87,6 +87,13 @@
       "expect": { "errorCode": "10905220" }
     },
     {
+      "id": "button-label-child",
+      "owner": "compiler/src/process_component_build.ts::checkButtonParamHasLabel",
+      "file": "ButtonLabelChild.ets",
+      "source": "@Component struct ButtonLabelChild { build() { Button('label') { Text('invalid') } } }",
+      "expect": { "errorCode": "10905202" }
+    },
+    {
       "id": "toggle-checkbox-child",
       "owner": "compiler/src/validate_ui_syntax.ts::checkNoChildComponent",
       "file": "ToggleCheckboxChild.ets",
@@ -106,6 +113,20 @@
       "file": "SpecificChild.ets",
       "source": "@Component struct SpecificChild { build() { Grid() { Text('invalid') } } }",
       "expect": { "errorCode": "10905219" }
+    },
+    {
+      "id": "specific-parent-component-type",
+      "owner": "compiler/src/process_component_build.ts::checkNonspecificParents",
+      "file": "SpecificParent.ets",
+      "source": "@Component struct SpecificParent { build() { Row() { GridItem() { Text('invalid parent') } } } }",
+      "expect": { "errorCode": "10905201" }
+    },
+    {
+      "id": "specific-parent-through-foreach",
+      "owner": "compiler/src/process_component_build.ts::checkNonspecificParents",
+      "file": "SpecificParentForEach.ets",
+      "source": "@Component struct SpecificParentForEach { build() { Grid() { ForEach([], () => { GridItem() { Text('valid') } }) } } }",
+      "expect": { "contains": [] }
     },
     {
       "id": "builder-non-ui-statement",
@@ -134,6 +155,13 @@
       "file": "LinkDefault.ets",
       "source": "@Component struct LinkDefault { @Link value: number = 0; build() {} }",
       "expect": { "errorCode": "10905304" }
+    },
+    {
+      "id": "builder-param-literal-initializer",
+      "owner": "compiler/src/process_component_member.ts::updateBuilderParamProperty",
+      "file": "BuilderParamLiteral.ets",
+      "source": "@Component struct BuilderParamLiteral { @BuilderParam content: number = 100; build() {} }",
+      "expect": { "errorCode": "10905101" }
     },
     {
       "id": "custom-and-inner-property-decorator",

@@ -677,15 +677,15 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             return;
         };
         for statement in &body.statements {
-            self.check_ui_statement(statement);
+            self.check_ui_statement(statement, None);
         }
     }
 
-    fn check_ui_statement(&mut self, statement: &Statement<'_>) {
+    fn check_ui_statement(&mut self, statement: &Statement<'_>, parent: Option<&str>) {
         match statement {
             Statement::ExpressionStatement(expression) => {
                 if let Expression::ArkUIComponentExpression(component) = &expression.expression {
-                    self.check_ui_component_children(component);
+                    self.check_ui_component_children(component, parent);
                 } else if !matches!(
                     expression.expression,
                     Expression::CallExpression(_)
@@ -701,14 +701,14 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 }
             }
             Statement::IfStatement(statement) => {
-                self.check_ui_statement(&statement.consequent);
+                self.check_ui_statement(&statement.consequent, parent);
                 if let Some(alternate) = statement.alternate.as_ref() {
-                    self.check_ui_statement(alternate);
+                    self.check_ui_statement(alternate, parent);
                 }
             }
             Statement::BlockStatement(block) => {
                 for statement in &block.body {
-                    self.check_ui_statement(statement);
+                    self.check_ui_statement(statement, parent);
                 }
             }
             _ => self.error(
@@ -723,18 +723,93 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
     fn check_ui_component_children(
         &mut self,
         component: &oxc_ast::ast::ArkUIComponentExpression<'_>,
+        parent: Option<&str>,
     ) {
+        self.check_component_parent_contract(component, parent);
         self.check_component_child_contract(component);
+        let component_name = Self::component_expression_name(component);
+        if Self::is_iteration_component(component) {
+            for argument in &component.arguments {
+                self.check_iteration_argument(argument, parent);
+            }
+        }
         for child in &component.children {
             match child {
                 oxc_ast::ast::ArkUIChild::Component(component) => {
-                    self.check_ui_component_children(component);
+                    self.check_ui_component_children(component, component_name);
                 }
                 oxc_ast::ast::ArkUIChild::Statement(statement) => {
-                    self.check_ui_statement(statement);
+                    self.check_ui_statement(statement, component_name);
                 }
-                oxc_ast::ast::ArkUIChild::Expression(_) => {}
+                oxc_ast::ast::ArkUIChild::Expression(expression) => {
+                    self.check_ui_expression(expression, component_name);
+                }
             }
+        }
+    }
+
+    fn check_ui_expression(&mut self, expression: &Expression<'_>, parent: Option<&str>) {
+        match expression {
+            Expression::ArkUIComponentExpression(component) => {
+                self.check_ui_component_children(component, parent);
+            }
+            Expression::ConditionalExpression(expression) => {
+                self.check_ui_expression(&expression.consequent, parent);
+                self.check_ui_expression(&expression.alternate, parent);
+            }
+            Expression::ParenthesizedExpression(expression) => {
+                self.check_ui_expression(&expression.expression, parent);
+            }
+            _ => {}
+        }
+    }
+
+    fn check_iteration_argument(&mut self, argument: &Argument<'_>, parent: Option<&str>) {
+        let Some(Expression::ArrowFunctionExpression(arrow)) = argument.as_expression() else {
+            return;
+        };
+        match &arrow.body {
+            ArrowFunctionBody::FunctionBody(body) => {
+                for statement in &body.statements {
+                    self.check_ui_statement(statement, parent);
+                }
+            }
+            body => {
+                if let Some(expression) = body.as_expression() {
+                    self.check_ui_expression(expression, parent);
+                }
+            }
+        }
+    }
+
+    fn check_component_parent_contract(
+        &mut self,
+        component: &ArkUIComponentExpression<'_>,
+        parent: Option<&str>,
+    ) {
+        let Some(component_name) = Self::component_expression_name(component) else {
+            return;
+        };
+        let Some(parent) = parent.filter(|parent| {
+            self.component_metadata
+                .is_some_and(|metadata| metadata.is_builtin_component_name(parent))
+        }) else {
+            return;
+        };
+        let allowed = self
+            .component_metadata
+            .and_then(|metadata| metadata.specific_parent_components(component_name));
+        if let Some(allowed) = allowed.filter(|allowed| !allowed.iter().any(|name| name == parent))
+        {
+            self.error(
+                "10905201",
+                format!(
+                    "The '{component_name}' component can only be nested in the '{}' parent component.",
+                    allowed.join(",")
+                ),
+                component.span,
+                &[],
+            );
         }
     }
 
@@ -814,6 +889,20 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 &[],
             );
         }
+
+        if component_name == "Button"
+            && component
+                .arguments
+                .iter()
+                .any(Self::is_button_label_argument)
+        {
+            self.error(
+                "10905202",
+                "The Button component with a label parameter can not have any child.",
+                callee.span,
+                &[],
+            );
+        }
     }
 
     fn toggle_component_type<'node>(
@@ -840,6 +929,25 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 _ => None,
             }
         })
+    }
+
+    fn is_button_label_argument(argument: &Argument<'_>) -> bool {
+        match argument.as_expression() {
+            Some(Expression::StringLiteral(_)) => true,
+            Some(Expression::CallExpression(call)) => {
+                matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "$r")
+            }
+            _ => false,
+        }
+    }
+
+    fn component_expression_name<'node>(
+        component: &'node ArkUIComponentExpression<'_>,
+    ) -> Option<&'node str> {
+        match &component.callee {
+            Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+            _ => None,
+        }
     }
 
     fn component_children_count(&self, component: &ArkUIComponentExpression<'_>) -> usize {
@@ -1167,6 +1275,19 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
 
             let has_require = decorators.contains(&ArkuiDecoratorName::REQUIRE);
             for decorator in &decorators {
+                if *decorator == ArkuiDecoratorName::BUILDER_PARAM
+                    && property
+                        .value
+                        .as_ref()
+                        .is_some_and(Self::is_non_builder_literal)
+                {
+                    self.error(
+                        "10905101",
+                        "'@BuilderParam' property can only initialized by '@Builder' function or '@LocalBuilder' method in struct.",
+                        property.span,
+                        &[],
+                    );
+                }
                 if Self::forbids_function_type(decorator)
                     && property.type_annotation.as_ref().is_some_and(|annotation| {
                         Self::is_function_type(&annotation.type_annotation)
@@ -1718,6 +1839,18 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             ),
             _ => false,
         }
+    }
+
+    fn is_non_builder_literal(expression: &Expression<'_>) -> bool {
+        matches!(
+            expression,
+            Expression::StringLiteral(_)
+                | Expression::NumericLiteral(_)
+                | Expression::BooleanLiteral(_)
+                | Expression::NullLiteral(_)
+                | Expression::ObjectExpression(_)
+                | Expression::ArrayExpression(_)
+        )
     }
 
     fn error(&mut self, code: &str, message: impl Into<String>, span: Span, solutions: &[&str]) {
