@@ -8,8 +8,9 @@ use crate::source::CompileArktsSourceType;
 use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::system_api::Arkts11SystemApiValidator;
-use crate::transform::ModuleExportIndex;
-use crate::transform::SystemApiCheckOptions;
+use crate::transform::{
+    CustomComponentSemanticInventory, ModuleExportIndex, SystemApiCheckOptions, TransformOptions,
+};
 use crate::TransformSourceSnapshot;
 
 use super::{EtsCheckReport, EtsChecker};
@@ -133,8 +134,15 @@ impl ArktsSourceChecker {
             return EtsCheckReport::default();
         }
 
+        let custom_component_options = self.custom_component_options();
+        let custom_component_inventory = CustomComponentSemanticInventory::collect(
+            &parsed.program,
+            source_id,
+            &custom_component_options,
+        );
         let mut checker = EtsChecker::new(&parsed.program, source_id)
-            .with_component_metadata(&self.component_metadata);
+            .with_component_metadata(&self.component_metadata)
+            .with_custom_component_info(&custom_component_inventory.info);
         if let Some(project) = &self.project_semantics {
             checker = checker.with_imported_class_observations(
                 project.module_exports.imported_class_observations(
@@ -186,6 +194,18 @@ impl ArktsSourceChecker {
             .diagnostics(&parsed.program),
         );
         report
+    }
+
+    fn custom_component_options(&self) -> TransformOptions {
+        let mut options = TransformOptions::default()
+            .with_component_metadata(Arc::clone(&self.component_metadata));
+        options.arkts_language_version = self.arkts_language_version;
+        if let Some(project) = &self.project_semantics {
+            options.sources = project.sources.clone();
+            options.module_roots.clone_from(&project.module_roots);
+            options.module_exports = project.module_exports.clone();
+        }
+        options
     }
 }
 
