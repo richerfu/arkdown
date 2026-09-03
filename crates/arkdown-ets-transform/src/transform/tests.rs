@@ -108,6 +108,16 @@ fn observed_inheritance_resolves_import_aliases_defaults_namespaces_and_reexport
     )
     .expect_err("default import must resolve to the observed-v2 parent class");
     assert!(default_error.to_string().contains("10905224"));
+
+    let property_error = TransformHarness::transform_with_options(
+        &make_source(
+            "/project/Property.ets",
+            "import Model from './model/Modern';\n@Component\nstruct Property { @State model: Model | undefined = undefined; build() {} }\n",
+        ),
+        &options,
+    )
+    .expect_err("imported observed-v2 property types must resolve through the export index");
+    assert!(property_error.to_string().contains("10905348"));
 }
 
 #[test]
@@ -4350,10 +4360,13 @@ struct Parent {
   }
 }
 "#;
-    let result = TransformHarness::transform(&make_source(
-        "products/phone/src/main/ets/pages/Parent.ets",
-        src,
-    ))
+    let result = TransformHarness::transform_with_options(
+        &make_source("products/phone/src/main/ets/pages/Parent.ets", src),
+        &TransformOptions {
+            checker_mode: crate::CheckerMode::Off,
+            ..TransformOptions::default()
+        },
+    )
     .unwrap();
     assert!(
         result.contains("item: this.item"),

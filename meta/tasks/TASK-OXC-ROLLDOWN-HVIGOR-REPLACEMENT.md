@@ -8,11 +8,13 @@
 
 ### 1.1 2026-09-03 ArkTS 1.1 第一批实施进度
 
-- 已建立可执行的 `arkts11.json` 源码契约清单，当前 45 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期。
+- 已建立可执行的 `arkts11.json` 源码契约清单，当前 56 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期。
 - 已删除旧 OXC checker 中约千行没有新源码错误码/函数证据的猜测式规则，改为结构化、多诊断、稳定顺序的 `EtsCheckReport`；`arkdown check --checker oxc` 可在不启动 Node checker 的情况下运行该路径。
 - 已对齐首批高频规则：struct/class/function decorator target、build/Styles、成员初始化、Watch、Observed V1/V2、生命周期、全局复用池、SDK 组件/容器命名与根节点约束、`apiAvailable`。
 - 已补动态 ArkTS 的 `worker.Worker('*.ts') -> '*.js'` 和 `ESObject -> any` 全程序 OXC 变换，并把 Builder factory/global reuse pool 错误改为源码错误码。
-- 默认 checker 仍保持 `sdk`，尚未提前切换。切换和删除 `ets-checker-bridge.cjs` 的剩余阻断项是完整 system API/permission/syscap、跨文件类型与继承、warning suppressor，以及剩余 UI rule corpus；这些完成前不得宣称 ArkTS 1.1 已完全替换。
+- 已把 `@Observed/@ObservedV2` 类事实并入并行构建的 `ModuleExportIndex`，named/default/namespace import 与 barrel re-export 的继承和 V1 property 类型检查不再退化为单文件名称判断；standalone check 也复用一次性 source snapshot。
+- 已从 SDK `components/*.json` 一次性加载 atomic/single/specific-child/style/systemApi grammar，补齐 10905219–10905223、10905228、10905348、10905363、10905365、10905367、10905372，并通过无 cache 的真实 ArkTS 1.1 OXC/Rolldown HAP 构建。
+- 默认 checker 仍保持 `sdk`，尚未提前切换。切换和删除 `ets-checker-bridge.cjs` 的剩余阻断项是完整 system API/permission/syscap、其余跨文件类型推导、warning suppressor，以及剩余 UI rule corpus；这些完成前不得宣称 ArkTS 1.1 已完全替换。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
 

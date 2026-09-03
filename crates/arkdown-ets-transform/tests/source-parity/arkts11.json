@@ -59,6 +59,41 @@
       "expect": { "errorCode": "10905210" }
     },
     {
+      "id": "atomic-component-child",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkNoChildComponent",
+      "file": "AtomicChild.ets",
+      "source": "@Component struct AtomicChild { build() { Image('photo') { Text('invalid') } } }",
+      "expect": { "errorCode": "10905222" }
+    },
+    {
+      "id": "single-child-component-count",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkOneChildComponent",
+      "file": "SingleChild.ets",
+      "source": "@Component struct SingleChild { build() { Button('action') { Text('first'); Text('second') } } }",
+      "expect": { "errorCode": "10905220" }
+    },
+    {
+      "id": "toggle-checkbox-child",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkNoChildComponent",
+      "file": "ToggleCheckboxChild.ets",
+      "source": "@Component struct ToggleCheckboxChild { build() { Toggle({ type: ToggleType.Checkbox }) { Text('invalid') } } }",
+      "expect": { "errorCode": "10905223" }
+    },
+    {
+      "id": "toggle-button-child-count",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkOneChildComponent",
+      "file": "ToggleButtonChildren.ets",
+      "source": "@Component struct ToggleButtonChildren { build() { Toggle({ type: ToggleType.Button }) { Text('first'); Text('second') } } }",
+      "expect": { "errorCode": "10905221" }
+    },
+    {
+      "id": "specific-child-component-type",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkSpecificChildComponent",
+      "file": "SpecificChild.ets",
+      "source": "@Component struct SpecificChild { build() { Grid() { Text('invalid') } } }",
+      "expect": { "errorCode": "10905219" }
+    },
+    {
       "id": "builder-non-ui-statement",
       "owner": "compiler/src/process_component_build.ts::processComponentBlock",
       "file": "BuilderStatement.ets",
@@ -122,6 +157,13 @@
       "expect": { "errorCode": "10905229" }
     },
     {
+      "id": "component-name-collides-with-style",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStruct",
+      "file": "StyleName.ets",
+      "source": "@Component struct width { build() {} }",
+      "expect": { "errorCode": "10905228" }
+    },
+    {
       "id": "reusable-v2-owner",
       "owner": "compiler/src/validate_ui_syntax.ts::validateStruct",
       "file": "ReusableOwner.ets",
@@ -134,6 +176,13 @@
       "file": "V1MemberInV2.ets",
       "source": "@ComponentV2 struct V1MemberInV2 { @State value: number = 0; build() {} }",
       "expect": { "errorCode": "10905339" }
+    },
+    {
+      "id": "v1-property-observed-v2-type",
+      "owner": "compiler/src/validate_ui_syntax.ts::validatePropertyInStruct",
+      "file": "V1ObservedV2Type.ets",
+      "source": "@ObservedV2 class Model {} @Component struct V1ObservedV2Type { @State model: Model | undefined = undefined; build() {} }",
+      "expect": { "errorCode": "10905348" }
     },
     {
       "id": "v2-member-in-component-v1",

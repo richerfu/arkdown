@@ -1,0 +1,5 @@
+{
+  "name": "GridItem",
+  "single": true,
+  "attrs": ["selected"]
+}

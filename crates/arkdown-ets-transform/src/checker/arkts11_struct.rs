@@ -1,6 +1,7 @@
 use oxc_ast::ast::{
-    Argument, Expression, MethodDefinitionKind, ObjectPropertyKind, PropertyKey, Statement,
-    StructElement, StructStatement, TSType, TSTypeName,
+    Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, Expression, FunctionBody,
+    MethodDefinitionKind, ObjectPropertyKind, PropertyKey, Statement, StructElement,
+    StructStatement, TSType, TSTypeName,
 };
 use oxc_span::{GetSpan, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -9,6 +10,7 @@ use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::viewpu_emit::GeneratedViewpuName;
+use crate::transform::ImportedClassObservations;
 
 use super::arkts11_monitor::Arkts11MonitorValidator;
 
@@ -26,6 +28,7 @@ pub(super) struct Arkts11StructValidator<'statement, 'errors> {
     exported: bool,
     component_metadata: Option<&'statement ComponentMetadata>,
     component_reuse: Option<&'statement FxHashMap<String, bool>>,
+    class_observations: Option<&'statement ImportedClassObservations>,
 }
 
 impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
@@ -41,6 +44,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             exported: false,
             component_metadata: None,
             component_reuse: None,
+            class_observations: None,
         }
     }
 
@@ -57,6 +61,14 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         component_metadata: Option<&'statement ComponentMetadata>,
     ) -> Self {
         self.component_metadata = component_metadata;
+        self
+    }
+
+    pub(super) fn with_class_observation_inventory(
+        mut self,
+        class_observations: &'statement ImportedClassObservations,
+    ) -> Self {
+        self.class_observations = Some(class_observations);
         self
     }
 
@@ -279,6 +291,20 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             self.error(
                 "10905241",
                 "The '@Reusable' and '@ReusableV2' decoraotrs cannot be applied simultaneously.",
+                self.statement.id.span,
+                &[],
+            );
+        }
+        if self.component_metadata.is_some_and(|metadata| {
+            metadata.is_builtin_style_name(self.statement.id.name.as_str())
+                && !metadata.is_system_api_style_name(self.statement.id.name.as_str())
+        }) {
+            self.error(
+                "10905228",
+                format!(
+                    "The struct '{}' cannot have the same name as the built-in attribute '{}'.",
+                    self.statement.id.name, self.statement.id.name
+                ),
                 self.statement.id.span,
                 &[],
             );
@@ -686,6 +712,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         &mut self,
         component: &oxc_ast::ast::ArkUIComponentExpression<'_>,
     ) {
+        self.check_component_child_contract(component);
         for child in &component.children {
             match child {
                 oxc_ast::ast::ArkUIChild::Component(component) => {
@@ -697,6 +724,292 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 oxc_ast::ast::ArkUIChild::Expression(_) => {}
             }
         }
+    }
+
+    fn check_component_child_contract(&mut self, component: &ArkUIComponentExpression<'_>) {
+        if !component.has_children {
+            return;
+        }
+        let Expression::Identifier(callee) = &component.callee else {
+            return;
+        };
+        let component_name = callee.name.as_str();
+        let toggle_type = (component_name == "Toggle")
+            .then(|| Self::toggle_component_type(component))
+            .flatten();
+        let atomic = self
+            .component_metadata
+            .is_some_and(|metadata| metadata.is_atomic_component(component_name));
+        if atomic || matches!(toggle_type, Some("Checkbox" | "Switch")) {
+            if let Some(toggle_type) = toggle_type {
+                self.error(
+                    "10905223",
+                    format!(
+                        "When the component '{component_name}' set 'type' as '{toggle_type}', it can't have any child."
+                    ),
+                    callee.span,
+                    &[],
+                );
+            } else {
+                self.error(
+                    "10905222",
+                    format!("The component '{component_name}' can't have any child."),
+                    callee.span,
+                    &[],
+                );
+            }
+        }
+
+        let single = self
+            .component_metadata
+            .is_some_and(|metadata| metadata.is_single_child_component(component_name))
+            || toggle_type == Some("Button");
+        if single && (component.children.len() > 3 || self.component_children_count(component) > 1)
+        {
+            if let Some(toggle_type) = toggle_type {
+                self.error(
+                    "10905221",
+                    format!(
+                        "When the component '{component_name}' set 'type' as '{toggle_type}', it can only have a single child component."
+                    ),
+                    callee.span,
+                    &[],
+                );
+            } else {
+                self.error(
+                    "10905220",
+                    format!("The '{component_name}' component can have only one child component."),
+                    callee.span,
+                    &[],
+                );
+            }
+        }
+
+        let allowed = self
+            .component_metadata
+            .and_then(|metadata| metadata.specific_child_components(component_name))
+            .map(<[String]>::to_vec);
+        if let Some(allowed) = allowed
+            .filter(|allowed| self.component_has_disallowed_child(component, allowed.as_slice()))
+        {
+            self.error(
+                "10905219",
+                format!(
+                    "The component '{component_name}' can only have the child component '{}'.",
+                    allowed.join(",")
+                ),
+                callee.span,
+                &[],
+            );
+        }
+    }
+
+    fn toggle_component_type<'node>(
+        component: &'node ArkUIComponentExpression<'_>,
+    ) -> Option<&'node str> {
+        let argument = component.arguments.first()?.as_expression()?;
+        let Expression::ObjectExpression(object) = argument else {
+            return None;
+        };
+        object.properties.iter().find_map(|property| {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                return None;
+            };
+            let PropertyKey::StaticIdentifier(name) = &property.key else {
+                return None;
+            };
+            if name.name != "type" {
+                return None;
+            }
+            match &property.value {
+                Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+                Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+                Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+                _ => None,
+            }
+        })
+    }
+
+    fn component_children_count(&self, component: &ArkUIComponentExpression<'_>) -> usize {
+        component
+            .children
+            .iter()
+            .map(|child| self.arkui_child_count(child))
+            .sum::<usize>()
+            .min(2)
+    }
+
+    fn arkui_child_count(&self, child: &ArkUIChild<'_>) -> usize {
+        match child {
+            ArkUIChild::Component(component) => {
+                if Self::is_iteration_component(component) {
+                    2
+                } else {
+                    1
+                }
+            }
+            ArkUIChild::Statement(statement) => self.statement_child_count(statement),
+            ArkUIChild::Expression(expression) => self.expression_child_count(expression),
+        }
+    }
+
+    fn statement_child_count(&self, statement: &Statement<'_>) -> usize {
+        match statement {
+            Statement::ExpressionStatement(statement) => {
+                self.expression_child_count(&statement.expression)
+            }
+            Statement::BlockStatement(block) => block
+                .body
+                .iter()
+                .map(|statement| self.statement_child_count(statement))
+                .sum::<usize>()
+                .min(2),
+            Statement::IfStatement(statement) => {
+                self.statement_child_count(&statement.consequent).max(
+                    statement
+                        .alternate
+                        .as_ref()
+                        .map_or(0, |alternate| self.statement_child_count(alternate)),
+                )
+            }
+            _ => 0,
+        }
+    }
+
+    fn expression_child_count(&self, expression: &Expression<'_>) -> usize {
+        match expression {
+            Expression::ArkUIComponentExpression(component) => {
+                if Self::is_iteration_component(component) {
+                    2
+                } else {
+                    1
+                }
+            }
+            Expression::ConditionalExpression(expression) => self
+                .expression_child_count(&expression.consequent)
+                .max(self.expression_child_count(&expression.alternate)),
+            Expression::ParenthesizedExpression(expression) => {
+                self.expression_child_count(&expression.expression)
+            }
+            _ => 0,
+        }
+    }
+
+    fn component_has_disallowed_child(
+        &self,
+        component: &ArkUIComponentExpression<'_>,
+        allowed: &[String],
+    ) -> bool {
+        component
+            .children
+            .iter()
+            .any(|child| self.arkui_child_is_disallowed(child, allowed))
+    }
+
+    fn arkui_child_is_disallowed(&self, child: &ArkUIChild<'_>, allowed: &[String]) -> bool {
+        match child {
+            ArkUIChild::Component(component) => {
+                self.component_expression_is_disallowed(component, allowed)
+            }
+            ArkUIChild::Statement(statement) => {
+                self.statement_has_disallowed_child(statement, allowed)
+            }
+            ArkUIChild::Expression(expression) => {
+                self.expression_has_disallowed_child(expression, allowed)
+            }
+        }
+    }
+
+    fn component_expression_is_disallowed(
+        &self,
+        component: &ArkUIComponentExpression<'_>,
+        allowed: &[String],
+    ) -> bool {
+        if Self::is_iteration_component(component) {
+            return component
+                .arguments
+                .iter()
+                .any(|argument| self.argument_has_disallowed_child(argument, allowed));
+        }
+        matches!(
+            &component.callee,
+            Expression::Identifier(identifier)
+                if !allowed.iter().any(|name| name == identifier.name.as_str())
+        )
+    }
+
+    fn argument_has_disallowed_child(&self, argument: &Argument<'_>, allowed: &[String]) -> bool {
+        let Some(Expression::ArrowFunctionExpression(arrow)) = argument.as_expression() else {
+            return false;
+        };
+        if let ArrowFunctionBody::FunctionBody(body) = &arrow.body {
+            return self.function_body_has_disallowed_child(body, allowed);
+        }
+        arrow
+            .body
+            .as_expression()
+            .is_some_and(|expression| self.expression_has_disallowed_child(expression, allowed))
+    }
+
+    fn function_body_has_disallowed_child(
+        &self,
+        body: &FunctionBody<'_>,
+        allowed: &[String],
+    ) -> bool {
+        body.statements
+            .iter()
+            .any(|statement| self.statement_has_disallowed_child(statement, allowed))
+    }
+
+    fn statement_has_disallowed_child(
+        &self,
+        statement: &Statement<'_>,
+        allowed: &[String],
+    ) -> bool {
+        match statement {
+            Statement::ExpressionStatement(statement) => {
+                self.expression_has_disallowed_child(&statement.expression, allowed)
+            }
+            Statement::BlockStatement(block) => block
+                .body
+                .iter()
+                .any(|statement| self.statement_has_disallowed_child(statement, allowed)),
+            Statement::IfStatement(statement) => {
+                self.statement_has_disallowed_child(&statement.consequent, allowed)
+                    || statement.alternate.as_ref().is_some_and(|alternate| {
+                        self.statement_has_disallowed_child(alternate, allowed)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn expression_has_disallowed_child(
+        &self,
+        expression: &Expression<'_>,
+        allowed: &[String],
+    ) -> bool {
+        match expression {
+            Expression::ArkUIComponentExpression(component) => {
+                self.component_expression_is_disallowed(component, allowed)
+            }
+            Expression::ConditionalExpression(expression) => {
+                self.expression_has_disallowed_child(&expression.consequent, allowed)
+                    || self.expression_has_disallowed_child(&expression.alternate, allowed)
+            }
+            Expression::ParenthesizedExpression(expression) => {
+                self.expression_has_disallowed_child(&expression.expression, allowed)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_iteration_component(component: &ArkUIComponentExpression<'_>) -> bool {
+        matches!(
+            &component.callee,
+            Expression::Identifier(identifier)
+                if matches!(identifier.name.as_str(), "ForEach" | "LazyForEach")
+        )
     }
 
     fn root_component_name<'node>(statement: &'node Statement<'_>) -> Option<&'node str> {
@@ -744,6 +1057,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             if !component_v2 {
                 self.check_custom_decorator_conflict(property, &decorators);
                 self.check_forbidden_state_type(property, name, &decorators);
+                self.check_observed_v2_property_type(property, &decorators);
             }
 
             for decorator in &property.decorators {
@@ -1022,6 +1336,62 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 property.span,
                 &[],
             );
+        }
+    }
+
+    fn check_observed_v2_property_type(
+        &mut self,
+        property: &oxc_ast::ast::PropertyDefinition<'_>,
+        decorators: &[&str],
+    ) {
+        let Some(decorator) = decorators
+            .iter()
+            .copied()
+            .find(|name| Self::is_v1_component_member_decorator(name))
+        else {
+            return;
+        };
+        let Some(annotation) = property.type_annotation.as_ref() else {
+            return;
+        };
+        if self.type_contains_observed_v2(&annotation.type_annotation) {
+            self.error(
+                "10905348",
+                format!(
+                    "The type of the '@{decorator}' property can not be a class decorated with '@ObservedV2'."
+                ),
+                property.span,
+                &[],
+            );
+        }
+    }
+
+    fn type_contains_observed_v2(&self, ty: &TSType<'_>) -> bool {
+        match ty {
+            TSType::TSUnionType(union) => union
+                .types
+                .iter()
+                .any(|member| self.type_contains_observed_v2(member)),
+            TSType::TSTypeReference(reference) => self
+                .class_observations
+                .and_then(|observations| match &reference.type_name {
+                    TSTypeName::IdentifierReference(identifier) => {
+                        observations.bindings.get(identifier.name.as_str()).copied()
+                    }
+                    TSTypeName::QualifiedName(qualified) => {
+                        let TSTypeName::IdentifierReference(namespace) = &qualified.left else {
+                            return None;
+                        };
+                        observations
+                            .namespaces
+                            .get(namespace.name.as_str())
+                            .and_then(|classes| classes.get(qualified.right.name.as_str()))
+                            .copied()
+                    }
+                    TSTypeName::ThisExpression(_) => None,
+                })
+                .is_some_and(|observation| observation.observed_v2),
+            _ => false,
         }
     }
 

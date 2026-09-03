@@ -5,7 +5,7 @@
         "method": ["build", "pageTransition"],
         "decorator": ["LocalBuilder", "Builder"]
       },
-      "components": ["Column", "Divider", "Image", "Row", "Text"],
+      "components": ["Button", "Column", "Divider", "Grid", "GridItem", "Image", "Row", "Text", "Toggle"],
       "extend": {
         "decorator": ["Extend", "AnimatableExtend"]
       },
