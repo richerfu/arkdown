@@ -92,6 +92,7 @@ Options:
   --arkts-version <version>
                       Compile as ArkTS 1.1 or 1.2. 1.2 must be explicit;
                       the default is 1.1.
+  --ohpm-mode <mode>  Dependency acquisition: offline, prefer-offline, or online.
   --watch             Rebuild on changes.
   --preview           Preview resource rebuild mode.
   --check-entry       Require exactly one @Entry on the previewed page.

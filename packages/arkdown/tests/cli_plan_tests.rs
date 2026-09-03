@@ -52,6 +52,20 @@ fn direct_build_selects_arkts_1_2_only_from_the_explicit_flag() {
 }
 
 #[test]
+fn direct_build_selects_the_ohpm_acquisition_policy() {
+  let defaults = PackageCliParser::parse_build(&args(&[])).expect("default build args");
+  assert_eq!(defaults.ohpm_mode, None);
+
+  let selected = PackageCliParser::parse_build(&args(&["--ohpm-mode", "prefer-offline"]))
+    .expect("prefer-offline should parse");
+  assert_eq!(selected.ohpm_mode.as_deref(), Some("prefer-offline"));
+
+  let error = PackageCliParser::parse_build(&args(&["--ohpm-mode", "cache-only"]))
+    .expect_err("unknown OHPM policies must be rejected by the CLI boundary");
+  assert_eq!(error.code, "INVALID_OHPM_ACQUISITION_MODE");
+}
+
+#[test]
 fn direct_build_forwards_the_preview_check_entry_override() {
   let defaults = PackageCliParser::parse_build(&args(&[])).expect("default build args");
   assert_eq!(defaults.check_entry, None);

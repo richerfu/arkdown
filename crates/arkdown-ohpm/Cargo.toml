@@ -18,6 +18,7 @@ tar = { workspace = true }
 base64 = { workspace = true }
 fs-err = { workspace = true }
 json5 = { workspace = true }
+semver = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }
@@ -26,3 +27,4 @@ sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }

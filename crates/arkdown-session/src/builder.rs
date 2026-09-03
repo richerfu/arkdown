@@ -15,7 +15,7 @@ use crate::dependency_graph::snapshot::DependencyNodeType;
 use crate::fingerprint::{FingerprintError, InputFingerprintSet};
 use crate::paths::PathResolver;
 use crate::profiles::store::{ProfileStore, ProfileStoreError};
-use crate::project::snapshot::ProjectSnapshot;
+use crate::project::snapshot::{ProjectSnapshot, ProjectSnapshotError};
 use crate::sdk::snapshot::{SdkSnapshot, SdkSnapshotError};
 use crate::session::BuildSession;
 use crate::source_store::SourceStore;
@@ -40,6 +40,10 @@ pub enum BuildSessionError {
     #[error("profile store error: {0}")]
     Profile(#[from] ProfileStoreError),
 
+    /// Project/module/package startup snapshot construction failed.
+    #[error("project snapshot error: {0}")]
+    Project(#[source] Box<ProjectSnapshotError>),
+
     /// Input fingerprinting failed.
     #[error("fingerprint error: {0}")]
     Fingerprint(#[from] FingerprintError),
@@ -51,6 +55,12 @@ pub enum BuildSessionError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl From<ProjectSnapshotError> for BuildSessionError {
+    fn from(value: ProjectSnapshotError) -> Self {
+        Self::Project(Box::new(value))
+    }
 }
 
 /// Builds an immutable [`BuildSession`] from a project root and configuration.
@@ -118,11 +128,11 @@ impl BuildSessionBuilder {
         }
 
         // Phase 1: Build project and module snapshots.
-        let project = ProjectSnapshot::from_config_with_parameter_file(
+        let project = ProjectSnapshot::from_config_with_parameter_file_and_acquisition_mode(
             &self.config,
             self.parameter_file_override.clone(),
-        )
-        .map_err(|e| BuildSessionError::Config(e.to_string()))?;
+            Some(self.ohpm_mode),
+        )?;
 
         // Phase 2: Build SDK snapshot.
         let sdk = SdkSnapshot::from_config(&self.config.sdk_config)?;

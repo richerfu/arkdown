@@ -63,10 +63,14 @@ pub struct LockfileEntry {
 struct RawLockfile {
     #[serde(default)]
     packages: IndexMap<String, RawEntry>,
+    #[serde(default)]
+    dependencies: IndexMap<String, RawEntry>,
 }
 
 #[derive(Deserialize)]
 struct RawEntry {
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     version: String,
     #[serde(default)]
@@ -93,9 +97,16 @@ impl OhPackageLockfile {
             Err(_) => return Self::default(),
         };
 
+        Self::from_raw(raw)
+    }
+
+    fn from_raw(raw: RawLockfile) -> Self {
         let mut entries = IndexMap::new();
-        for (key, raw_entry) in raw.packages {
-            let name = strip_version_suffix(&key).to_string();
+        for (key, raw_entry) in raw.packages.into_iter().chain(raw.dependencies) {
+            let name = raw_entry
+                .name
+                .clone()
+                .unwrap_or_else(|| strip_version_suffix(&key).to_string());
             entries.insert(
                 name,
                 LockfileEntry {
@@ -108,6 +119,14 @@ impl OhPackageLockfile {
         }
 
         OhPackageLockfile { entries }
+    }
+
+    fn parse_or_error(path: &Path, content: &str) -> Result<Self, OhpmError> {
+        let raw = json5::from_str(content).map_err(|error| OhpmError::Parse {
+            file: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        Ok(Self::from_raw(raw))
     }
 
     /// Load and parse `oh-package-lock.json5` from `root`.
@@ -125,13 +144,13 @@ impl OhPackageLockfile {
 
     /// Load and parse, returning a typed error on I/O failure.
     ///
-    /// Unlike [`OhPackageLockfile::load`], this variant reports I/O errors
-    /// to the caller. Parse errors on a present file still silently return an
-    /// empty lockfile.
+    /// Unlike [`OhPackageLockfile::load`], this variant reports both I/O and
+    /// parse errors for a present lockfile. Session startup uses this strict
+    /// path so a corrupt lock cannot silently select a different package.
     pub fn load_or_error(root: &Path) -> Result<Self, OhpmError> {
         let path = root.join("oh-package-lock.json5");
         match std::fs::read_to_string(&path) {
-            Ok(content) => Ok(Self::parse(&content)),
+            Ok(content) => Self::parse_or_error(&path, &content),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(OhpmError::io(path, e)),
         }
@@ -234,6 +253,28 @@ mod tests {
     fn test_empty_lockfile_on_invalid_json() {
         let lf = OhPackageLockfile::parse("this is not json");
         assert!(lf.is_empty());
+    }
+
+    #[test]
+    fn strict_lockfile_load_reports_present_invalid_json() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("oh-package-lock.json5"), "not json").unwrap();
+        assert!(matches!(
+            OhPackageLockfile::load_or_error(temp.path()),
+            Err(OhpmError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn dependency_shape_uses_explicit_package_name_for_alias_keys() {
+        let lockfile = OhPackageLockfile::parse(
+            r#"{
+              dependencies: {
+                alias: { name: "@scope/library", version: "1.2.3" }
+              }
+            }"#,
+        );
+        assert_eq!(lockfile.resolved_version("@scope/library"), Some("1.2.3"));
     }
 
     #[test]

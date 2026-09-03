@@ -7,6 +7,7 @@ edition = "2021"
 arkdown-core = { workspace = true }
 arkdown-config = { workspace = true }
 arkdown-path = { workspace = true }
+arkdown-ohpm = { workspace = true }
 arkdown-ohos-schema = { workspace = true }
 oxc_index = { workspace = true }
 compact_str = { workspace = true }
