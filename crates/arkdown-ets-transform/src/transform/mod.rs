@@ -1,5 +1,6 @@
 pub(crate) mod api_available;
 mod auto_lazy_import;
+pub(crate) mod available_annotation;
 pub(crate) use auto_lazy_import::apply as apply_auto_lazy_import;
 mod build_fn;
 mod builder_factory;
@@ -49,6 +50,7 @@ use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
 use crate::transform::api_available::{
     ApiAvailableLowerer, ApiAvailableTransformOptions, ApiAvailableValidator,
 };
+use crate::transform::available_annotation::AvailableAnnotationValidator;
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, CustomComponentUpdateProps,
     StylesMethodInfo,
@@ -352,9 +354,11 @@ impl<'a> ArktsTransformer<'a> {
             false
         };
         let needs_api_available = options.api_available.should_transform_source(content);
+        let needs_available_annotation = options.api_available.should_validate_annotation(content);
         let syntax_detector = ArktsTransformSyntaxDetector::new();
         if !mock_setup_decorators_lowered
             && !needs_api_available
+            && !needs_available_annotation
             && !syntax_detector.program(&parsed.program)
         {
             return Ok(ArktsTransformOutput {
@@ -365,6 +369,17 @@ impl<'a> ArktsTransformer<'a> {
         }
 
         if matches!(options.checker_mode, CheckerMode::Oxc) {
+            if needs_available_annotation {
+                let diagnostics =
+                    AvailableAnnotationValidator::new(&source.id.id, options.api_available)
+                        .diagnostics(&parsed.program);
+                for diagnostic in &diagnostics {
+                    tracing::debug!(file = %source.id.id, diagnostic = ?diagnostic, "available annotation diagnostic");
+                }
+                if let Some(error) = diagnostics.iter().find(|diagnostic| diagnostic.is_error()) {
+                    return Err(error.clone());
+                }
+            }
             if needs_api_available {
                 ApiAvailableValidator::new(&source.id.id, options.api_available)
                     .validate(&parsed.program)?;
