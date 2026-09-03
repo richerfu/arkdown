@@ -40,11 +40,11 @@ pub use hvigor_runtime::{
   RuntimeHvigorParameterState, RuntimeHvigorTaskExecutionState, RuntimeHvigorTaskHooks,
   RuntimeHvigorTaskState, RuntimeHvigorWorkerPoolState,
 };
-mod hvigor_script;
 mod hvigor_sync;
 mod js_callback;
 mod native_build_config;
 mod ohpm_dependency_map;
+mod plugin_module;
 pub mod progress;
 mod remote_hsp;
 mod runtime_invocation;
@@ -126,19 +126,19 @@ pub fn hvigor_project_cache_hash(project_root: String) -> napi::Result<String> {
     .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
-/// Compile one hvigor TypeScript configuration module through Rust OXC and
-/// Rolldown. JavaScript receives only the CommonJS text that it must execute
-/// in the owning V8 isolate.
+/// Compile one user-authored TypeScript plugin module through OXC and Rolldown.
+/// JavaScript receives only the CommonJS text it must execute in the owning V8
+/// isolate.
 #[napi]
-pub async fn compile_hvigor_script(file: String, source_map: Option<bool>) -> napi::Result<String> {
-  hvigor_script::HvigorScriptNapiCompiler::compile(file, source_map.unwrap_or(false)).await
+pub async fn compile_plugin_module(file: String, source_map: Option<bool>) -> napi::Result<String> {
+  plugin_module::PluginModuleNapiCompiler::compile(file, source_map.unwrap_or(false)).await
 }
 
 /// Synchronous counterpart required by Node's `Module._extensions` contract
-/// for TypeScript files imported from another hvigor configuration module.
+/// for TypeScript files imported from another plugin module.
 #[napi]
-pub fn compile_hvigor_script_sync(file: String, source_map: Option<bool>) -> napi::Result<String> {
-  hvigor_script::HvigorScriptNapiCompiler::compile_sync(file, source_map.unwrap_or(false))
+pub fn compile_plugin_module_sync(file: String, source_map: Option<bool>) -> napi::Result<String> {
+  plugin_module::PluginModuleNapiCompiler::compile_sync(file, source_map.unwrap_or(false))
 }
 
 /// Resolve latest-hvigor compile-plugin order against the native Rolldown
@@ -1134,9 +1134,9 @@ impl HvigorModuleInfo {
 
 /// Compile plugin context — the `this` value inside user plugin hooks.
 ///
-/// Runtime JS binds this object before forwarding hooks into the Rust NAPI
-/// bridge. Methods are typed here for generated TypeScript declarations; the
-/// actual method implementations live in `js/runtime.js`.
+/// The plugin adapter binds this object before forwarding hooks into the Rust
+/// NAPI bridge. Methods are typed here for generated TypeScript declarations;
+/// the actual method implementations live in `js/plugin-adapter.js`.
 #[napi(object)]
 pub struct HvigorPluginContext {
   pub share: Option<HvigorShareContext>,
@@ -1161,11 +1161,9 @@ pub struct PluginCacheRequest {
 
 /// Rolldown-compatible arkdown compile plugin.
 ///
-/// The runtime loader accepts plugin objects from explicit `build(config,
-/// plugins)`, `compilePluginPath`, `hvigorPluginFile`, and discovered
-/// hvigorfiles. Hooks are normalized by `js/runtime.js` before they are passed to
-/// Rust, so user-facing cache hooks receive structured objects while the native
-/// bridge still exchanges JSON strings internally.
+/// The plugin adapter accepts objects passed explicitly to `build(config,
+/// plugins)` or loaded from `compilePluginPath`/`hvigorPluginFile`. Hooks are
+/// normalized by `js/plugin-adapter.js` before they are passed to Rust.
 #[napi(object)]
 pub struct ArkdownPlugin {
   pub name: Option<String>,
@@ -1350,22 +1348,26 @@ pub fn build<'a>(
   if let Some(arr) = plugins {
     let len = arr.len();
     for i in 0..len {
-      if let Some(obj) = arr.get::<Object<'_>>(i)? {
-        match JsPlugin::from_js_object(obj) {
-          Ok((p, order)) => {
-            let module_root = p.module_root.clone();
-            let target_name = p.target_name.clone();
-            let plugin = p.clone() as rolldown_plugin::__inner::SharedPluginable;
-            let gap_hooks = p as Arc<dyn HvigorPluginGapHooks>;
-            js_plugins.push(
-              PackagePlugin::with_gap_hooks(plugin, order, gap_hooks)
-                .with_module_root(module_root)
-                .with_target_name(target_name),
-            );
-          }
-          Err(e) => tracing::warn!(index = i, error = %e, "failed to wrap plugin[{i}]"),
-        }
-      }
+      let obj = arr.get::<Object<'_>>(i)?.ok_or_else(|| {
+        napi::Error::from_reason(format!(
+          "ARKDOWN_PLUGIN_EXPORT_INVALID: plugin[{i}] is missing"
+        ))
+      })?;
+      let (plugin, order) = JsPlugin::from_js_object(obj).map_err(|error| {
+        napi::Error::from_reason(format!(
+          "ARKDOWN_PLUGIN_EXPORT_INVALID: plugin[{i}]: {}",
+          error.reason
+        ))
+      })?;
+      let module_root = plugin.module_root.clone();
+      let target_name = plugin.target_name.clone();
+      let rolldown_plugin = plugin.clone() as rolldown_plugin::__inner::SharedPluginable;
+      let gap_hooks = plugin as Arc<dyn HvigorPluginGapHooks>;
+      js_plugins.push(
+        PackagePlugin::with_gap_hooks(rolldown_plugin, order, gap_hooks)
+          .with_module_root(module_root)
+          .with_target_name(target_name),
+      );
     }
   }
 

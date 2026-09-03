@@ -468,7 +468,7 @@ export interface BuildConfig {
   project?: string
   target?: string
   mode?: string
-  /** ArkTS 1.2 is opt-in; omitted builds use ArkTS 1.1. */
+  /** Explicit ArkTS compiler language. Omitted means ArkTS 1.1. */
   arktsVersion?: '1.1' | '1.2'
   module?: string
   product?: string
@@ -505,17 +505,17 @@ export interface BuildResult {
 }
 
 /**
- * Compile one hvigor TypeScript configuration module through Rust OXC and
- * Rolldown. JavaScript receives only the CommonJS text that it must execute
- * in the owning V8 isolate.
+ * Compile one user-authored TypeScript plugin module through OXC and Rolldown.
+ * JavaScript receives only the CommonJS text it must execute in the owning V8
+ * isolate.
  */
-export declare function compileHvigorScript(file: string, sourceMap?: boolean | undefined | null): Promise<string>
+export declare function compilePluginModule(file: string, sourceMap?: boolean | undefined | null): Promise<string>
 
 /**
  * Synchronous counterpart required by Node's `Module._extensions` contract
- * for TypeScript files imported from another hvigor configuration module.
+ * for TypeScript files imported from another plugin module.
  */
-export declare function compileHvigorScriptSync(file: string, sourceMap?: boolean | undefined | null): string
+export declare function compilePluginModuleSync(file: string, sourceMap?: boolean | undefined | null): string
 
 export declare function emitRuntimeLog(record: RuntimeLogRecord): void
 
