@@ -516,3 +516,43 @@ fn arkts11_system_api_enforces_stage_form_atomic_and_test_tags() {
         )
     }));
 }
+
+#[test]
+fn arkts11_system_api_resolves_return_and_local_value_type_flow() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "interface Manager {\n\
+             /** @since 13 */\n\
+             run(): void;\n\
+             }\n\
+             export declare function getManager(): Manager;\n\
+             export declare const directManager: Manager;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { getManager, directManager } from '@ohos.demo';\n\
+         directManager.run();\n\
+         getManager().run();\n\
+         const manager = getManager();\n\
+         manager.run();\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(since, 3);
+}
