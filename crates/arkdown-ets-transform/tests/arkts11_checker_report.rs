@@ -40,6 +40,26 @@ class Model {
 }
 
 #[test]
+fn arkts11_extend_and_animatable_extend_report_both_source_phases() {
+    let allocator = Allocator::default();
+    let source = "@Extend(Text) @AnimatableExtend(Text) function sharedStyle() {}";
+    let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let report = EtsChecker::new(&parsed.program, "ExtendConflict.ets").check();
+    let codes = report
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            EtsTransformError::CodedDiagnostic { code, .. } => Some(code.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(codes, ["10905117", "10905111"]);
+}
+
+#[test]
 fn arkts11_component_v2_property_contracts_keep_source_codes_and_order() {
     let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
     let report = checker.check(

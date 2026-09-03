@@ -548,9 +548,8 @@ impl<'a> ArktsTransformer<'a> {
                         options.component_metadata.runtime_names(),
                     )
                     .statements(&allocator)
-                    .map_err(|err| EtsTransformError::Fatal {
-                        file: source.id.id.clone(),
-                        message: format!("unsupported ArkUI build() DSL: {err}"),
+                    .map_err(|error| {
+                        error.into_transform_error(&source.id.id, "unsupported ArkUI build() DSL")
                     })?;
                     Ok(Some(StatementReplacementPlan::AstStatements(statements)))
                 } else {
@@ -1168,9 +1167,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     return_annotation,
                     &BuildBodyInfo::plan(body),
                 )
-                .map_err(|err| EtsTransformError::Fatal {
-                    file: self.id.to_string(),
-                    message: format!("unsupported ArkUI builder DSL: {err:?}"),
+                .map_err(|error| {
+                    error.into_transform_error(self.id, "unsupported ArkUI builder DSL")
                 })?
             }
         };
