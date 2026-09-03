@@ -75,3 +75,27 @@ test('runtime entry performs no project, task, cache, or worker orchestration', 
   assert.doesNotMatch(entry, /(?:readFile|writeFile|readdir|Worker|Task|hvigorfile|runHvigorCommand)/)
   assert.match(entry, /createBuild/)
 })
+
+test('native package exposes only build and plugin bridges, not a Hvigor runtime', () => {
+  const packageRoot = path.resolve(__dirname, '..')
+  const sourceRoot = path.join(packageRoot, 'src')
+  const napi = fs.readFileSync(path.join(sourceRoot, 'lib.rs'), 'utf8')
+  const declarations = fs.readFileSync(path.join(packageRoot, 'index.d.ts'), 'utf8')
+
+  for (const removed of [
+    'build_script_runtime_model',
+    'hvigor_runtime',
+    'runtime_task',
+    'hvigor_config_merge.rs',
+    'hvigor_dependency_workspace.rs',
+    'hvigor_maintenance.rs',
+    'hvigor_sync.rs',
+    'runtime_invocation.rs',
+  ]) {
+    assert.equal(fs.existsSync(path.join(sourceRoot, removed)), false, `${removed} must stay deleted`)
+  }
+
+  assert.doesNotMatch(napi, /run_runtime_tasks|RuntimeTaskBridgeSeed|RuntimeBuildScriptSession/)
+  assert.doesNotMatch(declarations, /runRuntimeTasks|RuntimeHvigor|RuntimeBuildScriptSession/)
+  assert.match(declarations, /build\(config: BuildConfig, plugins\?: Array<ArkdownPlugin>/)
+})

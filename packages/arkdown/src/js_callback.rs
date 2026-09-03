@@ -52,12 +52,6 @@ pub type MaybeAsyncJsReturn<Ret> = Either<Either<Promise<Ret>, Ret>, InvalidRetu
 pub type MaybeAsyncJsCallback<T, Args, Ret> =
   Arc<ThreadsafeFunction<T, MaybeAsyncJsReturn<Ret>, Args, Status, false, true>>;
 
-/// Strong callback ownership for bridge values that are created only for the
-/// duration of a native invocation. Unlike plugin objects, these callbacks do
-/// not have another long-lived JavaScript owner after the N-API entry returns.
-pub type StrongMaybeAsyncJsCallback<T, Args, Ret> =
-  Arc<ThreadsafeFunction<T, MaybeAsyncJsReturn<Ret>, Args, Status, false, false>>;
-
 pub trait MaybeAsyncJsCallbackExt<T, Ret> {
   fn await_call(&self, value: T) -> impl Future<Output = napi::Result<Ret>> + Send;
 }

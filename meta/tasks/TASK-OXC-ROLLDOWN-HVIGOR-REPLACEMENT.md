@@ -27,7 +27,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 
 当前最明显的架构偏差是：
 
-1. `arkdown-napi` 有约 6.6 万行 Rust，实际承担了构建编排、ABC、打包、运行时任务、hvigor 公共 API 仿真等主体逻辑，不是薄绑定层。
+1. `arkdown-napi` 已从约 6.6 万行降至 4.7 万行 Rust：Hvigor project/task/worker/build-script runtime 与 N-API facade 已删除，但构建编排、ABC 和打包仍待迁入对应 application/domain crate，当前还不是薄绑定层。
 2. `packages/arkdown/js` 已从约 4,454 行收敛到 790 行：只保留原生入口、CLI trampoline、完整 TS/JS compile-plugin 适配，以及尚待 OXC 语义尾项完成后删除的 checker 对比 bridge。
 3. 默认 checker 已改为 OXC；显式 `checker=sdk` 对比后端及其 Node bridge 仍待最后一批语义用例迁移后删除。
 4. ArkTS 1.2 虽然已经按参数正确分流，但 Rust 只解析并投影模块请求，真正的 UI、语法检查、Memo 和 ABC 驱动仍由 Node 加载 SDK 插件执行。
@@ -146,8 +146,8 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 | 能力域 | 当前状态 | 证据与实际差异 | 重构结论 |
 |---|---|---|---|
-| 项目模型/CLI/任务编排 | JS 外壳已删除，Rust facade 待删 | npm CLI 只接受 native `build`；`runtime.js` 和五个 `hvigor-*-runtime.js` 已删除，但 Rust `runtime_task`/build-script N-API export 仍存在 | 抽出 `arkdown-build`；删除剩余 Rust facade；CLI/N-API 共用同一原生入口 |
-| 配置和 build script | JS 执行路径已删除，Rust模型待删 | `build()` 不再发现或执行 `hvigorfile.ts`/`hvigorconfig.ts`，旧 task/config 参数用 `ARKDOWN_HVIGOR_RUNTIME_UNSUPPORTED` 拒绝；遗留 Rust model 尚未清理 | 结构化配置全部 Rust 化；删除遗留 build-script runtime；TS 只用于插件模块 |
+| 项目模型/CLI/任务编排 | Hvigor runtime facade 已删除 | npm CLI 只接受 native `build`；JS runtime 以及 Rust `runtime_task`、project/task/worker N-API export 均已删除，`build(config, plugins)` 是唯一 package 构建入口；构建 application 仍位于 N-API crate | 抽出 `arkdown-build`；CLI/N-API 共用同一原生 `BuildRequest` |
+| 配置和 build script | 旧脚本 runtime 已删除 | `build()` 不发现或执行 `hvigorfile.ts`/`hvigorconfig.ts`；build-script model、config merge、sync/dependency workspace facade 已删除；旧 task/config 参数用 `ARKDOWN_HVIGOR_RUNTIME_UNSUPPORTED` 拒绝 | `arkdown-config` 产出单一结构化配置；TS 只用于插件模块 |
 | OHPM/依赖获取 | 部分且未接线 | `arkdown-ohpm` 有 registry/tarball/integrity，但生产 BuildSession 不调用；当前主要扫描已安装 `oh_modules` | 在 session 建立前执行 lockfile 驱动的 offline/prefer-offline/online acquire；缓存、完整性、代理都由 Rust 管理 |
 | BuildSession/输入快照 | 部分 | 已有 package/sdk/fingerprint/source snapshot，但 profile 又维护一套 `LocalDependencyGraph`，bundle hook 仍重复查包和读 JSON5 | 只保留 session graph/source store/package index；删除重复图和 hook I/O |
 | Profile/Loader/Resource | 基本可用但需补金标 | 已有 typed schema、loader、pkgContext、restool、router/startup/worker；`$r/$rawfile` 已消费原生 app/sys/HSP/rawfile 库存并对齐主要诊断和 warning 降级；大应用边界仍需源码用例覆盖 | 保留 domain crate；用源码 fixture 补 router、worker、InsightIntent、ByteCode HAR、overlay 和真实 HSP 产物回归 |
@@ -227,6 +227,8 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 - `arkdown-core/src/paths.rs`：与 `arkdown-path::lexical_normalize` 重复，且没有调用者。
 - `arkdown-cache/src/rollup_cache.rs`：仅有自身单测，没有生产调用，记录 module IDs 而不保存可恢复的 Rolldown 图或 bundle 结果。
 - bundle stage 写空 `rollup_cache.json` 的逻辑。
+- `packages/arkdown/src/runtime_task/`、`hvigor_runtime/` 和 `build_script_runtime_model/`：仅服务已删除的 JS Hvigor project/task/worker/build-script facade，不参与原生构建或插件 ABI。
+- `hvigor_sync.rs`、`hvigor_maintenance.rs`、`hvigor_dependency_workspace.rs`、`hvigor_config_merge.rs`、`runtime_invocation.rs` 等同组 N-API facade：生产调用已归零，公开类型和生成绑定同步删除。
 
 这些删除不会损失真实构建能力，只移除重复或虚假的兼容表象。
 
@@ -236,9 +238,6 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 |---|---|
 | `packages/arkdown/js/runtime.js` | native build API 和 plugin adapter 稳定 |
 | `hvigor-parameter-runtime.js`、`hvigor-public-runtime.js`、`hvigor-task-runtime.js`、`hvigor-worker*.js` | 删除 hvigor public/task/worker facade |
-| `packages/arkdown/src/runtime_task/` | `arkdown-build::StageExecutor` 覆盖所有真实 build roots |
-| `hvigor_runtime.rs`、`hvigor_sync.rs`、`hvigor_maintenance.rs`、`hvigor_dependency_workspace.rs` 等 public facade | Rust config/session/OHPM/CLI 入口完成 |
-| `build_script_runtime_model/` 及 config/session 中的 hvigor script runtime | 结构化模型归一化完成，插件 loader 独立 |
 | `ets-checker-bridge.cjs` 和 `checker=sdk` | OXC semantic/checker corpus 通过 |
 | static ArkTS Node driver/config bridge | OXC static passes + native ABC plan 完成 |
 | Visual Node runner | Rust Visual parser/codegen 通过源码金标 |
