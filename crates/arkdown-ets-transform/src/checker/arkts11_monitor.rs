@@ -67,7 +67,6 @@ impl<'decorator, 'context, 'errors> Arkts11MonitorValidator<'decorator, 'context
                 }
                 continue;
             };
-            self.check_observable_root(name, literal.value.as_str(), literal.span);
             if (!is_monitor || (wildcard.is_enabled() && index > 0))
                 && !MonitorWildcardPattern::new(literal.value.as_str()).is_valid()
             {
@@ -78,7 +77,9 @@ impl<'decorator, 'context, 'errors> Arkts11MonitorValidator<'decorator, 'context
                     ),
                     literal.span,
                 );
+                continue;
             }
+            self.check_observable_root(name, literal.value.as_str(), literal.span);
         }
     }
 
