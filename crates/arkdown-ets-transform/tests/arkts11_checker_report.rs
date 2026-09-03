@@ -63,6 +63,84 @@ fn arkts11_source_checker_aggregates_sdk_api_diagnostics_without_transforming() 
 }
 
 #[test]
+fn arkts11_source_checker_validates_only_sdk_available_annotations() {
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
+    let report = checker.check(
+        "AvailableFormat.ets",
+        "import { Available as SdkAvailable } from '@ohos.annotation';\n\
+         @SdkAvailable({ minApiVersion: '25.0.0' }) class Feature {}",
+    );
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. } if code == "11706016"
+        )
+    }));
+
+    let collision = checker.check(
+        "AvailableCollision.ets",
+        "function Available(value: object): ClassDecorator { return () => {}; }\n\
+         @Available({ minApiVersion: '25.0.0' }) class Feature {}",
+    );
+    assert!(collision.diagnostics().iter().all(|diagnostic| {
+        !matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. }
+                if matches!(code.as_str(), "11706016" | "11706017")
+        )
+    }));
+
+    let shadowed = checker.check(
+        "AvailableShadowed.ets",
+        "import { Available } from '@ohos.annotation';\n\
+         function scope(Available: any): void {\n\
+           @Available({ minApiVersion: '25.0.0' }) class Feature {}\n\
+         }",
+    );
+    assert!(shadowed.diagnostics().iter().all(|diagnostic| {
+        !matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. }
+                if matches!(code.as_str(), "11706016" | "11706017")
+        )
+    }));
+}
+
+#[test]
+fn arkts11_source_checker_reports_available_os_and_parent_scope_contracts() {
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()));
+    let os_report = checker.check(
+        "AvailableOs.ets",
+        "import { Available } from '@kit.BasicServicesKit';\n\
+         @Available({ minApiVersion: 'HarmonyOS 6.0.0' }) class Feature {}",
+    );
+    assert!(os_report.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. } if code == "11706017"
+        )
+    }));
+
+    let hierarchy = checker.check(
+        "AvailableHierarchy.ets",
+        "import { Available } from '@ohos.annotation';\n\
+         @Available({ minApiVersion: '28' })\n\
+         class Feature { @Available({ minApiVersion: '27' }) run(): void {} }",
+    );
+    assert!(hierarchy.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            EtsTransformError::Diagnostic {
+                message,
+                severity: arkdown_ets_transform::error::DiagnosticSeverity::Warning,
+                ..
+            } if message.contains("outer annotation") && message.contains("28")
+        )
+    }));
+    assert_eq!(hierarchy.error_count(), 0);
+}
+
+#[test]
 fn arkts11_source_checker_uses_sdk_component_inventory_for_name_collisions() {
     let loader = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")

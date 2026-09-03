@@ -46,6 +46,18 @@ impl ApiAvailableTransformOptions {
     pub(crate) fn should_transform_source(self, source: &str) -> bool {
         self.enabled && source.contains(".apiAvailable")
     }
+
+    pub(crate) fn should_validate_annotation(self, source: &str) -> bool {
+        source.contains("Available")
+    }
+
+    pub(crate) fn runtime_os(self) -> &'static str {
+        if self.open_harmony_runtime {
+            "OpenHarmony"
+        } else {
+            "HarmonyOS"
+        }
+    }
 }
 
 /// Validates calls to the SDK `deviceInfo.apiAvailable` binding before the

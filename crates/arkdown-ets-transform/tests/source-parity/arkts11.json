@@ -360,6 +360,34 @@
       "expect": { "errorCode": "11706013" }
     },
     {
+      "id": "available-annotation-openharmony-format",
+      "owner": "compiler/src/fast_build/system_api/api_check_utils.ts::isSourceRetentionAnnotationContentValid",
+      "file": "AvailableFormat.ets",
+      "source": "import { Available } from '@ohos.annotation'; @Available({ minApiVersion: '25.0.0' }) class Feature {}",
+      "expect": { "errorCode": "11706016" }
+    },
+    {
+      "id": "available-annotation-runtime-os",
+      "owner": "compiler/src/fast_build/system_api/api_check_utils.ts::checkFormatResult",
+      "file": "AvailableOs.ets",
+      "source": "import { Available } from '@kit.BasicServicesKit'; @Available({ minApiVersion: 'HarmonyOS 6.0.0' }) class Feature {}",
+      "expect": { "errorCode": "11706017" }
+    },
+    {
+      "id": "available-annotation-alias",
+      "owner": "compiler/src/fast_build/system_api/api_check_utils.ts::isSourceRetentionDeclarationValid",
+      "file": "AvailableAlias.ets",
+      "source": "import { Available as SdkAvailable } from '@ohos.annotation'; @SdkAvailable({ minApiVersion: '26.0.0' }) class Feature {}",
+      "expect": { "contains": [] }
+    },
+    {
+      "id": "available-annotation-user-symbol-collision",
+      "owner": "compiler/src/fast_build/system_api/api_check_utils.ts::isSourceRetentionDeclarationValid",
+      "file": "AvailableCollision.ets",
+      "source": "function Available(value: object): ClassDecorator { return () => {}; } @Available({ minApiVersion: '25.0.0' }) class Feature {}",
+      "expect": { "contains": [] }
+    },
+    {
       "id": "watch-lowering",
       "owner": "compiler/src/process_component_member.ts::processWatch",
       "file": "Watch.ets",

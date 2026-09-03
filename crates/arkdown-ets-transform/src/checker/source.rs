@@ -6,6 +6,7 @@ use oxc_allocator::Allocator;
 use crate::error::EtsTransformError;
 use crate::source::CompileArktsSourceType;
 use crate::transform::api_available::{ApiAvailableTransformOptions, ApiAvailableValidator};
+use crate::transform::available_annotation::AvailableAnnotationValidator;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::ModuleExportIndex;
 use crate::TransformSourceSnapshot;
@@ -139,6 +140,12 @@ impl ArktsSourceChecker {
             );
         }
         let mut report = checker.check();
+        if self.api_available.should_validate_annotation(content) {
+            report.extend(
+                AvailableAnnotationValidator::new(source_id, self.api_available)
+                    .diagnostics(&parsed.program),
+            );
+        }
         if self.api_available.should_transform_source(content) {
             report.extend(
                 ApiAvailableValidator::new(source_id, self.api_available)
