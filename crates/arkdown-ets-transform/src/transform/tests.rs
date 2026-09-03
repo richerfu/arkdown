@@ -241,6 +241,20 @@ fn api_available_validation_requires_the_sdk_import_identity() {
 }
 
 #[test]
+fn api_available_validation_respects_local_shadowing_of_sdk_import() {
+    let source = "import deviceInfo from '@ohos.deviceInfo'\n\
+                  function check(deviceInfo: object): boolean {\n\
+                    return deviceInfo.apiAvailable(null)\n\
+                  }";
+    let output = TransformHarness::transform(&make_source("Index.ets", source))
+        .expect("a shadowing parameter must not resolve to the SDK import");
+    assert!(
+        output.contains("__mockApiAvailable(deviceInfo, null)"),
+        "process_available_statement still lowers the property shape after identity-safe validation:\n{output}"
+    );
+}
+
+#[test]
 fn api_available_rejects_sdk_usage_in_typescript_sources() {
     let source =
         "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable(12)";

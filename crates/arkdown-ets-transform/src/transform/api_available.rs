@@ -14,8 +14,9 @@ use oxc_ast::ast::{
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_parser::Parser;
+use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::{SourceType, SPAN};
-use oxc_syntax::operator::UnaryOperator;
+use oxc_syntax::{operator::UnaryOperator, symbol::SymbolId};
 use rustc_hash::FxHashSet;
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
@@ -85,16 +86,22 @@ impl<'a> ApiAvailableValidator<'a> {
         }
     }
 
-    pub(crate) fn diagnostics(&self, program: &Program<'_>) -> Vec<EtsTransformError> {
+    pub(crate) fn diagnostics<'program>(
+        &self,
+        program: &'program Program<'program>,
+    ) -> Vec<EtsTransformError> {
         if !self.options.enabled {
             return Vec::new();
         }
+        let semantic = SemanticBuilder::new().build(program).semantic;
+        let scoping = semantic.into_scoping();
         let bindings = ApiAvailableSdkBindings::from_program(program);
         if bindings.is_empty() {
             return Vec::new();
         }
         let mut visitor = ApiAvailableCallValidator {
             bindings: &bindings,
+            scoping: &scoping,
             source_id: self.source_id,
             open_harmony_runtime: self.options.open_harmony_runtime,
             issues: Vec::new(),
@@ -117,7 +124,7 @@ impl<'a> ApiAvailableValidator<'a> {
 
 #[derive(Default)]
 struct ApiAvailableSdkBindings {
-    names: FxHashSet<String>,
+    symbols: FxHashSet<SymbolId>,
 }
 
 impl ApiAvailableSdkBindings {
@@ -135,16 +142,16 @@ impl ApiAvailableSdkBindings {
                 for specifier in specifiers {
                     match specifier {
                         ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                            bindings.names.insert(specifier.local.name.to_string());
+                            bindings.symbols.insert(specifier.local.symbol_id());
                         }
                         ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                            bindings.names.insert(specifier.local.name.to_string());
+                            bindings.symbols.insert(specifier.local.symbol_id());
                         }
                         ImportDeclarationSpecifier::ImportSpecifier(specifier)
                             if ModuleExportNameText::new(&specifier.imported).as_str()
                                 == "default" =>
                         {
-                            bindings.names.insert(specifier.local.name.to_string());
+                            bindings.symbols.insert(specifier.local.symbol_id());
                         }
                         _ => {}
                     }
@@ -155,7 +162,7 @@ impl ApiAvailableSdkBindings {
                         continue;
                     };
                     if ModuleExportNameText::new(&specifier.imported).as_str() == "deviceInfo" {
-                        bindings.names.insert(specifier.local.name.to_string());
+                        bindings.symbols.insert(specifier.local.symbol_id());
                     }
                 }
             }
@@ -164,11 +171,15 @@ impl ApiAvailableSdkBindings {
     }
 
     fn is_empty(&self) -> bool {
-        self.names.is_empty()
+        self.symbols.is_empty()
     }
 
-    fn contains(&self, name: &str) -> bool {
-        self.names.contains(name)
+    fn contains(&self, reference: &IdentifierReference<'_>, scoping: &Scoping) -> bool {
+        reference
+            .reference_id
+            .get()
+            .and_then(|reference_id| scoping.get_reference(reference_id).symbol_id())
+            .is_some_and(|symbol_id| self.symbols.contains(&symbol_id))
     }
 }
 
@@ -192,6 +203,7 @@ impl<'a> ModuleExportNameText<'a> {
 
 struct ApiAvailableCallValidator<'a> {
     bindings: &'a ApiAvailableSdkBindings,
+    scoping: &'a Scoping,
     source_id: &'a str,
     open_harmony_runtime: bool,
     issues: Vec<ApiAvailableIssue>,
@@ -211,7 +223,7 @@ impl<'a> ApiAvailableCallValidator<'a> {
 
     fn validate_call(&self, call: &CallExpression<'_>) -> Option<ApiAvailableIssue> {
         let receiver = ApiAvailableCallee::new(&call.callee).receiver_identifier()?;
-        if !self.bindings.contains(receiver) {
+        if !self.bindings.contains(receiver, self.scoping) {
             return None;
         }
         if std::path::Path::new(self.source_id)
@@ -381,7 +393,7 @@ impl<'a> ApiAvailableCallee<'a> {
         Self { expression }
     }
 
-    fn receiver_identifier(&self) -> Option<&'a str> {
+    fn receiver_identifier(&self) -> Option<&'a IdentifierReference<'a>> {
         let receiver = match self.unwrap(self.expression) {
             Expression::StaticMemberExpression(member)
                 if member.property.name == "apiAvailable" =>
@@ -394,7 +406,7 @@ impl<'a> ApiAvailableCallee<'a> {
             _ => return None,
         };
         match receiver {
-            Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+            Expression::Identifier(identifier) => Some(identifier),
             _ => None,
         }
     }
