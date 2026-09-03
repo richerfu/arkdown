@@ -13,7 +13,7 @@ use oxc_ast::{
     AstKind,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_semantic::{JSDocFinder, Scoping, SemanticBuilder};
+use oxc_semantic::{JSDoc, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::{operator::BinaryOperator, symbol::SymbolId};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -229,6 +229,19 @@ impl SystemApiSymbol {
         }
     }
 
+    fn merge_type_shape(&mut self, other: &Self) {
+        for (name, symbol) in &other.members {
+            self.members.entry(name.clone()).or_default().merge(symbol);
+        }
+    }
+
+    fn type_shape(&self) -> Self {
+        Self {
+            members: self.members.clone(),
+            ..Self::default()
+        }
+    }
+
     fn member(&self, path: &[Box<str>]) -> Option<&Self> {
         path.iter()
             .try_fold(self, |symbol, name| symbol.members.get(name.as_ref()))
@@ -302,15 +315,15 @@ impl SystemApiModuleFacts {
         if !is_sdk && (!is_project || !program.source_text.contains("Available")) {
             return Self::default();
         }
-        let semantic = SemanticBuilder::new().build(program).semantic;
         let available_contracts = if is_project {
+            let semantic = SemanticBuilder::new().build(program).semantic;
             ProjectAvailableContractInventory::new(program, semantic.scoping()).collect()
         } else {
             FxHashMap::default()
         };
         let mut collector = SystemApiDeclarationCollector::new(
             path,
-            is_sdk.then(|| semantic.jsdoc()),
+            is_sdk.then(|| SystemApiJsDocInventory::from_program(program)),
             available_contracts,
         );
         collector.collect_program(program);
@@ -399,17 +412,65 @@ impl<'program> Visit<'program> for ProjectAvailableContractInventory<'_, 'progra
     }
 }
 
-struct SystemApiDeclarationCollector<'a, 'program> {
+#[derive(Clone, Default)]
+struct SystemApiJsDocInventory {
+    by_attached_to: FxHashMap<u32, Vec<SystemApiJsDocTag>>,
+}
+
+impl SystemApiJsDocInventory {
+    fn from_program(program: &Program<'_>) -> Self {
+        let mut inventory = Self::default();
+        for comment in &program.comments {
+            if !comment.is_jsdoc() || comment.span.end < comment.span.start + 5 {
+                continue;
+            }
+            let content_span = Span::new(comment.span.start + 3, comment.span.end - 2);
+            let Some(content) = program
+                .source_text
+                .get(content_span.start as usize..content_span.end as usize)
+            else {
+                continue;
+            };
+            let document = JSDoc::new(content, content_span);
+            let tags = document
+                .tags()
+                .iter()
+                .map(|tag| SystemApiJsDocTag {
+                    name: tag.kind.parsed().to_ascii_lowercase().into(),
+                    value: tag.comment().parsed().into(),
+                })
+                .collect::<Vec<_>>();
+            inventory
+                .by_attached_to
+                .entry(comment.attached_to)
+                .or_default()
+                .extend(tags);
+        }
+        inventory
+    }
+
+    fn tags(&self, span: Span) -> Option<&[SystemApiJsDocTag]> {
+        self.by_attached_to.get(&span.start).map(Vec::as_slice)
+    }
+}
+
+#[derive(Clone)]
+struct SystemApiJsDocTag {
+    name: Box<str>,
+    value: Box<str>,
+}
+
+struct SystemApiDeclarationCollector<'a> {
     declaration_path: &'a Path,
-    jsdoc: Option<&'a JSDocFinder<'program>>,
+    jsdoc: Option<SystemApiJsDocInventory>,
     available_contracts: FxHashMap<u32, Box<str>>,
     facts: SystemApiModuleFacts,
 }
 
-impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
+impl<'a> SystemApiDeclarationCollector<'a> {
     fn new(
         declaration_path: &'a Path,
-        jsdoc: Option<&'a JSDocFinder<'program>>,
+        jsdoc: Option<SystemApiJsDocInventory>,
         available_contracts: FxHashMap<u32, Box<str>>,
     ) -> Self {
         Self {
@@ -420,7 +481,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         }
     }
 
-    fn collect_program(&mut self, program: &'program Program<'program>) {
+    fn collect_program<'program>(&mut self, program: &'program Program<'program>) {
         for statement in &program.body {
             if let Statement::TSExternalModuleDeclaration(module) = statement {
                 if let Some(body) = &module.body {
@@ -432,13 +493,21 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         }
     }
 
-    fn collect_module_block(&mut self, statements: &'program [Statement<'program>], ambient: bool) {
+    fn collect_module_block<'program>(
+        &mut self,
+        statements: &'program [Statement<'program>],
+        ambient: bool,
+    ) {
         for statement in statements {
             self.collect_statement(statement, ambient);
         }
     }
 
-    fn collect_statement(&mut self, statement: &'program Statement<'program>, ambient: bool) {
+    fn collect_statement<'program>(
+        &mut self,
+        statement: &'program Statement<'program>,
+        ambient: bool,
+    ) {
         match statement {
             Statement::ExportDeclaration(export) => {
                 self.collect_declaration(&export.declaration, Some(export.span), true);
@@ -471,7 +540,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         }
     }
 
-    fn collect_default_declaration(
+    fn collect_default_declaration<'program>(
         &mut self,
         declaration: &'program ExportDefaultDeclarationKind<'program>,
         wrapper_span: Span,
@@ -505,7 +574,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         }
     }
 
-    fn collect_declaration(
+    fn collect_declaration<'program>(
         &mut self,
         declaration: &'program Declaration<'program>,
         wrapper_span: Option<Span>,
@@ -587,7 +656,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         }
     }
 
-    fn collect_namespace(
+    fn collect_namespace<'program>(
         &mut self,
         namespace: &'program TSNamespaceDeclaration<'program>,
         wrapper_span: Option<Span>,
@@ -595,7 +664,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
     ) {
         let mut nested = Self {
             declaration_path: self.declaration_path,
-            jsdoc: self.jsdoc,
+            jsdoc: self.jsdoc.clone(),
             available_contracts: self.available_contracts.clone(),
             facts: SystemApiModuleFacts::default(),
         };
@@ -625,7 +694,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         self.record_direct_binding(namespace.id.name.as_str(), exported);
     }
 
-    fn class_symbol(
+    fn class_symbol<'program>(
         &self,
         class: &'program Class<'program>,
         wrapper_span: Option<Span>,
@@ -662,7 +731,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         symbol
     }
 
-    fn interface_symbol(
+    fn interface_symbol<'program>(
         &self,
         interface: &'program TSInterfaceDeclaration<'program>,
         wrapper_span: Option<Span>,
@@ -702,7 +771,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         symbol
     }
 
-    fn function_symbol(
+    fn function_symbol<'program>(
         &self,
         function: &'program oxc_ast::ast::Function<'program>,
         wrapper_span: Option<Span>,
@@ -716,7 +785,7 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
         symbol
     }
 
-    fn insert_member(
+    fn insert_member<'program>(
         &self,
         owner: &mut SystemApiSymbol,
         key: &PropertyKey<'program>,
@@ -753,38 +822,36 @@ impl<'a, 'program> SystemApiDeclarationCollector<'a, 'program> {
             if contract.available.is_none() {
                 contract.available = self.available_contracts.get(&span.start).cloned();
             }
-            if let Some(documents) = self.jsdoc.and_then(|jsdoc| jsdoc.get_all_by_span(span)) {
-                for document in documents {
-                    for tag in document.tags() {
-                        let value = tag.comment().parsed();
-                        match tag.kind.parsed().to_ascii_lowercase().as_str() {
-                            "since"
-                                if contract.since.is_none()
-                                    && SystemApiVersion::is_valid_since(&value) =>
-                            {
-                                contract.since = Some(value.trim().into());
-                            }
-                            "permission" if !value.trim().is_empty() => {
-                                let value: Box<str> = value.trim().into();
-                                if !contract.permissions.contains(&value) {
-                                    contract.permissions.push(value);
-                                }
-                            }
-                            "syscap" if contract.syscap.is_none() && !value.trim().is_empty() => {
-                                contract.syscap = Some(value.trim().into());
-                            }
-                            "systemapi" => contract.system_api = Some(value.trim().into()),
-                            "deprecated" => contract.deprecated = true,
-                            "form" => contract.form = Some(value.trim().into()),
-                            "atomicservice" => {
-                                contract.atomic_service = Some(value.trim().into());
-                            }
-                            "famodelonly" => {
-                                contract.fa_model_only = Some(value.trim().into());
-                            }
-                            "test" => contract.test_only = Some(value.trim().into()),
-                            _ => {}
+            if let Some(tags) = self.jsdoc.as_ref().and_then(|jsdoc| jsdoc.tags(span)) {
+                for tag in tags {
+                    let value = tag.value.as_ref();
+                    match tag.name.as_ref() {
+                        "since"
+                            if contract.since.is_none()
+                                && SystemApiVersion::is_valid_since(value) =>
+                        {
+                            contract.since = Some(value.trim().into());
                         }
+                        "permission" if !value.trim().is_empty() => {
+                            let value: Box<str> = value.trim().into();
+                            if !contract.permissions.contains(&value) {
+                                contract.permissions.push(value);
+                            }
+                        }
+                        "syscap" if contract.syscap.is_none() && !value.trim().is_empty() => {
+                            contract.syscap = Some(value.trim().into());
+                        }
+                        "systemapi" => contract.system_api = Some(value.trim().into()),
+                        "deprecated" => contract.deprecated = true,
+                        "form" => contract.form = Some(value.trim().into()),
+                        "atomicservice" => {
+                            contract.atomic_service = Some(value.trim().into());
+                        }
+                        "famodelonly" => {
+                            contract.fa_model_only = Some(value.trim().into());
+                        }
+                        "test" => contract.test_only = Some(value.trim().into()),
+                        _ => {}
                     }
                 }
             }
@@ -847,7 +914,7 @@ impl<'a> SystemApiReferenceResolver<'a> {
                 .and_then(|target| target.member(&reference[1..]))
             {
                 let previous = symbol.clone();
-                symbol.merge(target);
+                symbol.merge_type_shape(target);
                 changed |= *symbol != previous;
             }
         }
@@ -958,6 +1025,7 @@ impl ImportedSystemApiBindings {
         sources: &TransformSourceSnapshot,
         module_roots: &[(String, PathBuf)],
         index: &ModuleExportIndex,
+        scoping: &Scoping,
     ) -> Self {
         let resolver = ImportTargetResolver::new(importer, sources, module_roots);
         let mut bindings = Self::default();
@@ -1006,6 +1074,7 @@ impl ImportedSystemApiBindings {
                 }
             }
         }
+        bindings.collect_local_value_bindings(program, scoping);
         bindings
     }
 
@@ -1024,6 +1093,85 @@ impl ImportedSystemApiBindings {
             .get()
             .and_then(|reference_id| scoping.get_reference(reference_id).symbol_id())?;
         self.symbols.get(&symbol_id)?.member(path)
+    }
+
+    fn collect_local_value_bindings(&mut self, program: &Program<'_>, scoping: &Scoping) {
+        let mut rounds = 0usize;
+        loop {
+            let facts = SystemApiLocalValueCollector::new(self, scoping).collect(program);
+            let mut changed = false;
+            for fact in facts {
+                changed |= self.symbols.insert(fact.symbol_id, fact.symbol) != Some(fact.previous);
+            }
+            rounds += 1;
+            if !changed || rounds > self.symbols.len().saturating_add(1) {
+                break;
+            }
+        }
+    }
+}
+
+struct SystemApiLocalValueFact {
+    symbol_id: SymbolId,
+    symbol: SystemApiSymbol,
+    previous: SystemApiSymbol,
+}
+
+struct SystemApiLocalValueCollector<'a> {
+    bindings: &'a ImportedSystemApiBindings,
+    scoping: &'a Scoping,
+    facts: Vec<SystemApiLocalValueFact>,
+}
+
+impl<'a> SystemApiLocalValueCollector<'a> {
+    fn new(bindings: &'a ImportedSystemApiBindings, scoping: &'a Scoping) -> Self {
+        Self {
+            bindings,
+            scoping,
+            facts: Vec::new(),
+        }
+    }
+
+    fn collect(mut self, program: &Program<'_>) -> Vec<SystemApiLocalValueFact> {
+        self.visit_program(program);
+        self.facts
+    }
+}
+
+impl<'program> Visit<'program> for SystemApiLocalValueCollector<'_> {
+    fn visit_variable_declarator(
+        &mut self,
+        declaration: &oxc_ast::ast::VariableDeclarator<'program>,
+    ) {
+        if let (Some(identifier), Some(initializer)) = (
+            declaration.id.get_binding_identifier(),
+            declaration.init.as_ref(),
+        ) {
+            if let Some((root, path, _)) = SystemApiUsePath::resolve(initializer) {
+                if let Some(symbol) = self.bindings.resolve(root, &path, self.scoping) {
+                    let symbol = if matches!(
+                        initializer,
+                        Expression::CallExpression(_) | Expression::NewExpression(_)
+                    ) {
+                        symbol.type_shape()
+                    } else {
+                        symbol.clone()
+                    };
+                    let symbol_id = identifier.symbol_id();
+                    self.facts.push(SystemApiLocalValueFact {
+                        previous: self
+                            .bindings
+                            .symbols
+                            .get(&symbol_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        symbol_id,
+                        symbol,
+                    });
+                }
+            }
+        }
+        walk::walk_variable_declarator(self, declaration);
     }
 }
 
@@ -1093,6 +1241,7 @@ impl<'a> Arkts11SystemApiValidator<'a> {
             self.sources,
             self.module_roots,
             self.module_exports,
+            scoping,
         );
         if !bindings.is_empty() {
             let mut validator = SystemApiUseValidator::new(SystemApiUseValidatorInput {
@@ -1362,7 +1511,15 @@ impl<'program> Visit<'program> for SystemApiUseValidator<'_, 'program> {
     }
 
     fn visit_expression(&mut self, expression: &Expression<'program>) {
-        if !self.validate_expression(expression) {
+        if self.validate_expression(expression) {
+            match expression {
+                Expression::CallExpression(call) => self.visit_arguments(&call.arguments),
+                Expression::NewExpression(constructor) => {
+                    self.visit_arguments(&constructor.arguments)
+                }
+                _ => {}
+            }
+        } else {
             walk::walk_expression(self, expression);
         }
     }
@@ -1400,6 +1557,8 @@ impl SystemApiUsePath {
             Expression::TSSatisfiesExpression(satisfies) => Self::resolve(&satisfies.expression),
             Expression::TSNonNullExpression(non_null) => Self::resolve(&non_null.expression),
             Expression::TSTypeAssertion(assertion) => Self::resolve(&assertion.expression),
+            Expression::CallExpression(call) => Self::resolve(&call.callee),
+            Expression::NewExpression(constructor) => Self::resolve(&constructor.callee),
             _ => None,
         }
     }
