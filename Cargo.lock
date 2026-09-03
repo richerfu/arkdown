@@ -327,7 +327,6 @@ dependencies = [
  "rolldown_plugin",
  "rolldown_sourcemap",
  "rustc-hash 2.1.3",
- "semver",
  "serde",
  "serde_json",
  "sha2",

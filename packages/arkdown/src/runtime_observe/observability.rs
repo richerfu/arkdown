@@ -138,32 +138,12 @@ impl RuntimeObservability {
       ObservabilityInstallPlan {
         mode: ObservabilityMode::Napi,
         console_owner: Self::console_owner_from_env(),
-        cache_dir: config
-          .hvigor_cache_dir
-          .as_deref()
-          .map(PathBuf::from)
-          .unwrap_or_else(|| project.join(".hvigor")),
+        cache_dir: project.join(".hvigor"),
         build_id: Arc::from("napi-build"),
         log_level: ObservabilityLevel::Info,
       },
       ObservabilityInstallSource::SafetyNet,
     )
-  }
-
-  pub(crate) fn install_runtime_task_safety_net(seed: &crate::runtime_task::RuntimeTaskBridgeSeed) {
-    if Self::global().is_some_and(|observability| observability.has_active_napi_plan()) {
-      return;
-    }
-    let _ = Self::install(
-      ObservabilityInstallPlan {
-        mode: ObservabilityMode::Napi,
-        console_owner: Self::console_owner_from_env(),
-        cache_dir: seed.project_cache_dir(),
-        build_id: Arc::from("napi-runtime-task"),
-        log_level: ObservabilityLevel::Info,
-      },
-      ObservabilityInstallSource::SafetyNet,
-    );
   }
 
   pub fn global() -> Option<Arc<Self>> {

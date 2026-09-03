@@ -25,29 +25,12 @@
 #[global_allocator]
 static ALLOC: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
-mod build_script_runtime_model;
-pub use build_script_runtime_model::RuntimeBuildScriptSession;
 pub mod cli_plan;
 pub mod cmd;
-mod hvigor_config_merge;
-mod hvigor_dependency_workspace;
-mod hvigor_maintenance;
 mod hvigor_plugin_plan;
-mod hvigor_runtime;
-pub use hvigor_runtime::{
-  RuntimeHvigorCacheStoreManager, RuntimeHvigorConstantApi, RuntimeHvigorFileApi,
-  RuntimeHvigorFileSet, RuntimeHvigorGlobalData, RuntimeHvigorLifecycle,
-  RuntimeHvigorParameterState, RuntimeHvigorTaskExecutionState, RuntimeHvigorTaskHooks,
-  RuntimeHvigorTaskState, RuntimeHvigorWorkerPoolState,
-};
-mod hvigor_sync;
 mod js_callback;
-mod native_build_config;
-mod ohpm_dependency_map;
 mod plugin_module;
 pub mod progress;
-mod remote_hsp;
-mod runtime_invocation;
 mod runtime_observe;
 pub use runtime_observe::{
   emit_runtime_log, finish_runtime_observability, install_runtime_observability,
@@ -55,7 +38,6 @@ pub use runtime_observe::{
   runtime_observability_is_enabled, ObservabilityInstallOptions, RuntimeLogRecord,
   RuntimeObservability, RuntimeProcessMonitor,
 };
-mod runtime_task;
 pub mod task_cache;
 
 use std::borrow::Cow;
@@ -87,15 +69,6 @@ use arkdown::plugins::hvigor_compile::{
 };
 use arkdown::PluginCacheModule;
 
-/// Parse the latest-hvigor command surface in Rust. JavaScript only revives
-/// the typed plan and dispatches the requested runtime operation.
-#[napi]
-pub fn parse_hvigor_cli_args(args: Vec<String>) -> napi::Result<String> {
-  cli_plan::PackageCliParser::parse_hvigor_json(&args).map_err(|error| {
-    napi::Error::from_reason(format!("failed to serialize hvigor CLI plan: {error}"))
-  })
-}
-
 /// Parse Arkdown's direct `build` command arguments in Rust.
 #[napi]
 pub fn parse_arkdown_build_cli_args(args: Vec<String>) -> napi::Result<String> {
@@ -104,26 +77,6 @@ pub fn parse_arkdown_build_cli_args(args: Vec<String>) -> napi::Result<String> {
       "failed to serialize Arkdown build CLI plan: {error}"
     ))
   })
-}
-
-/// Deep-merge callback-produced hvigor configuration in Rust without
-/// serializing live JavaScript functions or object identities.
-#[napi]
-pub fn merge_hvigor_config<'env>(
-  env: Env,
-  base: Unknown<'env>,
-  overlay: Unknown<'env>,
-) -> napi::Result<Unknown<'env>> {
-  hvigor_config_merge::HvigorConfigMergeNapiAdapter::new(env).merge(base, overlay)
-}
-
-/// Compute latest-hvigor's normalized 32-character project cache identity in
-/// the Rust session layer.
-#[napi]
-pub fn hvigor_project_cache_hash(project_root: String) -> napi::Result<String> {
-  arkdown_session::BuildScriptProjectCacheIdentity::new(project_root)
-    .map(|identity| identity.hash())
-    .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 /// Compile one user-authored TypeScript plugin module through OXC and Rolldown.
@@ -1232,64 +1185,10 @@ pub struct BuildConfig {
   #[napi(ts_type = "'oxc' | 'yuku'")]
   pub module_analyzer: Option<String>,
   pub cache: Option<bool>,
-  /// Runtime-owned Hvigor `enableSignTask` property.
-  #[napi(skip_typescript)]
-  pub enable_sign_task: Option<bool>,
-  /// Runtime-owned selected-product `packOptions.fastBuildApp` value.
-  #[napi(skip_typescript)]
-  pub fast_build_app: Option<bool>,
   #[napi(ts_type = "string | string[]")]
   pub compile_plugin_path: Option<String>,
   #[napi(ts_type = "string | string[]")]
   pub hvigor_plugin_file: Option<String>,
-  /// Runtime-owned serialized `project/hvigorfile.*` OHOS overrides.
-  #[napi(skip_typescript)]
-  pub project_hvigor_overrides_json: Option<String>,
-  /// Runtime-owned serialized module-root build-option overrides.
-  #[napi(skip_typescript)]
-  pub module_hvigor_overrides_json: Option<String>,
-  /// Runtime-owned complete model values replaced through OHOS contexts.
-  #[napi(skip_typescript)]
-  pub runtime_context_overrides_json: Option<String>,
-  /// Runtime-owned custom TaskInput paths for the Rust watch inventory.
-  #[napi(skip_typescript)]
-  pub runtime_task_inputs_json: Option<String>,
-  /// Runtime-owned numeric mapping of hvigor's `ohos.pack.compressLevel`.
-  #[napi(skip_typescript)]
-  pub pack_compress_level: Option<u32>,
-  /// Runtime-owned hvigor `ohos.align.deviceTypes` list.
-  #[napi(skip_typescript)]
-  pub align_device_types: Option<Vec<String>>,
-  /// Runtime-owned hvigor `ohos.collect.debugSymbol` override.
-  #[napi(skip_typescript)]
-  pub collect_debug_symbol: Option<bool>,
-  /// Runtime-owned hvigor `ohos.uiTransform.Optimization` property.
-  #[napi(skip_typescript)]
-  pub ui_transform_optimization: Option<bool>,
-  /// Runtime-owned hvigor `ohos.integratedHsp.useGetCurrentBundleName` property.
-  #[napi(skip_typescript)]
-  pub integrated_hsp_use_get_current_bundle_name: Option<bool>,
-  /// Runtime-owned hvigor `ohos.byteCodeHar.integratedOptimization` property.
-  #[napi(skip_typescript)]
-  pub byte_code_har_integrated_optimization: Option<bool>,
-  /// Runtime-owned hvigor `hvigor.keepDependency` property.
-  #[napi(skip_typescript)]
-  pub keep_dependency: Option<bool>,
-  /// Runtime-owned typed OHOS plugin property snapshot.
-  #[napi(skip_typescript)]
-  pub hvigor_runtime_properties_json: Option<String>,
-  /// Runtime-owned project-scoped `PathUtil.getHvigorCacheDir()` result.
-  #[napi(skip_typescript)]
-  pub hvigor_cache_dir: Option<String>,
-  /// Runtime-owned hvigor CLI `parameterFile` extra-parameter override.
-  #[napi(skip_typescript)]
-  pub parameter_file_override: Option<String>,
-  /// Runtime-owned path to the Node executable hosting this native addon.
-  #[napi(skip_typescript)]
-  pub runtime_node_executable: Option<String>,
-  /// Runtime-owned selected partial hvigor task roots.
-  #[napi(skip_typescript)]
-  pub native_task_roots_json: Option<String>,
 }
 
 #[napi(object)]
@@ -1335,10 +1234,6 @@ pub fn build<'a>(
   env: Env,
   config: BuildConfig,
   #[napi(ts_arg_type = "Array<ArkdownPlugin> | undefined | null")] plugins: Option<Array<'a>>,
-  #[napi(
-    ts_arg_type = "{ tasks: Array<Record<string, unknown>>; catalogs: Array<Record<string, unknown>>; removedTaskPaths: string[]; selection: Record<string, unknown>; dispatchTask: (request: { taskPath: string; phase: string; error?: string }) => Record<string, unknown> | Promise<Record<string, unknown>>; commandModifierTypes: number[]; transformAbc: (event: unknown) => void | Promise<void>; modifyNativeCommand: (event: unknown) => string[] | Promise<string[]> } | undefined | null"
-  )]
-  runtime_tasks: Option<Object<'a>>,
 ) -> napi::Result<Object<'a>> {
   runtime_observe::RuntimeObservability::install_build_safety_net(&config)
     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -1371,15 +1266,6 @@ pub fn build<'a>(
     }
   }
 
-  let runtime_task_seed = runtime_tasks
-    .map(crate::runtime_task::RuntimeTaskBridgeSeed::from_js_object)
-    .transpose()?;
-  let bridge_input_paths_json = runtime_task_seed
-    .as_ref()
-    .map(crate::runtime_task::RuntimeTaskBridgeSeed::declared_input_paths_json)
-    .transpose()
-    .map_err(|error| napi::Error::from_reason(format!("{error:#}")))?;
-
   // Extract all config values (Send types only).
   let BuildConfig {
     project,
@@ -1410,26 +1296,8 @@ pub fn build<'a>(
     checker,
     module_analyzer,
     cache,
-    enable_sign_task,
-    fast_build_app,
     compile_plugin_path: _,
     hvigor_plugin_file: _,
-    project_hvigor_overrides_json,
-    module_hvigor_overrides_json,
-    runtime_context_overrides_json,
-    runtime_task_inputs_json: configured_runtime_task_inputs_json,
-    pack_compress_level,
-    align_device_types,
-    collect_debug_symbol,
-    ui_transform_optimization,
-    integrated_hsp_use_get_current_bundle_name,
-    byte_code_har_integrated_optimization,
-    keep_dependency,
-    hvigor_runtime_properties_json,
-    hvigor_cache_dir,
-    parameter_file_override,
-    runtime_node_executable,
-    native_task_roots_json,
   } = config;
   let project = project.unwrap_or_else(|| ".".to_string());
   let target = target.unwrap_or_else(|| "hap".to_string());
@@ -1462,32 +1330,6 @@ pub fn build<'a>(
     checker,
     module_analyzer,
     cache: cache.unwrap_or(true),
-    enable_sign_task: enable_sign_task.unwrap_or(true),
-    fast_build_app: fast_build_app.unwrap_or(false),
-    project_hvigor_overrides_json,
-    module_hvigor_overrides_json,
-    runtime_context_overrides_json,
-    runtime_task_inputs_json: bridge_input_paths_json.or(configured_runtime_task_inputs_json),
-    pack_compress_level,
-    align_device_types,
-    collect_debug_symbol,
-    ui_transform_optimization: ui_transform_optimization.unwrap_or(false),
-    integrated_hsp_use_get_current_bundle_name: integrated_hsp_use_get_current_bundle_name
-      .unwrap_or(false),
-    byte_code_har_integrated_optimization: byte_code_har_integrated_optimization.unwrap_or(false),
-    keep_dependency: keep_dependency.unwrap_or(true),
-    hvigor_properties: hvigor_runtime_properties_json
-      .as_deref()
-      .map(serde_json::from_str::<crate::cmd::build::HvigorRuntimeProperties>)
-      .transpose()
-      .map_err(|error| {
-        napi::Error::from_reason(format!("invalid hvigor runtime properties: {error}"))
-      })?
-      .unwrap_or_default(),
-    hvigor_cache_dir,
-    parameter_file_override,
-    runtime_node_executable,
-    native_task_roots_json,
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -1496,11 +1338,6 @@ pub fn build<'a>(
     env.raw(),
     async move {
       let start = std::time::Instant::now();
-      let task_observer = match runtime_task_seed {
-        Some(seed) => crate::runtime_task::RuntimeTaskActorObserver::spawn(seed)
-          .map_err(|error| napi::Error::from_reason(format!("{error:#}")))?,
-        None => None,
-      };
       let artifacts = run_build(
         project,
         target,
@@ -1509,7 +1346,6 @@ pub fn build<'a>(
         product,
         package_args,
         js_plugins,
-        task_observer,
       )
       .await
       .map_err(|e| napi::Error::from_reason(format!("{e:#}")))?;
@@ -1524,35 +1360,8 @@ pub fn build<'a>(
   unsafe { Object::from_napi_value(env.raw(), raw_promise) }
 }
 
-/// Execute custom hvigor command roots through the Rust-owned task graph.
-/// JavaScript remains only the callback host for user-authored task actions.
-#[napi(ts_return_type = "Promise<Array<string>>")]
-pub fn run_runtime_tasks<'a>(
-  env: Env,
-  #[napi(
-    ts_arg_type = "{ tasks: Array<Record<string, unknown>>; catalogs: Array<Record<string, unknown>>; removedTaskPaths: string[]; selection: Record<string, unknown>; dispatchTask: (request: { taskPath: string; phase: string; error?: string }) => Record<string, unknown> | Promise<Record<string, unknown>>; commandModifierTypes: number[]; transformAbc: (event: unknown) => void | Promise<void>; modifyNativeCommand: (event: unknown) => string[] | Promise<string[]> }"
-  )]
-  runtime_tasks: Object<'a>,
-) -> napi::Result<Object<'a>> {
-  let seed = crate::runtime_task::RuntimeTaskBridgeSeed::from_js_object(runtime_tasks)?;
-  crate::runtime_observe::RuntimeObservability::install_runtime_task_safety_net(&seed);
-  let raw_promise = napi::bindgen_prelude::execute_tokio_future(
-    env.raw(),
-    async move {
-      seed
-        .execute()
-        .await
-        .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
-    },
-    |env_raw, result| unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env_raw, result) },
-  )?;
-  unsafe { Object::from_napi_value(env.raw(), raw_promise) }
-}
-
-/// Compare latest-hvigor and SDK cache metadata without routing filesystem
-/// behavior through the JavaScript plugin layer.
 /// Parse JavaScript for plugin glue that is not currently inside a live
-/// Rolldown callback (for example direct context construction in a hvigorfile).
+/// Rolldown callback.
 #[napi]
 pub fn parse_plugin_ast(
   source: String,
@@ -1586,24 +1395,6 @@ struct PackageBuildArgs {
   checker: Option<String>,
   module_analyzer: Option<String>,
   cache: bool,
-  enable_sign_task: bool,
-  fast_build_app: bool,
-  project_hvigor_overrides_json: Option<String>,
-  module_hvigor_overrides_json: Option<String>,
-  runtime_context_overrides_json: Option<String>,
-  runtime_task_inputs_json: Option<String>,
-  pack_compress_level: Option<u32>,
-  align_device_types: Option<Vec<String>>,
-  collect_debug_symbol: Option<bool>,
-  ui_transform_optimization: bool,
-  integrated_hsp_use_get_current_bundle_name: bool,
-  byte_code_har_integrated_optimization: bool,
-  keep_dependency: bool,
-  hvigor_properties: crate::cmd::build::HvigorRuntimeProperties,
-  hvigor_cache_dir: Option<String>,
-  parameter_file_override: Option<String>,
-  runtime_node_executable: Option<String>,
-  native_task_roots_json: Option<String>,
 }
 
 async fn run_build(
@@ -1614,13 +1405,10 @@ async fn run_build(
   product: Option<String>,
   package_args: PackageBuildArgs,
   js_plugins: Vec<PackagePlugin>,
-  task_observer: Option<Arc<dyn crate::cmd::build::coordinator::BuildTaskObserver>>,
 ) -> anyhow::Result<Vec<String>> {
   use crate::cmd::build::args::{AbcBackendChoice, ModuleAnalyzerChoice};
   use crate::cmd::build::BuildArgs;
-  use arkdown_config::{
-    ArkdownConfigLoader, ModuleHvigorOverrides, ProjectHvigorOverrides, RuntimeContextOverrides,
-  };
+  use arkdown_config::ArkdownConfigLoader;
   use arkdown_core::{BuildMode, OutputTarget};
   use arkdown_session::BuildSessionBuilder;
 
@@ -1662,43 +1450,6 @@ async fn run_build(
     }
   };
 
-  let project_hvigor_overrides = package_args
-    .project_hvigor_overrides_json
-    .as_deref()
-    .map(serde_json::from_str::<ProjectHvigorOverrides>)
-    .transpose()
-    .map_err(|error| anyhow::anyhow!("invalid project hvigor overrides: {error}"))?;
-  let module_hvigor_overrides = package_args
-    .module_hvigor_overrides_json
-    .as_deref()
-    .map(serde_json::from_str::<ModuleHvigorOverrides>)
-    .transpose()
-    .map_err(|error| anyhow::anyhow!("invalid module hvigor overrides: {error}"))?;
-  let runtime_context_overrides = package_args
-    .runtime_context_overrides_json
-    .as_deref()
-    .map(serde_json::from_str::<RuntimeContextOverrides>)
-    .transpose()
-    .map_err(|error| anyhow::anyhow!("invalid runtime context overrides: {error}"))?
-    .map(Arc::new);
-  let custom_task_input_paths = package_args
-    .runtime_task_inputs_json
-    .as_deref()
-    .map(serde_json::from_str::<Vec<String>>)
-    .transpose()
-    .map_err(|error| anyhow::anyhow!("invalid custom task input paths: {error}"))?
-    .unwrap_or_default()
-    .into_iter()
-    .map(PathBuf::from)
-    .collect::<Vec<_>>();
-  let native_task_roots = package_args
-    .native_task_roots_json
-    .as_deref()
-    .map(serde_json::from_str::<Vec<crate::cmd::build::args::NativeTaskRoot>>)
-    .transpose()
-    .map_err(|error| anyhow::anyhow!("invalid native task roots: {error}"))?
-    .unwrap_or_default();
-
   let config_loader = ArkdownConfigLoader::new(
     &project_path,
     build_mode,
@@ -1706,37 +1457,15 @@ async fn run_build(
     product.as_deref(),
     None,
   );
-  let mut config = if let Some(runtime_overrides) = runtime_context_overrides.as_deref() {
-    config_loader
-      .with_runtime_overrides(runtime_overrides)
-      .load()
-  } else {
-    config_loader.load()
-  }
-  .map_err(|e| anyhow::anyhow!("load_config: {e}"))?;
-  if let Some(overrides) = project_hvigor_overrides.as_ref() {
-    overrides
-      .apply_to(&mut config, &project_path.join("hvigorfile.ts"))
-      .map_err(|error| anyhow::anyhow!("apply project hvigor overrides: {error}"))?;
-  }
+  let mut config = config_loader
+    .load()
+    .map_err(|e| anyhow::anyhow!("load_config: {e}"))?;
   if let Some(build_version) = package_args.build_version.as_ref() {
     config.product.build_version = Some(build_version.clone());
   }
-  let module_hvigor_overrides = module_hvigor_overrides
-    .as_ref()
-    .map(|overrides| overrides.bind_to_modules(&config))
-    .unwrap_or_default();
   let config = std::sync::Arc::new(config);
-  let mut session_builder = BuildSessionBuilder::new(config.clone());
-  session_builder =
-    session_builder.with_arkts_language_version(package_args.arkts_language_version);
-  if let Some(runtime_overrides) = runtime_context_overrides.clone() {
-    session_builder = session_builder.with_runtime_overrides(runtime_overrides);
-  }
-  if let Some(parameter_file_override) = package_args.parameter_file_override.as_ref() {
-    session_builder = session_builder
-      .with_parameter_file_override(std::path::PathBuf::from(parameter_file_override));
-  }
+  let session_builder = BuildSessionBuilder::new(config.clone())
+    .with_arkts_language_version(package_args.arkts_language_version);
   let session = std::sync::Arc::new(
     session_builder
       .build()
@@ -1759,8 +1488,8 @@ async fn run_build(
     coverage_path_filter: package_args.coverage_path_filter,
     coverage_mode: package_args.coverage_mode,
     unit_test_replace_page: package_args.unit_test_replace_page,
-    fast_build_app: package_args.fast_build_app,
-    enable_sign_task: package_args.enable_sign_task,
+    fast_build_app: false,
+    enable_sign_task: true,
     ohos_debug_asan: package_args.ohos_debug_asan,
     ohos_enable_hwasan: package_args.ohos_enable_hwasan,
     ohos_enable_tsan: package_args.ohos_enable_tsan,
@@ -1781,45 +1510,34 @@ async fn run_build(
     skip_resource: false,
     skip_profile: false,
     watch_invalidation: None,
-    project_hvigor_overrides,
-    module_hvigor_overrides,
-    runtime_context_overrides,
-    custom_task_input_paths,
-    pack_compress_level: package_args.pack_compress_level,
-    align_device_types: package_args.align_device_types.unwrap_or_default(),
-    collect_debug_symbol: package_args.collect_debug_symbol,
-    ui_transform_optimization: package_args.ui_transform_optimization,
-    integrated_hsp_use_get_current_bundle_name: package_args
-      .integrated_hsp_use_get_current_bundle_name,
-    byte_code_har_integrated_optimization: package_args.byte_code_har_integrated_optimization,
-    keep_dependency: package_args.keep_dependency,
-    hvigor_properties: package_args.hvigor_properties,
-    parameter_file_override: package_args
-      .parameter_file_override
-      .map(std::path::PathBuf::from),
-    node_executable: package_args
-      .runtime_node_executable
-      .map(std::path::PathBuf::from),
-    hvigor_cache_dir: package_args.hvigor_cache_dir.map(std::path::PathBuf::from),
-    native_task_roots,
+    project_hvigor_overrides: None,
+    module_hvigor_overrides: Default::default(),
+    runtime_context_overrides: None,
+    custom_task_input_paths: Vec::new(),
+    pack_compress_level: None,
+    align_device_types: Vec::new(),
+    collect_debug_symbol: None,
+    ui_transform_optimization: false,
+    integrated_hsp_use_get_current_bundle_name: false,
+    byte_code_har_integrated_optimization: false,
+    keep_dependency: true,
+    hvigor_properties: Default::default(),
+    parameter_file_override: None,
+    node_executable: None,
+    hvigor_cache_dir: None,
+    native_task_roots: Vec::new(),
   };
 
   let output = if is_app_build {
-    let mut coordinator =
-      crate::cmd::build::app_coordinator::AppBuildCoordinator::new(session, config, args)
-        .with_package_plugins(js_plugins);
-    if let Some(task_observer) = task_observer {
-      coordinator = coordinator.with_task_observer(task_observer);
-    }
-    coordinator.execute().await?
+    crate::cmd::build::app_coordinator::AppBuildCoordinator::new(session, config, args)
+      .with_package_plugins(js_plugins)
+      .execute()
+      .await?
   } else {
-    let mut coordinator =
-      crate::cmd::build::coordinator::BuildCoordinator::new(session, config, args)
-        .with_package_plugins(js_plugins);
-    if let Some(task_observer) = task_observer {
-      coordinator = coordinator.with_task_observer(task_observer);
-    }
-    coordinator.execute().await?
+    crate::cmd::build::coordinator::BuildCoordinator::new(session, config, args)
+      .with_package_plugins(js_plugins)
+      .execute()
+      .await?
   };
 
   Ok(
