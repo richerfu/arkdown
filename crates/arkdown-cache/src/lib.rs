@@ -29,7 +29,6 @@
 //! | `namespace.rs` | `CacheNamespace`, `StageCacheNamespace` |
 //! | `artifact.rs` | `CachedArtifact`, `CachedArtifactKind`, `CachedArtifactFingerprint` |
 //! | `plugin_cache.rs` | `ShouldInvalidCacheBridge`, `PluginCacheDecision`, ... |
-//! | `rollup_cache.rs` | `RollupCacheStore`, `RollupCacheEntry`, ... |
 //! | `event_name.rs` | `CacheEventName`, `UpdateEventNameHandler`, `ChangedFileEvent` |
 
 pub mod artifact;
@@ -40,7 +39,6 @@ pub mod key;
 pub mod manifest;
 pub mod namespace;
 pub mod plugin_cache;
-pub mod rollup_cache;
 pub mod store;
 
 // ---------------------------------------------------------------------------
@@ -72,11 +70,6 @@ pub use artifact::{CachedArtifact, CachedArtifactFingerprint, CachedArtifactKind
 pub use plugin_cache::{
     PluginCacheDecision, PluginInvalidationInput, PluginInvalidationOutput,
     ShouldInvalidCacheBridge,
-};
-
-// rollup_cache — bundle cache store
-pub use rollup_cache::{
-    RollupCacheEntry, RollupCacheReadResult, RollupCacheStore, RollupCacheWritePlan,
 };
 
 // event_name — watch-mode event tracking

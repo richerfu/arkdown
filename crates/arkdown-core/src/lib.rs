@@ -20,7 +20,6 @@
 //! |                 |                                                         |
 //! | SPEC-048 migration targets (to be moved out):           |            |
 //! | `config.rs`     | Build config types → `arkdown-config` (Phase 3+)       |
-//! | `paths.rs`      | `lexical_normalize` → `arkdown-path::normalize`         |
 
 pub mod arkts;
 pub mod artifact;
@@ -33,7 +32,6 @@ pub mod hash;
 pub mod ids;
 pub mod manifest;
 pub mod module;
-pub mod paths;
 // SPEC-048: resolution.rs — OhosResolvedModule / PkgBriefInfo / PkgContext
 // are kept here until arkdown-resolver absorbs them (Phase 3).  Only those
 // specific types are re-exported.
