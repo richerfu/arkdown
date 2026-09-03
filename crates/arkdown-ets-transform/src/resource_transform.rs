@@ -6,7 +6,9 @@
 //! structured model so the field order and static names stay centralized
 //! instead of being assembled ad hoc at call sites.
 
-use rustc_hash::FxHashMap;
+use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use oxc_allocator::{Allocator, ArenaVec, CloneIn, GetAllocator};
 use oxc_ast::ast::{
@@ -17,9 +19,11 @@ use oxc_ast::ast::{
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
-use oxc_span::SPAN;
+use oxc_span::{GetSpan, Span, SPAN};
 use oxc_str::{Ident, Str};
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
+
+use crate::error::{DiagnosticSeverity, EtsTransformError};
 
 pub(crate) const RAWFILE_RUNTIME_TYPE: i64 = 30000;
 
@@ -36,6 +40,66 @@ pub struct ResourceReference {
     pub runtime_type: u32,
     pub bundle_name: String,
     pub module_name: String,
+}
+
+/// Resource names and rawfiles exported by one HSP dependency.
+///
+/// The coordinator constructs this once from the HSP `ResourceTable.txt` and
+/// adjacent `resources/rawfile` directory. Transform hooks only query it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceModuleReference {
+    resources: FxHashMap<String, FxHashSet<String>>,
+    rawfiles: FxHashSet<String>,
+    resource_table_available: bool,
+    rawfile_root_available: bool,
+}
+
+impl ResourceModuleReference {
+    pub fn new(
+        resources: FxHashSet<String>,
+        rawfiles: FxHashSet<String>,
+        resource_table_available: bool,
+        rawfile_root_available: bool,
+    ) -> Self {
+        let mut resources_by_type: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+        for resource in resources {
+            let Some((resource_type, name)) = resource.split_once('.') else {
+                continue;
+            };
+            resources_by_type
+                .entry(resource_type.to_string())
+                .or_default()
+                .insert(name.to_string());
+        }
+        Self {
+            resources: resources_by_type,
+            rawfiles,
+            resource_table_available,
+            rawfile_root_available,
+        }
+    }
+
+    fn contains_resource(&self, resource_type: &str, name: &str) -> bool {
+        self.resources
+            .get(resource_type)
+            .is_some_and(|resources| resources.contains(name))
+    }
+
+    fn contains_type(&self, resource_type: &str) -> bool {
+        self.resources.contains_key(resource_type)
+    }
+
+    fn contains_rawfile(&self, name: &str) -> bool {
+        self.rawfiles.contains(name)
+    }
+
+    fn has_rawfile_root(&self) -> bool {
+        self.rawfile_root_available
+    }
+
+    fn has_resource_table(&self) -> bool {
+        self.resource_table_available
+    }
 }
 
 #[derive(Debug)]
@@ -377,6 +441,12 @@ pub struct ResourceTransformContext {
     pub allow_empty_bundle_name: bool,
     pub bundle_name: String,
     pub module_name: String,
+    /// Whether the Stage build supplied `hspResourcesMap`, including an empty map.
+    pub validate_resource_modules: bool,
+    /// Whether the compiled current-module rawfile directory was inventoried.
+    pub validate_rawfiles: bool,
+    pub rawfiles: Arc<FxHashSet<String>>,
+    pub resource_modules: Arc<FxHashMap<String, ResourceModuleReference>>,
 }
 
 impl ResourceTransformContext {
@@ -460,8 +530,41 @@ impl ResourceNames {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ResourceReferenceIndex {
+    types: FxHashMap<ResourceSource, FxHashSet<String>>,
+}
+
+impl ResourceReferenceIndex {
+    pub(crate) fn new(resource_refs: &FxHashMap<String, ResourceReference>) -> Self {
+        let mut types: FxHashMap<ResourceSource, FxHashSet<String>> = FxHashMap::default();
+        for key in resource_refs.keys() {
+            let mut components = key.split('.');
+            let (Some(source), Some(resource_type)) = (components.next(), components.next()) else {
+                continue;
+            };
+            let Some(source) = ResourceSource::parse(source) else {
+                continue;
+            };
+            types
+                .entry(source)
+                .or_default()
+                .insert(resource_type.to_string());
+        }
+        Self { types }
+    }
+
+    fn contains_type(&self, source: ResourceSource, resource_type: &str) -> bool {
+        self.types
+            .get(&source)
+            .is_some_and(|types| types.contains(resource_type))
+    }
+}
+
 pub(crate) struct ResourceReferenceRewriter<'a> {
+    id: &'a str,
     resource_refs: &'a FxHashMap<String, ResourceReference>,
+    reference_index: &'a ResourceReferenceIndex,
     names: ResourceNames,
     context: ResourceTransformContext,
 }
@@ -471,13 +574,15 @@ impl<'a> ResourceReferenceRewriter<'a> {
         source: &'a str,
         id: &'a str,
         resource_refs: &'a FxHashMap<String, ResourceReference>,
+        reference_index: &'a ResourceReferenceIndex,
         bundle_name: &str,
         module_name: Option<&str>,
     ) -> Self {
         let _ = source;
-        let _ = id;
         Self {
+            id,
             resource_refs,
+            reference_index,
             names: ResourceNames::new(bundle_name, module_name),
             context: ResourceTransformContext {
                 bundle_name: bundle_name.to_string(),
@@ -502,28 +607,39 @@ impl<'a> ResourceReferenceRewriter<'a> {
         &self,
         allocator: &'ast Allocator,
         program: &mut oxc_ast::ast::Program<'ast>,
-    ) -> bool {
+    ) -> Result<ResourceRewriteResult, EtsTransformError> {
         let mut visitor = ResourceReferenceMutator {
             allocator,
+            id: self.id,
             resource_refs: self.resource_refs,
+            reference_index: self.reference_index,
             names: self.names.clone(),
             context: self.context.clone(),
             changed: false,
+            diagnostics: Vec::new(),
         };
         visitor.visit_program(program);
         if visitor.changed && visitor.context.is_dynamic() {
             visitor.insert_module_info_import(program);
         }
-        visitor.changed
+        visitor.finish()
     }
+}
+
+pub(crate) struct ResourceRewriteResult {
+    pub(crate) changed: bool,
+    pub(crate) warnings: Vec<EtsTransformError>,
 }
 
 struct ResourceReferenceMutator<'a, 'refs> {
     allocator: &'a Allocator,
+    id: &'refs str,
     resource_refs: &'refs FxHashMap<String, ResourceReference>,
+    reference_index: &'refs ResourceReferenceIndex,
     names: ResourceNames,
     context: ResourceTransformContext,
     changed: bool,
+    diagnostics: Vec<EtsTransformError>,
 }
 
 impl<'a> VisitMut<'a> for ResourceReferenceMutator<'a, '_> {
@@ -542,6 +658,20 @@ impl<'a> VisitMut<'a> for ResourceReferenceMutator<'a, '_> {
 }
 
 impl<'a> ResourceReferenceMutator<'a, '_> {
+    fn finish(self) -> Result<ResourceRewriteResult, EtsTransformError> {
+        if let Some(error) = self
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.is_error())
+        {
+            return Err(error.clone());
+        }
+        Ok(ResourceRewriteResult {
+            changed: self.changed,
+            warnings: self.diagnostics,
+        })
+    }
+
     fn insert_module_info_import(&self, program: &mut oxc_ast::ast::Program<'a>) {
         let already_imported = program.body.iter().any(|statement| {
             matches!(
@@ -584,7 +714,7 @@ impl<'a> ResourceReferenceMutator<'a, '_> {
         );
     }
 
-    fn resource_expression(&self, call: &CallExpression<'_>) -> Option<Expression<'a>> {
+    fn resource_expression(&mut self, call: &CallExpression<'_>) -> Option<Expression<'a>> {
         let Expression::Identifier(callee) = &call.callee else {
             return None;
         };
@@ -597,42 +727,144 @@ impl<'a> ResourceReferenceMutator<'a, '_> {
         Some(replacement.expression(&AstBuilder::new(self.allocator)))
     }
 
-    fn resource_object(&self, call: &CallExpression<'_>) -> Option<ResourceObject<'a>> {
+    fn resource_object(&mut self, call: &CallExpression<'_>) -> Option<ResourceObject<'a>> {
         let first_arg = call.arguments.first()?.as_expression()?;
         let argument_text = ResourceArgumentText::new(first_arg);
         if let Some(resource_name) = argument_text.text() {
-            if let Some(module) = ResourceModuleName::parse(resource_name) {
-                return Some(ResourceObject::resource_module(
-                    module.name,
-                    ResourceCallArguments::new(call, self.allocator).collect_all(),
-                    &self.context,
-                ));
-            }
-            let Some(name) = ResourceName::parse(resource_name) else {
-                return argument_text
-                    .is_template()
-                    .then(|| self.dynamic_resource_object(call));
-            };
-            let source = name.source;
-            let resource_key = name.into_key();
-            let Some(resource) = self.resource_refs.get(&resource_key) else {
-                return argument_text
-                    .is_template()
-                    .then(|| self.dynamic_resource_object(call));
-            };
-            return Some(ResourceObject::app_static(
-                resource,
-                if self.context.compile_har {
-                    ResourceCallArguments::new(call, self.allocator).collect_all()
-                } else {
-                    ResourceCallArguments::new(call, self.allocator).collect_after_first()
-                },
-                &self.context,
-                source,
-            ));
+            return self.static_resource_object(
+                call,
+                resource_name.trim(),
+                argument_text.is_template(),
+            );
         }
 
         Some(self.dynamic_resource_object(call))
+    }
+
+    fn static_resource_object(
+        &mut self,
+        call: &CallExpression<'_>,
+        resource_name: &str,
+        is_template: bool,
+    ) -> Option<ResourceObject<'a>> {
+        let Some(name) = ResourceName::parse(resource_name) else {
+            self.coded_diagnostic(
+                "10905332",
+                "Invalid resource file parameter. Enter a value in the format of 'xxx.yyy.zzz'.",
+                Self::template_severity(is_template),
+                call.span(),
+            );
+            return is_template.then(|| self.dynamic_resource_object(call));
+        };
+        if let Some(module) = name.resource_module() {
+            return self.resource_module_object(call, &name, module, is_template);
+        }
+        self.app_or_system_resource_object(call, name, is_template)
+    }
+
+    fn app_or_system_resource_object(
+        &mut self,
+        call: &CallExpression<'_>,
+        name: ResourceName<'_>,
+        is_template: bool,
+    ) -> Option<ResourceObject<'a>> {
+        let Some(source) = ResourceSource::parse(name.source) else {
+            self.coded_diagnostic(
+                "10903331",
+                &format!("Unknown resource source '{}'.", name.source),
+                Self::template_severity(is_template),
+                call.span(),
+            );
+            return is_template.then(|| self.dynamic_resource_object(call));
+        };
+        if !self
+            .reference_index
+            .contains_type(source, name.resource_type)
+        {
+            self.coded_diagnostic(
+                "10903330",
+                &format!("Unknown resource type '{}'.", name.resource_type),
+                Self::template_severity(is_template),
+                call.span(),
+            );
+            return is_template.then(|| self.dynamic_resource_object(call));
+        }
+        let resource_key = name.runtime_key(source);
+        let Some(resource) = self.resource_refs.get(&resource_key) else {
+            self.coded_diagnostic(
+                "10903329",
+                &format!("Unknown resource name '{}'.", name.name),
+                Self::template_severity(is_template),
+                call.span(),
+            );
+            return is_template.then(|| self.dynamic_resource_object(call));
+        };
+        if ResourceRuntimeType::from_name(name.resource_type).is_none() {
+            self.unsupported_type(name.resource_type, is_template, call.span());
+            return is_template.then(|| self.dynamic_resource_object(call));
+        }
+        Some(ResourceObject::app_static(
+            resource,
+            if self.context.compile_har {
+                ResourceCallArguments::new(call, self.allocator).collect_all()
+            } else {
+                ResourceCallArguments::new(call, self.allocator).collect_after_first()
+            },
+            &self.context,
+            source,
+        ))
+    }
+
+    fn resource_module_object(
+        &mut self,
+        call: &CallExpression<'_>,
+        name: &ResourceName<'_>,
+        module_name: &str,
+        is_template: bool,
+    ) -> Option<ResourceObject<'a>> {
+        if self.context.validate_resource_modules {
+            let Some(module) = self
+                .context
+                .resource_modules
+                .get(module_name)
+                .filter(|module| module.has_resource_table())
+            else {
+                self.coded_diagnostic(
+                    "10903331",
+                    &format!("Unknown resource source '{module_name}'."),
+                    DiagnosticSeverity::Warning,
+                    call.span(),
+                );
+                return is_template.then(|| self.dynamic_resource_object(call));
+            };
+            if !module.contains_type(name.resource_type) {
+                self.coded_diagnostic(
+                    "10903330",
+                    &format!("Unknown resource type '{}'.", name.resource_type),
+                    DiagnosticSeverity::Warning,
+                    call.span(),
+                );
+                return is_template.then(|| self.dynamic_resource_object(call));
+            }
+            if !module.contains_resource(name.resource_type, name.name) {
+                self.coded_diagnostic(
+                    "10903329",
+                    &format!("Unknown resource name '{}'.", name.name),
+                    DiagnosticSeverity::Warning,
+                    call.span(),
+                );
+                return is_template.then(|| self.dynamic_resource_object(call));
+            }
+        }
+        if ResourceRuntimeType::from_name(name.resource_type).is_none() {
+            self.unsupported_type(name.resource_type, is_template, call.span());
+            return is_template.then(|| self.dynamic_resource_object(call));
+        }
+        Some(ResourceObject::resource_module(
+            module_name,
+            ResourceCallArguments::new(call, self.allocator).collect_all(),
+            &self.context,
+        ))
     }
 
     fn dynamic_resource_object(&self, call: &CallExpression<'_>) -> ResourceObject<'a> {
@@ -643,13 +875,38 @@ impl<'a> ResourceReferenceMutator<'a, '_> {
         )
     }
 
-    fn rawfile_object(&self, call: &CallExpression<'_>) -> Option<ResourceObject<'a>> {
+    fn rawfile_object(&mut self, call: &CallExpression<'_>) -> Option<ResourceObject<'a>> {
         let first_arg = call.arguments.first()?;
-        let static_text = first_arg
-            .as_expression()
-            .and_then(|expression| ResourceArgumentText::new(expression).text());
+        let static_argument = first_arg.as_expression().map(ResourceArgumentText::new);
+        let static_text = static_argument
+            .as_ref()
+            .and_then(ResourceArgumentText::text);
         let is_static_string = static_text.is_some();
-        let resource_module = static_text.and_then(ResourceModuleName::parse);
+        let is_template = static_argument
+            .as_ref()
+            .is_some_and(|argument| argument.is_template());
+        let resource_module = static_text.and_then(|text| ResourceModuleName::parse(text.trim()));
+        if let Some(module) = resource_module {
+            self.validate_module_rawfile(call, module);
+        } else if let Some(resource_text) = static_text {
+            if self.context.validate_rawfiles && !self.context.rawfiles.contains(resource_text) {
+                self.coded_diagnostic(
+                    "10904333",
+                    &format!("No such '{resource_text}' resource in current module."),
+                    Self::template_severity(is_template),
+                    call.span(),
+                );
+                if is_template {
+                    return Some(ResourceObject::rawfile(
+                        -1,
+                        ResourceCallArguments::new(call, self.allocator).collect_all(),
+                        &self.names,
+                        &self.context,
+                        None,
+                    ));
+                }
+            }
+        }
         let params = if is_static_string {
             vec![first_arg.clone_in(self.allocator)]
         } else {
@@ -667,6 +924,79 @@ impl<'a> ResourceReferenceMutator<'a, '_> {
             resource_module.map(|module| module.name),
         ))
     }
+
+    fn validate_module_rawfile(
+        &mut self,
+        call: &CallExpression<'_>,
+        module: ResourceModuleName<'_>,
+    ) {
+        if !self.context.validate_resource_modules {
+            return;
+        }
+        let Some(reference) = self.context.resource_modules.get(module.name) else {
+            self.diagnostic(
+                &format!("Unknown resource source '[{}]'.", module.name),
+                DiagnosticSeverity::Warning,
+                call.span(),
+            );
+            return;
+        };
+        if !reference.has_rawfile_root() {
+            self.diagnostic(
+                &format!("Unknown resource source '[{}]'.", module.name),
+                DiagnosticSeverity::Warning,
+                call.span(),
+            );
+        } else if !reference.contains_rawfile(module.resource) {
+            self.diagnostic(
+                &format!("No such '[{}].{}' resource.", module.name, module.resource),
+                DiagnosticSeverity::Warning,
+                call.span(),
+            );
+        }
+    }
+
+    fn unsupported_type(&mut self, resource_type: &str, is_template: bool, span: Span) {
+        self.coded_diagnostic(
+            "10906334",
+            &format!("The resource type '{resource_type}' is not supported."),
+            Self::template_severity(is_template),
+            span,
+        );
+    }
+
+    fn template_severity(is_template: bool) -> DiagnosticSeverity {
+        if is_template {
+            DiagnosticSeverity::Warning
+        } else {
+            DiagnosticSeverity::Error
+        }
+    }
+
+    fn coded_diagnostic(
+        &mut self,
+        code: &str,
+        message: &str,
+        severity: DiagnosticSeverity,
+        span: Span,
+    ) {
+        self.diagnostics.push(EtsTransformError::CodedDiagnostic {
+            file: self.id.to_string(),
+            code: code.to_string(),
+            message: message.to_string(),
+            severity,
+            span: Some(span),
+            solutions: Vec::new(),
+        });
+    }
+
+    fn diagnostic(&mut self, message: &str, severity: DiagnosticSeverity, _span: Span) {
+        self.diagnostics.push(EtsTransformError::Diagnostic {
+            file: self.id.to_string(),
+            message: message.to_string(),
+            severity,
+        });
+    }
 }
 
 struct ResourceArgumentText<'a> {
@@ -680,12 +1010,11 @@ impl<'a> ResourceArgumentText<'a> {
 
     fn text(&self) -> Option<&'a str> {
         match self.expression {
-            Expression::StringLiteral(literal) => Some(literal.value.as_str().trim()),
+            Expression::StringLiteral(literal) => Some(literal.value.as_str()),
             Expression::TemplateLiteral(literal) if literal.expressions.is_empty() => literal
                 .quasis
                 .first()
-                .and_then(|quasi| quasi.value.cooked.as_deref())
-                .map(str::trim),
+                .and_then(|quasi| quasi.value.cooked.as_deref()),
             _ => None,
         }
     }
@@ -698,6 +1027,7 @@ impl<'a> ResourceArgumentText<'a> {
 #[derive(Debug, Clone, Copy)]
 struct ResourceModuleName<'a> {
     name: &'a str,
+    resource: &'a str,
 }
 
 impl<'a> ResourceModuleName<'a> {
@@ -707,7 +1037,7 @@ impl<'a> ResourceModuleName<'a> {
         let end = rest.find(']')?;
         let name = rest.get(..end)?.trim();
         let resource = rest.get(end + 1..)?.strip_prefix('.')?;
-        (!name.is_empty() && !resource.is_empty()).then_some(Self { name })
+        (!resource.is_empty()).then_some(Self { name, resource })
     }
 }
 
@@ -769,7 +1099,7 @@ impl ResourceRuntimeType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ResourceSource {
     App,
     Sys,
@@ -794,7 +1124,7 @@ impl ResourceSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResourceName<'a> {
-    source: ResourceSource,
+    source: &'a str,
     resource_type: &'a str,
     name: &'a str,
 }
@@ -802,22 +1132,23 @@ struct ResourceName<'a> {
 impl<'a> ResourceName<'a> {
     fn parse(value: &'a str) -> Option<Self> {
         let mut scanner = ResourceNameScanner::new(value);
-        let source = ResourceSource::parse(scanner.next_component()?)?;
+        let source = scanner.next_component()?;
         let resource_type = scanner.next_component()?;
         let name = scanner.next_component()?;
-        (scanner.is_complete()
-            && !resource_type.is_empty()
-            && !name.is_empty()
-            && ResourceRuntimeType::from_name(resource_type).is_some())
-        .then_some(Self {
+        scanner.is_complete().then_some(Self {
             source,
             resource_type,
             name,
         })
     }
 
-    fn into_key(self) -> String {
-        ResourceRuntimeKey::new(self.source, self.resource_type, self.name).to_key()
+    fn runtime_key(&self, source: ResourceSource) -> String {
+        ResourceRuntimeKey::new(source, self.resource_type, self.name).to_key()
+    }
+
+    fn resource_module(&self) -> Option<&'a str> {
+        let name = self.source.strip_prefix('[')?.strip_suffix(']')?.trim();
+        Some(name)
     }
 }
 
@@ -852,15 +1183,22 @@ impl<'a> ResourceRuntimeKey<'a> {
 struct ResourceNameScanner<'a> {
     value: &'a str,
     cursor: usize,
+    ended_without_separator: bool,
 }
 
 impl<'a> ResourceNameScanner<'a> {
     fn new(value: &'a str) -> Self {
-        Self { value, cursor: 0 }
+        Self {
+            value,
+            cursor: 0,
+            ended_without_separator: false,
+        }
     }
 
     fn next_component(&mut self) -> Option<&'a str> {
-        if self.cursor > self.value.len() {
+        if self.cursor > self.value.len()
+            || (self.cursor == self.value.len() && self.ended_without_separator)
+        {
             return None;
         }
         let rest = self.value.get(self.cursor..)?;
@@ -869,11 +1207,12 @@ impl<'a> ResourceNameScanner<'a> {
             .find_map(|(index, ch)| (ch == '.').then_some(index))
             .unwrap_or(rest.len());
         let component = rest.get(..end)?;
+        self.ended_without_separator = end == rest.len();
         self.cursor += end + usize::from(end < rest.len());
         Some(component)
     }
 
     fn is_complete(&self) -> bool {
-        self.cursor >= self.value.len()
+        self.ended_without_separator && self.cursor >= self.value.len()
     }
 }

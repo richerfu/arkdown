@@ -14,7 +14,8 @@
 - 已补动态 ArkTS 的 `worker.Worker('*.ts') -> '*.js'` 和 `ESObject -> any` 全程序 OXC 变换，并把 Builder factory/global reuse pool 错误改为源码错误码。
 - 已把 `@Observed/@ObservedV2` 类事实并入并行构建的 `ModuleExportIndex`，named/default/namespace import 与 barrel re-export 的继承和 V1 property 类型检查不再退化为单文件名称判断；standalone check 也复用一次性 source snapshot。
 - 已从 SDK `components/*.json` 一次性加载 atomic/single/specific-child/style/systemApi grammar，补齐 10905219–10905223、10905228、10905348、10905363、10905365、10905367、10905372，并通过无 cache 的真实 ArkTS 1.1 OXC/Rolldown HAP 构建。
-- 默认 checker 仍保持 `sdk`，尚未提前切换。system API 已以 SDK declaration JSDoc、OXC `SymbolId` 和 import/export 闭包接入生产 build/check，并从 `SdkSnapshot` 消费一次读取的 device capability inventory；剩余阻断项是重载/返回值类型流、crossplatform 外部依赖收集、其余跨文件类型推导和剩余 UI rule corpus。这些完成前不得宣称 ArkTS 1.1 已完全替换。
+- 已按 `processResourceData` 建立原生资源查询库存：当前模块 rawfile、HSP `ResourceTable.txt`/rawfile 在 bundle 启动边界读取并跨模块复用，Rolldown hook 只读 `Arc` 快照；普通资源的 format/source/type/name、unsupported type、rawfile 错误码和模板/HSP warning 降级行为已接入生产变换。
+- 默认 checker 仍保持 `sdk`，尚未提前切换。system API 已以 SDK declaration JSDoc、OXC `SymbolId` 和 import/export 闭包接入生产 build/check，并从 `SdkSnapshot` 消费一次读取的 device capability inventory；直接返回值和局部变量类型流已经覆盖，剩余阻断项是重载/复杂泛型类型流、crossplatform 外部依赖收集、其余跨文件类型推导和剩余 UI rule corpus。这些完成前不得宣称 ArkTS 1.1 已完全替换。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
 
@@ -149,11 +150,11 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | 配置和 build script | 部分，兼容层过多 | Rust 已读 build-profile/module 配置，但仍支持编译/执行 `hvigorfile.ts`、`hvigorconfig.ts` 并覆盖模型 | 结构化配置全部 Rust 化；任意 hvigor 脚本不再执行，给出迁移诊断；TS 只用于插件模块 |
 | OHPM/依赖获取 | 部分且未接线 | `arkdown-ohpm` 有 registry/tarball/integrity，但生产 BuildSession 不调用；当前主要扫描已安装 `oh_modules` | 在 session 建立前执行 lockfile 驱动的 offline/prefer-offline/online acquire；缓存、完整性、代理都由 Rust 管理 |
 | BuildSession/输入快照 | 部分 | 已有 package/sdk/fingerprint/source snapshot，但 profile 又维护一套 `LocalDependencyGraph`，bundle hook 仍重复查包和读 JSON5 | 只保留 session graph/source store/package index；删除重复图和 hook I/O |
-| Profile/Loader/Resource | 基本可用但需补金标 | 已有 typed schema、loader、pkgContext、restool、router/startup/worker 等实现；大应用边界仍需源码用例覆盖 | 保留 domain crate；用源码 fixture 补 router、worker、InsightIntent、ByteCode HAR、overlay、跨模块资源回归 |
+| Profile/Loader/Resource | 基本可用但需补金标 | 已有 typed schema、loader、pkgContext、restool、router/startup/worker；`$r/$rawfile` 已消费原生 app/sys/HSP/rawfile 库存并对齐主要诊断和 warning 降级；大应用边界仍需源码用例覆盖 | 保留 domain crate；用源码 fixture 补 router、worker、InsightIntent、ByteCode HAR、overlay 和真实 HSP 产物回归 |
 | Resolver/Rolldown 图 | 基本可用但热路径不合格 | 已有 OHM URL、kit、native/json/commonjs、duplicate/module meta；`ModuleMetaPlugin` 每模块向上找包，JSON5 hook 读盘，若干 collector 用 `Arc<Mutex>` | session 预载全部 metadata/source；plugin 只读 snapshot 并返回事实；确定性归并 |
 | ArkTS 1.1 UI transform | 主干可用，未完全覆盖 | 已覆盖 V1/V2、state、Builder/Styles/Extend、WrapBuilder/MutableBuilder、ForEach/Repeat、常见组件和 source map；仍缺 InsightIntent、worker 专用变换、declaration merger、部分 interop/边界 | 直接移植源码测试语料；按 OXC pass 补齐，不以名称或行数判断完成 |
 | ArkTS checker | 部分且默认错误 | OXC checker 仅覆盖一部分 decorator/build 规则；默认仍是 SDK Node checker | 默认改为完整 OXC checker；移除 `sdk` 模式和 `ets-checker-bridge.cjs`；`off` 仅保留为显式调试选项 |
-| System API/syscap/permission | 主干完成，深层类型流待补 | 已建立 `SystemApiInventory`，解析 SDK JSDoc、namespace/class/interface/type 引用和 barrel export；生产链路已接入 version/permission/syscap/device 及 suppressor。尚缺基于重载签名和调用返回值的完整类型流，以及 crossplatform 外部依赖配置 | 扩展 OXC typed semantic API 后补重载/返回值链；接入 external SDK crossplatform config；以源码诊断顺序做 corpus 金标 |
+| System API/syscap/permission | 主干完成，深层类型流待补 | 已建立 `SystemApiInventory`，解析 SDK JSDoc、namespace/class/interface/type 引用和 barrel export；生产链路已接入 version/permission/syscap/device、suppressor、直接返回值和局部变量类型流。尚缺重载/复杂泛型的精确签名选择，以及 crossplatform 外部依赖配置 | 扩展 OXC typed semantic API 后补重载/泛型链；接入 external SDK crossplatform config；以源码诊断顺序做 corpus 金标 |
 | Visual/SuperVisual | JS 托管 | Rust 只做发现、验证和 OXC 插入，生成片段由 Node 调 `codegen_ets.js` | 把 `.visual` parser/codegen 和 deterministic insertion 全部迁入 Rust/OXC；删除 Node generator |
 | ArkTS 1.2 | Rust 行为基本缺失 | OXC 使用 `SourceType::ets_static()` 并生成图投影，但生产编译仍由 Node static driver 加载 UI/syntax/memo 插件；interop 未完整接入，多个 config 字段为空 | 按源码固定阶段在 OXC 实现 interop parsed/checked、UI parsed/checked、UI syntax checked、memo checked+recheck；Rust 直接调用原生后端 |
 | ABC/AOT/中间文件 | 基本可用但散落 | dynamic es2abc、filesInfo、sourceMaps、AOT/quickfix 有较多实现，static 仍被 JS driver 包住，代码位于 N-API crate | 抽出 `arkdown-abc`；统一动态/静态/preview/reload command plan 和缓存键 |

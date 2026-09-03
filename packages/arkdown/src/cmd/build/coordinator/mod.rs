@@ -112,9 +112,9 @@ use crate::progress::Progress;
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 
 use arkdown::plugins::ets_transform::{
-  CheckerMode, ComponentMetadata, ModuleAnalyzerKind, NavigationRouteMap, ResourceReference,
-  ResourceTransformContext, SystemApiCheckOptions, SystemResourceReferenceLoader,
-  TransformResolvedStaticModule, TransformSourceSnapshot,
+  CheckerMode, ComponentMetadata, ModuleAnalyzerKind, NavigationRouteMap, ResourceModuleReference,
+  ResourceReference, ResourceTransformContext, SystemApiCheckOptions,
+  SystemResourceReferenceLoader, TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
@@ -147,6 +147,7 @@ use arkdown_profile::{
 use arkdown_resolver::{OhPackage, PackageResolutionPlan};
 use arkdown_resource::{
   IdDefinedFileProcessor, ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput,
+  ResourceReferenceInventory,
 };
 
 mod bundle_stage;

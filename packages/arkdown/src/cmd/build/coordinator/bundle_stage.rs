@@ -3,6 +3,70 @@
 use super::*;
 use crate::cmd::build::visual_codegen::VisualCodegenAdapter;
 
+struct TransformResourceInventoryLoader {
+  dependency_tables: FxHashMap<PathBuf, ResourceReferenceInventory>,
+}
+
+impl TransformResourceInventoryLoader {
+  fn new() -> Self {
+    Self {
+      dependency_tables: FxHashMap::default(),
+    }
+  }
+
+  fn load(
+    &mut self,
+    loader_json: &LoaderJson,
+    module_layout: &ModuleBuildLayout,
+  ) -> Result<TransformResourceInventory> {
+    let current = ResourceReferenceInventory::from_rawfile_dir(
+      &module_layout.res_resources_dir().join("rawfile"),
+    )?;
+    let mut entries = loader_json.hsp_resources_map.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut modules = FxHashMap::default();
+    for (module_name, resource_table) in entries {
+      let resource_table = PathBuf::from(resource_table);
+      if !self.dependency_tables.contains_key(&resource_table) {
+        let inventory = if resource_table.is_file() {
+          ResourceReferenceInventory::from_resource_table(&resource_table)?
+        } else {
+          let rawfiles = resource_table
+            .parent()
+            .map(|parent| parent.join("resources").join("rawfile"))
+            .unwrap_or_default();
+          ResourceReferenceInventory::from_rawfile_dir(&rawfiles)?
+        };
+        self
+          .dependency_tables
+          .insert(resource_table.clone(), inventory);
+      }
+      let inventory = self
+        .dependency_tables
+        .get(&resource_table)
+        .expect("resource table was inserted above");
+      modules.insert(
+        module_name.clone(),
+        ResourceModuleReference::new(
+          inventory.resources().clone(),
+          inventory.rawfiles().clone(),
+          inventory.resource_table_available(),
+          inventory.rawfile_root_available(),
+        ),
+      );
+    }
+    Ok(TransformResourceInventory {
+      rawfiles: Arc::new(current.rawfiles().clone()),
+      modules: Arc::new(modules),
+    })
+  }
+}
+
+struct TransformResourceInventory {
+  rawfiles: Arc<FxHashSet<String>>,
+  modules: Arc<FxHashMap<String, ResourceModuleReference>>,
+}
+
 pub(super) struct CoordinatorBundleStageInput<'a> {
   pub(super) args: &'a BuildArgs,
   pub(super) config: &'a Arc<ArkdownConfig>,
@@ -79,6 +143,7 @@ impl BuildCoordinator {
     let mut bundle_outs: Vec<(BundleStageOutput,)> = Vec::new();
     let mut widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>> = Vec::new();
     let mut compile_task_active = Vec::new();
+    let mut transform_resource_inventory_loader = TransformResourceInventoryLoader::new();
     let module_obfuscation_contexts = loader_jsons
       .iter()
       .map(|(module, _, _, _, module_target_name, module_config)| {
@@ -581,6 +646,8 @@ impl BuildCoordinator {
       );
 
       let plugin_factory_start = Instant::now();
+      let transform_resource_inventory =
+        transform_resource_inventory_loader.load(loader_json, &module_layout)?;
       let integrated_hsp = module_build_option
         .ark_options
         .as_ref()
@@ -655,6 +722,10 @@ impl BuildCoordinator {
           allow_empty_bundle_name: false,
           bundle_name: module_config.product.bundle_name.clone(),
           module_name: loader_json.module_name.clone(),
+          validate_resource_modules: true,
+          validate_rawfiles: true,
+          rawfiles: transform_resource_inventory.rawfiles,
+          resource_modules: transform_resource_inventory.modules,
         },
         component_metadata: component_metadata.clone(),
         system_api,
