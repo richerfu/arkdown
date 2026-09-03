@@ -15,6 +15,7 @@ use oxc_parser::{
     Parser, ParserReturn,
 };
 use oxc_span::SourceType;
+use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -29,6 +30,10 @@ use sdk_semantics::SdkArkUiSemanticSnapshot;
 pub struct ComponentMetadata {
     arkts_parser: ArkTsParserConfig,
     atomic_components: FxHashSet<String>,
+    single_child_components: FxHashSet<String>,
+    specific_child_components: FxHashMap<String, Vec<String>>,
+    builtin_style_names: FxHashSet<String>,
+    system_api_style_names: FxHashSet<String>,
     need_pop_components: FxHashSet<String>,
     bind_object_properties: FxHashMap<String, FxHashSet<String>>,
     create_bind_components: FxHashSet<String>,
@@ -100,6 +105,26 @@ impl ComponentMetadata {
 
     pub(crate) fn is_builtin_container_component(&self, name: &str) -> bool {
         self.is_builtin_component_name(name) && !self.atomic_components.contains(name)
+    }
+
+    pub(crate) fn is_atomic_component(&self, name: &str) -> bool {
+        self.atomic_components.contains(name)
+    }
+
+    pub(crate) fn is_single_child_component(&self, name: &str) -> bool {
+        self.single_child_components.contains(name)
+    }
+
+    pub(crate) fn specific_child_components(&self, name: &str) -> Option<&[String]> {
+        self.specific_child_components.get(name).map(Vec::as_slice)
+    }
+
+    pub(crate) fn is_builtin_style_name(&self, name: &str) -> bool {
+        self.builtin_style_names.contains(name)
+    }
+
+    pub(crate) fn is_system_api_style_name(&self, name: &str) -> bool {
+        self.system_api_style_names.contains(name)
     }
 
     pub(crate) fn is_forbidden_state_type(&self, name: &str) -> bool {
@@ -593,7 +618,7 @@ impl<'a> ComponentMetadataLoader<'a> {
         let arkts_parser = ArkTsParserConfig::from_sdk(
             SdkArkTsOptionsLoader::new(self.ets_loader_path.join("tsconfig.json")).load()?,
         );
-        let atomic_components = self.load_atomic_components()?;
+        let component_grammar = self.load_component_grammar()?;
         let semantics = SdkArkUiSemanticSnapshot::bundled();
         let enum_names = SdkEnumNameLoader::new(self.ets_loader_path).load()?;
         let sdk_declarations =
@@ -610,7 +635,11 @@ impl<'a> ComponentMetadataLoader<'a> {
 
         Ok(ComponentMetadata {
             arkts_parser,
-            atomic_components,
+            atomic_components: component_grammar.atomic,
+            single_child_components: component_grammar.single,
+            specific_child_components: component_grammar.children,
+            builtin_style_names: component_grammar.attrs,
+            system_api_style_names: component_grammar.system_api_attrs,
             need_pop_components: semantics.need_pop_components,
             bind_object_properties,
             create_bind_components: semantics.create_bind_components,
@@ -634,24 +663,76 @@ impl<'a> ComponentMetadataLoader<'a> {
         })
     }
 
-    fn load_atomic_components(&self) -> anyhow::Result<FxHashSet<String>> {
+    fn load_component_grammar(&self) -> anyhow::Result<SdkComponentGrammarInventory> {
         let components_dir = self.ets_loader_path.join("components");
-        let mut atomic_components = FxHashSet::default();
+        let mut paths = Vec::new();
         for entry in fs::read_dir(&components_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let value: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
-            let Some(name) = value.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            if value.get("atomic").and_then(Value::as_bool) == Some(true) {
-                atomic_components.insert(name.to_string());
+            if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+                paths.push(path);
             }
         }
-        Ok(atomic_components)
+        paths.sort();
+        let components = paths
+            .par_iter()
+            .map(|path| {
+                fs::read_to_string(path)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|source| serde_json::from_str(&source).map_err(anyhow::Error::from))
+            })
+            .collect::<Vec<anyhow::Result<SdkComponentGrammar>>>();
+        let mut inventory = SdkComponentGrammarInventory::default();
+        for component in components {
+            inventory.insert(component?);
+        }
+        Ok(inventory)
+    }
+}
+
+#[derive(Deserialize)]
+struct SdkComponentGrammar {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    atomic: bool,
+    #[serde(default)]
+    single: bool,
+    #[serde(default)]
+    children: Vec<String>,
+    #[serde(default)]
+    attrs: Vec<String>,
+    #[serde(default, rename = "systemApi")]
+    system_api: bool,
+}
+
+#[derive(Default)]
+struct SdkComponentGrammarInventory {
+    atomic: FxHashSet<String>,
+    single: FxHashSet<String>,
+    children: FxHashMap<String, Vec<String>>,
+    attrs: FxHashSet<String>,
+    system_api_attrs: FxHashSet<String>,
+}
+
+impl SdkComponentGrammarInventory {
+    fn insert(&mut self, component: SdkComponentGrammar) {
+        let Some(name) = component.name else {
+            return;
+        };
+        if component.atomic {
+            self.atomic.insert(name.clone());
+        }
+        if component.single {
+            self.single.insert(name.clone());
+        }
+        if !component.children.is_empty() {
+            self.children.insert(name, component.children);
+        }
+        self.attrs.extend(component.attrs.iter().cloned());
+        if component.system_api {
+            self.system_api_attrs.extend(component.attrs);
+        }
     }
 }
 

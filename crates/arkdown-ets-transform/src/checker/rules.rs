@@ -109,7 +109,13 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
         for statement in &self.program.body {
             match statement {
                 Statement::StructStatement(structure) => {
-                    self.check_struct(structure, false, &component_reuse, &mut report);
+                    self.check_struct(
+                        structure,
+                        false,
+                        &component_reuse,
+                        &class_observations,
+                        &mut report,
+                    );
                     page_decorators.collect(structure);
                 }
                 Statement::ClassDeclaration(class) => {
@@ -123,7 +129,13 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                 }
                 Statement::ExportDeclaration(export) => match &export.declaration {
                     Declaration::StructStatement(structure) => {
-                        self.check_struct(structure, true, &component_reuse, &mut report);
+                        self.check_struct(
+                            structure,
+                            true,
+                            &component_reuse,
+                            &class_observations,
+                            &mut report,
+                        );
                         page_decorators.collect(structure);
                     }
                     Declaration::ClassDeclaration(class) => {
@@ -139,7 +151,13 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                 },
                 Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                     ExportDefaultDeclarationKind::StructStatement(structure) => {
-                        self.check_struct(structure, true, &component_reuse, &mut report);
+                        self.check_struct(
+                            structure,
+                            true,
+                            &component_reuse,
+                            &class_observations,
+                            &mut report,
+                        );
                         page_decorators.collect(structure);
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(class) => {
@@ -168,12 +186,14 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
         statement: &StructStatement<'_>,
         exported: bool,
         component_reuse: &FxHashMap<String, bool>,
+        class_observations: &ImportedClassObservations,
         report: &mut EtsCheckReport,
     ) {
         Arkts11StructValidator::new(statement, self.file, &mut report.diagnostics)
             .with_exported(exported)
             .with_component_metadata(self.component_metadata)
             .with_component_reuse_inventory(component_reuse)
+            .with_class_observation_inventory(class_observations)
             .check();
     }
 

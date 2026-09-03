@@ -193,6 +193,11 @@ impl TransformOptions {
         self
     }
 
+    pub fn with_component_metadata(mut self, metadata: Arc<ComponentMetadata>) -> Self {
+        self.component_metadata = metadata;
+        self
+    }
+
     /// Whether Stage model partial update is enabled (API >= 9).
     pub fn supports_partial_update(&self) -> bool {
         self.partial_update

@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use arkdown_core::{ArktsLanguageVersion, ModuleSource, ModuleType, ResolvedId};
-use arkdown_ets_transform::{error::EtsTransformError, transform::ArktsTransformer};
+use arkdown_ets_transform::{
+    error::EtsTransformError,
+    transform::{component_meta::ComponentMetadata, ArktsTransformer, TransformOptions},
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -31,6 +34,7 @@ struct SourceContractExpectation {
 
 struct SourceContractRunner {
     manifest: SourceContractManifest,
+    options: TransformOptions,
 }
 
 impl SourceContractRunner {
@@ -41,7 +45,19 @@ impl SourceContractRunner {
             .unwrap_or_else(|error| panic!("read source contract {}: {error}", path.display()));
         let manifest = serde_json::from_str(&source)
             .unwrap_or_else(|error| panic!("parse source contract {}: {error}", path.display()));
-        Self { manifest }
+        let loader = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("ets-loader");
+        let component_metadata =
+            ComponentMetadata::from_ets_loader_path(&loader).unwrap_or_else(|error| {
+                panic!("load fixture SDK metadata {}: {error}", loader.display())
+            });
+        Self {
+            manifest,
+            options: TransformOptions::default()
+                .with_component_metadata(std::sync::Arc::new(component_metadata)),
+        }
     }
 
     fn run(self) {
@@ -50,6 +66,7 @@ impl SourceContractRunner {
         assert_eq!(ArktsLanguageVersion::default(), ArktsLanguageVersion::V1_1);
 
         let mut ids = std::collections::BTreeSet::new();
+        let options = self.options;
         for case in self.manifest.cases {
             assert!(
                 ids.insert(case.id.clone()),
@@ -62,11 +79,11 @@ impl SourceContractRunner {
                 case.id,
                 case.owner
             );
-            Self::run_case(case);
+            Self::run_case(&options, case);
         }
     }
 
-    fn run_case(case: SourceContractCase) {
+    fn run_case(options: &TransformOptions, case: SourceContractCase) {
         let source = ModuleSource {
             id: ResolvedId {
                 id: case.file,
@@ -77,7 +94,7 @@ impl SourceContractRunner {
             content: case.source,
             source_map: None,
         };
-        let result = ArktsTransformer::new(&source).transform();
+        let result = ArktsTransformer::with_options(&source, options).transform();
         if let Some(expected_code) = case.expect.error_code {
             match result {
                 Err(EtsTransformError::CodedDiagnostic { code, .. }) => assert_eq!(

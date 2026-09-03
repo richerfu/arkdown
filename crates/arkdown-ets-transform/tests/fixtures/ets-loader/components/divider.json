@@ -1,4 +1,5 @@
 {
   "name": "Divider",
-  "atomic": true
+  "atomic": true,
+  "attrs": ["width"]
 }
