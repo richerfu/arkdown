@@ -1,4 +1,4 @@
-use oxc_ast::ast::{Decorator, Function};
+use oxc_ast::ast::{Decorator, Expression, Function};
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
@@ -99,6 +99,29 @@ impl<'function, 'errors> Arkts11FunctionValidator<'function, 'errors> {
                 span: Some(self.function.span),
                 solutions: Vec::new(),
             });
+        }
+
+        for decorator in &self.function.decorators {
+            let name = ArkuiDecorator::new(decorator).name();
+            if !matches!(
+                name,
+                ArkuiDecoratorName::EXTEND | ArkuiDecoratorName::ANIMATABLE_EXTEND
+            ) {
+                continue;
+            }
+            let Expression::CallExpression(call) = &decorator.expression else {
+                continue;
+            };
+            if call.arguments.len() != 1 {
+                self.errors.push(EtsTransformError::CodedDiagnostic {
+                    file: self.file.to_string(),
+                    code: "10905108".to_string(),
+                    message: format!("'@{name}' should have one and only one parameter."),
+                    severity: DiagnosticSeverity::Error,
+                    span: Some(call.span),
+                    solutions: Vec::new(),
+                });
+            }
         }
     }
 }

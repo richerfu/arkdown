@@ -494,6 +494,18 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             }) {
                 self.check_ui_body_syntax(method);
             }
+            if method.r#static
+                && method.decorators.iter().any(|decorator| {
+                    ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::LOCAL_BUILDER
+                })
+            {
+                self.error(
+                    "10905104",
+                    "Static methods in custom components cannot be decorated by '@LocalBuilder'.",
+                    method.span,
+                    &[],
+                );
+            }
         }
         if build_count != 1 {
             self.error(
@@ -1054,6 +1066,18 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                 .map(|decorator| ArkuiDecorator::new(decorator).name())
                 .collect::<Vec<_>>();
 
+            if decorators.contains(&ArkuiDecoratorName::ENV)
+                && !self.has_struct_decorator(ArkuiDecoratorName::COMPONENT)
+                && !self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2)
+            {
+                self.error(
+                    "10905250",
+                    "The '@Env' decorator can only be used in structs decorated with either '@Component' or '@ComponentV2'.",
+                    property.span,
+                    &[],
+                );
+            }
+
             if !component_v2 {
                 self.check_custom_decorator_conflict(property, &decorators);
                 self.check_forbidden_state_type(property, name, &decorators);
@@ -1062,6 +1086,19 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
 
             for decorator in &property.decorators {
                 let decorator_name = ArkuiDecorator::new(decorator).name();
+                if self
+                    .component_metadata
+                    .is_some_and(|metadata| metadata.is_builtin_style_name(decorator_name))
+                {
+                    self.error(
+                        "10905309",
+                        format!(
+                            "The decorator '@{decorator_name}' cannot have the same name as the built-in style attribute '{decorator_name}'."
+                        ),
+                        decorator.span,
+                        &[],
+                    );
+                }
                 if matches!(
                     decorator_name,
                     ArkuiDecoratorName::MONITOR
