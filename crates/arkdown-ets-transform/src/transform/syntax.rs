@@ -5,7 +5,9 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{walk, Visit};
 
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
-use crate::transform::global_rewrite::GlobalContextCallRewrite;
+use crate::transform::global_rewrite::{
+    EsObjectTypeRewrite, GlobalContextCallRewrite, WorkerPathRewrite,
+};
 
 const KNOWN_ARKUI_DECORATORS: &[&str] = &[
     ArkuiDecoratorName::COMPONENT,
@@ -70,6 +72,8 @@ impl ArktsTransformSyntaxDetector {
 
     pub(super) fn program(&self, program: &Program<'_>) -> bool {
         GlobalContextCallRewrite::new().program_needs_rewrite(program)
+            || WorkerPathRewrite::new().program_needs_rewrite(program)
+            || EsObjectTypeRewrite::new().program_needs_rewrite(program)
             || BuilderFactoryCallDetector::new().contains(program)
             || program
                 .body

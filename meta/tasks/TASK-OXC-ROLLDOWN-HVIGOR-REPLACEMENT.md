@@ -1,10 +1,18 @@
 # OXC/Rolldown 完整替换 hvigor 重构计划
 
-状态：架构审计结论与实施基线  
+状态：实施中（优先收口 ArkTS 1.1）
 更新时间：2026-09-03  
 适用范围：Stage 模型、ESMODULE、ArkTS 1.1 默认编译、显式 ArkTS 1.2 编译，以及 HAP/HSP/HAR/APP 的现代构建链路
 
 ## 1. 结论
+
+### 1.1 2026-09-03 ArkTS 1.1 第一批实施进度
+
+- 已建立可执行的 `arkts11.json` 源码契约清单，当前 45 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期。
+- 已删除旧 OXC checker 中约千行没有新源码错误码/函数证据的猜测式规则，改为结构化、多诊断、稳定顺序的 `EtsCheckReport`；`arkdown check --checker oxc` 可在不启动 Node checker 的情况下运行该路径。
+- 已对齐首批高频规则：struct/class/function decorator target、build/Styles、成员初始化、Watch、Observed V1/V2、生命周期、全局复用池、SDK 组件/容器命名与根节点约束、`apiAvailable`。
+- 已补动态 ArkTS 的 `worker.Worker('*.ts') -> '*.js'` 和 `ESObject -> any` 全程序 OXC 变换，并把 Builder factory/global reuse pool 错误改为源码错误码。
+- 默认 checker 仍保持 `sdk`，尚未提前切换。切换和删除 `ets-checker-bridge.cjs` 的剩余阻断项是完整 system API/permission/syscap、跨文件类型与继承、warning suppressor，以及剩余 UI rule corpus；这些完成前不得宣称 ArkTS 1.1 已完全替换。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
 
@@ -141,7 +149,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | BuildSession/输入快照 | 部分 | 已有 package/sdk/fingerprint/source snapshot，但 profile 又维护一套 `LocalDependencyGraph`，bundle hook 仍重复查包和读 JSON5 | 只保留 session graph/source store/package index；删除重复图和 hook I/O |
 | Profile/Loader/Resource | 基本可用但需补金标 | 已有 typed schema、loader、pkgContext、restool、router/startup/worker 等实现；大应用边界仍需源码用例覆盖 | 保留 domain crate；用源码 fixture 补 router、worker、InsightIntent、ByteCode HAR、overlay、跨模块资源回归 |
 | Resolver/Rolldown 图 | 基本可用但热路径不合格 | 已有 OHM URL、kit、native/json/commonjs、duplicate/module meta；`ModuleMetaPlugin` 每模块向上找包，JSON5 hook 读盘，若干 collector 用 `Arc<Mutex>` | session 预载全部 metadata/source；plugin 只读 snapshot 并返回事实；确定性归并 |
-| ArkTS 1.1 UI transform | 主干可用，未完全覆盖 | 已覆盖 V1/V2、state、Builder/Styles/Extend、ForEach/Repeat、常见组件和 source map；缺 `WrapBuilder`、InsightIntent、worker 专用变换、declaration merger、部分 interop/边界 | 直接移植源码测试语料；按 OXC pass 补齐，不以名称或行数判断完成 |
+| ArkTS 1.1 UI transform | 主干可用，未完全覆盖 | 已覆盖 V1/V2、state、Builder/Styles/Extend、WrapBuilder/MutableBuilder、ForEach/Repeat、常见组件和 source map；仍缺 InsightIntent、worker 专用变换、declaration merger、部分 interop/边界 | 直接移植源码测试语料；按 OXC pass 补齐，不以名称或行数判断完成 |
 | ArkTS checker | 部分且默认错误 | OXC checker 仅覆盖一部分 decorator/build 规则；默认仍是 SDK Node checker | 默认改为完整 OXC checker；移除 `sdk` 模式和 `ets-checker-bridge.cjs`；`off` 仅保留为显式调试选项 |
 | System API/syscap/permission | 大部分缺失 | 当前 `api_transform` 主要做 Kit import rewrite 和少量 `apiAvailable`；没有源码中 version/permission/syscap/device/cross-platform 校验体系 | 建立 `SystemApiInventory` 和 OXC semantic pass，保持 warning suppression、错误位置及 API 版本行为 |
 | Visual/SuperVisual | JS 托管 | Rust 只做发现、验证和 OXC 插入，生成片段由 Node 调 `codegen_ets.js` | 把 `.visual` parser/codegen 和 deterministic insertion 全部迁入 Rust/OXC；删除 Node generator |
@@ -363,7 +371,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 - 扩展 OXC semantic facts，按源码补齐 62 个 UI rule files 所代表的规则族；共享 rule context，不重复 traverse。
 - 补 decorator target/type/modifier、V1/V2 混用、constructor、build mutation、children/nesting、reuse、Observed/Track、Env/Monitor/SyncMonitor、WrapBuilder 等检查。
 - 建立 system API index，补 since/available、permission、syscap、device、cross-platform、warning suppressor 和 `apiAvailable` 控制流。
-- 补 `WrapBuilder`、InsightIntent parser/metadata、worker transform、declaration merger、dynamic/static interop、mock/sendable/lazy import 等源码缺口。
+- 扩展 WrapBuilder/MutableBuilder 源码 corpus，并补 InsightIntent parser/metadata、worker transform、declaration merger、dynamic/static interop、mock/sendable/lazy import 等剩余缺口。
 - checker 默认切到 OXC，删除 SDK Node checker。
 - transform 使用一次 parse/semantic，多 pass 共享 scoping，最后统一 codegen/source map。
 
