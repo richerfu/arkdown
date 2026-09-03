@@ -46,7 +46,9 @@ use oxc_span::{GetSpan, SPAN};
 
 use crate::error::EtsTransformError;
 use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
-use crate::transform::api_available::{ApiAvailableLowerer, ApiAvailableTransformOptions};
+use crate::transform::api_available::{
+    ApiAvailableLowerer, ApiAvailableTransformOptions, ApiAvailableValidator,
+};
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, CustomComponentUpdateProps,
     StylesMethodInfo,
@@ -71,7 +73,9 @@ use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::entry::{
     EntryOptions, EntryRegistrationBlock, EntryRegistrationInfo, PreviewRegistrationBlock,
 };
-use crate::transform::global_rewrite::GlobalContextCallRewriter;
+use crate::transform::global_rewrite::{
+    EsObjectTypeRewriter, GlobalContextCallRewriter, WorkerPathRewriter,
+};
 use crate::transform::navigation::NavigationBuilderRegistrationBlock;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
@@ -354,30 +358,26 @@ impl<'a> ArktsTransformer<'a> {
         }
 
         if matches!(options.checker_mode, CheckerMode::Oxc) {
-            let diagnostics = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
+            if needs_api_available {
+                ApiAvailableValidator::new(&source.id.id, options.api_available)
+                    .validate(&parsed.program)?;
+            }
+            let report = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
+                .with_component_metadata(&options.component_metadata)
                 .with_page_context(
                     options.entry_source,
                     options.preview_mode,
                     options.check_entry,
                 )
                 .check();
-            for diag in &diagnostics {
+            for diag in report.diagnostics() {
                 tracing::debug!(file = %source.id.id, diagnostic = ?diag, "ets checker diagnostic");
             }
             let demote_linter_errors = is_inside_oh_modules(Path::new(&source.id.id));
-            if let Some(error) = diagnostics.iter().find(|diag| {
-                if demote_linter_errors {
-                    return false;
+            if !demote_linter_errors {
+                if let Some(error) = report.first_error() {
+                    return Err(error.clone());
                 }
-                matches!(
-                    diag,
-                    EtsTransformError::Diagnostic {
-                        severity: crate::error::DiagnosticSeverity::Error,
-                        ..
-                    } | EtsTransformError::Fatal { .. }
-                )
-            }) {
-                return Err(error.clone());
             }
         }
 
@@ -464,6 +464,9 @@ impl<'a> ArktsTransformer<'a> {
             ConcurrentDirectiveLowerer::new(&allocator).program(&mut parsed.program);
         let global_context_calls_lowered =
             GlobalContextCallRewriter::new(&allocator).program(&mut parsed.program);
+        let worker_paths_lowered = WorkerPathRewriter::new(&allocator).program(&mut parsed.program);
+        let es_object_types_lowered =
+            EsObjectTypeRewriter::new(&allocator).program(&mut parsed.program);
         let custom_dialog_controllers_lowered = CustomDialogControllerLowerer::new(
             &allocator,
             options.component_metadata.runtime_names(),
@@ -532,6 +535,8 @@ impl<'a> ArktsTransformer<'a> {
         if mock_setup_decorators_lowered
             || concurrent_directives_lowered
             || global_context_calls_lowered
+            || worker_paths_lowered
+            || es_object_types_lowered
             || custom_dialog_controllers_lowered
             || api_available_lowered
             || !navigation_registrations.is_empty()
@@ -1565,6 +1570,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         }
         let (Some(ownership), Some(accepted_components)) = (ownership, accepted_components) else {
             return Err(self.global_reuse_pool_error(
+                "10905375",
                 &component.id.name,
                 &format!(
                     "'{}' must provide both reusePool and poolAccepts. Neither can be omitted when using the global reuse pool.",
@@ -1574,12 +1580,14 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         };
         let Expression::StringLiteral(ownership_literal) = ownership else {
             return Err(self.global_reuse_pool_error(
+                "10905378",
                 &component.id.name,
                 "ReusePool can only accept string literal.",
             ));
         };
         if !matches!(ownership_literal.value.as_str(), "shared" | "perInstance") {
             return Err(self.global_reuse_pool_error(
+                "10905377",
                 &component.id.name,
                 &format!(
                     "ReusePool must be either 'shared' or 'perInstance'. The value '{}' is not valid.",
@@ -1589,6 +1597,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         }
         if accepted_components.elements.is_empty() {
             return Err(self.global_reuse_pool_error(
+                "10905376",
                 &component.id.name,
                 "PoolAccepts cannot be an empty array. Provide at least one '@Reusable' or '@ReusableV2' component.",
             ));
@@ -1599,6 +1608,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             };
             if name.name == component.id.name {
                 return Err(self.global_reuse_pool_error(
+                    "10905374",
                     &component.id.name,
                     &format!(
                         "'{}' cannot list itself in poolAccepts. The pool is not yet ready when '{}' is being constructed.",
@@ -1612,6 +1622,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 .is_some_and(|info| info.reusable || info.reusable_v2)
             {
                 return Err(self.global_reuse_pool_error(
+                    "10905373",
                     &component.id.name,
                     &format!(
                         "'{}' is not a '@Reusable' or '@ReusableV2' component and cannot be added to poolAccepts.",
@@ -1659,10 +1670,19 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         }
     }
 
-    fn global_reuse_pool_error(&self, component: &str, message: &str) -> EtsTransformError {
-        EtsTransformError::Fatal {
+    fn global_reuse_pool_error(
+        &self,
+        code: &str,
+        component: &str,
+        message: &str,
+    ) -> EtsTransformError {
+        EtsTransformError::CodedDiagnostic {
             file: self.id.to_string(),
             message: format!("@Component '{component}': {message}"),
+            code: code.to_string(),
+            severity: crate::error::DiagnosticSeverity::Error,
+            span: None,
+            solutions: Vec::new(),
         }
     }
 

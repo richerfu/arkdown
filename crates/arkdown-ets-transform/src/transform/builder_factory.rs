@@ -4,7 +4,7 @@ use arkdown_core::ArktsLanguageVersion;
 use oxc_ast::ast::{CallExpression, Expression, Program};
 use oxc_ast_visit::{walk, Visit};
 
-use crate::error::EtsTransformError;
+use crate::error::{DiagnosticSeverity, EtsTransformError};
 
 /// Validates `wrapBuilder` and `mutableBuilder` exactly where the source
 /// `process_ui_syntax.ts` does: each factory takes a single identifier that
@@ -39,16 +39,19 @@ impl<'a> BuilderFactoryValidator<'a> {
         };
         visitor.visit_program(program);
         match visitor.invalid_factory {
-            Some(factory) => Err(EtsTransformError::Fatal {
+            Some((factory, span)) if self.language_version == ArktsLanguageVersion::V1_1 => {
+                Err(EtsTransformError::CodedDiagnostic {
+                    file: self.source_id.to_string(),
+                    code: "10905109".to_string(),
+                    message: format!("The {factory}'s parameter should be '@Builder' function."),
+                    severity: DiagnosticSeverity::Error,
+                    span: Some(span),
+                    solutions: Vec::new(),
+                })
+            }
+            Some((_factory, _span)) => Err(EtsTransformError::Fatal {
                 file: self.source_id.to_string(),
-                message: match self.language_version {
-                    ArktsLanguageVersion::V1_1 => {
-                        format!("The {factory}'s parameter should be '@Builder' function.")
-                    }
-                    ArktsLanguageVersion::V1_2 => {
-                        "The wrapBuilder's parameter should be @Builder function.".to_string()
-                    }
-                },
+                message: "The wrapBuilder's parameter should be @Builder function.".to_string(),
             }),
             None => Ok(()),
         }
@@ -58,7 +61,7 @@ impl<'a> BuilderFactoryValidator<'a> {
 struct BuilderFactoryCallVisitor<'a> {
     builder_functions: &'a FxHashSet<String>,
     language_version: ArktsLanguageVersion,
-    invalid_factory: Option<&'static str>,
+    invalid_factory: Option<(&'static str, oxc_span::Span)>,
 }
 
 impl BuilderFactoryCallVisitor<'_> {
@@ -105,7 +108,7 @@ impl<'program> Visit<'program> for BuilderFactoryCallVisitor<'_> {
         }
         if let Some(factory) = self.factory(call) {
             if !self.has_valid_argument(call) {
-                self.invalid_factory = Some(factory);
+                self.invalid_factory = Some((factory, call.span));
                 return;
             }
         }

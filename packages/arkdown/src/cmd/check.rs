@@ -13,12 +13,8 @@ use anyhow::Result;
 use clap::Args;
 use walkdir::WalkDir;
 
-use arkdown::plugins::ets_transform::{
-  ComponentMetadata, RolldownEtsTransformPlan, SystemResourceReferenceLoader,
-  TransformSourceSnapshot,
-};
+use arkdown::plugins::ets_transform::{ArktsSourceChecker, ComponentMetadata};
 use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
-use arkdown_ets_transform::RolldownEtsTransformer;
 use arkdown_path::{ArtifactPathSerializer, HostPlatform};
 use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
 
@@ -41,6 +37,10 @@ pub struct CheckArgs {
   /// Node executable used to invoke the SDK semantic checker.
   #[arg(long)]
   pub node_executable: Option<PathBuf>,
+  /// ArkTS checker backend. `sdk` keeps the SDK semantic checker plus native
+  /// source rules; `oxc` runs the Rust/OXC checker without Node.
+  #[arg(long, default_value = "sdk")]
+  pub checker: String,
 }
 
 pub fn run(args: CheckArgs) -> Result<()> {
@@ -63,6 +63,7 @@ impl CheckCommandRunner {
       .clone()
       .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
     let target = Self::parse_target(&self.args.target);
+    let checker_backend = CheckBackend::parse(&self.args.checker)?;
     let config = Arc::new(
       arkdown_config::load_config(&project_root, BuildMode::Debug, target, None, None)
         .map_err(|error| anyhow::anyhow!("config error: {error}"))?,
@@ -94,6 +95,7 @@ impl CheckCommandRunner {
         module,
         &module_context,
         self.node_executable(),
+        checker_backend,
       )
       .run()?;
       summary.merge(module_summary);
@@ -134,6 +136,7 @@ struct CheckModuleRunner<'a> {
   module: &'a ModuleConfig,
   module_context: &'a ModuleCompileContext,
   node_executable: PathBuf,
+  checker_backend: CheckBackend,
 }
 
 impl<'a> CheckModuleRunner<'a> {
@@ -143,6 +146,7 @@ impl<'a> CheckModuleRunner<'a> {
     module: &'a ModuleConfig,
     module_context: &'a ModuleCompileContext,
     node_executable: PathBuf,
+    checker_backend: CheckBackend,
   ) -> Self {
     Self {
       config,
@@ -150,6 +154,7 @@ impl<'a> CheckModuleRunner<'a> {
       module,
       module_context,
       node_executable,
+      checker_backend,
     }
   }
 
@@ -159,7 +164,9 @@ impl<'a> CheckModuleRunner<'a> {
       files: sources.len(),
       ..CheckSummary::default()
     };
-    summary.errors += self.run_sdk_semantic_checker(&sources)?;
+    if self.checker_backend.runs_sdk() {
+      summary.errors += self.run_sdk_semantic_checker(&sources)?;
+    }
     summary.errors += self.run_oxc_structural_checker(&sources)?;
     Ok(summary)
   }
@@ -236,36 +243,17 @@ impl<'a> CheckModuleRunner<'a> {
   }
 
   fn run_oxc_structural_checker(&self, sources: &[PathBuf]) -> Result<usize> {
-    let resource_refs = SystemResourceReferenceLoader::new(
+    let component_metadata = Arc::new(ComponentMetadata::from_ets_loader_path(
       &self.config.sdk_config.ets_loader_path,
-      &self.config.product.bundle_name,
-      &self.module.name,
-    )
-    .load()
-    .unwrap_or_default();
-    let component_metadata =
-      ComponentMetadata::from_ets_loader_path(&self.config.sdk_config.ets_loader_path)?;
-    let transform_plan = Arc::new(RolldownEtsTransformPlan::new(
-      self.config.product.bundle_name.clone(),
-      self.module.name.clone(),
-      self.config.project_root.clone(),
-      self.module_context.module.src_main.join("ets"),
-      self
-        .config
-        .modules
-        .iter()
-        .map(|module| (module.name.clone(), module.src_path.clone()))
-        .collect(),
-      self.config.sdk_config.compile_api_version,
-      resource_refs,
-      component_metadata,
-      TransformSourceSnapshot::default(),
-    ));
-    let transformer = RolldownEtsTransformer::new(transform_plan);
+    )?);
+    let checker = ArktsSourceChecker::new(component_metadata).with_api_available_context(
+      &self.config.product.compatible_sdk_version,
+      &self.config.product.runtime_os,
+    );
     let mut errors = 0usize;
     for path in sources
       .iter()
-      .filter(|path| CheckSourceInventory::is_ets(path))
+      .filter(|path| CheckSourceInventory::is_arkts_source(path))
     {
       let source = match std::fs::read_to_string(path) {
         Ok(source) => source,
@@ -283,12 +271,37 @@ impl<'a> CheckModuleRunner<'a> {
           continue;
         }
       };
-      if let Err(error) = transformer.transform(&source, &source_id) {
-        tracing::error!(path = %path.display(), error = %error, "ArkTS structural check failed");
-        errors += 1;
+      let report = checker.check(&source_id, &source);
+      for diagnostic in report.diagnostics() {
+        if diagnostic.is_error() {
+          tracing::error!(path = %path.display(), diagnostic = %diagnostic, "ArkTS OXC check failed");
+        } else {
+          tracing::warn!(path = %path.display(), diagnostic = %diagnostic, "ArkTS OXC check warning");
+        }
       }
+      errors += report.error_count();
     }
     Ok(errors)
+  }
+}
+
+#[derive(Clone, Copy)]
+enum CheckBackend {
+  Sdk,
+  Oxc,
+}
+
+impl CheckBackend {
+  fn parse(value: &str) -> Result<Self> {
+    match value {
+      "sdk" => Ok(Self::Sdk),
+      "oxc" => Ok(Self::Oxc),
+      _ => anyhow::bail!("unsupported checker '{value}'; expected 'sdk' or 'oxc'"),
+    }
+  }
+
+  fn runs_sdk(self) -> bool {
+    matches!(self, Self::Sdk)
   }
 }
 
@@ -334,12 +347,14 @@ impl<'a> CheckSourceInventory<'a> {
     )
   }
 
-  fn is_ets(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("ets")
-      && !path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".d.ets"))
+  fn is_arkts_source(path: &Path) -> bool {
+    matches!(
+      path.extension().and_then(|extension| extension.to_str()),
+      Some("ets" | "ts")
+    ) && !path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .is_some_and(|name| name.ends_with(".d.ets") || name.ends_with(".d.ts"))
   }
 }
 

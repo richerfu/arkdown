@@ -41,6 +41,7 @@ pub struct ComponentMetadata {
     bind_drag_attrs: FxHashSet<String>,
     gesture_attr_names: FxHashSet<String>,
     gesture_type_names: FxHashSet<String>,
+    forbidden_state_types: FxHashSet<String>,
     enum_names: FxHashSet<String>,
     sdk_components: FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
     sdk_builder_functions: FxHashMap<String, FxHashSet<String>>,
@@ -84,6 +85,25 @@ impl ComponentMetadata {
 
     pub fn is_known_enum(&self, name: &str) -> bool {
         self.enum_names.contains(name)
+    }
+
+    pub(crate) fn is_builtin_component_name(&self, name: &str) -> bool {
+        self.arkts_parser
+            .legacy_options
+            .as_ref()
+            .is_some_and(|options| options.components.iter().any(|component| component == name))
+    }
+
+    pub(crate) fn has_builtin_component_inventory(&self) -> bool {
+        self.arkts_parser.legacy_options.is_some()
+    }
+
+    pub(crate) fn is_builtin_container_component(&self, name: &str) -> bool {
+        self.is_builtin_component_name(name) && !self.atomic_components.contains(name)
+    }
+
+    pub(crate) fn is_forbidden_state_type(&self, name: &str) -> bool {
+        self.forbidden_state_types.contains(name)
     }
 
     pub fn is_builder_attribute_method(&self, component_name: &str, method_name: &str) -> bool {
@@ -604,6 +624,7 @@ impl<'a> ComponentMetadataLoader<'a> {
             bind_drag_attrs: semantics.bind_drag_attrs,
             gesture_attr_names: semantics.gesture_attr_names,
             gesture_type_names: semantics.gesture_type_names,
+            forbidden_state_types: semantics.forbidden_state_types,
             enum_names,
             sdk_components: sdk_declarations.components,
             sdk_builder_functions: sdk_declarations.builder_functions,

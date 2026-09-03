@@ -88,12 +88,107 @@ deviceInfo.apiAvailable = replacement
 #[test]
 fn point_compatible_sdk_keeps_native_api_available_behavior() {
     let src = "const direct = deviceInfo.apiAvailable('26.0.0')";
-    let mut options = TransformOptions::default();
-    options.api_available =
-        ApiAvailableTransformOptions::from_build_context("26.0.0", "OpenHarmony");
+    let options = TransformOptions {
+        api_available: ApiAvailableTransformOptions::from_build_context("26.0.0", "OpenHarmony"),
+        ..TransformOptions::default()
+    };
     let result = TransformHarness::transform_with_options(&make_source("Index.ets", src), &options)
         .expect("point compatible SDK source");
     assert_eq!(result, src);
+}
+
+#[test]
+fn api_available_rejects_invalid_sdk_arguments_like_source_checker() {
+    for (argument, expected) in [
+        ("null", "Null and undefined are not allowed"),
+        ("undefined", "Null and undefined are not allowed"),
+        ("0x10", "Only decimal digits are allowed"),
+        ("01", "Only decimal digits are allowed"),
+        ("26", "decimal integer between 1 and 25"),
+        ("'25.0.0'", "M must be greater than or equal to 26"),
+        ("'26.00.0'", "M must be greater than or equal to 26"),
+        ("'OpenHarmony 26.0.0'", "Only digits and dots are allowed"),
+    ] {
+        let source = format!(
+            "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable({argument})"
+        );
+        let error = TransformHarness::transform(&make_source("Index.ets", &source))
+            .expect_err("invalid SDK apiAvailable argument must be rejected");
+        assert!(
+            error.to_string().contains("[11706013]") && error.to_string().contains(expected),
+            "argument {argument} produced unexpected diagnostic: {error}"
+        );
+    }
+}
+
+#[test]
+fn api_available_accepts_source_checker_literal_forms() {
+    for argument in ["1", "+25", "'26.0.0'", "`99.99.99`"] {
+        let source = format!(
+            "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable({argument})"
+        );
+        let output = TransformHarness::transform(&make_source("Index.ets", &source))
+            .unwrap_or_else(|error| panic!("argument {argument} must be valid: {error}"));
+        assert!(output.contains("__mockApiAvailable(deviceInfo"), "{output}");
+    }
+}
+
+#[test]
+fn api_available_uses_distribution_os_version_rules() {
+    let options = TransformOptions {
+        api_available: ApiAvailableTransformOptions::from_build_context("12", "HarmonyOS"),
+        ..TransformOptions::default()
+    };
+    for argument in ["'6.1.1'", "'6.1.1(24)'", "'26.0.0'"] {
+        let source = format!(
+            "import {{ deviceInfo as info }} from '@kit.BasicServicesKit'\nconst available = info.apiAvailable({argument})"
+        );
+        TransformHarness::transform_with_options(&make_source("Index.ets", &source), &options)
+            .unwrap_or_else(|error| panic!("argument {argument} must be valid: {error}"));
+    }
+
+    let source = "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable('26.0.0(24)')";
+    let error =
+        TransformHarness::transform_with_options(&make_source("Index.ets", source), &options)
+            .expect_err("major >= 26 must not carry an OH build version");
+    assert!(
+        error
+            .to_string()
+            .contains("decimal integers between 1 and 99"),
+        "{error}"
+    );
+}
+
+#[test]
+fn api_available_validation_requires_the_sdk_import_identity() {
+    let source = "const deviceInfo = userObject\nconst available = deviceInfo.apiAvailable(null)";
+    let output = TransformHarness::transform(&make_source("Index.ets", source))
+        .expect("a user-defined apiAvailable method must not receive SDK diagnostics");
+    assert!(
+        output.contains("__mockApiAvailable(deviceInfo, null)"),
+        "{output}"
+    );
+}
+
+#[test]
+fn api_available_rejects_sdk_usage_in_typescript_sources() {
+    let source =
+        "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable(12)";
+    let error = TransformHarness::transform(&make_source("Index.ts", source))
+        .expect_err("the source checker rejects apiAvailable in .ts files");
+    assert!(error.to_string().contains("[11706015]"), "{error}");
+}
+
+#[test]
+fn api_available_requires_exactly_one_argument() {
+    for arguments in ["", "12, 13"] {
+        let source = format!(
+            "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable({arguments})"
+        );
+        let error = TransformHarness::transform(&make_source("Index.ets", &source))
+            .expect_err("SDK apiAvailable arity must be checked");
+        assert!(error.to_string().contains("[11706013]"), "{error}");
+    }
 }
 
 #[test]
@@ -666,33 +761,6 @@ export namespace FontRegister {
 }
 
 #[test]
-fn test_preserves_arkui_decorators_on_regular_class_like_hvigor() {
-    let src = "@Observed\nexport class UserModel {\n  @Trace name: string = 'guest';\n}";
-    let result =
-        TransformHarness::transform(&make_source("entry/src/main/ets/model/UserModel.ets", src))
-            .expect("regular observed class must transform");
-
-    assert!(result.contains("export class UserModel"));
-    assert!(result.contains("name: string"));
-    assert!(result.contains("@Observed"), "{result}");
-    assert!(result.contains("@Trace"), "{result}");
-
-    let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(
-        &allocator,
-        &result,
-        oxc_span::SourceType::ts().with_module(true),
-    )
-    .parse();
-    assert!(
-        parsed.diagnostics.is_empty(),
-        "hvigor-compatible decorated class must remain valid ArkTS: {:?}\n{}",
-        parsed.diagnostics,
-        result
-    );
-}
-
-#[test]
 fn test_preserves_observed_v2_and_trace_like_hvigor() {
     let src = "@ObservedV2\nexport class Counter {\n  @Trace count: number = 0;\n}";
     let result =
@@ -1143,7 +1211,7 @@ fn test_component_v2_rejects_non_ui_build_statements_like_hvigor() {
 }
 
 #[test]
-fn test_component_v2_skips_direct_build_block_but_lowers_if_block_like_hvigor() {
+fn test_component_v2_rejects_multiple_build_roots_like_validate_root_node() {
     let src = r#"@ComponentV2
 struct MyView {
   build() {
@@ -1155,18 +1223,10 @@ struct MyView {
     }
   }
 }"#;
-    let result =
+    let error =
         TransformHarness::transform(&make_source("entry/src/main/ets/pages/MyView.ets", src))
-            .expect("direct build block and if block must lower with hvigor block semantics");
-
-    assert!(
-        !result.contains("Text.create('skipped')"),
-        "direct build block must be skipped like hvigor processComponentChild:\n{result}"
-    );
-    assert!(
-        result.contains("Text.create('kept')"),
-        "if branch block must still lower ArkUI children:\n{result}"
-    );
+            .expect_err("validateRootNode rejects two top-level build statements");
+    assert!(error.to_string().contains("[10905210]"), "{error}");
 }
 
 #[test]
@@ -5173,6 +5233,7 @@ fn test_custom_dialog_controller_builder_uses_link_backing_property() {
 @CustomDialog
 struct TimeDialog {
   @Link selectedTime: number
+  controller: CustomDialogController
   build() {
     Column()
   }

@@ -26,6 +26,7 @@ pub(super) struct SdkArkUiSemanticSnapshot {
     pub(super) component_double_exclamation_properties: FxHashMap<String, FxHashSet<String>>,
     pub(super) bind_popup_attrs: FxHashSet<String>,
     pub(super) bind_drag_attrs: FxHashSet<String>,
+    pub(super) forbidden_state_types: FxHashSet<String>,
 }
 
 impl SdkArkUiSemanticSnapshot {
@@ -48,6 +49,7 @@ impl SdkArkUiSemanticSnapshot {
             ),
             bind_popup_attrs: Self::set(BIND_POPUP_ATTRS),
             bind_drag_attrs: Self::set(BIND_DRAG_ATTRS),
+            forbidden_state_types: Self::set(FORBIDDEN_STATE_TYPES),
         }
     }
 
@@ -75,6 +77,34 @@ const GESTURE_TYPE_NAMES: &[&str] = &[
     "RotationGesture",
     "SwipeGesture",
     "TapGesture",
+];
+
+// `component_map.ts::forbiddenUseStateType`.
+const FORBIDDEN_STATE_TYPES: &[&str] = &[
+    "Scroller",
+    "SwiperScroller",
+    "VideoController",
+    "WebController",
+    "CustomDialogController",
+    "SwiperController",
+    "TabsController",
+    "CalendarController",
+    "AbilityController",
+    "XComponentController",
+    "CanvasRenderingContext2D",
+    "CanvasGradient",
+    "ImageBitmap",
+    "ImageData",
+    "Path2D",
+    "RenderingContextSettings",
+    "OffscreenCanvasRenderingContext2D",
+    "PatternLockController",
+    "TextAreaController",
+    "TextInputController",
+    "TextTimerController",
+    "SearchController",
+    "RichEditorController",
+    "ArcSwiperController",
 ];
 
 const CUSTOM_BUILDER_PROPERTIES: &[&str] = &[

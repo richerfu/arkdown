@@ -7,14 +7,18 @@
 
 use oxc_allocator::{Allocator, ArenaBox, CloneIn, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
-    Argument, ArrowFunctionBody, BindingIdentifier, BindingPattern, Expression, FormalParameter,
-    FormalParameterKind, FormalParameters, IdentifierName, IdentifierReference, Program,
+    Argument, ArrowFunctionBody, BindingIdentifier, BindingPattern, CallExpression, Expression,
+    FormalParameter, FormalParameterKind, FormalParameters, IdentifierName, IdentifierReference,
+    ImportDeclarationSpecifier, ModuleExportName, Program, Statement,
 };
 use oxc_ast::builder::AstBuilder;
-use oxc_ast_visit::{walk_mut, Visit, VisitMut};
+use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_parser::Parser;
 use oxc_span::{SourceType, SPAN};
 use oxc_syntax::operator::UnaryOperator;
+use rustc_hash::FxHashSet;
+
+use crate::error::{DiagnosticSeverity, EtsTransformError};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApiAvailableTransformOptions {
@@ -42,6 +46,444 @@ impl ApiAvailableTransformOptions {
     pub(crate) fn should_transform_source(self, source: &str) -> bool {
         self.enabled && source.contains(".apiAvailable")
     }
+}
+
+/// Validates calls to the SDK `deviceInfo.apiAvailable` binding before the
+/// compatibility lowerer rewrites them.
+///
+/// The source checker resolves the callee through TypeScript's type checker to
+/// `@ohos.deviceInfo.d.ts::apiAvailable`. Arkdown's transform snapshot has
+/// already resolved imports, so this pass records only bindings imported from
+/// that SDK module (including the BasicServicesKit re-export) and leaves user
+/// objects with an `apiAvailable` member alone.
+pub(crate) struct ApiAvailableValidator<'a> {
+    source_id: &'a str,
+    options: ApiAvailableTransformOptions,
+}
+
+impl<'a> ApiAvailableValidator<'a> {
+    pub(crate) fn new(source_id: &'a str, options: ApiAvailableTransformOptions) -> Self {
+        Self { source_id, options }
+    }
+
+    pub(crate) fn validate(&self, program: &Program<'_>) -> Result<(), EtsTransformError> {
+        match self.diagnostics(program).into_iter().next() {
+            Some(diagnostic) => Err(diagnostic),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn diagnostics(&self, program: &Program<'_>) -> Vec<EtsTransformError> {
+        if !self.options.enabled {
+            return Vec::new();
+        }
+        let bindings = ApiAvailableSdkBindings::from_program(program);
+        if bindings.is_empty() {
+            return Vec::new();
+        }
+        let mut visitor = ApiAvailableCallValidator {
+            bindings: &bindings,
+            source_id: self.source_id,
+            open_harmony_runtime: self.options.open_harmony_runtime,
+            issues: Vec::new(),
+        };
+        visitor.visit_program(program);
+        visitor
+            .issues
+            .into_iter()
+            .map(|issue| EtsTransformError::CodedDiagnostic {
+                file: self.source_id.to_string(),
+                code: issue.code.to_string(),
+                message: issue.message,
+                severity: DiagnosticSeverity::Error,
+                span: Some(issue.span),
+                solutions: issue.solutions,
+            })
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct ApiAvailableSdkBindings {
+    names: FxHashSet<String>,
+}
+
+impl ApiAvailableSdkBindings {
+    fn from_program(program: &Program<'_>) -> Self {
+        let mut bindings = Self::default();
+        for statement in &program.body {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            let source = import.source.value.as_str();
+            let Some(specifiers) = import.specifiers.as_ref() else {
+                continue;
+            };
+            if matches!(source, "@ohos.deviceInfo" | "@ohos:deviceInfo") {
+                for specifier in specifiers {
+                    match specifier {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                            bindings.names.insert(specifier.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                            bindings.names.insert(specifier.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                            if ModuleExportNameText::new(&specifier.imported).as_str()
+                                == "default" =>
+                        {
+                            bindings.names.insert(specifier.local.name.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            } else if source == "@kit.BasicServicesKit" {
+                for specifier in specifiers {
+                    let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                        continue;
+                    };
+                    if ModuleExportNameText::new(&specifier.imported).as_str() == "deviceInfo" {
+                        bindings.names.insert(specifier.local.name.to_string());
+                    }
+                }
+            }
+        }
+        bindings
+    }
+
+    fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+}
+
+struct ModuleExportNameText<'a> {
+    name: &'a ModuleExportName<'a>,
+}
+
+impl<'a> ModuleExportNameText<'a> {
+    fn new(name: &'a ModuleExportName<'a>) -> Self {
+        Self { name }
+    }
+
+    fn as_str(&self) -> &str {
+        match self.name {
+            ModuleExportName::IdentifierName(identifier) => identifier.name.as_str(),
+            ModuleExportName::IdentifierReference(identifier) => identifier.name.as_str(),
+            ModuleExportName::StringLiteral(literal) => literal.value.as_str(),
+        }
+    }
+}
+
+struct ApiAvailableCallValidator<'a> {
+    bindings: &'a ApiAvailableSdkBindings,
+    source_id: &'a str,
+    open_harmony_runtime: bool,
+    issues: Vec<ApiAvailableIssue>,
+}
+
+impl<'a> ApiAvailableCallValidator<'a> {
+    const BASE_ERROR: &'static str = "Invalid parameters for apiAvailable.";
+    const NULLISH_ERROR: &'static str = "Null and undefined are not allowed for parameters.";
+    const NUMBER_FORMAT_ERROR: &'static str = "Only decimal digits are allowed.";
+    const OPEN_HARMONY_FORMAT_ERROR: &'static str = "Only digits and dots are allowed.";
+    const DISTRIBUTION_FORMAT_ERROR: &'static str =
+        "Only digits, dots, and left and right parentheses are allowed.";
+    const OPEN_HARMONY_CONTENT_ERROR: &'static str = "The api version must be a decimal integer between 1 and 25. The M.S.F format must meet the following requirements: The value must be in the three decimal format, M must be greater than or equal to 26, and S and F must be decimal integers between 0 and 99.";
+    const DISTRIBUTION_CONTENT_ERROR: &'static str = "The api version must be a decimal integer between 1 and 25. The M.S.F format must meet the following requirements: The value must be in the three decimal format, M must be decimal integers between 1 and 99, and S and F must be decimal integers between 0 and 99.";
+    const TS_FILE_ERROR: &'static str =
+        "apiAvailable cannot be used in .ts files. Please use .ets files instead.";
+
+    fn validate_call(&self, call: &CallExpression<'_>) -> Option<ApiAvailableIssue> {
+        let receiver = ApiAvailableCallee::new(&call.callee).receiver_identifier()?;
+        if !self.bindings.contains(receiver) {
+            return None;
+        }
+        if std::path::Path::new(self.source_id)
+            .extension()
+            .is_some_and(|extension| extension == "ts")
+        {
+            return Some(ApiAvailableIssue::new(
+                "11706015",
+                Self::TS_FILE_ERROR,
+                call.span,
+                ["Use .ets files instead of .ts files for apiAvailable calls."],
+            ));
+        }
+        if call.arguments.len() != 1 {
+            return Some(self.issue(call.span, None));
+        }
+        let argument = call.arguments.first()?.as_expression()?;
+        self.validate_argument(argument)
+            .map(|suffix| self.issue(call.span, Some(suffix)))
+    }
+
+    fn validate_argument(&self, argument: &Expression<'_>) -> Option<&'static str> {
+        match argument {
+            Expression::NullLiteral(_) => Some(Self::NULLISH_ERROR),
+            Expression::Identifier(identifier) if identifier.name == "undefined" => {
+                Some(Self::NULLISH_ERROR)
+            }
+            Expression::NumericLiteral(number) => self.validate_number(
+                number
+                    .raw
+                    .as_ref()
+                    .map_or_else(|| number.value.to_string(), |raw| raw.as_str().to_string()),
+                number.value,
+            ),
+            Expression::UnaryExpression(unary) if unary.operator.is_arithmetic() => {
+                let Expression::NumericLiteral(number) = &unary.argument else {
+                    return None;
+                };
+                let sign = if unary.operator == UnaryOperator::UnaryNegation {
+                    "-"
+                } else {
+                    "+"
+                };
+                let raw = number
+                    .raw
+                    .as_ref()
+                    .map_or_else(|| number.value.to_string(), |raw| raw.as_str().to_string());
+                let value = if sign == "-" {
+                    -number.value
+                } else {
+                    number.value
+                };
+                self.validate_number(format!("{sign}{raw}"), value)
+            }
+            Expression::StringLiteral(string) => self.validate_string(string.value.as_str()),
+            Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
+                .quasis
+                .first()
+                .map(|quasi| {
+                    quasi
+                        .value
+                        .cooked
+                        .as_ref()
+                        .unwrap_or(&quasi.value.raw)
+                        .as_str()
+                })
+                .and_then(|value| self.validate_string(value)),
+            _ => None,
+        }
+    }
+
+    fn validate_number(&self, raw: String, value: f64) -> Option<&'static str> {
+        if !CanonicalDecimalInteger::new(&raw).is_valid() {
+            return Some(Self::NUMBER_FORMAT_ERROR);
+        }
+        if !(1.0..26.0).contains(&value) {
+            return Some(self.content_error());
+        }
+        None
+    }
+
+    fn validate_string(&self, value: &str) -> Option<&'static str> {
+        if self.open_harmony_runtime {
+            if !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+            {
+                return Some(Self::OPEN_HARMONY_FORMAT_ERROR);
+            }
+            if !MsfVersion::new(value).is_valid_open_harmony() {
+                return Some(Self::OPEN_HARMONY_CONTENT_ERROR);
+            }
+        } else {
+            if !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'(' | b')'))
+            {
+                return Some(Self::DISTRIBUTION_FORMAT_ERROR);
+            }
+            if !MsfVersion::new(value).is_valid_distribution() {
+                return Some(Self::DISTRIBUTION_CONTENT_ERROR);
+            }
+        }
+        None
+    }
+
+    fn content_error(&self) -> &'static str {
+        if self.open_harmony_runtime {
+            Self::OPEN_HARMONY_CONTENT_ERROR
+        } else {
+            Self::DISTRIBUTION_CONTENT_ERROR
+        }
+    }
+
+    fn issue(&self, span: oxc_span::Span, suffix: Option<&str>) -> ApiAvailableIssue {
+        ApiAvailableIssue::new(
+            "11706013",
+            format!("{}{}", Self::BASE_ERROR, suffix.unwrap_or_default()),
+            span,
+            ["Check the official API reference documentation, and switch to the supported interfaces."],
+        )
+    }
+}
+
+struct ApiAvailableIssue {
+    code: &'static str,
+    message: String,
+    span: oxc_span::Span,
+    solutions: Vec<String>,
+}
+
+impl ApiAvailableIssue {
+    fn new<I, S>(
+        code: &'static str,
+        message: impl Into<String>,
+        span: oxc_span::Span,
+        solutions: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            code,
+            message: message.into(),
+            span,
+            solutions: solutions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl<'program> Visit<'program> for ApiAvailableCallValidator<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'program>) {
+        if let Some(issue) = self.validate_call(call) {
+            self.issues.push(issue);
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+struct ApiAvailableCallee<'a> {
+    expression: &'a Expression<'a>,
+}
+
+impl<'a> ApiAvailableCallee<'a> {
+    fn new(expression: &'a Expression<'a>) -> Self {
+        Self { expression }
+    }
+
+    fn receiver_identifier(&self) -> Option<&'a str> {
+        let receiver = match self.unwrap(self.expression) {
+            Expression::StaticMemberExpression(member)
+                if member.property.name == "apiAvailable" =>
+            {
+                self.unwrap(&member.object)
+            }
+            Expression::ComputedMemberExpression(member) if matches!(&member.expression, Expression::StringLiteral(value) if value.value == "apiAvailable") => {
+                self.unwrap(&member.object)
+            }
+            _ => return None,
+        };
+        match receiver {
+            Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+            _ => None,
+        }
+    }
+
+    fn unwrap<'expression>(
+        &self,
+        expression: &'expression Expression<'a>,
+    ) -> &'expression Expression<'a> {
+        match expression {
+            Expression::TSNonNullExpression(expression) => self.unwrap(&expression.expression),
+            Expression::ParenthesizedExpression(expression) => self.unwrap(&expression.expression),
+            Expression::TSAsExpression(expression) => self.unwrap(&expression.expression),
+            Expression::TSTypeAssertion(expression) => self.unwrap(&expression.expression),
+            _ => expression,
+        }
+    }
+}
+
+struct CanonicalDecimalInteger<'a> {
+    value: &'a str,
+}
+
+impl<'a> CanonicalDecimalInteger<'a> {
+    fn new(value: &'a str) -> Self {
+        Self { value }
+    }
+
+    fn is_valid(&self) -> bool {
+        let digits = self.value.strip_prefix(['+', '-']).unwrap_or(self.value);
+        !digits.is_empty()
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+            && (digits == "0" || !digits.starts_with('0'))
+    }
+}
+
+struct MsfVersion<'a> {
+    value: &'a str,
+}
+
+impl<'a> MsfVersion<'a> {
+    fn new(value: &'a str) -> Self {
+        Self { value }
+    }
+
+    fn is_valid_open_harmony(&self) -> bool {
+        self.parts()
+            .is_some_and(|parts| parts.major >= 26 && parts.build.is_none())
+    }
+
+    fn is_valid_distribution(&self) -> bool {
+        self.parts()
+            .is_some_and(|parts| parts.major < 26 || parts.build.is_none())
+    }
+
+    fn parts(&self) -> Option<MsfVersionParts<'_>> {
+        let (version, build) = match self.value.split_once('(') {
+            Some((version, build)) => {
+                let build = build.strip_suffix(')')?;
+                if build.is_empty()
+                    || build.len() > 2
+                    || !build.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return None;
+                }
+                (version, Some(build))
+            }
+            None => (self.value, None),
+        };
+        let mut components = version.split('.');
+        let major = Self::component(components.next()?, false)?;
+        let minor = Self::component(components.next()?, true)?;
+        let patch = Self::component(components.next()?, true)?;
+        if components.next().is_some() {
+            return None;
+        }
+        Some(MsfVersionParts {
+            major,
+            _minor: minor,
+            _patch: patch,
+            build,
+        })
+    }
+
+    fn component(value: &str, allow_zero: bool) -> Option<u32> {
+        if value.is_empty()
+            || value.len() > 2
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+            || (value.len() > 1 && value.starts_with('0'))
+        {
+            return None;
+        }
+        let value = value.parse::<u32>().ok()?;
+        (allow_zero || value > 0).then_some(value)
+    }
+}
+
+struct MsfVersionParts<'a> {
+    major: u32,
+    _minor: u32,
+    _patch: u32,
+    build: Option<&'a str>,
 }
 
 struct CompatibleSdkVersion<'a> {

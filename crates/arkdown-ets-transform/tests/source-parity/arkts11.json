@@ -1,0 +1,340 @@
+{
+  "schemaVersion": 1,
+  "arktsVersion": "1.1",
+  "cases": [
+    {
+      "id": "component-build-arguments",
+      "owner": "compiler/src/process_component_class.ts::processComponentMethod",
+      "file": "BuildArguments.ets",
+      "source": "@Component struct BuildArguments { build(value: number) {} }",
+      "expect": { "errorCode": "10905106" }
+    },
+    {
+      "id": "component-styles-method-arguments",
+      "owner": "compiler/src/process_component_class.ts::processComponentMethod",
+      "file": "StylesMethodArguments.ets",
+      "source": "@Component struct StylesMethodArguments { @Styles style(value: number) {} build() {} }",
+      "expect": { "errorCode": "10905105" }
+    },
+    {
+      "id": "global-styles-function-arguments",
+      "owner": "compiler/src/process_ui_syntax.ts::processAllNodes",
+      "file": "StylesFunctionArguments.ets",
+      "source": "@Styles function style(value: number) {}",
+      "expect": { "errorCode": "10905110" }
+    },
+    {
+      "id": "exported-global-styles-function-arguments",
+      "owner": "compiler/src/process_ui_syntax.ts::processAllNodes",
+      "file": "ExportedStylesFunctionArguments.ets",
+      "source": "@Styles export function style(value: number) {}",
+      "expect": { "errorCode": "10905110" }
+    },
+    {
+      "id": "local-builder-global-function",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateFunction",
+      "file": "GlobalLocalBuilder.ets",
+      "source": "@LocalBuilder function content() {}",
+      "expect": { "errorCode": "10905117" }
+    },
+    {
+      "id": "multiple-global-function-decorators",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateFunction",
+      "file": "FunctionDecorators.ets",
+      "source": "@Builder @Custom function content() {}",
+      "expect": { "errorCode": "10905117" }
+    },
+    {
+      "id": "component-build-count",
+      "owner": "compiler/src/process_component_class.ts::validateBuildMethodCount",
+      "file": "BuildCount.ets",
+      "source": "@Component struct BuildCount {}",
+      "expect": { "errorCode": "10905103" }
+    },
+    {
+      "id": "component-build-root-count",
+      "owner": "compiler/src/process_component_build.ts::validateRootNode",
+      "file": "BuildRoots.ets",
+      "source": "@Component struct BuildRoots { build() { Text('first'); Text('second'); } }",
+      "expect": { "errorCode": "10905210" }
+    },
+    {
+      "id": "builder-non-ui-statement",
+      "owner": "compiler/src/process_component_build.ts::processComponentBlock",
+      "file": "BuilderStatement.ets",
+      "source": "@Component struct BuilderStatement { @Builder content() { const value = 1; } build() {} }",
+      "expect": { "errorCode": "10905209" }
+    },
+    {
+      "id": "builder-non-ui-expression",
+      "owner": "compiler/src/process_component_build.ts::getComponentType",
+      "file": "BuilderExpression.ets",
+      "source": "@Component struct BuilderExpression { value: number = 0; @Builder content() { this.value = 1; } build() {} }",
+      "expect": { "errorCode": "10905204" }
+    },
+    {
+      "id": "struct-heritage",
+      "owner": "compiler/src/process_component_class.ts::updateHeritageClauses",
+      "file": "Heritage.ets",
+      "source": "@Component struct Heritage extends BaseView { build() {} }",
+      "expect": { "errorCode": "10905212" }
+    },
+    {
+      "id": "link-default-value",
+      "owner": "compiler/src/process_component_member.ts::validatePropertyDefaultValue",
+      "file": "LinkDefault.ets",
+      "source": "@Component struct LinkDefault { @Link value: number = 0; build() {} }",
+      "expect": { "errorCode": "10905304" }
+    },
+    {
+      "id": "custom-and-inner-property-decorator",
+      "owner": "compiler/src/process_component_member.ts::validateCustomDecorator",
+      "file": "MixedPropertyDecorator.ets",
+      "source": "@Component struct MixedPropertyDecorator { @State @Custom value: number = 0; build() {} }",
+      "expect": { "errorCode": "10905312" }
+    },
+    {
+      "id": "component-class-target",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStructDecorator",
+      "file": "ClassTarget.ets",
+      "source": "@Component class ClassTarget { build(): void {} }",
+      "expect": { "errorCode": "10905337" }
+    },
+    {
+      "id": "struct-missing-decorator",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStructSpec",
+      "file": "MissingDecorator.ets",
+      "source": "struct MissingDecorator { build() {} }",
+      "expect": { "errorCode": "10905233" }
+    },
+    {
+      "id": "struct-without-inner-decorator",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStruct",
+      "file": "InvalidDecorator.ets",
+      "source": "@Arbitrary struct InvalidDecorator { build() {} }",
+      "expect": { "errorCode": "10905230" }
+    },
+    {
+      "id": "component-v1-v2-conflict",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStruct",
+      "file": "VersionConflict.ets",
+      "source": "@Component @ComponentV2 struct VersionConflict { build() {} }",
+      "expect": { "errorCode": "10905229" }
+    },
+    {
+      "id": "reusable-v2-owner",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStruct",
+      "file": "ReusableOwner.ets",
+      "source": "@ReusableV2 struct ReusableOwner { build() {} }",
+      "expect": { "errorCode": "10905242" }
+    },
+    {
+      "id": "v1-member-in-component-v2",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStructDecorator",
+      "file": "V1MemberInV2.ets",
+      "source": "@ComponentV2 struct V1MemberInV2 { @State value: number = 0; build() {} }",
+      "expect": { "errorCode": "10905339" }
+    },
+    {
+      "id": "v2-member-in-component-v1",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStructDecorator",
+      "file": "V2MemberInV1.ets",
+      "source": "@Component struct V2MemberInV1 { @Local value: number = 0; build() {} }",
+      "expect": { "errorCode": "10905338" }
+    },
+    {
+      "id": "state-decorator-on-method",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateStateVariable",
+      "file": "StateMethod.ets",
+      "source": "@Component struct StateMethod { @State invalid() {} build() {} }",
+      "expect": { "errorCode": "10905112" }
+    },
+    {
+      "id": "concurrent-method",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkConcurrentDecorator",
+      "file": "ConcurrentMethod.ets",
+      "source": "@Component struct ConcurrentMethod { @Concurrent task() {} build() {} }",
+      "expect": { "errorCode": "10905123" }
+    },
+    {
+      "id": "concurrent-generator",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkConcurrentDecorator",
+      "file": "ConcurrentGenerator.ets",
+      "source": "@Concurrent function* task() {}",
+      "expect": { "errorCode": "10905122" }
+    },
+    {
+      "id": "lifecycle-method-arguments",
+      "owner": "compiler/src/validate_ui_syntax.ts::handleLifecycleDecorator",
+      "file": "LifecycleArguments.ets",
+      "source": "@Component struct LifecycleArguments { @ComponentAppear appear(value: number) {} build() {} }",
+      "expect": { "errorCode": "10905371" }
+    },
+    {
+      "id": "component-v2-reuse-arguments",
+      "owner": "compiler/src/validate_ui_syntax.ts::handleLifecycleDecorator",
+      "file": "V2ReuseArguments.ets",
+      "source": "@ComponentV2 struct V2ReuseArguments { @ComponentReuse reuse(value: object) {} build() {} }",
+      "expect": { "errorCode": "10905370" }
+    },
+    {
+      "id": "component-v1-reuse-argument-type",
+      "owner": "compiler/src/validate_ui_syntax.ts::handleLifecycleDecorator",
+      "file": "V1ReuseArguments.ets",
+      "source": "@Component struct V1ReuseArguments { @ComponentReuse reuse(value: number) {} build() {} }",
+      "expect": { "errorCode": "10905369" }
+    },
+    {
+      "id": "active-lifecycle-builder-conflict",
+      "owner": "compiler/src/validate_ui_syntax.ts::checkComponentReuseSyntax",
+      "file": "LifecycleBuilder.ets",
+      "source": "@Component struct LifecycleBuilder { @ComponentActive @Builder content() {} build() {} }",
+      "expect": { "errorCode": "10905383" }
+    },
+    {
+      "id": "observed-version-conflict",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateMutilObserved",
+      "file": "ObservedConflict.ets",
+      "source": "@Observed @ObservedV2 class ObservedConflict {}",
+      "expect": { "errorCode": "10905226" }
+    },
+    {
+      "id": "observed-v2-inherits-observed",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateInheritClassDecorator",
+      "file": "ObservedV2Inheritance.ets",
+      "source": "@Observed class Parent {} @ObservedV2 class Child extends Parent {}",
+      "expect": { "errorCode": "10905225" }
+    },
+    {
+      "id": "observed-inherits-observed-v2",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateInheritClassDecorator",
+      "file": "ObservedV1Inheritance.ets",
+      "source": "@ObservedV2 class Parent {} @Observed class Child extends Parent {}",
+      "expect": { "errorCode": "10905224" }
+    },
+    {
+      "id": "track-in-observed-v2",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateMemberInClass",
+      "file": "TrackInObservedV2.ets",
+      "source": "@ObservedV2 class TrackInObservedV2 { @Track value: number = 0; }",
+      "expect": { "errorCode": "10905344" }
+    },
+    {
+      "id": "trace-outside-observed-v2",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateMemberInClass",
+      "file": "TraceOutsideObservedV2.ets",
+      "source": "class TraceOutsideObservedV2 { @Trace value: number = 0; }",
+      "expect": { "errorCode": "10905343" }
+    },
+    {
+      "id": "computed-requires-getter",
+      "owner": "compiler/src/validate_ui_syntax.ts::validateSingleDecorator",
+      "file": "ComputedMethod.ets",
+      "source": "@ObservedV2 class ComputedMethod { @Computed value(): number { return 0; } }",
+      "expect": { "errorCode": "10905116" }
+    },
+    {
+      "id": "global-reuse-pool-required-fields",
+      "owner": "compiler/src/process_component_class.ts::processComponentReusePool",
+      "file": "ReusePoolFields.ets",
+      "source": "@Component({ reusePool: 'shared', other: [] }) struct ReusePoolFields { build() {} }",
+      "expect": { "errorCode": "10905375" }
+    },
+    {
+      "id": "global-reuse-pool-ownership-type",
+      "owner": "compiler/src/process_component_class.ts::processComponentReusePool",
+      "file": "ReusePoolType.ets",
+      "source": "@Component({ reusePool: 1, poolAccepts: [Child] }) struct ReusePoolType { build() {} }",
+      "expect": { "errorCode": "10905378" }
+    },
+    {
+      "id": "global-reuse-pool-ownership-value",
+      "owner": "compiler/src/process_component_class.ts::checkReusePoolArg",
+      "file": "ReusePoolValue.ets",
+      "source": "@Component({ reusePool: 'invalid', poolAccepts: [Child] }) struct ReusePoolValue { build() {} }",
+      "expect": { "errorCode": "10905377" }
+    },
+    {
+      "id": "global-reuse-pool-empty-accepts",
+      "owner": "compiler/src/process_component_class.ts::checkPoolAcceptsArg",
+      "file": "ReusePoolEmpty.ets",
+      "source": "@Component({ reusePool: 'shared', poolAccepts: [] }) struct ReusePoolEmpty { build() {} }",
+      "expect": { "errorCode": "10905376" }
+    },
+    {
+      "id": "global-reuse-pool-self-reference",
+      "owner": "compiler/src/process_component_class.ts::checkPoolAcceptsArg",
+      "file": "ReusePoolSelf.ets",
+      "source": "@Component({ reusePool: 'shared', poolAccepts: [ReusePoolSelf] }) struct ReusePoolSelf { build() {} }",
+      "expect": { "errorCode": "10905374" }
+    },
+    {
+      "id": "global-reuse-pool-local-non-reusable",
+      "owner": "compiler/src/process_component_class.ts::checkPoolAcceptsArg",
+      "file": "ReusePoolMember.ets",
+      "source": "@Component struct Child { build() {} } @Component({ reusePool: 'shared', poolAccepts: [Child] }) struct ReusePoolMember { build() {} }",
+      "expect": { "errorCode": "10905373" }
+    },
+    {
+      "id": "api-available-openharmony-format",
+      "owner": "compiler/src/fast_build/system_api/api_validator/apiAvailable_validate_utils.ts::validateApiAvailableArgument",
+      "file": "ApiAvailable.ets",
+      "source": "import deviceInfo from '@ohos.deviceInfo'; const available = deviceInfo.apiAvailable('25.0.0');",
+      "expect": { "errorCode": "11706013" }
+    },
+    {
+      "id": "watch-lowering",
+      "owner": "compiler/src/process_component_member.ts::processWatch",
+      "file": "Watch.ets",
+      "source": "@Component struct Watch { @State @Watch('changed') value: number = 0; changed() {} build() {} }",
+      "expect": {
+        "contains": [
+          "class Watch extends ViewPU",
+          "this.declareWatch(\"value\", this.changed)"
+        ]
+      }
+    },
+    {
+      "id": "worker-typescript-path-lowering",
+      "owner": "compiler/src/process_ui_syntax.ts::processWorker",
+      "file": "WorkerPath.ets",
+      "source": "const task = new worker.Worker('workers/task.ts');",
+      "expect": {
+        "contains": [
+          "new worker.Worker(\"workers/task.js\")"
+        ]
+      }
+    },
+    {
+      "id": "es-object-type-lowering",
+      "owner": "compiler/src/process_ui_syntax.ts::isESObjectNode",
+      "file": "ESObject.ets",
+      "source": "function run(value: ESObject): ESObject[] { return [value]; }",
+      "expect": {
+        "contains": [
+          "function run(value: any): any[]"
+        ]
+      }
+    },
+    {
+      "id": "builder-factory-argument",
+      "owner": "compiler/src/process_ui_syntax.ts::processAllNodes",
+      "file": "BuilderFactory.ets",
+      "source": "function content() {} const wrapped = wrapBuilder(content);",
+      "expect": { "errorCode": "10905109" }
+    },
+    {
+      "id": "default-dynamic-viewpu-lowering",
+      "owner": "compiler/src/fast_build/ets_ui/rollup-plugin-ets-typescript.ts::etsTransform",
+      "file": "DynamicPage.ets",
+      "source": "@Component struct DynamicPage { build() { Text('dynamic') } }",
+      "expect": {
+        "contains": [
+          "class DynamicPage extends ViewPU",
+          "Text.create('dynamic')",
+          "this.updateDirtyElements()"
+        ]
+      }
+    }
+  ]
+}

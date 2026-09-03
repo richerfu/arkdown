@@ -32,8 +32,6 @@ impl ArkuiDecoratorName {
     pub(crate) const STORAGE_LINK: &'static str = "StorageLink";
     pub(crate) const STORAGE_PROP: &'static str = "StorageProp";
     pub(crate) const STORAGE_PROP_REF: &'static str = "StoragePropRef";
-    pub(crate) const APP_STORAGE_LINK: &'static str = "AppStorageLink";
-    pub(crate) const APP_STORAGE_PROP: &'static str = "AppStorageProp";
     pub(crate) const LOCAL_STORAGE_LINK: &'static str = "LocalStorageLink";
     pub(crate) const LOCAL_STORAGE_PROP: &'static str = "LocalStorageProp";
     pub(crate) const LOCAL_STORAGE_PROP_REF: &'static str = "LocalStoragePropRef";
@@ -127,29 +125,6 @@ impl ArkuiDecoratorName {
         )
     }
 
-    pub(crate) fn is_checker_state_property(name: &str) -> bool {
-        matches!(
-            name,
-            Self::STATE
-                | Self::PROP
-                | Self::LINK
-                | Self::OBJECT_LINK
-                | Self::PROVIDE
-                | Self::CONSUME
-                | Self::STORAGE_LINK
-                | Self::STORAGE_PROP
-                | Self::LOCAL_STORAGE_LINK
-                | Self::LOCAL_STORAGE_PROP
-        )
-    }
-
-    pub(crate) fn can_combine_with_require(name: &str) -> bool {
-        matches!(
-            name,
-            Self::STATE | Self::PROP | Self::PROVIDE | Self::BUILDER_PARAM
-        )
-    }
-
     pub(crate) fn primary_state(names: &[&str]) -> Option<&'static str> {
         STATE_DECORATOR_PRIORITY.iter().copied().find(|candidate| {
             names.iter().any(|name| name == candidate)
@@ -220,7 +195,7 @@ impl<'a> ArkuiDecorator<'a> {
         None
     }
 
-    pub(super) fn arg_expression(&self) -> Option<&'a Expression<'a>> {
+    pub(crate) fn arg_expression(&self) -> Option<&'a Expression<'a>> {
         let Expression::CallExpression(call) = &self.decorator.expression else {
             return None;
         };

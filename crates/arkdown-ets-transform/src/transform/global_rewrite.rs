@@ -1,10 +1,11 @@
 use oxc_allocator::{Allocator, ArenaBox, CloneIn, FromIn};
 use oxc_ast::ast::{
     CallExpression, ClassElement, Expression, IdentifierName, MemberExpression, MethodDefinition,
-    Program,
+    NewExpression, Program, TSType, TSTypeName,
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
+use oxc_str::Str;
 use oxc_syntax::scope::ScopeFlags;
 
 pub(crate) struct GlobalContextCallRewriter<'a> {
@@ -186,5 +187,230 @@ impl GlobalContextCallRewrite {
                 Expression::PrivateFieldExpression(member)
             }
         }
+    }
+}
+
+/// Rewrites the first literal path passed to `new <namespace>.Worker(...)`.
+///
+/// This is the exact `process_ui_syntax.ts::processWorker` dynamic ArkTS rule:
+/// only property-access constructors named `Worker` participate and only a
+/// trailing `.ts` suffix becomes `.js`.
+pub(crate) struct WorkerPathRewriter<'a> {
+    allocator: &'a Allocator,
+}
+
+impl<'a> WorkerPathRewriter<'a> {
+    pub(crate) fn new(allocator: &'a Allocator) -> Self {
+        Self { allocator }
+    }
+
+    pub(crate) fn program(&self, program: &mut Program<'a>) -> bool {
+        let mut mutator = WorkerPathMutator {
+            allocator: self.allocator,
+            changed: false,
+        };
+        mutator.visit_program(program);
+        mutator.changed
+    }
+}
+
+pub(crate) struct WorkerPathRewrite;
+
+impl WorkerPathRewrite {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    pub(crate) fn program_needs_rewrite(&self, program: &Program<'_>) -> bool {
+        let mut detector = WorkerPathDetector { found: false };
+        detector.visit_program(program);
+        detector.found
+    }
+
+    fn is_target(&self, expression: &NewExpression<'_>) -> bool {
+        matches!(
+            &expression.callee,
+            Expression::StaticMemberExpression(member) if member.property.name == "Worker"
+        ) && matches!(
+            expression.arguments.first(),
+            Some(oxc_ast::ast::Argument::StringLiteral(literal)) if literal.value.ends_with(".ts")
+        )
+    }
+}
+
+struct WorkerPathDetector {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for WorkerPathDetector {
+    fn visit_new_expression(&mut self, expression: &NewExpression<'a>) {
+        if WorkerPathRewrite::new().is_target(expression) {
+            self.found = true;
+            return;
+        }
+        walk::walk_new_expression(self, expression);
+    }
+}
+
+struct WorkerPathMutator<'a> {
+    allocator: &'a Allocator,
+    changed: bool,
+}
+
+impl<'a> VisitMut<'a> for WorkerPathMutator<'a> {
+    fn visit_new_expression(&mut self, expression: &mut NewExpression<'a>) {
+        if WorkerPathRewrite::new().is_target(expression) {
+            let Some(oxc_ast::ast::Argument::StringLiteral(literal)) =
+                expression.arguments.first_mut()
+            else {
+                unreachable!("WorkerPathRewrite established a literal first argument");
+            };
+            let rewritten = literal.value.trim_end_matches(".ts").to_string() + ".js";
+            literal.value = Str::from_str_in(&rewritten, &self.allocator);
+            literal.raw = None;
+            literal.span = oxc_span::SPAN;
+            self.changed = true;
+        }
+        walk_mut::walk_new_expression(self, expression);
+    }
+}
+
+/// Dynamic ArkTS erases the interop-only `ESObject` type to TypeScript `any`.
+/// This mirrors `process_ui_syntax.ts::isESObjectNode` in the same OXC pass as
+/// the other whole-program rewrites.
+pub(crate) struct EsObjectTypeRewriter<'a> {
+    allocator: &'a Allocator,
+}
+
+impl<'a> EsObjectTypeRewriter<'a> {
+    pub(crate) fn new(allocator: &'a Allocator) -> Self {
+        Self { allocator }
+    }
+
+    pub(crate) fn program(&self, program: &mut Program<'a>) -> bool {
+        let mut mutator = EsObjectTypeMutator {
+            allocator: self.allocator,
+            changed: false,
+        };
+        mutator.visit_program(program);
+        mutator.changed
+    }
+}
+
+pub(crate) struct EsObjectTypeRewrite;
+
+impl EsObjectTypeRewrite {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    pub(crate) fn program_needs_rewrite(&self, program: &Program<'_>) -> bool {
+        let mut detector = EsObjectTypeDetector { found: false };
+        detector.visit_program(program);
+        detector.found
+    }
+
+    fn is_target(&self, ty: &TSType<'_>) -> bool {
+        matches!(
+            ty,
+            TSType::TSTypeReference(reference)
+                if matches!(
+                    &reference.type_name,
+                    TSTypeName::IdentifierReference(identifier) if identifier.name == "ESObject"
+                )
+        )
+    }
+}
+
+struct EsObjectTypeDetector {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for EsObjectTypeDetector {
+    fn visit_ts_type(&mut self, ty: &TSType<'a>) {
+        if EsObjectTypeRewrite::new().is_target(ty) {
+            self.found = true;
+            return;
+        }
+        walk::walk_ts_type(self, ty);
+    }
+}
+
+struct EsObjectTypeMutator<'a> {
+    allocator: &'a Allocator,
+    changed: bool,
+}
+
+impl<'a> VisitMut<'a> for EsObjectTypeMutator<'a> {
+    fn visit_ts_type(&mut self, ty: &mut TSType<'a>) {
+        if EsObjectTypeRewrite::new().is_target(ty) {
+            *ty = TSType::new_ts_any_keyword(oxc_span::SPAN, &AstBuilder::new(self.allocator));
+            self.changed = true;
+            return;
+        }
+        walk_mut::walk_ts_type(self, ty);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    #[test]
+    fn worker_path_rewrite_matches_process_worker() {
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(
+            &allocator,
+            "const task = new worker.Worker('workers/task.ts');",
+            SourceType::ets(),
+        )
+        .parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert!(
+            WorkerPathRewrite::new().program_needs_rewrite(&parsed.program),
+            "{:#?}",
+            parsed.program
+        );
+        assert!(WorkerPathRewriter::new(&allocator).program(&mut parsed.program));
+        let output = oxc_codegen::Codegen::new().build(&parsed.program).code;
+        assert!(
+            output.contains("new worker.Worker(\"workers/task.js\")"),
+            "{output}"
+        );
+
+        for source in [
+            "const task = new Worker('workers/task.ts');",
+            "const task = new worker.Worker(workerPath);",
+            "const task = new worker.Other('workers/task.ts');",
+        ] {
+            let allocator = Allocator::default();
+            let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
+            assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+            assert!(
+                !WorkerPathRewrite::new().program_needs_rewrite(&parsed.program),
+                "processWorker must leave this form unchanged: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn es_object_type_rewrite_matches_process_ui_syntax() {
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(
+            &allocator,
+            "function run(value: ESObject): ESObject[] { return [value]; }",
+            SourceType::ets(),
+        )
+        .parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert!(EsObjectTypeRewrite::new().program_needs_rewrite(&parsed.program));
+        assert!(EsObjectTypeRewriter::new(&allocator).program(&mut parsed.program));
+        let output = oxc_codegen::Codegen::new().build(&parsed.program).code;
+        assert!(
+            output.contains("function run(value: any): any[]"),
+            "{output}"
+        );
     }
 }
