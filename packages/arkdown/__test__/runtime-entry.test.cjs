@@ -1,59 +1,24 @@
 'use strict'
 
 const assert = require('node:assert/strict')
-const path = require('node:path')
 const test = require('node:test')
 
-test('runtime entry keeps runHvigorCommand bound to the raw native build', async (context) => {
+test('runtime entry forwards native config and a normalized plugin ABI', async (context) => {
   const indexPath = require.resolve('../index.js')
+  const adapterPath = require.resolve('../js/plugin-adapter.js')
   const entryPath = require.resolve('../js/runtime-entry.js')
-  const actualNativeBinding = require('../index.js')
   const previousIndex = require.cache[indexPath]
+  const previousAdapter = require.cache[adapterPath]
   const previousEntry = require.cache[entryPath]
   const calls = []
   const nativeBinding = {
-    async build(config, _plugins, runtimeTasks) {
-      calls.push(config)
-      assert.ok(Array.isArray(runtimeTasks.tasks))
-      assert.equal(typeof runtimeTasks.selection, 'object')
-      assert.equal(typeof runtimeTasks.dispatchTask, 'function')
-      assert.equal(typeof runtimeTasks.transformAbc, 'function')
-      assert.equal(typeof runtimeTasks.modifyNativeCommand, 'function')
+    async build(config, plugins) {
+      calls.push({ config, plugins })
       return { artifacts: ['entry.hap'], elapsedMs: 1 }
     },
-    RuntimeBuildScriptSession: actualNativeBinding.RuntimeBuildScriptSession,
-    RuntimeHvigorLifecycle: actualNativeBinding.RuntimeHvigorLifecycle,
-    RuntimeHvigorFileSet: actualNativeBinding.RuntimeHvigorFileSet,
-    RuntimeHvigorTaskState: actualNativeBinding.RuntimeHvigorTaskState,
-    RuntimeHvigorTaskHooks: actualNativeBinding.RuntimeHvigorTaskHooks,
-    RuntimeHvigorTaskExecutionState: actualNativeBinding.RuntimeHvigorTaskExecutionState,
-    RuntimeHvigorCacheStoreManager: actualNativeBinding.RuntimeHvigorCacheStoreManager,
-    RuntimeHvigorConstantApi: actualNativeBinding.RuntimeHvigorConstantApi,
-    RuntimeHvigorParameterState: actualNativeBinding.RuntimeHvigorParameterState,
-    RuntimeHvigorGlobalData: actualNativeBinding.RuntimeHvigorGlobalData,
-    RuntimeHvigorFileApi: actualNativeBinding.RuntimeHvigorFileApi,
-    RuntimeHvigorWorkerPoolState: actualNativeBinding.RuntimeHvigorWorkerPoolState,
-    RuntimeProcessMonitor: actualNativeBinding.RuntimeProcessMonitor,
-    installRuntimeObservability() {},
-    finishRuntimeObservability() {},
-    persistRuntimeReport() {},
-    persistRuntimeDetails() {},
-    runtimeObservabilityIsEnabled() {
-      return false
+    planRolldownPackagePlugins(plugins) {
+      return { placements: plugins.map((_, pluginIndex) => ({ pluginIndex })) }
     },
-    emitRuntimeLog() {},
-    runtimeHvigorReportSnapshot: actualNativeBinding.runtimeHvigorReportSnapshot,
-    compileHvigorScript: actualNativeBinding.compileHvigorScript,
-    compileHvigorScriptSync: actualNativeBinding.compileHvigorScriptSync,
-    hvigorProjectCacheHash: actualNativeBinding.hvigorProjectCacheHash,
-    planHvigorCompilePlugins: actualNativeBinding.planHvigorCompilePlugins,
-    planRolldownPackagePlugins: actualNativeBinding.planRolldownPackagePlugins,
-    parseHvigorJsonText: actualNativeBinding.parseHvigorJsonText,
-    mergeHvigorConfig: actualNativeBinding.mergeHvigorConfig,
-    RuntimeFileSnapshot: actualNativeBinding.RuntimeFileSnapshot,
-    RuntimeTaskCacheSession: actualNativeBinding.RuntimeTaskCacheSession,
-    RuntimeTaskSnapshot: actualNativeBinding.RuntimeTaskSnapshot,
-    validateHvigorCompilePlugins: actualNativeBinding.validateHvigorCompilePlugins,
   }
   require.cache[indexPath] = {
     id: indexPath,
@@ -61,25 +26,28 @@ test('runtime entry keeps runHvigorCommand bound to the raw native build', async
     loaded: true,
     exports: nativeBinding,
   }
+  delete require.cache[adapterPath]
   delete require.cache[entryPath]
   context.after(() => {
     if (previousIndex) require.cache[indexPath] = previousIndex
     else delete require.cache[indexPath]
+    if (previousAdapter) require.cache[adapterPath] = previousAdapter
+    else delete require.cache[adapterPath]
     if (previousEntry) require.cache[entryPath] = previousEntry
     else delete require.cache[entryPath]
   })
 
   const runtime = require('../js/runtime-entry.js')
-  const project = path.resolve(__dirname, '../../../tests/fixtures/minimal-hap')
-  const result = await runtime.runHvigorCommand({
-    project,
-    tasks: ['assembleHap'],
-    executionMode: 'module',
-    module: 'entry@default',
-  })
+  const plugin = { name: 'fixture', transform: (code) => code }
+  const result = await runtime.build({ project: '/tmp/app', target: 'hap' }, plugin)
 
   assert.deepEqual(result.artifacts, ['entry.hap'])
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].target, 'hap')
-  assert.equal(calls[0].module, 'entry')
+  assert.deepEqual(calls[0].config, { project: '/tmp/app', target: 'hap' })
+  assert.equal(calls[0].config.arktsVersion, undefined, 'ArkTS 1.1 remains the native default')
+  assert.equal(calls[0].plugins.length, 1)
+  assert.deepEqual(calls[0].plugins[0].__arkdownPluginHooks, ['transform'])
+  assert.equal(typeof calls[0].plugins[0].__arkdownDispatchPluginHook, 'function')
+  assert.equal(runtime.runHvigorCommand, undefined)
+  assert.equal(runtime.hvigorVersion, undefined)
 })

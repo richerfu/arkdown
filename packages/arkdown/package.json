@@ -5,8 +5,7 @@
   "main": "js/runtime-entry.js",
   "types": "runtime-entry.d.ts",
   "bin": {
-    "arkdown": "js/arkdown-cli.js",
-    "hvigorw": "js/arkdown-cli.js"
+    "arkdown": "js/arkdown-cli.js"
   },
   "repository": {
     "type": "git",
@@ -57,9 +56,6 @@
     "prepublishOnly": "napi prepublish -t npm",
     "preversion": "napi build --platform && git add .",
     "version": "napi version"
-  },
-  "dependencies": {
-    "typescript": "4.9.5"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.1",

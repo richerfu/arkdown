@@ -1,11 +1,11 @@
 use std::fs;
 
-use arkdown::HvigorScriptCompiler;
+use arkdown::PluginModuleCompiler;
 
 #[tokio::test]
 async fn compiler_keeps_node_imports_external_and_embeds_oxc_helpers() {
     let fixture = tempfile::tempdir().expect("create fixture");
-    let entry = fixture.path().join("hvigorfile.ts");
+    let entry = fixture.path().join("plugin.ts");
     fs::write(
         &entry,
         r#"
@@ -18,7 +18,7 @@ export default plugin
     )
     .expect("write TypeScript entry");
 
-    let output = HvigorScriptCompiler::new(&entry)
+    let output = PluginModuleCompiler::new(&entry)
         .compile()
         .await
         .expect("compile TypeScript entry");
@@ -36,7 +36,7 @@ async fn compiler_emits_an_inline_source_map_when_requested() {
     let entry = fixture.path().join("plugin.ts");
     fs::write(&entry, "export default { pluginId: 'mapped' }\n").expect("write TypeScript entry");
 
-    let output = HvigorScriptCompiler::new(&entry)
+    let output = PluginModuleCompiler::new(&entry)
         .with_source_map(true)
         .compile()
         .await
@@ -52,7 +52,7 @@ async fn compiler_preserves_typescript_legacy_field_decorator_semantics() {
     fs::write(
         &entry,
         r#"
-import { Input } from '@ohos/hvigor'
+const Input = () => (_target: object, _propertyKey: string) => undefined
 class DecoratedTask {
   @Input() flavor = 'default'
 }
@@ -61,16 +61,16 @@ export default new DecoratedTask()
     )
     .expect("write decorated TypeScript entry");
 
-    let output = HvigorScriptCompiler::new(&entry)
+    let output = PluginModuleCompiler::new(&entry)
         .compile()
         .await
         .expect("compile decorated TypeScript entry");
 
-    // DevEco Studio 6.1.1 / hvigor 6.24.3 uses TypeScript 4.9.5's
+    // Existing OHOS TypeScript plugins use the legacy
     // `__decorate(..., DecoratedTask.prototype, "flavor")` contract.
     assert!(output.contains("DecoratedTask.prototype"));
     assert!(output.contains("\"flavor\""));
-    assert!(output.contains("Input)()"));
+    assert!(!output.contains("@Input"));
 }
 
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn compiler_reports_rolldown_syntax_diagnostics_with_the_script_path() {
     let entry = fixture.path().join("broken.ts");
     fs::write(&entry, "export default {\n").expect("write broken TypeScript entry");
 
-    let error = HvigorScriptCompiler::new(&entry)
+    let error = PluginModuleCompiler::new(&entry)
         .compile()
         .await
         .expect_err("reject broken TypeScript");

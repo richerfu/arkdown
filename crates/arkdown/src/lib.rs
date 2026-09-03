@@ -24,13 +24,13 @@ pub mod compile_entry;
 pub mod diagnostics;
 pub mod facts;
 pub mod hvigor_json;
-pub mod hvigor_script;
 pub mod manual_chunks;
 #[cfg(feature = "memory-diagnostics")]
 pub mod memory_diagnostics;
 pub mod output;
 pub mod plan;
 pub mod plugin_ast;
+pub mod plugin_module;
 pub mod plugins;
 pub mod watch_config;
 
@@ -73,8 +73,8 @@ pub use cache_bridge::{
 // diagnostics
 pub use diagnostics::{BundlerDiagnostic, RolldownErrorKind};
 
-// hvigor_script — Rust/OXC/Rolldown configuration-script compiler
-pub use hvigor_script::{HvigorScriptCompileError, HvigorScriptCompiler};
+// plugin_module — Rust/OXC/Rolldown TypeScript plugin compiler
+pub use plugin_module::{PluginModuleCompileError, PluginModuleCompiler};
 
 // hvigor_json — Rust/OXC implementation of hvigor's public JSON5 reader
 pub use hvigor_json::{HvigorJsonParseError, HvigorJsonParser};

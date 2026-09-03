@@ -1,14 +1,9 @@
-//! Rust-owned compiler for hvigor TypeScript configuration scripts.
+//! Rust-owned compiler for user-authored JavaScript and TypeScript plugins.
 //!
-//! The latest installed hvigor (`6.24.3`) compiles every `.ts` and `.mjs`
-//! file independently to ES2016 CommonJS before handing the result to
-//! Node's `Module._compile`. Arkdown keeps only that final V8 hand-off in
-//! JavaScript: OXC strips TypeScript and lowers the target syntax while
-//! Rolldown owns CommonJS generation and external-module preservation.
-//!
-//! Observed owners in the latest installed DevEco Studio are
-//! `hvigor/src/base/boot/hooks/require-hook.js::extensionHandler` and
-//! `hvigor/src/base/util/options/compile-options.js::compilerOptions`.
+//! OXC strips TypeScript and lowers syntax while Rolldown emits one ES2016
+//! CommonJS module. User imports remain external so Node retains ownership of
+//! package loading and executes the generated module in the caller's V8
+//! isolate. No build configuration or task behavior is interpreted here.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -26,18 +21,18 @@ use thiserror::Error;
 
 use crate::diagnostics::RolldownBuildDiagnostics;
 
-/// Compiles one hvigor runtime script without executing JavaScript.
+/// Compiles one plugin module without executing JavaScript.
 ///
-/// Imports stay external so Node retains hvigor's per-file module cache,
-/// extension handlers, package mocks, and `require` resolution behavior.
-/// Rolldown still owns module syntax lowering and CommonJS code generation.
+/// Imports stay external so Node retains its module cache, extension handlers,
+/// and `require` resolution behavior. Rolldown owns module syntax lowering and
+/// CommonJS code generation.
 #[derive(Debug, Clone)]
-pub struct HvigorScriptCompiler {
+pub struct PluginModuleCompiler {
     file: PathBuf,
     source_map: bool,
 }
 
-impl HvigorScriptCompiler {
+impl PluginModuleCompiler {
     pub fn new(file: impl Into<PathBuf>) -> Self {
         Self {
             file: file.into(),
@@ -51,7 +46,7 @@ impl HvigorScriptCompiler {
     }
 
     /// Produce one ES2016 CommonJS module for Node's `Module._compile`.
-    pub async fn compile(self) -> Result<String, HvigorScriptCompileError> {
+    pub async fn compile(self) -> Result<String, PluginModuleCompileError> {
         let file = self.absolute_file()?;
         let mut bundler = rolldown::Bundler::new(self.options(&file)?)
             .map_err(|error| self.rolldown_error(error))?;
@@ -66,33 +61,33 @@ impl HvigorScriptCompiler {
         });
         let entry = entry_chunks
             .next()
-            .ok_or_else(|| HvigorScriptCompileError::MissingEntryOutput { file: file.clone() })?;
+            .ok_or_else(|| PluginModuleCompileError::MissingEntryOutput { file: file.clone() })?;
         if entry_chunks.next().is_some() {
-            return Err(HvigorScriptCompileError::MultipleEntryOutputs { file });
+            return Err(PluginModuleCompileError::MultipleEntryOutputs { file });
         }
         Ok(entry.code.clone())
     }
 
-    fn absolute_file(&self) -> Result<PathBuf, HvigorScriptCompileError> {
+    fn absolute_file(&self) -> Result<PathBuf, PluginModuleCompileError> {
         if self.file.is_absolute() {
             return Ok(self.file.clone());
         }
         std::env::current_dir()
             .map(|cwd| cwd.join(&self.file))
-            .map_err(|source| HvigorScriptCompileError::CurrentDirectory { source })
+            .map_err(|source| PluginModuleCompileError::CurrentDirectory { source })
     }
 
-    fn options(&self, file: &Path) -> Result<BundlerOptions, HvigorScriptCompileError> {
+    fn options(&self, file: &Path) -> Result<BundlerOptions, PluginModuleCompileError> {
         let file_text = file
             .to_str()
-            .ok_or_else(|| HvigorScriptCompileError::NonUtf8Path {
+            .ok_or_else(|| PluginModuleCompileError::NonUtf8Path {
                 file: file.to_path_buf(),
             })?;
         let output_file = Self::output_file(file);
         let output_file_text =
             output_file
                 .to_str()
-                .ok_or_else(|| HvigorScriptCompileError::NonUtf8Path {
+                .ok_or_else(|| PluginModuleCompileError::NonUtf8Path {
                     file: output_file.clone(),
                 })?;
         let cwd = file
@@ -107,7 +102,7 @@ impl HvigorScriptCompiler {
 
         Ok(BundlerOptions {
             input: Some(vec![InputItem {
-                name: Some("hvigor-script".to_owned()),
+                name: Some("plugin-module".to_owned()),
                 import: file_text.to_owned(),
             }]),
             cwd: Some(cwd),
@@ -124,18 +119,16 @@ impl HvigorScriptCompiler {
             preserve_entry_signatures: Some(PreserveEntrySignatures::Strict),
             experimental: Some(ExperimentalOptions {
                 // Rolldown defaults this experiment on and emits absolute
-                // module IDs in `//#region` comments. Hvigor's transpiler does
-                // not, and those paths make output platform-dependent.
+                // module IDs in `//#region` comments. Those paths make output
+                // platform-dependent and are not part of the plugin ABI.
                 attach_debug_info: Some(AttachDebugInfo::None),
                 ..Default::default()
             }),
             transform: Some(BundlerTransformOptions {
                 target: Some(Either::Left("es2016".to_owned())),
-                // TypeScript 4.9.5 transpileModule emits hvigor's field
-                // decorators with the legacy `(prototype, propertyKey)`
-                // contract even though compile-options.js does not spell out
-                // experimentalDecorators. OXC must select that contract
-                // explicitly or it discards these TypeScript decorators.
+                // Plugin modules use the legacy `(prototype, propertyKey)`
+                // field-decorator contract supported by existing OHOS build
+                // plugins. OXC must select it explicitly.
                 decorator: Some(DecoratorOptions {
                     legacy: Some(true),
                     ..Default::default()
@@ -158,8 +151,14 @@ impl HvigorScriptCompiler {
 
     fn output_file(file: &Path) -> PathBuf {
         match file.extension().and_then(|extension| extension.to_str()) {
-            Some(extension) if extension.eq_ignore_ascii_case("ts") => file.with_extension("js"),
-            Some(extension) if extension.eq_ignore_ascii_case("tsx") => file.with_extension("js"),
+            Some(extension)
+                if matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "ts" | "tsx" | "mts" | "cts"
+                ) =>
+            {
+                file.with_extension("js")
+            }
             Some(_) | None => file.to_path_buf(),
         }
     }
@@ -188,8 +187,8 @@ impl HvigorScriptCompiler {
     fn rolldown_error(
         &self,
         error: rolldown_error::BatchedBuildDiagnostic,
-    ) -> HvigorScriptCompileError {
-        HvigorScriptCompileError::Rolldown {
+    ) -> PluginModuleCompileError {
+        PluginModuleCompileError::Rolldown {
             file: self.file.clone(),
             message: RolldownBuildDiagnostics::new(error).into_message(),
         }
@@ -197,13 +196,13 @@ impl HvigorScriptCompiler {
 }
 
 #[derive(Debug, Error)]
-pub enum HvigorScriptCompileError {
-    #[error("failed to resolve the current directory for a hvigor script: {source}")]
+pub enum PluginModuleCompileError {
+    #[error("failed to resolve the current directory for a plugin module: {source}")]
     CurrentDirectory {
         #[source]
         source: std::io::Error,
     },
-    #[error("hvigor script path is not valid UTF-8: {}", file.display())]
+    #[error("plugin module path is not valid UTF-8: {}", file.display())]
     NonUtf8Path { file: PathBuf },
     #[error("failed to transpile {}:\n{message}", file.display())]
     Rolldown { file: PathBuf, message: String },
