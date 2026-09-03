@@ -33,7 +33,9 @@ impl BuildCoordinator {
       .as_ref()
       .map(|batch| batch.changed_files.clone())
       .unwrap_or_default();
-    let preview_mode = args.preview;
+    let preview_mode = args.preview
+      || args.preview_transform_mode
+      || matches!(config.output_target, OutputTarget::Preview);
     let preview_incremental_resources = matches!(config.output_target, OutputTarget::Preview)
       && args.hvigor_properties.previewer_compile_res_incremental;
     if preview_incremental_resources
@@ -2474,6 +2476,9 @@ impl BuildCoordinator {
           coverage_path_filter: None,
           coverage_mode: None,
           debug_line: false,
+          preview_mode: false,
+          check_entry: false,
+          watch_mode: false,
           byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
           single_file_emit: false,
           rollup_cache_use_source_hash: args.hvigor_properties.rollup_cache_use_source_hash,
@@ -2496,7 +2501,9 @@ impl BuildCoordinator {
     // no Rolldown transform has run yet, which is the equivalent native
     // boundary. The SDK checker remains an explicit stage so transform hooks
     // never read SDK/configuration state.
-    if checker_selection.runs_sdk_semantic_checker() {
+    if checker_selection.runs_sdk_semantic_checker()
+      && args.arkts_version == arkdown_core::ArktsLanguageVersion::V1_1
+    {
       let semantic_checker_start = Instant::now();
       let mut checker_plans = Vec::with_capacity(loader_jsons.len());
       for (module, _manifest, loader_json, _resource_refs, module_target_name, module_config) in
@@ -2583,6 +2590,9 @@ impl BuildCoordinator {
             coverage_path_filter: args.coverage_path_filter.as_deref(),
             coverage_mode: args.coverage_mode.as_deref(),
             debug_line: false,
+            preview_mode,
+            check_entry: args.check_entry,
+            watch_mode,
             byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
             single_file_emit: module_config.build_mode.is_debuggable()
               && args.hvigor_properties.single_file_emit

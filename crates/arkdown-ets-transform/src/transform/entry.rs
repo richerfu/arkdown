@@ -6,6 +6,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
+use oxc_syntax::number::NumberBase;
 use oxc_syntax::operator::{BinaryOperator, LogicalOperator};
 use std::path::PathBuf;
 
@@ -120,6 +121,256 @@ impl<'a> EntryRegistrationBlock<'a> {
     }
 }
 
+/// Emits the preview runtime switch from
+/// `process_ui_syntax.ts::createPreviewComponentFunction`.
+///
+/// Preview components are materialized only in the `getPreviewComponentFlag`
+/// branch. The alternate branch retains the ordinary entry registration so a
+/// preview-compiled page can still launch normally.
+#[derive(Debug)]
+pub(super) struct PreviewRegistrationBlock<'a> {
+    preview_components: Vec<String>,
+    entry: Option<EntryRegistrationItem<'a>>,
+}
+
+impl<'a> PreviewRegistrationBlock<'a> {
+    pub(super) fn new(preview_components: Vec<String>) -> Self {
+        Self {
+            preview_components,
+            entry: None,
+        }
+    }
+
+    pub(super) fn set_entry(
+        &mut self,
+        component_name: &str,
+        info: Option<&EntryRegistrationInfo<'a>>,
+    ) {
+        self.entry = Some(EntryRegistrationItem {
+            component_name: component_name.to_string(),
+            info: info.cloned(),
+        });
+    }
+
+    pub(super) fn statement<'b>(
+        &self,
+        ast: AstBuilder<'b>,
+        allocator: &'b Allocator,
+        runtime_names: &ArkuiRuntimeNames,
+    ) -> Statement<'b> {
+        let test = Expression::new_call_expression(
+            SPAN,
+            Expression::new_identifier(SPAN, EntryRuntimeName::GET_PREVIEW_COMPONENT_FLAG, &ast),
+            None,
+            OxcVec::new_in(&ast),
+            false,
+            &ast,
+        );
+        let consequent = Statement::new_block_statement(
+            SPAN,
+            self.preview_statements(&ast, allocator, runtime_names),
+            &ast,
+        );
+        let alternate = Statement::new_block_statement(
+            SPAN,
+            self.entry_statements(&ast, allocator, runtime_names),
+            &ast,
+        );
+        Statement::new_if_statement(SPAN, test, consequent, Some(alternate), &ast)
+    }
+
+    fn preview_statements<'b>(
+        &self,
+        ast: &AstBuilder<'b>,
+        allocator: &'b Allocator,
+        runtime_names: &ArkuiRuntimeNames,
+    ) -> OxcVec<'b, Statement<'b>> {
+        let mut statements = self.store_preview_statements(ast, allocator, runtime_names);
+        statements.push(Statement::new_expression_statement(
+            SPAN,
+            Expression::new_call_expression(
+                SPAN,
+                Expression::new_identifier(SPAN, EntryRuntimeName::PREVIEW_COMPONENT, ast),
+                None,
+                OxcVec::new_in(ast),
+                false,
+                ast,
+            ),
+            ast,
+        ));
+        statements
+    }
+
+    fn store_preview_statements<'b>(
+        &self,
+        ast: &AstBuilder<'b>,
+        allocator: &'b Allocator,
+        runtime_names: &ArkuiRuntimeNames,
+    ) -> OxcVec<'b, Statement<'b>> {
+        let Some(entry) = &self.entry else {
+            return OxcVec::from_value_in(
+                self.store_preview_statement(ast, runtime_names, None, None),
+                ast,
+            );
+        };
+        let Some(info) = &entry.info else {
+            return OxcVec::from_value_in(
+                self.store_preview_statement(ast, runtime_names, Some(&entry.component_name), None),
+                ast,
+            );
+        };
+
+        if info.options.object_literal {
+            let Some(storage) = info.options.storage else {
+                return OxcVec::from_value_in(
+                    self.store_preview_statement(
+                        ast,
+                        runtime_names,
+                        Some(&entry.component_name),
+                        None,
+                    ),
+                    ast,
+                );
+            };
+            let declaration = self.storage_declaration(ast, storage.clone_in(allocator));
+            let store = self.store_preview_statement(
+                ast,
+                runtime_names,
+                Some(&entry.component_name),
+                Some(Expression::new_identifier(
+                    SPAN,
+                    EntryRuntimeName::STORAGE_NODE,
+                    ast,
+                )),
+            );
+            return OxcVec::from_iter_in([declaration, store], ast);
+        }
+
+        let Some(argument) = info.options.argument else {
+            return OxcVec::from_value_in(
+                self.store_preview_statement(ast, runtime_names, Some(&entry.component_name), None),
+                ast,
+            );
+        };
+        let entry_emitter =
+            EntryRegistrationAstEmitter::new(&entry.component_name, Some(info), runtime_names);
+        let test = entry_emitter.identifier_property_condition(
+            ast,
+            allocator,
+            argument,
+            EntryRuntimeName::STORAGE,
+            BinaryOperator::Inequality,
+        );
+        let consequent = self.store_preview_statement(
+            ast,
+            runtime_names,
+            Some(&entry.component_name),
+            Some(entry_emitter.identifier_property_expression(
+                ast,
+                allocator,
+                argument,
+                EntryRuntimeName::STORAGE,
+            )),
+        );
+        let alternate = self.store_preview_statement(
+            ast,
+            runtime_names,
+            Some(&entry.component_name),
+            Some(argument.clone_in(allocator)),
+        );
+        OxcVec::from_value_in(
+            Statement::new_if_statement(
+                SPAN,
+                test,
+                Statement::new_block_statement(SPAN, OxcVec::from_value_in(consequent, ast), ast),
+                Some(Statement::new_block_statement(
+                    SPAN,
+                    OxcVec::from_value_in(alternate, ast),
+                    ast,
+                )),
+                ast,
+            ),
+            ast,
+        )
+    }
+
+    fn storage_declaration<'b>(
+        &self,
+        ast: &AstBuilder<'b>,
+        initializer: Expression<'b>,
+    ) -> Statement<'b> {
+        let binding =
+            BindingPattern::new_binding_identifier(SPAN, EntryRuntimeName::STORAGE_NODE, ast);
+        let declarator =
+            VariableDeclarator::new(SPAN, binding, None, Some(initializer), false, ast);
+        Statement::new_variable_declaration(
+            SPAN,
+            VariableDeclarationKind::Let,
+            OxcVec::from_value_in(declarator, ast),
+            false,
+            ast,
+        )
+    }
+
+    fn store_preview_statement<'b>(
+        &self,
+        ast: &AstBuilder<'b>,
+        runtime_names: &ArkuiRuntimeNames,
+        entry_name: Option<&str>,
+        mut entry_storage: Option<Expression<'b>>,
+    ) -> Statement<'b> {
+        let mut arguments =
+            OxcVec::with_capacity_in(1 + self.preview_components.len().saturating_mul(2), ast);
+        arguments.push(Argument::from(Expression::new_numeric_literal(
+            SPAN,
+            self.preview_components.len() as f64,
+            None,
+            NumberBase::Decimal,
+            ast,
+        )));
+        for component_name in &self.preview_components {
+            arguments.push(Argument::from(Expression::new_string_literal(
+                SPAN,
+                ast.allocator().alloc_str(component_name),
+                None,
+                ast,
+            )));
+            let storage = (entry_name == Some(component_name.as_str()))
+                .then(|| entry_storage.take())
+                .flatten();
+            let emitter = EntryRegistrationAstEmitter::new(component_name, None, runtime_names);
+            arguments.push(Argument::from(Expression::NewExpression(
+                emitter.component_new_expression(ast, storage),
+            )));
+        }
+        Statement::new_expression_statement(
+            SPAN,
+            Expression::new_call_expression(
+                SPAN,
+                Expression::new_identifier(SPAN, EntryRuntimeName::STORE_PREVIEW_COMPONENTS, ast),
+                None,
+                arguments,
+                false,
+                ast,
+            ),
+            ast,
+        )
+    }
+
+    fn entry_statements<'b>(
+        &self,
+        ast: &AstBuilder<'b>,
+        allocator: &'b Allocator,
+        runtime_names: &ArkuiRuntimeNames,
+    ) -> OxcVec<'b, Statement<'b>> {
+        let Some(entry) = &self.entry else {
+            return OxcVec::new_in(ast);
+        };
+        EntryRegistrationAstEmitter::new(&entry.component_name, entry.info.as_ref(), runtime_names)
+            .statements(ast, allocator)
+    }
+}
+
 struct EntryRuntimeName;
 
 impl EntryRuntimeName {
@@ -141,6 +392,10 @@ impl EntryRuntimeName {
     const USE_SHARED_STORAGE: &'static str = "useSharedStorage";
     const LOCAL_STORAGE: &'static str = "LocalStorage";
     const GET_SHARED: &'static str = "getShared";
+    const GET_PREVIEW_COMPONENT_FLAG: &'static str = "getPreviewComponentFlag";
+    const STORE_PREVIEW_COMPONENTS: &'static str = "storePreviewComponents";
+    const PREVIEW_COMPONENT: &'static str = "previewComponent";
+    const STORAGE_NODE: &'static str = "storageNode";
 }
 
 #[derive(Debug)]
@@ -185,13 +440,9 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
             return self.object_entry_statements(ast, info, allocator);
         }
 
-        if info.options.argument.is_some() {
+        if let Some(argument) = info.options.argument {
             return OxcVec::from_value_in(
-                self.identifier_entry_statement(
-                    ast,
-                    allocator,
-                    info.options.argument.expect("checked above"),
-                ),
+                self.identifier_entry_statement(ast, allocator, argument),
                 ast,
             );
         }

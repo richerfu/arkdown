@@ -870,7 +870,8 @@ impl BuildCoordinator {
                   &module_config.product.name,
                   &source_dir,
                   &module.name,
-                );
+                )
+                .with_arkts_language_version(self.session.arkts_language_version);
                 let declaration_generator = if matches!(artifact_type, HarArtifactType::Bytecode) {
                   declaration_generator.with_generated_source(&generated_module_info)
                 } else {

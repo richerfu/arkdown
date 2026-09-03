@@ -25,8 +25,9 @@ pub use arkdown_ets_transform::transform;
 pub use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
 pub use arkdown_ets_transform::{
     CheckerMode, ModuleAnalyzerKind, NavigationRouteMap, ResourceReference,
-    RolldownEtsTransformPlan, StaticModuleSpecifierRewrite, SystemResourceReferenceLoader,
-    TransformEntrySourceId, TransformResolvedStaticModule, TransformSourceSnapshot,
+    ResourceTransformContext, RolldownEtsTransformPlan, StaticModuleSpecifierRewrite,
+    SystemResourceReferenceLoader, TransformEntrySourceId, TransformResolvedStaticModule,
+    TransformSourceSnapshot,
 };
 
 /// ArkTS transform plugin adapter.

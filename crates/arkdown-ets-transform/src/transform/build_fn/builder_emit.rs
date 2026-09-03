@@ -539,9 +539,27 @@ impl<'a, 'ctx> BuilderDispatchCallEmitter<'a, 'ctx> {
 
     pub(super) fn rewrite<'b>(&self, call: &mut CallExpression<'b>, allocator: &'b Allocator) {
         let ast = &AstBuilder::new(allocator);
+        let mutable_receiver = self.mutable_receiver();
+        let dispatch_target = mutable_receiver.map_or_else(
+            || self.call.callee.clone_in(allocator),
+            |receiver| {
+                Expression::from(MemberExpression::new_static_member_expression(
+                    SPAN,
+                    receiver.clone_in(allocator),
+                    IdentifierName::new(
+                        SPAN,
+                        ast.allocator()
+                            .alloc_str(&self.context.runtime_names().mutable_builder_dispatch),
+                        ast,
+                    ),
+                    false,
+                    ast,
+                ))
+            },
+        );
         let bind_member = MemberExpression::new_static_member_expression(
             SPAN,
-            self.call.callee.clone_in(allocator),
+            dispatch_target,
             IdentifierName::new(
                 SPAN,
                 ast.allocator()
@@ -562,17 +580,45 @@ impl<'a, 'ctx> BuilderDispatchCallEmitter<'a, 'ctx> {
             false,
             ast,
         );
-        call.arguments = self.arguments(ast, allocator);
+        call.arguments = self.arguments(ast, allocator, mutable_receiver);
     }
 
     pub(super) fn arguments<'b>(
         &self,
         ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
+        mutable_receiver: Option<&Expression<'a>>,
     ) -> OxcVec<'b, Argument<'b>> {
+        let receiver_argument = mutable_receiver.map(|receiver| {
+            let body = ArrowFunctionBody::from(receiver.clone_in(allocator));
+            Argument::from(Expression::new_arrow_function_expression(
+                SPAN,
+                false,
+                None,
+                ArenaBox::new_in(
+                    FormalParameters::new(
+                        SPAN,
+                        FormalParameterKind::ArrowFormalParameters,
+                        OxcVec::new_in(ast),
+                        None,
+                        ast,
+                    ),
+                    ast,
+                ),
+                None,
+                body,
+                ast,
+            ))
+        });
         if let [argument] = self.call.arguments.as_slice() {
             if let Some(Expression::ObjectExpression(object)) = argument.as_expression() {
-                let proxy_object = BuilderParamProxyObjectEmitter::new(self.context)
+                let mutable_proxy_context = self.context.clone().with_mutable_builder_proxy_scope();
+                let proxy_context = if mutable_receiver.is_some() {
+                    &mutable_proxy_context
+                } else {
+                    self.context
+                };
+                let proxy_object = BuilderParamProxyObjectEmitter::new(proxy_context)
                     .object_expression(object, allocator);
                 let arguments = OxcVec::from_iter_in(
                     [
@@ -600,12 +646,25 @@ impl<'a, 'ctx> BuilderDispatchCallEmitter<'a, 'ctx> {
                     false,
                     ast,
                 );
-                return OxcVec::from_value_in(Argument::from(proxy), ast);
+                return OxcVec::from_iter_in(
+                    receiver_argument.into_iter().chain([Argument::from(proxy)]),
+                    ast,
+                );
             }
         }
-        BuildArgumentEmitter::new()
+        let arguments = BuildArgumentEmitter::new()
             .with_context(self.context)
-            .arguments_with_allocator(&self.call.arguments, allocator)
+            .arguments_with_allocator(&self.call.arguments, allocator);
+        OxcVec::from_iter_in(receiver_argument.into_iter().chain(arguments), ast)
+    }
+
+    fn mutable_receiver(&self) -> Option<&Expression<'a>> {
+        let Expression::StaticMemberExpression(member) = &self.call.callee else {
+            return None;
+        };
+        self.context
+            .is_mutable_builder_receiver(&member.object)
+            .then_some(&member.object)
     }
 }
 

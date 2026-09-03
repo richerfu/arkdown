@@ -19,13 +19,18 @@ use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
 
 use crate::transform::build_fn::{
-    BuildBodyInfo, BuildBodyPlan, CustomComponentUpdateProps, StylesMethodInfo,
+    BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, CustomComponentUpdateProps,
+    StylesMethodInfo,
 };
-use crate::transform::component_analysis::ExtendAttributeIndex;
+use crate::transform::component::{
+    BuilderMethodKind, GlobalReusePoolConfig, GlobalReusePoolPropertyEmitter,
+};
+use crate::transform::component_analysis::{ExtendAttributeIndex, StructMutableBuilderProperties};
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
+use crate::transform::local_builder::LocalBuilderRuntimeEmitter;
 use crate::transform::viewpu_emit::{
     GeneratedViewpuName, ViewpuAstBuilder, ViewpuMemberAstEmitter,
 };
@@ -51,6 +56,13 @@ pub enum ComponentV2Error {
     InvalidFieldDecorators {
         name: String,
         field: String,
+        message: String,
+    },
+
+    #[error("@ComponentV2 struct '{name}': invalid method '{method}': {message}")]
+    InvalidMethod {
+        name: String,
+        method: String,
         message: String,
     },
 }
@@ -87,14 +99,14 @@ enum V2SourceMember {
 }
 
 impl<'a> V2RegularMember<'a> {
-    fn to_class_element<'b>(&self, allocator: &'b Allocator) -> ClassElement<'b> {
+    fn to_class_element<'b>(self, allocator: &'b Allocator) -> ClassElement<'b> {
         let ast = AstBuilder::new(allocator);
         match self {
             Self::Method {
                 method,
                 retain_decorators,
             } => GlobalContextCallRewriter::new(allocator)
-                .method_definition_with_decorators(method, *retain_decorators),
+                .method_definition_with_decorators(method, retain_decorators),
             Self::StaticBlock(block) => {
                 ClassElement::StaticBlock(ArenaBox::new_in(block.clone_in(allocator), &ast))
             }
@@ -182,6 +194,8 @@ pub(super) struct ComponentV2Lowerer<'a, 'b> {
     is_default: bool,
     is_entry: bool,
     emit_reusable_v2_helper: bool,
+    global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
+    has_local_builder_in_file: bool,
 }
 
 impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
@@ -203,6 +217,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         is_default: bool,
         is_entry: bool,
         emit_reusable_v2_helper: bool,
+        global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
+        has_local_builder_in_file: bool,
     ) -> Self {
         Self {
             stmt,
@@ -221,12 +237,16 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             is_default,
             is_entry,
             emit_reusable_v2_helper,
+            global_reuse_pool,
+            has_local_builder_in_file,
         }
     }
 
     pub(super) fn lower(&self) -> Result<OxcVec<'b, Statement<'b>>, ComponentV2Error> {
         let name = self.stmt.id.name.as_str();
         let raw_object_fields = FxHashSet::default();
+        let mutable_builder_properties =
+            Arc::new(StructMutableBuilderProperties::new(self.stmt).collect());
         let mut visible_builder_methods = self.visible_builder_methods();
         self.collect_builder_param_methods(&mut visible_builder_methods);
 
@@ -294,6 +314,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     )
                     .with_xcomponent_module_identity(self.bundle_name, self.module_name)
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
                     .with_styles_methods(&styles_methods);
                     build_body = Some(plan);
                     source_members.push(V2SourceMember::InitialRender);
@@ -302,21 +323,55 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     let Some(method_name) = method.key.static_name() else {
                         continue;
                     };
-                    let plan = BuildBodyPlan::builder_v2(
-                        method.value.body.as_deref(),
-                        self.source_text,
-                        self.source_id,
-                        self.custom_components,
-                        &visible_builder_methods,
-                        self.custom_component_update_props,
-                        self.component_metadata,
-                        &raw_object_fields,
-                        self.module_name,
-                    )
+                    let kind = if self
+                        .has_method_decorator(method, ArkuiDecoratorName::LOCAL_BUILDER)
+                    {
+                        if method.r#static {
+                            return Err(ComponentV2Error::InvalidMethod {
+                                name: name.to_string(),
+                                method: method_name.into_owned(),
+                                message: "Static methods in custom components cannot be decorated by '@LocalBuilder'.".to_string(),
+                            });
+                        }
+                        BuilderMethodKind::LocalBuilder
+                    } else {
+                        BuilderMethodKind::Builder
+                    };
+                    let plan = match kind {
+                        BuilderMethodKind::Builder => BuildBodyPlan::builder_v2(
+                            method.value.body.as_deref(),
+                            self.source_text,
+                            self.source_id,
+                            self.custom_components,
+                            &visible_builder_methods,
+                            self.custom_component_update_props,
+                            self.component_metadata,
+                            &raw_object_fields,
+                            self.module_name,
+                        ),
+                        BuilderMethodKind::LocalBuilder => {
+                            BuildBodyPlan::local_builder_with_shared_inputs(
+                                method.value.body.as_deref(),
+                                BuildBodySharedInputs {
+                                    source_text: Arc::from(self.source_text),
+                                    source_id: Arc::from(self.source_id),
+                                    custom_components: self.custom_components,
+                                    builder_methods: &visible_builder_methods,
+                                    custom_component_update_props: self
+                                        .custom_component_update_props,
+                                    component_metadata: Arc::new(self.component_metadata.clone()),
+                                    raw_object_fields: &raw_object_fields,
+                                    module_name: self.module_name.map(Arc::from),
+                                },
+                                GeneratedViewpuName::VIEW_V2_BASE,
+                            )
+                        }
+                    }
                     .with_xcomponent_module_identity(self.bundle_name, self.module_name)
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
                     .with_styles_methods(&styles_methods);
-                    builder_methods.push((method_name.into_owned(), method.as_ref(), plan));
+                    builder_methods.push((method_name.into_owned(), method.as_ref(), plan, kind));
                     source_members.push(V2SourceMember::Builder(builder_methods.len() - 1));
                 }
                 StructElement::MethodDefinition(method) if self.is_styles_method(method) => {
@@ -374,6 +429,9 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         let ast = AstBuilder::new(self.allocator);
         let mut elements = OxcVec::new_in(&ast);
 
+        if let Some(reuse_pool) = self.global_reuse_pool {
+            elements.push(GlobalReusePoolPropertyEmitter::new(reuse_pool).element(self.allocator));
+        }
         elements.push(self.constructor_element(constructor_method, &fields));
         elements.push(self.reset_state_vars_on_reuse_element(
             &fields,
@@ -390,8 +448,14 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     elements.push(self.initial_render_element(name, build_body.as_ref())?);
                 }
                 V2SourceMember::Builder(index) => {
-                    let (method_name, method, body) = &builder_methods[index];
-                    elements.push(self.builder_method_element(name, method_name, method, body)?);
+                    let (method_name, method, body, kind) = &builder_methods[index];
+                    elements.push(self.builder_method_element(
+                        name,
+                        method_name,
+                        method,
+                        body,
+                        *kind,
+                    )?);
                 }
                 V2SourceMember::Regular(index) => {
                     elements.push(regular_members[index].to_class_element(self.allocator));
@@ -723,7 +787,11 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         let Expression::CallExpression(call) = &member.object else {
             return false;
         };
-        matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "wrapBuilder")
+        matches!(
+            &call.callee,
+            Expression::Identifier(identifier)
+                if matches!(identifier.name.as_str(), "wrapBuilder" | "mutableBuilder")
+        )
     }
 
     fn validate_lifecycle_method(
@@ -769,6 +837,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 | ArkuiDecoratorName::COMPONENT_REUSE
                 | ArkuiDecoratorName::COMPONENT_RECYCLE
                 | ArkuiDecoratorName::COMPONENT_DISAPPEAR
+                | ArkuiDecoratorName::COMPONENT_ACTIVE
+                | ArkuiDecoratorName::COMPONENT_INACTIVE
         )
     }
 
@@ -938,14 +1008,24 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         component_name: &str,
         build_body: Option<&BuildBodyPlan<'_>>,
     ) -> Result<ClassElement<'b>, ComponentV2Error> {
-        let stmts = build_body
-            .map(|body| BuildBodyInfo::Plan(body.clone()).statements(self.allocator))
+        let mut stmts = build_body
+            .map(|body| BuildBodyInfo::plan(body.clone()).statements(self.allocator))
             .transpose()
             .map_err(|err| ComponentV2Error::UnsupportedBuildDsl {
                 name: component_name.to_string(),
                 detail: err.to_string(),
             })?
             .unwrap_or_else(|| OxcVec::new_in(&self.allocator));
+        if self.has_local_builder_in_file
+            && build_body
+                .is_some_and(|body| BuildBodyInfo::plan(body.clone()).has_source_statements())
+        {
+            stmts.insert(
+                0,
+                LocalBuilderRuntimeEmitter::new().push_statement(self.allocator),
+            );
+            stmts.push(LocalBuilderRuntimeEmitter::new().pop_statement(self.allocator));
+        }
         let builder = ViewpuAstBuilder::new(self.allocator);
         Ok(
             ViewpuMemberAstEmitter::new(self.allocator).method_with_params(
@@ -964,14 +1044,37 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         method_name: &str,
         method: &MethodDefinition<'_>,
         body: &BuildBodyPlan<'_>,
+        kind: BuilderMethodKind,
     ) -> Result<ClassElement<'b>, ComponentV2Error> {
-        let stmts = BuildBodyInfo::Plan(body.clone())
+        let stmts = BuildBodyInfo::plan(body.clone())
             .statements(self.allocator)
             .map_err(|err| ComponentV2Error::UnsupportedBuildDsl {
                 name: component_name.to_string(),
                 detail: err.to_string(),
             })?;
         let builder = ViewpuAstBuilder::new(self.allocator);
+        if kind == BuilderMethodKind::LocalBuilder {
+            let ast = AstBuilder::new(self.allocator);
+            let arrow_body = FunctionBody::new(SPAN, OxcVec::new_in(&ast), stmts, &ast);
+            let arrow = Expression::new_arrow_function_expression(
+                SPAN,
+                false,
+                None,
+                builder.clone_formal_parameters(&method.value.params),
+                None,
+                ArrowFunctionBody::FunctionBody(ArenaBox::new_in(arrow_body, &ast)),
+                &ast,
+            );
+            return Ok(
+                ViewpuMemberAstEmitter::new(self.allocator).property_with_type_annotation(
+                    self.allocator.alloc_str(method_name),
+                    None,
+                    Some(arrow),
+                    false,
+                    false,
+                ),
+            );
+        }
         let return_type = method
             .value
             .return_type
@@ -996,6 +1099,13 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             GeneratedViewpuName::UPDATE_DIRTY_ELEMENTS,
             builder.expressions(),
         ));
+        if self.has_local_builder_in_file {
+            stmts.insert(
+                0,
+                LocalBuilderRuntimeEmitter::new().push_statement(self.allocator),
+            );
+            stmts.push(LocalBuilderRuntimeEmitter::new().pop_statement(self.allocator));
+        }
         ViewpuMemberAstEmitter::new(self.allocator).method_with_params(
             GeneratedViewpuName::RERENDER,
             builder.formal_parameters(),

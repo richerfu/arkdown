@@ -10,13 +10,16 @@ use rustc_hash::FxHashMap;
 
 use oxc_allocator::{Allocator, ArenaVec, CloneIn, GetAllocator};
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, CallExpression, Expression, NumberBase, ObjectPropertyKind,
-    PropertyKey, PropertyKind, StringLiteral,
+    Argument, ArrayExpressionElement, BindingIdentifier, CallExpression, Expression,
+    FormalParameterKind, FormalParameters, FunctionBody, FunctionType, ImportDeclarationSpecifier,
+    ImportOrExportKind, NumberBase, ObjectPropertyKind, PropertyKey, PropertyKind, Statement,
+    StringLiteral,
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::SPAN;
-use oxc_str::Str;
+use oxc_str::{Ident, Str};
+use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
 pub(crate) const RAWFILE_RUNTIME_TYPE: i64 = 30000;
 
@@ -37,47 +40,91 @@ pub struct ResourceReference {
 
 #[derive(Debug)]
 struct ResourceObject<'a> {
-    id: i64,
+    id: ResourceObjectId,
     runtime_type: i64,
     params: Vec<Argument<'a>>,
-    bundle_name: String,
-    module_name: String,
+    bundle_name: ResourceObjectName,
+    module_name: ResourceObjectName,
 }
 
 impl<'a> ResourceObject<'a> {
-    fn app_static(reference: &ResourceReference, params: Vec<Argument<'a>>) -> Self {
+    fn app_static(
+        reference: &ResourceReference,
+        params: Vec<Argument<'a>>,
+        context: &ResourceTransformContext,
+        source: ResourceSource,
+    ) -> Self {
         Self {
-            id: i64::from(reference.id),
+            id: context.static_resource_id(i64::from(reference.id), source),
             runtime_type: i64::from(reference.runtime_type),
             params,
-            bundle_name: reference.bundle_name.clone(),
-            module_name: reference.module_name.clone(),
+            bundle_name: context.bundle_name(&context.bundle_name),
+            module_name: context.module_name(&context.module_name),
         }
     }
 
-    fn app_dynamic(params: Vec<Argument<'a>>, names: &ResourceNames) -> Self {
+    fn app_dynamic(
+        params: Vec<Argument<'a>>,
+        names: &ResourceNames,
+        context: &ResourceTransformContext,
+    ) -> Self {
         Self {
-            id: -1,
+            id: context.dynamic_resource_id(),
             runtime_type: -1,
             params,
-            bundle_name: names.bundle_name.clone(),
-            module_name: names.module_name.clone(),
+            bundle_name: context.bundle_name(&names.bundle_name),
+            module_name: context.module_name(&names.module_name),
         }
     }
 
-    fn rawfile(id: i64, params: Vec<Argument<'a>>, names: &ResourceNames) -> Self {
+    fn resource_module(
+        module_name: &str,
+        params: Vec<Argument<'a>>,
+        context: &ResourceTransformContext,
+    ) -> Self {
         Self {
-            id,
+            id: context.resource_module_id(),
+            runtime_type: -1,
+            params,
+            bundle_name: context.bundle_name(&context.bundle_name),
+            module_name: ResourceObjectName::Literal(module_name.to_string()),
+        }
+    }
+
+    fn rawfile(
+        id: i64,
+        params: Vec<Argument<'a>>,
+        names: &ResourceNames,
+        context: &ResourceTransformContext,
+        resource_module: Option<&str>,
+    ) -> Self {
+        Self {
+            id: ResourceObjectId::Literal(id),
             runtime_type: RAWFILE_RUNTIME_TYPE,
             params,
-            bundle_name: names.bundle_name.clone(),
-            module_name: names.module_name.clone(),
+            bundle_name: context.bundle_name(&names.bundle_name),
+            module_name: resource_module.map_or_else(
+                || context.module_name(&names.module_name),
+                |module| ResourceObjectName::Literal(module.to_string()),
+            ),
         }
     }
 
     fn expression<'b>(&self, ast: &AstBuilder<'b>) -> Expression<'b> {
         ResourceObjectEmitter::new(self).expression(ast)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResourceObjectId {
+    Literal(i64),
+    RuntimeGetter(&'static str),
+}
+
+#[derive(Debug, Clone)]
+enum ResourceObjectName {
+    Literal(String),
+    RuntimeIdentifier(&'static str),
 }
 
 struct ResourceObjectEmitter<'a, 'b> {
@@ -99,24 +146,108 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
 
     fn properties<'c>(&self, ast: &AstBuilder<'c>) -> [ObjectPropertyKind<'c>; 5] {
         [
-            self.number_property(ast, ResourceObjectPropertyName::ID, self.resource.id),
+            self.id_property(ast),
             self.number_property(
                 ast,
                 ResourceObjectPropertyName::TYPE,
                 self.resource.runtime_type,
             ),
             self.params_property(ast),
-            self.string_property(
+            self.name_property(
                 ast,
                 ResourceObjectPropertyName::BUNDLE_NAME,
                 &self.resource.bundle_name,
             ),
-            self.string_property(
+            self.name_property(
                 ast,
                 ResourceObjectPropertyName::MODULE_NAME,
                 &self.resource.module_name,
             ),
         ]
+    }
+
+    fn id_property<'c>(&self, ast: &AstBuilder<'c>) -> ObjectPropertyKind<'c> {
+        match self.resource.id {
+            ResourceObjectId::Literal(value) => {
+                self.number_property(ast, ResourceObjectPropertyName::ID, value)
+            }
+            ResourceObjectId::RuntimeGetter(function) => self.runtime_id_getter(ast, function),
+        }
+    }
+
+    fn runtime_id_getter<'c>(
+        &self,
+        ast: &AstBuilder<'c>,
+        function: &'static str,
+    ) -> ObjectPropertyKind<'c> {
+        let function_identifier = || Expression::new_identifier(SPAN, function, ast);
+        let test = Expression::new_binary_expression(
+            SPAN,
+            Expression::new_unary_expression(
+                SPAN,
+                UnaryOperator::Typeof,
+                function_identifier(),
+                ast,
+            ),
+            BinaryOperator::StrictEquality,
+            Expression::new_string_literal(SPAN, "function", None, ast),
+            ast,
+        );
+        let call = Expression::new_call_expression(
+            SPAN,
+            function_identifier(),
+            None,
+            ArenaVec::from_value_in(
+                Argument::from(Expression::new_this_expression(SPAN, ast)),
+                ast,
+            ),
+            false,
+            ast,
+        );
+        let raw = Str::from_str_in("1", ast);
+        let alternate = Expression::new_unary_expression(
+            SPAN,
+            UnaryOperator::UnaryNegation,
+            Expression::new_numeric_literal(SPAN, 1.0, Some(raw), NumberBase::Decimal, ast),
+            ast,
+        );
+        let result = Expression::new_conditional_expression(SPAN, test, call, alternate, ast);
+        let body = FunctionBody::boxed(
+            SPAN,
+            ArenaVec::new_in(ast),
+            ArenaVec::from_value_in(
+                Statement::new_return_statement(SPAN, Some(result), ast),
+                ast,
+            ),
+            ast,
+        );
+        let params = FormalParameters::boxed(
+            SPAN,
+            FormalParameterKind::FormalParameter,
+            ArenaVec::new_in(ast),
+            None,
+            ast,
+        );
+        let getter = Expression::new_function_expression(
+            SPAN,
+            FunctionType::FunctionExpression,
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            params,
+            None,
+            Some(body),
+            ast,
+        );
+        self.property_with_kind(
+            ast,
+            ResourceObjectPropertyName::ID,
+            getter,
+            PropertyKind::Get,
+        )
     }
 
     fn number_property<'c>(
@@ -139,17 +270,21 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
         )
     }
 
-    fn string_property<'c>(
+    fn name_property<'c>(
         &self,
         ast: &AstBuilder<'c>,
         name: &'static str,
-        value: &str,
+        value: &ResourceObjectName,
     ) -> ObjectPropertyKind<'c> {
-        self.property(
-            ast,
-            name,
-            Expression::new_string_literal(SPAN, Str::from_str_in(value, ast), None, ast),
-        )
+        let value = match value {
+            ResourceObjectName::Literal(value) => {
+                Expression::new_string_literal(SPAN, Str::from_str_in(value, ast), None, ast)
+            }
+            ResourceObjectName::RuntimeIdentifier(value) => {
+                Expression::new_identifier(SPAN, *value, ast)
+            }
+        };
+        self.property(ast, name, value)
     }
 
     fn params_property<'c>(&self, ast: &AstBuilder<'c>) -> ObjectPropertyKind<'c> {
@@ -173,7 +308,19 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
         name: &'static str,
         value: Expression<'c>,
     ) -> ObjectPropertyKind<'c> {
-        let key = if ResourceObjectPropertyName::uses_string_literal_key(name) {
+        self.property_with_kind(ast, name, value, PropertyKind::Init)
+    }
+
+    fn property_with_kind<'c>(
+        &self,
+        ast: &AstBuilder<'c>,
+        name: &'static str,
+        value: Expression<'c>,
+        kind: PropertyKind,
+    ) -> ObjectPropertyKind<'c> {
+        let key = if kind != PropertyKind::Get
+            && ResourceObjectPropertyName::uses_string_literal_key(name)
+        {
             // Latest `process_ui_syntax.js::createResourceParam` constructs
             // id/type/bundle/module keys with `createStringLiteral`; `params`
             // alone is created with `createIdentifier`. Keeping this AST shape
@@ -188,16 +335,7 @@ impl<'a, 'b> ResourceObjectEmitter<'a, 'b> {
         } else {
             PropertyKey::new_static_identifier(SPAN, name, ast)
         };
-        ObjectPropertyKind::new_object_property(
-            SPAN,
-            PropertyKind::Init,
-            key,
-            value,
-            false,
-            false,
-            false,
-            ast,
-        )
+        ObjectPropertyKind::new_object_property(SPAN, kind, key, value, false, false, false, ast)
     }
 }
 
@@ -224,6 +362,95 @@ struct ResourceNames {
     module_name: String,
 }
 
+/// Immutable source-compiler resource behavior selected before Rolldown
+/// starts. This mirrors the fields read by `processResourceData` without
+/// consulting project globals from a transform hook.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceTransformContext {
+    pub min_api_version: u32,
+    pub compile_har: bool,
+    pub byte_code_har: bool,
+    pub integrated_hsp: bool,
+    pub use_get_current_bundle_name: bool,
+    pub ui_transform_optimization: bool,
+    pub reset_bundle_name: bool,
+    pub allow_empty_bundle_name: bool,
+    pub bundle_name: String,
+    pub module_name: String,
+}
+
+impl ResourceTransformContext {
+    const GET_RESOURCE_ID: &'static str = "__getResourceId__";
+    const RESOURCE_ID_HAR: &'static str = "__resourceIdHar__";
+    const BUNDLE_NAME: &'static str = "__BUNDLE_NAME__";
+    const MODULE_NAME: &'static str = "__MODULE_NAME__";
+    const HAR_DEFAULT_BUNDLE_NAME: &'static str = "__harDefaultBundleName__";
+    const HAR_DEFAULT_MODULE_NAME: &'static str = "__harDefaultModuleName__";
+
+    fn static_resource_id(&self, id: i64, source: ResourceSource) -> ResourceObjectId {
+        if !self.compile_har {
+            return ResourceObjectId::Literal(id);
+        }
+        if self.api_level() < 23 {
+            return ResourceObjectId::Literal(-1);
+        }
+        if source == ResourceSource::Sys {
+            ResourceObjectId::Literal(id)
+        } else {
+            ResourceObjectId::RuntimeGetter(Self::RESOURCE_ID_HAR)
+        }
+    }
+
+    fn resource_module_id(&self) -> ResourceObjectId {
+        if self.api_level() >= 22 {
+            ResourceObjectId::RuntimeGetter(Self::GET_RESOURCE_ID)
+        } else {
+            ResourceObjectId::Literal(-1)
+        }
+    }
+
+    fn dynamic_resource_id(&self) -> ResourceObjectId {
+        self.resource_module_id()
+    }
+
+    fn bundle_name(&self, configured: &str) -> ResourceObjectName {
+        if self.allow_empty_bundle_name
+            || (self.reset_bundle_name && !self.use_get_current_bundle_name)
+        {
+            return ResourceObjectName::Literal(String::new());
+        }
+        if self.is_dynamic() {
+            return ResourceObjectName::RuntimeIdentifier(Self::BUNDLE_NAME);
+        }
+        ResourceObjectName::Literal(if self.compile_har {
+            Self::HAR_DEFAULT_BUNDLE_NAME.to_string()
+        } else {
+            configured.to_string()
+        })
+    }
+
+    fn module_name(&self, configured: &str) -> ResourceObjectName {
+        if self.is_dynamic() {
+            return ResourceObjectName::RuntimeIdentifier(Self::MODULE_NAME);
+        }
+        ResourceObjectName::Literal(if self.compile_har {
+            Self::HAR_DEFAULT_MODULE_NAME.to_string()
+        } else {
+            configured.to_string()
+        })
+    }
+
+    fn is_dynamic(&self) -> bool {
+        self.ui_transform_optimization
+            || (self.compile_har && self.byte_code_har)
+            || (self.integrated_hsp && self.use_get_current_bundle_name)
+    }
+
+    fn api_level(&self) -> u32 {
+        self.min_api_version % 1000
+    }
+}
+
 impl ResourceNames {
     fn new(bundle_name: &str, module_name: Option<&str>) -> Self {
         Self {
@@ -236,6 +463,7 @@ impl ResourceNames {
 pub(crate) struct ResourceReferenceRewriter<'a> {
     resource_refs: &'a FxHashMap<String, ResourceReference>,
     names: ResourceNames,
+    context: ResourceTransformContext,
 }
 
 impl<'a> ResourceReferenceRewriter<'a> {
@@ -251,7 +479,23 @@ impl<'a> ResourceReferenceRewriter<'a> {
         Self {
             resource_refs,
             names: ResourceNames::new(bundle_name, module_name),
+            context: ResourceTransformContext {
+                bundle_name: bundle_name.to_string(),
+                module_name: module_name.unwrap_or_default().to_string(),
+                ..ResourceTransformContext::default()
+            },
         }
+    }
+
+    pub(crate) fn with_context(mut self, mut context: ResourceTransformContext) -> Self {
+        if context.bundle_name.is_empty() {
+            context.bundle_name.clone_from(&self.names.bundle_name);
+        }
+        if context.module_name.is_empty() {
+            context.module_name.clone_from(&self.names.module_name);
+        }
+        self.context = context;
+        self
     }
 
     pub(crate) fn rewrite_program<'ast>(
@@ -263,9 +507,13 @@ impl<'a> ResourceReferenceRewriter<'a> {
             allocator,
             resource_refs: self.resource_refs,
             names: self.names.clone(),
+            context: self.context.clone(),
             changed: false,
         };
         visitor.visit_program(program);
+        if visitor.changed && visitor.context.is_dynamic() {
+            visitor.insert_module_info_import(program);
+        }
         visitor.changed
     }
 }
@@ -274,6 +522,7 @@ struct ResourceReferenceMutator<'a, 'refs> {
     allocator: &'a Allocator,
     resource_refs: &'refs FxHashMap<String, ResourceReference>,
     names: ResourceNames,
+    context: ResourceTransformContext,
     changed: bool,
 }
 
@@ -293,6 +542,48 @@ impl<'a> VisitMut<'a> for ResourceReferenceMutator<'a, '_> {
 }
 
 impl<'a> ResourceReferenceMutator<'a, '_> {
+    fn insert_module_info_import(&self, program: &mut oxc_ast::ast::Program<'a>) {
+        let already_imported = program.body.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::ImportDeclaration(import) if import.source.value == "ModuleInfo"
+            )
+        });
+        if already_imported {
+            return;
+        }
+        let ast = AstBuilder::new(self.allocator);
+        let specifiers = ArenaVec::from_iter_in(
+            [
+                ResourceTransformContext::MODULE_NAME,
+                ResourceTransformContext::BUNDLE_NAME,
+            ]
+            .into_iter()
+            .map(|name| {
+                ImportDeclarationSpecifier::new_import_specifier(
+                    SPAN,
+                    oxc_ast::ast::ModuleExportName::new_identifier_name(SPAN, name, &ast),
+                    BindingIdentifier::new(SPAN, Ident::from_str_in(name, &ast), &ast),
+                    ImportOrExportKind::Value,
+                    &ast,
+                )
+            }),
+            &ast,
+        );
+        program.body.insert(
+            0,
+            Statement::new_import_declaration(
+                SPAN,
+                Some(specifiers),
+                StringLiteral::new(SPAN, "ModuleInfo", None, &ast),
+                None,
+                None,
+                ImportOrExportKind::Value,
+                &ast,
+            ),
+        );
+    }
+
     fn resource_expression(&self, call: &CallExpression<'_>) -> Option<Expression<'a>> {
         let Expression::Identifier(callee) = &call.callee else {
             return None;
@@ -308,36 +599,115 @@ impl<'a> ResourceReferenceMutator<'a, '_> {
 
     fn resource_object(&self, call: &CallExpression<'_>) -> Option<ResourceObject<'a>> {
         let first_arg = call.arguments.first()?.as_expression()?;
-        if let Expression::StringLiteral(resource_name) = first_arg {
-            let resource_key = ResourceName::parse(resource_name.value.as_str())?.into_key();
-            let resource = self.resource_refs.get(&resource_key)?;
+        let argument_text = ResourceArgumentText::new(first_arg);
+        if let Some(resource_name) = argument_text.text() {
+            if let Some(module) = ResourceModuleName::parse(resource_name) {
+                return Some(ResourceObject::resource_module(
+                    module.name,
+                    ResourceCallArguments::new(call, self.allocator).collect_all(),
+                    &self.context,
+                ));
+            }
+            let Some(name) = ResourceName::parse(resource_name) else {
+                return argument_text
+                    .is_template()
+                    .then(|| self.dynamic_resource_object(call));
+            };
+            let source = name.source;
+            let resource_key = name.into_key();
+            let Some(resource) = self.resource_refs.get(&resource_key) else {
+                return argument_text
+                    .is_template()
+                    .then(|| self.dynamic_resource_object(call));
+            };
             return Some(ResourceObject::app_static(
                 resource,
-                ResourceCallArguments::new(call, self.allocator).collect_after_first(),
+                if self.context.compile_har {
+                    ResourceCallArguments::new(call, self.allocator).collect_all()
+                } else {
+                    ResourceCallArguments::new(call, self.allocator).collect_after_first()
+                },
+                &self.context,
+                source,
             ));
         }
 
-        Some(ResourceObject::app_dynamic(
+        Some(self.dynamic_resource_object(call))
+    }
+
+    fn dynamic_resource_object(&self, call: &CallExpression<'_>) -> ResourceObject<'a> {
+        ResourceObject::app_dynamic(
             ResourceCallArguments::new(call, self.allocator).collect_all(),
             &self.names,
-        ))
+            &self.context,
+        )
     }
 
     fn rawfile_object(&self, call: &CallExpression<'_>) -> Option<ResourceObject<'a>> {
         let first_arg = call.arguments.first()?;
-        let is_static_string = first_arg
+        let static_text = first_arg
             .as_expression()
-            .is_some_and(|expr| matches!(expr, Expression::StringLiteral(_)));
+            .and_then(|expression| ResourceArgumentText::new(expression).text());
+        let is_static_string = static_text.is_some();
+        let resource_module = static_text.and_then(ResourceModuleName::parse);
         let params = if is_static_string {
             vec![first_arg.clone_in(self.allocator)]
         } else {
             ResourceCallArguments::new(call, self.allocator).collect_all()
         };
         Some(ResourceObject::rawfile(
-            if is_static_string { 0 } else { -1 },
+            if resource_module.is_some() || !is_static_string {
+                -1
+            } else {
+                0
+            },
             params,
             &self.names,
+            &self.context,
+            resource_module.map(|module| module.name),
         ))
+    }
+}
+
+struct ResourceArgumentText<'a> {
+    expression: &'a Expression<'a>,
+}
+
+impl<'a> ResourceArgumentText<'a> {
+    fn new(expression: &'a Expression<'a>) -> Self {
+        Self { expression }
+    }
+
+    fn text(&self) -> Option<&'a str> {
+        match self.expression {
+            Expression::StringLiteral(literal) => Some(literal.value.as_str().trim()),
+            Expression::TemplateLiteral(literal) if literal.expressions.is_empty() => literal
+                .quasis
+                .first()
+                .and_then(|quasi| quasi.value.cooked.as_deref())
+                .map(str::trim),
+            _ => None,
+        }
+    }
+
+    fn is_template(&self) -> bool {
+        matches!(self.expression, Expression::TemplateLiteral(_))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResourceModuleName<'a> {
+    name: &'a str,
+}
+
+impl<'a> ResourceModuleName<'a> {
+    fn parse(value: &'a str) -> Option<Self> {
+        let value = value.trim();
+        let rest = value.strip_prefix('[')?;
+        let end = rest.find(']')?;
+        let name = rest.get(..end)?.trim();
+        let resource = rest.get(end + 1..)?.strip_prefix('.')?;
+        (!name.is_empty() && !resource.is_empty()).then_some(Self { name })
     }
 }
 

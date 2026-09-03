@@ -374,7 +374,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             return Vec::new();
         }
         let mut generated =
-            TypeScriptSourceBoundaryInventory::with_source_text(&parsed.program.source_text);
+            TypeScriptSourceBoundaryInventory::with_source_text(parsed.program.source_text);
         generated.visit_program(&parsed.program);
         let mut generated_by_kind = HashMap::<TypeScriptSourceBoundaryKind, VecDeque<Span>>::new();
         for boundary in generated.boundaries {

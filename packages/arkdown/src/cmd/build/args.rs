@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use arkdown::plugins::ets_transform::ModuleAnalyzerKind;
 use arkdown::plugins::factory::PackagePlugin;
+use arkdown_core::ArktsLanguageVersion;
 use arkdown_watcher::WatchInvalidationBatch;
 use clap::{Args, ValueEnum};
 
@@ -165,6 +166,10 @@ pub struct BuildArgs {
   /// Build mode: debug, release, test
   #[arg(long, default_value = "debug")]
   pub mode: String,
+  /// ArkTS compiler language. ArkTS 1.2 is opt-in; omitted builds retain the
+  /// existing ArkTS 1.1 parser and transform pipeline.
+  #[arg(long = "arkts-version", default_value_t = ArktsLanguageVersion::default())]
+  pub arkts_version: ArktsLanguageVersion,
   /// Scope to a specific module
   #[arg(long)]
   pub module: Option<String>,
@@ -232,6 +237,15 @@ pub struct BuildArgs {
   /// resource-only rebuilds during DevEco IDE preview sessions.
   #[arg(long, default_value = "false")]
   pub preview: bool,
+  /// Require the previewed page to use exactly one `@Entry`, matching the
+  /// source compiler's `projectConfig.checkEntry` override.
+  #[arg(long = "check-entry", default_value = "false")]
+  pub check_entry: bool,
+  /// Internal Preview transform state retained by incremental rebuilds without
+  /// recursively starting another watcher.
+  #[arg(skip)]
+  #[doc(hidden)]
+  pub preview_transform_mode: bool,
   /// Disable the ABC compile cache (parity mode).
   ///
   /// When set, the ABC compilation step skips the coarse-grained `TaskInputs`
@@ -454,6 +468,7 @@ impl BuildCommand {
     }
     let config = std::sync::Arc::new(config);
     let mut session_builder = BuildSessionBuilder::new(config.clone());
+    session_builder = session_builder.with_arkts_language_version(args.arkts_version);
     if let Some(runtime_overrides) = args.runtime_context_overrides.clone() {
       session_builder = session_builder.with_runtime_overrides(runtime_overrides);
     }

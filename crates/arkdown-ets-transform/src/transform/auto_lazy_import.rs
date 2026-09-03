@@ -32,7 +32,8 @@ pub(crate) fn apply<'a>(source: &'a str, id: &str, options: &TransformOptions) -
         return Cow::Borrowed(source);
     }
     let allocator = Allocator::default();
-    let source_type = CompileArktsSourceType::from_id(id);
+    let source_type =
+        CompileArktsSourceType::from_id_with_version(id, options.arkts_language_version);
     let mut parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.diagnostics.is_empty() || !lower_program(&mut parsed.program, &allocator, options) {
         return Cow::Borrowed(source);

@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 
+use arkdown_core::ArktsLanguageVersion;
 use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::{ImportOrExportKind, LazyImportDeclaration, Statement};
 use oxc_ast::builder::AstBuilder;
@@ -18,16 +19,26 @@ use crate::source::CompileArktsSourceType;
 pub(crate) struct LazyImportRolldownAdapter<'a> {
     source: &'a str,
     id: &'a str,
+    arkts_language_version: ArktsLanguageVersion,
 }
 
 impl<'a> LazyImportRolldownAdapter<'a> {
-    pub(crate) fn new(source: &'a str, id: &'a str) -> Self {
-        Self { source, id }
+    pub(crate) fn new(
+        source: &'a str,
+        id: &'a str,
+        arkts_language_version: ArktsLanguageVersion,
+    ) -> Self {
+        Self {
+            source,
+            id,
+            arkts_language_version,
+        }
     }
 
     pub(crate) fn lower(&self) -> Cow<'a, str> {
         let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_id(self.id);
+        let source_type =
+            CompileArktsSourceType::from_id_with_version(self.id, self.arkts_language_version);
         let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return Cow::Borrowed(self.source);

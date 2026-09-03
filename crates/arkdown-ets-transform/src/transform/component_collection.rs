@@ -210,10 +210,10 @@ impl ComponentNameCollector {
 
     fn collect_call_expression_components(&mut self, call: &CallExpression<'_>) {
         match &call.callee {
-            Expression::Identifier(identifier) => {
-                if ComponentCallName::new(identifier.name.as_str()).is_component_candidate() {
-                    self.push_component_name(identifier.name.as_str(), true);
-                }
+            Expression::Identifier(identifier)
+                if ComponentCallName::new(identifier.name.as_str()).is_component_candidate() =>
+            {
+                self.push_component_name(identifier.name.as_str(), true);
             }
             Expression::StaticMemberExpression(member) => {
                 if let Expression::CallExpression(inner) = &member.object {

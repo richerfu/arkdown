@@ -533,7 +533,10 @@ fn is_dependency_path(path: &Path) -> bool {
 }
 
 fn is_source_ext(ext: &str) -> bool {
-    matches!(ext, "ets" | "ts" | "js" | "mjs" | "cjs" | "json" | "json5")
+    matches!(
+        ext,
+        "ets" | "ts" | "js" | "mjs" | "cjs" | "json" | "json5" | "visual"
+    )
 }
 
 /// Compute a simple FNV-1a fingerprint for a file.
@@ -707,6 +710,26 @@ mod tests {
         // .png in a non-resource path should return None
         let event = InvalidationEvent::from_file_event(&path, &baseline);
         assert!(event.is_none(), "png in non-resource path must return None");
+    }
+
+    #[test]
+    fn visual_change_invalidates_bundle_bytecode_and_package() {
+        let path = PathBuf::from("/project/entry/src/main/supervisual/pages/Index.visual");
+        let event = InvalidationEvent::from_file_event(&path, &HashMap::new())
+            .expect("visual input must produce an invalidation");
+
+        assert!(matches!(
+            event.reason,
+            InvalidationReason::SourceFileChanged { .. }
+        ));
+        assert_eq!(
+            event.affected_stages,
+            vec![
+                AffectedStage::Bundle,
+                AffectedStage::Ts2abc,
+                AffectedStage::Package,
+            ]
+        );
     }
 
     #[test]

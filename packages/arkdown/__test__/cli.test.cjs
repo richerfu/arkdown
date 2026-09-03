@@ -19,6 +19,9 @@ test('package CLI parses repeated hvigor plugin path flags', () => {
     './hvigor-plugin.js',
     '--build-version',
     '2026.07.23',
+    '--arkts-version',
+    '1.2',
+    '--check-entry',
     '--enable-zig',
   ])
 
@@ -27,6 +30,8 @@ test('package CLI parses repeated hvigor plugin path flags', () => {
     compilePluginPath: ['./compile-a.js', './compile-b.js'],
     hvigorPluginFile: './hvigor-plugin.js',
     buildVersion: '2026.07.23',
+    arktsVersion: '1.2',
+    checkEntry: true,
     enableZig: true,
   })
 })

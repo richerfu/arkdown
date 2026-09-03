@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_config::{ArkdownCustomConfig, RuntimeContextOverrides};
-use arkdown_core::ArkdownConfig;
+use arkdown_core::{ArkdownConfig, ArktsLanguageVersion};
 use arkdown_path::{lexical_normalize, to_slash};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -154,6 +154,30 @@ impl InputFingerprintSet {
         runtime_overrides: Option<&RuntimeContextOverrides>,
         custom_config: &ArkdownCustomConfig,
     ) -> Result<Self, FingerprintError> {
+        Self::build_with_custom_config_and_arkts_version(
+            config,
+            project,
+            profiles,
+            sdk,
+            runtime_overrides,
+            custom_config,
+            ArktsLanguageVersion::default(),
+        )
+    }
+
+    /// Build fingerprints including the explicit ArkTS compiler language.
+    ///
+    /// Version selection affects parsing, lowering, emitted source, and ABC
+    /// inputs, so 1.1 and 1.2 builds must never share a configuration cache.
+    pub fn build_with_custom_config_and_arkts_version(
+        config: &ArkdownConfig,
+        project: &ProjectSnapshot,
+        profiles: &ProfileStore,
+        sdk: &SdkSnapshot,
+        runtime_overrides: Option<&RuntimeContextOverrides>,
+        custom_config: &ArkdownCustomConfig,
+        arkts_language_version: ArktsLanguageVersion,
+    ) -> Result<Self, FingerprintError> {
         let project_inputs = ProjectFingerprintInventory::new(project).build()?;
         Ok(Self {
             config: Self::compute_config_hash(
@@ -161,6 +185,7 @@ impl InputFingerprintSet {
                 project,
                 runtime_overrides,
                 custom_config.source_path(),
+                arkts_language_version,
             )?,
             package_graph: Self::compute_package_hash(project, runtime_overrides)?,
             profiles: profiles.fingerprint(),
@@ -182,8 +207,13 @@ impl InputFingerprintSet {
         project: &ProjectSnapshot,
         runtime_overrides: Option<&RuntimeContextOverrides>,
         custom_config_path: Option<&Path>,
+        arkts_language_version: ArktsLanguageVersion,
     ) -> Result<Fingerprint, FingerprintError> {
         let mut builder = FingerprintBuilder::new("config", &project.root);
+        builder.add_value(
+            "arkts_language_version",
+            arkts_language_version.as_str().as_bytes(),
+        );
         let encoded = serde_json::to_vec(config).map_err(|source| FingerprintError::Serialize {
             name: "ArkdownConfig",
             source,
@@ -359,6 +389,9 @@ impl<'a> ProjectFingerprintInventory<'a> {
         let mut paths = ModuleInputPaths::default();
         self.paths
             .add_source_roots(&mut paths.sources, &module.source_roots)?;
+        let visual_root = module.src_main.join("supervisual");
+        self.paths
+            .add_source_roots(&mut paths.sources, std::slice::from_ref(&visual_root))?;
         self.paths
             .add_resource_roots(&mut paths.resources, &module.resource_roots)?;
         if let Some(package_path) = &module.package_path {

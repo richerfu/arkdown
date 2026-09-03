@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use arkdown_config::{build_profile::BuildOptionProfileInventory, ArkdownCustomConfig};
+use arkdown_core::ArktsLanguageVersion;
 
 use crate::artifacts::layout::ArtifactLayout;
 use crate::dependency_graph::snapshot::DependencyGraphSnapshot;
@@ -39,6 +40,8 @@ pub struct BuildSession {
     pub custom_config: Arc<ArkdownCustomConfig>,
     /// Typed source, resource, dependency, and configuration watch inventory.
     pub watch_inputs: Arc<Vec<WatchPlanInput>>,
+    /// Explicit ArkTS language selected for this immutable build session.
+    pub arkts_language_version: ArktsLanguageVersion,
 }
 
 impl BuildSession {

@@ -319,7 +319,6 @@ impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
                         stmts,
                         &mut animation_segment,
                         ast,
-                        allocator,
                         &attr.arguments,
                         self.context,
                         has_preceding_attribute,
@@ -660,7 +659,43 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
             .enumerate()
             .map(|(index, argument)| self.argument(argument, index, allocator))
             .collect();
-        self.double_dollar_arguments(processed, allocator)
+        let processed = self.double_exclamation_arguments(processed, allocator);
+        self.double_dollar_arguments(processed.into_iter().collect(), allocator)
+    }
+
+    pub(super) fn double_exclamation_arguments<'b>(
+        &self,
+        arguments: Vec<Argument<'b>>,
+        allocator: &'b Allocator,
+    ) -> OxcVec<'b, Argument<'b>> {
+        let should_rewrite_style = self
+            .context
+            .is_style_double_exclamation_attr(self.attr_name)
+            && !arguments.is_empty();
+        let should_rewrite_component = self
+            .context
+            .is_component_double_exclamation_property(self.component_name, self.attr_name)
+            && arguments.len() == 1;
+        if !should_rewrite_style && !should_rewrite_component {
+            let ast = AstBuilder::new(allocator);
+            return OxcVec::from_iter_in(arguments, &ast);
+        }
+        let Some(first_expression) = arguments.first().and_then(Argument::as_expression) else {
+            let ast = AstBuilder::new(allocator);
+            return OxcVec::from_iter_in(arguments, &ast);
+        };
+        let emitter = DoubleExclamationBindingEmitter::new(self.context);
+        let Some(value) = emitter.updated_expression(first_expression, allocator) else {
+            let ast = AstBuilder::new(allocator);
+            return OxcVec::from_iter_in(arguments, &ast);
+        };
+        let ast = AstBuilder::new(allocator);
+        let mut rewritten = OxcVec::with_capacity_in(arguments.len(), &ast);
+        rewritten.push(Argument::from(
+            emitter.value_change_object_from_value(value, allocator),
+        ));
+        rewritten.extend(arguments.into_iter().skip(1));
+        rewritten
     }
 
     pub(super) fn argument<'b>(
@@ -1403,61 +1438,75 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
         let Expression::ObjectExpression(object) = expression else {
             return self.plain_expression(expression, allocator);
         };
-        let has_double_dollar = object.properties.iter().any(|property| {
+        let has_double_binding = object.properties.iter().any(|property| {
             let ObjectPropertyKind::ObjectProperty(property) = property else {
                 return false;
             };
             property.key.static_name().is_some_and(|name| {
-                self.context
+                (self
+                    .context
                     .is_component_double_dollar_property_name(self.component_name, name.as_ref())
                     && DoubleDollarBindingEmitter::new(self.context)
                         .updated_expression(&property.value, allocator)
-                        .is_some()
+                        .is_some())
+                    || (self.context.is_component_double_exclamation_property(
+                        self.component_name,
+                        name.as_ref(),
+                    ) && DoubleExclamationBindingEmitter::new(self.context)
+                        .updated_expression(&property.value, allocator)
+                        .is_some())
             })
         });
-        if !has_double_dollar && !needs_builder {
+        if !has_double_binding && !needs_builder {
             return self.plain_expression(expression, allocator);
         }
         let ast = &AstBuilder::new(allocator);
-        let properties = OxcVec::from_iter_in(
-            object.properties.iter().map(|property| {
-                let ObjectPropertyKind::ObjectProperty(property) = property else {
-                    return attribute_emitter.plain_object_property(property, allocator);
-                };
-                let Some(property_name) = property.key.static_name() else {
-                    return attribute_emitter.plain_regular_object_property(property, allocator);
-                };
-                if self.context.is_component_double_dollar_property_name(
-                    self.component_name,
-                    property_name.as_ref(),
-                ) {
-                    if let Some(value) = DoubleDollarBindingEmitter::new(self.context)
-                        .value_change_object(&property.value, allocator)
-                    {
-                        return ObjectPropertyKind::new_object_property(
-                            property.span,
-                            property.kind,
-                            property.key.clone_in(allocator),
-                            value,
-                            false,
-                            false,
-                            property.computed,
-                            ast,
-                        );
-                    }
-                }
-                if needs_builder
-                    && self
-                        .context
-                        .runtime_names()
-                        .is_builder_object_property_name(property_name.as_ref())
+        let mut properties = OxcVec::with_capacity_in(object.properties.len() * 2, ast);
+        for property in &object.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                properties.push(attribute_emitter.plain_object_property(property, allocator));
+                continue;
+            };
+            let Some(property_name) = property.key.static_name() else {
+                properties
+                    .push(attribute_emitter.plain_regular_object_property(property, allocator));
+                continue;
+            };
+            if self.context.is_component_double_exclamation_property(
+                self.component_name,
+                property_name.as_ref(),
+            ) {
+                if let Some(value) = DoubleExclamationBindingEmitter::new(self.context)
+                    .updated_expression(&property.value, allocator)
                 {
-                    let value = attribute_emitter
-                        .object_property_builder_value(&property.value, allocator)
-                        .unwrap_or_else(|| {
-                            attribute_emitter.plain_expression(&property.value, allocator)
-                        });
-                    return ObjectPropertyKind::new_object_property(
+                    properties.push(ObjectPropertyKind::new_object_property(
+                        property.span,
+                        property.kind,
+                        property.key.clone_in(allocator),
+                        value.clone_in(allocator),
+                        false,
+                        false,
+                        property.computed,
+                        ast,
+                    ));
+                    properties.push(
+                        DoubleExclamationBindingEmitter::new(self.context).change_property(
+                            property_name.as_ref(),
+                            value,
+                            allocator,
+                        ),
+                    );
+                    continue;
+                }
+            }
+            if self.context.is_component_double_dollar_property_name(
+                self.component_name,
+                property_name.as_ref(),
+            ) {
+                if let Some(value) = DoubleDollarBindingEmitter::new(self.context)
+                    .value_change_object(&property.value, allocator)
+                {
+                    properties.push(ObjectPropertyKind::new_object_property(
                         property.span,
                         property.kind,
                         property.key.clone_in(allocator),
@@ -1466,12 +1515,35 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
                         false,
                         property.computed,
                         ast,
-                    );
+                    ));
+                    continue;
                 }
-                attribute_emitter.plain_regular_object_property(property, allocator)
-            }),
-            ast,
-        );
+            }
+            if needs_builder
+                && self
+                    .context
+                    .runtime_names()
+                    .is_builder_object_property_name(property_name.as_ref())
+            {
+                let value = attribute_emitter
+                    .object_property_builder_value(&property.value, allocator)
+                    .unwrap_or_else(|| {
+                        attribute_emitter.plain_expression(&property.value, allocator)
+                    });
+                properties.push(ObjectPropertyKind::new_object_property(
+                    property.span,
+                    property.kind,
+                    property.key.clone_in(allocator),
+                    value,
+                    false,
+                    false,
+                    property.computed,
+                    ast,
+                ));
+                continue;
+            }
+            properties.push(attribute_emitter.plain_regular_object_property(property, allocator));
+        }
         Expression::new_object_expression(object.span, properties, ast)
     }
 
@@ -1501,6 +1573,96 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
             emitter = emitter.without_top_level_raw_object_rewrite();
         }
         emitter.expression_with_allocator(expression, allocator)
+    }
+}
+
+pub(super) struct DoubleExclamationBindingEmitter<'ctx> {
+    context: &'ctx BuildContext,
+}
+
+impl<'ctx> DoubleExclamationBindingEmitter<'ctx> {
+    fn new(context: &'ctx BuildContext) -> Self {
+        Self { context }
+    }
+
+    fn updated_expression<'b>(
+        &self,
+        expression: &Expression<'_>,
+        allocator: &'b Allocator,
+    ) -> Option<Expression<'b>> {
+        let Expression::TSNonNullExpression(outer) = expression else {
+            return None;
+        };
+        let Expression::TSNonNullExpression(inner) = &outer.expression else {
+            return None;
+        };
+        if matches!(inner.expression, Expression::TSNonNullExpression(_)) {
+            return None;
+        }
+        Some(inner.expression.clone_in(allocator))
+    }
+
+    fn value_change_object_from_value<'b>(
+        &self,
+        value: Expression<'b>,
+        allocator: &'b Allocator,
+    ) -> Expression<'b> {
+        let ast = AstBuilder::new(allocator);
+        let value_property = ObjectPropertyKind::new_object_property(
+            SPAN,
+            PropertyKind::Init,
+            PropertyKey::new_static_identifier(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(&self.context.runtime_names().double_dollar_value),
+                &ast,
+            ),
+            value.clone_in(allocator),
+            false,
+            false,
+            false,
+            &ast,
+        );
+        let change_property = ObjectPropertyKind::new_object_property(
+            SPAN,
+            PropertyKind::Init,
+            PropertyKey::new_static_identifier(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(&self.context.runtime_names().double_exclamation_change_value),
+                &ast,
+            ),
+            DoubleDollarBindingEmitter::new(self.context).change_event_arrow(value, allocator),
+            false,
+            false,
+            false,
+            &ast,
+        );
+        Expression::new_object_expression(
+            SPAN,
+            OxcVec::from_iter_in([value_property, change_property], &ast),
+            &ast,
+        )
+    }
+
+    fn change_property<'b>(
+        &self,
+        property_name: &str,
+        value: Expression<'b>,
+        allocator: &'b Allocator,
+    ) -> ObjectPropertyKind<'b> {
+        let ast = AstBuilder::new(allocator);
+        let change_name = format!("${property_name}");
+        ObjectPropertyKind::new_object_property(
+            SPAN,
+            PropertyKind::Init,
+            PropertyKey::new_static_identifier(SPAN, ast.allocator().alloc_str(&change_name), &ast),
+            DoubleDollarBindingEmitter::new(self.context).change_event_arrow(value, allocator),
+            false,
+            false,
+            false,
+            &ast,
+        )
     }
 }
 
@@ -1725,11 +1887,11 @@ impl<'ctx> DoubleDollarBindingEmitter<'ctx> {
     ) -> AssignmentTarget<'b> {
         match expression {
             Expression::Identifier(identifier) => {
-                AssignmentTarget::from(AssignmentTarget::new_assignment_target_identifier(
+                AssignmentTarget::new_assignment_target_identifier(
                     identifier.span,
                     identifier.name,
                     ast,
-                ))
+                )
             }
             Expression::StaticMemberExpression(member) => {
                 AssignmentTarget::from(MemberExpression::StaticMemberExpression(member))
@@ -1749,7 +1911,6 @@ impl ComponentCallStatementEmitter {
 
     pub(super) fn create<'b>(
         ast: &AstBuilder<'b>,
-        allocator: &'b Allocator,
         component_name: &str,
         create_method: &str,
         arguments: &[Argument<'_>],
@@ -1758,7 +1919,7 @@ impl ComponentCallStatementEmitter {
         component_span: Span,
     ) -> Statement<'b> {
         let arguments = CreateArgumentEmitter::new(component_name, builder_methods, context, false)
-            .arguments(arguments, allocator);
+            .arguments(arguments, ast.allocator());
         Self::raw_call_with_source(
             ast,
             component_name,
@@ -1851,15 +2012,19 @@ impl ComponentCallStatementEmitter {
         statements: &mut OxcVec<'b, Statement<'b>>,
         segment: &mut OxcVec<'b, Statement<'b>>,
         ast: &AstBuilder<'b>,
-        allocator: &'b Allocator,
         arguments: &[&Argument<'_>],
         context: &BuildContext,
         emit_configuration: bool,
         emit_clear: bool,
     ) {
         if emit_configuration {
-            statements.push(Self::animation_refs(ast, allocator, arguments, context));
-            Self::flush_animation_segment(statements, segment, allocator);
+            statements.push(Self::animation_refs(
+                ast,
+                ast.allocator(),
+                arguments,
+                context,
+            ));
+            Self::flush_animation_segment(statements, segment, ast.allocator());
         } else {
             debug_assert!(segment.is_empty());
         }

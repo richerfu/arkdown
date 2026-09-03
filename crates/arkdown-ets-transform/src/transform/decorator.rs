@@ -12,6 +12,7 @@ impl ArkuiDecoratorName {
     pub(crate) const CONSUME: &'static str = "Consume";
     pub(crate) const CONSUMER: &'static str = "Consumer";
     pub(crate) const CUSTOM_DIALOG: &'static str = "CustomDialog";
+    pub(crate) const CUSTOM_ENV: &'static str = "CustomEnv";
     pub(crate) const ENTRY: &'static str = "Entry";
     pub(crate) const EXTEND: &'static str = "Extend";
     pub(crate) const LOCAL_BUILDER: &'static str = "LocalBuilder";
@@ -179,6 +180,7 @@ const STATE_DECORATOR_PRIORITY: &[&str] = &[
     ArkuiDecoratorName::CONSUMER,
     ArkuiDecoratorName::EVENT,
     ArkuiDecoratorName::ENV,
+    ArkuiDecoratorName::CUSTOM_ENV,
     ArkuiDecoratorName::TRACE,
 ];
 
@@ -210,10 +212,8 @@ impl<'a> ArkuiDecorator<'a> {
     pub(super) fn string_arg(&self) -> Option<String> {
         if let Expression::CallExpression(call) = &self.decorator.expression {
             if let Some(arg) = call.arguments.first() {
-                if let Some(expr) = arg.as_expression() {
-                    if let Expression::StringLiteral(lit) = expr {
-                        return Some(lit.value.to_string());
-                    }
+                if let Some(Expression::StringLiteral(lit)) = arg.as_expression() {
+                    return Some(lit.value.to_string());
                 }
             }
         }
@@ -244,19 +244,19 @@ impl<'a> ArkuiDecorator<'a> {
 pub enum ConstructorInitKind {
     /// `new BackingClass(fieldInit, this, "name")` — `@State`, `@Provide`.
     /// The initial value comes from the field's own initializer expression.
-    NewWithLocalInit,
+    Local,
     /// `new BackingClass(params.name, this, "name")` — `@Prop`, `@Link`, `@ObjectLink`.
     /// The initial value is supplied by the parent via the params object.
-    NewWithParamInit,
+    Param,
     /// `this.initializeConsume("alias", "name")` — `@Consume`.
     /// The property is resolved from a parent `@Provide` by key at runtime.
-    ConsumeInit,
+    Consume,
     /// `this.name = init ?? undefined` — `@BuilderParam`.
     /// Assigned directly onto `this` (no `__` prefix) from field init or undefined.
-    BuilderParamInit,
+    BuilderParam,
     /// Storage-backed properties (`@StorageProp`, `@StorageLink`,
     /// `@LocalStorageProp`, `@LocalStorageLink`) use runtime storage APIs.
-    StorageInit,
+    Storage,
 }
 
 pub(crate) struct ArkuiStateDecorator<'a> {
@@ -343,24 +343,24 @@ impl<'a> ArkuiStateDecorator<'a> {
             | ArkuiDecoratorName::LOCAL
             | ArkuiDecoratorName::PROVIDER
             | ArkuiDecoratorName::ENV
-            | ArkuiDecoratorName::TRACE => ConstructorInitKind::NewWithLocalInit,
+            | ArkuiDecoratorName::TRACE => ConstructorInitKind::Local,
             ArkuiDecoratorName::PROP
             | ArkuiDecoratorName::PARAM
             | ArkuiDecoratorName::ONCE
             | ArkuiDecoratorName::LINK
             | ArkuiDecoratorName::OBJECT_LINK
-            | ArkuiDecoratorName::PROP_REF => ConstructorInitKind::NewWithParamInit,
+            | ArkuiDecoratorName::PROP_REF => ConstructorInitKind::Param,
             ArkuiDecoratorName::CONSUME | ArkuiDecoratorName::CONSUMER => {
-                ConstructorInitKind::ConsumeInit
+                ConstructorInitKind::Consume
             }
-            ArkuiDecoratorName::BUILDER_PARAM => ConstructorInitKind::BuilderParamInit,
+            ArkuiDecoratorName::BUILDER_PARAM => ConstructorInitKind::BuilderParam,
             ArkuiDecoratorName::STORAGE_LINK
             | ArkuiDecoratorName::STORAGE_PROP
             | ArkuiDecoratorName::STORAGE_PROP_REF
             | ArkuiDecoratorName::LOCAL_STORAGE_LINK
             | ArkuiDecoratorName::LOCAL_STORAGE_PROP
-            | ArkuiDecoratorName::LOCAL_STORAGE_PROP_REF => ConstructorInitKind::StorageInit,
-            _ => ConstructorInitKind::NewWithLocalInit,
+            | ArkuiDecoratorName::LOCAL_STORAGE_PROP_REF => ConstructorInitKind::Storage,
+            _ => ConstructorInitKind::Local,
         }
     }
 
@@ -478,51 +478,51 @@ mod tests {
     fn test_constructor_init_kind() {
         assert_eq!(
             ArkuiStateDecorator::new("State").constructor_init_kind(),
-            ConstructorInitKind::NewWithLocalInit
+            ConstructorInitKind::Local
         );
         assert_eq!(
             ArkuiStateDecorator::new("Provide").constructor_init_kind(),
-            ConstructorInitKind::NewWithLocalInit
+            ConstructorInitKind::Local
         );
         assert_eq!(
             ArkuiStateDecorator::new("Prop").constructor_init_kind(),
-            ConstructorInitKind::NewWithParamInit
+            ConstructorInitKind::Param
         );
         assert_eq!(
             ArkuiStateDecorator::new("Link").constructor_init_kind(),
-            ConstructorInitKind::NewWithParamInit
+            ConstructorInitKind::Param
         );
         assert_eq!(
             ArkuiStateDecorator::new("ObjectLink").constructor_init_kind(),
-            ConstructorInitKind::NewWithParamInit
+            ConstructorInitKind::Param
         );
         assert_eq!(
             ArkuiStateDecorator::new("Consume").constructor_init_kind(),
-            ConstructorInitKind::ConsumeInit
+            ConstructorInitKind::Consume
         );
         assert_eq!(
             ArkuiStateDecorator::new("BuilderParam").constructor_init_kind(),
-            ConstructorInitKind::BuilderParamInit
+            ConstructorInitKind::BuilderParam
         );
         assert_eq!(
             ArkuiStateDecorator::new("StorageProp").constructor_init_kind(),
-            ConstructorInitKind::StorageInit
+            ConstructorInitKind::Storage
         );
         assert_eq!(
             ArkuiStateDecorator::new("LocalStorageLink").constructor_init_kind(),
-            ConstructorInitKind::StorageInit
+            ConstructorInitKind::Storage
         );
         assert_eq!(
             ArkuiStateDecorator::new("Local").constructor_init_kind(),
-            ConstructorInitKind::NewWithLocalInit
+            ConstructorInitKind::Local
         );
         assert_eq!(
             ArkuiStateDecorator::new("Param").constructor_init_kind(),
-            ConstructorInitKind::NewWithParamInit
+            ConstructorInitKind::Param
         );
         assert_eq!(
             ArkuiStateDecorator::new("Consumer").constructor_init_kind(),
-            ConstructorInitKind::ConsumeInit
+            ConstructorInitKind::Consume
         );
     }
 

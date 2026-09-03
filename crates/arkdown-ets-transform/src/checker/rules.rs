@@ -12,31 +12,43 @@ use rustc_hash::FxHashSet;
 pub struct EtsChecker<'program, 'alloc, 'file> {
     program: &'program Program<'alloc>,
     file: &'file str,
+    page_context: Option<PageValidationContext>,
 }
 
 impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
     pub fn new(program: &'program Program<'alloc>, file: &'file str) -> Self {
-        Self { program, file }
+        Self {
+            program,
+            file,
+            page_context: None,
+        }
+    }
+
+    pub fn with_page_context(
+        mut self,
+        entry_source: bool,
+        preview_mode: bool,
+        check_entry: bool,
+    ) -> Self {
+        self.page_context = Some(PageValidationContext {
+            entry_source,
+            preview_mode,
+            check_entry,
+        });
+        self
     }
 
     pub fn check(&self) -> Vec<EtsTransformError> {
         let file = self.file;
         let mut errors: Vec<EtsTransformError> = Vec::new();
         let mut seen_component_names: FxHashSet<String> = Default::default();
-        let mut entry_count = 0usize;
+        let mut page_decorators = PageDecoratorCounts::default();
 
         for stmt in &self.program.body {
             match stmt {
                 Statement::StructStatement(statement) => {
                     check_struct_component(statement, file, &mut seen_component_names, &mut errors);
-                    // Count @Entry decorators — at most one per file.
-                    if statement
-                        .decorators
-                        .iter()
-                        .any(|d| ArkuiDecorator::new(d).name() == ArkuiDecoratorName::ENTRY)
-                    {
-                        entry_count += 1;
-                    }
+                    page_decorators.collect(statement);
                     // Rule: @Sendable cannot be applied to structs — only to class declarations.
                     // hvigor's etsChecker rejects @Sendable on @Component structs.
                     if statement
@@ -63,6 +75,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                             &mut seen_component_names,
                             &mut errors,
                         );
+                        page_decorators.collect(statement);
                     }
                 }
                 Statement::ExportDefaultDeclaration(export) => {
@@ -75,6 +88,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
                             &mut seen_component_names,
                             &mut errors,
                         );
+                        page_decorators.collect(statement);
                     }
                 }
                 _ => {}
@@ -511,19 +525,84 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             }
         }
 
-        // Rule: at most one @Entry struct per file.
-        if entry_count > 1 {
-            errors.push(EtsTransformError::Diagnostic {
-                file: file.to_string(),
-                message: format!(
-                    "At most one '@Entry' decorated struct is allowed per file, but {} were found",
-                    entry_count
-                ),
-                severity: DiagnosticSeverity::Error,
-            });
+        if let Some(context) = self.page_context {
+            page_decorators.validate(context, file, &mut errors);
         }
 
         errors
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PageValidationContext {
+    entry_source: bool,
+    preview_mode: bool,
+    check_entry: bool,
+}
+
+#[derive(Default)]
+struct PageDecoratorCounts {
+    entry: usize,
+    preview: usize,
+}
+
+impl PageDecoratorCounts {
+    fn collect(&mut self, statement: &StructStatement<'_>) {
+        for decorator in &statement.decorators {
+            match ArkuiDecorator::new(decorator).name() {
+                ArkuiDecoratorName::ENTRY => self.entry += 1,
+                ArkuiDecoratorName::PREVIEW => self.preview += 1,
+                _ => {}
+            }
+        }
+    }
+
+    fn validate(
+        &self,
+        context: PageValidationContext,
+        file: &str,
+        errors: &mut Vec<EtsTransformError>,
+    ) {
+        if !context.entry_source {
+            return;
+        }
+        if self.preview > 10 {
+            self.push_error(
+                file,
+                "A page can contain at most 10 '@Preview' decorators.",
+                errors,
+            );
+        }
+        if self.entry > 1 {
+            self.push_error(
+                file,
+                "A page can't contain more than one '@Entry' decorator.",
+                errors,
+            );
+        }
+        if context.preview_mode && !context.check_entry {
+            if self.preview == 0 && self.entry != 1 {
+                self.push_error(
+                    file,
+                    "A page which is being previewed must have one and only one '@Entry' decorator, or at least one '@Preview' decorator.",
+                    errors,
+                );
+            }
+        } else if self.entry != 1 {
+            self.push_error(
+                file,
+                "A page configured in 'pages.json or build-profile.json5' must have one and only one '@Entry' decorator.",
+                errors,
+            );
+        }
+    }
+
+    fn push_error(&self, file: &str, message: &str, errors: &mut Vec<EtsTransformError>) {
+        errors.push(EtsTransformError::Diagnostic {
+            file: file.to_string(),
+            message: message.to_string(),
+            severity: DiagnosticSeverity::Error,
+        });
     }
 }
 
@@ -995,6 +1074,57 @@ mod tests {
             return Vec::new();
         }
         EtsChecker::new(&parsed.program, file).check()
+    }
+
+    fn check_page(
+        source: &str,
+        entry_source: bool,
+        preview_mode: bool,
+        check_entry: bool,
+    ) -> Vec<EtsTransformError> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        EtsChecker::new(&parsed.program, "Page.ets")
+            .with_page_context(entry_source, preview_mode, check_entry)
+            .check()
+    }
+
+    #[test]
+    fn entry_and_preview_counts_apply_only_to_entry_sources() {
+        let two_entries = r#"@Entry @Component struct First { build() {} }
+@Entry @Component struct Second { build() {} }"#;
+        assert!(!check_page(two_entries, false, false, false)
+            .iter()
+            .any(|error| error.to_string().contains("more than one '@Entry'")));
+        assert!(check_page(two_entries, true, false, false)
+            .iter()
+            .any(|error| error.to_string().contains("more than one '@Entry'")));
+
+        let no_preview_or_entry = "@Component struct Page { build() {} }";
+        assert!(check_page(no_preview_or_entry, true, true, false)
+            .iter()
+            .any(|error| error.to_string().contains("being previewed")));
+
+        let previews = (0..11)
+            .map(|index| format!("@Preview @Component struct Preview{index} {{ build() {{}} }}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(check_page(&previews, true, true, false)
+            .iter()
+            .any(|error| error.to_string().contains("at most 10 '@Preview'")));
+    }
+
+    #[test]
+    fn check_entry_requires_entry_during_preview() {
+        let preview_only = "@Preview @Component struct Page { build() {} }";
+
+        assert!(check_page(preview_only, true, true, false).is_empty());
+        assert!(check_page(preview_only, true, true, true)
+            .iter()
+            .any(|error| error
+                .to_string()
+                .contains("must have one and only one '@Entry'")));
     }
 
     fn has_error_containing(source: &str, fragment: &str) -> bool {

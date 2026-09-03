@@ -9,6 +9,11 @@ pub(crate) struct CompileEnvKeyBuilder<'a> {
   pub(crate) obfuscation_enabled: bool,
   pub(crate) target_name: &'a str,
   pub(crate) use_source_hash: bool,
+  pub(crate) arkts_language_version: arkdown_core::ArktsLanguageVersion,
+  pub(crate) preview_mode: bool,
+  pub(crate) check_entry: bool,
+  pub(crate) ui_transform_optimization: bool,
+  pub(crate) use_get_current_bundle_name: bool,
 }
 
 impl<'a> CompileEnvKeyBuilder<'a> {
@@ -19,6 +24,7 @@ impl<'a> CompileEnvKeyBuilder<'a> {
     obfuscation_enabled: bool,
     target_name: &'a str,
     use_source_hash: bool,
+    arkts_language_version: arkdown_core::ArktsLanguageVersion,
   ) -> Self {
     Self {
       config,
@@ -27,7 +33,32 @@ impl<'a> CompileEnvKeyBuilder<'a> {
       obfuscation_enabled,
       target_name,
       use_source_hash,
+      arkts_language_version,
+      preview_mode: false,
+      check_entry: false,
+      ui_transform_optimization: false,
+      use_get_current_bundle_name: false,
     }
+  }
+
+  pub(crate) fn with_preview_mode(mut self, preview_mode: bool) -> Self {
+    self.preview_mode = preview_mode;
+    self
+  }
+
+  pub(crate) fn with_check_entry(mut self, check_entry: bool) -> Self {
+    self.check_entry = check_entry;
+    self
+  }
+
+  pub(crate) fn with_ui_transform_optimization(mut self, enabled: bool) -> Self {
+    self.ui_transform_optimization = enabled;
+    self
+  }
+
+  pub(crate) fn with_use_get_current_bundle_name(mut self, enabled: bool) -> Self {
+    self.use_get_current_bundle_name = enabled;
+    self
   }
 
   pub(crate) fn build(&self) -> Result<String> {
@@ -39,7 +70,7 @@ impl<'a> CompileEnvKeyBuilder<'a> {
     let compiler_cache_path = arkdown_cache::compiler_cache_path(&self.loader_json.cache_path);
 
     Ok(format!(
-      "{}#target={}#useSourceHash={}",
+      "{}#target={}#useSourceHash={}#arkts={}#preview={}#checkEntry={}#uiTransformOptimization={}#useGetCurrentBundleName={}",
       arkdown_cache::CompileEnv::from_plan(
         self.config.sdk_config.compile_sdk_version.clone(),
         self.config.product.compatible_sdk_version.clone(),
@@ -52,6 +83,11 @@ impl<'a> CompileEnvKeyBuilder<'a> {
       .to_key_string(),
       self.target_name,
       self.use_source_hash,
+      self.arkts_language_version,
+      self.preview_mode,
+      self.check_entry,
+      self.ui_transform_optimization,
+      self.use_get_current_bundle_name,
     ))
   }
 }
@@ -573,7 +609,7 @@ impl<'a> CompileContextInfoWriter<'a> {
         "compileEntries": compile_entries,
         "updateVersionInfo": update_version_info,
     });
-    if matches!(self.bundle_type, "shared" | "appPlugin") {
+    if matches!(self.bundle_type, "shared" | "appPlugin" | "appService") {
       value["needModifyRecord"] = serde_json::Value::Bool(true);
       value["bundleName"] = serde_json::Value::String(self.bundle_name.to_string());
     }

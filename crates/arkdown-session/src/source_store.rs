@@ -32,7 +32,10 @@ use arkdown_core::SourceFileId;
 /// watcher can invalidate on is also captured by the source store and the
 /// project fingerprint inventory.
 pub(crate) fn is_source_inventory_ext(ext: &str) -> bool {
-    matches!(ext, "ets" | "ts" | "js" | "mjs" | "cjs" | "json" | "json5")
+    matches!(
+        ext,
+        "ets" | "ts" | "js" | "mjs" | "cjs" | "json" | "json5" | "visual"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +164,24 @@ impl VisualSourceInventory {
             .map(|v| vec![v])
             .unwrap_or_default()
     }
+
+    fn insert(&mut self, visual_path: &std::path::Path) {
+        let mut source_path = PathBuf::new();
+        let mut replaced = false;
+        for component in visual_path.components() {
+            if !replaced && component.as_os_str() == "supervisual" {
+                source_path.push("ets");
+                replaced = true;
+            } else {
+                source_path.push(component.as_os_str());
+            }
+        }
+        if replaced {
+            source_path.set_extension("ets");
+            self.ets_to_visual
+                .insert(source_path, visual_path.to_path_buf());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,18 +247,36 @@ impl SourceStore {
     /// `GenerateLoaderJson` and `arkts-pack.js::init_config`.
     pub fn discover(source_roots: &[PathBuf]) -> Result<Self, std::io::Error> {
         let mut files = FxHashMap::default();
+        let mut visuals = VisualSourceInventory::default();
         let mut next_id = 0u32;
 
+        let mut inventory_roots = source_roots
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
         for root in source_roots {
+            if root.file_name().is_some_and(|name| name == "ets") {
+                if let Some(src_main) = root.parent() {
+                    let visual_root = src_main.join("supervisual");
+                    if visual_root.is_dir() {
+                        inventory_roots.insert(visual_root);
+                    }
+                }
+            }
+        }
+
+        for root in inventory_roots {
             if !root.exists() {
                 continue;
             }
-            for entry in walkdir::WalkDir::new(root.as_path())
+            let mut entries = walkdir::WalkDir::new(root.as_path())
                 .follow_links(false)
                 .into_iter()
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().is_file())
-            {
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.path().cmp(right.path()));
+            for entry in entries {
                 let path = entry.path().to_path_buf();
                 if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
                     continue;
@@ -245,6 +284,9 @@ impl SourceStore {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if !is_source_inventory_ext(ext) {
                     continue;
+                }
+                if ext == "visual" {
+                    visuals.insert(&path);
                 }
                 if let Ok(meta) = std::fs::metadata(&path) {
                     // Compute fingerprint from file size and mtime (fast path).
@@ -284,7 +326,7 @@ impl SourceStore {
         Ok(Self {
             files,
             code_resources: CodeResourceInventory::default(),
-            visuals: VisualSourceInventory::default(),
+            visuals,
             workers: WorkerSourceInventory::default(),
         })
     }
@@ -370,5 +412,25 @@ mod tests {
         assert!(store.source_by_path(&real_source).is_some());
         assert!(store.source_by_path(&apple_double).is_none());
         assert!(store.source_by_path(&ds_store).is_none());
+    }
+
+    #[test]
+    fn discover_indexes_sibling_supervisual_inputs_for_ets_sources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src_main = temp.path().join("entry/src/main");
+        let source_dir = src_main.join("ets/pages");
+        let visual_dir = src_main.join("supervisual/pages");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+        std::fs::create_dir_all(&visual_dir).expect("create visual dir");
+        let source = source_dir.join("Index.ets");
+        let visual = visual_dir.join("Index.visual");
+        std::fs::write(&source, "@Component struct Index { build() {} }").expect("write source");
+        std::fs::write(&visual, "{}").expect("write visual");
+
+        let store = SourceStore::discover(&[src_main.join("ets")]).expect("discover");
+
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.visual_files_for_source(&source), vec![&visual]);
+        assert!(store.fingerprint(&visual).is_some());
     }
 }

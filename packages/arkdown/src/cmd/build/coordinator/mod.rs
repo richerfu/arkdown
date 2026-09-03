@@ -83,6 +83,7 @@ use super::quickfix::{
   QuickFixTaskPlan, QuickFixVersionStore,
 };
 use super::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
+use super::static_arkts::{StaticArktsCompileInput, StaticArktsCompiler};
 use super::syscap::SyscapTransform;
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
@@ -112,7 +113,8 @@ use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 
 use arkdown::plugins::ets_transform::{
   CheckerMode, ComponentMetadata, ModuleAnalyzerKind, NavigationRouteMap, ResourceReference,
-  SystemResourceReferenceLoader, TransformResolvedStaticModule, TransformSourceSnapshot,
+  ResourceTransformContext, SystemResourceReferenceLoader, TransformResolvedStaticModule,
+  TransformSourceSnapshot,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
@@ -1838,6 +1840,7 @@ mod compile_context_info_tests {
       compile_entry: vec![],
       form_entry_sources: vec![],
       runtime_entry_sources: vec![],
+      page_entry_sources: vec![],
       module_root_path: module_root.to_string_lossy().into_owned(),
       cache_path: String::new(),
       ace_module_build: String::new(),

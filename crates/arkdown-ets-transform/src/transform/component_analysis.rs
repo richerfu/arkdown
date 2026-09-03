@@ -7,8 +7,8 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, CallExpression, Declaration,
     Decorator, ExportDefaultDeclarationKind, Expression, Function, FunctionBody,
-    ImportDeclarationSpecifier, ModuleExportName, Program, Statement, StructElement,
-    StructStatement, TSLiteral, TSType, TSTypeName,
+    ImportDeclarationSpecifier, ModuleExportName, Program, PropertyDefinition, Statement,
+    StructElement, StructStatement, TSLiteral, TSType, TSTypeName,
 };
 use rayon::prelude::*;
 
@@ -272,9 +272,9 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
             ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
                 let imported = ComponentModuleExportName::value(&specifier.imported);
                 let local = specifier.local.name.to_string();
-                if imported == ComponentModuleExportName::DEFAULT && target_components.has_default {
-                    self.names.insert(local);
-                } else if target_components.named.contains_key(&imported) {
+                if (imported == ComponentModuleExportName::DEFAULT && target_components.has_default)
+                    || target_components.named.contains_key(&imported)
+                {
                     self.names.insert(local);
                 }
             }
@@ -831,7 +831,10 @@ impl<'a> StructBuilderMethodNames<'a> {
                 continue;
             };
             if !method.decorators.iter().any(|decorator| {
-                ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::BUILDER
+                matches!(
+                    ArkuiDecorator::new(decorator).name(),
+                    ArkuiDecoratorName::BUILDER | ArkuiDecoratorName::LOCAL_BUILDER
+                )
             }) {
                 continue;
             }
@@ -845,6 +848,132 @@ impl<'a> StructBuilderMethodNames<'a> {
 
 pub(super) struct StructBuilderParamNames<'a> {
     statement: &'a StructStatement<'a>,
+}
+
+/// Resolves the component properties whose `.builder()` call has
+/// `MutableBuilder` semantics. The upstream implementation asks the TypeScript
+/// checker for the receiver type in
+/// `process_component_build.ts::isMutableBuilder`; component property type
+/// annotations and direct `mutableBuilder(...)` initializers are the
+/// authoritative syntax available to the OXC lowering stage.
+pub(super) struct StructMutableBuilderProperties<'a> {
+    statement: &'a StructStatement<'a>,
+}
+
+pub(super) struct PreviewComponentNameCollector<'a> {
+    program: &'a Program<'a>,
+}
+
+pub(super) struct LocalBuilderFileInventory<'a> {
+    program: &'a Program<'a>,
+}
+
+impl<'a> LocalBuilderFileInventory<'a> {
+    pub(super) fn new(program: &'a Program<'a>) -> Self {
+        Self { program }
+    }
+
+    pub(super) fn has_local_builder(&self) -> bool {
+        self.program
+            .body
+            .iter()
+            .filter_map(PreviewComponentNameCollector::struct_statement)
+            .flat_map(|statement| statement.body.body.iter())
+            .any(|element| {
+                matches!(
+                    element,
+                    StructElement::MethodDefinition(method)
+                        if method.decorators.iter().any(|decorator| {
+                            ArkuiDecorator::new(decorator).name()
+                                == ArkuiDecoratorName::LOCAL_BUILDER
+                        })
+                )
+            })
+    }
+}
+
+impl<'a> PreviewComponentNameCollector<'a> {
+    pub(super) fn new(program: &'a Program<'a>) -> Self {
+        Self { program }
+    }
+
+    pub(super) fn collect(&self) -> Vec<String> {
+        self.program
+            .body
+            .iter()
+            .filter_map(Self::struct_statement)
+            .filter(|statement| {
+                statement.decorators.iter().any(|decorator| {
+                    ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::PREVIEW
+                })
+            })
+            .map(|statement| statement.id.name.to_string())
+            .collect()
+    }
+
+    fn struct_statement(statement: &'a Statement<'a>) -> Option<&'a StructStatement<'a>> {
+        match statement {
+            Statement::StructStatement(statement) => Some(statement),
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::StructStatement(statement) => Some(statement),
+                _ => None,
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::StructStatement(statement) => Some(statement),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl<'a> StructMutableBuilderProperties<'a> {
+    const CLASS: &'static str = "MutableBuilder";
+    const FACTORY: &'static str = "mutableBuilder";
+
+    pub(super) fn new(statement: &'a StructStatement<'a>) -> Self {
+        Self { statement }
+    }
+
+    pub(super) fn collect(&self) -> FxHashSet<String> {
+        self.statement
+            .body
+            .body
+            .iter()
+            .filter_map(|element| {
+                let StructElement::PropertyDefinition(property) = element else {
+                    return None;
+                };
+                Self::is_mutable_builder_property(property)
+                    .then(|| property.key.static_name().map(|name| name.into_owned()))
+                    .flatten()
+            })
+            .collect()
+    }
+
+    fn is_mutable_builder_property(property: &PropertyDefinition<'_>) -> bool {
+        property.type_annotation.as_ref().is_some_and(|annotation| {
+            matches!(
+                &annotation.type_annotation,
+                TSType::TSTypeReference(reference)
+                    if matches!(
+                        &reference.type_name,
+                        TSTypeName::IdentifierReference(identifier)
+                            if identifier.name == Self::CLASS
+                    )
+            )
+        }) || property.value.as_ref().is_some_and(|initializer| {
+            matches!(
+                initializer,
+                Expression::CallExpression(call)
+                    if matches!(
+                        &call.callee,
+                        Expression::Identifier(identifier)
+                            if identifier.name == Self::FACTORY
+                    )
+            )
+        })
+    }
 }
 
 impl<'a> StructBuilderParamNames<'a> {
@@ -1293,9 +1422,27 @@ impl ModuleExportIndex {
         module_roots: &[(String, PathBuf)],
         component_metadata: &crate::transform::component_meta::ComponentMetadata,
     ) -> Self {
-        let inventory =
-            ModuleExportFactInventoryBuilder::new(sources, module_roots, component_metadata)
-                .build();
+        Self::build_with_version(
+            sources,
+            module_roots,
+            component_metadata,
+            arkdown_core::ArktsLanguageVersion::default(),
+        )
+    }
+
+    pub(crate) fn build_with_version(
+        sources: &crate::source::TransformSourceSnapshot,
+        module_roots: &[(String, PathBuf)],
+        component_metadata: &crate::transform::component_meta::ComponentMetadata,
+        arkts_language_version: arkdown_core::ArktsLanguageVersion,
+    ) -> Self {
+        let inventory = ModuleExportFactInventoryBuilder::new(
+            sources,
+            module_roots,
+            component_metadata,
+            arkts_language_version,
+        )
+        .build();
         let mut entries = FxHashMap::default();
         for _ in 0..inventory.paths.len().saturating_add(1).max(1) {
             let mut analyzer = ModuleExportClosureAnalyzer::new(&inventory.facts, &entries);
@@ -1363,6 +1510,7 @@ struct ModuleExportFactInventoryBuilder<'a> {
     sources: &'a crate::source::TransformSourceSnapshot,
     module_roots: &'a [(String, PathBuf)],
     component_metadata: &'a crate::transform::component_meta::ComponentMetadata,
+    arkts_language_version: arkdown_core::ArktsLanguageVersion,
 }
 
 impl<'a> ModuleExportFactInventoryBuilder<'a> {
@@ -1370,11 +1518,13 @@ impl<'a> ModuleExportFactInventoryBuilder<'a> {
         sources: &'a crate::source::TransformSourceSnapshot,
         module_roots: &'a [(String, PathBuf)],
         component_metadata: &'a crate::transform::component_meta::ComponentMetadata,
+        arkts_language_version: arkdown_core::ArktsLanguageVersion,
     ) -> Self {
         Self {
             sources,
             module_roots,
             component_metadata,
+            arkts_language_version,
         }
     }
 
@@ -1388,6 +1538,7 @@ impl<'a> ModuleExportFactInventoryBuilder<'a> {
                     self.sources,
                     self.module_roots,
                     self.component_metadata,
+                    self.arkts_language_version,
                 );
                 (source.path.clone(), Arc::new(facts))
             })
@@ -1417,9 +1568,11 @@ impl ModuleExportFacts {
         sources: &crate::source::TransformSourceSnapshot,
         module_roots: &[(String, PathBuf)],
         component_metadata: &crate::transform::component_meta::ComponentMetadata,
+        arkts_language_version: arkdown_core::ArktsLanguageVersion,
     ) -> Self {
         let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_path(&source.path);
+        let source_type =
+            CompileArktsSourceType::from_path_with_version(&source.path, arkts_language_version);
         let parsed = component_metadata.parse_ets(&allocator, &source.source, source_type);
         if !parsed.diagnostics.is_empty() {
             return Self::default();

@@ -22,6 +22,8 @@ pub(super) struct SdkArkUiSemanticSnapshot {
     pub(super) create_bind_components: FxHashSet<String>,
     pub(super) style_double_dollar_attrs: FxHashSet<String>,
     pub(super) component_double_dollar_properties: FxHashMap<String, FxHashSet<String>>,
+    pub(super) style_double_exclamation_attrs: FxHashSet<String>,
+    pub(super) component_double_exclamation_properties: FxHashMap<String, FxHashSet<String>>,
     pub(super) bind_popup_attrs: FxHashSet<String>,
     pub(super) bind_drag_attrs: FxHashSet<String>,
 }
@@ -40,6 +42,10 @@ impl SdkArkUiSemanticSnapshot {
             create_bind_components: Self::set(CREATE_BIND_COMPONENTS),
             style_double_dollar_attrs: Self::set(STYLE_DOUBLE_DOLLAR_ATTRS),
             component_double_dollar_properties: Self::set_map(COMPONENT_DOUBLE_DOLLAR_PROPERTIES),
+            style_double_exclamation_attrs: Self::set(STYLE_DOUBLE_EXCLAMATION_ATTRS),
+            component_double_exclamation_properties: Self::set_map(
+                COMPONENT_DOUBLE_EXCLAMATION_PROPERTIES,
+            ),
             bind_popup_attrs: Self::set(BIND_POPUP_ATTRS),
             bind_drag_attrs: Self::set(BIND_DRAG_ATTRS),
         }
@@ -77,6 +83,8 @@ const CUSTOM_BUILDER_PROPERTIES: &[&str] = &[
     "background",
     "bindContentCover",
     "bindContextMenu",
+    "bindContextMenuByIsShow",
+    "bindContextMenuByResponseType",
     "bindContextMenuWithResponse",
     "bindMenu",
     "bindPopup",
@@ -86,12 +94,15 @@ const CUSTOM_BUILDER_PROPERTIES: &[&str] = &[
     "customKeyboard",
     "description",
     "dragPreview",
+    "footer",
+    "header",
     "menus",
     "navDestination",
     "onDragStart",
     "onItemDragStart",
     "overlay",
     "showUnit",
+    "subMenuBuilder",
     "swipeAction",
     "tabBar",
     "title",
@@ -100,7 +111,8 @@ const CUSTOM_BUILDER_PROPERTIES: &[&str] = &[
     "toolbarConfiguration",
 ];
 
-const CUSTOM_BUILDER_PROPERTIES_WITHOUT_KEY: &[&str] = &["create", "showUnit"];
+const CUSTOM_BUILDER_PROPERTIES_WITHOUT_KEY: &[&str] =
+    &["create", "showUnit", "header", "footer", "subMenuBuilder"];
 
 const BIND_OBJECT_PROPERTIES: &[(&str, &[&str])] = &[
     (
@@ -131,6 +143,14 @@ const CREATE_BIND_COMPONENTS: &[&str] = &["ListItemGroup", "Refresh"];
 const STYLE_DOUBLE_DOLLAR_ATTRS: &[&str] =
     &["bindContentCover", "bindPopup", "bindSheet", "visibility"];
 
+const STYLE_DOUBLE_EXCLAMATION_ATTRS: &[&str] = &[
+    "bindMenu",
+    "bindContextMenu",
+    "bindPopup",
+    "bindContentCover",
+    "bindSheet",
+];
+
 const COMPONENT_DOUBLE_DOLLAR_PROPERTIES: &[(&str, &[&str])] = &[
     ("AlphabetIndexer", &["selected"]),
     ("Calendar", &["date"]),
@@ -141,6 +161,7 @@ const COMPONENT_DOUBLE_DOLLAR_PROPERTIES: &[(&str, &[&str])] = &[
     ("ListItem", &["selected"]),
     ("MenuItem", &["selected"]),
     ("Panel", &["mode"]),
+    ("Picker", &["selectedIndex"]),
     ("Radio", &["checked"]),
     ("Rating", &["rating"]),
     ("Refresh", &["refreshing"]),
@@ -157,6 +178,44 @@ const COMPONENT_DOUBLE_DOLLAR_PROPERTIES: &[(&str, &[&str])] = &[
     ("TextTimer", &["count", "format", "isCountDown"]),
     ("TimePicker", &["selected"]),
     ("Toggle", &["isOn"]),
+];
+
+const COMPONENT_DOUBLE_EXCLAMATION_PROPERTIES: &[(&str, &[&str])] = &[
+    ("Radio", &["checked"]),
+    ("TextTimer", &["format", "count", "isCountDown"]),
+    ("Refresh", &["refreshing"]),
+    ("Checkbox", &["select"]),
+    ("CheckboxGroup", &["selectAll"]),
+    ("Picker", &["selectedIndex"]),
+    ("DatePicker", &["selected"]),
+    ("TimePicker", &["selected"]),
+    ("MenuItem", &["selected"]),
+    ("Navigation", &["navBarWidth"]),
+    ("Panel", &["mode"]),
+    ("Rating", &["rating"]),
+    ("Search", &["value"]),
+    ("SideBarContainer", &["showSideBar", "sideBarWidth"]),
+    ("Slider", &["value"]),
+    ("Stepper", &["index"]),
+    ("Swiper", &["index"]),
+    ("Tabs", &["index"]),
+    ("TextArea", &["text"]),
+    ("TextInput", &["text"]),
+    ("TextPicker", &["value", "selected"]),
+    ("Toggle", &["isOn"]),
+    ("AlphabetIndexer", &["selected"]),
+    ("ArcAlphabetIndexer", &["selected"]),
+    ("Select", &["selected", "value"]),
+    ("Calendar", &["date"]),
+    ("GridItem", &["selected"]),
+    ("ListItem", &["selected"]),
+    ("Grid", &["enableEditMode"]),
+    ("List", &["enableEditMode"]),
+    ("Scroll", &["zoomScale"]),
+    (
+        "ContainerReader",
+        &["size", "widthBreakpoint", "heightBreakpoint"],
+    ),
 ];
 
 const BIND_POPUP_ATTRS: &[&str] = &["bindPopup"];

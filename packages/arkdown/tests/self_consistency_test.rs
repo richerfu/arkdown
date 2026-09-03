@@ -186,6 +186,7 @@ impl SelfConsistencyOracle {
       BuildCommand::new(BuildArgs {
         target: "hap".to_string(),
         mode: "debug".to_string(),
+        arkts_version: arkdown_core::ArktsLanguageVersion::default(),
         module: None,
         product: None,
         project: Some(project_path.to_path_buf()),
@@ -206,6 +207,8 @@ impl SelfConsistencyOracle {
         ohos_enable_binxo: false,
         enable_zig: false,
         preview: false,
+        check_entry: false,
+        preview_transform_mode: false,
         disable_abc_cache,
         cache_file: None,
         abc_backend: AbcBackendChoice::Auto,

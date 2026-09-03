@@ -1,7 +1,8 @@
 use oxc_ast::ast::{
-    Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Program, Statement,
-    TSNamespaceDeclarationBody,
+    CallExpression, Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind,
+    Expression, Program, Statement, TSNamespaceDeclarationBody,
 };
+use oxc_ast_visit::{walk, Visit};
 
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::global_rewrite::GlobalContextCallRewrite;
@@ -38,6 +39,7 @@ const KNOWN_ARKUI_DECORATORS: &[&str] = &[
     ArkuiDecoratorName::CONSUMER,
     ArkuiDecoratorName::EVENT,
     ArkuiDecoratorName::ENV,
+    ArkuiDecoratorName::CUSTOM_ENV,
     ArkuiDecoratorName::REQUIRE,
     ArkuiDecoratorName::WATCH,
     ArkuiDecoratorName::TRACE,
@@ -68,6 +70,7 @@ impl ArktsTransformSyntaxDetector {
 
     pub(super) fn program(&self, program: &Program<'_>) -> bool {
         GlobalContextCallRewrite::new().program_needs_rewrite(program)
+            || BuilderFactoryCallDetector::new().contains(program)
             || program
                 .body
                 .iter()
@@ -154,5 +157,37 @@ impl ArktsTransformSyntaxDetector {
                 ClassElement::MethodDefinition(method) => !method.decorators.is_empty(),
                 _ => false,
             })
+    }
+}
+
+struct BuilderFactoryCallDetector {
+    found: bool,
+}
+
+impl BuilderFactoryCallDetector {
+    fn new() -> Self {
+        Self { found: false }
+    }
+
+    fn contains<'a>(mut self, program: &Program<'a>) -> bool {
+        self.visit_program(program);
+        self.found
+    }
+}
+
+impl<'a> Visit<'a> for BuilderFactoryCallDetector {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if self.found {
+            return;
+        }
+        if matches!(
+            &call.callee,
+            Expression::Identifier(identifier)
+                if matches!(identifier.name.as_str(), "wrapBuilder" | "mutableBuilder")
+        ) {
+            self.found = true;
+            return;
+        }
+        walk::walk_call_expression(self, call);
     }
 }

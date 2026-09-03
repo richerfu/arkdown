@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use arkdown_config::build_profile::BuildOptionProfileInventory;
 use arkdown_config::{ArkdownCustomConfigLoader, RuntimeContextOverrides};
-use arkdown_core::ArkdownConfig;
+use arkdown_core::{ArkdownConfig, ArktsLanguageVersion};
 
 use crate::fingerprint::{FingerprintError, InputFingerprintSet};
 use crate::paths::PathResolver;
@@ -67,6 +67,8 @@ pub struct BuildSessionBuilder {
     pub runtime_overrides: Option<Arc<RuntimeContextOverrides>>,
     /// Hvigor CLI `parameterFile` extra-parameter override.
     pub parameter_file_override: Option<PathBuf>,
+    /// Explicit ArkTS language selected by the arkdown invocation.
+    pub arkts_language_version: ArktsLanguageVersion,
 }
 
 impl BuildSessionBuilder {
@@ -77,6 +79,7 @@ impl BuildSessionBuilder {
             ohpm_mode: crate::package::acquisition::AcquisitionMode::Online,
             runtime_overrides: None,
             parameter_file_override: None,
+            arkts_language_version: ArktsLanguageVersion::default(),
         }
     }
 
@@ -97,6 +100,14 @@ impl BuildSessionBuilder {
 
     pub fn with_parameter_file_override(mut self, path: PathBuf) -> Self {
         self.parameter_file_override = Some(path);
+        self
+    }
+
+    /// Select the ArkTS compiler language for the whole build invocation.
+    ///
+    /// Callers must opt in explicitly; the builder default remains ArkTS 1.1.
+    pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
+        self.arkts_language_version = version;
         self
     }
 
@@ -148,13 +159,14 @@ impl BuildSessionBuilder {
         .map_err(|error| BuildSessionError::Config(error.to_string()))?;
 
         // Phase 7: Build input fingerprints.
-        let fingerprints = InputFingerprintSet::build_with_custom_config(
+        let fingerprints = InputFingerprintSet::build_with_custom_config_and_arkts_version(
             &self.config,
             &project,
             &profiles,
             &sdk,
             self.runtime_overrides.as_deref(),
             &custom_config,
+            self.arkts_language_version,
         )?;
 
         Ok(BuildSession {
@@ -169,6 +181,7 @@ impl BuildSessionBuilder {
             profiles: Arc::new(profiles),
             build_options: Arc::new(build_options),
             custom_config: Arc::new(custom_config),
+            arkts_language_version: self.arkts_language_version,
         })
     }
 }

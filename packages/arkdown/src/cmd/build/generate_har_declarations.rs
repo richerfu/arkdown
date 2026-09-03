@@ -11,11 +11,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use arkdown_core::ArktsLanguageVersion;
+use arkdown_ets_transform::CompileArktsSourceType;
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc_isolated_declarations::{IsolatedDeclarations, IsolatedDeclarationsOptions};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
+use oxc_span::GetSpan;
 use walkdir::WalkDir;
 
 use super::layout::ModuleBuildLayout;
@@ -27,6 +29,7 @@ pub(super) struct HarDeclarationGenerator<'a> {
   module_output_prefix: PathBuf,
   output_prefix: PathBuf,
   generated_sources: Vec<&'a Path>,
+  arkts_language_version: ArktsLanguageVersion,
 }
 
 impl<'a> HarDeclarationGenerator<'a> {
@@ -44,6 +47,7 @@ impl<'a> HarDeclarationGenerator<'a> {
       output_prefix: module_output_prefix.join("src/main/ets"),
       module_output_prefix,
       generated_sources: Vec::new(),
+      arkts_language_version: ArktsLanguageVersion::default(),
     }
   }
 
@@ -64,6 +68,7 @@ impl<'a> HarDeclarationGenerator<'a> {
       output_prefix: module_output_prefix.join("src/main/ets"),
       module_output_prefix,
       generated_sources: Vec::new(),
+      arkts_language_version: ArktsLanguageVersion::default(),
     }
   }
 
@@ -73,6 +78,11 @@ impl<'a> HarDeclarationGenerator<'a> {
   /// relative to the consuming module below `etsFortgz`.
   pub(super) fn with_generated_source(mut self, source: &'a Path) -> Self {
     self.generated_sources.push(source);
+    self
+  }
+
+  pub(super) fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
+    self.arkts_language_version = version;
     self
   }
 
@@ -145,7 +155,7 @@ impl<'a> HarDeclarationGenerator<'a> {
       fs_err::copy(source_path, &output_path)?;
       return Ok(());
     }
-    let declaration = HarSourceDeclaration::new(source_path).emit()?;
+    let declaration = HarSourceDeclaration::new(source_path, self.arkts_language_version).emit()?;
     fs_err::write(&output_path, declaration)?;
     Ok(())
   }
@@ -168,19 +178,22 @@ impl<'a> HarDeclarationGenerator<'a> {
 
 struct HarSourceDeclaration<'a> {
   path: &'a Path,
+  arkts_language_version: ArktsLanguageVersion,
 }
 
 impl<'a> HarSourceDeclaration<'a> {
-  fn new(path: &'a Path) -> Self {
-    Self { path }
+  fn new(path: &'a Path, arkts_language_version: ArktsLanguageVersion) -> Self {
+    Self {
+      path,
+      arkts_language_version,
+    }
   }
 
   fn emit(&self) -> Result<String> {
     let source = fs_err::read_to_string(self.path)
       .with_context(|| format!("read Source HAR declaration input {}", self.path.display()))?;
-    let source_type = SourceType::from_path(self.path)
-      .unwrap_or_else(|_| SourceType::ts())
-      .with_module(true);
+    let source_type =
+      CompileArktsSourceType::from_path_with_version(self.path, self.arkts_language_version);
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
@@ -195,10 +208,9 @@ impl<'a> HarSourceDeclaration<'a> {
           .join("\n")
       );
     }
-    // OXC's IsolatedDeclarations does not lower ArkUI `struct` statements;
-    // the SDK TypeScript compiler emits `declare struct` with decorators and
-    // member signatures. Emit that shape directly for struct-only sources
-    // (widget form pages), falling back to IsolatedDeclarations otherwise.
+    // ArkTS 1.1 structs use the legacy declaration shape below. The current
+    // OXC static frontend owns ArkTS 1.2 struct declarations, including
+    // static-only modifiers, overloads, accessors and package declarations.
     let structs = parsed
       .program
       .body
@@ -210,7 +222,7 @@ impl<'a> HarSourceDeclaration<'a> {
         _ => None,
       })
       .collect::<Vec<_>>();
-    if !structs.is_empty() {
+    if !self.arkts_language_version.is_static() && !structs.is_empty() {
       return Self::emit_struct_declarations(&source, &structs);
     }
     let declarations = IsolatedDeclarations::new(

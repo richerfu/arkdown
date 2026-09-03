@@ -61,7 +61,8 @@ use crate::plugins::api_transform::ApiTransformPlugin;
 use crate::plugins::duplicate_check::DuplicateCheckPlugin;
 use crate::plugins::ets_transform::{
     CheckerMode, ComponentMetadata, EtsTransformPlugin, NavigationRouteMap,
-    RolldownEtsTransformPlan, TransformEntrySourceId, TransformSourceSnapshot,
+    ResourceTransformContext, RolldownEtsTransformPlan, TransformEntrySourceId,
+    TransformSourceSnapshot,
 };
 use crate::plugins::har_dedup::HarDedupPlugin;
 use crate::plugins::hvigor_compile::{HvigorCompilePluginShare, HvigorNativePluginSlot};
@@ -121,6 +122,9 @@ pub struct PluginFactoryInput {
     ///
     /// Maps resource identifiers to their resolved `ResourceReference` values.
     pub resource_refs: FxHashMap<String, crate::plugins::ets_transform::ResourceReference>,
+    /// Source-compiler resource lowering context for API 22/23, HAR, and
+    /// integrated-HSP runtime name behavior.
+    pub resource_context: ResourceTransformContext,
     /// SDK ArkUI component metadata loaded before Rolldown hooks run.
     pub component_metadata: ComponentMetadata,
     /// Source files loaded before Rolldown hooks run for cross-file AST analysis.
@@ -190,6 +194,7 @@ impl PluginFactoryInput {
                 plan.input.module_root.clone(),
             )],
             resource_refs: FxHashMap::default(),
+            resource_context: ResourceTransformContext::default(),
             component_metadata: ComponentMetadata::default(),
             transform_sources: TransformSourceSnapshot::default(),
             navigation_routes: NavigationRouteMap::default(),
@@ -744,6 +749,10 @@ impl<'a> PluginFactory<'a> {
         // plugin's transform hook in array order, so EtsTransformPlugin.transform
         // now runs after OhosResolvePlugin's other hooks — matching hvigor's
         // compile stage ordering.
+        let transform_entry_sources = TransformEntrySources::new(self.plan);
+        let form_entry_source_ids = transform_entry_sources.form_source_ids();
+        let entry_source_ids =
+            transform_entry_sources.source_ids_for(&self.plan.input.page_entry_sources);
         let ets_transform_plan = RolldownEtsTransformPlan::new(
             self.plan.bundle_name.clone(),
             self.plan.input.module_name.clone(),
@@ -755,10 +764,16 @@ impl<'a> PluginFactory<'a> {
             self.input.component_metadata,
             self.input.transform_sources,
         )
-        .with_form_entry_source_ids(TransformEntrySources::new(&self.plan).form_source_ids())
+        .with_form_entry_source_ids(form_entry_source_ids)
+        .with_entry_source_ids(entry_source_ids)
+        .with_preview_mode(self.plan.preview_mode)
+        .with_check_entry(self.plan.check_entry)
         .with_navigation_routes(self.input.navigation_routes)
         .with_checker_mode(self.input.checker_mode)
         .with_should_emit_js(self.plan.should_emit_js)
+        .with_arkts_language_version(self.plan.arkts_language_version)
+        .with_api_available_context(&self.plan.compatible_sdk_version, &self.plan.runtime_os)
+        .with_resource_context(self.input.resource_context)
         .with_tsc_target(self.input.tsc_target)
         .with_module_analyzer(self.plan.module_analyzer)
         .with_auto_lazy_import(
@@ -768,9 +783,7 @@ impl<'a> PluginFactory<'a> {
         )
         .with_expand_import_path(self.input.expand_import_path.clone())
         .with_hsp_har_package_names(self.input.hsp_har_package_names.clone())
-        .with_disable_mock_setup_decorator(
-            self.plan.output_target != arkdown_core::OutputTarget::Preview,
-        );
+        .with_disable_mock_setup_decorator(!self.plan.preview_mode);
         let ets_transform_plan = Arc::new(ets_transform_plan);
         let ets_transform_plugin: SharedPluginable = Arc::new(EtsTransformPlugin::from_plan(
             Arc::clone(&ets_transform_plan),
@@ -968,6 +981,7 @@ mod tests {
                 entries: vec!["./ets/pages/Index.ets".to_string()],
                 form_entry_sources: Vec::new(),
                 runtime_entry_sources: Vec::new(),
+                page_entry_sources: Vec::new(),
                 support_chunks: false,
                 source_map_packages: crate::plan::BundleSourceMapPackageInfo {
                     entry_package_name: "entry".to_string(),
@@ -989,12 +1003,17 @@ mod tests {
             },
             plugins: BundlePluginSet::default(),
             build_mode: BuildMode::Debug,
+            arkts_language_version: arkdown_core::ArktsLanguageVersion::default(),
             target_api_version: 12,
+            compatible_sdk_version: "12".to_string(),
+            runtime_os: "OpenHarmony".to_string(),
             bundle_name: "com.example.test".to_string(),
             use_normalized_ohm_url: true,
             should_emit_js: true,
             module_analyzer: arkdown_ets_transform::ModuleAnalyzerKind::default(),
             output_target: OutputTarget::Hap,
+            preview_mode: false,
+            check_entry: false,
             shim_missing_exports_override: None,
             treeshake_override: None,
             context_override: None,

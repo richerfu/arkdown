@@ -202,6 +202,16 @@ fn test_loader_json_main_pages_are_runtime_entries() {
     assert!(loader
         .runtime_entry_sources
         .contains(&"./ets/pages/PrivacyPage.ets".to_string()));
+    assert_eq!(
+        loader.page_entry_sources,
+        [
+            "./ets/pages/Index.ets".to_string(),
+            "./ets/pages/PrivacyPage.ets".to_string(),
+        ]
+    );
+    assert!(!loader
+        .page_entry_sources
+        .contains(&"./ets/entryability/EntryAbility.ets".to_string()));
     assert!(loader
         .compile_entry
         .contains(&"./ets/pages/Index.ets".to_string()));
