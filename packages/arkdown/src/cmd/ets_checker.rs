@@ -813,9 +813,9 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       Value::Array(
         self
           .input
-          .config
-          .sdk_config
-          .arkguard_api_dirs(&self.input.config.product.runtime_os)
+          .session
+          .sdk
+          .global_module_paths
           .iter()
           .map(|path| self.path(path).map(Value::String))
           .collect::<Result<Vec<_>>>()?,
@@ -1275,15 +1275,14 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
   }
 
   fn external_api_paths(&self) -> Result<Vec<String>> {
-    let mut paths = Vec::new();
-    if self.input.config.sdk_config.compile_api_version > 9
-      && arkdown_core::is_harmony_os(&self.input.config.product.runtime_os)
-    {
-      if let Some(hms_ets) = self.input.config.sdk_config.hms_ets_component_path() {
-        paths.push(self.path(&hms_ets)?);
-      }
-    }
-    Ok(paths)
+    self
+      .input
+      .session
+      .sdk
+      .external_api_paths
+      .iter()
+      .map(|path| self.path(path))
+      .collect()
   }
 
   fn sdk_root_path(&self) -> Result<String> {

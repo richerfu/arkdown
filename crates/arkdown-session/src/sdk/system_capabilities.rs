@@ -6,7 +6,6 @@ use std::{
 };
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::Deserialize;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -76,18 +75,35 @@ impl SdkSystemCapabilityInventory {
                     source,
                 }
             })?;
-            let definition: SdkSystemCapabilityDefinition = serde_json::from_str(&content)
-                .map_err(|source| SdkSystemCapabilityError::Parse {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&content).map_err(|source| {
+                    SdkSystemCapabilityError::Parse {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+            let Some(sys_caps) = value
+                .as_object_mut()
+                .and_then(|object| object.remove("SysCaps"))
+            else {
+                // External SDKs colocate metadata such as
+                // `syscap-version.json` and `api-white-list.json` with device
+                // declarations. ets-loader selects only device-name files;
+                // the startup inventory equivalently ignores JSON values that
+                // do not declare `SysCaps`.
+                continue;
+            };
+            let sys_caps: Vec<String> = serde_json::from_value(sys_caps).map_err(|source| {
+                SdkSystemCapabilityError::Parse {
                     path: path.clone(),
                     source,
-                })?;
+                }
+            })?;
             for device_type in SdkSystemCapabilityDeviceFile::new(&path).device_types() {
-                by_device_type.entry(device_type).or_default().extend(
-                    definition
-                        .sys_caps
-                        .iter()
-                        .map(|capability| capability.clone().into()),
-                );
+                by_device_type
+                    .entry(device_type)
+                    .or_default()
+                    .extend(sys_caps.iter().map(|capability| capability.clone().into()));
             }
         }
         Ok(Self {
@@ -132,12 +148,6 @@ impl SdkSystemCapabilityInventory {
 pub struct SdkSystemCapabilitySelection {
     pub intersection: FxHashSet<Box<str>>,
     pub union: FxHashSet<Box<str>>,
-}
-
-#[derive(Deserialize)]
-struct SdkSystemCapabilityDefinition {
-    #[serde(rename = "SysCaps", default)]
-    sys_caps: Vec<String>,
 }
 
 struct SdkSystemCapabilityDeviceFile<'a> {

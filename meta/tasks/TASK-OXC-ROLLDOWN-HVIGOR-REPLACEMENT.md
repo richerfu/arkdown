@@ -1,7 +1,7 @@
 # OXC/Rolldown 完整替换 hvigor 重构计划
 
 状态：实施中（优先收口 ArkTS 1.1）
-更新时间：2026-09-03  
+更新时间：2026-09-04
 适用范围：Stage 模型、ESMODULE、ArkTS 1.1 默认编译、显式 ArkTS 1.2 编译，以及 HAP/HSP/HAR/APP 的现代构建链路
 
 ## 1. 结论
@@ -17,6 +17,7 @@
 - 已按 `processResourceData` 建立原生资源查询库存：当前模块 rawfile、HSP `ResourceTable.txt`/rawfile 在 bundle 启动边界读取并跨模块复用，Rolldown hook 只读 `Arc` 快照；普通资源的 format/source/type/name、unsupported type、rawfile 错误码和模板/HSP warning 降级行为已接入生产变换。
 - 默认 build/check checker 已切换为 `oxc`，不再启动 SDK Node checker；`sdk` 仅作为显式对比后端暂留，待重载/复杂泛型类型流、crossplatform 外部依赖收集和其余跨文件类型推导完成后连同 bridge 删除。system API 已以 SDK declaration JSDoc、OXC `SymbolId` 和 import/export 闭包接入生产 build/check，并从 `SdkSnapshot` 消费一次读取的 device capability inventory。
 - Ark VM 版本探测已按新 ets2bundle `ts2abc.js` 的实际转发语义改为 Rust 直接调用原生 `es2abc --target-bc-version`；API 8 固定值由 Rust 返回，配置加载不再为该探测启动 Node。
+- HarmonyOS 外部 ETS SDK 组件已按 `ets/sdkConfig.json` 在 `BuildSession` 启动时一次冻结：同一份 `globalModulePaths`/`externalApiPaths` 快照同时供 OXC component metadata、standalone/build checker、syscap、系统资源和 ArkGuard 消费；外部 `sysResource.js` 不再依赖进程环境变量，也不再由各阶段重复扫描 SDK 目录。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
 
