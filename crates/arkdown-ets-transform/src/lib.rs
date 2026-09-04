@@ -37,6 +37,7 @@ mod sys_resource;
 pub mod transform;
 mod typescript_emit;
 mod visual;
+mod visual_codegen;
 
 // Narrow re-exports per spec (lib.rs only re-exports, no new business functions).
 pub use checker::{ArktsSourceChecker, EtsCheckReport, EtsChecker};
@@ -60,5 +61,6 @@ pub use transform::{
 };
 pub use typescript_emit::TypeScriptDirectiveFlags;
 pub use visual::VisualGeneratedSource;
+pub use visual_codegen::{VisualCodeGenerator, VisualCodegenError};
 
 pub(crate) use module_name::ModuleExportNameText;

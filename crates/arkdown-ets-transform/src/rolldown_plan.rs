@@ -425,7 +425,11 @@ impl RolldownEtsTransformer {
         } else {
             None
         };
-        let code = pipeline.prepare_source(visual_source.as_deref().unwrap_or(original_source));
+        let code = pipeline.prepare_source(
+            visual_source
+                .as_ref()
+                .map_or(original_source, |source| source.code.as_str()),
+        );
 
         if !is_ets && !self.plan.arkts_language_version.is_static() {
             let finalization = pipeline.finalize_source(code.as_ref())?;
@@ -557,7 +561,19 @@ impl RolldownEtsTransformer {
         }
 
         let emitted = self.emit_javascript_if_required(final_source, id, directive_flags)?;
-        let transformed_source_map = match (transformed.source_map, finalization_source_map) {
+        let transformed_source_map = match (
+            visual_source
+                .as_ref()
+                .map(|source| source.source_map.as_str()),
+            transformed.source_map,
+        ) {
+            (Some(visual_map), Some(transform_map)) => {
+                Some(self.collapse_source_maps(id, visual_map, &transform_map)?)
+            }
+            (None, transform_map) => transform_map,
+            (Some(visual_map), None) => Some(visual_map.to_string()),
+        };
+        let transformed_source_map = match (transformed_source_map, finalization_source_map) {
             (Some(transform_map), Some(finalization_map)) => {
                 Some(self.collapse_source_maps(id, &transform_map, &finalization_map)?)
             }
