@@ -56,7 +56,6 @@ use arkdown_session::{
 };
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
-use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
 };
@@ -79,6 +78,7 @@ use arkdown_build::bundle_plan::{
   BundleRuntimePackageInfoBuilder, BundleStage, BundleStageInput, BundleStageOutput,
   HvigorCompileTarget,
 };
+use arkdown_build::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use arkdown_build::code_resource::CodeResourceCopyPlan;
 use arkdown_build::har_dedup::HarDedupProjectPlan;
 use arkdown_build::hot_reload::{

@@ -1,5 +1,4 @@
 pub mod app_coordinator;
-mod bytecode_har_declaration;
 pub mod coordinator;
 mod native_stage;
 mod service;
