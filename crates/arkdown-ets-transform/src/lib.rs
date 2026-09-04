@@ -22,6 +22,7 @@
 
 mod api_transform;
 mod checker;
+mod coverage;
 pub mod declaration_merge;
 pub mod error;
 mod har_declaration;
@@ -42,6 +43,7 @@ mod visual_codegen;
 
 // Narrow re-exports per spec (lib.rs only re-exports, no new business functions).
 pub use checker::{ArktsSourceChecker, EtsCheckReport, EtsChecker};
+pub use coverage::CoverageInstrumenter;
 pub use har_declaration::HarDeclarationGenerator;
 pub use module_rewrite::{ModuleAnalyzerKind, StaticModuleSpecifierRewrite};
 pub use resource_transform::{

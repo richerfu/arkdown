@@ -63,7 +63,6 @@ use super::bundle_plan::{
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
 };
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
-use super::coverage_instrument::CoverageInstrumenter;
 use super::har_dedup::HarDedupProjectPlan;
 use super::har_importee_cache::HarImporteeCache;
 use super::hot_reload::{
@@ -134,7 +133,8 @@ use arkdown_config::build_profile::{
   EffectiveTargetConfig,
 };
 use arkdown_ets_transform::{
-  ArkuiComponentNameCollector, HarDeclarationGenerator, RolldownEtsTransformPlan, SourceClassifier,
+  ArkuiComponentNameCollector, CoverageInstrumenter, HarDeclarationGenerator,
+  RolldownEtsTransformPlan, SourceClassifier,
 };
 use arkdown_obfuscate::{
   ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
