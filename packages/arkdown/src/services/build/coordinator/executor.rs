@@ -1297,7 +1297,8 @@ impl BuildCoordinator {
       // Hvigor writes MergeProfile and ProcessProfile at distinct task
       // boundaries. Build the canonical profile once in memory, then emit
       // only each task's declared artifacts before its lifecycle `after`.
-      let form_widget_abilities = merge_form_widget_abilities(config, &module_json5)?;
+      let form_widget_abilities =
+        FormWidgetAbilityMerger::new(&session.project).collect(&module_json5);
       let merge_profile_enabled = if skip_profile_writes {
         false
       } else {

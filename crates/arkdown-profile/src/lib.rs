@@ -30,6 +30,7 @@ mod preload_system_so;
 // It will move to `arkdown-session::dependency_graph` in Phase 3.
 pub(crate) mod dependency_graph;
 pub mod form_profile;
+pub mod form_widget;
 pub mod har_abilities;
 pub mod insight_intent;
 pub(crate) mod layout;
@@ -59,6 +60,7 @@ pub use form_profile::{
     FormProfileEntry, FormProfileInput, FormProfileProcessor, FormSourceEntry,
     ModuleFormProfileInput,
 };
+pub use form_widget::FormWidgetAbilityMerger;
 pub use har_abilities::{HarAbility, HarAbilityCollector};
 pub use insight_intent::{
     InsightIntentEntityInput, InsightIntentInput, InsightIntentModuleInput,
