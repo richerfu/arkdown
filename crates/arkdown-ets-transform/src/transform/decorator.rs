@@ -192,6 +192,42 @@ impl<'a> ArkuiDecorator<'a> {
         None
     }
 
+    pub(super) fn provider_alias(&self) -> Option<(String, bool)> {
+        if let Some(alias) = self.string_arg() {
+            return Some((alias, false));
+        }
+        if self.name() != ArkuiDecoratorName::PROVIDE {
+            return None;
+        }
+        let Expression::ObjectExpression(object) = self.arg_expression()? else {
+            return None;
+        };
+        let [oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property)] =
+            object.properties.as_slice()
+        else {
+            return None;
+        };
+        let Expression::StringLiteral(alias) = &property.value else {
+            return None;
+        };
+        Some((alias.value.to_string(), true))
+    }
+
+    pub(super) fn provider_override_key(&self) -> Option<&'a Expression<'a>> {
+        if self.name() != ArkuiDecoratorName::PROVIDE {
+            return None;
+        }
+        let Expression::ObjectExpression(object) = self.arg_expression()? else {
+            return None;
+        };
+        let [oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property)] =
+            object.properties.as_slice()
+        else {
+            return None;
+        };
+        Some(&property.value)
+    }
+
     pub(crate) fn arg_expression(&self) -> Option<&'a Expression<'a>> {
         let Expression::CallExpression(call) = &self.decorator.expression else {
             return None;

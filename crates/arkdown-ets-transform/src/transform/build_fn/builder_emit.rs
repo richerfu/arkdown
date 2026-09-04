@@ -68,7 +68,23 @@ impl<'a, 'b> NavigationCreateCall<'a, 'b> {
         if let Some(builder_body) = builder_body {
             arguments.push(Argument::from(self.builder_arrow(ast, builder_body)));
         } else if self.component.arguments.is_empty() {
-            arguments.push(Argument::from(self.empty_builder_arrow(ast)));
+            let default_argument = if context.component_kind(self.name).is_navigation() {
+                Expression::new_new_expression(
+                    SPAN,
+                    Expression::new_identifier(
+                        SPAN,
+                        ast.allocator()
+                            .alloc_str(&context.runtime_names().nav_path_stack),
+                        ast,
+                    ),
+                    None,
+                    OxcVec::new_in(ast),
+                    ast,
+                )
+            } else {
+                self.empty_builder_arrow(ast)
+            };
+            arguments.push(Argument::from(default_argument));
         } else {
             for argument in &self.component.arguments {
                 arguments.push(self.source_argument(argument, allocator, context));

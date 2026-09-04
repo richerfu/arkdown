@@ -1,5 +1,6 @@
 use rustc_hash::FxHashMap;
 
+use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::FunctionBody;
 
 /// A component-local `@Styles` declaration.
@@ -30,5 +31,23 @@ impl<'a> StylesAttributeIndex<'a> {
 
     pub(super) fn body(&self, name: &str) -> Option<Option<&'a FunctionBody<'a>>> {
         self.bodies.get(name).copied()
+    }
+
+    pub(super) fn clone_in_allocator<'b>(
+        &self,
+        allocator: &'b Allocator,
+    ) -> StylesAttributeIndex<'b> {
+        let bodies = self
+            .bodies
+            .iter()
+            .map(|(name, body)| {
+                let body = body.map(|body| {
+                    let cloned = body.clone_in(allocator);
+                    &*allocator.alloc(cloned)
+                });
+                (name.clone(), body)
+            })
+            .collect();
+        StylesAttributeIndex { bodies }
     }
 }

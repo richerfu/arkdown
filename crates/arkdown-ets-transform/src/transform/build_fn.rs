@@ -8,9 +8,10 @@ use oxc_ast::ast::{
     ChainExpression, Expression, FormalParameter, FormalParameterKind, FormalParameters,
     FunctionBody, IdentifierName, IfStatement, MemberExpression, ObjectExpression, ObjectProperty,
     ObjectPropertyKind, PropertyKey, PropertyKind, SpreadElement, Statement,
-    VariableDeclarationKind, VariableDeclarator,
+    StaticMemberExpression, VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_ast::builder::AstBuilder;
+use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::{GetSpan, Span, SPAN};
 use oxc_syntax::operator::{AssignmentOperator, UnaryOperator};
 
@@ -197,11 +198,14 @@ pub type CustomComponentUpdateProps = FxHashMap<String, CustomComponentInfo>;
 struct BuildContext {
     use_parent_context: bool,
     global_builder_parameter: Option<Arc<str>>,
+    custom_observation_uses_parent: bool,
     builder_proxy_scope: BuilderProxyScope,
     current_component_reusable: bool,
     inside_lazy_for_each: bool,
     inside_repeat: bool,
+    inside_page_transition: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
+    regular_attribute_properties: Arc<FxHashSet<String>>,
     mutable_builder_properties: Arc<FxHashSet<String>>,
     component_metadata: Arc<ComponentMetadata>,
     extend_attributes: Arc<ExtendAttributeIndex>,
@@ -215,11 +219,14 @@ impl Default for BuildContext {
         Self {
             use_parent_context: false,
             global_builder_parameter: None,
+            custom_observation_uses_parent: false,
             builder_proxy_scope: BuilderProxyScope::Component,
             current_component_reusable: false,
             inside_lazy_for_each: false,
             inside_repeat: false,
+            inside_page_transition: false,
             raw_object_fields: Arc::default(),
+            regular_attribute_properties: Arc::default(),
             mutable_builder_properties: Arc::default(),
             component_metadata: Arc::new(ComponentMetadata::default()),
             extend_attributes: Arc::new(ExtendAttributeIndex::default()),
@@ -295,6 +302,185 @@ impl<'a> BuildBodyInfo<'a> {
     }
 }
 
+/// Lowers the attribute-only body of `@Extend`/`@AnimatableExtend` with the
+/// same attribute, stateStyles, gesture, binding, and nested-extend machinery
+/// used by normal component build functions.
+pub(crate) struct ExtendBodyPlan<'a> {
+    body: Option<&'a FunctionBody<'a>>,
+    component: &'a str,
+    component_metadata: Arc<ComponentMetadata>,
+    extend_attributes: Arc<ExtendAttributeIndex>,
+    styles: StylesAttributeIndex<'a>,
+}
+
+impl<'a> ExtendBodyPlan<'a> {
+    pub(crate) fn new(
+        body: Option<&'a FunctionBody<'a>>,
+        component: &'a str,
+        component_metadata: Arc<ComponentMetadata>,
+        extend_attributes: Arc<ExtendAttributeIndex>,
+    ) -> Self {
+        Self {
+            body,
+            component,
+            component_metadata,
+            extend_attributes,
+            styles: StylesAttributeIndex::default(),
+        }
+    }
+
+    pub(crate) fn with_styles_methods(mut self, methods: &[StylesMethodInfo<'a>]) -> Self {
+        self.styles = StylesAttributeIndex::from_methods(methods);
+        self
+    }
+
+    pub(crate) fn statements<'b>(
+        &self,
+        allocator: &'b Allocator,
+    ) -> Result<OxcVec<'b, Statement<'b>>, BuildLoweringError> {
+        let Some(body) = self.body else {
+            return Ok(OxcVec::new_in(&allocator));
+        };
+        let context = BuildContext::default()
+            .with_shared_component_metadata(Arc::clone(&self.component_metadata))
+            .with_shared_extend_attributes(Arc::clone(&self.extend_attributes));
+        let cloned_styles = self.styles.clone_in_allocator(allocator);
+        let mut output = OxcVec::new_in(&allocator);
+        for statement in &body.statements {
+            if let Some(expression) = Self::leading_dot_expression(statement) {
+                output.extend(self.attribute_statements(
+                    expression,
+                    allocator,
+                    &context,
+                    &self.styles,
+                )?);
+                continue;
+            }
+            let mut statement = statement.clone_in(allocator);
+            let mut rewriter =
+                ExtendBodyStatementRewriter::new(self, allocator, &context, &cloned_styles);
+            rewriter.visit_statement(&mut statement);
+            if let Some(error) = rewriter.error {
+                return Err(error);
+            }
+            output.push(statement);
+        }
+        Ok(output)
+    }
+
+    fn leading_dot_expression(statement: &'a Statement<'a>) -> Option<&'a Expression<'a>> {
+        let Statement::ExpressionStatement(statement) = statement else {
+            return None;
+        };
+        let Expression::LeadingDotExpression(expression) = &statement.expression else {
+            return None;
+        };
+        Some(&expression.expression)
+    }
+
+    fn attribute_statements<'source, 'b>(
+        &self,
+        expression: &'source Expression<'source>,
+        allocator: &'b Allocator,
+        context: &BuildContext,
+        styles: &StylesAttributeIndex<'source>,
+    ) -> Result<OxcVec<'b, Statement<'b>>, BuildLoweringError> {
+        let attrs = StylesAttributeList::from_expression(expression, context)?;
+        let mut expanded = Vec::new();
+        for attr in attrs.attrs {
+            if let Some(body) = styles.body(&attr.name) {
+                for attr in StylesAttributeList::from_body(body, context)?.attrs {
+                    expanded.push(attr.with_state_styles(styles, context)?);
+                }
+            } else {
+                expanded.push(attr.with_state_styles(styles, context)?);
+            }
+        }
+        let ast = AstBuilder::new(allocator);
+        let builder_methods = FxHashSet::default();
+        let mut statements = OxcVec::new_in(&allocator);
+        LeafAttributeStatementEmitter::new(
+            self.component,
+            SPAN,
+            &expanded,
+            &builder_methods,
+            context,
+        )
+        .without_reusable_immutable_guard()
+        .push_statements(&mut statements, &ast, allocator);
+        Ok(statements)
+    }
+}
+
+struct ExtendBodyStatementRewriter<'a, 'ctx> {
+    plan: &'ctx ExtendBodyPlan<'ctx>,
+    allocator: &'a Allocator,
+    context: &'ctx BuildContext,
+    styles: &'ctx StylesAttributeIndex<'a>,
+    error: Option<BuildLoweringError>,
+}
+
+impl<'a, 'ctx> ExtendBodyStatementRewriter<'a, 'ctx> {
+    fn new(
+        plan: &'ctx ExtendBodyPlan<'ctx>,
+        allocator: &'a Allocator,
+        context: &'ctx BuildContext,
+        styles: &'ctx StylesAttributeIndex<'a>,
+    ) -> Self {
+        Self {
+            plan,
+            allocator,
+            context,
+            styles,
+            error: None,
+        }
+    }
+
+    fn replacement(
+        &self,
+        statement: &Statement<'a>,
+    ) -> Option<Result<Statement<'a>, BuildLoweringError>> {
+        let Statement::ExpressionStatement(statement) = statement else {
+            return None;
+        };
+        let Expression::LeadingDotExpression(expression) = &statement.expression else {
+            return None;
+        };
+        Some(
+            self.plan
+                .attribute_statements(
+                    &expression.expression,
+                    self.allocator,
+                    self.context,
+                    self.styles,
+                )
+                .map(|statements| {
+                    Statement::new_block_statement(
+                        statement.span,
+                        statements,
+                        &AstBuilder::new(self.allocator),
+                    )
+                }),
+        )
+    }
+}
+
+impl<'a> VisitMut<'a> for ExtendBodyStatementRewriter<'a, '_> {
+    fn visit_statement(&mut self, statement: &mut Statement<'a>) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Some(replacement) = self.replacement(statement) {
+            match replacement {
+                Ok(replacement) => *statement = replacement,
+                Err(error) => self.error = Some(error),
+            }
+            return;
+        }
+        walk_mut::walk_statement(self, statement);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BuildBodyPlan<'a> {
     body: Option<&'a FunctionBody<'a>>,
@@ -307,6 +493,7 @@ pub struct BuildBodyPlan<'a> {
     extend_attributes: Arc<ExtendAttributeIndex>,
     styles: StylesAttributeIndex<'a>,
     raw_object_fields: FxHashSet<String>,
+    regular_attribute_properties: Arc<FxHashSet<String>>,
     mutable_builder_properties: Arc<FxHashSet<String>>,
     module_name: Option<Arc<str>>,
     xcomponent_module_identity: Option<Arc<str>>,
@@ -383,6 +570,7 @@ impl<'a> BuildBodyPlan<'a> {
         component_metadata: &ComponentMetadata,
         raw_object_fields: &FxHashSet<String>,
         module_name: Option<&str>,
+        current_component_reusable: bool,
     ) -> Self {
         Self::builder_with_shared_inputs(
             body,
@@ -397,6 +585,7 @@ impl<'a> BuildBodyPlan<'a> {
                 module_name: module_name.map(Arc::from),
             },
             GeneratedViewpuName::VIEW_V2_BASE,
+            current_component_reusable,
         )
     }
 
@@ -404,12 +593,13 @@ impl<'a> BuildBodyPlan<'a> {
         body: Option<&'a FunctionBody<'a>>,
         inputs: BuildBodySharedInputs<'_>,
         custom_component_base_name: &'static str,
+        current_component_reusable: bool,
     ) -> Self {
         Self::new(
             body,
             inputs,
             BuildBodyContextKind::Builder,
-            false,
+            current_component_reusable,
             custom_component_base_name,
         )
     }
@@ -418,11 +608,26 @@ impl<'a> BuildBodyPlan<'a> {
         body: Option<&'a FunctionBody<'a>>,
         inputs: BuildBodySharedInputs<'_>,
         custom_component_base_name: &'static str,
+        current_component_reusable: bool,
     ) -> Self {
         Self::new(
             body,
             inputs,
             BuildBodyContextKind::LocalBuilder,
+            current_component_reusable,
+            custom_component_base_name,
+        )
+    }
+
+    pub(crate) fn page_transition_with_shared_inputs(
+        body: Option<&'a FunctionBody<'a>>,
+        inputs: BuildBodySharedInputs<'_>,
+        custom_component_base_name: &'static str,
+    ) -> Self {
+        Self::new(
+            body,
+            inputs,
+            BuildBodyContextKind::PageTransition,
             false,
             custom_component_base_name,
         )
@@ -462,6 +667,7 @@ impl<'a> BuildBodyPlan<'a> {
             extend_attributes: Arc::new(ExtendAttributeIndex::default()),
             styles: StylesAttributeIndex::default(),
             raw_object_fields: inputs.raw_object_fields.clone(),
+            regular_attribute_properties: Arc::default(),
             mutable_builder_properties: Arc::default(),
             module_name: inputs.module_name,
             xcomponent_module_identity: None,
@@ -508,6 +714,14 @@ impl<'a> BuildBodyPlan<'a> {
         self
     }
 
+    pub(crate) fn with_shared_regular_attribute_properties(
+        mut self,
+        properties: Arc<FxHashSet<String>>,
+    ) -> Self {
+        self.regular_attribute_properties = properties;
+        self
+    }
+
     pub(crate) fn with_xcomponent_module_identity(
         mut self,
         bundle_name: Option<&str>,
@@ -522,15 +736,17 @@ impl<'a> BuildBodyPlan<'a> {
 
     fn context(&self) -> BuildContext {
         let mut context = match &self.context_kind {
-            BuildBodyContextKind::Component => BuildContext::default()
-                .with_current_component_reusable(self.current_component_reusable),
+            BuildBodyContextKind::Component => BuildContext::default(),
             BuildBodyContextKind::Builder => BuildContext::builder(),
             BuildBodyContextKind::LocalBuilder => BuildContext::local_builder(),
+            BuildBodyContextKind::PageTransition => BuildContext::page_transition(),
             BuildBodyContextKind::GlobalBuilder { first_parameter } => {
                 BuildContext::global_builder(first_parameter.clone())
             }
         }
-        .with_raw_object_fields(&self.raw_object_fields);
+        .with_current_component_reusable(self.current_component_reusable)
+        .with_raw_object_fields(&self.raw_object_fields)
+        .with_shared_regular_attribute_properties(Arc::clone(&self.regular_attribute_properties));
         context = context
             .with_shared_mutable_builder_properties(Arc::clone(&self.mutable_builder_properties));
         if let Some(module_name) = &self.module_name {
@@ -555,6 +771,7 @@ enum BuildBodyContextKind {
     Component,
     Builder,
     LocalBuilder,
+    PageTransition,
     GlobalBuilder { first_parameter: Option<Arc<str>> },
 }
 
@@ -576,6 +793,20 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         };
         let mut statements = OxcVec::new_in(&allocator);
         let context = self.plan.context();
+        if context.inside_page_transition {
+            let ast = AstBuilder::new(allocator);
+            let create = ComponentCallStatementEmitter::empty(
+                &ast,
+                &context.runtime_names().component_page_transition,
+                &context.runtime_names().method_create,
+            );
+            let create_body = OxcVec::from_value_in(create, &ast);
+            statements.push(context.observe_component_creation(
+                ast,
+                &context.runtime_names().component_page_transition,
+                create_body,
+            ));
+        }
         if let Some(parameter) = &context.global_builder_parameter {
             let ast = &AstBuilder::new(allocator);
             let capture_name = format!("__{parameter}__");
@@ -598,6 +829,13 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         }
         for statement in &body.statements {
             self.push_statement(&mut statements, statement, allocator, &context)?;
+        }
+        if context.inside_page_transition {
+            statements.push(ComponentCallStatementEmitter::empty(
+                &AstBuilder::new(allocator),
+                &context.runtime_names().component_page_transition,
+                &context.runtime_names().method_pop,
+            ));
         }
         Ok(statements)
     }
@@ -798,7 +1036,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             && self.plan.builder_methods.contains(&name)
             && !self.plan.custom_components.contains(&name)
         {
-            if !component.children.is_empty() {
+            if component.has_children {
                 return Err(BuildLoweringError::UnsupportedChild);
             }
             statements.push(
@@ -814,8 +1052,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         }
         if self.plan.custom_components.contains(&component_path) || is_namespace_component {
             let source_metadata = self.plan.source_metadata();
-            let reuse_id = CustomReuseId::from_component_attrs(component, context);
             let component_info = self.plan.custom_component_update_props.get(&component_path);
+            let reusable_v2 = component_info.is_some_and(|info| info.reusable_v2);
+            let reuse_id = CustomReuseId::from_component_attrs(component, context, reusable_v2);
             let builder_param = self.custom_component_builder_param(
                 &name,
                 component,
@@ -824,9 +1063,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 context,
             )?;
             let resolved_attrs = self.component_chain_attributes(component, context)?;
+            let id_is_only_argumented_attribute =
+                context.id_is_only_argumented_attribute(&resolved_attrs);
             let chain_attrs = resolved_attrs
                 .iter()
-                .filter(|attr| !context.is_reuse_id_attribute_name(&attr.name))
+                .filter(|attr| !context.is_reuse_control_attribute_name(&attr.name, reusable_v2))
                 .cloned()
                 .collect::<Vec<_>>();
             if chain_attrs.is_empty() {
@@ -853,6 +1094,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     reuse_id,
                     component.callee.span(),
                     &chain_attrs,
+                    id_is_only_argumented_attribute,
                     &self.plan.builder_methods,
                     &source_metadata,
                     context,
@@ -862,7 +1104,15 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         }
         let component_kind = context.component_kind(&name);
         if component_kind.is_for_each() {
-            return self.push_for_each(statements, &component.arguments, allocator, context);
+            let resolved_attrs = self.component_chain_attributes(component, context)?;
+            return self.push_for_each(
+                statements,
+                &component.arguments,
+                &resolved_attrs,
+                component.callee.span(),
+                allocator,
+                context,
+            );
         }
         if component_kind.is_lazy_for_each() {
             return self.push_lazy_for_each(statements, component, allocator, context);
@@ -881,7 +1131,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         if component_kind.is_nav_router() {
             return self.push_nav_component(statements, component, &name, allocator, context);
         }
-        if component_kind.creates_child_body() && !component.children.is_empty() {
+        if component_kind.creates_child_body() && component.has_children {
             return self
                 .push_child_body_component(statements, component, &name, allocator, context);
         }
@@ -891,7 +1141,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         creation_stmts.push(ComponentCallStatementEmitter::create(
             ast,
             &name,
-            context.create_method_name(component_kind, !component.children.is_empty()),
+            context.create_method_name(component_kind, component.has_children),
             &component.arguments,
             &self.plan.builder_methods,
             context,
@@ -906,16 +1156,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             context,
         )
         .push_statements(&mut creation_stmts, ast, allocator);
-        statements.push(
-            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
-                AstBuilder::new(allocator),
-                context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
-                &name,
-                context.runtime_names(),
-                creation_stmts,
-            ),
-        );
+        statements.push(context.observe_component_creation(
+            AstBuilder::new(allocator),
+            &name,
+            creation_stmts,
+        ));
         for child in &component.children {
             self.push_child(statements, child, allocator, context)?;
         }
@@ -964,16 +1209,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             context,
         )
         .push_statements(&mut creation_stmts, ast, allocator);
-        statements.push(
-            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
-                AstBuilder::new(allocator),
-                context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
-                name,
-                context.runtime_names(),
-                creation_stmts,
-            ),
-        );
+        statements.push(context.observe_component_creation(
+            AstBuilder::new(allocator),
+            name,
+            creation_stmts,
+        ));
         if context.component_needs_pop(name, component.arguments.iter()) {
             statements.push(ComponentCallStatementEmitter::empty_with_source(
                 ast,
@@ -993,7 +1233,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         allocator: &'b Allocator,
         context: &BuildContext,
     ) -> Result<Option<(&'c str, OxcVec<'b, Statement<'b>>)>, BuildLoweringError> {
-        if component.children.is_empty() {
+        if !component.has_children {
             return Ok(None);
         }
         let Some(component_info) = component_info else {
@@ -1032,8 +1272,8 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
     ) -> Result<(), BuildLoweringError> {
         let ast = &AstBuilder::new(allocator);
         let component_kind = context.component_kind(name);
-        let children_in_create = component_kind == ArkuiRuntimeComponentKind::NavDestination
-            && !component.children.is_empty();
+        let children_in_create =
+            component_kind == ArkuiRuntimeComponentKind::NavDestination && component.has_children;
         let builder_body = if children_in_create {
             let mut child_stmts = OxcVec::new_in(&allocator);
             for child in &component.children {
@@ -1064,16 +1304,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             context,
         )
         .push_statements(&mut creation_stmts, ast, allocator);
-        statements.push(
-            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
-                AstBuilder::new(allocator),
-                context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
-                name,
-                context.runtime_names(),
-                creation_stmts,
-            ),
-        );
+        statements.push(context.observe_component_creation(
+            AstBuilder::new(allocator),
+            name,
+            creation_stmts,
+        ));
         if !children_in_create {
             for child in &component.children {
                 self.push_child(statements, child, allocator, context)?;
@@ -1096,40 +1331,50 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         allocator: &'b Allocator,
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
-        if context.call_matches_component_kind(call, ArkuiRuntimeComponentKind::ForEach) {
-            return self.push_for_each(statements, &call.arguments, allocator, context);
-        }
-        if context.call_matches_component_kind(call, ArkuiRuntimeComponentKind::LazyForEach) {
-            return self.push_lazy_for_each_arguments(
+        let lc = LeafComponent::from_call(call, context)?;
+        let component_kind = context.component_kind(&lc.name);
+        let base_call = LeafComponent::base_call(call);
+        if component_kind.is_for_each() {
+            let resolved_attrs = self.expand_leaf_attributes(&lc.chain_attrs, context)?;
+            return self.push_for_each(
                 statements,
-                &call.arguments,
+                &base_call.arguments,
+                &resolved_attrs,
+                lc.component_span,
                 allocator,
                 context,
             );
         }
-        let lc = LeafComponent::from_call(call, context)?;
+        if component_kind.is_lazy_for_each() {
+            let resolved_attrs = self.expand_leaf_attributes(&lc.chain_attrs, context)?;
+            return self.push_lazy_for_each_arguments(
+                statements,
+                &base_call.arguments,
+                &resolved_attrs,
+                lc.component_span,
+                allocator,
+                context,
+            );
+        }
         let resolved_attrs = self.expand_leaf_attributes(&lc.chain_attrs, context)?;
         if self.plan.custom_components.contains(&lc.path) || lc.path != lc.name {
             let source_metadata = self.plan.source_metadata();
-            let base_call = LeafComponent::base_call(call);
-            let reuse_id = CustomReuseId::from_leaf_attrs(&resolved_attrs, context);
-            let is_reusable_reuse_id_only = self
-                .plan
-                .custom_component_update_props
-                .get(&lc.path)
-                .is_some_and(|info| {
-                    info.reusable
-                        && resolved_attrs
-                            .iter()
-                            .all(|attr| context.is_reuse_id_attribute_name(&attr.name))
-                });
+            let component_info = self.plan.custom_component_update_props.get(&lc.path);
+            let reusable_v2 = component_info.is_some_and(|info| info.reusable_v2);
+            let reuse_id = CustomReuseId::from_leaf_attrs(&resolved_attrs, context, reusable_v2);
+            let is_reusable_reuse_id_only = component_info.is_some_and(|info| {
+                (info.reusable || info.reusable_v2)
+                    && resolved_attrs.iter().all(|attr| {
+                        context.is_reuse_control_attribute_name(&attr.name, reusable_v2)
+                    })
+            });
             if resolved_attrs.is_empty() || is_reusable_reuse_id_only {
                 statements.extend(CustomComponentStatementEmitter::custom(
                     allocator,
                     &lc.name,
                     &base_call.callee,
                     &base_call.arguments,
-                    self.plan.custom_component_update_props.get(&lc.path),
+                    component_info,
                     None,
                     reuse_id,
                     base_call.span,
@@ -1139,7 +1384,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             } else {
                 let common_attrs = resolved_attrs
                     .iter()
-                    .filter(|attr| !context.is_reuse_id_attribute_name(&attr.name))
+                    .filter(|attr| {
+                        !context.is_reuse_control_attribute_name(&attr.name, reusable_v2)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 if common_attrs.is_empty() {
@@ -1148,7 +1395,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                         &lc.name,
                         &base_call.callee,
                         &base_call.arguments,
-                        self.plan.custom_component_update_props.get(&lc.path),
+                        component_info,
                         None,
                         reuse_id,
                         base_call.span,
@@ -1161,11 +1408,12 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                         &lc.name,
                         &base_call.callee,
                         &base_call.arguments,
-                        self.plan.custom_component_update_props.get(&lc.path),
+                        component_info,
                         None,
                         reuse_id,
                         base_call.span,
                         &common_attrs,
+                        context.id_is_only_argumented_attribute(&resolved_attrs),
                         &self.plan.builder_methods,
                         &source_metadata,
                         context,
@@ -1194,16 +1442,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             context,
         )
         .push_statements(&mut creation_stmts, ast, allocator);
-        statements.push(
-            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
-                AstBuilder::new(allocator),
-                context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
-                &lc.name,
-                context.runtime_names(),
-                creation_stmts,
-            ),
-        );
+        statements.push(context.observe_component_creation(
+            AstBuilder::new(allocator),
+            &lc.name,
+            creation_stmts,
+        ));
         if context.component_needs_pop(&lc.name, lc.create_arguments.iter().copied()) {
             statements.push(ComponentCallStatementEmitter::empty(
                 ast,
@@ -1253,19 +1496,14 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             false,
             ast,
         );
-        statements.push(
-            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
-                AstBuilder::new(allocator),
-                context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
-                &context.runtime_names().component_repeat,
-                context.runtime_names(),
-                OxcVec::from_value_in(
-                    Statement::new_expression_statement(SPAN, render_call, ast),
-                    ast,
-                ),
+        statements.push(context.observe_component_creation(
+            AstBuilder::new(allocator),
+            &context.runtime_names().component_repeat,
+            OxcVec::from_value_in(
+                Statement::new_expression_statement(SPAN, render_call, ast),
+                ast,
             ),
-        );
+        ));
         Ok(true)
     }
 
@@ -1304,6 +1542,10 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 arguments.push(
                     BuildArgumentEmitter::new()
                         .with_context(context)
+                        // `processRepeat` reuses the source Repeat data node;
+                        // unlike ordinary build expressions, a direct state
+                        // member is not wrapped in ObservedObject.GetRawObject.
+                        .without_top_level_raw_object_rewrite()
                         .argument_with_allocator(argument, allocator),
                 );
             }
@@ -1438,7 +1680,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         for chain in &component.chain_expressions {
             let name = ArkuiCallName::chain(chain)?;
             if let Some(body) = self.plan.styles.body(&name) {
-                attrs.extend(StylesAttributeList::from_body(body, context)?.attrs);
+                for attr in StylesAttributeList::from_body(body, context)?.attrs {
+                    attrs.push(attr.with_state_styles(&self.plan.styles, context)?);
+                }
             } else {
                 let attribute_span = match &chain.callee {
                     Expression::StaticMemberExpression(member) => member.property.span,
@@ -1486,7 +1730,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         let mut expanded = Vec::new();
         for attr in attrs {
             if let Some(body) = self.plan.styles.body(&attr.name) {
-                expanded.extend(StylesAttributeList::from_body(body, context)?.attrs);
+                for attr in StylesAttributeList::from_body(body, context)?.attrs {
+                    expanded.push(attr.with_state_styles(&self.plan.styles, context)?);
+                }
             } else {
                 expanded.push(attr.clone().with_state_styles(&self.plan.styles, context)?);
             }
@@ -1498,6 +1744,8 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         &self,
         statements: &mut OxcVec<'b, Statement<'b>>,
         arguments: &[Argument<'_>],
+        attributes: &[LeafAttribute<'_>],
+        source_span: Span,
         allocator: &'b Allocator,
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
@@ -1528,6 +1776,14 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             &context.runtime_names().component_for_each,
             &context.runtime_names().method_create,
         ));
+        LeafAttributeStatementEmitter::new(
+            &context.runtime_names().component_for_each,
+            source_span,
+            attributes,
+            &self.plan.builder_methods,
+            context,
+        )
+        .push_statements(&mut observe_body, ast, allocator);
         observe_body.push(IterationAstStatement::const_arrow_function_with_params(
             ast,
             &context.runtime_names().foreach_item_gen_function,
@@ -1565,16 +1821,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             index_param.is_some(),
             key,
         ));
-        statements.push(
-            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
-                AstBuilder::new(allocator),
-                context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
-                &context.runtime_names().component_for_each,
-                context.runtime_names(),
-                observe_body,
-            ),
-        );
+        statements.push(context.observe_component_creation(
+            AstBuilder::new(allocator),
+            &context.runtime_names().component_for_each,
+            observe_body,
+        ));
         statements.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_for_each,
@@ -1590,13 +1841,23 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         allocator: &'b Allocator,
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
-        self.push_lazy_for_each_arguments(statements, &component.arguments, allocator, context)
+        let attributes = self.component_chain_attributes(component, context)?;
+        self.push_lazy_for_each_arguments(
+            statements,
+            &component.arguments,
+            &attributes,
+            component.callee.span(),
+            allocator,
+            context,
+        )
     }
 
     fn push_lazy_for_each_arguments<'b>(
         &self,
         statements: &mut OxcVec<'b, Statement<'b>>,
         arguments: &[Argument<'_>],
+        attributes: &[LeafAttribute<'_>],
+        source_span: Span,
         allocator: &'b Allocator,
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
@@ -1660,6 +1921,14 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             data,
             has_id_func,
         ));
+        LeafAttributeStatementEmitter::new(
+            &context.runtime_names().component_lazy_for_each,
+            source_span,
+            attributes,
+            &self.plan.builder_methods,
+            context,
+        )
+        .push_statements(&mut lazy_for_each_body, ast, allocator);
         lazy_for_each_body.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_lazy_for_each,
@@ -1787,7 +2056,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         observed_body.push(IterationAstStatement::member_call(
             ast,
             allocator,
-            IterationAstStatement::view_context(ast, context),
+            // SDK processItemComponent always registers the generated item
+            // callback on lexical `this`, including inside a global builder.
+            Expression::new_this_expression(SPAN, ast),
             &context.runtime_names().observe_component_creation2,
             OxcVec::from_iter_in(
                 [
@@ -2000,16 +2271,11 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             &context.runtime_names().method_create,
         ));
         observe_stmts.push(self.if_chain_statement(ast, allocator, statement, context, 0)?);
-        statements.push(
-            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
-                AstBuilder::new(allocator),
-                context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
-                &context.runtime_names().component_if,
-                context.runtime_names(),
-                observe_stmts,
-            ),
-        );
+        statements.push(context.observe_component_creation(
+            AstBuilder::new(allocator),
+            &context.runtime_names().component_if,
+            observe_stmts,
+        ));
         statements.push(ComponentCallStatementEmitter::empty(
             ast,
             &context.runtime_names().component_if,
@@ -2208,6 +2474,7 @@ impl BuildContext {
             // selects `(parent ? parent : this)` for every component receiver.
             use_parent_context: true,
             global_builder_parameter: first_parameter,
+            custom_observation_uses_parent: true,
             builder_proxy_scope: BuilderProxyScope::GlobalBuilder,
             ..Default::default()
         }
@@ -2217,6 +2484,13 @@ impl BuildContext {
         Self {
             use_parent_context: true,
             builder_proxy_scope: BuilderProxyScope::Builder,
+            ..Default::default()
+        }
+    }
+
+    fn page_transition() -> Self {
+        Self {
+            inside_page_transition: true,
             ..Default::default()
         }
     }
@@ -2232,6 +2506,18 @@ impl BuildContext {
     ) -> Self {
         self.mutable_builder_properties = properties;
         self
+    }
+
+    fn with_shared_regular_attribute_properties(
+        mut self,
+        properties: Arc<FxHashSet<String>>,
+    ) -> Self {
+        self.regular_attribute_properties = properties;
+        self
+    }
+
+    fn is_regular_attribute_property(&self, name: &str) -> bool {
+        self.regular_attribute_properties.contains(name)
     }
 
     fn is_mutable_builder_receiver(&self, expression: &Expression<'_>) -> bool {
@@ -2395,6 +2681,21 @@ impl BuildContext {
         name == self.runtime_names().reuse_id
     }
 
+    fn is_reuse_control_attribute_name(&self, name: &str, reusable_v2: bool) -> bool {
+        self.is_reuse_id_attribute_name(name) || (reusable_v2 && name == self.runtime_names().reuse)
+    }
+
+    /// `process_custom_component.ts` selects `__Common__.create(true)` when
+    /// `.id(...)` is the only chained attribute carrying arguments. Attributes
+    /// without arguments do not contribute to the upstream `attrCount`.
+    fn id_is_only_argumented_attribute(&self, attributes: &[LeafAttribute<'_>]) -> bool {
+        let mut argumented = attributes.iter().filter(|attr| !attr.arguments.is_empty());
+        argumented
+            .next()
+            .is_some_and(|attr| attr.name == self.runtime_names().attribute_id)
+            && argumented.next().is_none()
+    }
+
     fn component_kind(&self, name: &str) -> ArkuiRuntimeComponentKind {
         self.runtime_names().component_kind(name)
     }
@@ -2409,19 +2710,6 @@ impl BuildContext {
         }
         XComponentCreateContract::new(arguments.into_iter().next(), self.runtime_names())
             .is_container()
-    }
-
-    fn call_matches_component_kind(
-        &self,
-        call: &CallExpression<'_>,
-        expected: ArkuiRuntimeComponentKind,
-    ) -> bool {
-        match &call.callee {
-            Expression::Identifier(identifier) => {
-                self.component_kind(identifier.name.as_str()) == expected
-            }
-            _ => false,
-        }
     }
 
     fn create_method_name(
@@ -2443,6 +2731,32 @@ impl BuildContext {
 
     fn runtime_names(&self) -> &ArkuiRuntimeNames {
         self.component_metadata.runtime_names()
+    }
+
+    fn observe_component_creation<'a>(
+        &self,
+        ast: AstBuilder<'a>,
+        component_name: &str,
+        body_stmts: OxcVec<'a, Statement<'a>>,
+    ) -> Statement<'a> {
+        if self.inside_page_transition {
+            ViewpuStatementAstEmitter::observe_transition_creation_ast_statement(
+                ast,
+                self.use_parent_context,
+                self.global_builder_parameter.as_deref(),
+                self.runtime_names(),
+                body_stmts,
+            )
+        } else {
+            ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
+                ast,
+                self.use_parent_context,
+                self.global_builder_parameter.as_deref(),
+                component_name,
+                self.runtime_names(),
+                body_stmts,
+            )
+        }
     }
 }
 

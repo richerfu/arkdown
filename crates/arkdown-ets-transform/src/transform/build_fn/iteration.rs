@@ -183,13 +183,36 @@ impl IterationFormalParameters {
         ast: &AstBuilder<'a>,
         context: &BuildContext,
     ) -> FormalParameters<'a> {
-        Self::from_names(
+        let mut params = Self::from_names(
             ast,
             [
                 context.runtime_names().elmt_id.as_str(),
                 context.runtime_names().is_initial_render.as_str(),
             ],
-        )
+        );
+        if let Some(parameter) = &context.global_builder_parameter {
+            let capture_name = format!("__{parameter}__");
+            params.items.push(FormalParameter::new(
+                SPAN,
+                oxc_allocator::ArenaVec::new_in(ast),
+                BindingPattern::new_binding_identifier(
+                    SPAN,
+                    ast.allocator().alloc_str(parameter),
+                    ast,
+                ),
+                None,
+                Some(ArenaBox::new_in(
+                    Expression::new_identifier(SPAN, ast.allocator().alloc_str(&capture_name), ast),
+                    ast,
+                )),
+                false,
+                None,
+                false,
+                false,
+                ast,
+            ));
+        }
+        params
     }
 
     pub(super) fn for_each_generator<'a>(
@@ -303,7 +326,7 @@ impl IterationAstStatement {
                 .alloc_str(&context.runtime_names().item_creation),
             ast,
         );
-        let arguments = ArenaVec::from_iter_in(
+        let mut arguments = ArenaVec::from_iter_in(
             [
                 Argument::from(Expression::new_identifier(
                     SPAN,
@@ -319,6 +342,13 @@ impl IterationAstStatement {
             ],
             ast,
         );
+        if let Some(parameter) = &context.global_builder_parameter {
+            arguments.push(Argument::from(Expression::new_identifier(
+                SPAN,
+                ast.allocator().alloc_str(parameter),
+                ast,
+            )));
+        }
         Statement::new_expression_statement(
             SPAN,
             Expression::new_call_expression(SPAN, callee, None, arguments, false, ast),
@@ -728,9 +758,11 @@ impl<'a, 'ast, 'ctx> LazyForEachCreateEmitter<'a, 'ast, 'ctx> {
             None,
             self.ast,
         )));
-        arguments.push(Argument::from(IterationAstStatement::view_context(
-            self.ast,
-            self.context,
+        // SDK createLazyForEach always passes lexical `this`; the surrounding
+        // global builder's conditional parent is only used for observation
+        // APIs and lowered child components.
+        arguments.push(Argument::from(Expression::new_this_expression(
+            SPAN, self.ast,
         )));
         arguments.push(Argument::from(data));
         arguments.push(Argument::from(Expression::new_identifier(

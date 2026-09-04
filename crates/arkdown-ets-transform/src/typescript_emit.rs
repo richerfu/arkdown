@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use arkdown_core::ArkTscTarget;
-use oxc_allocator::{Allocator, ArenaVec};
+use oxc_allocator::{Allocator, ArenaVec, CloneIn, GetAllocator};
 use oxc_ast::ast::{
     Argument, AssignmentTarget, ChainElement, ComputedMemberExpression, Declaration,
     ExportAllDeclaration, ExportDefaultDeclarationKind, ExportFromDeclaration,
     ExportNamedDeclaration, Expression, IdentifierReference, ImportDeclaration,
-    ImportDeclarationSpecifier, Program, Statement, StaticMemberExpression, TSNamespaceDeclaration,
-    TSNamespaceDeclarationBody, VariableDeclaration, VariableDeclarationKind,
+    ImportDeclarationSpecifier, MethodDefinition, MethodDefinitionKind, Program, Statement,
+    StaticMemberExpression, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
+    VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
@@ -164,6 +165,11 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
         options.assumptions.set_public_class_fields = true;
         options.typescript.optimize_const_enums = true;
         options.typescript.remove_class_fields_without_initializer = true;
+        // Hvigor's compiler options enable TypeScript experimental
+        // decorators. Coverage/project-level JavaScript emission must retain
+        // property, method, parameter and class decorator side effects rather
+        // than merely erasing their TypeScript syntax.
+        options.decorator.legacy = true;
         let path = Path::new(self.id);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             Transformer::new(&allocator, path, &options)
@@ -172,6 +178,7 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
         if result.is_err() {
             return None;
         }
+        TypeScriptDecoratorHelperCanonicalizer::new(&allocator).canonicalize(&mut parsed.program);
         TypeScriptEmitParityCanonicalizer::new(&allocator).canonicalize(&mut parsed.program);
 
         let options = CodegenOptions {
@@ -246,6 +253,168 @@ impl<'a> TypeScriptJavascriptEmitter<'a> {
     }
 }
 
+/// Replace OXC's legacy-decorator runtime imports with the inline helpers
+/// emitted by the TypeScript compiler used by hvigor.
+///
+/// OXC owns the decorator lowering itself. This pass only adapts the helper
+/// transport boundary: OpenHarmony modules do not depend on
+/// `@oxc-project/runtime`, and the CompileArkTS cache must be self-contained.
+struct TypeScriptDecoratorHelperCanonicalizer<'a> {
+    allocator: &'a Allocator,
+    ast: AstBuilder<'a>,
+}
+
+impl<'a> TypeScriptDecoratorHelperCanonicalizer<'a> {
+    const DECORATE_SOURCE: &'static str = r#"var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+  var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+  if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+  else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+  return c > 3 && r && Object.defineProperty(target, key, r), r;
+};"#;
+    const PARAM_SOURCE: &'static str = r#"var __param = (this && this.__param) || function (paramIndex, decorator) {
+  return function (target, key) { decorator(target, key, paramIndex); };
+};"#;
+    const METADATA_SOURCE: &'static str = r#"var __metadata = (this && this.__metadata) || function (k, v) {
+  if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};"#;
+
+    fn new(allocator: &'a Allocator) -> Self {
+        Self {
+            allocator,
+            ast: AstBuilder::new(allocator),
+        }
+    }
+
+    fn canonicalize(&self, program: &mut Program<'a>) {
+        let old_body = std::mem::replace(&mut program.body, ArenaVec::new_in(&self.ast));
+        let mut body = ArenaVec::with_capacity_in(old_body.len(), &self.ast);
+        let mut aliases = FxHashMap::default();
+        let mut helpers = FxHashSet::default();
+
+        for statement in old_body {
+            let Some((helper, alias)) = Self::decorator_helper_import(&statement) else {
+                body.push(statement);
+                continue;
+            };
+            aliases.insert(alias, helper.binding_name());
+            helpers.insert(helper);
+        }
+
+        if aliases.is_empty() {
+            program.body = body;
+            return;
+        }
+
+        program.body = body;
+        TypeScriptDecoratorHelperReferenceRewriter::new(&self.ast, &aliases).visit_program(program);
+
+        let mut output = ArenaVec::new_in(&self.ast);
+        for helper in [
+            TypeScriptDecoratorHelper::Decorate,
+            TypeScriptDecoratorHelper::Param,
+            TypeScriptDecoratorHelper::Metadata,
+        ] {
+            if helpers.contains(&helper) {
+                let parsed =
+                    Parser::new(self.allocator, helper.source(), SourceType::mjs()).parse();
+                debug_assert!(parsed.diagnostics.is_empty());
+                let mut parsed = parsed;
+                TypeScriptGeneratedSpanClearer.visit_program(&mut parsed.program);
+                output.extend(parsed.program.body);
+            }
+        }
+        output.extend(std::mem::replace(
+            &mut program.body,
+            ArenaVec::new_in(&self.ast),
+        ));
+        program.body = output;
+    }
+
+    fn decorator_helper_import(
+        statement: &Statement<'_>,
+    ) -> Option<(TypeScriptDecoratorHelper, String)> {
+        let Statement::ImportDeclaration(import) = statement else {
+            return None;
+        };
+        let helper = TypeScriptDecoratorHelper::from_import_source(import.source.value.as_str())?;
+        let local = import.specifiers.as_ref()?.iter().find_map(|specifier| {
+            let ImportDeclarationSpecifier::ImportDefaultSpecifier(default) = specifier else {
+                return None;
+            };
+            Some(default.local.name.to_string())
+        })?;
+        Some((helper, local))
+    }
+}
+
+/// Inline helper source is parsed into the user's allocator, but its offsets
+/// belong to the helper snippet rather than the user module. Mark those nodes
+/// synthetic so OXC source-map generation never indexes the user source with
+/// unrelated helper offsets.
+struct TypeScriptGeneratedSpanClearer;
+
+impl<'a> VisitMut<'a> for TypeScriptGeneratedSpanClearer {
+    fn visit_span(&mut self, span: &mut oxc_span::Span) {
+        *span = SPAN;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TypeScriptDecoratorHelper {
+    Decorate,
+    Param,
+    Metadata,
+}
+
+impl TypeScriptDecoratorHelper {
+    fn from_import_source(source: &str) -> Option<Self> {
+        match source.rsplit('/').next()? {
+            "decorate" => Some(Self::Decorate),
+            "decorateParam" => Some(Self::Param),
+            "decorateMetadata" => Some(Self::Metadata),
+            _ => None,
+        }
+    }
+
+    fn binding_name(self) -> &'static str {
+        match self {
+            Self::Decorate => "__decorate",
+            Self::Param => "__param",
+            Self::Metadata => "__metadata",
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::Decorate => TypeScriptDecoratorHelperCanonicalizer::DECORATE_SOURCE,
+            Self::Param => TypeScriptDecoratorHelperCanonicalizer::PARAM_SOURCE,
+            Self::Metadata => TypeScriptDecoratorHelperCanonicalizer::METADATA_SOURCE,
+        }
+    }
+}
+
+struct TypeScriptDecoratorHelperReferenceRewriter<'a, 'aliases, 'builder> {
+    ast: &'builder AstBuilder<'a>,
+    aliases: &'aliases FxHashMap<String, &'static str>,
+}
+
+impl<'a, 'aliases, 'builder> TypeScriptDecoratorHelperReferenceRewriter<'a, 'aliases, 'builder> {
+    fn new(
+        ast: &'builder AstBuilder<'a>,
+        aliases: &'aliases FxHashMap<String, &'static str>,
+    ) -> Self {
+        Self { ast, aliases }
+    }
+}
+
+impl<'a> VisitMut<'a> for TypeScriptDecoratorHelperReferenceRewriter<'a, '_, '_> {
+    fn visit_identifier_reference(&mut self, identifier: &mut IdentifierReference<'a>) {
+        if let Some(replacement) = self.aliases.get(identifier.name.as_str()) {
+            identifier.name = Ident::from_str_in(replacement, self.ast);
+        }
+    }
+}
+
 /// Canonicalize the small, observable gaps between OXC's TypeScript lowering
 /// and the latest SDK TypeScript emitter before `es2abc` consumes the cache.
 ///
@@ -265,7 +434,65 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
 
     fn canonicalize(&self, program: &mut Program<'a>) {
         self.canonicalize_regular_enum_declarations(program);
+        self.canonicalize_decorated_class_aliases(program);
         self.canonicalize_class_static_self_references(program);
+        TypeScriptSynthesizedConstructorCanonicalizer::new(&self.ast).visit_program(program);
+    }
+
+    fn canonicalize_decorated_class_aliases(&self, program: &mut Program<'a>) {
+        let aliases = program
+            .body
+            .iter()
+            .filter_map(Self::variable_declaration)
+            .flat_map(|declaration| declaration.declarations.iter())
+            .filter_map(Self::decorated_class_alias)
+            .collect::<FxHashMap<_, _>>();
+        if aliases.is_empty() {
+            return;
+        }
+
+        let old_body = std::mem::replace(&mut program.body, ArenaVec::new_in(&self.ast));
+        let mut body = ArenaVec::with_capacity_in(old_body.len(), &self.ast);
+        for mut statement in old_body {
+            if self.retain_non_alias_variable_declarators(&mut statement, &aliases) {
+                body.push(statement);
+            }
+        }
+        program.body = body;
+        OxcDecoratedClassAliasRewriter::new(&self.ast, &aliases).visit_program(program);
+    }
+
+    fn variable_declaration<'statement>(
+        statement: &'statement Statement<'a>,
+    ) -> Option<&'statement VariableDeclaration<'a>> {
+        match statement {
+            Statement::VariableDeclaration(declaration) => Some(declaration),
+            Statement::ExportDeclaration(export) => {
+                let Declaration::VariableDeclaration(declaration) = &export.declaration else {
+                    return None;
+                };
+                Some(declaration)
+            }
+            _ => None,
+        }
+    }
+
+    fn decorated_class_alias(
+        declarator: &oxc_ast::ast::VariableDeclarator<'a>,
+    ) -> Option<(String, String)> {
+        let class_name = declarator.id.get_binding_identifier()?.name.as_str();
+        let Expression::AssignmentExpression(assignment) = declarator.init.as_ref()? else {
+            return None;
+        };
+        let AssignmentTarget::AssignmentTargetIdentifier(alias) = &assignment.left else {
+            return None;
+        };
+        let Expression::ClassExpression(class) = &assignment.right else {
+            return None;
+        };
+        let emitted_name = class.id.as_ref()?.name.as_str();
+        (emitted_name == class_name && Self::is_oxc_class_static_alias(&alias.name, class_name))
+            .then(|| (alias.name.to_string(), class_name.to_string()))
     }
 
     /// The SDK TypeScript emitter writes a regular enum as a hoisted `var`
@@ -367,8 +594,10 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
         let Expression::CallExpression(call) = expression else {
             return false;
         };
-        if !matches!(call.arguments.as_slice(), [Argument::ObjectExpression(object)] if object.properties.is_empty())
-        {
+        let [argument] = call.arguments.as_slice() else {
+            return false;
+        };
+        if !Self::is_oxc_enum_iife_argument(argument, enum_name) {
             return false;
         }
         let Expression::FunctionExpression(function) = &call.callee else {
@@ -400,6 +629,22 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
                     Some(Expression::Identifier(identifier)) if identifier.name.as_str() == enum_name
                 )
         )
+    }
+
+    fn is_oxc_enum_iife_argument(argument: &Argument<'_>, enum_name: &str) -> bool {
+        match argument {
+            Argument::ObjectExpression(object) => object.properties.is_empty(),
+            Argument::LogicalExpression(logical)
+                if logical.operator == LogicalOperator::Or
+                    && matches!(
+                        &logical.left,
+                        Expression::Identifier(identifier) if identifier.name == enum_name
+                    ) =>
+            {
+                matches!(&logical.right, Expression::ObjectExpression(object) if object.properties.is_empty())
+            }
+            _ => false,
+        }
     }
 
     /// OXC's class-fields lowering creates `var _Class; _Class = Class;` for
@@ -598,10 +843,102 @@ impl<'a> TypeScriptEmitParityCanonicalizer<'a> {
     }
 }
 
+/// OXC inserts `constructor(..._args) { super(..._args); ... }` while the
+/// TypeScript emitter used by hvigor inserts
+/// `constructor() { super(...arguments); ... }`. Only constructors whose own
+/// span and rest parameter are synthetic are eligible, so authored rest
+/// parameters retain their original semantics.
+struct TypeScriptSynthesizedConstructorCanonicalizer<'a, 'builder> {
+    ast: &'builder AstBuilder<'a>,
+}
+
+impl<'a, 'builder> TypeScriptSynthesizedConstructorCanonicalizer<'a, 'builder> {
+    fn new(ast: &'builder AstBuilder<'a>) -> Self {
+        Self { ast }
+    }
+
+    fn canonicalize(&self, method: &mut MethodDefinition<'a>) {
+        if method.kind != MethodDefinitionKind::Constructor || method.span != SPAN {
+            return;
+        }
+        let Some(rest) = method.value.params.rest.as_ref() else {
+            return;
+        };
+        if rest.span != SPAN {
+            return;
+        }
+        let Some(rest_name) = rest.rest.argument.get_binding_identifier() else {
+            return;
+        };
+        let rest_name = rest_name.name.to_string();
+        let Some(body) = method.value.body.as_mut() else {
+            return;
+        };
+        let Some(Statement::ExpressionStatement(statement)) = body.statements.first_mut() else {
+            return;
+        };
+        let Expression::CallExpression(call) = &mut statement.expression else {
+            return;
+        };
+        if !call.callee.is_super() || call.arguments.len() != 1 {
+            return;
+        }
+        let Argument::SpreadElement(spread) = &mut call.arguments[0] else {
+            return;
+        };
+        let Expression::Identifier(argument) = &mut spread.argument else {
+            return;
+        };
+        if argument.name.as_str() != rest_name {
+            return;
+        }
+
+        argument.name = Ident::from_str_in("arguments", self.ast);
+        method.value.params.rest = None;
+    }
+}
+
+impl<'a> VisitMut<'a> for TypeScriptSynthesizedConstructorCanonicalizer<'a, '_> {
+    fn visit_method_definition(&mut self, method: &mut MethodDefinition<'a>) {
+        self.canonicalize(method);
+        walk_mut::walk_method_definition(self, method);
+    }
+}
+
 struct OxcClassStaticAliasReferenceRewriter<'ast, 'aliases, 'class, 'builder> {
     ast: &'builder AstBuilder<'ast>,
     aliases: &'aliases FxHashMap<String, String>,
     class_name: &'class str,
+}
+
+struct OxcDecoratedClassAliasRewriter<'ast, 'aliases, 'builder> {
+    ast: &'builder AstBuilder<'ast>,
+    aliases: &'aliases FxHashMap<String, String>,
+}
+
+impl<'ast, 'aliases, 'builder> OxcDecoratedClassAliasRewriter<'ast, 'aliases, 'builder> {
+    fn new(ast: &'builder AstBuilder<'ast>, aliases: &'aliases FxHashMap<String, String>) -> Self {
+        Self { ast, aliases }
+    }
+}
+
+impl<'ast> VisitMut<'ast> for OxcDecoratedClassAliasRewriter<'ast, '_, '_> {
+    fn visit_expression(&mut self, expression: &mut Expression<'ast>) {
+        if let Expression::AssignmentExpression(assignment) = expression {
+            if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left {
+                if self.aliases.contains_key(identifier.name.as_str()) {
+                    *expression = assignment.right.clone_in(self.ast.allocator());
+                }
+            }
+        }
+        walk_mut::walk_expression(self, expression);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &mut IdentifierReference<'ast>) {
+        if let Some(class_name) = self.aliases.get(identifier.name.as_str()) {
+            identifier.name = Ident::from_str_in(class_name, self.ast);
+        }
+    }
 }
 
 impl<'ast, 'aliases, 'class, 'builder>
@@ -1958,6 +2295,78 @@ export enum QueryType {
         assert!(
             !output.contains("return QueryType") && !output.contains("@__PURE__"),
             "OXC-only enum return/pure annotation must be removed:\n{output}"
+        );
+    }
+
+    #[test]
+    fn emits_non_exported_enums_with_hvigor_var_iife_shape() {
+        let source_path = PathBuf::from("/tmp/project/entry/src/main/ets/Page.ts");
+        let source = "const selected = Option.Buy;\nenum Option { Buy }\n";
+        let output = TypeScriptJavascriptEmitter::new(
+            source,
+            source_path.to_str().expect("UTF-8 fixture path"),
+            &TransformSourceSnapshot::default(),
+        )
+        .emit_with_source_map()
+        .map(|output| output.code)
+        .expect("TypeScript JavaScript emission");
+
+        assert!(output.contains("var Option;"), "{output}");
+        assert!(output.contains("})(Option || (Option = {}));"), "{output}");
+        assert!(!output.contains("return Option"), "{output}");
+    }
+
+    #[test]
+    fn emits_legacy_decorators_with_typescript_runtime_helpers() {
+        let source_path = PathBuf::from("/tmp/project/entry/src/main/ets/Value.ts");
+        let source = r#"class Value {
+  @Local enabled: boolean = false;
+}
+"#;
+        let output = TypeScriptJavascriptEmitter::new(
+            source,
+            source_path.to_str().expect("UTF-8 fixture path"),
+            &TransformSourceSnapshot::default(),
+        )
+        .emit_with_source_map()
+        .map(|output| output.code)
+        .expect("TypeScript JavaScript emission");
+
+        assert!(output.contains("var __decorate ="), "{output}");
+        assert!(
+            output.contains("__decorate([Local], Value.prototype, \"enabled\", void 0)"),
+            "{output}"
+        );
+        assert!(
+            !output.contains("@oxc-project/runtime") && !output.contains("import _decorate"),
+            "OXC helper imports and aliases are not valid OHOS runtime dependencies:\n{output}"
+        );
+    }
+
+    #[test]
+    fn emits_synthesized_derived_constructor_with_typescript_arguments_forwarding() {
+        let source_path = PathBuf::from("/tmp/project/entry/src/main/ets/DataSource.ts");
+        let source = r#"class BasicDataSource {}
+class MyDataSource extends BasicDataSource {
+  private values: string[] = [];
+}
+"#;
+        let output = TypeScriptJavascriptEmitter::new(
+            source,
+            source_path.to_str().expect("UTF-8 fixture path"),
+            &TransformSourceSnapshot::default(),
+        )
+        .emit_with_source_map()
+        .map(|output| output.code)
+        .expect("TypeScript JavaScript emission");
+
+        assert!(
+            output.contains("constructor()") && output.contains("super(...arguments);"),
+            "{output}"
+        );
+        assert!(
+            !output.contains("..._args"),
+            "OXC's synthesized forwarding parameter changes hvigor output:\n{output}"
         );
     }
 

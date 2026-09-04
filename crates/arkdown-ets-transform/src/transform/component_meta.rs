@@ -333,6 +333,9 @@ pub struct ArkuiRuntimeNames {
     pub component_tab_content: String,
     pub component_navigation: String,
     pub component_nav_destination: String,
+    pub nav_path_stack: String,
+    pub component_page_transition: String,
+    pub page_transition_method: String,
     pub component_gesture_group: String,
     pub component_gesture: String,
     pub component_if: String,
@@ -414,6 +417,7 @@ pub struct ArkuiRuntimeNames {
     pub builder_property: String,
     pub mutable_builder_dispatch: String,
     pub reuse_id: String,
+    pub reuse: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -481,6 +485,9 @@ impl Default for ArkuiRuntimeNames {
             component_tab_content: "TabContent".to_string(),
             component_navigation: "Navigation".to_string(),
             component_nav_destination: "NavDestination".to_string(),
+            nav_path_stack: "NavPathStack".to_string(),
+            component_page_transition: "PageTransition".to_string(),
+            page_transition_method: "pageTransition".to_string(),
             component_gesture_group: "GestureGroup".to_string(),
             component_gesture: "Gesture".to_string(),
             component_if: "If".to_string(),
@@ -562,6 +569,7 @@ impl Default for ArkuiRuntimeNames {
             builder_property: "builder".to_string(),
             mutable_builder_dispatch: "_dispatchBuilder".to_string(),
             reuse_id: "reuseId".to_string(),
+            reuse: "reuse".to_string(),
         }
     }
 }
@@ -1549,6 +1557,7 @@ mod tests {
         assert_eq!(metadata.runtime_names().observed_object, "ObservedObject");
         assert_eq!(metadata.runtime_names().get_raw_object, "GetRawObject");
         assert_eq!(metadata.runtime_names().reuse_id, "reuseId");
+        assert_eq!(metadata.runtime_names().reuse, "reuse");
         let kit_component = metadata
             .sdk_component("@kit.AudioKit", "AVVolumePanel")
             .expect("kit component declaration");

@@ -26,7 +26,9 @@ use crate::transform::component::{
     BuilderMethodKind, ComponentRuntimeOptions, GlobalReusePoolConfig,
     GlobalReusePoolPropertyEmitter,
 };
-use crate::transform::component_analysis::{ExtendAttributeIndex, StructMutableBuilderProperties};
+use crate::transform::component_analysis::{
+    ExtendAttributeIndex, StructMutableBuilderProperties, StructRegularAttributeProperties,
+};
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
@@ -88,6 +90,12 @@ enum V2SourceMember {
     InitialRender,
     Builder(usize),
     Regular(usize),
+}
+
+#[derive(Debug, Clone)]
+enum V2ReuseReset {
+    Field(usize),
+    Computed(String),
 }
 
 impl<'a> V2RegularMember<'a> {
@@ -229,6 +237,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         let raw_object_fields = FxHashSet::default();
         let mutable_builder_properties =
             Arc::new(StructMutableBuilderProperties::new(self.stmt).collect());
+        let regular_attribute_properties =
+            Arc::new(StructRegularAttributeProperties::new(self.stmt, true).collect());
         let mut visible_builder_methods = self.visible_builder_methods();
         self.collect_builder_param_methods(&mut visible_builder_methods);
 
@@ -265,7 +275,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         }
         let mut regular_members: Vec<V2RegularMember<'_>> = Vec::new();
         let mut constructor_method: Option<&MethodDefinition<'_>> = None;
-        let mut computed_names = Vec::new();
+        let mut reuse_resets = Vec::new();
         let mut has_monitor_method = false;
 
         for element in &self.stmt.body.body {
@@ -275,6 +285,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         self.field_from_property(name, property, &visible_builder_methods)?
                     {
                         fields.push(field);
+                        reuse_resets.push(V2ReuseReset::Field(fields.len() - 1));
                         source_members.push(V2SourceMember::Field(fields.len() - 1));
                     }
                 }
@@ -292,11 +303,14 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         self.component_metadata,
                         &raw_object_fields,
                         self.module_name,
-                        false,
+                        self.is_reusable_v2(),
                     )
                     .with_xcomponent_module_identity(self.bundle_name, self.module_name)
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
                     .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_shared_regular_attribute_properties(Arc::clone(
+                        &regular_attribute_properties,
+                    ))
                     .with_styles_methods(&styles_methods);
                     build_body = Some(plan);
                     source_members.push(V2SourceMember::InitialRender);
@@ -330,6 +344,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                             self.component_metadata,
                             &raw_object_fields,
                             self.module_name,
+                            self.is_reusable_v2(),
                         ),
                         BuilderMethodKind::LocalBuilder => {
                             BuildBodyPlan::local_builder_with_shared_inputs(
@@ -346,12 +361,16 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                                     module_name: self.module_name.map(Arc::from),
                                 },
                                 GeneratedViewpuName::VIEW_V2_BASE,
+                                self.is_reusable_v2(),
                             )
                         }
                     }
                     .with_xcomponent_module_identity(self.bundle_name, self.module_name)
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
                     .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_shared_regular_attribute_properties(Arc::clone(
+                        &regular_attribute_properties,
+                    ))
                     .with_styles_methods(&styles_methods);
                     builder_methods.push((method_name.into_owned(), method.as_ref(), plan, kind));
                     source_members.push(V2SourceMember::Builder(builder_methods.len() - 1));
@@ -366,7 +385,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 StructElement::MethodDefinition(method) => {
                     if self.has_method_decorator(method, ArkuiDecoratorName::COMPUTED) {
                         if let Some(method_name) = method.key.static_name() {
-                            computed_names.push(method_name.into_owned());
+                            reuse_resets.push(V2ReuseReset::Computed(method_name.into_owned()));
                         }
                     }
                     self.validate_lifecycle_method(name, method)?;
@@ -379,7 +398,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         // the ArkUI runtime can register the callback. Normal
                         // component methods continue through the source-only
                         // decorator stripping path.
-                        retain_decorators: self.has_lifecycle_method_decorator(method),
+                        retain_decorators: self.has_runtime_method_decorator(method),
                     });
                     source_members.push(V2SourceMember::Regular(regular_members.len() - 1));
                 }
@@ -417,7 +436,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         elements.push(self.constructor_element(constructor_method, &fields));
         elements.push(self.reset_state_vars_on_reuse_element(
             &fields,
-            &computed_names,
+            &reuse_resets,
             has_monitor_method,
         ));
 
@@ -818,6 +837,16 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         })
     }
 
+    fn has_runtime_method_decorator(&self, method: &MethodDefinition<'_>) -> bool {
+        self.has_lifecycle_method_decorator(method)
+            || method.decorators.iter().any(|decorator| {
+                matches!(
+                    ArkuiDecorator::new(decorator).name(),
+                    ArkuiDecoratorName::MONITOR | ArkuiDecoratorName::COMPUTED
+                )
+            })
+    }
+
     fn constructor_element(
         &self,
         constructor_method: Option<&MethodDefinition<'_>>,
@@ -879,21 +908,25 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
     fn reset_state_vars_on_reuse_element(
         &self,
         fields: &[V2Field<'_>],
-        computed_names: &[String],
+        reuse_resets: &[V2ReuseReset],
         has_monitor_method: bool,
     ) -> ClassElement<'b> {
         let builder = ViewpuAstBuilder::new(self.allocator);
         let mut stmts = builder.statements();
-        for field in fields {
-            if let Some(statement) = self.reset_field_statement(field) {
-                stmts.push(statement);
+        for reset in reuse_resets {
+            match reset {
+                V2ReuseReset::Field(index) => {
+                    if let Some(statement) = self.reset_field_statement(&fields[*index]) {
+                        stmts.push(statement);
+                    }
+                }
+                V2ReuseReset::Computed(name) => {
+                    stmts.push(builder.this_call_statement(
+                        GeneratedViewpuName::RESET_COMPUTED,
+                        builder.expressions_from_iter([builder.string_expression(name)]),
+                    ));
+                }
             }
-        }
-        for name in computed_names {
-            stmts.push(builder.this_call_statement(
-                GeneratedViewpuName::RESET_COMPUTED,
-                builder.expressions_from_iter([builder.string_expression(name)]),
-            ));
         }
         if has_monitor_method {
             stmts.push(builder.this_call_statement(

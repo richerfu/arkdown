@@ -500,10 +500,24 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
                 OxcVec::from_value_in(self.route_block(ast, allocator, route_name), ast)
             }
             (None, Some(storage)) => OxcVec::from_value_in(
-                self.named_route_statement_with(ast, allocator, None, Some(storage)),
+                Statement::new_block_statement(
+                    SPAN,
+                    OxcVec::from_value_in(
+                        self.named_route_statement_with(ast, allocator, None, Some(storage)),
+                        ast,
+                    ),
+                    ast,
+                ),
                 ast,
             ),
-            (None, None) => OxcVec::from_value_in(self.named_route_statement(ast, allocator), ast),
+            (None, None) => OxcVec::from_value_in(
+                Statement::new_block_statement(
+                    SPAN,
+                    OxcVec::from_value_in(self.named_route_statement(ast, allocator), ast),
+                    ast,
+                ),
+                ast,
+            ),
         }
     }
 
@@ -672,7 +686,7 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
             ast,
             allocator,
             None,
-            Some(self.local_storage_get_shared_call(ast)),
+            Some(self.identifier_shared_storage_expression(ast, allocator, argument)),
         );
         let fallback_statement = self.named_route_statement_with(
             ast,
@@ -844,6 +858,31 @@ impl<'a, 'runtime> EntryRegistrationAstEmitter<'a, 'runtime> {
                 allocator,
                 argument,
                 EntryRuntimeName::STORAGE,
+            ),
+            ast,
+        )
+    }
+
+    fn identifier_shared_storage_expression<'b>(
+        &self,
+        ast: &AstBuilder<'b>,
+        allocator: &'b Allocator,
+        argument: &Expression<'_>,
+    ) -> Expression<'b> {
+        Expression::new_conditional_expression(
+            SPAN,
+            self.identifier_property_expression(
+                ast,
+                allocator,
+                argument,
+                EntryRuntimeName::USE_SHARED_STORAGE,
+            ),
+            self.local_storage_get_shared_call(ast),
+            Expression::new_identifier(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(self.runtime_names.undefined.as_str()),
+                ast,
             ),
             ast,
         )

@@ -92,6 +92,7 @@ pub(super) fn make_bundle_plan(
   custom_cfg: Option<&ArkdownCustomConfig>,
   module_analyzer: ModuleAnalyzerKind,
   arkts_language_version: ArktsLanguageVersion,
+  should_emit_js: bool,
   package_info: BundlePlanPackageInfo,
 ) -> BundlePlan {
   let BundlePlanPackageInfo {
@@ -189,7 +190,11 @@ pub(super) fn make_bundle_plan(
     runtime_os: config.product.runtime_os.clone(),
     bundle_name: config.product.bundle_name.clone(),
     use_normalized_ohm_url: loader_json.use_normalized_ohm_url,
-    should_emit_js: true,
+    // Latest hvigor keeps transformed TypeScript for normal Stage/ESMODULE
+    // builds. `rollup-plugin-ets-typescript.ts::getShouldEmitJs` selects
+    // JavaScript for coverage builds (and still honors per-file suppression
+    // directives when this project-level switch is false).
+    should_emit_js,
     module_analyzer,
     output_target: config.output_target.clone(),
     preview_mode: matches!(config.output_target, arkdown_core::OutputTarget::Preview),

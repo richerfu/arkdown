@@ -1,8 +1,7 @@
 use oxc_allocator::{Allocator, CloneIn, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
-    AnnotationDeclaration, AnnotationElement, Argument, ArrowFunctionBody, CallExpression,
-    Expression, FormalParameters, FunctionBody, IdentifierName, MemberExpression, Statement,
-    TSTypeAnnotation,
+    AnnotationDeclaration, AnnotationElement, Argument, ArrowFunctionBody, Expression,
+    FormalParameters, IdentifierName, MemberExpression, Statement, TSTypeAnnotation,
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
@@ -79,7 +78,7 @@ impl TopLevelFunctionEmitter {
         component: &str,
         name: &str,
         params: &FormalParameters<'_>,
-        body: Option<&FunctionBody<'_>>,
+        body_statements: OxcVec<'b, Statement<'b>>,
     ) -> Statement<'b> {
         let function_name = GeneratedViewpuName::extend_function(component, name);
         TopLevelFunctionAstEmitter::new(exported, &function_name)
@@ -87,7 +86,7 @@ impl TopLevelFunctionEmitter {
                 allocator,
                 |allocator| Self::formal_parameters(params, false, allocator),
                 |allocator| Some(ViewpuAstBuilder::new(allocator).void_type_annotation()),
-                |allocator| ExtendBodyEmitter::statements(body, component, allocator),
+                |_| body_statements,
             )
     }
 
@@ -97,10 +96,10 @@ impl TopLevelFunctionEmitter {
         component: &str,
         name: &str,
         params: &FormalParameters<'_>,
-        body: Option<&FunctionBody<'_>>,
+        body_statements: OxcVec<'b, Statement<'b>>,
         runtime_names: &ArkuiRuntimeNames,
     ) -> Statement<'b> {
-        AnimatableExtendEmitter::new(component, name, params, body, runtime_names)
+        AnimatableExtendEmitter::new(component, name, params, body_statements, runtime_names)
             .statement(allocator, exported)
     }
 
@@ -126,32 +125,41 @@ impl TopLevelFunctionEmitter {
     }
 }
 
-struct AnimatableExtendEmitter<'a> {
-    component: &'a str,
-    name: &'a str,
-    params: &'a FormalParameters<'a>,
-    body: Option<&'a FunctionBody<'a>>,
-    runtime_names: &'a ArkuiRuntimeNames,
+struct AnimatableExtendEmitter<'source, 'output> {
+    component: &'source str,
+    name: &'source str,
+    params: &'source FormalParameters<'source>,
+    body_statements: OxcVec<'output, Statement<'output>>,
+    runtime_names: &'source ArkuiRuntimeNames,
 }
 
-impl<'a> AnimatableExtendEmitter<'a> {
+impl<'source, 'output> AnimatableExtendEmitter<'source, 'output> {
     fn new(
-        component: &'a str,
-        name: &'a str,
-        params: &'a FormalParameters<'a>,
-        body: Option<&'a FunctionBody<'a>>,
-        runtime_names: &'a ArkuiRuntimeNames,
+        component: &'source str,
+        name: &'source str,
+        params: &'source FormalParameters<'source>,
+        body_statements: OxcVec<'output, Statement<'output>>,
+        runtime_names: &'source ArkuiRuntimeNames,
     ) -> Self {
         Self {
             component,
             name,
             params,
-            body,
+            body_statements,
             runtime_names,
         }
     }
 
-    fn statement<'b>(&self, allocator: &'b Allocator, exported: bool) -> Statement<'b> {
+    fn statement(&self, allocator: &'output Allocator, exported: bool) -> Statement<'output> {
+        if self.body_statements.is_empty() {
+            return TopLevelFunctionAstEmitter::new(exported, self.name)
+                .statement_with_formal_parameters_and_body_statements(
+                    allocator,
+                    |allocator| self.formal_parameters(allocator),
+                    |_| None,
+                    |allocator| OxcVec::new_in(&allocator),
+                );
+        }
         TopLevelFunctionAstEmitter::new(exported, self.name)
             .statement_with_formal_parameters_and_body_statements(
                 allocator,
@@ -179,20 +187,16 @@ impl<'a> AnimatableExtendEmitter<'a> {
         oxc_allocator::Box::new_in(params, &allocator)
     }
 
-    fn body_statements<'b>(&self, allocator: &'b Allocator) -> OxcVec<'b, Statement<'b>> {
-        let Some(body) = self.body else {
-            return OxcVec::new_in(&allocator);
-        };
-        let Some(first_statement) = body.statements.first() else {
-            return OxcVec::new_in(&allocator);
-        };
-
+    fn body_statements(
+        &self,
+        allocator: &'output Allocator,
+    ) -> OxcVec<'output, Statement<'output>> {
         let ast = AstBuilder::new(allocator);
-        let mut attributes = OxcVec::new_in(&ast);
-        ExtendBodyStatementEmitter::new(body, self.component).push_statement(
-            first_statement,
-            allocator,
-            &mut attributes,
+        let attributes = OxcVec::from_iter_in(
+            self.body_statements
+                .iter()
+                .map(|statement| statement.clone_in(allocator)),
+            &ast,
         );
 
         let callback = self.update_callback(&ast, &attributes);
@@ -354,204 +358,5 @@ impl<'a> AnimatableExtendEmitter<'a> {
 
     fn string_expression<'b>(&self, ast: &AstBuilder<'b>, value: &str) -> Expression<'b> {
         Expression::new_string_literal(SPAN, ast.allocator().alloc_str(value), None, ast)
-    }
-}
-
-pub(crate) struct ExtendBodyEmitter;
-
-impl ExtendBodyEmitter {
-    pub(crate) fn statements<'b>(
-        body: Option<&FunctionBody<'_>>,
-        component: &str,
-        allocator: &'b Allocator,
-    ) -> OxcVec<'b, Statement<'b>> {
-        let Some(body) = body else {
-            return OxcVec::new_in(&allocator);
-        };
-        ExtendBodyStatementEmitter::new(body, component).statements(allocator)
-    }
-}
-
-struct ExtendBodyStatementEmitter<'a> {
-    body: &'a FunctionBody<'a>,
-    component: &'a str,
-}
-
-impl<'a> ExtendBodyStatementEmitter<'a> {
-    fn new(body: &'a FunctionBody<'a>, component: &'a str) -> Self {
-        Self { body, component }
-    }
-
-    fn statements<'b>(&self, allocator: &'b Allocator) -> OxcVec<'b, Statement<'b>> {
-        let mut statements = OxcVec::new_in(&allocator);
-        for statement in &self.body.statements {
-            self.push_statement(statement, allocator, &mut statements);
-        }
-        statements
-    }
-
-    fn push_statement<'b>(
-        &self,
-        statement: &Statement<'_>,
-        allocator: &'b Allocator,
-        statements: &mut OxcVec<'b, Statement<'b>>,
-    ) {
-        if let Statement::ExpressionStatement(expression_statement) = statement {
-            if let Expression::LeadingDotExpression(leading_dot) = &expression_statement.expression
-            {
-                if Self::is_attribute_chain(&leading_dot.expression) {
-                    self.push_attribute_chain(&leading_dot.expression, allocator, statements);
-                    return;
-                }
-            }
-        }
-
-        statements.push(self.statement(statement, allocator));
-    }
-
-    fn is_attribute_chain(expression: &Expression<'_>) -> bool {
-        let Expression::CallExpression(call) = expression else {
-            return false;
-        };
-        match &call.callee {
-            Expression::Identifier(_) => true,
-            Expression::StaticMemberExpression(member) => Self::is_attribute_chain(&member.object),
-            _ => false,
-        }
-    }
-
-    fn push_attribute_chain<'b>(
-        &self,
-        expression: &Expression<'_>,
-        allocator: &'b Allocator,
-        statements: &mut OxcVec<'b, Statement<'b>>,
-    ) {
-        let Expression::CallExpression(call) = expression else {
-            return;
-        };
-        match &call.callee {
-            Expression::Identifier(identifier) => {
-                statements.push(self.attribute_statement(
-                    identifier.name.as_str(),
-                    call,
-                    allocator,
-                ));
-            }
-            Expression::StaticMemberExpression(member) => {
-                self.push_attribute_chain(&member.object, allocator, statements);
-                statements.push(self.attribute_statement(
-                    member.property.name.as_str(),
-                    call,
-                    allocator,
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    fn attribute_statement<'b>(
-        &self,
-        attribute: &str,
-        call: &CallExpression<'_>,
-        allocator: &'b Allocator,
-    ) -> Statement<'b> {
-        let ast = AstBuilder::new(allocator);
-        let member = MemberExpression::new_static_member_expression(
-            call.span,
-            Expression::new_identifier(SPAN, allocator.alloc_str(self.component), &ast),
-            IdentifierName::new(call.span, allocator.alloc_str(attribute), &ast),
-            false,
-            &ast,
-        );
-        let type_arguments = call
-            .type_arguments
-            .as_ref()
-            .map(|type_arguments| type_arguments.clone_in(allocator));
-        let expression = Expression::new_call_expression(
-            call.span,
-            Expression::from(member),
-            type_arguments,
-            call.arguments.clone_in(allocator),
-            call.optional,
-            &ast,
-        );
-        Statement::new_expression_statement(call.span, expression, &ast)
-    }
-
-    fn statement<'b>(&self, statement: &Statement<'_>, allocator: &'b Allocator) -> Statement<'b> {
-        match statement {
-            Statement::ExpressionStatement(statement) => {
-                let expression = self.expression(&statement.expression, allocator);
-                Statement::new_expression_statement(
-                    statement.span,
-                    expression,
-                    &AstBuilder::new(allocator),
-                )
-            }
-            _ => statement.clone_in(allocator),
-        }
-    }
-
-    fn expression<'b>(
-        &self,
-        expression: &Expression<'_>,
-        allocator: &'b Allocator,
-    ) -> Expression<'b> {
-        match expression {
-            Expression::LeadingDotExpression(expression) => {
-                let mut expression = expression.expression.clone_in(allocator);
-                ExtendLeadingDotPrefixer::new(allocator, self.component).prefix(&mut expression);
-                expression
-            }
-            _ => expression.clone_in(allocator),
-        }
-    }
-}
-
-struct ExtendLeadingDotPrefixer<'a, 'b> {
-    allocator: &'a Allocator,
-    ast: AstBuilder<'a>,
-    component: &'b str,
-}
-
-impl<'a, 'b> ExtendLeadingDotPrefixer<'a, 'b> {
-    fn new(allocator: &'a Allocator, component: &'b str) -> Self {
-        Self {
-            allocator,
-            ast: AstBuilder::new(allocator),
-            component,
-        }
-    }
-
-    fn prefix(&self, expression: &mut Expression<'a>) -> bool {
-        if let Expression::CallExpression(call) = expression {
-            self.prefix_callee(&mut call.callee)
-        } else {
-            false
-        }
-    }
-
-    fn prefix_callee(&self, callee: &mut Expression<'a>) -> bool {
-        match callee {
-            Expression::Identifier(identifier) => {
-                let property_name = self.allocator.alloc_str(identifier.name.as_str());
-                let member = MemberExpression::new_static_member_expression(
-                    identifier.span,
-                    Expression::new_identifier(
-                        SPAN,
-                        self.allocator.alloc_str(self.component),
-                        &self.ast,
-                    ),
-                    IdentifierName::new(identifier.span, property_name, &self.ast),
-                    false,
-                    &self.ast,
-                );
-                *callee = Expression::from(member);
-                true
-            }
-            Expression::StaticMemberExpression(member) => self.prefix(&mut member.object),
-            Expression::CallExpression(call) => self.prefix_callee(&mut call.callee),
-            _ => false,
-        }
     }
 }

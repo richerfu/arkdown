@@ -486,6 +486,7 @@ impl BuildCoordinator {
         Some(custom_cfg),
         module_analyzer,
         self.session.arkts_language_version,
+        coverage_mode,
         BundlePlanPackageInfo {
           source_map: source_map_packages,
           runtime: runtime_packages,

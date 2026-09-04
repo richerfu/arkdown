@@ -926,9 +926,7 @@ impl<'a> ComponentInfoCollector<'a> {
                 property.decorators.iter().any(|decorator| {
                     matches!(
                         ArkuiDecorator::new(decorator).name(),
-                        ArkuiDecoratorName::PARAM
-                            | ArkuiDecoratorName::ONCE
-                            | ArkuiDecoratorName::EVENT
+                        ArkuiDecoratorName::PARAM | ArkuiDecoratorName::ONCE
                     )
                 })
             } else {
@@ -1274,6 +1272,15 @@ pub(super) struct StructMutableBuilderProperties<'a> {
     statement: &'a StructStatement<'a>,
 }
 
+/// Collects instance fields that ets-loader treats as immutable attribute
+/// inputs while lowering a reusable component. V1 records every undecorated
+/// property in `regularCollection`; V2 additionally requires an explicit
+/// primitive annotation in `process_component_build.ts::isSimpleType`.
+pub(super) struct StructRegularAttributeProperties<'a> {
+    statement: &'a StructStatement<'a>,
+    component_v2: bool,
+}
+
 pub(super) struct PreviewComponentNameCollector<'a> {
     program: &'a Program<'a>,
 }
@@ -1387,6 +1394,54 @@ impl<'a> StructMutableBuilderProperties<'a> {
                     )
             )
         })
+    }
+}
+
+impl<'a> StructRegularAttributeProperties<'a> {
+    pub(super) fn new(statement: &'a StructStatement<'a>, component_v2: bool) -> Self {
+        Self {
+            statement,
+            component_v2,
+        }
+    }
+
+    pub(super) fn collect(&self) -> FxHashSet<String> {
+        self.statement
+            .body
+            .body
+            .iter()
+            .filter_map(|element| {
+                let StructElement::PropertyDefinition(property) = element else {
+                    return None;
+                };
+                if property.r#static || !self.is_regular_property(property) {
+                    return None;
+                }
+                property.key.static_name().map(|name| name.into_owned())
+            })
+            .collect()
+    }
+
+    fn is_regular_property(&self, property: &PropertyDefinition<'_>) -> bool {
+        let decorator_names: Vec<&str> = property
+            .decorators
+            .iter()
+            .map(|decorator| ArkuiDecorator::new(decorator).name())
+            .collect();
+        if ArkuiDecoratorRules::primary_state(&decorator_names).is_some()
+            || decorator_names.contains(&ArkuiDecoratorName::CUSTOM_ENV)
+        {
+            return false;
+        }
+        !self.component_v2
+            || property.type_annotation.as_ref().is_some_and(|annotation| {
+                matches!(
+                    annotation.type_annotation,
+                    TSType::TSStringKeyword(_)
+                        | TSType::TSNumberKeyword(_)
+                        | TSType::TSBooleanKeyword(_)
+                )
+            })
     }
 }
 
@@ -2185,6 +2240,7 @@ struct ModuleExportFacts {
     direct: ModuleExportEntry,
     local_enums: FxHashSet<String>,
     local_simple_type_aliases: FxHashSet<String>,
+    local_builders: FxHashSet<String>,
     local_components: CustomComponentUpdateProps,
     local_classes: FxHashMap<String, ClassObservation>,
     local_entities: FxHashMap<String, String>,
@@ -2261,7 +2317,7 @@ impl ModuleExportFacts {
                     if FunctionDecorators::new(function).has(ArkuiDecoratorName::BUILDER) =>
                 {
                     if let Some(function_id) = &function.id {
-                        facts.direct.builders.insert(function_id.name.to_string());
+                        facts.local_builders.insert(function_id.name.to_string());
                     }
                 }
                 Statement::ExportDeclaration(export) => {
@@ -2309,7 +2365,9 @@ impl ModuleExportFacts {
                             })
                         {
                             if let Some(function_id) = &function.id {
-                                facts.direct.builders.insert(function_id.name.to_string());
+                                let name = function_id.name.to_string();
+                                facts.local_builders.insert(name.clone());
+                                facts.direct.builders.insert(name);
                             }
                         }
                     }
@@ -2333,6 +2391,19 @@ impl ModuleExportFacts {
                     }
                 }
                 Statement::ExportDefaultDeclaration(export) => {
+                    if let ExportDefaultDeclarationKind::FunctionDeclaration(function) =
+                        &export.declaration
+                    {
+                        if FunctionDecorators::new(function).has(ArkuiDecoratorName::BUILDER) {
+                            facts
+                                .direct
+                                .builders
+                                .insert(ComponentModuleExportName::DEFAULT.to_string());
+                            if let Some(function_id) = &function.id {
+                                facts.local_builders.insert(function_id.name.to_string());
+                            }
+                        }
+                    }
                     if let ExportDefaultDeclarationKind::ClassDeclaration(class) =
                         &export.declaration
                     {
@@ -2464,6 +2535,13 @@ impl ModuleExportFacts {
                         });
                     }
                 }
+                Statement::TSExportAssignment(export) => {
+                    if let Expression::Identifier(identifier) = &export.expression {
+                        facts.exports.push(ModuleExportFact::DefaultLocal {
+                            local: identifier.name.to_string(),
+                        });
+                    }
+                }
                 Statement::ExportAllDeclaration(export) => {
                     if let Some(target) = resolver.resolve(export.source.value.as_str()) {
                         if let Some(exported) = &export.exported {
@@ -2574,6 +2652,7 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
         let mut entry = facts.direct.clone();
         let mut local_enums = facts.local_enums.clone();
         let local_simple_type_aliases = facts.local_simple_type_aliases.clone();
+        let mut local_builders = facts.local_builders.clone();
         let mut local_components = facts.local_components.clone();
         let mut local_classes = facts.local_classes.clone();
         let mut local_entities = facts.local_entities.clone();
@@ -2584,6 +2663,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
             for binding in &import.named {
                 if target_entry.enums.contains(&binding.imported) {
                     local_enums.insert(binding.local.clone());
+                }
+                if target_entry.builders.contains(&binding.imported) {
+                    local_builders.insert(binding.local.clone());
                 }
                 let props = if binding.imported == ComponentModuleExportName::DEFAULT
                     && target_entry.components.has_default
@@ -2606,6 +2688,12 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 }
             }
             for local in &import.default_components {
+                if target_entry
+                    .builders
+                    .contains(ComponentModuleExportName::DEFAULT)
+                {
+                    local_builders.insert(local.clone());
+                }
                 if target_entry.components.has_default {
                     local_components
                         .insert(local.clone(), target_entry.components.default_info.clone());
@@ -2721,6 +2809,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                         if local_enums.contains(&binding.local) {
                             entry.enums.insert(binding.exported.clone());
                         }
+                        if local_builders.contains(&binding.local) {
+                            entry.builders.insert(binding.exported.clone());
+                        }
                         if let Some(observation) = local_classes.get(&binding.local).copied() {
                             if binding.exported == ComponentModuleExportName::DEFAULT {
                                 entry.classes.default = Some(observation);
@@ -2749,6 +2840,11 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     }
                 }
                 ModuleExportFact::DefaultLocal { local } => {
+                    if local_builders.contains(local) {
+                        entry
+                            .builders
+                            .insert(ComponentModuleExportName::DEFAULT.to_string());
+                    }
                     if let Some(info) = local_components.get(local) {
                         entry.components.has_default = true;
                         entry.components.default_info = info.clone();

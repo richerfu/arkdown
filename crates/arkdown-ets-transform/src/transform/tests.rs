@@ -569,6 +569,108 @@ struct NamespacePage {
 }
 
 #[test]
+fn commonjs_export_assignment_default_import_is_a_custom_component() {
+    let component_path = PathBuf::from("/project/components/Legacy.ets");
+    let page_path = PathBuf::from("/project/pages/Page.ets");
+    let component_source = r#"@Component
+struct Legacy {
+  @Link value: number
+  build() {}
+}
+export = Legacy
+"#;
+    let page_source = r#"import LegacyDefault from '../components/Legacy'
+@Component
+struct Page {
+  @State value: number = 1
+  build() { LegacyDefault({ value: $value }) }
+}
+"#;
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        component_path,
+        std::sync::Arc::<str>::from(component_source),
+    );
+    source_map.insert(page_path.clone(), std::sync::Arc::<str>::from(page_source));
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = std::sync::Arc::new(ComponentMetadata::default());
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &metadata),
+        component_metadata: metadata,
+        ..TransformOptions::default()
+    };
+
+    let result = TransformHarness::transform_with_options(
+        &make_source(page_path.to_str().unwrap(), page_source),
+        &options,
+    )
+    .expect("TypeScript export assignment must provide the default component binding");
+
+    assert!(
+        result.contains("new LegacyDefault(this, { value: this.__value }"),
+        "export = component must use the custom-component constructor protocol:\n{result}"
+    );
+    assert!(
+        !result.contains("LegacyDefault.create("),
+        "export = component must not be treated as an SDK component:\n{result}"
+    );
+}
+
+#[test]
+fn imported_builder_alias_survives_local_reexport_chain() {
+    let builder_path = PathBuf::from("/project/components/Builder.ets");
+    let first_barrel_path = PathBuf::from("/project/components/First.ets");
+    let second_barrel_path = PathBuf::from("/project/components/Second.ets");
+    let page_path = PathBuf::from("/project/pages/Page.ets");
+    let builder_source =
+        "@Builder\nfunction content(value: number) { Text(value) }\nexport { content }\n";
+    let first_barrel_source =
+        "import { content as aliased } from './Builder'\nexport { aliased }\n";
+    let second_barrel_source = "import { aliased as nested } from './First'\nexport { nested }\n";
+    let page_source = r#"import { nested as renderContent } from '../components/Second'
+@Component
+struct Page {
+  build() { renderContent(20) }
+}
+"#;
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(builder_path, std::sync::Arc::<str>::from(builder_source));
+    source_map.insert(
+        first_barrel_path,
+        std::sync::Arc::<str>::from(first_barrel_source),
+    );
+    source_map.insert(
+        second_barrel_path,
+        std::sync::Arc::<str>::from(second_barrel_source),
+    );
+    source_map.insert(page_path.clone(), std::sync::Arc::<str>::from(page_source));
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = std::sync::Arc::new(ComponentMetadata::default());
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &metadata),
+        component_metadata: metadata,
+        ..TransformOptions::default()
+    };
+
+    let result = TransformHarness::transform_with_options(
+        &make_source(page_path.to_str().unwrap(), page_source),
+        &options,
+    )
+    .expect("builder identity must survive imported local re-export aliases");
+
+    assert!(
+        result.contains("renderContent.bind(this)(20);"),
+        "re-exported builder call must retain hvigor's bound invocation:\n{result}"
+    );
+    assert!(
+        !result.contains("renderContent.create("),
+        "re-exported builder must not become an SDK component:\n{result}"
+    );
+}
+
+#[test]
 fn api_available_calls_and_references_match_reference_compiler_lowering() {
     let src = r#"import deviceInfo from '@ohos.deviceInfo'
 const direct = deviceInfo.apiAvailable(25)
@@ -840,6 +942,10 @@ struct Parent {
     assert!(
         result.contains("new Child(parent ? parent : this, {}, undefined, elmtId"),
         "LocalBuilder custom components must use the context-stack parent: {result}"
+    );
+    assert!(
+        !result.contains("(parent ? parent : this).observeComponentCreation2"),
+        "LocalBuilder observation/update callbacks keep lexical this; only child construction uses the context-stack parent: {result}"
     );
     assert!(
         result.contains("PUV2ViewBase.contextStack && PUV2ViewBase.contextStack.push(this);"),
@@ -1700,8 +1806,8 @@ fn test_transforms_component_v2_property_decorators() {
     assert!(result.contains("this.resetMonitorsOnReuse();"));
     assert!(!result.contains("@ComponentV2"));
     assert!(!result.contains("@Require"));
-    assert!(!result.contains("@Computed"));
-    assert!(!result.contains("@Monitor"));
+    assert!(result.contains("@Computed"));
+    assert!(result.contains("@Monitor('count')"));
     assert!(!result.contains("SyncedProperty"));
     assert!(!result.contains("EventEmitter"));
     assert!(!result.contains("__initializeStruct"));
@@ -1841,7 +1947,9 @@ struct Host {
         result.contains("this.reuseOrCreateNewComponent({")
             && result.contains("componentClass: ReusableCell")
             && result.contains("getParams: () => ({ value: this.value })")
-            && result.contains("getReuseId: () => \"ReusableCell\"")
+            && result.contains(
+                "getReuseId: getUINativeModule().common.getApiTargetVersion() >= 26 ? () => \"ReusableCell\" : () => \"ReusableCell\""
+            )
             && result.contains(
                 "extraInfo: { page: \"entry/src/main/ets/pages/ReusableCell.ets\""
             ),
@@ -2451,6 +2559,45 @@ struct Parent {
         2,
         "only source components carrying .id(...) should receive retake guards:\n{result}"
     );
+    assert!(
+        result.contains("__Common__.create(true);"),
+        "id-only custom components must use the SDK retake-aware common create contract:\n{result}"
+    );
+}
+
+#[test]
+fn test_page_transition_method_uses_transition_observation_context() {
+    let src = r#"
+@Component
+struct TransitionPage {
+  @State opacity: number = 1;
+
+  build() {}
+
+  pageTransition() {
+    PageTransitionEnter({ duration: 300 })
+      .onEnter((type: RouteType, progress: number) => {
+        this.opacity = progress
+      })
+    PageTransitionExit({ duration: 200 })
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/TransitionPage.ets",
+        src,
+    ))
+    .expect("pageTransition DSL must lower");
+
+    assert!(result.contains("PageTransition.create();"), "{result}");
+    assert!(result.contains("PageTransitionEnter.create({"), "{result}");
+    assert!(result.contains("PageTransitionExit.create({"), "{result}");
+    assert!(result.contains("PageTransition.pop();"), "{result}");
+    assert_eq!(
+        result.matches("}, null);").count(),
+        3,
+        "the root and both transition nodes use the SDK null observation marker:\n{result}"
+    );
 }
 
 #[test]
@@ -3009,6 +3156,161 @@ struct SearchBarItem {
         !result.contains("Text.fontSize(13).fontColor"),
         "ArkUI attribute calls cannot be chained by their JavaScript return values:\n{result}"
     );
+}
+
+#[test]
+fn test_extend_body_reuses_component_attribute_pipeline() {
+    let src = r#"
+@Extend(Text)
+function baseText() {
+  .fontSize(13)
+}
+
+@Extend(Text)
+function statefulText() {
+  .baseText()
+  .stateStyles({
+    normal: {
+      .width(200)
+    }
+  })
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/components/ExtendStateStyles.ets",
+        src,
+    ))
+    .expect("@Extend stateStyles must use the normal attribute lowering pipeline");
+
+    assert!(result.contains("__Text__baseText();"), "{result}");
+    assert!(
+        result.contains("ViewStackProcessor.visualState(\"normal\");")
+            && result.contains("Text.width(200);")
+            && result.contains("ViewStackProcessor.visualState();"),
+        "{result}"
+    );
+    assert!(!result.contains("Text.stateStyles("), "{result}");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &result,
+        oxc_span::SourceType::ts().with_module(true),
+    )
+    .parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{:?}\n{result}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
+fn test_custom_component_local_storage_arguments_match_hvigor() {
+    let src = r#"
+let storage = new LocalStorage();
+
+@Component struct ComA { @Prop message: string; build() {} }
+@Component struct ComB { build() {} }
+@Component struct ComD { build() {} }
+@Component struct ComE { build() {} }
+
+@Component
+struct Host {
+  build() {
+    Column() {
+      ComA({ message: 'Hi' }, storage)
+      ComB({}, storage)
+      ComD(storage)
+      ComE()
+    }
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/LocalStorageParam.ets",
+        src,
+    ))
+    .expect("custom component LocalStorage call forms must transform");
+
+    assert!(
+        result.contains("new ComA(this, { message: 'Hi' }, storage, elmtId"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new ComB(this, {}, storage, elmtId"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new ComD(this, {}, storage, elmtId"),
+        "{result}"
+    );
+    assert!(
+        result.contains("new ComE(this, {}, undefined, elmtId"),
+        "{result}"
+    );
+}
+
+#[test]
+fn test_dynamic_provide_consume_keys_and_allow_override_match_hvigor() {
+    let src = r#"
+const token = 'theme';
+
+@Component
+struct ProviderHost {
+  @Provide({ allowOverride: token }) theme: string = 'dark';
+  @Consume(token) incoming: string;
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/DynamicProvider.ets",
+        src,
+    ))
+    .expect("dynamic provider and consumer keys must transform");
+
+    assert!(
+        result.contains("this.addProvidedVar(token, this.__theme, true);")
+            && result.contains("this.addProvidedVar(\"theme\", this.__theme, true);"),
+        "{result}"
+    );
+    assert!(
+        result.contains("this.initializeConsume(token, \"incoming\")"),
+        "{result}"
+    );
+}
+
+#[test]
+fn test_reusable_regular_member_attributes_are_initial_only() {
+    let src = r#"
+@Reusable
+@Component
+struct ReusableCard {
+  regular: number = 12;
+  @State reactive: number = 20;
+
+  build() {
+    Text('card')
+      .fontSize(this.regular)
+      .width(this.reactive)
+  }
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "entry/src/main/ets/pages/ReusableCard.ets",
+        src,
+    ))
+    .expect("reusable regular attributes must transform");
+
+    let width = result
+        .find("Text.width(this.reactive);")
+        .expect("reactive attr");
+    let initial = result
+        .find("if (isInitialRender) {")
+        .expect("initial guard");
+    let font_size = result
+        .find("Text.fontSize(this.regular);")
+        .expect("regular attr");
+    assert!(width < initial && initial < font_size, "{result}");
 }
 
 #[test]
@@ -6451,7 +6753,11 @@ function emptyAnimatable() {}
         "{output}"
     );
     assert!(
-        output.contains("function emptyAnimatable(elmtId, isInitialRender, parent): void {}"),
+        output.contains("function emptyAnimatable(elmtId, isInitialRender, parent) {}"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Polyline.backgroundColor(Color.Red);"),
         "{output}"
     );
     assert!(

@@ -361,6 +361,29 @@ struct Foo {
 }
 
 #[test]
+fn repeat_preserves_direct_state_data_member() {
+    let source = r#"@Component
+struct Foo {
+  @State items: object[] = []
+
+  build() {
+    Repeat(this.items).each(item => Text(item.item))
+  }
+}"#;
+    let out = parse_and_lower_with_raw_object_fields(
+        source,
+        &FxHashSet::from_iter(["items".to_string()]),
+    )
+    .unwrap();
+
+    assert!(out.contains("Repeat(this.items, this)"), "{out}");
+    assert!(
+        !out.contains("Repeat(ObservedObject.GetRawObject(this.items)"),
+        "Repeat data must follow the SDK's source-node reuse semantics:\n{out}"
+    );
+}
+
+#[test]
 fn lowers_regular_builder_object_argument_with_hvigor_proxy() {
     let source = r#"@Component
 struct Foo {
@@ -1702,6 +1725,61 @@ struct Foo {
 }
 
 #[test]
+fn lowers_for_each_chain_attributes_before_the_item_generator() {
+    let source = r#"@Component
+struct Foo {
+  items: string[] = [];
+
+  build() {
+    ForEach(this.items, item => {
+      Text(item)
+    }, item => item).onMove((from, to) => {})
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    let create = out.find("ForEach.create();").expect("ForEach.create");
+    let on_move = out.find("ForEach.onMove(").expect("ForEach.onMove");
+    let generator = out
+        .find("const forEachItemGenFunction")
+        .expect("ForEach item generator");
+    let text = out.find("Text.create(item);").expect("item child");
+
+    assert!(
+        create < on_move && on_move < generator && generator < text,
+        "ForEach attributes must be emitted between create and item generation:\n{out}"
+    );
+    assert!(
+        !out.contains("ForEach.create(this.items"),
+        "ForEach data and callbacks belong to the update call, not create:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_lazy_for_each_chain_attributes_after_create() {
+    let source = r#"@Component
+struct Foo {
+  data: Object;
+
+  build() {
+    LazyForEach(this.data, item => {
+      ListItem() {
+        Text(item)
+      }
+    }, item => item).onMove((from, to) => {})
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    let create = out.find("LazyForEach.create(").expect("LazyForEach.create");
+    let on_move = out.find("LazyForEach.onMove(").expect("LazyForEach.onMove");
+    let pop = out.find("LazyForEach.pop();").expect("LazyForEach.pop");
+
+    assert!(
+        create < on_move && on_move < pop,
+        "LazyForEach attributes must be emitted after create and before pop:\n{out}"
+    );
+}
+
+#[test]
 fn lowers_minimal_fixture_build_body_from_oxc_arkui_ast() {
     let source = r#"
 @Entry
@@ -2025,6 +2103,20 @@ struct Foo {
 }
 
 #[test]
+fn custom_component_with_only_id_uses_retake_aware_common_create() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    MyCard({ title: "hello" }).id("stable-card")
+  }
+}"#;
+    let out = parse_and_lower_with_custom_components(source, &["MyCard"]).unwrap();
+
+    assert!(out.contains("__Common__.create(true);"), "{out}");
+    assert!(out.contains("__Common__.id(\"stable-card\");"), "{out}");
+}
+
+#[test]
 fn custom_component_animation_attribute_uses_context_animation() {
     let source = r#"@Component
 struct Foo {
@@ -2128,6 +2220,25 @@ struct Foo {
         out.contains("isUserCreateStack: true"),
         "Navigation(this.stack) must mark a user-created stack even when the body is empty; got:\n{out}"
     );
+}
+
+#[test]
+fn navigation_without_stack_synthesizes_nav_path_stack() {
+    let source = r#"@Component
+struct Foo {
+  build() {
+    Navigation() {}
+  }
+}"#;
+    let out =
+        parse_and_lower_with_module(source, "features/nav/DefaultNavPage.ets", "entry").unwrap();
+
+    assert!(
+        out.contains("Navigation.create(new NavPathStack(),"),
+        "{out}"
+    );
+    assert!(out.contains("isUserCreateStack: false"), "{out}");
+    assert!(!out.contains("Navigation.create(() => {}"), "{out}");
 }
 
 #[test]
