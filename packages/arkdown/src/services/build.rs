@@ -2,7 +2,6 @@ pub mod app_coordinator;
 mod bundle_plan;
 mod bytecode_har_declaration;
 pub mod coordinator;
-mod coverage_instrument;
 mod device_test;
 mod har_dedup;
 #[cfg(test)]
