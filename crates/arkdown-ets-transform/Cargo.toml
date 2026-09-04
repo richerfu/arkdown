@@ -16,6 +16,7 @@ rustc-hash = { workspace = true }
 rayon = { workspace = true }
 tracing = { workspace = true }
 fs-err = { workspace = true }
+walkdir = { workspace = true }
 # OXC parser/transformer for ArkTS source processing
 # Uses ohos-rs/oxc fork with .ets StructStatement support
 oxc_allocator = { workspace = true }
@@ -23,6 +24,7 @@ oxc_str = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_codegen = { workspace = true }
+oxc_isolated_declarations = { workspace = true }
 oxc_semantic = { workspace = true }
 oxc_transformer = { workspace = true }
 oxc_span = { workspace = true }

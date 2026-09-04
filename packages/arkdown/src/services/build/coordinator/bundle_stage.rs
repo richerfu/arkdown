@@ -1037,14 +1037,16 @@ impl BuildCoordinator {
       )
       .execute()?;
       if matches!(module.module_type, OhosModuleType::Shared) {
-        HarDeclarationGenerator::new_hsp(
+        let declaration_packages =
+          HarDeclarationDependencyPackageInventory::new(&module_context.deps).collect();
+        HarDeclarationGenerator::new(
           &module.src_path,
-          &module_config.product.name,
           &module_layout.source().ets(),
+          module_layout.declarations_dir(),
           &module.name,
         )
         .with_arkts_language_version(self.session.arkts_language_version)
-        .with_dependency_graph(&module_context.deps)
+        .with_dependency_declaration_packages(declaration_packages)
         .with_package_bundled_declarations(
           module_build_option
             .ark_options

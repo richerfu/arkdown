@@ -4,9 +4,6 @@ mod bytecode_har_declaration;
 pub mod coordinator;
 mod coverage_instrument;
 mod device_test;
-mod generate_har_declarations;
-#[cfg(test)]
-mod generate_har_declarations_tests;
 mod har_dedup;
 #[cfg(test)]
 mod har_dedup_tests;

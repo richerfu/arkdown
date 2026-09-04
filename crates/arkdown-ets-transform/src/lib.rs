@@ -24,6 +24,7 @@ mod api_transform;
 mod checker;
 pub mod declaration_merge;
 pub mod error;
+mod har_declaration;
 mod kit_map;
 mod lazy_import;
 mod module_emit;
@@ -41,6 +42,7 @@ mod visual_codegen;
 
 // Narrow re-exports per spec (lib.rs only re-exports, no new business functions).
 pub use checker::{ArktsSourceChecker, EtsCheckReport, EtsChecker};
+pub use har_declaration::HarDeclarationGenerator;
 pub use module_rewrite::{ModuleAnalyzerKind, StaticModuleSpecifierRewrite};
 pub use resource_transform::{
     ResourceModuleReference, ResourceReference, ResourceTransformContext,
