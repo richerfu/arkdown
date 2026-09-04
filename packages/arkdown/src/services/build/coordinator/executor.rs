@@ -2090,15 +2090,17 @@ impl BuildCoordinator {
           .map(|package| package.name.as_str())
           .filter(|name| !name.is_empty())
           .unwrap_or(&module.name);
-        let preview = crate::services::build::preview::PreviewAssetProcessor::new(
-          &project_root,
-          &module.src_path,
-          &module.name,
-          &module.module_type,
-          &module_config.product.name,
-          &module_target_name,
-          &manifest.compile_mode,
-          package_name,
+        let preview = arkdown_build::preview::PreviewAssetProcessor::new(
+          arkdown_build::preview::PreviewAssetProcessorInput {
+            project_root: &project_root,
+            module_root: &module.src_path,
+            module_name: &module.name,
+            module_type: &module.module_type,
+            product_name: &module_config.product.name,
+            target_name: &module_target_name,
+            compile_mode: &manifest.compile_mode,
+            package_name,
+          },
         );
         if preview_incremental_resources
           && task_lifecycle
@@ -2319,15 +2321,17 @@ impl BuildCoordinator {
             .map(|package| package.name.as_str())
             .filter(|name| !name.is_empty())
             .unwrap_or(&module.name);
-          crate::services::build::preview::PreviewAssetProcessor::new(
-            &project_root,
-            &module.src_path,
-            &module.name,
-            &module.module_type,
-            &module_config.product.name,
-            &module_target_name,
-            &manifest.compile_mode,
-            package_name,
+          arkdown_build::preview::PreviewAssetProcessor::new(
+            arkdown_build::preview::PreviewAssetProcessorInput {
+              project_root: &project_root,
+              module_root: &module.src_path,
+              module_name: &module.name,
+              module_type: &module.module_type,
+              product_name: &module_config.product.name,
+              target_name: &module_target_name,
+              compile_mode: &manifest.compile_mode,
+              package_name,
+            },
           )
           .update_assets()?;
           task_lifecycle
