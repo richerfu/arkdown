@@ -59,10 +59,6 @@ use arkdown_session::{
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
-use super::hot_reload::{
-  HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
-  ReloadResourceTaskPlan,
-};
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
 };
@@ -91,6 +87,10 @@ use arkdown_build::bundle_plan::{
 };
 use arkdown_build::code_resource::CodeResourceCopyPlan;
 use arkdown_build::har_dedup::HarDedupProjectPlan;
+use arkdown_build::hot_reload::{
+  HotReloadCompileInput, HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary,
+  HotReloadTaskPlan, ReloadResourceTaskPlan,
+};
 use arkdown_build::intermediates::{
   IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, ResourceConfigInput,
   SourceMapPackageHandoff,

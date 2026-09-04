@@ -148,15 +148,15 @@ impl BuildCoordinator {
         .collect::<Result<Vec<_>>>()?;
       let hot_reload_compile_plan = if hot_reload_task_plan.is_some() {
         let hot_reload = HotReloadProcessor::new(&module_layout, &project_root);
-        hot_reload.compile_plan(
-          loader_json.patch_config.as_ref(),
-          &loader_json.compile_mode,
-          config.sdk_config.compile_api_version,
-          args.watch_invalidation.is_some(),
-          &bundle_out.bundle_output.module_source_files,
-          &bundle_out.bundle_output.modules_abc_path,
-          bundle_out.bundle_output.source_maps_path.as_deref(),
-        )?
+        hot_reload.compile_plan(HotReloadCompileInput {
+          patch_config: loader_json.patch_config.as_ref(),
+          compile_mode: &loader_json.compile_mode,
+          compile_api: config.sdk_config.compile_api_version,
+          incremental: args.watch_invalidation.is_some(),
+          module_source_files: &bundle_out.bundle_output.module_source_files,
+          base_modules_abc_path: &bundle_out.bundle_output.modules_abc_path,
+          source_maps_path: bundle_out.bundle_output.source_maps_path.as_deref(),
+        })?
       } else {
         None
       };

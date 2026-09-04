@@ -173,6 +173,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkdown",
+ "arkdown-abc",
  "arkdown-config",
  "arkdown-core",
  "arkdown-ets-transform",
@@ -185,6 +186,7 @@ dependencies = [
  "fast-glob",
  "fs-err",
  "globset",
+ "indexmap",
  "json5",
  "jsonschema",
  "rayon",
