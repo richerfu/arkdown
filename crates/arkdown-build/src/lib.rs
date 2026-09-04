@@ -5,6 +5,7 @@
 //! exposing argv/process lifecycle behavior.
 
 pub mod bundle_plan;
+pub mod check;
 pub mod clean;
 #[cfg(test)]
 mod clean_tests;
