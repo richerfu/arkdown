@@ -172,13 +172,23 @@ name = "arkdown-build"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arkdown",
  "arkdown-core",
+ "arkdown-pack",
+ "arkdown-path",
+ "arkdown-profile",
  "arkdown-session",
+ "fast-glob",
+ "fs-err",
+ "globset",
  "json5",
  "jsonschema",
  "rustc-hash 2.1.3",
+ "serde",
  "serde_json",
  "tempfile",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]

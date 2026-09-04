@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use super::coordinator::PackInfoFormResourceResolver;
 use super::device_test::DeviceTestExecutionPlan;
-use super::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
+use arkdown_build::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
 use arkdown_build::layout::ModuleBuildLayout;
 
 #[test]
