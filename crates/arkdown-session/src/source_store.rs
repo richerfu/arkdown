@@ -173,6 +173,13 @@ impl VisualSourceInventory {
             .unwrap_or_default()
     }
 
+    /// Return all source/Visual associations in deterministic path order.
+    pub fn sources(&self) -> impl Iterator<Item = (&Path, &Path)> {
+        self.ets_to_visual
+            .iter()
+            .map(|(source, visual)| (source.as_path(), visual.as_path()))
+    }
+
     fn insert(&mut self, visual_path: &std::path::Path) {
         let mut source_path = PathBuf::new();
         let mut replaced = false;
@@ -496,6 +503,11 @@ impl SourceStore {
     pub fn visual_files_for_source(&self, ets_path: &std::path::Path) -> Vec<&PathBuf> {
         self.visuals
             .visual_files_for_source(&self.lookup_path(ets_path))
+    }
+
+    /// Return startup-captured Visual associations in deterministic order.
+    pub fn visual_sources(&self) -> impl Iterator<Item = (&Path, &Path)> {
+        self.visuals.sources()
     }
 
     /// Return the worker entry inventory.

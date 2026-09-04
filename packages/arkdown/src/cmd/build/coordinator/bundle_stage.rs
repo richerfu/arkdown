@@ -644,8 +644,7 @@ impl BuildCoordinator {
       };
       let visual_sources = if is_incremental_watch && !session.arkts_language_version.is_static() {
         VisualCodegenAdapter::new(
-          &args.resolved_node_executable(),
-          &config.sdk_config.ets_loader_path,
+          &session.source_store,
           &all_module_roots,
           &dependency_source_roots,
         )

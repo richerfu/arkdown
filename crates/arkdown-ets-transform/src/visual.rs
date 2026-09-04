@@ -1,8 +1,7 @@
-//! OXC-owned insertion of SDK-generated Visual/SuperVisual ArkTS fragments.
+//! OXC-owned insertion of native Visual/SuperVisual ArkTS fragments.
 //!
-//! The SDK's `codegen_ets.js::genETS` remains a JavaScript compatibility
-//! boundary because the generator is shipped as a JavaScript SDK artifact.
-//! Discovery, validation, insertion ordering, and compilation remain in Rust.
+//! `.visual` decoding and fragment generation are implemented in Rust. This
+//! pass locates the ArkTS struct and inserts those fragments using OXC spans.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -14,8 +13,9 @@ use oxc_span::{GetSpan, SourceType};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EtsTransformError;
+use crate::source_map::{offset_to_line_col, EtsSourceMapBuilder, MapEntry};
 
-/// ArkTS fragments returned by the SDK `genETS` compatibility module.
+/// ArkTS fragments generated from a Visual document.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisualGeneratedSource {
@@ -37,6 +37,12 @@ pub(crate) struct VisualSourceInjector<'a> {
     generated: &'a VisualGeneratedSource,
 }
 
+#[derive(Debug)]
+pub(crate) struct VisualSourceTransform {
+    pub(crate) code: String,
+    pub(crate) source_map: String,
+}
+
 impl<'a> VisualSourceInjector<'a> {
     pub(crate) fn new(source: &'a str, id: &'a str, generated: &'a VisualGeneratedSource) -> Self {
         Self {
@@ -46,7 +52,7 @@ impl<'a> VisualSourceInjector<'a> {
         }
     }
 
-    pub(crate) fn transform(&self) -> Result<Option<String>, EtsTransformError> {
+    pub(crate) fn transform(&self) -> Result<Option<VisualSourceTransform>, EtsTransformError> {
         if self.generated == &VisualGeneratedSource::default() {
             return Ok(None);
         }
@@ -65,6 +71,7 @@ impl<'a> VisualSourceInjector<'a> {
 #[derive(Debug)]
 struct VisualInsertion {
     offset: usize,
+    original_line: u32,
     sequence: usize,
     content: String,
 }
@@ -126,7 +133,7 @@ impl<'a> VisualInsertionPlan<'a> {
         self.validate_empty_build(build)?;
 
         if !self.generated.ets_import.is_empty() {
-            self.push(0, format!("{}\n", self.generated.ets_import));
+            self.push_at_line(0, 0, format!("{}\n", self.generated.ets_import));
         }
         let fields = format!(
             "{}{}",
@@ -209,15 +216,21 @@ impl<'a> VisualInsertionPlan<'a> {
     }
 
     fn push(&mut self, offset: usize, content: String) {
+        let original_line = offset_to_line_col(self.source, offset as u32).0 + 1;
+        self.push_at_line(offset, original_line, content);
+    }
+
+    fn push_at_line(&mut self, offset: usize, original_line: u32, content: String) {
         self.insertions.push(VisualInsertion {
             offset,
+            original_line,
             sequence: self.sequence,
             content,
         });
         self.sequence += 1;
     }
 
-    fn apply(mut self) -> Result<Option<String>, EtsTransformError> {
+    fn apply(mut self) -> Result<Option<VisualSourceTransform>, EtsTransformError> {
         if !self.saw_struct || self.insertions.is_empty() {
             return Ok(None);
         }
@@ -232,6 +245,20 @@ impl<'a> VisualInsertionPlan<'a> {
                     .sum::<usize>(),
         );
         let mut cursor = 0;
+        let shifts = self
+            .insertions
+            .iter()
+            .map(|insertion| {
+                (
+                    insertion.original_line,
+                    insertion
+                        .content
+                        .bytes()
+                        .filter(|byte| *byte == b'\n')
+                        .count() as u32,
+                )
+            })
+            .collect::<Vec<_>>();
         for insertion in self.insertions {
             let offset = insertion.offset.min(self.source.len());
             if offset < cursor || !self.source.is_char_boundary(offset) {
@@ -245,7 +272,31 @@ impl<'a> VisualInsertionPlan<'a> {
             cursor = offset;
         }
         output.push_str(&self.source[cursor..]);
-        Ok(Some(output))
+        let entries = self
+            .source
+            .split('\n')
+            .enumerate()
+            .map(|(source_line, _)| {
+                let original_line = source_line as u32 + 1;
+                let inserted_lines = shifts
+                    .iter()
+                    .filter(|(insertion_line, _)| original_line > *insertion_line)
+                    .map(|(_, lines)| *lines)
+                    .sum::<u32>();
+                MapEntry {
+                    generated_line: (original_line + inserted_lines - 1) as usize,
+                    generated_col: 0,
+                    src_line: source_line as u32,
+                    src_col: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let source_map =
+            EtsSourceMapBuilder::new(self.id, output.lines().count(), &entries).build();
+        Ok(Some(VisualSourceTransform {
+            code: output,
+            source_map,
+        }))
     }
 }
 
@@ -270,12 +321,18 @@ mod tests {
             .expect("visual transform")
             .expect("visual output");
 
-        assert!(output.starts_with("import mediaquery"));
-        assert!(output.contains("private listener"));
-        assert!(output.contains("aboutToAppear()"));
-        assert!(output.contains("build() {\n    Column()\n}"));
-        assert!(output.find("private listener").unwrap() < output.find("aboutToAppear").unwrap());
-        assert!(output.find("aboutToAppear").unwrap() < output.find("build()").unwrap());
+        assert!(output.code.starts_with("import mediaquery"));
+        assert!(output.code.contains("private listener"));
+        assert!(output.code.contains("aboutToAppear()"));
+        assert!(output.code.contains("build() {\n    Column()\n}"));
+        assert!(
+            output.code.find("private listener").unwrap()
+                < output.code.find("aboutToAppear").unwrap()
+        );
+        assert!(output.code.find("aboutToAppear").unwrap() < output.code.find("build()").unwrap());
+        let source_map: serde_json::Value =
+            serde_json::from_str(&output.source_map).expect("Visual source map");
+        assert_eq!(source_map["sources"][0], "Index.ets");
     }
 
     #[test]
