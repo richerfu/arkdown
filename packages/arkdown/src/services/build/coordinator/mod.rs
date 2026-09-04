@@ -32,13 +32,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_abc::aot::AotArtifactWriter;
 use arkdown_abc::bytecode::{
-  BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompiler,
+  BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompileInput,
+  RolldownBytecodeCompiler,
 };
 use arkdown_build::pre_build::PreBuildValidator;
 use arkdown_core::{
   ArkdownConfig, ArktsLanguageVersion, BuildMode, HapManifest, HarArtifactType, ModuleConfig,
   ObfuscationConfig, OhosModuleType, OutputTarget,
 };
+use arkdown_pack::PackingCheck;
 use arkdown_path::{
   canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, HvigorSourceFileFilter,
   NormalizedOhmUrl,
@@ -61,8 +63,6 @@ use super::bundle_plan::{
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
 };
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
-use super::bytecode_stage::{BytecodeStage, BytecodeStageInput};
-use super::code_resource::CodeResourceCopyPlan;
 use super::coverage_instrument::CoverageInstrumenter;
 use super::generate_har_declarations::HarDeclarationGenerator;
 use super::har_dedup::HarDedupProjectPlan;
@@ -74,7 +74,6 @@ use super::hot_reload::{
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
 };
-use super::packing_check::PackingCheck;
 use super::preload_system_so::{PreloadSystemSoArtifactWriter, PreloadSystemSoPlan};
 use super::quickfix::{
   ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
@@ -96,6 +95,7 @@ use arkdown::{
   CrossplatformCollectionWriter, PluginCacheModuleInventory, ShouldInvalidCacheRequest,
   SourceMapPolicy,
 };
+use arkdown_build::code_resource::CodeResourceCopyPlan;
 use arkdown_build::intermediates::{
   IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, ResourceConfigInput,
   SourceMapPackageHandoff,

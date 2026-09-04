@@ -2,6 +2,7 @@ pub mod app;
 pub mod error;
 pub mod integrated_hsp;
 pub mod packager;
+pub mod packing_check;
 pub mod plan;
 pub mod zip_writer;
 
@@ -21,6 +22,7 @@ pub use packager::{
     HarPackInput, HarPackageParameterInput, HarVariantInput, HspInterfaceHarInput, HspTgzInput,
     PackInfoInput, PackInfoModuleInput, PackInput, Packager,
 };
+pub use packing_check::PackingCheck;
 pub use plan::{
     PackageEntry, PackageEntrySource, PackageKind, PackageOutput, PackagePlan, PackageToolMode,
 };
@@ -32,8 +34,8 @@ mod tests {
     use std::sync::Arc;
 
     use arkdown_core::{
-        ArkdownConfig, BuildMode, BuildOption, NativeLibOption, OutputTarget, ProductConfig,
-        SdkConfig, StrictModeConfig,
+        ArkdownConfig, BuildMode, BuildOption, CompileMode, ExtensionAbilityEntry, HapManifest,
+        ModuleConfig, NativeLibOption, OutputTarget, ProductConfig, SdkConfig, StrictModeConfig,
     };
 
     use super::*;
@@ -465,5 +467,67 @@ mod tests {
             .read_to_string(&mut privacy_entry)
             .unwrap();
         assert_eq!(privacy_entry, r#"{"dataProcess":[],"specialAPIs":[]}"#);
+    }
+
+    #[test]
+    fn packing_check_requires_native_extension_entry_for_default_abi() {
+        let temp = tempfile::tempdir().expect("temporary packing layout");
+        let module_root = temp.path().join("entry");
+        let module_json = module_root.join("src/main/module.json5");
+        let config = make_config();
+        let module = ModuleConfig {
+            name: "entry".to_string(),
+            src_path: module_root,
+            module_type: arkdown_core::OhosModuleType::Entry,
+        };
+        let manifest = HapManifest {
+            module_name: "entry".to_string(),
+            module_type: arkdown_core::OhosModuleType::Entry,
+            device_types: Vec::new(),
+            virtual_machine: "ark12.0.6.0".to_string(),
+            compile_mode: CompileMode::EsModule,
+            abilities: Vec::new(),
+            extension_abilities: vec![ExtensionAbilityEntry {
+                name: "NativeAbility".to_string(),
+                src_entry: "libability.so".to_string(),
+                extension_type: "service".to_string(),
+                label: None,
+                description: None,
+                metadata: Vec::new(),
+            }],
+            dependencies: Vec::new(),
+            router_map: None,
+            pages: None,
+            main_element: None,
+            description: None,
+            src_entry: None,
+        };
+        let stripped = temp.path().join("stripped_native_libs");
+        let check = PackingCheck::new(
+            &config,
+            &module,
+            &manifest,
+            temp.path().join("loader_out"),
+            stripped.clone(),
+            temp.path().join("resources"),
+        );
+
+        let error = check
+            .validate()
+            .expect_err("missing extension ability library must fail packing");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "MODULE_SRC_ENTRY_NOT_FOUND: 'libability.so' is not present under stripped_native_libs/arm64-v8a (referenced by {})",
+                module_json.display()
+            )
+        );
+
+        fs::create_dir_all(stripped.join("arm64-v8a")).expect("create stripped ABI directory");
+        fs::write(stripped.join("arm64-v8a/libability.so"), b"native")
+            .expect("write extension ability library");
+        check
+            .validate()
+            .expect("present extension ability library must pass packing");
     }
 }

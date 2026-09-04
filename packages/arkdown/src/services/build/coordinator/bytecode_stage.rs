@@ -274,8 +274,8 @@ impl BuildCoordinator {
         .compile()
       } else if let Some(reload_plan) = hot_reload_compile_plan.as_ref() {
         let initial = reload_plan.phase == HotReloadCompilePhase::Initial;
-        BytecodeStage::run(BytecodeStageInput {
-          compiler: RolldownBytecodeCompiler::new(
+        Self::compile_bytecode(
+          RolldownBytecodeCompiler::new(
             abc_ts2abc_backend_inner,
             config.sdk_config.es2abc_path.clone(),
             Arc::clone(&session.sdk.es2abc_options),
@@ -286,25 +286,27 @@ impl BuildCoordinator {
           .with_branch_elimination(false)
           .with_transform_lib(transform_lib.clone())
           .with_reload(Some(reload_plan.reload.clone())),
-          module_source_files: reload_plan.module_source_files.clone(),
-          external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
-          npm_entries: bundle_out.bundle_output.npm_entries.clone(),
-          modules_abc_path: reload_plan.modules_abc_path.clone(),
-          cache_dir: bytecode_cache_dir.clone(),
-          cache_file: effective_cache_file.clone(),
-          abc_input_files: if initial {
-            abc_input_files.clone()
-          } else {
-            Vec::new()
+          RolldownBytecodeCompileInput {
+            module_source_files: reload_plan.module_source_files.clone(),
+            external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
+            npm_entries: bundle_out.bundle_output.npm_entries.clone(),
+            modules_abc_path: reload_plan.modules_abc_path.clone(),
+            cache_dir: bytecode_cache_dir.clone(),
+            cache_file: effective_cache_file.clone(),
+            abc_input_files: if initial {
+              abc_input_files.clone()
+            } else {
+              Vec::new()
+            },
+            compile_context_info_path: compile_context_info_path.clone(),
+            byte_code_har: initial && loader_json.byte_code_har.unwrap_or(false),
           },
-          compile_context_info_path: compile_context_info_path.clone(),
-          byte_code_har: initial && loader_json.byte_code_har.unwrap_or(false),
-        })
+        )
       } else if hot_reload_task_plan.is_some() {
         Ok(())
       } else if let Some(reload_plan) = cold_reload_plan.as_ref() {
-        BytecodeStage::run(BytecodeStageInput {
-          compiler: RolldownBytecodeCompiler::new(
+        Self::compile_bytecode(
+          RolldownBytecodeCompiler::new(
             abc_ts2abc_backend_inner,
             config.sdk_config.es2abc_path.clone(),
             Arc::clone(&session.sdk.es2abc_options),
@@ -315,21 +317,23 @@ impl BuildCoordinator {
           .with_branch_elimination(false)
           .with_transform_lib(transform_lib.clone())
           .with_reload(Some(reload_plan.reload.clone())),
-          module_source_files: reload_plan.module_source_files.clone(),
-          external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
-          npm_entries: bundle_out.bundle_output.npm_entries.clone(),
-          modules_abc_path: reload_plan.modules_abc_path.clone(),
-          cache_dir: bytecode_cache_dir.clone(),
-          cache_file: effective_cache_file.clone(),
-          abc_input_files: Vec::new(),
-          compile_context_info_path: compile_context_info_path.clone(),
-          byte_code_har: false,
-        })
+          RolldownBytecodeCompileInput {
+            module_source_files: reload_plan.module_source_files.clone(),
+            external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
+            npm_entries: bundle_out.bundle_output.npm_entries.clone(),
+            modules_abc_path: reload_plan.modules_abc_path.clone(),
+            cache_dir: bytecode_cache_dir.clone(),
+            cache_file: effective_cache_file.clone(),
+            abc_input_files: Vec::new(),
+            compile_context_info_path: compile_context_info_path.clone(),
+            byte_code_har: false,
+          },
+        )
       } else if quickfix_task_plan.is_some() {
         Ok(())
       } else {
-        BytecodeStage::run(BytecodeStageInput {
-          compiler: RolldownBytecodeCompiler::new(
+        Self::compile_bytecode(
+          RolldownBytecodeCompiler::new(
             abc_ts2abc_backend_inner,
             config.sdk_config.es2abc_path.clone(),
             Arc::clone(&session.sdk.es2abc_options),
@@ -339,16 +343,18 @@ impl BuildCoordinator {
           .with_target_api_sub_version(compile_target.api_sub_version())
           .with_branch_elimination(branch_elimination)
           .with_transform_lib(transform_lib.clone()),
-          module_source_files: bundle_out.bundle_output.module_source_files.clone(),
-          external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
-          npm_entries: bundle_out.bundle_output.npm_entries.clone(),
-          modules_abc_path: bundle_out.bundle_output.modules_abc_path.clone(),
-          cache_dir: bytecode_cache_dir,
-          cache_file: effective_cache_file,
-          abc_input_files: abc_input_files.clone(),
-          compile_context_info_path,
-          byte_code_har: loader_json.byte_code_har.unwrap_or(false),
-        })
+          RolldownBytecodeCompileInput {
+            module_source_files: bundle_out.bundle_output.module_source_files.clone(),
+            external_module_requests: bundle_out.bundle_output.external_module_requests.clone(),
+            npm_entries: bundle_out.bundle_output.npm_entries.clone(),
+            modules_abc_path: bundle_out.bundle_output.modules_abc_path.clone(),
+            cache_dir: bytecode_cache_dir,
+            cache_file: effective_cache_file,
+            abc_input_files: abc_input_files.clone(),
+            compile_context_info_path,
+            byte_code_har: loader_json.byte_code_har.unwrap_or(false),
+          },
+        )
       };
       // On ABC compile failure, remove the task-inputs cache so the next build
       // is forced to recompile (mirrors hvigor's removeCompileFailedFilesFromCache).
@@ -482,8 +488,8 @@ impl BuildCoordinator {
         } else {
           None
         };
-        BytecodeStage::run(BytecodeStageInput {
-          compiler: RolldownBytecodeCompiler::new(
+        Self::compile_bytecode(
+          RolldownBytecodeCompiler::new(
             abc_ts2abc_backend_inner,
             config.sdk_config.es2abc_path.clone(),
             Arc::clone(&session.sdk.es2abc_options),
@@ -493,24 +499,26 @@ impl BuildCoordinator {
           .with_target_api_sub_version(compile_target.api_sub_version())
           .with_branch_elimination(branch_elimination)
           .with_transform_lib(transform_lib.clone()),
-          module_source_files: widget_out
-            .bundle_out
-            .bundle_output
-            .module_source_files
-            .clone(),
-          external_module_requests: widget_out
-            .bundle_out
-            .bundle_output
-            .external_module_requests
-            .clone(),
-          npm_entries: widget_out.bundle_out.bundle_output.npm_entries.clone(),
-          modules_abc_path: widget_out.plan.modules_abc_path.clone(),
-          cache_dir: widget_out.plan.cache_dir.clone(),
-          cache_file: Some(widget_out.plan.cache_file.clone()),
-          abc_input_files: widget_abc_input_files,
-          compile_context_info_path: widget_compile_context_info_path,
-          byte_code_har: widget_loader_json.byte_code_har.unwrap_or(false),
-        })?;
+          RolldownBytecodeCompileInput {
+            module_source_files: widget_out
+              .bundle_out
+              .bundle_output
+              .module_source_files
+              .clone(),
+            external_module_requests: widget_out
+              .bundle_out
+              .bundle_output
+              .external_module_requests
+              .clone(),
+            npm_entries: widget_out.bundle_out.bundle_output.npm_entries.clone(),
+            modules_abc_path: widget_out.plan.modules_abc_path.clone(),
+            cache_dir: widget_out.plan.cache_dir.clone(),
+            cache_file: Some(widget_out.plan.cache_file.clone()),
+            abc_input_files: widget_abc_input_files,
+            compile_context_info_path: widget_compile_context_info_path,
+            byte_code_har: widget_loader_json.byte_code_har.unwrap_or(false),
+          },
+        )?;
       }
 
       if bundle_out.bundle_output.source_maps_path.is_some() {
@@ -738,5 +746,15 @@ impl BuildCoordinator {
       early_output: None,
       bundle_package_outs,
     })
+  }
+
+  fn compile_bytecode(
+    compiler: RolldownBytecodeCompiler,
+    input: RolldownBytecodeCompileInput,
+  ) -> Result<()> {
+    compiler
+      .compile(input)
+      .map(drop)
+      .map_err(|error| anyhow::anyhow!("bytecode stage failed: {error}"))
   }
 }

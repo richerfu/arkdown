@@ -198,7 +198,7 @@ impl BuildCoordinator {
         &module_pack_info_plans,
       )?;
       for (
-        ((module, _, loader_json, _, module_target_name, module_config), (package_out,)),
+        ((module, manifest, loader_json, _, module_target_name, module_config), (package_out,)),
         (enabled, fast_task_name),
       ) in loader_jsons
         .iter()
@@ -224,7 +224,8 @@ impl BuildCoordinator {
           PackingCheck::new(
             module_config,
             module,
-            loader_json,
+            manifest,
+            PathBuf::from(&loader_json.ace_module_build),
             module_layout.stripped_native_libs_dir(),
             module_layout.res_default_dir(),
           )
@@ -1457,7 +1458,8 @@ impl BuildCoordinator {
             let packing_check = PackingCheck::new(
               config,
               module,
-              loader_json,
+              manifest,
+              PathBuf::from(&loader_json.ace_module_build),
               module_layout.stripped_native_libs_dir(),
               module_layout.res_default_dir(),
             );
