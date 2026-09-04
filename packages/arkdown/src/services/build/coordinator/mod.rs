@@ -52,7 +52,6 @@ use arkdown_session::{BuildSession, ModuleCompileContext, ProjectSnapshot, SdkTo
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
 use super::native_stage::NativeDependencyStageExecutor;
-use super::static_arkts::{StaticArktsCompileInput, StaticArktsCompiler};
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
@@ -96,6 +95,7 @@ use arkdown_build::quickfix::{
 use arkdown_build::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
 use arkdown_build::request::{AbcBackendChoice, BuildRequest, NativeTaskRoot};
 use arkdown_build::source_snapshot::TransformSourceSnapshotBuilder;
+use arkdown_build::static_arkts::{StaticArktsCompileInput, StaticArktsCompiler};
 
 use crate::progress::Progress;
 use arkdown_build::package_resolution::{
