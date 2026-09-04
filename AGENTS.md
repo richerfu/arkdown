@@ -47,7 +47,7 @@ Use Cargo directly; there is no `justfile`.
 
 The only executable command-line entry is `packages/arkdown/js/arkdown-cli.js`, published through the npm `bin` field. JavaScript owns argv parsing, help/version text, stdout/stderr, exit codes, and TS/JS plugin compatibility. Project discovery, build plans, transforms, caches, SDK commands, artifacts, checking, and cleaning remain Rust-owned behind typed N-API services.
 
-Rust must not expose a command-line interface: do not add Rust `[[bin]]` targets, `main.rs`, Clap dependencies/derives, argv parsers, or N-API functions such as `parse*CliArgs`. The N-API boundary may expose typed service requests such as `build`, `check`, and `clean`; those are not CLI APIs. Entrypoint changes must preserve the architecture deletion test in `packages/arkdown/__test__/runtime-architecture.test.cjs`.
+Rust must not expose a command-line interface: do not add Rust `[[bin]]` targets, `main.rs`, Clap dependencies/derives, argv parsers, CLI install modes, or N-API functions such as `parse*CliArgs`. Do not recreate public process-monitor, runtime-report persistence, or CLI observability lifecycle facades in Rust; build diagnostics and internal structured tracing belong to the typed service implementation, while their CLI presentation and process lifecycle belong to JavaScript. The N-API boundary may expose typed service requests such as `build`, `check`, and `clean`; those are not CLI APIs. Entrypoint changes must preserve the architecture deletion test in `packages/arkdown/__test__/runtime-architecture.test.cjs`.
 
 ## Coding Style & Naming Conventions
 

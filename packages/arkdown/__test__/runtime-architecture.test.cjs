@@ -117,11 +117,18 @@ test('the npm JavaScript file is the only CLI entrypoint', () => {
   const napi = fs.readFileSync(path.join(packageRoot, 'src/lib.rs'), 'utf8')
   const declarations = fs.readFileSync(path.join(packageRoot, 'index.d.ts'), 'utf8')
   const cli = fs.readFileSync(path.join(packageRoot, 'js/arkdown-cli.js'), 'utf8')
+  const observability = fs.readFileSync(path.join(packageRoot, 'src/runtime_observe/observability.rs'), 'utf8')
 
   assert.equal(fs.existsSync(path.join(packageRoot, 'src/main.rs')), false)
+  assert.equal(fs.existsSync(path.join(packageRoot, 'src/runtime_observe/napi.rs')), false)
+  assert.equal(fs.existsSync(path.join(packageRoot, 'src/runtime_observe/process_monitor.rs')), false)
   assert.doesNotMatch(manifest, /\[\[bin\]\]|clap\s*=/)
   assert.doesNotMatch(workspaceManifest, /^clap\s*=/m)
   assert.doesNotMatch(napi, /parse_arkdown_.*cli_args|clap::/)
-  assert.doesNotMatch(declarations, /parseArkdown.*CliArgs/)
+  assert.doesNotMatch(observability, /install_cli|ObservabilityMode::Cli|FormatStyle::Cli/)
+  assert.doesNotMatch(
+    declarations,
+    /parseArkdown.*CliArgs|installRuntimeObservability|RuntimeProcessMonitor|runtimeHvigorReportSnapshot/,
+  )
   assert.match(cli, /class JsCliArgumentParser/)
 })
