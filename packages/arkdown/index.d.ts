@@ -28,17 +28,6 @@ export declare class ArkdownRolldownPluginContext {
 }
 
 /**
- * Rust-owned equivalent of Hvigor 6.24.x `ReportServiceImpl` process
- * monitoring. JavaScript supplies only the live V8 memory snapshot because
- * those counters are not available from the Rust process APIs.
- */
-export declare class RuntimeProcessMonitor {
-  constructor(sampler: () => MaybeAsyncJsReturn<JsProcessMemoryUsage>, pid: number)
-  start(): void
-  stop(): string | null
-}
-
-/**
  * Rolldown-compatible arkdown compile plugin.
  *
  * The plugin adapter accepts objects passed explicitly to `build(config,
@@ -205,10 +194,6 @@ export declare function compilePluginModule(file: string, sourceMap?: boolean | 
  * for TypeScript files imported from another plugin module.
  */
 export declare function compilePluginModuleSync(file: string, sourceMap?: boolean | undefined | null): string
-
-export declare function emitRuntimeLog(record: RuntimeLogRecord): void
-
-export declare function finishRuntimeObservability(): void
 
 export interface HvigorCachedFileInfo {
   exists: boolean
@@ -398,8 +383,6 @@ throwArkTsCompilerError?: (error: unknown) => never
 recordErrorFileId?: (id: string) => void
 }
 
-export declare function installRuntimeObservability(options: ObservabilityInstallOptions): string
-
 export interface JsBuildEndContext {
   errors: Array<JsPluginError>
 }
@@ -519,14 +502,6 @@ export interface JsPluginHookMetaInput {
   order: string
 }
 
-export interface JsProcessMemoryUsage {
-  rss: number
-  heapTotal: number
-  heapUsed: number
-  external: number
-  arrayBuffers: number
-}
-
 export type JsResolvedExternal =
   boolean | string
 
@@ -563,23 +538,11 @@ export interface JsTransformOutput {
   description?: string
 }
 
-export interface ObservabilityInstallOptions {
-  mode: string
-  cacheDir: string
-  buildId: string
-  logLevel: string
-  consoleOwner: string
-}
-
 /**
  * Parse JavaScript for plugin glue that is not currently inside a live
  * Rolldown callback.
  */
 export declare function parsePluginAst(source: string, options?: JsPluginAstParseOptions | undefined | null): any
-
-export declare function persistRuntimeDetails(detailsJson: string): string
-
-export declare function persistRuntimeReport(reportJson: string, analyzeHtml: boolean): string
 
 /**
  * Resolve latest-hvigor compile-plugin order against the native Rolldown
@@ -608,20 +571,6 @@ export interface PluginCacheRequest {
  * does not own filesystem or fingerprinting behavior.
  */
 export declare function pluginModuleCacheIdentity(file: string): string
-
-export declare function runtimeHvigorReportSnapshot(ppid: number): any
-
-export interface RuntimeLogRecord {
-  level: string
-  category: string
-  message: string
-  durationId?: string
-  taskPath?: string
-  eventId?: string
-  source: string
-}
-
-export declare function runtimeObservabilityIsEnabled(level: string, target: string): boolean
 
 /**
  * Validate raw compile-plugin exports before JavaScript wraps their function

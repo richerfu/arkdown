@@ -186,8 +186,10 @@ sets `generateModuleGraphOnly` and `disableGenerateBundle`; Arkdown must not
 manufacture JavaScript chunks merely to invoke them.
 
 The only executable entrypoint is `js/arkdown-cli.js`. Rust exposes typed N-API
-build/check/clean services and must not add a binary, argv parser, or CLI-shaped
-export.
+build/check/clean services and must not add a binary, argv parser, CLI install
+mode, process monitor, runtime-report lifecycle, or other CLI-shaped export.
+Rust may keep internal structured tracing; JavaScript owns CLI formatting,
+stdio policy, process lifecycle, and exit codes.
 
 ### Build from source
 

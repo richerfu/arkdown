@@ -31,7 +31,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 
 当前最明显的架构偏差是：
 
-1. `arkdown-napi` 已从约 6.6 万行降至 4.7 万行 Rust：Hvigor project/task/worker/build-script runtime 与 N-API facade 已删除，但构建编排、ABC 和打包仍待迁入对应 application/domain crate，当前还不是薄绑定层。
+1. `arkdown-napi` 已从约 6.6 万行降至 4.7 万行 Rust：Hvigor project/task/worker/build-script runtime，以及零调用的 CLI observability/process-monitor/report lifecycle N-API facade 已删除，但构建编排、ABC 和打包仍待迁入对应 application/domain crate，当前还不是薄绑定层。
 2. `packages/arkdown/js` 已从约 4,454 行收敛到 790 行：只保留原生入口、CLI trampoline、完整 TS/JS compile-plugin 适配，以及尚待 OXC 语义尾项完成后删除的 checker 对比 bridge。
 3. 默认 checker 已改为 OXC；显式 `checker=sdk` 对比后端及其 Node bridge 仍待最后一批语义用例迁移后删除。
 4. ArkTS 1.2 虽然已经按参数正确分流，但 Rust 只解析并投影模块请求，真正的 UI、语法检查、Memo 和 ABC 驱动仍由 Node 加载 SDK 插件执行。
@@ -140,7 +140,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 强制所有权规则：
 
 - JS 不能解析项目配置、组织任务图、决定缓存、构造 SDK 命令或生成构建产物。
-- 唯一 CLI 入口是 npm `bin` 指向的 `packages/arkdown/js/arkdown-cli.js`；JS 只拥有 argv/help/stdout/stderr/exit code，Rust 不得提供 binary、Clap、argv parser 或 CLI-shaped N-API export。
+- 唯一 CLI 入口是 npm `bin` 指向的 `packages/arkdown/js/arkdown-cli.js`；JS 只拥有 argv/help/stdout/stderr/exit code 和进程生命周期，Rust 不得提供 binary、Clap、argv parser、CLI install mode、process monitor、runtime-report lifecycle 或其他 CLI-shaped N-API export。Rust 内部可保留 typed diagnostics 与 structured tracing，但不得借此形成第二套命令入口。
 - N-API 不能拥有构建业务；它只做值转换、异步调用和插件函数句柄管理。
 - BuildSession 是一次构建唯一的文件、包、SDK、依赖和 SourceStore 快照。
 - Rolldown hook 不做目录扫描、重复读文件或包根向上查找。
@@ -151,7 +151,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 | 能力域 | 当前状态 | 证据与实际差异 | 重构结论 |
 |---|---|---|---|
-| 项目模型/CLI/任务编排 | Hvigor runtime facade 与 Rust CLI 已删除 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不再包含 binary、Clap 或 CLI parser export；`build/check/clean` 以 typed N-API service 暴露，构建 application 仍位于 N-API crate | 抽出 `arkdown-build`；JS CLI 和 programmatic N-API 共用同一原生 `BuildRequest` |
+| 项目模型/CLI/任务编排 | Hvigor runtime facade 与 Rust CLI 已删除 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不再包含 binary、Clap、CLI parser/install mode 或 process-monitor/report lifecycle export；`build/check/clean` 以 typed N-API service 暴露，构建 application 仍位于 N-API crate | 抽出 `arkdown-build`；JS CLI 和 programmatic N-API 共用同一原生 `BuildRequest` |
 | 配置和 build script | 旧脚本 runtime 已删除 | `build()` 不发现或执行 `hvigorfile.ts`/`hvigorconfig.ts`；build-script model、config merge、sync/dependency workspace facade 已删除；旧 task/config 参数用 `ARKDOWN_HVIGOR_RUNTIME_UNSUPPORTED` 拒绝 | `arkdown-config` 产出单一结构化配置；TS 只用于插件模块 |
 | OHPM/依赖获取 | 启动链已接入，真实项目语料待扩展 | 生产 `BuildSessionBuilder` 在项目快照前执行 lockfile 驱动的 local/cache/registry acquire；支持 offline/prefer-offline/online、semver range、完整性校验、同包去重并行和原子 cache publish，获取结果直接种入依赖图；仍需以真实 OHPM lockfile/store 变体扩展语料 | 保持 package inventory 只构建一次；补 registry/auth/lockfile 真实工程金标，不再回退为静默扫描 |
 | BuildSession/输入快照 | 主链已冻结，领域重复库存待收敛 | SourceStore 已在 startup 并行冻结源码内容/hash/mtime，package manifest/acquired roots、SDK/profile/build option 同样由 session 提供；profile 仍维护一套 `LocalDependencyGraph`，部分领域仍有二次目录读取 | 只保留 session graph/source store/package index；删除 profile 重复图和剩余 stage I/O |
@@ -234,6 +234,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 - bundle stage 写空 `rollup_cache.json` 的逻辑。
 - `packages/arkdown/src/runtime_task/`、`hvigor_runtime/` 和 `build_script_runtime_model/`：仅服务已删除的 JS Hvigor project/task/worker/build-script facade，不参与原生构建或插件 ABI。
 - `hvigor_sync.rs`、`hvigor_maintenance.rs`、`hvigor_dependency_workspace.rs`、`hvigor_config_merge.rs`、`runtime_invocation.rs` 等同组 N-API facade：生产调用已归零，公开类型和生成绑定同步删除。
+- `runtime_observe/napi.rs`、`emit.rs`、`process_monitor.rs` 及 report/details/monitor artifact store：没有 JS CLI、插件适配器或原生构建调用者，只形成另一套 CLI 生命周期和公开 N-API 表象；保留构建服务实际使用的 Rust structured tracing 与 `build.log` writer。
 
 这些删除不会损失真实构建能力，只移除重复或虚假的兼容表象。
 
@@ -310,7 +311,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 ### JS CLI
 
-不新增 Rust `arkdown-cli` crate。npm `arkdown-cli.js` 是唯一可执行入口，负责 argv/help/stdout/stderr/exit code，并调用 `arkdown-napi` 的 typed service。Rust workspace 不得依赖 Clap 或暴露 argv parser。
+不新增 Rust `arkdown-cli` crate。npm `arkdown-cli.js` 是唯一可执行入口，负责 argv/help/stdout/stderr/exit code 和进程生命周期，并调用 `arkdown-napi` 的 typed service。Rust workspace 不得依赖 Clap，或暴露 argv parser、CLI install mode、process monitor、runtime-report lifecycle。
 
 ### `arkdown-napi`
 

@@ -587,21 +587,13 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.ArkdownRolldownPluginContext = nativeBinding.ArkdownRolldownPluginContext
-module.exports.RuntimeProcessMonitor = nativeBinding.RuntimeProcessMonitor
 module.exports.build = nativeBinding.build
 module.exports.check = nativeBinding.check
 module.exports.clean = nativeBinding.clean
 module.exports.compilePluginModule = nativeBinding.compilePluginModule
 module.exports.compilePluginModuleSync = nativeBinding.compilePluginModuleSync
-module.exports.emitRuntimeLog = nativeBinding.emitRuntimeLog
-module.exports.finishRuntimeObservability = nativeBinding.finishRuntimeObservability
-module.exports.installRuntimeObservability = nativeBinding.installRuntimeObservability
 module.exports.parsePluginAst = nativeBinding.parsePluginAst
-module.exports.persistRuntimeDetails = nativeBinding.persistRuntimeDetails
-module.exports.persistRuntimeReport = nativeBinding.persistRuntimeReport
 module.exports.planHvigorCompilePlugins = nativeBinding.planHvigorCompilePlugins
 module.exports.planRolldownPackagePlugins = nativeBinding.planRolldownPackagePlugins
 module.exports.pluginModuleCacheIdentity = nativeBinding.pluginModuleCacheIdentity
-module.exports.runtimeHvigorReportSnapshot = nativeBinding.runtimeHvigorReportSnapshot
-module.exports.runtimeObservabilityIsEnabled = nativeBinding.runtimeObservabilityIsEnabled
 module.exports.validateHvigorCompilePlugins = nativeBinding.validateHvigorCompilePlugins
