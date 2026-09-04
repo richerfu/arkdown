@@ -181,6 +181,7 @@ dependencies = [
  "arkdown-pack",
  "arkdown-path",
  "arkdown-profile",
+ "arkdown-resolver",
  "arkdown-session",
  "arkdown-sign",
  "arkdown-watcher",
