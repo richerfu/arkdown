@@ -4,7 +4,7 @@
 //! and `ReplaceUnitTestIndexFile` for the local unit-test build root
 //! (`buildRoot=.test`):
 //!
-//! * `generate_unit_test_template` writes the three `@ohos/coverage` templates
+//! * [`UnitTestTemplateWriter`] writes the three `@ohos/coverage` templates
 //!   into `<module>/.test/testability/` — `pages/Index.ets` (parameterized),
 //!   `TestAbility.ets` (fixed) and `phoneSettingConfig_Phone.json` (fixed).
 //!   The byte-for-byte content matches `@ohos/coverage/lib/src/commandLine/
@@ -13,10 +13,9 @@
 //!   `intermediates/process_profile/<target>/module.json` (HAR/HSP type
 //!   rewrites included) and overwrites `intermediates/res/<target>/
 //!   ark_module.json` with the same document.
-//! * `replace_unit_test_index_file` rewrites `intermediates/res/<target>/
-//!   module.json` `pages` and emits `resources/base/profile/main_pages.json`
-//!   from the `unit.test.replace.page` default
-//!   (`../../../.test/testability/pages/Index`).
+//! * [`UnitTestProfileWriter`] rewrites `intermediates/res/<target>/module.json`
+//!   `pages` and emits `resources/base/profile/main_pages.json` from the
+//!   `unit.test.replace.page` default (`../../../.test/testability/pages/Index`).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -28,10 +27,10 @@ use serde_json::Value;
 
 use arkdown_core::{HvigorModuleSourceFile, OhosModuleType, SdkConfig};
 use arkdown_session::dependency_graph::snapshot::{
-  DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeType,
+    DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeType,
 };
 
-use arkdown_build::layout::ModuleBuildLayout;
+use crate::layout::ModuleBuildLayout;
 
 /// `CommonConst.TEST_ABILITY` — synthetic ability name.
 const TEST_ABILITY: &str = "TestAbility";
@@ -42,117 +41,119 @@ const ICON: &str = "icon";
 const LABEL: &str = "label";
 /// hvigor `defaultTestProps["unit.test.replace.page"]` (InjectConst.
 /// UNIT_TEST_REPLACE_PAGE).
-pub(crate) const UNIT_TEST_REPLACE_PAGE: &str = "../../../.test/testability/pages/Index";
+pub const UNIT_TEST_REPLACE_PAGE: &str = "../../../.test/testability/pages/Index";
 /// `ReplaceUnitTestIndexFile` page resource id.
 const PAGE_JSON_RESOURCE: &str = "$profile:main_pages";
 
 /// Parameters for the local unit-test index page template
 /// (`@ohos/coverage` `pageIndexTemplate`).
-pub(crate) struct UnitTestTemplateParams<'a> {
-  /// `app.json5` bundle name.
-  pub bundle_name: &'a str,
-  /// Module name (`-m` parameter).
-  pub module_name: &'a str,
-  /// hvigor extra config `scope` (`OHOS_TEST_COVERAGE_SCOPE`); empty when unset.
-  pub scope: &'a str,
-  /// `ohos-test-coverage` extra config: `true`/`false` string in the template.
-  pub coverage: bool,
-  /// Absolute module path (`pathInfo.getModulePath()`), `/`-normalized.
-  pub module_path: &'a Path,
+pub struct UnitTestTemplateParams<'a> {
+    /// `app.json5` bundle name.
+    pub bundle_name: &'a str,
+    /// Module name (`-m` parameter).
+    pub module_name: &'a str,
+    /// hvigor extra config `scope` (`OHOS_TEST_COVERAGE_SCOPE`); empty when unset.
+    pub scope: &'a str,
+    /// `ohos-test-coverage` extra config: `true`/`false` string in the template.
+    pub coverage: bool,
+    /// Absolute module path (`pathInfo.getModulePath()`), `/`-normalized.
+    pub module_path: &'a Path,
 }
 
 impl UnitTestTemplateParams<'_> {
-  /// `@ohos/coverage` `pageIndexTemplate(testTemplateParam)` with
-  /// `fileOperte.js` platform path serialization.
-  pub(crate) fn render_page_index(&self) -> Result<String> {
-    let module_path = arkdown_path::ArtifactPathSerializer::path_to_slash_string(self.module_path)?;
-    let coverage = if self.coverage { "true" } else { "false" };
-    Ok(
-      PAGE_INDEX_TEMPLATE
-        .replace("__MODULE_PATH__", &module_path)
-        .replace("__BUNDLE_NAME__", self.bundle_name)
-        .replace("__MODULE_NAME__", self.module_name)
-        .replace("__SCOPE__", self.scope)
-        .replace("__COVERAGE__", coverage),
-    )
-  }
+    /// `@ohos/coverage` `pageIndexTemplate(testTemplateParam)` with
+    /// `fileOperte.js` platform path serialization.
+    pub fn render_page_index(&self) -> Result<String> {
+        let module_path =
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(self.module_path)?;
+        let coverage = if self.coverage { "true" } else { "false" };
+        Ok(PAGE_INDEX_TEMPLATE
+            .replace("__MODULE_PATH__", &module_path)
+            .replace("__BUNDLE_NAME__", self.bundle_name)
+            .replace("__MODULE_NAME__", self.module_name)
+            .replace("__SCOPE__", self.scope)
+            .replace("__COVERAGE__", coverage))
+    }
 }
 
-/// Write the three local unit-test template files into
-/// `<module>/.test/testability/`. Mirrors `GenerateUnitTestTemplate`
-/// calling `@ohos/coverage` `generateTemplateFile`.
-pub(crate) fn generate_unit_test_template(
-  module_root: &Path,
-  product_name: &str,
-  params: &UnitTestTemplateParams<'_>,
-) -> Result<()> {
-  let layout = ModuleBuildLayout::for_test_product(module_root, product_name);
-  std::fs::create_dir_all(layout.testability_pages_dir())?;
-  std::fs::write(layout.unit_test_index_ets(), params.render_page_index()?)?;
-  std::fs::write(layout.test_ability_ets(), TEST_ABILITY_TEMPLATE)?;
-  std::fs::write(
-    layout.test_phone_settings_json(),
-    PHONE_SETTING_CONFIG_TEMPLATE,
-  )?;
-  Ok(())
+/// Materializes the SDK-compatible local-test and ohosTest template trees.
+pub struct UnitTestTemplateWriter<'a> {
+    module_root: &'a Path,
+    product_name: &'a str,
 }
 
-/// Write the `ohosTest` template tree into
-/// `<module>/.test/<product>/intermediates/src/ohosTest/` (hvigor
-/// `GenerateOhosTestTemplate` calling `@ohos/coverage`
-/// `generateOhosTestTemplateFile`). API >= 11 uses the `@kit.*` template
-/// variants (`TestAbility_withKit.ets`, `OpenHarmonyTestRunner_mock.ets`);
-/// older SDKs use the plain templates.
-pub(crate) fn generate_ohos_test_template(
-  module_root: &Path,
-  product_name: &str,
-  api_version: u32,
-) -> Result<()> {
-  let layout = ModuleBuildLayout::for_ohos_test_template(module_root, product_name);
-  let runner_dir = layout.ohos_test_runner_dir();
-  let ability_dir = layout.ohos_test_ability_dir();
-  let pages_dir = layout.ohos_test_pages_dir();
-  let element_dir = layout.ohos_test_resource_element_dir();
-  let profile_dir = layout.ohos_test_resource_profile_dir();
-  for dir in [
-    &runner_dir,
-    &ability_dir,
-    &pages_dir,
-    &element_dir,
-    &profile_dir,
-  ] {
-    std::fs::create_dir_all(dir)?;
-  }
-  let (runner_src, ability_src) = if api_version >= 11 {
-    (
-      OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE,
-      TEST_ABILITY_WITH_KIT_TEMPLATE,
-    )
-  } else {
-    (
-      OPEN_HARMONY_TEST_RUNNER_TEMPLATE,
-      TEST_ABILITY_TEMPLATE_OHOS,
-    )
-  };
-  std::fs::write(runner_dir.join("OpenHarmonyTestRunner.ets"), runner_src)?;
-  std::fs::write(ability_dir.join("TestAbility.ets"), ability_src)?;
-  std::fs::write(pages_dir.join("Index.ets"), OHOS_TEST_INDEX_TEMPLATE)?;
-  std::fs::write(element_dir.join("color.json"), OHOS_TEST_COLOR_TEMPLATE)?;
-  std::fs::write(element_dir.join("string.json"), OHOS_TEST_STRING_TEMPLATE)?;
-  std::fs::write(
-    profile_dir.join("test_pages.json"),
-    OHOS_TEST_PAGES_TEMPLATE,
-  )?;
-  Ok(())
-}
+impl<'a> UnitTestTemplateWriter<'a> {
+    pub fn new(module_root: &'a Path, product_name: &'a str) -> Self {
+        Self {
+            module_root,
+            product_name,
+        }
+    }
 
-/// Whether the generated `ohosTest` template exists — used to gate the
-/// ohosTest compile inputs.
-pub(crate) fn has_ohos_test_template(module_root: &Path, product_name: &str) -> bool {
-  ModuleBuildLayout::for_ohos_test_template(module_root, product_name)
-    .ohos_test_ability_dir()
-    .join("TestAbility.ets")
-    .is_file()
+    /// Write the three local unit-test template files into
+    /// `<module>/.test/testability/`. Mirrors `GenerateUnitTestTemplate`
+    /// calling `@ohos/coverage` `generateTemplateFile`.
+    pub fn generate_local(&self, params: &UnitTestTemplateParams<'_>) -> Result<()> {
+        let layout = ModuleBuildLayout::for_test_product(self.module_root, self.product_name);
+        std::fs::create_dir_all(layout.testability_pages_dir())?;
+        std::fs::write(layout.unit_test_index_ets(), params.render_page_index()?)?;
+        std::fs::write(layout.test_ability_ets(), TEST_ABILITY_TEMPLATE)?;
+        std::fs::write(
+            layout.test_phone_settings_json(),
+            PHONE_SETTING_CONFIG_TEMPLATE,
+        )?;
+        Ok(())
+    }
+
+    /// Write the `ohosTest` template tree into
+    /// `<module>/.test/<product>/intermediates/src/ohosTest/`. API >= 11 uses
+    /// the `@kit.*` template variants; older SDKs use the plain templates.
+    pub fn generate_ohos_test(&self, api_version: u32) -> Result<()> {
+        let layout = ModuleBuildLayout::for_ohos_test_template(self.module_root, self.product_name);
+        let runner_dir = layout.ohos_test_runner_dir();
+        let ability_dir = layout.ohos_test_ability_dir();
+        let pages_dir = layout.ohos_test_pages_dir();
+        let element_dir = layout.ohos_test_resource_element_dir();
+        let profile_dir = layout.ohos_test_resource_profile_dir();
+        for dir in [
+            &runner_dir,
+            &ability_dir,
+            &pages_dir,
+            &element_dir,
+            &profile_dir,
+        ] {
+            std::fs::create_dir_all(dir)?;
+        }
+        let (runner_src, ability_src) = if api_version >= 11 {
+            (
+                OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE,
+                TEST_ABILITY_WITH_KIT_TEMPLATE,
+            )
+        } else {
+            (
+                OPEN_HARMONY_TEST_RUNNER_TEMPLATE,
+                TEST_ABILITY_TEMPLATE_OHOS,
+            )
+        };
+        std::fs::write(runner_dir.join("OpenHarmonyTestRunner.ets"), runner_src)?;
+        std::fs::write(ability_dir.join("TestAbility.ets"), ability_src)?;
+        std::fs::write(pages_dir.join("Index.ets"), OHOS_TEST_INDEX_TEMPLATE)?;
+        std::fs::write(element_dir.join("color.json"), OHOS_TEST_COLOR_TEMPLATE)?;
+        std::fs::write(element_dir.join("string.json"), OHOS_TEST_STRING_TEMPLATE)?;
+        std::fs::write(
+            profile_dir.join("test_pages.json"),
+            OHOS_TEST_PAGES_TEMPLATE,
+        )?;
+        Ok(())
+    }
+
+    /// Whether the generated `ohosTest` template exists.
+    pub fn has_ohos_test(&self) -> bool {
+        ModuleBuildLayout::for_ohos_test_template(self.module_root, self.product_name)
+            .ohos_test_ability_dir()
+            .join("TestAbility.ets")
+            .is_file()
+    }
 }
 
 /// Typed `GenerateUnitTestResult` input. The SDK component roots and HSP
@@ -160,158 +161,165 @@ pub(crate) fn has_ohos_test_template(module_root: &Path, product_name: &str) -> 
 /// `GenerateUnitTestResult.doTaskAction` handoff to `@ohos/coverage`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UnitTestExecutionPlan {
-  pub sdk_api_path: PathBuf,
-  pub hms_sdk_api_path: PathBuf,
-  pub runtime_type: UnitTestRuntimeType,
-  pub module_path: PathBuf,
-  pub project_path: PathBuf,
-  pub coverage: bool,
-  pub hsp_dependencies: Vec<PathBuf>,
-  #[serde(skip)]
-  pub node_executable: PathBuf,
-  #[serde(skip)]
-  pub coverage_package_path: PathBuf,
+pub struct UnitTestExecutionPlan {
+    pub sdk_api_path: PathBuf,
+    pub hms_sdk_api_path: PathBuf,
+    pub runtime_type: UnitTestRuntimeType,
+    pub module_path: PathBuf,
+    pub project_path: PathBuf,
+    pub coverage: bool,
+    pub hsp_dependencies: Vec<PathBuf>,
+    #[serde(skip)]
+    pub node_executable: PathBuf,
+    #[serde(skip)]
+    pub coverage_package_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub(crate) enum UnitTestRuntimeType {
-  OpenHarmony,
-  HarmonyOS,
+pub enum UnitTestRuntimeType {
+    OpenHarmony,
+    HarmonyOS,
+}
+
+/// Immutable build-session inputs needed to construct the local test runner
+/// request. Keeping the handoff typed prevents coordinator argument drift.
+pub struct UnitTestExecutionInput<'a> {
+    pub sdk_config: &'a SdkConfig,
+    pub runtime_os: &'a str,
+    pub module_path: &'a Path,
+    pub project_path: &'a Path,
+    pub module_type: &'a OhosModuleType,
+    pub dependencies: &'a DependencyGraphSnapshot,
+    pub coverage: bool,
+    pub node_executable: PathBuf,
 }
 
 impl UnitTestExecutionPlan {
-  /// Resolve the exact SDK/package/runtime handoff used by hvigor
-  /// `GenerateUnitTestResult`. Component locations are derived from the
-  /// selected SDK and dependency roots come from the immutable build session.
-  pub(crate) fn from_build(
-    sdk_config: &SdkConfig,
-    runtime_os: &str,
-    module_path: &Path,
-    project_path: &Path,
-    module_type: &OhosModuleType,
-    dependencies: &DependencyGraphSnapshot,
-    coverage: bool,
-    node_executable: PathBuf,
-  ) -> Result<Self> {
-    let sdk_api_path = sdk_config.previewer_component_path().ok_or_else(|| {
+    /// Resolve the exact SDK/package/runtime handoff used by hvigor
+    /// `GenerateUnitTestResult`. Component locations are derived from the
+    /// selected SDK and dependency roots come from the immutable build session.
+    pub fn from_build(input: UnitTestExecutionInput<'_>) -> Result<Self> {
+        let sdk_api_path = input.sdk_config.previewer_component_path().ok_or_else(|| {
       anyhow::anyhow!(
         "ARKDOWN_UNIT_TEST_PREVIEWER_COMPONENT_MISSING: selected SDK has no Previewer component ({})",
-        sdk_config.ets_loader_path.display()
+        input.sdk_config.ets_loader_path.display()
       )
     })?;
-    let runtime_type = if arkdown_core::is_harmony_os(runtime_os) {
-      UnitTestRuntimeType::HarmonyOS
-    } else {
-      UnitTestRuntimeType::OpenHarmony
-    };
-    let hms_sdk_api_path = if matches!(runtime_type, UnitTestRuntimeType::HarmonyOS) {
-      sdk_config.hms_previewer_component_path().ok_or_else(|| {
+        let runtime_type = if arkdown_core::is_harmony_os(input.runtime_os) {
+            UnitTestRuntimeType::HarmonyOS
+        } else {
+            UnitTestRuntimeType::OpenHarmony
+        };
+        let hms_sdk_api_path = if matches!(runtime_type, UnitTestRuntimeType::HarmonyOS) {
+            input.sdk_config.hms_previewer_component_path().ok_or_else(|| {
         anyhow::anyhow!(
           "ARKDOWN_UNIT_TEST_HMS_PREVIEWER_COMPONENT_MISSING: selected HarmonyOS SDK has no HMS Previewer component ({})",
-          sdk_config.ets_loader_path.display()
+          input.sdk_config.ets_loader_path.display()
         )
       })?
-    } else {
-      PathBuf::new()
-    };
-    let coverage_package_path = sdk_config.hvigor_coverage_package_path().ok_or_else(|| {
+        } else {
+            PathBuf::new()
+        };
+        let coverage_package_path = input.sdk_config.hvigor_coverage_package_path().ok_or_else(|| {
       anyhow::anyhow!(
         "ARKDOWN_UNIT_TEST_COVERAGE_COMPONENT_MISSING: selected SDK has no @ohos/coverage package ({})",
-        sdk_config.ets_loader_path.display()
+        input.sdk_config.ets_loader_path.display()
       )
     })?;
 
-    let mut seen = IndexSet::new();
-    let hsp_dependencies = dependencies
-      .edges
-      .iter()
-      .filter(|edge| !matches!(edge.kind, DependencyEdgeKind::DynamicDependency))
-      .filter_map(|edge| {
-        let node = dependencies.nodes.get(&edge.package_name)?;
-        matches!(
-          node.node_type,
-          DependencyNodeType::IntegratedHsp | DependencyNodeType::SharedHsp
-        )
-        .then_some(&edge.package_root)
-      })
-      .filter(|root| seen.insert((*root).clone()))
-      .cloned()
-      .collect();
+        let mut seen = IndexSet::new();
+        let hsp_dependencies = input
+            .dependencies
+            .edges
+            .iter()
+            .filter(|edge| !matches!(edge.kind, DependencyEdgeKind::DynamicDependency))
+            .filter_map(|edge| {
+                let node = input.dependencies.nodes.get(&edge.package_name)?;
+                matches!(
+                    node.node_type,
+                    DependencyNodeType::IntegratedHsp | DependencyNodeType::SharedHsp
+                )
+                .then_some(&edge.package_root)
+            })
+            .filter(|root| seen.insert((*root).clone()))
+            .cloned()
+            .collect();
 
-    let plan = Self {
-      sdk_api_path,
-      hms_sdk_api_path,
-      runtime_type,
-      module_path: arkdown_path::canonicalize_or_owned(module_path),
-      project_path: arkdown_path::canonicalize_or_owned(project_path),
-      coverage,
-      hsp_dependencies,
-      node_executable,
-      coverage_package_path,
-    };
-    if matches!(module_type, OhosModuleType::Shared) {
-      tracing::debug!(
-        module_path = %plan.module_path.display(),
-        "local-test HSP module will use the UnitTestArkTS buildConfig handoff"
-      );
+        let plan = Self {
+            sdk_api_path,
+            hms_sdk_api_path,
+            runtime_type,
+            module_path: arkdown_path::canonicalize_or_owned(input.module_path),
+            project_path: arkdown_path::canonicalize_or_owned(input.project_path),
+            coverage: input.coverage,
+            hsp_dependencies,
+            node_executable: input.node_executable,
+            coverage_package_path,
+        };
+        if matches!(input.module_type, OhosModuleType::Shared) {
+            tracing::debug!(
+              module_path = %plan.module_path.display(),
+              "local-test HSP module will use the UnitTestArkTS buildConfig handoff"
+            );
+        }
+        Ok(plan)
     }
-    Ok(plan)
-  }
 
-  /// Invoke the installed `@ohos/coverage` owner rather than duplicating its
-  /// Previewer command, log parser, source-map translation, HSP merge, and HTML
-  /// report implementation in Rust.
-  pub(crate) fn execute(&self) -> Result<()> {
-    let command_line = self
-      .coverage_package_path
-      .join("lib")
-      .join("src")
-      .join("commandLine")
-      .join("index.js");
-    if !command_line.is_file() {
-      anyhow::bail!(
+    /// Invoke the installed `@ohos/coverage` owner rather than duplicating its
+    /// Previewer command, log parser, source-map translation, HSP merge, and HTML
+    /// report implementation in Rust.
+    pub fn execute(&self) -> Result<()> {
+        let command_line = self
+            .coverage_package_path
+            .join("lib")
+            .join("src")
+            .join("commandLine")
+            .join("index.js");
+        if !command_line.is_file() {
+            anyhow::bail!(
         "ARKDOWN_UNIT_TEST_COVERAGE_COMPONENT_MISSING: @ohos/coverage command-line API was not found at {}",
         command_line.display()
       );
-    }
-    let previewer = self
-      .sdk_api_path
-      .join("common")
-      .join("bin")
-      .join(if cfg!(windows) {
-        "Previewer.exe"
-      } else {
-        "Previewer"
-      });
-    if !previewer.is_file() {
-      anyhow::bail!(
-        "ARKDOWN_UNIT_TEST_PREVIEWER_COMPONENT_MISSING: Previewer was not found at {}",
-        previewer.display()
-      );
-    }
-    if matches!(self.runtime_type, UnitTestRuntimeType::HarmonyOS)
-      && self.hms_sdk_api_path.as_os_str().is_empty()
-    {
-      anyhow::bail!(
+        }
+        let previewer = self
+            .sdk_api_path
+            .join("common")
+            .join("bin")
+            .join(if cfg!(windows) {
+                "Previewer.exe"
+            } else {
+                "Previewer"
+            });
+        if !previewer.is_file() {
+            anyhow::bail!(
+                "ARKDOWN_UNIT_TEST_PREVIEWER_COMPONENT_MISSING: Previewer was not found at {}",
+                previewer.display()
+            );
+        }
+        if matches!(self.runtime_type, UnitTestRuntimeType::HarmonyOS)
+            && self.hms_sdk_api_path.as_os_str().is_empty()
+        {
+            anyhow::bail!(
         "ARKDOWN_UNIT_TEST_HMS_PREVIEWER_COMPONENT_MISSING: HarmonyOS local tests require the HMS Previewer component"
       );
-    }
+        }
 
-    let request = serde_json::to_string(self)?;
-    let status = std::process::Command::new(&self.node_executable)
-      .arg("-e")
-      .arg(COVERAGE_COMMAND_RUNNER)
-      .arg(&command_line)
-      .arg(&request)
-      .current_dir(&self.module_path)
-      .status()
-      .map_err(|error| anyhow::anyhow!("start @ohos/coverage runner failed: {error}"))?;
-    if !status.success() {
-      anyhow::bail!("ARKDOWN_UNIT_TEST_RESULT_FAILED: @ohos/coverage exited with status {status}");
+        let request = serde_json::to_string(self)?;
+        let status = std::process::Command::new(&self.node_executable)
+            .arg("-e")
+            .arg(COVERAGE_COMMAND_RUNNER)
+            .arg(&command_line)
+            .arg(&request)
+            .current_dir(&self.module_path)
+            .status()
+            .map_err(|error| anyhow::anyhow!("start @ohos/coverage runner failed: {error}"))?;
+        if !status.success() {
+            anyhow::bail!(
+                "ARKDOWN_UNIT_TEST_RESULT_FAILED: @ohos/coverage exited with status {status}"
+            );
+        }
+        Ok(())
     }
-    Ok(())
-  }
 }
 
 /// Fixed adapter for the package's Promise API. Arguments are transported as
@@ -339,116 +347,118 @@ commandLine.executeCoverageTest({ ...request, logger })
 /// that owner avoids a second, subtly incompatible BJC implementation.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TestCoverageInstrumentationPlan {
-  module_path: PathBuf,
-  project_path: PathBuf,
-  init_coverage_path: PathBuf,
-  ets_loader_path: PathBuf,
-  coverage_package_path: PathBuf,
-  coverage_mode: String,
-  test_mode: String,
-  sources: Vec<UnitTestCoverageSource>,
-  #[serde(skip)]
-  node_executable: PathBuf,
+pub struct TestCoverageInstrumentationPlan {
+    module_path: PathBuf,
+    project_path: PathBuf,
+    init_coverage_path: PathBuf,
+    ets_loader_path: PathBuf,
+    coverage_package_path: PathBuf,
+    coverage_mode: String,
+    test_mode: String,
+    sources: Vec<UnitTestCoverageSource>,
+    #[serde(skip)]
+    node_executable: PathBuf,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UnitTestCoverageSource {
-  source_path: PathBuf,
-  module_id: PathBuf,
+    source_path: PathBuf,
+    module_id: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TestCoverageMode {
-  UnitTest,
-  OhosTest,
+pub enum TestCoverageMode {
+    UnitTest,
+    OhosTest,
 }
 
 impl TestCoverageMode {
-  const fn as_str(self) -> &'static str {
-    match self {
-      Self::UnitTest => "unitTest",
-      Self::OhosTest => "ohosTest",
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnitTest => "unitTest",
+            Self::OhosTest => "ohosTest",
+        }
     }
-  }
 
-  const fn path_segment(self) -> &'static str {
-    match self {
-      Self::UnitTest => "test",
-      Self::OhosTest => "ohosTest",
+    const fn path_segment(self) -> &'static str {
+        match self {
+            Self::UnitTest => "test",
+            Self::OhosTest => "ohosTest",
+        }
     }
-  }
 }
 
 impl TestCoverageInstrumentationPlan {
-  pub(crate) fn from_build(
-    sdk_config: &SdkConfig,
-    project_path: &Path,
-    module_path: &Path,
-    test_mode: TestCoverageMode,
-    coverage_mode: Option<&str>,
-    module_sources: &[HvigorModuleSourceFile],
-    node_executable: PathBuf,
-  ) -> Result<Self> {
-    let coverage_package_path = sdk_config.hvigor_coverage_package_path().ok_or_else(|| {
+    pub fn from_build(
+        sdk_config: &SdkConfig,
+        project_path: &Path,
+        module_path: &Path,
+        test_mode: TestCoverageMode,
+        coverage_mode: Option<&str>,
+        module_sources: &[HvigorModuleSourceFile],
+        node_executable: PathBuf,
+    ) -> Result<Self> {
+        let coverage_package_path = sdk_config.hvigor_coverage_package_path().ok_or_else(|| {
       anyhow::anyhow!(
         "ARKDOWN_UNIT_TEST_COVERAGE_COMPONENT_MISSING: selected SDK has no @ohos/coverage package ({})",
         sdk_config.ets_loader_path.display()
       )
     })?;
-    let sources = module_sources
-      .iter()
-      .filter_map(|source| {
-        let module_id = PathBuf::from(&source.module_id);
-        module_id.is_file().then(|| UnitTestCoverageSource {
-          source_path: source.path.clone(),
-          module_id,
+        let sources = module_sources
+            .iter()
+            .filter_map(|source| {
+                let module_id = PathBuf::from(&source.module_id);
+                module_id.is_file().then(|| UnitTestCoverageSource {
+                    source_path: source.path.clone(),
+                    module_id,
+                })
+            })
+            .collect();
+        // `@ohos/coverage` 1.0.24 `buildInstrument.beforeBuildEnd` uses this
+        // fixed root even when the command overrides the build product.
+        let layout = ModuleBuildLayout::for_test_product(module_path, "default");
+        Ok(Self {
+            module_path: arkdown_path::canonicalize_or_owned(module_path),
+            project_path: arkdown_path::canonicalize_or_owned(project_path),
+            init_coverage_path: layout
+                .intermediates()
+                .join(test_mode.path_segment())
+                .join("init_coverage.json"),
+            ets_loader_path: sdk_config.ets_loader_path.clone(),
+            coverage_package_path,
+            coverage_mode: coverage_mode.unwrap_or("white").to_string(),
+            test_mode: test_mode.as_str().to_string(),
+            sources,
+            node_executable,
         })
-      })
-      .collect();
-    // `@ohos/coverage` 1.0.24 `buildInstrument.beforeBuildEnd` uses this
-    // fixed root even when the command overrides the build product.
-    let layout = ModuleBuildLayout::for_test_product(module_path, "default");
-    Ok(Self {
-      module_path: arkdown_path::canonicalize_or_owned(module_path),
-      project_path: arkdown_path::canonicalize_or_owned(project_path),
-      init_coverage_path: layout
-        .intermediates()
-        .join(test_mode.path_segment())
-        .join("init_coverage.json"),
-      ets_loader_path: sdk_config.ets_loader_path.clone(),
-      coverage_package_path,
-      coverage_mode: coverage_mode.unwrap_or("white").to_string(),
-      test_mode: test_mode.as_str().to_string(),
-      sources,
-      node_executable,
-    })
-  }
+    }
 
-  pub(crate) fn execute(&self) -> Result<()> {
-    let request = serde_json::to_string(self)?;
-    let output = std::process::Command::new(&self.node_executable)
-      .arg("-e")
-      .arg(COVERAGE_INSTRUMENTATION_RUNNER)
-      .arg(&request)
-      .current_dir(&self.module_path)
-      .output()
-      .map_err(|error| anyhow::anyhow!("start @ohos/coverage instrumenter failed: {error}"))?;
-    if !output.status.success() {
-      anyhow::bail!(
+    pub fn execute(&self) -> Result<()> {
+        let request = serde_json::to_string(self)?;
+        let output = std::process::Command::new(&self.node_executable)
+            .arg("-e")
+            .arg(COVERAGE_INSTRUMENTATION_RUNNER)
+            .arg(&request)
+            .current_dir(&self.module_path)
+            .output()
+            .map_err(|error| {
+                anyhow::anyhow!("start @ohos/coverage instrumenter failed: {error}")
+            })?;
+        if !output.status.success() {
+            anyhow::bail!(
         "ARKDOWN_TEST_COVERAGE_INSTRUMENTATION_FAILED: @ohos/coverage exited with status {}: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
       );
-    }
-    serde_json::from_slice::<BTreeSet<PathBuf>>(&output.stdout).map_err(|error| {
-      anyhow::anyhow!(
+        }
+        serde_json::from_slice::<BTreeSet<PathBuf>>(&output.stdout).map_err(|error| {
+            anyhow::anyhow!(
         "ARKDOWN_TEST_COVERAGE_INSTRUMENTATION_FAILED: invalid @ohos/coverage result: {error}"
       )
-    })?;
-    Ok(())
-  }
+        })?;
+        Ok(())
+    }
 }
 
 /// Process-local adapter around the installed SDK package. Every project and
@@ -504,118 +514,118 @@ if (fs.existsSync(request.initCoveragePath)) {
 
 /// Artifact handoffs owned by UnitTestArkTS and its two independently
 /// selectable post-compile tasks.
-pub(crate) struct UnitTestArtifactWriter<'a> {
-  layout: ModuleBuildLayout<'a>,
+pub struct UnitTestArtifactWriter<'a> {
+    layout: ModuleBuildLayout<'a>,
 }
 
 impl<'a> UnitTestArtifactWriter<'a> {
-  pub(crate) fn new(module_root: &'a Path, product_name: &'a str) -> Self {
-    Self {
-      layout: ModuleBuildLayout::for_test_product(module_root, product_name),
-    }
-  }
-
-  /// Device-test variant of Hvigor's shared `TestCopyMockConfigJson` action.
-  /// Unlike local unit tests it keeps the normal `build/<product>` root and
-  /// writes into the selected `ohosTest` target's compiled resources.
-  pub(crate) fn for_ohos_test(
-    module_root: &'a Path,
-    product_name: &'a str,
-    target_name: &'a str,
-  ) -> Self {
-    Self {
-      layout: ModuleBuildLayout::for_target_product(module_root, product_name, target_name),
-    }
-  }
-
-  pub(crate) fn stage_compiled_assets(
-    &self,
-    modules_abc: &Path,
-    source_maps: Option<&Path>,
-  ) -> Result<()> {
-    let output = self.layout.test_assets_ets_dir();
-    std::fs::create_dir_all(&output)?;
-    std::fs::copy(modules_abc, self.layout.test_assets_modules_abc())?;
-    if let Some(source_maps) = source_maps.filter(|path| path.is_file()) {
-      std::fs::copy(source_maps, self.layout.test_assets_source_maps())?;
-    }
-    Ok(())
-  }
-
-  /// `TestCopyMockConfigJson.copyMockConfigJson` — a missing compiler output
-  /// is a debug-only no-op in hvigor.
-  pub(crate) fn copy_mock_config_json(&self) -> Result<()> {
-    let input = self.layout.intermediates_mock_config_json();
-    if !input.is_file() {
-      return Ok(());
-    }
-    let output = self.layout.test_mock_config_output_json();
-    if let Some(parent) = output.parent() {
-      std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(input, output)?;
-    Ok(())
-  }
-
-  /// `ReplaceSourcemapInCoverageMode` merges the coverage transformer's
-  /// replacement mappings into the UnitTestArkTS asset source map.
-  pub(crate) fn replace_source_map_in_coverage_mode(&self, coverage: bool) -> Result<()> {
-    if !coverage {
-      return Ok(());
-    }
-    let replacement = self.layout.test_coverage_source_map();
-    let output = self.layout.test_assets_source_maps();
-    if !replacement.is_file() || !output.is_file() {
-      return Ok(());
-    }
-
-    let mut fragment = std::fs::read_to_string(&replacement)?;
-    if fragment.ends_with(',') {
-      fragment.pop();
-    }
-    let replacements =
-      serde_json::from_str::<serde_json::Map<String, Value>>(&format!("{{{fragment}}}"))?;
-    let mut source_maps = serde_json::from_slice::<Value>(&std::fs::read(&output)?)?;
-    let Some(source_map_entries) = source_maps.as_object_mut() else {
-      return Ok(());
-    };
-    for (source, replacement) in replacements {
-      let Some(mapping) = replacement.get("mappings").cloned() else {
-        continue;
-      };
-      for source_map in source_map_entries.values_mut() {
-        let matches_source = source_map
-          .get("sources")
-          .and_then(Value::as_array)
-          .is_some_and(|sources| {
-            sources.len() == 1 && sources[0].as_str() == Some(source.as_str())
-          });
-        if matches_source {
-          if let Some(source_map) = source_map.as_object_mut() {
-            source_map.insert("mappings".to_string(), mapping.clone());
-          }
-          break;
+    pub fn new(module_root: &'a Path, product_name: &'a str) -> Self {
+        Self {
+            layout: ModuleBuildLayout::for_test_product(module_root, product_name),
         }
-      }
     }
-    std::fs::write(output, serde_json::to_vec_pretty(&source_maps)?)?;
-    Ok(())
-  }
 
-  pub(crate) fn write_hsp_build_config(&self) -> Result<()> {
-    let path = self.layout.test_build_config_json();
-    if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent)?;
+    /// Device-test variant of Hvigor's shared `TestCopyMockConfigJson` action.
+    /// Unlike local unit tests it keeps the normal `build/<product>` root and
+    /// writes into the selected `ohosTest` target's compiled resources.
+    pub fn for_ohos_test(
+        module_root: &'a Path,
+        product_name: &'a str,
+        target_name: &'a str,
+    ) -> Self {
+        Self {
+            layout: ModuleBuildLayout::for_target_product(module_root, product_name, target_name),
+        }
     }
-    let ace_module_build = self.layout.test_assets_ets_dir();
-    std::fs::write(
-      path,
-      serde_json::to_vec(&serde_json::json!({
-        "aceModuleBuild": arkdown_path::ArtifactPathSerializer::path_to_slash_string(&ace_module_build)?
-      }))?,
-    )?;
-    Ok(())
-  }
+
+    pub fn stage_compiled_assets(
+        &self,
+        modules_abc: &Path,
+        source_maps: Option<&Path>,
+    ) -> Result<()> {
+        let output = self.layout.test_assets_ets_dir();
+        std::fs::create_dir_all(&output)?;
+        std::fs::copy(modules_abc, self.layout.test_assets_modules_abc())?;
+        if let Some(source_maps) = source_maps.filter(|path| path.is_file()) {
+            std::fs::copy(source_maps, self.layout.test_assets_source_maps())?;
+        }
+        Ok(())
+    }
+
+    /// `TestCopyMockConfigJson.copyMockConfigJson` — a missing compiler output
+    /// is a debug-only no-op in hvigor.
+    pub fn copy_mock_config_json(&self) -> Result<()> {
+        let input = self.layout.intermediates_mock_config_json();
+        if !input.is_file() {
+            return Ok(());
+        }
+        let output = self.layout.test_mock_config_output_json();
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(input, output)?;
+        Ok(())
+    }
+
+    /// `ReplaceSourcemapInCoverageMode` merges the coverage transformer's
+    /// replacement mappings into the UnitTestArkTS asset source map.
+    pub fn replace_source_map_in_coverage_mode(&self, coverage: bool) -> Result<()> {
+        if !coverage {
+            return Ok(());
+        }
+        let replacement = self.layout.test_coverage_source_map();
+        let output = self.layout.test_assets_source_maps();
+        if !replacement.is_file() || !output.is_file() {
+            return Ok(());
+        }
+
+        let mut fragment = std::fs::read_to_string(&replacement)?;
+        if fragment.ends_with(',') {
+            fragment.pop();
+        }
+        let replacements =
+            serde_json::from_str::<serde_json::Map<String, Value>>(&format!("{{{fragment}}}"))?;
+        let mut source_maps = serde_json::from_slice::<Value>(&std::fs::read(&output)?)?;
+        let Some(source_map_entries) = source_maps.as_object_mut() else {
+            return Ok(());
+        };
+        for (source, replacement) in replacements {
+            let Some(mapping) = replacement.get("mappings").cloned() else {
+                continue;
+            };
+            for source_map in source_map_entries.values_mut() {
+                let matches_source = source_map
+                    .get("sources")
+                    .and_then(Value::as_array)
+                    .is_some_and(|sources| {
+                        sources.len() == 1 && sources[0].as_str() == Some(source.as_str())
+                    });
+                if matches_source {
+                    if let Some(source_map) = source_map.as_object_mut() {
+                        source_map.insert("mappings".to_string(), mapping.clone());
+                    }
+                    break;
+                }
+            }
+        }
+        std::fs::write(output, serde_json::to_vec_pretty(&source_maps)?)?;
+        Ok(())
+    }
+
+    pub fn write_hsp_build_config(&self) -> Result<()> {
+        let path = self.layout.test_build_config_json();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let ace_module_build = self.layout.test_assets_ets_dir();
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+              "aceModuleBuild": arkdown_path::ArtifactPathSerializer::path_to_slash_string(&ace_module_build)?
+            }))?,
+        )?;
+        Ok(())
+    }
 }
 
 /// `UnitTestProcessProfile.doTaskAction` — append the synthetic `TestAbility`
@@ -625,153 +635,159 @@ impl<'a> UnitTestArtifactWriter<'a> {
 /// `module_type` is `"entry"`/`"feature"`/`"shared"`/`"har"` as resolved by
 /// the module model; HAR/HSP modules get `deliveryWithInstall` rewritten and
 /// HAR additionally `module.type = "entry"` plus `app.icon`/`app.label`.
-pub(crate) fn inject_unit_test_ability(
-  process_profile: &mut Value,
-  module_type: &str,
-) -> Result<()> {
-  let document = process_profile
-    .as_object_mut()
-    .ok_or_else(|| anyhow::anyhow!("process_profile module.json is not a JSON object"))?;
+pub fn inject_unit_test_ability(process_profile: &mut Value, module_type: &str) -> Result<()> {
+    let document = process_profile
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("process_profile module.json is not a JSON object"))?;
 
-  let is_har = module_type == "har";
-  let is_hsp = module_type == "shared";
-  if is_hsp || is_har {
+    let is_har = module_type == "har";
+    let is_hsp = module_type == "shared";
+    if is_hsp || is_har {
+        let module = document
+            .get_mut("module")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("process_profile module.json lacks module object"))?;
+        module.insert("deliveryWithInstall".into(), Value::Bool(is_har));
+        if is_har {
+            module.insert("type".into(), "entry".into());
+            let app = document
+                .get_mut("app")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow::anyhow!("process_profile module.json lacks app object"))?;
+            app.insert("icon".into(), ICON.into());
+            app.insert("label".into(), LABEL.into());
+        }
+    }
+
     let module = document
-      .get_mut("module")
-      .and_then(Value::as_object_mut)
-      .ok_or_else(|| anyhow::anyhow!("process_profile module.json lacks module object"))?;
-    module.insert("deliveryWithInstall".into(), Value::Bool(is_har));
-    if is_har {
-      module.insert("type".into(), "entry".into());
-      let app = document
-        .get_mut("app")
+        .get_mut("module")
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| anyhow::anyhow!("process_profile module.json lacks app object"))?;
-      app.insert("icon".into(), ICON.into());
-      app.insert("label".into(), LABEL.into());
-    }
-  }
+        .ok_or_else(|| anyhow::anyhow!("process_profile module.json lacks module object"))?;
+    let abilities = module
+        .entry("abilities")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let abilities = abilities
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("process_profile module.json abilities is not an array"))?;
 
-  let module = document
-    .get_mut("module")
-    .and_then(Value::as_object_mut)
-    .ok_or_else(|| anyhow::anyhow!("process_profile module.json lacks module object"))?;
-  let abilities = module
-    .entry("abilities")
-    .or_insert_with(|| Value::Array(Vec::new()));
-  let abilities = abilities
-    .as_array_mut()
-    .ok_or_else(|| anyhow::anyhow!("process_profile module.json abilities is not an array"))?;
+    let (start_window_icon, start_window_background) = abilities
+        .first()
+        .and_then(Value::as_object)
+        .map(|first| {
+            (
+                first
+                    .get("startWindowIcon")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("startIcon".to_string())),
+                first
+                    .get("startWindowBackground")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("#FFFFFF".to_string())),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                Value::String("startIcon".to_string()),
+                Value::String("#FFFFFF".to_string()),
+            )
+        });
 
-  let (start_window_icon, start_window_background) = abilities
-    .first()
-    .and_then(Value::as_object)
-    .map(|first| {
-      (
-        first
-          .get("startWindowIcon")
-          .cloned()
-          .unwrap_or_else(|| Value::String("startIcon".to_string())),
-        first
-          .get("startWindowBackground")
-          .cloned()
-          .unwrap_or_else(|| Value::String("#FFFFFF".to_string())),
-      )
-    })
-    .unwrap_or_else(|| {
-      (
-        Value::String("startIcon".to_string()),
-        Value::String("#FFFFFF".to_string()),
-      )
-    });
-
-  abilities.push(serde_json::json!({
-    "name": TEST_ABILITY,
-    "srcEntrance": ENTRY_TEST_ABILITY_PATH,
-    "startWindowIcon": start_window_icon,
-    "startWindowBackground": start_window_background,
-  }));
-  Ok(())
-}
-
-/// `ReplaceUnitTestIndexFile.doTaskAction` — set `module.pages =
-/// "$profile:main_pages"` on the res module.json (falling back to the
-/// processed profile when it does not exist) and write
-/// `resources/base/profile/main_pages.json` as `{ "src": ["<replace page>"] }`.
-///
-/// HAP modules with an existing `pages` value keep it (hvigor's `!pages`
-/// guard); HAR always rewrites; HSP rewrites only when `pages` is absent.
-pub(crate) fn replace_unit_test_index_file(
-  res_module_json: &Path,
-  process_profile: &Value,
-  res_profile_dir: &Path,
-  module_type: &str,
-  replace_page: &str,
-) -> Result<()> {
-  let page_json_file = res_profile_dir.join("main_pages.json");
-  let write_main_pages = |page_json_file: &Path| -> Result<()> {
-    if let Some(parent) = page_json_file.parent() {
-      std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(
-      page_json_file,
-      serde_json::to_string_pretty(&serde_json::json!({ "src": [replace_page] }))?,
-    )?;
+    abilities.push(serde_json::json!({
+      "name": TEST_ABILITY,
+      "srcEntrance": ENTRY_TEST_ABILITY_PATH,
+      "startWindowIcon": start_window_icon,
+      "startWindowBackground": start_window_background,
+    }));
     Ok(())
-  };
-
-  if module_type == "har" {
-    write_module_json(res_module_json, process_profile)?;
-    return write_main_pages(&page_json_file);
-  }
-
-  let existing_pages = if res_module_json.is_file() {
-    let content = std::fs::read_to_string(res_module_json)?;
-    serde_json::from_str::<Value>(&content)
-      .ok()
-      .and_then(|doc| doc.get("module").and_then(|m| m.get("pages")).cloned())
-  } else {
-    None
-  };
-  let is_hsp = module_type == "shared";
-  if !is_hsp {
-    // HAP: only rewrite when pages is absent.
-    if existing_pages.is_some() {
-      return write_main_pages(&page_json_file);
-    }
-  } else if existing_pages.is_some() {
-    // HSP: keep an existing pages; still emit main_pages.json.
-    return write_main_pages(&page_json_file);
-  }
-  write_module_json(res_module_json, process_profile)?;
-  write_main_pages(&page_json_file)
 }
 
-fn write_module_json(res_module_json: &Path, process_profile: &Value) -> Result<()> {
-  let mut document = if res_module_json.is_file() {
-    let content = std::fs::read_to_string(res_module_json)?;
-    serde_json::from_str::<Value>(&content).unwrap_or_else(|_| process_profile.clone())
-  } else {
-    process_profile.clone()
-  };
-  let module_pages = |document: &mut Value| {
-    if let Some(module) = document.get_mut("module").and_then(Value::as_object_mut) {
-      module.insert("pages".into(), PAGE_JSON_RESOURCE.into());
-      true
-    } else {
-      false
+/// Owns the `ReplaceUnitTestIndexFile` output pair.
+pub struct UnitTestProfileWriter<'a> {
+    res_module_json: &'a Path,
+    process_profile: &'a Value,
+    res_profile_dir: &'a Path,
+    module_type: &'a str,
+    replace_page: &'a str,
+}
+
+impl<'a> UnitTestProfileWriter<'a> {
+    pub fn new(
+        res_module_json: &'a Path,
+        process_profile: &'a Value,
+        res_profile_dir: &'a Path,
+        module_type: &'a str,
+        replace_page: &'a str,
+    ) -> Self {
+        Self {
+            res_module_json,
+            process_profile,
+            res_profile_dir,
+            module_type,
+            replace_page,
+        }
     }
-  };
-  if !module_pages(&mut document) {
-    // Neither the res module.json nor the processed profile has a module
-    // section — hvigor synthesizes `{ "module": { "pages": ... } }`.
-    document = serde_json::json!({ "module": { "pages": PAGE_JSON_RESOURCE } });
-  }
-  if let Some(parent) = res_module_json.parent() {
-    std::fs::create_dir_all(parent)?;
-  }
-  std::fs::write(res_module_json, serde_json::to_string_pretty(&document)?)?;
-  Ok(())
+
+    /// Set `module.pages = "$profile:main_pages"` and write the selected test
+    /// page. HAP/HAR/HSP overwrite behavior matches Hvigor's task guard.
+    pub fn replace_index(&self) -> Result<()> {
+        let page_json_file = self.res_profile_dir.join("main_pages.json");
+        if self.module_type == "har" {
+            self.write_module_json()?;
+            return self.write_main_pages(&page_json_file);
+        }
+
+        let existing_pages = if self.res_module_json.is_file() {
+            let content = std::fs::read_to_string(self.res_module_json)?;
+            serde_json::from_str::<Value>(&content)
+                .ok()
+                .and_then(|doc| doc.get("module").and_then(|m| m.get("pages")).cloned())
+        } else {
+            None
+        };
+        if existing_pages.is_some() {
+            return self.write_main_pages(&page_json_file);
+        }
+        self.write_module_json()?;
+        self.write_main_pages(&page_json_file)
+    }
+
+    fn write_main_pages(&self, page_json_file: &Path) -> Result<()> {
+        if let Some(parent) = page_json_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            page_json_file,
+            serde_json::to_string_pretty(&serde_json::json!({ "src": [self.replace_page] }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_module_json(&self) -> Result<()> {
+        let mut document = if self.res_module_json.is_file() {
+            let content = std::fs::read_to_string(self.res_module_json)?;
+            serde_json::from_str::<Value>(&content).unwrap_or_else(|_| self.process_profile.clone())
+        } else {
+            self.process_profile.clone()
+        };
+        let has_module =
+            if let Some(module) = document.get_mut("module").and_then(Value::as_object_mut) {
+                module.insert("pages".into(), PAGE_JSON_RESOURCE.into());
+                true
+            } else {
+                false
+            };
+        if !has_module {
+            document = serde_json::json!({ "module": { "pages": PAGE_JSON_RESOURCE } });
+        }
+        if let Some(parent) = self.res_module_json.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            self.res_module_json,
+            serde_json::to_string_pretty(&document)?,
+        )?;
+        Ok(())
+    }
 }
 
 /// `@ohos/coverage` `pageIndexTemplate` — the local unit-test entry page.

@@ -7,7 +7,10 @@ use tempfile::TempDir;
 
 use super::coordinator::PackInfoFormResourceResolver;
 use arkdown_build::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
-use arkdown_build::layout::ModuleBuildLayout;
+use arkdown_build::unit_test::{
+  inject_unit_test_ability, UnitTestArtifactWriter, UnitTestProfileWriter, UnitTestTemplateParams,
+  UnitTestTemplateWriter, UNIT_TEST_REPLACE_PAGE,
+};
 
 #[test]
 fn make_pack_info_form_profiles_follow_form_widget_module_source_set() {
@@ -112,40 +115,6 @@ fn make_pack_info_form_profiles_follow_form_widget_module_source_set() {
   assert_eq!(
     missing_widget_fallback,
     [entry_root.join("src").join("main").join("resources")]
-  );
-}
-
-#[test]
-fn ohos_test_mock_config_uses_normal_build_target_resources() {
-  let temp = TempDir::new().expect("create ohosTest mock fixture root");
-  let layout = ModuleBuildLayout::for_target_product(temp.path(), "demo", "ohosTest");
-  let input = layout.intermediates_mock_config_json();
-  std::fs::create_dir_all(input.parent().expect("mock input parent"))
-    .expect("create mock input directory");
-  std::fs::write(&input, b"{\"mock\":true}").expect("write transformed mock config");
-
-  super::unit_test::UnitTestArtifactWriter::for_ohos_test(temp.path(), "demo", "ohosTest")
-    .copy_mock_config_json()
-    .expect("copy ohosTest mock config");
-
-  let output = layout.test_mock_config_output_json();
-  assert_eq!(
-    output,
-    temp
-      .path()
-      .join("build")
-      .join("demo")
-      .join("intermediates")
-      .join("res")
-      .join("ohosTest")
-      .join("resources")
-      .join("rawfile")
-      .join("mock")
-      .join("mock-config.json")
-  );
-  assert_eq!(
-    std::fs::read(output).expect("read copied mock config"),
-    b"{\"mock\":true}"
   );
 }
 
@@ -722,7 +691,7 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
   ))
   .expect("hvigor-generated phoneSettingConfig golden must exist");
 
-  let params = super::unit_test::UnitTestTemplateParams {
+  let params = UnitTestTemplateParams {
     bundle_name: "com.example.arkdown.test",
     module_name: "entry",
     scope: "",
@@ -738,7 +707,8 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
   );
 
   let dir = tempfile::tempdir().expect("tempdir");
-  super::unit_test::generate_unit_test_template(dir.path(), "default", &params)
+  UnitTestTemplateWriter::new(dir.path(), "default")
+    .generate_local(&params)
     .expect("template generation");
   assert_eq!(
     std::fs::read(dir.path().join(".test/testability/TestAbility.ets")).unwrap(),
@@ -761,7 +731,7 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
 fn unit_test_template_coverage_false_and_scope_are_substituted() {
   let dir = tempfile::tempdir().expect("tempdir");
   let module_path = dir.path().join("example").join("entry");
-  let params = super::unit_test::UnitTestTemplateParams {
+  let params = UnitTestTemplateParams {
     bundle_name: "com.example.arkdown.test",
     module_name: "entry",
     scope: "ActsAbilityTest",
@@ -814,7 +784,7 @@ fn unit_test_process_profile_injects_test_ability_like_hvigor() {
   )
   .unwrap();
   let mut document = process_profile.clone();
-  super::unit_test::inject_unit_test_ability(&mut document, "entry").expect("injection");
+  inject_unit_test_ability(&mut document, "entry").expect("injection");
   let abilities = document["module"]["abilities"].as_array().unwrap();
   assert_eq!(abilities.len(), 2, "one TestAbility appended");
   assert_eq!(abilities[1]["name"], "TestAbility");
@@ -840,7 +810,7 @@ fn unit_test_process_profile_har_rewrite_matches_hvigor() {
     "app": {"icon": "$media:layered_image", "label": "$string:app_name"},
     "module": {"name": "library", "type": "har", "abilities": []}
   });
-  super::unit_test::inject_unit_test_ability(&mut document, "har").expect("injection");
+  inject_unit_test_ability(&mut document, "har").expect("injection");
   assert_eq!(document["module"]["type"], "entry");
   // hvigor: `s.module.deliveryWithInstall = n.isHarModule()` — HAR is true.
   assert_eq!(document["module"]["deliveryWithInstall"], true);
@@ -862,13 +832,14 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
     "module": {"pages": "$profile:main_pages"}
   });
   // HAP without pages -> rewrite.
-  super::unit_test::replace_unit_test_index_file(
+  UnitTestProfileWriter::new(
     &res_module_json,
     &process_profile,
     &profile_dir,
     "entry",
-    super::unit_test::UNIT_TEST_REPLACE_PAGE,
+    UNIT_TEST_REPLACE_PAGE,
   )
+  .replace_index()
   .expect("replace");
   let module_doc: serde_json::Value =
     serde_json::from_str(&std::fs::read_to_string(&res_module_json).unwrap()).unwrap();
@@ -876,10 +847,7 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
   let main_pages: serde_json::Value =
     serde_json::from_str(&std::fs::read_to_string(profile_dir.join("main_pages.json")).unwrap())
       .unwrap();
-  assert_eq!(
-    main_pages["src"][0],
-    super::unit_test::UNIT_TEST_REPLACE_PAGE
-  );
+  assert_eq!(main_pages["src"][0], UNIT_TEST_REPLACE_PAGE);
 
   // HAP with existing pages -> keep, but still write main_pages.json.
   let res_module_json2 = res.join("module2.json");
@@ -888,13 +856,14 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
     r#"{"module": {"pages": "$profile:existing"}}"#,
   )
   .unwrap();
-  super::unit_test::replace_unit_test_index_file(
+  UnitTestProfileWriter::new(
     &res_module_json2,
     &process_profile,
     &profile_dir,
     "entry",
-    super::unit_test::UNIT_TEST_REPLACE_PAGE,
+    UNIT_TEST_REPLACE_PAGE,
   )
+  .replace_index()
   .expect("replace keeps pages");
   let kept: serde_json::Value =
     serde_json::from_str(&std::fs::read_to_string(&res_module_json2).unwrap()).unwrap();
@@ -904,7 +873,6 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
 
 #[test]
 fn unit_test_artifact_handoffs_use_the_typed_module_layout() {
-  use super::unit_test::UnitTestArtifactWriter;
   use arkdown_build::layout::ModuleBuildLayout;
 
   let temp = tempfile::tempdir().expect("tempdir");

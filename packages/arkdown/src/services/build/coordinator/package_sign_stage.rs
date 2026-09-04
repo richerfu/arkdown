@@ -69,7 +69,7 @@ impl BuildCoordinator {
       for (module, _manifest, _loader_json, _resource_refs, module_target_name, module_config) in
         loader_jsons.iter()
       {
-        let artifacts = crate::services::build::unit_test::UnitTestArtifactWriter::new(
+        let artifacts = arkdown_build::unit_test::UnitTestArtifactWriter::new(
           &module.src_path,
           &module_config.product.name,
         );
@@ -135,15 +135,17 @@ impl BuildCoordinator {
           let module_context = session
             .module_context(&module.name)
             .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
-          crate::services::build::unit_test::UnitTestExecutionPlan::from_build(
-            &config.sdk_config,
-            &config.product.runtime_os,
-            &module.src_path,
-            &config.project_root,
-            &module.module_type,
-            module_context.deps.as_ref(),
-            coverage,
-            args.resolved_node_executable(),
+          arkdown_build::unit_test::UnitTestExecutionPlan::from_build(
+            arkdown_build::unit_test::UnitTestExecutionInput {
+              sdk_config: &config.sdk_config,
+              runtime_os: &config.product.runtime_os,
+              module_path: &module.src_path,
+              project_path: &config.project_root,
+              module_type: &module.module_type,
+              dependencies: module_context.deps.as_ref(),
+              coverage,
+              node_executable: args.resolved_node_executable(),
+            },
           )
           .and_then(|plan| plan.execute())
           .map_err(|error| {
@@ -754,7 +756,7 @@ impl BuildCoordinator {
             )
             .await?
         {
-          crate::services::build::unit_test::UnitTestArtifactWriter::for_ohos_test(
+          arkdown_build::unit_test::UnitTestArtifactWriter::for_ohos_test(
             &module.src_path,
             &module_config.product.name,
             artifact_target_label,
