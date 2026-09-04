@@ -595,6 +595,53 @@ pub(super) struct DependencyCustomTypeInputBuilder<'a> {
   pub(super) properties: &'a HvigorRuntimeProperties,
 }
 
+/// Projects the immutable build-session dependency graph into the declaration
+/// package roots consumed by bundled HAR declaration merging. This mirrors
+/// `ets2bundle`'s `modulePathMap`/`depName2DepInfo` lookup while keeping session
+/// types out of the OXC transform crate.
+pub(super) struct HarDeclarationDependencyPackageInventory<'a> {
+  dependencies: &'a DependencyGraphSnapshot,
+}
+
+impl<'a> HarDeclarationDependencyPackageInventory<'a> {
+  pub(super) fn new(dependencies: &'a DependencyGraphSnapshot) -> Self {
+    Self { dependencies }
+  }
+
+  pub(super) fn collect(&self) -> Vec<(String, PathBuf, PathBuf)> {
+    self
+      .dependencies
+      .nodes
+      .values()
+      .flat_map(|node| {
+        let Some(root) = node.package_root.as_ref() else {
+          return Vec::new();
+        };
+        let entry = node
+          .package
+          .as_deref()
+          .and_then(|package| {
+            package
+              .package_json
+              .types
+              .as_ref()
+              .or(package.package_json.main.as_ref())
+          })
+          .cloned()
+          .unwrap_or_else(|| "Index.d.ets".to_string());
+        let mut names = vec![node.package_name.clone()];
+        if node.alias != node.package_name {
+          names.push(node.alias.clone());
+        }
+        names
+          .into_iter()
+          .map(|name| (name, root.clone(), PathBuf::from(&entry)))
+          .collect::<Vec<_>>()
+      })
+      .collect()
+  }
+}
+
 impl<'a> DependencyCustomTypeInputBuilder<'a> {
   pub(super) fn new(
     dependencies: &'a DependencyGraphSnapshot,
@@ -737,5 +784,48 @@ impl Drop for BuildTimingProbe<'_> {
     } else {
       tracing::debug!(stage = self.stage, elapsed_ms, "profile substage completed");
     }
+  }
+}
+
+#[cfg(test)]
+mod har_declaration_dependency_package_inventory_tests {
+  use super::*;
+
+  #[test]
+  fn projects_package_name_alias_and_default_declaration_entry() {
+    let package_root = PathBuf::from("project").join("oh_modules").join("alias");
+    let mut dependencies = DependencyGraphSnapshot::default();
+    dependencies.nodes.insert(
+      "@scope/package".to_string(),
+      DependencyNodeSnapshot {
+        alias: "alias".to_string(),
+        package_name: "@scope/package".to_string(),
+        version_spec: None,
+        package_root: Some(package_root.clone()),
+        package: None,
+        module_profile: None,
+        node_type: DependencyNodeType::SourceHar,
+        is_runtime_only: false,
+        is_dynamic: false,
+        is_transitive: false,
+        direct_deps: Vec::new(),
+      },
+    );
+
+    assert_eq!(
+      HarDeclarationDependencyPackageInventory::new(&dependencies).collect(),
+      vec![
+        (
+          "@scope/package".to_string(),
+          package_root.clone(),
+          PathBuf::from("Index.d.ets"),
+        ),
+        (
+          "alias".to_string(),
+          package_root,
+          PathBuf::from("Index.d.ets"),
+        ),
+      ]
+    );
   }
 }

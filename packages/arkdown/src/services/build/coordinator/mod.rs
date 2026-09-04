@@ -64,7 +64,6 @@ use super::bundle_plan::{
 };
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use super::coverage_instrument::CoverageInstrumenter;
-use super::generate_har_declarations::HarDeclarationGenerator;
 use super::har_dedup::HarDedupProjectPlan;
 use super::har_importee_cache::HarImporteeCache;
 use super::hot_reload::{
@@ -135,7 +134,7 @@ use arkdown_config::build_profile::{
   EffectiveTargetConfig,
 };
 use arkdown_ets_transform::{
-  ArkuiComponentNameCollector, RolldownEtsTransformPlan, SourceClassifier,
+  ArkuiComponentNameCollector, HarDeclarationGenerator, RolldownEtsTransformPlan, SourceClassifier,
 };
 use arkdown_obfuscate::{
   ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
@@ -178,9 +177,10 @@ use obfuscation::{
   ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
 };
 use planning::{
-  copy_tree, BuildTimingProbe, DependencyCustomTypeInputBuilder, ModuleBuildConfiguration,
-  ModuleTargetSelection, NativeCmakeLocalDependencyInventoryBuilder,
-  NativeDependencyStagePlanBuilder, TargetBuildExecutionPlan,
+  copy_tree, BuildTimingProbe, DependencyCustomTypeInputBuilder,
+  HarDeclarationDependencyPackageInventory, ModuleBuildConfiguration, ModuleTargetSelection,
+  NativeCmakeLocalDependencyInventoryBuilder, NativeDependencyStagePlanBuilder,
+  TargetBuildExecutionPlan,
 };
 pub(crate) use plugin_share::{
   HvigorCompilePluginShareBuilder, PluginCacheInvalidationRunner, PluginContextCacheRunner,

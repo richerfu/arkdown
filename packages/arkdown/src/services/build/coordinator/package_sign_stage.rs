@@ -866,14 +866,16 @@ impl BuildCoordinator {
               if !matches!(artifact_type, HarArtifactType::Original) {
                 let generated_module_info =
                   module_layout.generated_module_info(&module_target_name);
-                let declaration_generator = HarDeclarationGenerator::new_har(
+                let declaration_packages =
+                  HarDeclarationDependencyPackageInventory::new(&module_context.deps).collect();
+                let declaration_generator = HarDeclarationGenerator::new(
                   &module.src_path,
-                  &module_config.product.name,
                   &source_dir,
+                  declarations_dir.clone(),
                   &module.name,
                 )
                 .with_arkts_language_version(self.session.arkts_language_version)
-                .with_dependency_graph(&module_context.deps)
+                .with_dependency_declaration_packages(declaration_packages)
                 .with_package_bundled_declarations(
                   module_build_option
                     .ark_options
