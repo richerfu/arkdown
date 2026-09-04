@@ -129,7 +129,11 @@ impl<'a> StateStylesAttributeList<'a> {
             let Some(body) = styles.body(style_name) else {
                 return Err(BuildLoweringError::InvalidStateStyles);
             };
-            return Ok(StylesAttributeList::from_body(body, context)?.attrs);
+            let mut attrs = Vec::new();
+            for attr in StylesAttributeList::from_body(body, context)?.attrs {
+                attrs.push(attr.with_state_styles(styles, context)?);
+            }
+            return Ok(attrs);
         }
 
         let Expression::ObjectExpression(object) = value else {
@@ -391,8 +395,7 @@ impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
             );
             if self.use_reusable_immutable_guard
                 && self.context.current_component_reusable
-                && RegularAttributeExpression::new(&self.context.component_metadata)
-                    .all_argument_refs(&attr.arguments)
+                && RegularAttributeExpression::new(self.context).all_argument_refs(&attr.arguments)
             {
                 immutable_stmts.push(statement);
             } else {
@@ -425,6 +428,10 @@ impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
         for state in &state_styles.states {
             stmts.push(self.visual_state_statement(ast, Some(&state.name)));
             for attr in &state.attrs {
+                if let Some(nested_state_styles) = &attr.state_styles {
+                    self.push_state_styles(stmts, nested_state_styles, ast, allocator);
+                    continue;
+                }
                 if let Some(gesture) = &attr.gesture {
                     gesture.push_sequence_statements(stmts, ast, allocator, self.context);
                     continue;
@@ -495,12 +502,12 @@ impl<'a, 'ctx> LeafAttributeStatementEmitter<'a, 'ctx> {
 }
 
 pub(super) struct RegularAttributeExpression<'a> {
-    pub(super) component_metadata: &'a ComponentMetadata,
+    context: &'a BuildContext,
 }
 
 impl<'a> RegularAttributeExpression<'a> {
-    pub(super) fn new(component_metadata: &'a ComponentMetadata) -> Self {
-        Self { component_metadata }
+    pub(super) fn new(context: &'a BuildContext) -> Self {
+        Self { context }
     }
 
     pub(super) fn all_argument_refs(&self, arguments: &[&Argument<'_>]) -> bool {
@@ -530,14 +537,30 @@ impl<'a> RegularAttributeExpression<'a> {
             | Expression::BooleanLiteral(_)
             | Expression::ArrowFunctionExpression(_) => true,
             Expression::StaticMemberExpression(member) => {
-                matches!(
-                    &member.object,
-                    Expression::Identifier(identifier)
-                        if self.component_metadata.is_known_enum(identifier.name.as_str())
-                )
+                self.matches_regular_property_access(member)
+                    || matches!(
+                        &member.object,
+                        Expression::Identifier(identifier)
+                            if self
+                                .context
+                                .component_metadata
+                                .is_known_enum(identifier.name.as_str())
+                    )
             }
             Expression::ParenthesizedExpression(parenthesized) => {
                 self.matches_expression(&parenthesized.expression)
+            }
+            _ => false,
+        }
+    }
+
+    fn matches_regular_property_access(&self, member: &StaticMemberExpression<'_>) -> bool {
+        match &member.object {
+            Expression::ThisExpression(_) => self
+                .context
+                .is_regular_attribute_property(member.property.name.as_str()),
+            Expression::StaticMemberExpression(parent) => {
+                self.matches_regular_property_access(parent)
             }
             _ => false,
         }

@@ -86,11 +86,14 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
         let old_body = std::mem::replace(&mut self.program.body, OxcVec::new_in(&self.allocator));
         let mut final_body = OxcVec::new_in(&self.allocator);
         let mut params = Vec::new();
+        let mut reusable_v2_helpers = Vec::new();
         let mut rest = Vec::new();
 
         for (index, statement) in old_body.into_iter().enumerate() {
             if params_interfaces.binary_search(&index).is_ok() {
                 params.push(statement);
+            } else if Self::is_reusable_v2_helper(&statement) {
+                reusable_v2_helpers.push(statement);
             } else {
                 rest.push((index, statement));
             }
@@ -100,6 +103,7 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
             final_body.push(FinalizeConstructionShim::new().statement(&ast));
             self.push_local_builder_context(&mut final_body, &ast);
             self.push_params_interfaces(&mut final_body, params);
+            final_body.extend(reusable_v2_helpers);
             for (_, statement) in rest {
                 final_body.push(statement);
             }
@@ -110,18 +114,30 @@ impl<'a, 'program> ViewpuFinalizePass<'a, 'program> {
             }
             self.push_local_builder_context(&mut final_body, &ast);
             self.push_params_interfaces(&mut final_body, params);
+            final_body.extend(reusable_v2_helpers);
             for (_, statement) in rest_iter {
                 final_body.push(statement);
             }
         } else {
             self.push_local_builder_context(&mut final_body, &ast);
             self.push_params_interfaces(&mut final_body, params);
+            final_body.extend(reusable_v2_helpers);
             for (_, statement) in rest {
                 final_body.push(statement);
             }
         }
 
         self.program.body = final_body;
+    }
+
+    fn is_reusable_v2_helper(statement: &Statement<'_>) -> bool {
+        matches!(
+            statement,
+            Statement::FunctionDeclaration(function)
+                if function.id.as_ref().is_some_and(|identifier| {
+                    identifier.name == GeneratedViewpuName::REUSABLE_V2_INNER_DECORATOR
+                })
+        )
     }
 
     fn push_local_builder_context(

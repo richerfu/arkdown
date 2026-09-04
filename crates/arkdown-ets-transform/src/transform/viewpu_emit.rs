@@ -32,6 +32,9 @@ impl GeneratedViewpuName {
     pub(crate) const COMPONENT_CLASS: &'static str = "componentClass";
     pub(crate) const GET_PARAMS: &'static str = "getParams";
     pub(crate) const GET_REUSE_ID: &'static str = "getReuseId";
+    pub(crate) const GET_UI_NATIVE_MODULE: &'static str = "getUINativeModule";
+    pub(crate) const COMMON: &'static str = "common";
+    pub(crate) const GET_API_TARGET_VERSION: &'static str = "getApiTargetVersion";
     pub(crate) const ENABLE_V2_COMPATIBILITY: &'static str = "enableV2Compatibility";
     pub(crate) const MAKE_V1_OBSERVED: &'static str = "makeV1Observed";
     pub(crate) const CAN_BE_OBSERVED: &'static str = "canBeObserved";
@@ -139,6 +142,44 @@ impl ViewpuStatementAstEmitter {
         runtime_names: &ArkuiRuntimeNames,
         body_stmts: OxcVec<'b, Statement<'b>>,
     ) -> Statement<'b> {
+        let component =
+            Expression::new_identifier(SPAN, ast.allocator().alloc_str(component_name), &ast);
+        Self::observe_component_creation_with_marker(
+            ast,
+            use_parent_context,
+            global_builder_parameter,
+            component,
+            runtime_names,
+            body_stmts,
+        )
+    }
+
+    pub(crate) fn observe_transition_creation_ast_statement<'b>(
+        ast: AstBuilder<'b>,
+        use_parent_context: bool,
+        global_builder_parameter: Option<&str>,
+        runtime_names: &ArkuiRuntimeNames,
+        body_stmts: OxcVec<'b, Statement<'b>>,
+    ) -> Statement<'b> {
+        let component = Expression::new_null_literal(SPAN, &ast);
+        Self::observe_component_creation_with_marker(
+            ast,
+            use_parent_context,
+            global_builder_parameter,
+            component,
+            runtime_names,
+            body_stmts,
+        )
+    }
+
+    fn observe_component_creation_with_marker<'b>(
+        ast: AstBuilder<'b>,
+        use_parent_context: bool,
+        global_builder_parameter: Option<&str>,
+        component: Expression<'b>,
+        runtime_names: &ArkuiRuntimeNames,
+        body_stmts: OxcVec<'b, Statement<'b>>,
+    ) -> Statement<'b> {
         let object = ViewpuAstEmitter::view_context_expression(&ast, use_parent_context);
         let property = IdentifierName::new(
             SPAN,
@@ -155,8 +196,6 @@ impl ViewpuStatementAstEmitter {
             global_builder_parameter,
             body_stmts,
         );
-        let component =
-            Expression::new_identifier(SPAN, ast.allocator().alloc_str(component_name), &ast);
         let arguments = OxcVec::from_iter_in(
             [
                 ViewpuAstEmitter::argument_from_expression(arrow),
@@ -258,11 +297,7 @@ impl ViewpuAstEmitter {
     }
 
     fn argument_from_expression<'b>(expression: Expression<'b>) -> Argument<'b> {
-        match expression {
-            Expression::Identifier(value) => Argument::Identifier(value),
-            Expression::ArrowFunctionExpression(value) => Argument::ArrowFunctionExpression(value),
-            _ => panic!("generated ViewPU observe arguments must be identifiers or arrows"),
-        }
+        Argument::from(expression)
     }
 
     fn member_expression_to_expression<'b>(member: MemberExpression<'b>) -> Expression<'b> {

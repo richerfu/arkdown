@@ -136,7 +136,7 @@ impl RolldownEtsTransformPlan {
             preview_mode: false,
             check_entry: false,
             checker_mode: CheckerMode::Oxc,
-            should_emit_js: true,
+            should_emit_js: false,
             tsc_target: ArkTscTarget::default(),
             module_analyzer: ModuleAnalyzerKind::default(),
             auto_lazy_import: false,
@@ -409,7 +409,11 @@ impl RolldownEtsTransformer {
 
         let original_source = code;
         let directive_flags = TypeScriptDirectiveFlags::from_source(original_source, id);
-        let emits_javascript = self.plan.should_emit_js && directive_flags.should_emit_javascript();
+        // SDK rollup-plugin-ets-typescript.ts::getShouldEmitJs selects emit
+        // whenever projectConfig.shouldEmitJs is true. When it is false, a
+        // source suppression directive still selects emit unless @keepTs is
+        // also present.
+        let emits_javascript = self.plan.should_emit_js || directive_flags.should_emit_javascript();
         let is_comment_only_javascript = emits_javascript && directive_flags.is_comment_only();
         let is_shared_module = directive_flags.is_shared_module();
         let pipeline = HvigorSourcePipeline::new(self, id);
@@ -624,7 +628,7 @@ impl RolldownEtsTransformer {
         id: &str,
         directive_flags: TypeScriptDirectiveFlags,
     ) -> Result<TypeScriptJavascriptEmitOutput, EtsTransformError> {
-        if !self.plan.should_emit_js || !directive_flags.should_emit_javascript() {
+        if !self.plan.should_emit_js && !directive_flags.should_emit_javascript() {
             return Ok(TypeScriptJavascriptEmitOutput {
                 code: source.to_string(),
                 source_map: None,
@@ -2507,6 +2511,37 @@ export namespace Zip {
         );
         assert!(!output.code.contains("namespace Zip"), "{}", output.code);
         assert!(output.emits_javascript);
+    }
+
+    #[test]
+    fn compile_transform_emits_ordinary_typescript_when_project_switch_is_enabled() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_should_emit_js(true);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "export const value: string = 'arkdown';\n",
+                "/tmp/project/entry/src/main/ets/Value.ts",
+            )
+            .unwrap()
+            .expect("project shouldEmitJs must select the JavaScript emitter");
+
+        assert_eq!(
+            output.code,
+            "export const value = \"arkdown\";\r\n//# sourceMappingURL=Value.js.map"
+        );
+        assert!(output.emits_javascript);
+        assert!(output.source_map.is_some());
     }
 
     #[test]

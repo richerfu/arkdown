@@ -33,6 +33,7 @@ impl CustomComponentStatementEmitter {
         reuse_id: Option<&Argument<'_>>,
         span: Span,
         chain_attrs: &[LeafAttribute<'_>],
+        id_is_only_argumented_attribute: bool,
         builder_methods: &FxHashSet<String>,
         source_metadata: &BuildSourceMetadata<'_>,
         context: &BuildContext,
@@ -40,10 +41,19 @@ impl CustomComponentStatementEmitter {
         let ast = &AstBuilder::new(allocator);
         let mut statements = OxcVec::new_in(&allocator);
         let mut common_stmts = OxcVec::new_in(&allocator);
-        common_stmts.push(ComponentCallStatementEmitter::empty(
+        let create_arguments = if id_is_only_argumented_attribute {
+            OxcVec::from_value_in(
+                Argument::from(Expression::new_boolean_literal(SPAN, true, ast)),
+                ast,
+            )
+        } else {
+            OxcVec::new_in(ast)
+        };
+        common_stmts.push(ComponentCallStatementEmitter::raw_call(
             ast,
             &context.runtime_names().component_common,
             &context.runtime_names().method_create,
+            create_arguments,
         ));
         LeafAttributeStatementEmitter::new(
             &context.runtime_names().component_common,
@@ -52,19 +62,23 @@ impl CustomComponentStatementEmitter {
             builder_methods,
             context,
         )
-        .without_reusable_immutable_guard()
         .push_statements(&mut common_stmts, ast, allocator);
+        let is_reusable = component_info.is_some_and(|info| info.reusable);
+        let global_builder_parameter = if is_reusable {
+            None
+        } else {
+            context.global_builder_parameter.as_deref()
+        };
         statements.push(
             ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
                 AstBuilder::new(allocator),
                 context.use_parent_context,
-                context.global_builder_parameter.as_deref(),
+                global_builder_parameter,
                 &context.runtime_names().component_common,
                 context.runtime_names(),
                 common_stmts,
             ),
         );
-        let is_reusable = component_info.is_some_and(|info| info.reusable);
         let mut custom_component_stmts = Self::custom(
             allocator,
             name,
@@ -145,7 +159,7 @@ impl CustomComponentStatementEmitter {
                 ViewpuStatementAstEmitter::observe_component_creation_ast_statement(
                     AstBuilder::new(allocator),
                     context.use_parent_context,
-                    context.global_builder_parameter.as_deref(),
+                    None,
                     &context.runtime_names().component_recycle,
                     context.runtime_names(),
                     recycle_stmts,
@@ -283,17 +297,7 @@ impl<'a, 'ast, 'b> ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
     }
 
     fn statement(&self, params: Expression<'a>, reuse_id: Option<&Argument<'_>>) -> Statement<'a> {
-        let reuse_id = reuse_id
-            .and_then(Argument::as_expression)
-            .map(|expression| expression.clone_in(self.allocator))
-            .unwrap_or_else(|| {
-                Expression::new_string_literal(
-                    SPAN,
-                    self.ast.allocator().alloc_str(self.name),
-                    None,
-                    self.ast,
-                )
-            });
+        let reuse_id = self.reuse_id_expression(reuse_id);
         let options = self.object_expression([
             self.object_property(
                 GeneratedViewpuName::COMPONENT_CLASS,
@@ -303,10 +307,7 @@ impl<'a, 'ast, 'b> ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
                 GeneratedViewpuName::GET_PARAMS,
                 self.arrow_expression(params),
             ),
-            self.object_property(
-                GeneratedViewpuName::GET_REUSE_ID,
-                self.arrow_expression(reuse_id),
-            ),
+            self.object_property(GeneratedViewpuName::GET_REUSE_ID, reuse_id),
             self.object_property(
                 GeneratedViewpuName::EXTRA_INFO,
                 self.source_info_expression(),
@@ -341,6 +342,93 @@ impl<'a, 'ast, 'b> ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
             ),
             self.ast,
         )
+    }
+
+    fn reuse_id_expression(&self, reuse: Option<&Argument<'_>>) -> Expression<'a> {
+        let configured = reuse.and_then(|argument| {
+            let Argument::ObjectExpression(object) = argument else {
+                return None;
+            };
+            object.properties.iter().find_map(|property| {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return None;
+                };
+                property
+                    .key
+                    .static_name()
+                    .is_some_and(|name| name == self.context.runtime_names().reuse_id)
+                    .then_some(&property.value)
+            })
+        });
+        let modern = configured
+            .map(|expression| expression.clone_in(self.allocator))
+            .unwrap_or_else(|| self.default_reuse_id_arrow());
+        let legacy = configured
+            .filter(|expression| {
+                matches!(
+                    expression,
+                    Expression::ArrowFunctionExpression(arrow)
+                        if matches!(arrow.body.as_expression(), Some(Expression::StringLiteral(_)))
+                )
+            })
+            .map(|expression| expression.clone_in(self.allocator))
+            .unwrap_or_else(|| self.default_reuse_id_arrow());
+        Expression::new_conditional_expression(
+            SPAN,
+            self.api_target_at_least_26_expression(),
+            modern,
+            legacy,
+            self.ast,
+        )
+    }
+
+    fn api_target_at_least_26_expression(&self) -> Expression<'a> {
+        let native_module = Expression::new_call_expression(
+            SPAN,
+            Expression::new_identifier(SPAN, GeneratedViewpuName::GET_UI_NATIVE_MODULE, self.ast),
+            None,
+            OxcVec::new_in(self.ast),
+            false,
+            self.ast,
+        );
+        let common = Expression::from(MemberExpression::new_static_member_expression(
+            SPAN,
+            native_module,
+            IdentifierName::new(SPAN, GeneratedViewpuName::COMMON, self.ast),
+            false,
+            self.ast,
+        ));
+        let target_version = Expression::from(MemberExpression::new_static_member_expression(
+            SPAN,
+            common,
+            IdentifierName::new(SPAN, GeneratedViewpuName::GET_API_TARGET_VERSION, self.ast),
+            false,
+            self.ast,
+        ));
+        let target_version = Expression::new_call_expression(
+            SPAN,
+            target_version,
+            None,
+            OxcVec::new_in(self.ast),
+            false,
+            self.ast,
+        );
+        Expression::new_binary_expression(
+            SPAN,
+            target_version,
+            BinaryOperator::GreaterEqualThan,
+            Expression::new_numeric_literal(SPAN, 26.0, None, NumberBase::Decimal, self.ast),
+            self.ast,
+        )
+    }
+
+    fn default_reuse_id_arrow(&self) -> Expression<'a> {
+        self.arrow_expression(Expression::new_string_literal(
+            SPAN,
+            self.ast.allocator().alloc_str(self.name),
+            None,
+            self.ast,
+        ))
     }
 
     fn arrow_expression(&self, body: Expression<'a>) -> Expression<'a> {
@@ -467,7 +555,7 @@ impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
 
     fn observe_statement(&self, params: CustomComponentParamExpressions<'a>) -> Statement<'a> {
         let callee = self.member_expression(
-            self.view_context_expression(),
+            self.observation_context_expression(),
             &self.context.runtime_names().observe_component_creation2,
         );
         let arrow = self.observe_arrow_function(params);
@@ -508,14 +596,20 @@ impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
         &self,
         params: CustomComponentParamExpressions<'a>,
     ) -> Statement<'a> {
+        let CustomComponentParamExpressions {
+            constructor_arguments,
+            local_storage,
+            lambda,
+            update,
+        } = params;
         let mut consequent = OxcVec::new_in(&self.allocator);
-        consequent.push(self.component_call_declaration(params.constructor_arguments));
+        consequent.push(self.component_call_declaration(constructor_arguments, local_storage));
         consequent.push(self.viewpu_create_statement());
-        consequent.push(self.params_lambda_declaration(params.lambda));
+        consequent.push(self.params_lambda_declaration(lambda));
         consequent.push(self.params_generator_assignment());
 
         let mut alternate = OxcVec::new_in(&self.allocator);
-        alternate.push(self.update_state_vars_statement(params.update));
+        alternate.push(self.update_state_vars_statement(update));
 
         Statement::new_if_statement(
             SPAN,
@@ -535,17 +629,20 @@ impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
     fn component_call_declaration(
         &self,
         constructor_arguments: OxcVec<'a, Argument<'a>>,
+        local_storage: Option<Expression<'a>>,
     ) -> Statement<'a> {
         let mut arguments = OxcVec::new_in(&self.allocator);
         arguments.push(Argument::from(self.view_context_expression()));
         arguments.extend(constructor_arguments);
-        arguments.push(Argument::from(Expression::new_identifier(
-            SPAN,
-            self.ast
-                .allocator()
-                .alloc_str(&self.context.runtime_names().undefined),
-            self.ast,
-        )));
+        arguments.push(Argument::from(local_storage.unwrap_or_else(|| {
+            Expression::new_identifier(
+                SPAN,
+                self.ast
+                    .allocator()
+                    .alloc_str(&self.context.runtime_names().undefined),
+                self.ast,
+            )
+        })));
         arguments.push(Argument::from(Expression::new_identifier(
             SPAN,
             self.ast
@@ -645,7 +742,7 @@ impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
     fn update_state_vars_statement(&self, update: Expression<'a>) -> Statement<'a> {
         self.call_statement(
             self.member_expression(
-                self.view_context_expression(),
+                self.observation_context_expression(),
                 &self
                     .context
                     .runtime_names()
@@ -665,6 +762,14 @@ impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
                 self.ast,
             ),
         )
+    }
+
+    fn observation_context_expression(&self) -> Expression<'a> {
+        if self.context.custom_observation_uses_parent {
+            self.view_context_expression()
+        } else {
+            Expression::new_this_expression(SPAN, self.ast)
+        }
     }
 
     fn variable_declaration(&self, name: &str, init: Expression<'a>) -> Statement<'a> {
@@ -969,16 +1074,22 @@ impl<'a, 'ast, 'b> ReusableCustomComponentAstEmitter<'a, 'ast, 'b> {
         params: CustomComponentParamExpressions<'a>,
         reuse_id: Expression<'a>,
     ) -> Statement<'a> {
-        let lambda_for_recycle = params.lambda.clone_in(self.allocator);
-        let lambda_for_generator = params.lambda;
+        let CustomComponentParamExpressions {
+            constructor_arguments,
+            local_storage,
+            lambda,
+            update,
+        } = params;
+        let lambda_for_recycle = lambda.clone_in(self.allocator);
+        let lambda_for_generator = lambda;
         let mut consequent = OxcVec::new_in(&self.allocator);
-        consequent.push(self.component_call_declaration(params.constructor_arguments));
+        consequent.push(self.component_call_declaration(constructor_arguments, local_storage));
         consequent.push(self.viewpu_create_recycle_statement(lambda_for_recycle, reuse_id));
         consequent.push(self.params_lambda_declaration(lambda_for_generator));
         consequent.push(self.params_generator_assignment());
 
         let mut alternate = OxcVec::new_in(&self.allocator);
-        alternate.push(self.update_state_vars_statement(params.update));
+        alternate.push(self.update_state_vars_statement(update));
 
         Statement::new_if_statement(
             SPAN,
@@ -998,17 +1109,20 @@ impl<'a, 'ast, 'b> ReusableCustomComponentAstEmitter<'a, 'ast, 'b> {
     fn component_call_declaration(
         &self,
         constructor_arguments: OxcVec<'a, Argument<'a>>,
+        local_storage: Option<Expression<'a>>,
     ) -> Statement<'a> {
         let mut arguments = OxcVec::new_in(&self.allocator);
         arguments.push(Argument::from(self.view_context_expression()));
         arguments.extend(constructor_arguments);
-        arguments.push(Argument::from(Expression::new_identifier(
-            SPAN,
-            self.ast
-                .allocator()
-                .alloc_str(&self.context.runtime_names().undefined),
-            self.ast,
-        )));
+        arguments.push(Argument::from(local_storage.unwrap_or_else(|| {
+            Expression::new_identifier(
+                SPAN,
+                self.ast
+                    .allocator()
+                    .alloc_str(&self.context.runtime_names().undefined),
+                self.ast,
+            )
+        })));
         arguments.push(Argument::from(Expression::new_identifier(
             SPAN,
             self.ast
@@ -1563,20 +1677,22 @@ impl CustomReuseId {
     pub(super) fn from_leaf_attrs<'a>(
         attrs: &'a [LeafAttribute<'a>],
         context: &BuildContext,
+        reusable_v2: bool,
     ) -> Option<&'a Argument<'a>> {
         attrs
             .iter()
-            .find(|attr| context.is_reuse_id_attribute_name(&attr.name))
+            .find(|attr| context.is_reuse_control_attribute_name(&attr.name, reusable_v2))
             .and_then(|attr| attr.arguments.first().copied())
     }
 
     pub(super) fn from_component_attrs<'a>(
         component: &'a ArkUIComponentExpression<'a>,
         context: &BuildContext,
+        reusable_v2: bool,
     ) -> Option<&'a Argument<'a>> {
         component.chain_expressions.iter().find_map(|chain| {
             let name = ArkuiCallName::chain(chain).ok()?;
-            if context.is_reuse_id_attribute_name(&name) {
+            if context.is_reuse_control_attribute_name(&name, reusable_v2) {
                 chain.arguments.first()
             } else {
                 None
@@ -1587,6 +1703,7 @@ impl CustomReuseId {
 
 struct CustomComponentParamExpressions<'a> {
     constructor_arguments: OxcVec<'a, Argument<'a>>,
+    local_storage: Option<Expression<'a>>,
     lambda: Expression<'a>,
     update: Expression<'a>,
 }
@@ -1634,6 +1751,7 @@ impl<'a> CustomComponentParamExpressions<'a> {
                         )),
                         ast,
                     ),
+                    local_storage: None,
                     lambda: object_emitter.empty_expression(
                         builder_param.as_ref().map(|(name, value)| (*name, value)),
                         component_info,
@@ -1647,31 +1765,62 @@ impl<'a> CustomComponentParamExpressions<'a> {
                 };
             }
 
-            let constructor_arguments = OxcVec::from_iter_in(
-                arguments
-                    .iter()
-                    .map(|argument| argument.clone_in(allocator)),
-                ast,
-            );
-            let lambda = Self::lambda_expression_from_arguments(allocator, arguments);
+            if arguments.len() == 1
+                && component_info.is_some_and(Self::accepts_storage_as_only_argument)
+            {
+                return Self {
+                    constructor_arguments: OxcVec::from_value_in(
+                        Argument::from(object_emitter.empty_expression(
+                            builder_param.as_ref().map(|(name, value)| (*name, value)),
+                            component_info,
+                            ParamMode::Ctor,
+                        )),
+                        ast,
+                    ),
+                    local_storage: arguments[0]
+                        .as_expression()
+                        .map(|expression| expression.clone_in(allocator)),
+                    lambda: object_emitter.empty_expression(
+                        builder_param.as_ref().map(|(name, value)| (*name, value)),
+                        component_info,
+                        ParamMode::Lambda,
+                    ),
+                    update: object_emitter.empty_expression(
+                        builder_param.as_ref().map(|(name, value)| (*name, value)),
+                        component_info,
+                        ParamMode::Update,
+                    ),
+                };
+            }
+
+            let constructor_arguments =
+                OxcVec::from_value_in(arguments[0].clone_in(allocator), ast);
+            let lambda = Self::lambda_expression_from_arguments(allocator, &arguments[..1]);
             return Self {
                 constructor_arguments,
+                local_storage: arguments
+                    .get(1)
+                    .and_then(Argument::as_expression)
+                    .map(|expression| expression.clone_in(allocator)),
                 lambda,
                 update: Expression::new_object_expression(SPAN, OxcVec::new_in(ast), ast),
             };
         };
 
+        let constructor_params = object_emitter.expression(
+            object,
+            component_info,
+            ParamMode::Ctor,
+            builder_param.as_ref().map(|(name, value)| (*name, value)),
+            context,
+        );
+        let local_storage = arguments
+            .get(1)
+            .and_then(Argument::as_expression)
+            .map(|expression| expression.clone_in(allocator));
         Self {
-            constructor_arguments: OxcVec::from_value_in(
-                Argument::from(object_emitter.expression(
-                    object,
-                    component_info,
-                    ParamMode::Ctor,
-                    builder_param.as_ref().map(|(name, value)| (*name, value)),
-                    context,
-                )),
-                ast,
-            ),
+            constructor_arguments: OxcVec::from_value_in(Argument::from(constructor_params), ast),
+            local_storage,
             lambda: object_emitter.expression(
                 object,
                 component_info,
@@ -1687,6 +1836,16 @@ impl<'a> CustomComponentParamExpressions<'a> {
                 context,
             ),
         }
+    }
+
+    fn accepts_storage_as_only_argument(info: &CustomComponentInfo) -> bool {
+        info.update_props.is_empty()
+            && info.link_props.is_empty()
+            && info.builder_params.is_empty()
+            && info.param_props.is_empty()
+            && info.event_props.is_empty()
+            && info.regular_props.is_empty()
+            && info.v1_property_kinds.is_empty()
     }
 
     fn lambda_expression_from_arguments(
@@ -1997,11 +2156,21 @@ impl<'a, 'ast> CustomComponentObjectEmitter<'a, 'ast> {
         mode: ParamMode,
         context: &BuildContext,
     ) -> Expression<'a> {
+        if mode == ParamMode::Ctor
+            && property_name.is_some_and(|name| {
+                component_info.is_some_and(|info| info.builder_params.contains(name))
+            })
+        {
+            if let Expression::CallExpression(call) = value {
+                if !Self::is_explicit_function_invocation(call) {
+                    return self.builder_param_call_fallback(value, context);
+                }
+            }
+        }
         if let Some(name) = Self::dollar_reference_name(value) {
             return match mode {
-                ParamMode::Ctor => self.backing_member_expression(&name),
+                ParamMode::Ctor | ParamMode::Update => self.backing_member_expression(&name),
                 ParamMode::Lambda => self.this_member_expression(&name),
-                ParamMode::Update => value.clone_in(self.allocator),
             };
         }
         if mode == ParamMode::Ctor
@@ -2012,6 +2181,9 @@ impl<'a, 'ast> CustomComponentObjectEmitter<'a, 'ast> {
             if let Some(name) = Self::this_member_name(value) {
                 return self.backing_member_expression(&name);
             }
+            if let Some(name) = Self::builder_parameter_member_name(value) {
+                return self.builder_parameter_backing_member_expression(&name);
+            }
         }
         if let Some(expression) = RawObjectArgumentTransform::new(context)
             .expression_with_call_args(value, self.allocator)
@@ -2021,9 +2193,93 @@ impl<'a, 'ast> CustomComponentObjectEmitter<'a, 'ast> {
         value.clone_in(self.allocator)
     }
 
+    fn is_explicit_function_invocation(call: &oxc_ast::ast::CallExpression<'_>) -> bool {
+        matches!(
+            &call.callee,
+            Expression::StaticMemberExpression(member)
+                if matches!(member.property.name.as_str(), "bind" | "call" | "apply")
+        )
+    }
+
+    fn builder_param_call_fallback(
+        &self,
+        call: &Expression<'_>,
+        context: &BuildContext,
+    ) -> Expression<'a> {
+        let test = Expression::new_binary_expression(
+            SPAN,
+            Expression::new_unary_expression(
+                SPAN,
+                UnaryOperator::Typeof,
+                call.clone_in(self.allocator),
+                self.ast,
+            ),
+            BinaryOperator::StrictEquality,
+            Expression::new_string_literal(
+                SPAN,
+                self.ast
+                    .allocator()
+                    .alloc_str(&context.runtime_names().function_type),
+                None,
+                self.ast,
+            ),
+            self.ast,
+        );
+        let fallback_body = FunctionBody::new(
+            SPAN,
+            OxcVec::new_in(self.ast),
+            OxcVec::from_value_in(
+                Statement::new_expression_statement(SPAN, call.clone_in(self.allocator), self.ast),
+                self.ast,
+            ),
+            self.ast,
+        );
+        let fallback = Expression::new_arrow_function_expression(
+            SPAN,
+            false,
+            None,
+            ArenaBox::new_in(
+                FormalParameters::new(
+                    SPAN,
+                    oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
+                    OxcVec::new_in(self.ast),
+                    None,
+                    self.ast,
+                ),
+                self.ast,
+            ),
+            None,
+            ArrowFunctionBody::FunctionBody(ArenaBox::new_in(fallback_body, self.ast)),
+            self.ast,
+        );
+        Expression::new_conditional_expression(
+            SPAN,
+            test,
+            call.clone_in(self.allocator),
+            fallback,
+            self.ast,
+        )
+    }
+
     fn backing_member_expression(&self, name: &str) -> Expression<'a> {
         let backing = GeneratedViewpuName::backing_field(name);
         self.this_member_expression(&backing)
+    }
+
+    fn builder_parameter_backing_member_expression(&self, name: &str) -> Expression<'a> {
+        let member = MemberExpression::new_static_member_expression(
+            SPAN,
+            Expression::new_identifier(SPAN, "$$", self.ast),
+            IdentifierName::new(
+                SPAN,
+                self.allocator
+                    .alloc_str(&GeneratedViewpuName::backing_field(name)),
+                self.ast,
+            ),
+            false,
+            self.ast,
+        );
+        Expression::from(member)
     }
 
     fn this_member_expression(&self, name: &str) -> Expression<'a> {
@@ -2050,6 +2306,14 @@ impl<'a, 'ast> CustomComponentObjectEmitter<'a, 'ast> {
             return None;
         };
         matches!(&member.object, Expression::ThisExpression(_))
+            .then(|| member.property.name.to_string())
+    }
+
+    fn builder_parameter_member_name(value: &Expression<'_>) -> Option<String> {
+        let Expression::StaticMemberExpression(member) = value else {
+            return None;
+        };
+        matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "$$")
             .then(|| member.property.name.to_string())
     }
 

@@ -54,7 +54,7 @@ use crate::error::EtsTransformError;
 use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
 use crate::transform::api_available::{ApiAvailableLowerer, ApiAvailableTransformOptions};
 use crate::transform::build_fn::{
-    BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, StylesMethodInfo,
+    BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, ExtendBodyPlan, StylesMethodInfo,
 };
 pub(crate) use crate::transform::build_fn::{
     CustomComponentGeneration, CustomComponentInfo, CustomComponentPropertyKind,
@@ -64,13 +64,14 @@ use crate::transform::builder_factory::BuilderFactoryValidator;
 use crate::transform::component::{
     BuilderMethodInfo, BuilderMethodKind, ComponentInfo, ComponentRuntimeOptions,
     ComponentSourceMember, CustomDialogControllerLowerer, FieldExpression, GlobalReusePoolConfig,
-    ParamField, RegularField, RegularMember, StateField, ViewPuClassEmitter,
+    PageTransitionMethodInfo, ParamField, RegularField, RegularMember, StateField,
+    ViewPuClassEmitter,
 };
 use crate::transform::component_analysis::{
     BuilderFunctionNameCollector, CustomComponentNameCollector, ExtendAttributeIndex,
     ImportedCustomComponentNamesCollector, LocalBuilderFileInventory,
     PreviewComponentNameCollector, SimpleTypeContext, StructBuilderMethodNames,
-    StructBuilderParamNames, StructMutableBuilderProperties,
+    StructBuilderParamNames, StructMutableBuilderProperties, StructRegularAttributeProperties,
 };
 use crate::transform::component_collection::ComponentNameCollector;
 use crate::transform::component_meta::ComponentMetadata;
@@ -1170,6 +1171,18 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     .find(|decorator| ArkuiDecorator::new(decorator).name() == decorator_kind)
                     .and_then(|decorator| ArkuiDecorator::new(decorator).identifier_arg())
                     .unwrap_or_else(|| "View".to_string());
+                let body_statements = ExtendBodyPlan::new(
+                    function.body.as_deref(),
+                    &component,
+                    Arc::clone(&self.options.component_metadata),
+                    Arc::clone(&self.extend_attributes),
+                )
+                .with_styles_methods(&self.global_styles)
+                .statements(self.allocator)
+                .map_err(|error| EtsTransformError::Fatal {
+                    file: self.id.to_string(),
+                    message: error.hvigor_message().to_string(),
+                })?;
                 if decorator_name == ArkuiDecoratorName::ANIMATABLE_EXTEND {
                     TopLevelFunctionEmitter::animatable_extend_statement(
                         self.allocator,
@@ -1177,7 +1190,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         &component,
                         name,
                         &function.params,
-                        function.body.as_deref(),
+                        body_statements,
                         self.options.component_metadata.runtime_names(),
                     )
                 } else {
@@ -1187,7 +1200,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         &component,
                         name,
                         &function.params,
-                        function.body.as_deref(),
+                        body_statements,
                     )
                 }
             }
@@ -1275,6 +1288,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         let mut initial_render_body = BuildBodyInfo::default();
         let mut initial_render_method_span = SPAN;
         let mut builder_methods: Vec<BuilderMethodInfo> = Vec::new();
+        let mut page_transition_methods: Vec<PageTransitionMethodInfo> = Vec::new();
         let mut styles_methods: Vec<StylesMethodInfo<'s>> = self.global_styles.to_vec();
         for element in &statement.body.body {
             let StructElement::MethodDefinition(method) = element else {
@@ -1303,6 +1317,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         let builder_param_names = StructBuilderParamNames::new(statement).collect();
         let mutable_builder_properties =
             Arc::new(StructMutableBuilderProperties::new(statement).collect());
+        let regular_attribute_properties =
+            Arc::new(StructRegularAttributeProperties::new(statement, false).collect());
         let mut builder_initializer_names = self.builder_functions.clone();
         builder_initializer_names.extend(builder_method_names.iter().cloned());
         let mut visible_builder_methods = builder_initializer_names.clone();
@@ -1411,13 +1427,21 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         .iter()
                         .find(|d| ArkuiDecorator::new(d).name() == ArkuiDecoratorName::WATCH)
                         .and_then(|decorator| ArkuiDecorator::new(decorator).string_arg());
-                    let alias = property
-                        .decorators
-                        .iter()
-                        .find(|d| {
-                            ArkuiDecoratorName::is_provider_alias(ArkuiDecorator::new(d).name())
+                    let provider_decorator = property.decorators.iter().find(|d| {
+                        ArkuiDecoratorName::is_provider_alias(ArkuiDecorator::new(d).name())
+                    });
+                    let provider_alias = provider_decorator
+                        .and_then(|decorator| ArkuiDecorator::new(decorator).provider_alias());
+                    let (alias, provide_allow_override) = provider_alias
+                        .map(|(alias, allow_override)| (Some(alias), allow_override))
+                        .unwrap_or((None, false));
+                    let provide_override_key = provider_decorator
+                        .and_then(|decorator| {
+                            ArkuiDecorator::new(decorator).provider_override_key()
                         })
-                        .and_then(|decorator| ArkuiDecorator::new(decorator).string_arg());
+                        .map(FieldExpression::from_expression);
+                    let provide_allow_override =
+                        provide_allow_override || provide_override_key.is_some();
                     let decorator_arg = property
                         .decorators
                         .iter()
@@ -1434,6 +1458,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         initializer,
                         watch_handler,
                         alias,
+                        provide_allow_override,
+                        provide_override_key,
                         decorator_arg,
                         is_simple_type: type_node.is_none_or(|ty| {
                             self.simple_type_context.is_simple_type_annotation(ty)
@@ -1468,6 +1494,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
                     .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_shared_regular_attribute_properties(Arc::clone(
+                        &regular_attribute_properties,
+                    ))
                     .with_styles_methods(&styles_methods);
                     initial_render_body = BuildBodyInfo::plan(plan);
                     // Preserve the original build method range on the generated
@@ -1519,6 +1548,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                             module_name: self.module_name.as_ref().map(Arc::clone),
                         },
                         GeneratedViewpuName::VIEWPU_BASE,
+                        is_reusable,
                     )
                     .with_xcomponent_module_identity(
                         self.options.bundle_name.as_deref(),
@@ -1526,6 +1556,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
                     .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_shared_regular_attribute_properties(Arc::clone(
+                        &regular_attribute_properties,
+                    ))
                     .with_styles_methods(&styles_methods);
                     builder_methods.push(BuilderMethodInfo {
                         name: name.into_owned(),
@@ -1535,6 +1568,44 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         kind,
                     });
                     source_members.push(ComponentSourceMember::Builder(builder_methods.len() - 1));
+                }
+                StructElement::MethodDefinition(method)
+                    if method.key.static_name().is_some_and(|name| {
+                        name == self
+                            .options
+                            .component_metadata
+                            .runtime_names()
+                            .page_transition_method
+                    }) =>
+                {
+                    let body = BuildBodyPlan::page_transition_with_shared_inputs(
+                        method.value.body.as_deref(),
+                        BuildBodySharedInputs {
+                            source_text: Arc::clone(&self.source_text),
+                            source_id: Arc::clone(&self.hvigor_source_id),
+                            custom_components: self.custom_components,
+                            builder_methods: &visible_builder_methods,
+                            custom_component_update_props: self.custom_component_update_props,
+                            component_metadata: Arc::clone(&self.options.component_metadata),
+                            raw_object_fields: &raw_object_fields,
+                            module_name: self.module_name.as_ref().map(Arc::clone),
+                        },
+                        GeneratedViewpuName::VIEWPU_BASE,
+                    )
+                    .with_xcomponent_module_identity(
+                        self.options.bundle_name.as_deref(),
+                        self.module_name.as_deref(),
+                    )
+                    .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
+                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_styles_methods(&styles_methods);
+                    page_transition_methods.push(PageTransitionMethodInfo {
+                        method,
+                        body: BuildBodyInfo::plan(body),
+                    });
+                    source_members.push(ComponentSourceMember::PageTransition(
+                        page_transition_methods.len() - 1,
+                    ));
                 }
                 StructElement::MethodDefinition(method)
                     if method
@@ -1612,6 +1683,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 })
                 .transpose()?,
             builder_methods,
+            page_transition_methods,
         }))
     }
 

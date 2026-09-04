@@ -47,6 +47,12 @@ pub struct BuilderMethodInfo<'a> {
     pub kind: BuilderMethodKind,
 }
 
+#[derive(Debug, Clone)]
+pub struct PageTransitionMethodInfo<'a> {
+    pub method: &'a MethodDefinition<'a>,
+    pub body: BuildBodyInfo<'a>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuilderMethodKind {
     Builder,
@@ -79,6 +85,11 @@ pub struct StateField<'a> {
     /// For `@Consume`, this is the key looked up from an ancestor `@Provide`.
     /// When absent the field name itself is used as the key.
     pub alias: Option<String>,
+    /// `@Provide({ allowOverride: "alias" })` enables descendant providers
+    /// to override both the alias and the source property registration.
+    pub provide_allow_override: bool,
+    /// Runtime key expression from `@Provide({ allowOverride: key })`.
+    pub provide_override_key: Option<FieldExpression<'a>>,
     /// First decorator argument expression for decorators that pass the
     /// original expression through to runtime APIs, such as `@StorageProp`.
     pub decorator_arg: Option<FieldExpression<'a>>,
@@ -819,6 +830,9 @@ pub struct ComponentInfo<'a> {
     pub entry_registration: Option<EntryRegistrationInfo<'a>>,
     /// `@Builder` methods: desugared ArkUI DSL, emitted as regular class methods.
     pub builder_methods: Vec<BuilderMethodInfo<'a>>,
+    /// `pageTransition()` methods use ArkUI DSL lowering with transition
+    /// observation markers and remain in their original source position.
+    pub page_transition_methods: Vec<PageTransitionMethodInfo<'a>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -837,6 +851,7 @@ pub enum ComponentSourceMember {
     Regular(usize),
     InitialRender,
     Builder(usize),
+    PageTransition(usize),
 }
 
 impl<'a> RegularMember<'a> {
@@ -892,6 +907,7 @@ impl Default for ComponentInfo<'_> {
             initial_render_body: Default::default(),
             entry_registration: Default::default(),
             builder_methods: Default::default(),
+            page_transition_methods: Default::default(),
         }
     }
 }
@@ -1102,6 +1118,11 @@ impl<'a> ViewPuClassEmitter<'a> {
                 ComponentSourceMember::Builder(index) => {
                     if let Some(method) = self.info.builder_methods.get(*index) {
                         elements.push(self.build_builder_method(allocator, method)?);
+                    }
+                }
+                ComponentSourceMember::PageTransition(index) => {
+                    if let Some(method) = self.info.page_transition_methods.get(*index) {
+                        elements.push(self.build_page_transition_method(allocator, method)?);
                     }
                 }
             }
@@ -1518,6 +1539,21 @@ impl<'a> ViewPuClassEmitter<'a> {
         Ok(elements)
     }
 
+    fn build_page_transition_method<'b>(
+        &self,
+        allocator: &'b Allocator,
+        method: &PageTransitionMethodInfo<'_>,
+    ) -> Result<oxc_ast::ast::ClassElement<'b>, BuildLoweringError> {
+        let mut output = method.method.clone_in(allocator);
+        output.decorators.clear();
+        if let Some(body) = output.value.body.as_mut() {
+            body.statements = method.body.statements(allocator)?;
+        }
+        Ok(ClassElement::MethodDefinition(ArenaBox::new_in(
+            output, &allocator,
+        )))
+    }
+
     fn build_builder_method<'b>(
         &self,
         allocator: &'b Allocator,
@@ -1751,11 +1787,17 @@ impl<'a> ViewPuClassEmitter<'a> {
                 );
             }
             ConstructorInitKind::Consume => {
-                let key = field.alias.as_deref().unwrap_or(field.name.as_str());
-                let mut args = builder.expressions_from_iter([
-                    builder.string_expression(key),
-                    builder.string_expression(&field.name),
-                ]);
+                let key = field.alias.as_deref().map_or_else(
+                    || {
+                        field.decorator_arg.as_ref().map_or_else(
+                            || builder.string_expression(&field.name),
+                            |argument| argument.to_expression(builder),
+                        )
+                    },
+                    |alias| builder.string_expression(alias),
+                );
+                let mut args =
+                    builder.expressions_from_iter([key, builder.string_expression(&field.name)]);
                 if field.initializer.is_some() {
                     args.push(self.field_initializer_expression(builder, field));
                 }
@@ -1799,12 +1841,36 @@ impl<'a> ViewPuClassEmitter<'a> {
         if field.decorator != ArkuiDecoratorName::PROVIDE {
             return;
         }
-        if let Some(alias) = &field.alias {
+        if let Some(key) = &field.provide_override_key {
+            stmts.push(self.add_provided_var_expression_statement(
+                builder,
+                key.to_expression(builder),
+                &field.name,
+                true,
+            ));
+        } else if let Some(alias) = &field.alias {
             if alias != &field.name {
-                stmts.push(self.add_provided_var_statement(builder, alias, &field.name));
+                stmts.push(self.add_provided_var_statement(
+                    builder,
+                    alias,
+                    &field.name,
+                    field.provide_allow_override,
+                ));
             }
+        } else if let Some(argument) = &field.decorator_arg {
+            stmts.push(self.add_provided_var_expression_statement(
+                builder,
+                argument.to_expression(builder),
+                &field.name,
+                field.provide_allow_override,
+            ));
         }
-        stmts.push(self.add_provided_var_statement(builder, &field.name, &field.name));
+        stmts.push(self.add_provided_var_statement(
+            builder,
+            &field.name,
+            &field.name,
+            field.provide_allow_override,
+        ));
     }
 
     fn add_provided_var_statement<'b>(
@@ -1812,13 +1878,29 @@ impl<'a> ViewPuClassEmitter<'a> {
         builder: &ViewpuAstBuilder<'b>,
         provided_name: &str,
         field_name: &str,
+        allow_override: bool,
+    ) -> oxc_ast::ast::Statement<'b> {
+        self.add_provided_var_expression_statement(
+            builder,
+            builder.string_expression(provided_name),
+            field_name,
+            allow_override,
+        )
+    }
+
+    fn add_provided_var_expression_statement<'b>(
+        &self,
+        builder: &ViewpuAstBuilder<'b>,
+        provided_name: Expression<'b>,
+        field_name: &str,
+        allow_override: bool,
     ) -> oxc_ast::ast::Statement<'b> {
         builder.this_call_statement(
             GeneratedViewpuName::ADD_PROVIDED_VAR,
             builder.expressions_from_iter([
-                builder.string_expression(provided_name),
+                provided_name,
                 builder.this_backing_member_expression(field_name),
-                builder.boolean_expression(false),
+                builder.boolean_expression(allow_override),
             ]),
         )
     }

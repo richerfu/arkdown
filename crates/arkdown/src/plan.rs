@@ -536,7 +536,7 @@ mod tests {
             runtime_os: "OpenHarmony".to_string(),
             bundle_name: "com.example.app".to_string(),
             use_normalized_ohm_url: true,
-            should_emit_js: true,
+            should_emit_js: false,
             module_analyzer: ModuleAnalyzerKind::default(),
             output_target: OutputTarget::Hap,
             preview_mode: false,
