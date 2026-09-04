@@ -208,7 +208,11 @@ impl<'a> ArkdownConfigLoader<'a> {
 
         let mut modules: Vec<ModuleConfig> = Vec::with_capacity(raw_modules.len());
         for raw_mod in raw_modules {
-            let module_root = root.join(&raw_mod.src_path);
+            // Hvigor resolves descriptor `srcPath` values before exposing the
+            // module directory to downstream tasks. Preserve the canonical
+            // project identity while removing lexical `.`/`..` components so
+            // plugin and SDK-facing projectConfig paths are stable.
+            let module_root = arkdown_path::lexical_normalize(&root.join(&raw_mod.src_path));
 
             // module.json5 is optional — if absent we fall back to Entry.
             let module_type = match RawModuleJson::load(&module_root) {
@@ -464,6 +468,10 @@ mod tests {
                 assert_eq!(cfg.product.bundle_name, "com.example.testapp");
                 assert_eq!(cfg.modules.len(), 1);
                 assert_eq!(cfg.modules[0].name, "entry");
+                assert_eq!(
+                    cfg.modules[0].src_path,
+                    arkdown_path::lexical_normalize(&tmp).join("entry")
+                );
                 assert_eq!(
                     cfg.modules[0].module_type,
                     arkdown_core::OhosModuleType::Entry

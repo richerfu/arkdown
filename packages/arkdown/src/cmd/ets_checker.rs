@@ -313,6 +313,14 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     })
   }
 
+  /// Return the exact Rust-owned ArkTS compile configuration used by both the
+  /// optional SDK checker comparison backend and JavaScript/TypeScript compile
+  /// plugins. Keeping a single serialized snapshot prevents the plugin bridge
+  /// from reconstructing a smaller, divergent configuration.
+  pub(crate) fn project_config_value(&self) -> Result<Value> {
+    serde_json::to_value(self.project_config()?).map_err(Into::into)
+  }
+
   fn entries(&self) -> Result<BTreeMap<String, String>> {
     let mut entries = BTreeMap::new();
     let mut seen = BTreeSet::new();
@@ -334,16 +342,34 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     let mut mock_config_key_to_module_info = Map::new();
     let mut source_to_module_id = Map::new();
 
-    if mock_config_path.is_file() {
-      let content = std::fs::read_to_string(&mock_config_path)
-        .with_context(|| format!("read mock config {}", mock_config_path.display()))?;
-      let entries = json5::from_str::<indexmap::IndexMap<String, Value>>(&content)
+    if let Some(source) = self
+      .input
+      .session
+      .source_store
+      .source_by_path(&mock_config_path)
+    {
+      let content = match source.cached_content() {
+        Some(arkdown_session::SourceContent::Text(content)) => content.as_ref(),
+        _ => {
+          anyhow::bail!(
+            "ARKDOWN_ETS_CHECKER_MOCK_CONFIG_CONTENT: mock config {} was not captured as UTF-8 text",
+            mock_config_path.display()
+          )
+        }
+      };
+      let entries = json5::from_str::<indexmap::IndexMap<String, Value>>(content)
         .with_context(|| format!("parse mock config {}", mock_config_path.display()))?;
       for (key, entry) in entries {
         if let Some(source) = entry.get("source").and_then(Value::as_str) {
           if !source.is_empty() {
             let source_path = self.input.module_context.module.root.join(source);
-            if source_path.is_file() {
+            if self
+              .input
+              .session
+              .source_store
+              .source_by_path(&source_path)
+              .is_some()
+            {
               source_to_module_id
                 .insert(source.to_string(), Value::String(self.path(&source_path)?));
             }
@@ -476,7 +502,25 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       "dependencyAliasMap".to_string(),
       self.dependency_alias_map(),
     );
-    extras.insert("permission".to_string(), Value::Object(Map::new()));
+    let permission = self
+      .input
+      .module_context
+      .module
+      .module_json
+      .as_ref()
+      .map(|module_json| {
+        json!({
+          "requestPermissions": module_json.module.request_permissions,
+          "definePermissions": module_json.module.define_permissions,
+        })
+      })
+      .unwrap_or_else(|| {
+        json!({
+          "requestPermissions": [],
+          "definePermissions": [],
+        })
+      });
+    extras.insert("permission".to_string(), permission);
     extras.insert("useGetCurrentBundleName".to_string(), Value::Bool(false));
     // Standalone checking does not call `main.js::initProjectConfig()`, while
     // the CompileArkTS bridge does. Keep the effective flag in the shared
@@ -644,6 +688,8 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
       ),
     );
     extras.insert("strictCheckerOnly".to_string(), Value::Bool(false));
+    extras.insert("ignoreWarning".to_string(), Value::Bool(false));
+    extras.insert("mixCompile".to_string(), Value::Bool(false));
     extras.insert(
       "aceModuleJsonPath".to_string(),
       Value::String(self.path(&self.input.paths.ace_module_json_path)?),

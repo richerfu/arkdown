@@ -894,6 +894,16 @@ mod tests {
             edge.package_root,
             canonicalize_or_owned(&fixture.root().join("packages/linked"))
         );
+        let linked_change = graph.host_root.join("oh_modules/linked/src/Index.ets");
+        assert_eq!(
+            graph.changed_package_names_for_paths([linked_change.as_path()]),
+            Some(vec!["linked".to_string()])
+        );
+        let project_change = fixture.root().join("entry/src/main/ets/Index.ets");
+        assert_eq!(
+            graph.changed_package_names_for_paths([project_change.as_path()]),
+            None
+        );
     }
 
     #[test]

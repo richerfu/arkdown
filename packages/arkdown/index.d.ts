@@ -219,17 +219,22 @@ block?: () => Promise<void>
  */
 export interface HvigorProjectConfig {
   bundleName?: string
+  moduleType?: string
   buildMode?: string
   buildArkMode?: string
   compileMode?: string
   target?: string
   targetName?: string
   useNormalizedOHMUrl?: boolean
-  compileSdkVersion?: string
-  compatibleSdkVersion?: string
+  compileSdkVersion?: number
+  compatibleSdkVersion?: number
+  compatibleSdkVersionStage?: string
   packageManagerType?: string
   isByteCodeHarOptimize?: boolean
   moduleName?: string
+  entryModuleName?: string
+  entryModuleVersion?: string
+  entryPackageName?: string
   modulePath?: string
   projectTopDir?: string
   projectRootPath?: string
@@ -240,18 +245,32 @@ export interface HvigorProjectConfig {
   aceBuildJson?: string
   aceModuleJsonPath?: string
   runtimeOS?: string
+  etsLoaderPath?: string
+  etsLoaderVersion?: string
   watchMode?: string
+  widgetCompile?: string
   arkTSVersion?: string
   isPreview?: boolean
   isOhosTest?: boolean
+  isLocalTest?: boolean
+  isCrossplatform?: boolean
   compileHar?: boolean
   compileShared?: boolean
   byteCodeHar?: boolean
-  modulePathMap?: Record<string, string>
-  byteCodeHarInfo?: Record<string, unknown>
-  hspNameOhmMap?: Record<string, string>
-  harNameOhmMap?: Record<string, string>
-  otherCompileFiles?: Array<string>
+  singleFileEmit?: boolean
+  needCoverageInsert?: boolean
+  needCompleteSourcesMap?: boolean
+  integratedHsp?: boolean
+  mixCompile?: boolean
+  ignoreWarning?: boolean
+  deviceTypes?: Array<string>
+  resolveModulePaths?: Array<string>
+permission?: { requestPermissions: unknown[]; definePermissions: unknown[] }
+modulePathMap?: Record<string, string>
+byteCodeHarInfo?: Record<string, unknown>
+hspNameOhmMap?: Record<string, string>
+harNameOhmMap?: Record<string, string>
+otherCompileFiles?: Array<string>
 }
 
 /**
@@ -263,10 +282,11 @@ export interface HvigorProjectConfig {
  * source table or perform hook-time filesystem reads.
  */
 export interface HvigorShareContext {
-  projectConfig?: HvigorProjectConfig
+  projectConfig: HvigorProjectConfig & Record<string, unknown>
   symlinkMap: Record<string, string[]>
-  cache?: Map<string, unknown>
-  commonCache?: Map<string, unknown>
+depInfo: { enableIncre: boolean; changedDeps: string[] }
+cache?: Map<string, unknown>
+commonCache?: Map<string, unknown>
 cacheStoreManager?: { keys(): IterableIterator<string>; unmount(key: string): void; mount(key: string): { getCache(cacheKey: string): unknown; setCache(cacheKey: string, value: unknown): void } }
 getHashByFilePath?: (path: string) => string
 setHashValueByFilePath?: (path: string, hash: string) => void

@@ -29,6 +29,8 @@ const state = {
   moduleInfoCount: 0,
   parsedType: "",
   projectConfig: undefined as unknown,
+  projectConfigShape: undefined as unknown,
+  depInfo: undefined as unknown,
   sourceFileCount: 0,
   sourceHash: undefined as string | undefined,
   sourceMtimeMs: undefined as number | undefined,
@@ -49,6 +51,13 @@ export default {
     state.events.push("buildStart");
     state.buildStartArgumentCount = arguments.length;
     state.projectConfig = this.share?.projectConfig;
+    state.projectConfigShape = {
+      depName2DepInfoIsMap: this.share.projectConfig.depName2DepInfo instanceof Map,
+      dependencyAliasMapIsMap: this.share.projectConfig.dependencyAliasMap instanceof Map,
+      permissionRequestCount: this.share.projectConfig.permission?.requestPermissions?.length ?? -1,
+      permissionDefineCount: this.share.projectConfig.permission?.definePermissions?.length ?? -1,
+    };
+    state.depInfo = this.share.depInfo;
     const sourceFiles: string[] = this.share.getSourceFiles();
     const entry = sourceFiles.find((file) => file.endsWith("/Index.ets"));
     state.sourceFileCount = sourceFiles.length;
