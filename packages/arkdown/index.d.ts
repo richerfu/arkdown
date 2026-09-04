@@ -222,6 +222,11 @@ export interface HvigorModuleInfo {
   dynamicallyImportedIds: Array<string>
   exportedBindings: Record<string, Array<string>> | null
   dynamicImporters: Array<string>
+  meta: any
+  moduleSideEffects?: boolean | 'no-treeshake' | null
+  description?: string
+  packageJsonPath?: string
+  inputFormat: 'es' | 'cjs' | 'unknown'
 }
 
 /**
@@ -395,6 +400,8 @@ export interface JsLoadOutput {
   map?: JsSourceMap
   moduleSideEffects?: boolean | 'no-treeshake'
   moduleType?: string
+  meta?: any
+  description?: string
 }
 
 export interface JsPluginAstParseOptions {
@@ -416,7 +423,10 @@ export interface JsPluginAstParseOptions {
 
 export interface JsPluginContextLoadOptions {
   id: string
+  resolveDependencies?: boolean
   moduleSideEffects?: boolean | 'no-treeshake'
+  meta?: any
+  description?: string
 }
 
 export interface JsPluginContextResolveOptions {
@@ -483,6 +493,8 @@ export interface JsResolveIdOutput {
   normalizeExternalId?: boolean
   moduleSideEffects?: boolean | 'no-treeshake'
   packageJsonPath?: string
+  meta?: any
+  description?: string
 }
 
 export type JsSourceMap =
@@ -497,6 +509,8 @@ export interface JsTransformOutput {
   map?: JsSourceMap | null
   moduleSideEffects?: boolean | 'no-treeshake'
   moduleType?: string
+  meta?: any
+  description?: string
 }
 
 export interface ObservabilityInstallOptions {

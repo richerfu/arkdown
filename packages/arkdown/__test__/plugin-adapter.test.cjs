@@ -401,6 +401,59 @@ test('plugin context delegates graph operations to Rolldown and retains hvigor c
   ])
 })
 
+test('module metadata returned by plugins is merged for later hooks and context loads', async () => {
+  const nativeModule = { id: '/project/index.ts', meta: {}, moduleSideEffects: null }
+  const nativeContext = {
+    getModuleInfo: () => nativeModule,
+    load: async () => nativeModule,
+  }
+  const producer = normalizePlugin({
+    name: 'metadata-producer',
+    transform(code) {
+      return { code, meta: { producer: () => 'live' }, moduleSideEffects: false }
+    },
+  }, fakeBinding())
+  let observed
+  const consumer = normalizePlugin({
+    name: 'metadata-consumer',
+    async transform(code, id) {
+      const loaded = await this.load({ id, meta: { loaded: true }, moduleSideEffects: 'no-treeshake' })
+      const info = this.getModuleInfo(id)
+      observed = { loaded, info }
+      return { code, meta: { consumer: true } }
+    },
+    moduleParsed(info) {
+      observed.parsed = info
+    },
+  }, fakeBinding())
+  const share = { __arkdownBuildInstanceId: 'metadata-build', projectConfig: {} }
+  await dispatch(producer, 'seedContext', { share })
+  await dispatch(consumer, 'seedContext', { share })
+
+  const produced = await dispatch(producer, 'transform', {
+    context: nativeContext,
+    id: nativeModule.id,
+    code: 'export {}',
+    transformOptions: { moduleType: 'ts' },
+  })
+  assert.deepEqual(produced.transform, { code: 'export {}', moduleSideEffects: false })
+  await dispatch(consumer, 'transform', {
+    context: nativeContext,
+    id: nativeModule.id,
+    code: 'export {}',
+    transformOptions: { moduleType: 'ts' },
+  })
+  await dispatch(consumer, 'moduleParsed', { context: nativeContext, moduleInfo: nativeModule })
+
+  assert.equal(observed.loaded.meta.producer(), 'live')
+  assert.equal(observed.loaded.meta.loaded, true)
+  assert.equal(observed.loaded.moduleSideEffects, 'no-treeshake')
+  assert.equal(observed.info.meta.producer(), 'live')
+  assert.equal(observed.info.meta.loaded, true)
+  assert.equal(observed.parsed.meta.consumer, true)
+  assert.equal(observed.parsed.moduleSideEffects, 'no-treeshake')
+})
+
 test('explicit plugin factories and nested arrays retain deterministic native order', () => {
   const binding = fakeBinding()
   binding.planRolldownPackagePlugins = (plugins) => ({

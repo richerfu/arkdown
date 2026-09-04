@@ -150,6 +150,7 @@ test('explicit JS plugins execute through the same native dispatcher', { skip: !
   context.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }))
   fs.cpSync(path.join(workspaceRoot, 'tests', 'fixtures', 'minimal-hap'), project, { recursive: true })
   const events = []
+  let metadataObserved = false
 
   const result = await build(
     {
@@ -161,19 +162,31 @@ test('explicit JS plugins execute through the same native dispatcher', { skip: !
       buildTargetName: 'default',
       cache: false,
     },
-    {
-      name: 'explicit-lifecycle',
-      buildStart() {
-        events.push('buildStart')
+    [
+      {
+        name: 'explicit-metadata-producer',
+        transform(code) {
+          return { code, meta: { arkdownFixture: 'native' }, moduleSideEffects: false }
+        },
       },
-      transform(code) {
-        return code
+      {
+        name: 'explicit-lifecycle',
+        buildStart() {
+          events.push('buildStart')
+        },
+        transform(code, id) {
+          const info = this.getModuleInfo(id)
+          if (info?.meta?.arkdownFixture === 'native' && info.moduleSideEffects === false) {
+            metadataObserved = true
+          }
+          return code
+        },
+        buildEnd(error) {
+          assert.equal(error, undefined)
+          events.push('buildEnd')
+        },
       },
-      buildEnd(error) {
-        assert.equal(error, undefined)
-        events.push('buildEnd')
-      },
-    },
+    ],
   )
 
   assert.equal(
@@ -181,6 +194,7 @@ test('explicit JS plugins execute through the same native dispatcher', { skip: !
     true,
   )
   assert.deepEqual(events, ['buildStart', 'buildEnd'])
+  assert.equal(metadataObserved, true)
 })
 
 test('compile-plugin cleanUp runs after a transform failure', { skip: !enabled }, async (context) => {

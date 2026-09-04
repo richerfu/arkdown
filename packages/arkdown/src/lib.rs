@@ -217,6 +217,8 @@ pub struct JsResolveIdOutput {
   #[napi(ts_type = "boolean | 'no-treeshake'")]
   pub module_side_effects: Option<JsHookSideEffects>,
   pub package_json_path: Option<String>,
+  pub meta: Option<serde_json::Value>,
+  pub description: Option<String>,
 }
 
 impl TryFrom<JsResolveIdOutput> for HookResolveIdOutput {
@@ -316,6 +318,8 @@ pub struct JsLoadOutput {
   #[napi(ts_type = "boolean | 'no-treeshake'")]
   pub module_side_effects: Option<JsHookSideEffects>,
   pub module_type: Option<String>,
+  pub meta: Option<serde_json::Value>,
+  pub description: Option<String>,
 }
 
 impl TryFrom<JsLoadOutput> for HookLoadOutput {
@@ -343,6 +347,8 @@ pub struct JsTransformOutput {
   #[napi(ts_type = "boolean | 'no-treeshake'")]
   pub module_side_effects: Option<JsHookSideEffects>,
   pub module_type: Option<String>,
+  pub meta: Option<serde_json::Value>,
+  pub description: Option<String>,
 }
 
 impl TryFrom<JsTransformOutput> for HookTransformOutput {
@@ -401,8 +407,11 @@ pub struct JsPluginContextResolveOptions {
 #[napi(object)]
 pub struct JsPluginContextLoadOptions {
   pub id: String,
+  pub resolve_dependencies: Option<bool>,
   #[napi(ts_type = "boolean | 'no-treeshake'")]
   pub module_side_effects: Option<JsHookSideEffects>,
+  pub meta: Option<serde_json::Value>,
+  pub description: Option<String>,
 }
 
 #[napi(object)]
@@ -599,6 +608,8 @@ impl ArkdownRolldownPluginContext {
         package_json_path: resolved
           .package_json
           .map(|package| package.realpath().to_string_lossy().into_owned()),
+        meta: None,
+        description: None,
       }
     }))
   }
@@ -1829,6 +1840,13 @@ pub struct HvigorModuleInfo {
   pub dynamically_imported_ids: Vec<String>,
   pub exported_bindings: Either<HashMap<String, Vec<String>>, Null>,
   pub dynamic_importers: Vec<String>,
+  pub meta: serde_json::Value,
+  #[napi(ts_type = "boolean | 'no-treeshake' | null")]
+  pub module_side_effects: Option<JsHookSideEffects>,
+  pub description: Option<String>,
+  pub package_json_path: Option<String>,
+  #[napi(ts_type = "'es' | 'cjs' | 'unknown'")]
+  pub input_format: String,
 }
 
 impl HvigorModuleInfo {
@@ -1872,6 +1890,16 @@ impl HvigorModuleInfo {
         .iter()
         .map(ToString::to_string)
         .collect(),
+      meta: serde_json::Value::Object(serde_json::Map::new()),
+      module_side_effects: None,
+      description: None,
+      package_json_path: None,
+      input_format: match module_info.input_format {
+        rolldown_common::ExportsKind::Esm => "es",
+        rolldown_common::ExportsKind::CommonJs => "cjs",
+        rolldown_common::ExportsKind::None => "unknown",
+      }
+      .to_string(),
     }
   }
 }

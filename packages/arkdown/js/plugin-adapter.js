@@ -34,6 +34,7 @@ let esmLoadSequence = 0
 const hvigorShareStateByScope = new Map()
 const hvigorShareByBuildInstance = new Map()
 const HVIGOR_SHARE_STATE = Symbol('arkdown.hvigorShareState')
+const HVIGOR_MODULE_OPTIONS = Symbol('arkdown.hvigorModuleOptions')
 const PROJECT_CONFIG_MAP_FIELDS = Object.freeze([
   'depName2OhExports',
   'depName2DepInfo',
@@ -427,6 +428,7 @@ function hydrateHvigorShare(rawShare, binding) {
   const pathKey = (value) => path.resolve(String(value)).split(path.sep).join('/')
   Object.defineProperty(share, 'projectConfig', { value: projectConfig, enumerable: true, configurable: true })
   Object.defineProperty(share, HVIGOR_SHARE_STATE, { value: state })
+  Object.defineProperty(share, HVIGOR_MODULE_OPTIONS, { value: new Map(), configurable: true })
   Object.assign(share, {
     arkProjectConfig: state.arkProjectConfig,
     cache: state.cache,
@@ -472,9 +474,35 @@ function hydrateHvigorShare(rawShare, binding) {
   return share
 }
 
+function updateModuleOptions(share, id, value) {
+  if (!id || !value || typeof value !== 'object') return
+  const options = share?.[HVIGOR_MODULE_OPTIONS]
+  if (!options) return
+  const current = options.get(id) || { meta: {} }
+  if (value.meta && typeof value.meta === 'object') current.meta = { ...current.meta, ...value.meta }
+  for (const key of ['moduleSideEffects', 'description', 'packageJsonPath']) {
+    if (Object.hasOwn(value, key)) current[key] = value[key]
+  }
+  options.set(id, current)
+}
+
+function moduleInfoWithOptions(share, info) {
+  if (!info) return info
+  const options = share?.[HVIGOR_MODULE_OPTIONS]?.get(info.id)
+  return {
+    ...info,
+    meta: options?.meta || info.meta || {},
+    moduleSideEffects: options && Object.hasOwn(options, 'moduleSideEffects')
+      ? options.moduleSideEffects
+      : info.moduleSideEffects ?? null,
+    ...(options && Object.hasOwn(options, 'description') ? { description: options.description } : {}),
+    ...(options && Object.hasOwn(options, 'packageJsonPath') ? { packageJsonPath: options.packageJsonPath } : {}),
+  }
+}
+
 function pluginContext(request, share, binding, cache, asyncTracker, pluginName) {
   const context = request.context
-  const moduleInfo = request.moduleInfo
+  const moduleInfo = moduleInfoWithOptions(share, request.moduleInfo)
   const unavailable = (operation) => {
     throw arkdownError('PLUGIN_CONTEXT_UNAVAILABLE', `${operation} requires a live Rolldown plugin context`)
   }
@@ -495,12 +523,19 @@ function pluginContext(request, share, binding, cache, asyncTracker, pluginName)
     async: (operation, ...args) => asyncTracker.run(operation, ...args),
     signal: () => asyncTracker.signal(),
     block: () => asyncTracker.block(),
-    resolve: (source, importer, options) => context?.resolve(source, importer, options) ?? Promise.resolve(null),
-    load: (options) => context?.load(options) ?? Promise.resolve(moduleInfo?.id === options?.id ? moduleInfo : null),
+    resolve: async (source, importer, options) => {
+      const result = context ? await context.resolve(source, importer, options) : null
+      return moduleInfoWithOptions(share, result)
+    },
+    load: async (options) => {
+      updateModuleOptions(share, options?.id, options)
+      const result = context ? await context.load(options) : moduleInfo?.id === options?.id ? moduleInfo : null
+      return moduleInfoWithOptions(share, result)
+    },
     emitFile: (file) => (context ? context.emitFile(file) : unavailable('emitFile')),
     addWatchFile: (id) => context?.addWatchFile(id),
     getModuleIds: () => context?.getModuleIds().values() ?? (moduleInfo?.id ? [moduleInfo.id] : []).values(),
-    getModuleInfo: (id) => context?.getModuleInfo(id) ?? (moduleInfo?.id === id ? moduleInfo : null),
+    getModuleInfo: (id) => moduleInfoWithOptions(share, context?.getModuleInfo(id) ?? (moduleInfo?.id === id ? moduleInfo : null)),
     ...(request.hookName === 'transform' && context
       ? { getCombinedSourcemap: () => context.getCombinedSourcemap() }
       : {}),
@@ -606,6 +641,7 @@ function normalizePlugin(plugin, binding, options = {}) {
       const cacheSnapshot = snapshotHvigorCacheState(share)
       return cacheSnapshot ? { cacheSnapshot } : {}
     }
+    if (request.moduleInfo) request.moduleInfo = moduleInfoWithOptions(share, request.moduleInfo)
     const hookName = request.hookName
     const context = pluginContext(request, share, binding, cache, asyncTracker, plugin.name || '<anonymous>')
     const handler = plugin[hookName] && hookHandler(plugin[hookName])
@@ -624,7 +660,17 @@ function normalizePlugin(plugin, binding, options = {}) {
       }
       return result && typeof result.then === 'function' ? Promise.resolve(result).then(finish) : finish()
     }
-    const wrap = (value) => (value === undefined || value === null ? {} : { [field]: value })
+    const wrap = (value) => {
+      if (value === undefined || value === null) return {}
+      const id = (hookName === 'resolveId' || hookName === 'resolveDynamicImport') && typeof value === 'object'
+        ? value.id
+        : request.id
+      updateModuleOptions(share, id, value)
+      if (typeof value !== 'object' || !Object.hasOwn(value, 'meta')) return { [field]: value }
+      const nativeValue = { ...value }
+      delete nativeValue.meta
+      return { [field]: nativeValue }
+    }
     return result && typeof result.then === 'function' ? Promise.resolve(result).then(wrap) : wrap(result)
   }
 
