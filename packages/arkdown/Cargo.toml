@@ -16,49 +16,22 @@ napi-derive = { workspace = true }
 
 # arkdown core crates (workspace = true)
 arkdown = { workspace = true }
-arkdown-abc = { workspace = true }
 arkdown-build = { workspace = true }
-arkdown-cache = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-config = { workspace = true }
-arkdown-ets-transform = { workspace = true }
-arkdown-native = { workspace = true }
-arkdown-obfuscate = { workspace = true }
-arkdown-pack = { workspace = true }
 arkdown-path = { workspace = true }
-arkdown-profile = { workspace = true }
-arkdown-resolver = { workspace = true }
-arkdown-resource = { workspace = true }
 arkdown-session = { workspace = true }
-arkdown-sign = { workspace = true }
-arkdown-watcher = { workspace = true }
 
 rolldown_plugin = { workspace = true }
 rolldown_common = { workspace = true }
 rolldown_sourcemap = { workspace = true }
 
-fs-err = { workspace = true }
-indexmap = { workspace = true }
-json5 = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-walkdir = { workspace = true }
-fast-glob = { workspace = true }
-oxc_index = { workspace = true }
-oxc_allocator = { workspace = true }
-oxc_ast = { workspace = true }
-oxc_ast_visit = { workspace = true }
-oxc_codegen = { workspace = true }
-oxc_parser = { workspace = true }
-oxc_resolver = { workspace = true }
-oxc_isolated_declarations = { workspace = true }
-oxc_span = { workspace = true }
-oxc_syntax = { workspace = true }
 rustc-hash = { workspace = true }
 dhat = { workspace = true, optional = true }
 
@@ -78,13 +51,10 @@ mimalloc-safe = { workspace = true, optional = true, features = [
   "no_opt_arch",
 ] }
 
-[target.'cfg(windows)'.dependencies]
-junction = { workspace = true }
-
 [features]
 default = ["allocator"]
 allocator = ["dep:mimalloc-safe"]
-memory-diagnostics = ["arkdown/memory-diagnostics"]
+memory-diagnostics = ["arkdown/memory-diagnostics", "arkdown-build/memory-diagnostics"]
 dhat-heap = ["dep:dhat"]
 
 [build-dependencies]
@@ -92,8 +62,12 @@ napi-build = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+arkdown-cache = { workspace = true }
+arkdown-profile = { workspace = true }
+arkdown-sign = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
+json5 = { workspace = true }
 walkdir = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }

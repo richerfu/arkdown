@@ -27,11 +27,10 @@ artifacts. These are direct implementations of source-observed build behavior, n
 compatibility layers. Internal Hvigor facades, wrappers, aliases, and parallel legacy paths are
 forbidden; only the public TS/JS plugin ABI may retain compatibility code at the JS/N-API boundary.
 `arkdown-build` owns typed build requests, module selection, build-application layout,
-pre-build validation, intermediate artifact handoffs, and code-resource copying. `arkdown-pack`
-owns archive construction and pre-package validation. The application crate will receive the
-remaining coordinator.
-`packages/arkdown` owns the public JS/N-API entry point and currently retains the coarse
-`BuildCoordinator` during that migration.
+pre-build validation, intermediate artifact handoffs, code-resource copying, the build coordinator,
+watch execution, and package/sign orchestration. `arkdown-pack` owns archive construction and
+pre-package validation. `packages/arkdown` owns only the public JS/N-API entry point, value
+conversion, asynchronous handoff, diagnostics serialization, and live TS/JS plugin handles.
 The npm JavaScript CLI is the only command-line entry: Rust crates must not add binaries, argv
 parsers, command-line lifecycle APIs, or Rust `cmd`/`BuildCommand` facades. N-API accepts typed
 service requests only.
@@ -132,9 +131,11 @@ release modes, including cold/unchanged/changed incremental builds.
 npm install @ohos-rs/arkdown
 ```
 
-The package does not install `@ohos/hvigor`. Its declared Hvigor API and the
-custom-task compatibility subset used by Arkdown are provided by the native
-runtime, so installation does not depend on the DevEco-only package registry.
+The package does not install or emulate `@ohos/hvigor`. Hvigor is used only as
+the source-observed behavioral reference. Verified build behavior is implemented
+directly by its Rust owner; internal Hvigor facades, wrappers, aliases, re-exports,
+and parallel legacy paths are forbidden. The sole compatibility boundary is the
+public TS/JS compile-plugin ABI at the JavaScript/N-API edge.
 
 ### CLI
 
