@@ -1,0 +1,25 @@
+[package]
+name = "arkdown-native"
+version = "0.1.0"
+edition = "2021"
+description = "OHOS native CMake, Ninja, library, and debug-symbol pipeline"
+publish = false
+
+[dependencies]
+arkdown-core = { workspace = true }
+arkdown-path = { workspace = true }
+arkdown-session = { workspace = true }
+globset = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+zip = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+junction = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

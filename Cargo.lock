@@ -291,6 +291,7 @@ dependencies = [
  "arkdown-config",
  "arkdown-core",
  "arkdown-ets-transform",
+ "arkdown-native",
  "arkdown-obfuscate",
  "arkdown-pack",
  "arkdown-path",
@@ -306,7 +307,6 @@ dependencies = [
  "fast-glob",
  "flate2",
  "fs-err",
- "globset",
  "hex",
  "indexmap",
  "json5",
@@ -326,7 +326,6 @@ dependencies = [
  "oxc_span",
  "oxc_syntax",
  "rayon",
- "regex",
  "rolldown_common",
  "rolldown_plugin",
  "rolldown_sourcemap",
@@ -337,10 +336,28 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.20",
- "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "arkdown-native"
+version = "0.1.0"
+dependencies = [
+ "arkdown-core",
+ "arkdown-path",
+ "arkdown-session",
+ "globset",
+ "junction",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
  "walkdir",
  "zip",
 ]

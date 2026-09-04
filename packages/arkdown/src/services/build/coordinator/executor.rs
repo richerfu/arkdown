@@ -390,7 +390,7 @@ impl BuildCoordinator {
       let skip_profile_writes = args.skip_profile;
 
       if task_lifecycle.is_observed() && task_lifecycle.before(&module.name, None, "clean").await? {
-        HvigorModuleCleanStage::new(&project_root, &module.src_path, &native_sdk_toolchain)
+        NativeCleanStage::new(&project_root, &module.src_path, &native_sdk_toolchain)
           .with_native_variants(
             vec![config.product.name.clone()],
             vec![module_target_name.clone()],

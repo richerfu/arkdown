@@ -5,7 +5,7 @@ use arkdown_config::build_profile::EffectiveNativeBuildOption;
 use arkdown_core::{ArkdownConfig, ModuleConfig};
 use arkdown_session::ModuleCompileContext;
 
-use crate::services::native_build::{
+use arkdown_native::{
   NativeCmakeLocalDependency, NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo,
 };
 

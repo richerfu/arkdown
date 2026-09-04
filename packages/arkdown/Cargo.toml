@@ -22,6 +22,7 @@ arkdown-cache = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-config = { workspace = true }
 arkdown-ets-transform = { workspace = true }
+arkdown-native = { workspace = true }
 arkdown-obfuscate = { workspace = true }
 arkdown-pack = { workspace = true }
 arkdown-path = { workspace = true }
@@ -49,8 +50,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 walkdir = { workspace = true }
 fast-glob = { workspace = true }
-globset = { workspace = true }
-zip = { workspace = true }
 oxc_index = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
@@ -63,9 +62,7 @@ oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
-regex = { workspace = true }
 sha2 = { workspace = true }
-time = { workspace = true }
 dhat = { workspace = true, optional = true }
 dunce = { workspace = true }
 
@@ -104,6 +101,7 @@ serde = { workspace = true }
 walkdir = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
+zip = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
 sha2 = { workspace = true, features = ["asm", "asm-aarch64"] }

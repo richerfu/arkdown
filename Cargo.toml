@@ -14,6 +14,7 @@ members = [
     "crates/arkdown-cache",
     "crates/arkdown-abc",
     "crates/arkdown-build",
+    "crates/arkdown-native",
     "crates/arkdown-sign",
     "crates/arkdown-obfuscate",
     "crates/arkdown-watcher",
@@ -37,6 +38,7 @@ arkdown-ets-transform = { path = "crates/arkdown-ets-transform" }
 arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
 arkdown-ohos-schema = { path = "crates/arkdown-ohos-schema" }
 arkdown-ohpm = { path = "crates/arkdown-ohpm" }
+arkdown-native = { path = "crates/arkdown-native" }
 arkdown-pack = { path = "crates/arkdown-pack" }
 arkdown-path = { path = "crates/arkdown-path" }
 arkdown-profile = { path = "crates/arkdown-profile" }
