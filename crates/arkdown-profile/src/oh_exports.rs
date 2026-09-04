@@ -163,6 +163,7 @@ mod tests {
             compiled_importees: Vec::new(),
             compile_entry: Vec::new(),
             form_entry_sources: Vec::new(),
+            insight_intent_form_bindings: Vec::new(),
             runtime_entry_sources: Vec::new(),
             page_entry_sources: Vec::new(),
             module_root_path: crate::loader_json::to_absolute_path_string(

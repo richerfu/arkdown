@@ -44,15 +44,20 @@ pub struct ModuleFormProfileInput<'a> {
 pub struct FormProfileEntry {
     pub resource: String,
     pub profile_path: PathBuf,
+    pub ability_name: String,
+    pub ability_src_entry: String,
 }
 
 /// One `forms[]` source entry from a referenced form profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormSourceEntry {
     pub profile_path: PathBuf,
+    pub name: Option<String>,
     pub src: String,
     pub source_path: PathBuf,
     pub ui_syntax: Option<String>,
+    pub ability_name: String,
+    pub ability_src_entry: String,
 }
 
 impl FormSourceEntry {
@@ -69,6 +74,7 @@ struct FormConfigFile {
 
 #[derive(Debug, serde::Deserialize)]
 struct FormConfigEntry {
+    name: Option<String>,
     src: Option<String>,
     #[serde(rename = "uiSyntax")]
     ui_syntax: Option<String>,
@@ -134,6 +140,8 @@ impl FormProfileProcessor {
                 profiles.push(FormProfileEntry {
                     resource: resource.to_string(),
                     profile_path,
+                    ability_name: ability.name.clone(),
+                    ability_src_entry: ability.src_entry.clone(),
                 });
             }
         }
@@ -175,9 +183,12 @@ impl FormProfileProcessor {
                 )?;
                 sources.push(FormSourceEntry {
                     profile_path: profile.profile_path.clone(),
+                    name: form.name,
                     src,
                     source_path,
                     ui_syntax: form.ui_syntax,
+                    ability_name: profile.ability_name.clone(),
+                    ability_src_entry: profile.ability_src_entry.clone(),
                 });
             }
         }

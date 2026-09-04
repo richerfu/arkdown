@@ -38,6 +38,10 @@ use arkdown_path::{
   canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, HvigorSourceFileFilter,
   NormalizedOhmUrl,
 };
+use arkdown_profile::{
+  InsightIntentEntityInput, InsightIntentInput, InsightIntentModuleInput,
+  InsightIntentProfileInput, InsightIntentProfileProcessor,
+};
 use arkdown_session::dependency_graph::snapshot::{
   DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeSnapshot, DependencyNodeType,
 };
@@ -113,9 +117,10 @@ use crate::progress::Progress;
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 
 use arkdown::plugins::ets_transform::{
-  CheckerMode, ComponentMetadata, ModuleAnalyzerKind, NavigationRouteMap, ResourceModuleReference,
-  ResourceReference, ResourceTransformContext, SystemApiCheckOptions,
-  SystemResourceReferenceLoader, TransformResolvedStaticModule, TransformSourceSnapshot,
+  CheckerMode, ComponentMetadata, InsightIntentSchemaCatalog, ModuleAnalyzerKind,
+  NavigationRouteMap, ResourceModuleReference, ResourceReference, ResourceTransformContext,
+  SystemApiCheckOptions, SystemResourceReferenceLoader, TransformResolvedStaticModule,
+  TransformSourceSnapshot,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
@@ -1862,6 +1867,7 @@ mod compile_context_info_tests {
       compiled_importees: vec![],
       compile_entry: vec![],
       form_entry_sources: vec![],
+      insight_intent_form_bindings: vec![],
       runtime_entry_sources: vec![],
       page_entry_sources: vec![],
       module_root_path: module_root.to_string_lossy().into_owned(),

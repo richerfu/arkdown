@@ -454,6 +454,7 @@ mod tests {
       compiled_importees: vec![],
       compile_entry,
       form_entry_sources: vec![],
+      insight_intent_form_bindings: vec![],
       runtime_entry_sources: vec![],
       page_entry_sources: vec![],
       module_root_path: String::new(),

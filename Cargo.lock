@@ -253,6 +253,7 @@ dependencies = [
  "anyhow",
  "arkdown-core",
  "arkdown-path",
+ "fs-err",
  "json5",
  "junction",
  "oxc_allocator",
@@ -428,6 +429,7 @@ dependencies = [
 name = "arkdown-profile"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arkdown-config",
  "arkdown-core",
  "arkdown-ohpm",

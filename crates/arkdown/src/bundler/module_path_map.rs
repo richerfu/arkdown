@@ -255,6 +255,18 @@ impl HvigorModulePathMap {
         ))
     }
 
+    pub(crate) fn package_root_for_entry(&self, entry: &str) -> Option<&Path> {
+        let entry_path = Path::new(entry);
+        if !entry_path.has_root() {
+            return Some(self.current_module_root.as_path());
+        }
+        let entry_path = Self::canonical_root(entry_path);
+        self.roots
+            .iter()
+            .find(|root| entry_path.starts_with(&root.path))
+            .map(|root| root.path.as_path())
+    }
+
     pub(crate) fn has_dependency_package_info(&self, module_id: &str) -> bool {
         let module_path = Self::canonical_root(Path::new(module_id));
         // `module-meta-info-plugin.js::addModuleInfoData` only attaches

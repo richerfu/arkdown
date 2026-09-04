@@ -35,6 +35,77 @@ fn runtime_packages(contexts: &[(&str, &str, &str, &str, &str, bool)]) -> Bundle
     BundleRuntimePackageInfo { packages }
 }
 
+#[test]
+fn insight_intent_facts_receive_normalized_decorator_and_page_urls() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    let source = module_root.join("src/main/ets/pages/Index.ets");
+    std::fs::create_dir_all(source.parent().unwrap()).expect("source parent");
+    std::fs::write(&source, "struct Index {}").expect("source");
+    std::fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{"name":"entry","version":"1.0.0"}"#,
+    )
+    .expect("package");
+    let module_path_map = HvigorModulePathMap::new(
+        "entry",
+        &module_root,
+        &[("entry".to_string(), module_root.clone())],
+    );
+    let mut packages = FxHashMap::default();
+    packages.insert(
+        "entry".to_string(),
+        BundleRuntimePackageContext {
+            package_name: "entry".to_string(),
+            bundle_name: "com.example.intent".to_string(),
+            module_name: "entry".to_string(),
+            version: "1.0.0".to_string(),
+            entry_path: "src/main/ets/pages/Index.ets".to_string(),
+            is_so: false,
+        },
+    );
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "decoratorType".to_string(),
+        serde_json::Value::String("@InsightIntentPage".to_string()),
+    );
+    data.insert(
+        "pagePath".to_string(),
+        serde_json::Value::String("ets/pages/Index".to_string()),
+    );
+    let mut facts = FxHashMap::default();
+    facts.insert(
+        source.to_string_lossy().into_owned(),
+        arkdown_ets_transform::InsightIntentSourceMetadata {
+            intents: vec![arkdown_ets_transform::InsightIntentDeclaration {
+                data,
+                entity_type_names: vec![],
+            }],
+            entities: vec![],
+            obfuscation_global_names: vec![],
+            obfuscation_property_names: vec![],
+        },
+    );
+
+    let output = Bundler::insight_intent_sources(
+        facts,
+        &module_path_map,
+        &BundleRuntimePackageInfo { packages },
+        "entry",
+        true,
+    )
+    .expect("normalize InsightIntent facts");
+
+    assert_eq!(output.len(), 1);
+    let expected = "@normalized:N&entry&com.example.intent&entry/src/main/ets/pages/Index&1.0.0";
+    assert_eq!(output[0].decorator_file, expected);
+    assert_eq!(
+        output[0].metadata.intents[0].data["decoratorFile"],
+        expected
+    );
+    assert_eq!(output[0].metadata.intents[0].data["pagePath"], expected);
+}
+
 /// Test-only replacement for the removed
 /// `HvigorSourceSpan::for_module_request_literal` helper: locate a module
 /// request literal's span through the shared ArkTS inventory.
@@ -409,6 +480,7 @@ fn chunk_source_files_follow_hvigor_module_path_map() {
                     .into_owned(),
             ],
             form_entry_sources: Vec::new(),
+            insight_intent_form_bindings: Vec::new(),
             runtime_entry_sources: vec![],
             page_entry_sources: vec![],
             support_chunks: false,
@@ -522,6 +594,7 @@ fn compile_entry_package_roots_do_not_require_loader_module_path_map_entries() {
             module_meta_info_files: Vec::new(),
             entries: vec![package_entry_id.clone()],
             form_entry_sources: Vec::new(),
+            insight_intent_form_bindings: Vec::new(),
             runtime_entry_sources: vec![],
             page_entry_sources: vec![],
             support_chunks: false,
@@ -704,6 +777,7 @@ textToSpeech.createEngine({});"#;
             source_maps: FxHashMap::default(),
             javascript_module_ids: FxHashSet::default(),
             shared_module_ids: FxHashSet::default(),
+            insight_intent_sources: FxHashMap::default(),
         },
     );
 
@@ -753,6 +827,7 @@ fn module_source_state_prefers_ets_transform_snapshot_over_rolldown_printer_outp
             source_maps: FxHashMap::default(),
             javascript_module_ids: FxHashSet::default(),
             shared_module_ids: FxHashSet::default(),
+            insight_intent_sources: FxHashMap::default(),
         },
     );
 
@@ -852,6 +927,7 @@ const dynamicHar = import("bytecode-har-dep");"#
             source_maps,
             javascript_module_ids: FxHashSet::from_iter([importer.to_string()]),
             shared_module_ids: FxHashSet::default(),
+            insight_intent_sources: FxHashMap::default(),
         },
     );
     assert_eq!(

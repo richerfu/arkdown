@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use rustc_hash::FxHashMap;
 
 use arkdown_core::{ChunkGraph, ChunkSourceFile, HvigorModuleSourceFile, HvigorNpmEntry};
+use arkdown_ets_transform::InsightIntentSourceMetadata;
 
 use crate::bundler::*;
 
@@ -48,4 +49,15 @@ pub struct BundleOutput {
     /// these to retain latest ets-loader's per-module incremental map order
     /// without re-reading source files after Rolldown finishes.
     pub source_map_input_fingerprints: Vec<SourceMapInputFingerprint>,
+    /// InsightIntent facts collected during OXC transforms and attributed to
+    /// normalized OHM URLs after Rolldown resolves package ownership.
+    pub insight_intent_sources: Vec<InsightIntentModuleSource>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsightIntentModuleSource {
+    pub module_id: String,
+    pub source_file_path: PathBuf,
+    pub decorator_file: String,
+    pub metadata: InsightIntentSourceMetadata,
 }

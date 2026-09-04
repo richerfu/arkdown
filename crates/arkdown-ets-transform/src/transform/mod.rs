@@ -13,6 +13,7 @@ pub(crate) mod decorator;
 mod entry;
 mod expand_import_path;
 mod global_rewrite;
+mod insight_intent;
 mod local_builder;
 mod navigation;
 pub(crate) mod source_emit;
@@ -30,7 +31,9 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 
-use arkdown_core::{ArktsLanguageVersion, AutoLazyFilter, ExpandImportPath, ModuleSource};
+use arkdown_core::{
+    ArktsLanguageVersion, AutoLazyFilter, ExpandImportPath, InsightIntentFormBinding, ModuleSource,
+};
 use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, HvigorModulePath};
 use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
@@ -78,6 +81,13 @@ use crate::transform::entry::{
 use crate::transform::global_rewrite::{
     EsObjectTypeRewriter, GlobalContextCallRewriter, WorkerPathRewriter,
 };
+pub use crate::transform::insight_intent::{
+    InsightIntentDeclaration, InsightIntentEntityDeclaration, InsightIntentSchemaCatalog,
+    InsightIntentSourceMetadata,
+};
+use crate::transform::insight_intent::{
+    InsightIntentDecoratorProcessor, InsightIntentProcessorOptions,
+};
 use crate::transform::navigation::NavigationBuilderRegistrationBlock;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
@@ -89,7 +99,7 @@ use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
 use crate::transform::viewv2::ComponentV2Lowerer;
 pub(crate) use component_analysis::{
     ClassObservation, CustomComponentSemanticInventory, ImportedClassObservations,
-    ModuleExportIndex,
+    ImportedInsightIntentEntities, ModuleExportIndex,
 };
 pub use navigation::{NavigationRoute, NavigationRouteMap};
 
@@ -127,6 +137,11 @@ pub struct TransformOptions {
     ///
     /// Mirrors SDK `projectConfig.cardObj[resourceFileName]`.
     pub form_entry: bool,
+    /// Form-extension ownership for `@InsightIntentForm`. This is distinct
+    /// from `form_entry`, which identifies ArkUI widget/card sources.
+    pub insight_intent_form_binding: Option<InsightIntentFormBinding>,
+    /// Built-in schema catalog from `<ets-loader>/insight_intents/schema`.
+    pub insight_intent_schema_catalog: InsightIntentSchemaCatalog,
     /// Whether Rolldown loaded this source through an entry query. This is the
     /// Rust equivalent of the source compiler's `fileQuery === '?entry'`.
     pub entry_source: bool,
@@ -179,6 +194,8 @@ impl Default for TransformOptions {
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
+            insight_intent_form_binding: None,
+            insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
             entry_source: false,
             preview_mode: false,
             check_entry: false,
@@ -289,6 +306,9 @@ pub struct ArktsTransformOutput {
     pub code: String,
     pub source_map: Option<String>,
     pub(crate) rolldown_projection: Option<String>,
+    /// Per-source InsightIntent facts consumed by the build-end profile
+    /// processor. Transform hooks never write profile or cache files.
+    pub insight_intent: InsightIntentSourceMetadata,
 }
 
 enum ArktsTransformerOptions<'a> {
@@ -379,6 +399,7 @@ impl<'a> ArktsTransformer<'a> {
                 code: source.content.clone(),
                 source_map: None,
                 rolldown_projection: None,
+                insight_intent: InsightIntentSourceMetadata::default(),
             });
         }
 
@@ -424,6 +445,27 @@ impl<'a> ArktsTransformer<'a> {
                 }
             }
         }
+
+        let imported_insight_intent_entities =
+            options.module_exports.imported_insight_intent_entities(
+                &parsed.program,
+                Path::new(&source.id.id),
+                &options.sources,
+                &options.module_roots,
+            );
+        let insight_intent = InsightIntentDecoratorProcessor::new(
+            &parsed.program,
+            InsightIntentProcessorOptions {
+                source_id: &source.id.id,
+                source_text: content,
+                bundle_name: options.bundle_name.as_deref().unwrap_or_default(),
+                module_name: options.module_name.as_deref().unwrap_or_default(),
+                form_binding: options.insight_intent_form_binding.clone(),
+                schema_catalog: options.insight_intent_schema_catalog.clone(),
+                imported_entity_types: imported_insight_intent_entities,
+            },
+        )
+        .program(&mut parsed.program)?;
 
         let simple_type_context =
             SimpleTypeContext::from_program(&parsed.program, &source.id.id, options);
@@ -565,6 +607,7 @@ impl<'a> ArktsTransformer<'a> {
             || es_object_types_lowered
             || custom_dialog_controllers_lowered
             || api_available_lowered
+            || insight_intent.changed
             || !navigation_registrations.is_empty()
             || replacement_plans.iter().any(Option::is_some)
         {
@@ -635,12 +678,14 @@ impl<'a> ArktsTransformer<'a> {
                 code: out,
                 source_map: generated.source_map,
                 rolldown_projection: None,
+                insight_intent: insight_intent.metadata,
             })
         } else {
             Ok(ArktsTransformOutput {
                 code: content.to_string(),
                 source_map: None,
                 rolldown_projection: None,
+                insight_intent: insight_intent.metadata,
             })
         }
     }
@@ -672,6 +717,7 @@ impl<'a> ArktsTransformer<'a> {
             code: self.source.content.clone(),
             source_map: None,
             rolldown_projection: Some(projection),
+            insight_intent: InsightIntentSourceMetadata::default(),
         })
     }
 }

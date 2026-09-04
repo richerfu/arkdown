@@ -15,6 +15,7 @@ json5 = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
 tracing = { workspace = true }
+fs-err = { workspace = true }
 # OXC parser/transformer for ArkTS source processing
 # Uses ohos-rs/oxc fork with .ets StructStatement support
 oxc_allocator = { workspace = true }

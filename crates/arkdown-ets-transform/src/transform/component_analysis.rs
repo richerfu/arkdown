@@ -1758,6 +1758,25 @@ pub(crate) struct ImportedClassObservations {
     pub(crate) namespaces: FxHashMap<String, FxHashMap<String, ClassObservation>>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ImportedInsightIntentEntities {
+    bindings: FxHashMap<String, String>,
+    namespaces: FxHashMap<String, FxHashMap<String, String>>,
+}
+
+impl ImportedInsightIntentEntities {
+    pub(crate) fn class_name(&self, name: &str) -> Option<&str> {
+        if let Some(class_name) = self.bindings.get(name) {
+            return Some(class_name);
+        }
+        let (namespace, member) = name.split_once('.')?;
+        self.namespaces
+            .get(namespace)
+            .and_then(|members| members.get(member))
+            .map(String::as_str)
+    }
+}
+
 impl ModuleExportIndex {
     pub(crate) fn build(
         sources: &crate::source::TransformSourceSnapshot,
@@ -1899,6 +1918,63 @@ impl ModuleExportIndex {
         }
         observations
     }
+
+    pub(crate) fn imported_insight_intent_entities(
+        &self,
+        program: &Program<'_>,
+        importer: &Path,
+        sources: &crate::source::TransformSourceSnapshot,
+        module_roots: &[(String, PathBuf)],
+    ) -> ImportedInsightIntentEntities {
+        let resolver = ImportTargetResolver::new(importer, sources, module_roots);
+        let mut entities = ImportedInsightIntentEntities::default();
+        for statement in &program.body {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            let Some(target) = resolver.resolve(import.source.value.as_str()) else {
+                continue;
+            };
+            let Some(exports) = self.entries.get(&target.path).map(|entry| &entry.entities) else {
+                continue;
+            };
+            let Some(specifiers) = &import.specifiers else {
+                continue;
+            };
+            for specifier in specifiers {
+                match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                        let imported = ComponentModuleExportName::value(&specifier.imported);
+                        if let Some(class_name) = exports.get(&imported) {
+                            entities
+                                .bindings
+                                .insert(specifier.local.name.to_string(), class_name.to_string());
+                        }
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        if let Some(class_name) = exports.default.as_deref() {
+                            entities
+                                .bindings
+                                .insert(specifier.local.name.to_string(), class_name.to_string());
+                        }
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        let mut namespace = exports.named.clone();
+                        if let Some(class_name) = exports.default.as_ref() {
+                            namespace.insert(
+                                ComponentModuleExportName::DEFAULT.to_string(),
+                                class_name.clone(),
+                            );
+                        }
+                        entities
+                            .namespaces
+                            .insert(specifier.local.name.to_string(), namespace);
+                    }
+                }
+            }
+        }
+        entities
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1908,7 +1984,24 @@ struct ModuleExportEntry {
     builders: FxHashSet<String>,
     components: ExportedComponentNames,
     classes: ExportedClassObservations,
+    entities: ExportedInsightIntentEntities,
     system_apis: ExportedSystemApiSymbols,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ExportedInsightIntentEntities {
+    named: FxHashMap<String, String>,
+    default: Option<String>,
+}
+
+impl ExportedInsightIntentEntities {
+    fn get(&self, name: &str) -> Option<&str> {
+        if name == ComponentModuleExportName::DEFAULT {
+            self.default.as_deref()
+        } else {
+            self.named.get(name).map(String::as_str)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1997,6 +2090,7 @@ struct ModuleExportFacts {
     local_simple_type_aliases: FxHashSet<String>,
     local_components: CustomComponentUpdateProps,
     local_classes: FxHashMap<String, ClassObservation>,
+    local_entities: FxHashMap<String, String>,
     local_system_apis: FxHashMap<Box<str>, SystemApiSymbol>,
     direct_system_api_bindings: Vec<(Box<str>, Box<str>)>,
     imports: Vec<ModuleImportFact>,
@@ -2051,7 +2145,19 @@ impl ModuleExportFacts {
                         facts
                             .local_classes
                             .insert(name.name.to_string(), ClassObservation::from_class(class));
+                        if Self::is_insight_intent_entity(&class.decorators) {
+                            facts
+                                .local_entities
+                                .insert(name.name.to_string(), name.name.to_string());
+                        }
                     }
+                }
+                Statement::StructStatement(structure)
+                    if Self::is_insight_intent_entity(&structure.decorators) =>
+                {
+                    facts
+                        .local_entities
+                        .insert(structure.id.name.to_string(), structure.id.name.to_string());
                 }
                 Statement::FunctionDeclaration(function)
                     if FunctionDecorators::new(function).has(ArkuiDecoratorName::BUILDER) =>
@@ -2072,6 +2178,16 @@ impl ModuleExportFacts {
                                 .classes
                                 .named
                                 .insert(name.name.to_string(), observation);
+                            if Self::is_insight_intent_entity(&class.decorators) {
+                                facts
+                                    .local_entities
+                                    .insert(name.name.to_string(), name.name.to_string());
+                                facts
+                                    .direct
+                                    .entities
+                                    .named
+                                    .insert(name.name.to_string(), name.name.to_string());
+                            }
                         }
                     }
                     if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
@@ -2100,6 +2216,16 @@ impl ModuleExportFacts {
                         }
                     }
                     if let Declaration::StructStatement(statement) = &export.declaration {
+                        if Self::is_insight_intent_entity(&statement.decorators) {
+                            facts.local_entities.insert(
+                                statement.id.name.to_string(),
+                                statement.id.name.to_string(),
+                            );
+                            facts.direct.entities.named.insert(
+                                statement.id.name.to_string(),
+                                statement.id.name.to_string(),
+                            );
+                        }
                         if ComponentExportRules::is_exported_component_struct(statement) {
                             facts.direct.components.named.insert(
                                 statement.id.name.to_string(),
@@ -2114,15 +2240,38 @@ impl ModuleExportFacts {
                     {
                         let observation = ClassObservation::from_class(class);
                         facts.direct.classes.default = Some(observation);
+                        facts.direct.entities.default =
+                            Self::is_insight_intent_entity(&class.decorators).then(|| {
+                                class
+                                    .id
+                                    .as_ref()
+                                    .map(|name| name.name.to_string())
+                                    .unwrap_or_else(|| {
+                                        ComponentModuleExportName::DEFAULT.to_string()
+                                    })
+                            });
                         if let Some(name) = &class.id {
                             facts
                                 .local_classes
                                 .insert(name.name.to_string(), observation);
+                            if let Some(class_name) = facts.direct.entities.default.as_ref() {
+                                facts
+                                    .local_entities
+                                    .insert(name.name.to_string(), class_name.clone());
+                            }
                         }
                     }
                     if let ExportDefaultDeclarationKind::StructStatement(statement) =
                         &export.declaration
                     {
+                        facts.direct.entities.default =
+                            Self::is_insight_intent_entity(&statement.decorators)
+                                .then(|| statement.id.name.to_string());
+                        if let Some(class_name) = facts.direct.entities.default.as_ref() {
+                            facts
+                                .local_entities
+                                .insert(statement.id.name.to_string(), class_name.clone());
+                        }
                         if ComponentExportRules::is_exported_component_struct(statement) {
                             facts.direct.components.has_default = true;
                             facts.direct.components.default_info =
@@ -2229,6 +2378,18 @@ impl ModuleExportFacts {
         }
         facts
     }
+
+    fn is_insight_intent_entity(decorators: &[Decorator<'_>]) -> bool {
+        decorators.iter().any(|decorator| {
+            let Expression::CallExpression(call) = &decorator.expression else {
+                return false;
+            };
+            matches!(
+                &call.callee,
+                Expression::Identifier(identifier) if identifier.name == "InsightIntentEntity"
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2306,6 +2467,7 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
         let local_simple_type_aliases = facts.local_simple_type_aliases.clone();
         let mut local_components = facts.local_components.clone();
         let mut local_classes = facts.local_classes.clone();
+        let mut local_entities = facts.local_entities.clone();
         let mut local_system_apis = facts.local_system_apis.clone();
 
         for import in &facts.imports {
@@ -2327,6 +2489,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 if let Some(observation) = target_entry.classes.get(&binding.imported) {
                     local_classes.insert(binding.local.clone(), observation);
                 }
+                if let Some(class_name) = target_entry.entities.get(&binding.imported) {
+                    local_entities.insert(binding.local.clone(), class_name.to_string());
+                }
                 if let Some(symbol) = target_entry.system_apis.get(&binding.imported) {
                     local_system_apis.insert(binding.local.clone().into(), symbol.clone());
                 }
@@ -2344,6 +2509,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 }
                 if let Some(observation) = target_entry.classes.default {
                     local_classes.insert(local.clone(), observation);
+                }
+                if let Some(class_name) = target_entry.entities.default.as_ref() {
+                    local_entities.insert(local.clone(), class_name.clone());
                 }
             }
             for local in &import.default_system_apis {
@@ -2386,6 +2554,16 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                                     .classes
                                     .named
                                     .insert(binding.exported.clone(), observation);
+                            }
+                        }
+                        if let Some(class_name) = target_entry.entities.get(&binding.local) {
+                            if binding.exported == ComponentModuleExportName::DEFAULT {
+                                entry.entities.default = Some(class_name.to_string());
+                            } else {
+                                entry
+                                    .entities
+                                    .named
+                                    .insert(binding.exported.clone(), class_name.to_string());
                             }
                         }
                         if let Some(symbol) = target_entry.system_apis.get(&binding.local) {
@@ -2444,6 +2622,16 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                                     .insert(binding.exported.clone(), observation);
                             }
                         }
+                        if let Some(class_name) = local_entities.get(&binding.local) {
+                            if binding.exported == ComponentModuleExportName::DEFAULT {
+                                entry.entities.default = Some(class_name.clone());
+                            } else {
+                                entry
+                                    .entities
+                                    .named
+                                    .insert(binding.exported.clone(), class_name.clone());
+                            }
+                        }
                         if let Some(symbol) = local_system_apis.get(binding.local.as_str()) {
                             entry
                                 .system_apis
@@ -2459,6 +2647,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     if let Some(observation) = local_classes.get(local).copied() {
                         entry.classes.default = Some(observation);
                     }
+                    if let Some(class_name) = local_entities.get(local) {
+                        entry.entities.default = Some(class_name.clone());
+                    }
                     if let Some(symbol) = local_system_apis.get(local.as_str()) {
                         entry.system_apis.insert("default", symbol.clone());
                     }
@@ -2472,6 +2663,7 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     entry.builders.extend(target_entry.builders);
                     entry.components.extend(target_entry.components);
                     entry.classes.extend_named(&target_entry.classes);
+                    entry.entities.named.extend(target_entry.entities.named);
                     entry.system_apis.extend_named(&target_entry.system_apis);
                 }
             }

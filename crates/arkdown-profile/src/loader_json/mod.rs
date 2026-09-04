@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{
-    ArkdownConfig, ArkdownError, HapManifest, ModuleConfig, ModuleJson5, OhosModuleType,
-    OutputTarget, PkgBriefInfo,
+    ArkdownConfig, ArkdownError, HapManifest, InsightIntentFormBinding, ModuleConfig, ModuleJson5,
+    OhosModuleType, OutputTarget, PkgBriefInfo,
 };
 use arkdown_path::{
     canonicalize_or_owned, AbsPath, ArtifactPath, ArtifactPathSerializer, ModuleSpecifier,
@@ -160,6 +160,10 @@ pub struct LoaderJson {
     /// `projectConfig.cardObj`; transforms must not infer it from directories.
     #[serde(skip)]
     pub form_entry_sources: Vec<String>,
+    /// Form-extension ability ownership and registered widget names used by
+    /// the Rust InsightIntent transform. This never enters hvigor loader.json.
+    #[serde(skip)]
+    pub insight_intent_form_bindings: Vec<InsightIntentFormBinding>,
     /// Source entries that the OHOS runtime loads directly from `module.json`.
     #[serde(skip)]
     pub runtime_entry_sources: Vec<String>,

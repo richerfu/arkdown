@@ -284,7 +284,7 @@ fn test_loader_json_form_profile_sources_feed_internal_compile_entries() {
     fs::write(&form_source, "export default struct Card {}").expect("write form source");
     fs::write(
         profile_dir.join("form_config.json"),
-        r#"{ forms: [{ src: "./ets/forms/Card.ets", uiSyntax: "arkts" }] }"#,
+        r#"{ forms: [{ name: "Card", src: "./ets/forms/Card.ets", uiSyntax: "arkts" }] }"#,
     )
     .expect("write form profile");
 
@@ -314,6 +314,19 @@ fn test_loader_json_form_profile_sources_feed_internal_compile_entries() {
         loader.form_entry_sources,
         vec!["./ets/forms/Card.ets".to_string()],
         "SDK readCardForm preserves referenced form sources in cardObj for ETS entry lowering"
+    );
+    assert_eq!(loader.insight_intent_form_bindings.len(), 1);
+    assert_eq!(
+        loader.insight_intent_form_bindings[0].source,
+        "./ets/form/EntryFormAbility.ets"
+    );
+    assert_eq!(
+        loader.insight_intent_form_bindings[0].ability_name,
+        "EntryFormAbility"
+    );
+    assert_eq!(
+        loader.insight_intent_form_bindings[0].form_names,
+        vec!["Card".to_string()]
     );
     assert!(
         !loader

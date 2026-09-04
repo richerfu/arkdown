@@ -28,15 +28,18 @@ use crate::source_map;
 use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::{
-    self, CheckerMode, ModuleExportIndex, NavigationRouteMap, SystemApiCheckOptions,
-    TransformOptions,
+    self, CheckerMode, InsightIntentSchemaCatalog, ModuleExportIndex, NavigationRouteMap,
+    SystemApiCheckOptions, TransformOptions,
 };
 use crate::typescript_emit::{
     ConstEnumExportCache, ImportedConstEnumRewriter, TypeScriptDirectiveFlags,
     TypeScriptEnumValueRewriter, TypeScriptJavascriptEmitOutput, TypeScriptJavascriptEmitter,
 };
 use crate::visual::VisualSourceInjector;
-use arkdown_core::{ArkTscTarget, ArktsLanguageVersion, ModuleSource, ModuleType, ResolvedId};
+use arkdown_core::{
+    ArkTscTarget, ArktsLanguageVersion, InsightIntentFormBinding, ModuleSource, ModuleType,
+    ResolvedId,
+};
 
 /// Narrow transform plan consumed by the Rolldown ETS transform adapter.
 ///
@@ -62,6 +65,8 @@ pub struct RolldownEtsTransformPlan {
     const_enum_exports: Arc<ConstEnumExportCache>,
     pub(crate) module_exports: ModuleExportIndex,
     form_entry_source_ids: Arc<FxHashSet<String>>,
+    insight_intent_form_bindings: Arc<FxHashMap<String, InsightIntentFormBinding>>,
+    insight_intent_schema_catalog: InsightIntentSchemaCatalog,
     entry_source_ids: Arc<FxHashSet<String>>,
     navigation_routes: NavigationRouteMap,
     preview_mode: bool,
@@ -124,6 +129,8 @@ impl RolldownEtsTransformPlan {
             const_enum_exports,
             module_exports,
             form_entry_source_ids: Arc::default(),
+            insight_intent_form_bindings: Arc::default(),
+            insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
             entry_source_ids: Arc::default(),
             navigation_routes: NavigationRouteMap::default(),
             preview_mode: false,
@@ -241,6 +248,22 @@ impl RolldownEtsTransformPlan {
         self
     }
 
+    pub fn with_insight_intent_form_bindings(
+        mut self,
+        bindings: FxHashMap<String, InsightIntentFormBinding>,
+    ) -> Self {
+        self.insight_intent_form_bindings = Arc::new(bindings);
+        self
+    }
+
+    pub fn with_insight_intent_schema_catalog(
+        mut self,
+        catalog: InsightIntentSchemaCatalog,
+    ) -> Self {
+        self.insight_intent_schema_catalog = catalog;
+        self
+    }
+
     pub fn with_entry_source_ids(mut self, entry_source_ids: FxHashSet<String>) -> Self {
         self.entry_source_ids = Arc::new(entry_source_ids);
         self
@@ -280,6 +303,8 @@ impl RolldownEtsTransformPlan {
             module_exports: self.module_exports.clone(),
             navigation_routes: self.navigation_routes.clone(),
             form_entry,
+            insight_intent_form_binding: self.insight_intent_form_binding(id),
+            insight_intent_schema_catalog: self.insight_intent_schema_catalog.clone(),
             entry_source: self.is_entry_source(id),
             preview_mode: self.preview_mode,
             check_entry: self.check_entry,
@@ -300,6 +325,16 @@ impl RolldownEtsTransformPlan {
         }
         let normalized = TransformEntrySourceId::new(id).normalized();
         self.form_entry_source_ids.contains(normalized.as_str())
+    }
+
+    fn insight_intent_form_binding(&self, id: &str) -> Option<InsightIntentFormBinding> {
+        if let Some(binding) = self.insight_intent_form_bindings.get(id) {
+            return Some(binding.clone());
+        }
+        let normalized = TransformEntrySourceId::new(id).normalized();
+        self.insight_intent_form_bindings
+            .get(normalized.as_str())
+            .cloned()
     }
 
     fn is_entry_source(&self, id: &str) -> bool {
@@ -331,6 +366,7 @@ pub struct RolldownEtsTransformOutput {
     /// genAbc-equivalent collector restores it from this typed transform fact.
     pub is_comment_only_javascript: bool,
     pub is_shared_module: bool,
+    pub insight_intent: transform::InsightIntentSourceMetadata,
 }
 
 /// Production ETS transform engine used by the Rolldown plugin adapter.
@@ -363,6 +399,7 @@ impl RolldownEtsTransformer {
                         emits_javascript: false,
                         is_comment_only_javascript: false,
                         is_shared_module: false,
+                        insight_intent: transform::InsightIntentSourceMetadata::default(),
                     }));
                 }
             }
@@ -423,6 +460,7 @@ impl RolldownEtsTransformer {
                 emits_javascript,
                 is_comment_only_javascript,
                 is_shared_module,
+                insight_intent: transform::InsightIntentSourceMetadata::default(),
             }));
         }
 
@@ -453,6 +491,7 @@ impl RolldownEtsTransformer {
                 emits_javascript: false,
                 is_comment_only_javascript: false,
                 is_shared_module,
+                insight_intent: transformed.insight_intent,
             }));
         }
 
@@ -513,6 +552,7 @@ impl RolldownEtsTransformer {
                 emits_javascript,
                 is_comment_only_javascript,
                 is_shared_module,
+                insight_intent: transformed.insight_intent,
             }));
         }
 
@@ -558,6 +598,7 @@ impl RolldownEtsTransformer {
             emits_javascript,
             is_comment_only_javascript,
             is_shared_module,
+            insight_intent: transformed.insight_intent,
         }))
     }
 

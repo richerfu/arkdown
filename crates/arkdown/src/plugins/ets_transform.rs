@@ -13,7 +13,7 @@ use std::{borrow::Cow, future::ready, sync::Arc};
 
 #[cfg(feature = "memory-diagnostics")]
 use arkdown_ets_transform::RolldownEtsTransformOutput;
-use arkdown_ets_transform::RolldownEtsTransformer;
+use arkdown_ets_transform::{InsightIntentSourceMetadata, RolldownEtsTransformer};
 use rolldown_common::LogWithoutPlugin;
 use rolldown_plugin::{
     HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
@@ -25,10 +25,11 @@ pub use arkdown_ets_transform::error::{DiagnosticSeverity, EtsTransformError};
 pub use arkdown_ets_transform::transform;
 pub use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
 pub use arkdown_ets_transform::{
-    ArktsSourceChecker, CheckerMode, ModuleAnalyzerKind, NavigationRouteMap,
-    ResourceModuleReference, ResourceReference, ResourceTransformContext, RolldownEtsTransformPlan,
-    StaticModuleSpecifierRewrite, SystemApiCheckOptions, SystemResourceReferenceLoader,
-    TransformEntrySourceId, TransformResolvedStaticModule, TransformSourceSnapshot,
+    ArktsSourceChecker, CheckerMode, InsightIntentSchemaCatalog, ModuleAnalyzerKind,
+    NavigationRouteMap, ResourceModuleReference, ResourceReference, ResourceTransformContext,
+    RolldownEtsTransformPlan, StaticModuleSpecifierRewrite, SystemApiCheckOptions,
+    SystemResourceReferenceLoader, TransformEntrySourceId, TransformResolvedStaticModule,
+    TransformSourceSnapshot,
 };
 
 /// ArkTS transform plugin adapter.
@@ -45,6 +46,7 @@ pub(crate) struct EtsTransformModuleMetadataEntry {
     pub(crate) has_source_map: bool,
     pub(crate) is_comment_only_javascript: bool,
     pub(crate) is_shared_module: bool,
+    pub(crate) insight_intent: InsightIntentSourceMetadata,
 }
 
 #[derive(Debug, Default)]
@@ -61,6 +63,7 @@ impl EtsTransformModuleMetadata {
         has_source_map: bool,
         is_comment_only_javascript: bool,
         is_shared_module: bool,
+        insight_intent: InsightIntentSourceMetadata,
     ) {
         self.entries.insert(
             module_id,
@@ -70,6 +73,7 @@ impl EtsTransformModuleMetadata {
                 has_source_map,
                 is_comment_only_javascript,
                 is_shared_module,
+                insight_intent,
             },
         );
     }
@@ -142,6 +146,7 @@ impl EtsTransformPlugin {
                     has_source_map,
                     output.is_comment_only_javascript,
                     output.is_shared_module,
+                    output.insight_intent,
                 );
         }
         Ok(Some(HookTransformOutput {

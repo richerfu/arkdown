@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use arkdown_ets_transform::InsightIntentSourceMetadata;
 use rolldown_plugin::{
     HookTransformArgs, HookTransformReturn, HookUsage, Plugin, SharedTransformPluginContext,
 };
@@ -22,6 +23,7 @@ pub(crate) struct HvigorModuleTransformStore {
     pub(crate) source_maps: Arc<FxDashMap<String, Arc<str>>>,
     pub(crate) javascript_module_ids: Arc<FxDashMap<String, ()>>,
     pub(crate) shared_module_ids: Arc<FxDashMap<String, ()>>,
+    pub(crate) insight_intent_sources: Arc<FxDashMap<String, InsightIntentSourceMetadata>>,
 }
 
 impl HvigorModuleTransformStore {
@@ -32,6 +34,7 @@ impl HvigorModuleTransformStore {
         source_map: Option<Arc<str>>,
         emits_javascript: bool,
         is_shared_module: bool,
+        insight_intent: InsightIntentSourceMetadata,
     ) {
         if let Some(module_source_code) = module_source_code {
             self.module_source_overrides
@@ -44,8 +47,14 @@ impl HvigorModuleTransformStore {
             self.javascript_module_ids.insert(module_id.clone(), ());
         }
         if is_shared_module {
-            self.shared_module_ids.insert(module_id, ());
+            self.shared_module_ids.insert(module_id.clone(), ());
         }
+        // Keep every transformed ETS/TS source, including an empty fact set.
+        // Incremental InsightIntent processing needs to distinguish an
+        // untouched source from a recompiled source whose decorators were
+        // removed; dropping empty facts would retain stale cache entries.
+        self.insight_intent_sources
+            .insert(module_id, insight_intent);
     }
 
     pub(crate) fn finish(&self) -> HvigorModuleTransformSnapshot {
@@ -71,11 +80,17 @@ impl HvigorModuleTransformStore {
             .map(|item| item.key().clone())
             .collect();
         self.shared_module_ids.clear();
+        let mut insight_intent_sources = FxHashMap::default();
+        for item in self.insight_intent_sources.iter() {
+            insight_intent_sources.insert(item.key().clone(), item.value().clone());
+        }
+        self.insight_intent_sources.clear();
         HvigorModuleTransformSnapshot {
             module_source_overrides,
             source_maps,
             javascript_module_ids,
             shared_module_ids,
+            insight_intent_sources,
         }
     }
 }
@@ -85,6 +100,7 @@ pub(crate) struct HvigorModuleTransformSnapshot {
     pub(crate) source_maps: FxHashMap<String, Arc<str>>,
     pub(crate) javascript_module_ids: FxHashSet<String>,
     pub(crate) shared_module_ids: FxHashSet<String>,
+    pub(crate) insight_intent_sources: FxHashMap<String, InsightIntentSourceMetadata>,
 }
 
 #[derive(Debug)]
@@ -186,9 +202,17 @@ impl Plugin for HvigorModuleTransformCollector {
                     source_map,
                     metadata.emits_javascript,
                     metadata.is_shared_module,
+                    metadata.insight_intent,
                 );
             } else if let Some(source_map) = source_map {
-                store.record(module_id, None, Some(source_map), true, false);
+                store.record(
+                    module_id,
+                    None,
+                    Some(source_map),
+                    true,
+                    false,
+                    InsightIntentSourceMetadata::default(),
+                );
             }
             Ok(None)
         }

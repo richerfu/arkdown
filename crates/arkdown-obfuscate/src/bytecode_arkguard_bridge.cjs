@@ -24,6 +24,21 @@ function sdkLogger() {
   };
 }
 
+function registerInsightIntentKeep(whiteListManager, file) {
+  whiteListManager.setCurrentCollector(file.originalPath);
+  const keepInfo =
+    whiteListManager.fileWhiteListInfo?.fileKeepInfo?.arkUIKeepInfo;
+  if (!keepInfo) {
+    fail(`ArkGuard has no arkUIKeepInfo collector for ${file.originalPath}`);
+  }
+  for (const name of file.insightIntentGlobalNames) {
+    keepInfo.globalNames.add(name);
+  }
+  for (const name of file.insightIntentPropertyNames) {
+    keepInfo.propertyNames.add(name);
+  }
+}
+
 async function main() {
   const requestPath = process.argv[2];
   const responsePath = process.argv[3];
@@ -188,7 +203,12 @@ async function main() {
   const typescript = require(require.resolve("typescript", {
     paths: [request.arkguardPath],
   }));
+  const whiteListManager = arkguard.ProjectCollections.projectWhiteListManager;
+  if (!whiteListManager) {
+    fail("ArkGuard project white-list manager was not initialized");
+  }
   for (const file of request.files) {
+    registerInsightIntentKeep(whiteListManager, file);
     const content = fs.readFileSync(file.buildPath, "utf8");
     const sourceFile = typescript.createSourceFile(
       file.originalPath,
@@ -203,10 +223,6 @@ async function main() {
     transformed.dispose();
   }
 
-  const whiteListManager = arkguard.ProjectCollections.projectWhiteListManager;
-  if (!whiteListManager) {
-    fail("ArkGuard project white-list manager was not initialized");
-  }
   const deletedSourcePaths = obfuscator.filePathManager
     ? obfuscator.filePathManager.getDeletedSourceFilePaths()
     : undefined;

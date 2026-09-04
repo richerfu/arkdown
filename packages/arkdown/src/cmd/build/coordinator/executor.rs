@@ -309,6 +309,15 @@ impl BuildCoordinator {
         )
       })?
     };
+    let insight_intent_schema_catalog =
+      InsightIntentSchemaCatalog::from_ets_loader_path(&config.sdk_config.ets_loader_path)
+        .map_err(|error| {
+          anyhow::anyhow!(
+            "SDK InsightIntent schema catalog load failed from {}: {}",
+            config.sdk_config.ets_loader_path.display(),
+            error
+          )
+        })?;
 
     for (module, resolved_module) in build_modules.into_iter().zip(build_module_configs) {
       let _module_timer = BuildTimingProbe::module(&module.name, "module_total");
@@ -2634,6 +2643,7 @@ impl BuildCoordinator {
         all_bc_har_deps: &all_bc_har_deps,
         sdk_declaration_roots: &sdk_declaration_roots,
         component_metadata: &component_metadata,
+        insight_intent_schema_catalog: &insight_intent_schema_catalog,
       })
       .await?;
     let mut bundle_outs = bundle_stage_output.bundle_outs;

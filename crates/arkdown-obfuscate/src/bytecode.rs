@@ -208,6 +208,8 @@ impl<'a> ArkguardBytecodeRunner<'a> {
                 Ok(BytecodeArkguardFile {
                     build_path: BytecodeArkguardPath::new(&file.build_path).text()?,
                     original_path: BytecodeArkguardPath::new(&file.original_path).text()?,
+                    insight_intent_global_names: file.insight_intent_global_names.clone(),
+                    insight_intent_property_names: file.insight_intent_property_names.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ObfuscationError>>()?;
@@ -342,6 +344,8 @@ struct BytecodeArkguardRequest {
 struct BytecodeArkguardFile {
     build_path: String,
     original_path: String,
+    insight_intent_global_names: Vec<String>,
+    insight_intent_property_names: Vec<String>,
 }
 
 #[derive(Serialize)]

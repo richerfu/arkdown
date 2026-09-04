@@ -27,8 +27,8 @@ mod module_source_writer_tests;
 mod transform_collector_tests;
 
 pub use types::{
-    BundleOutput, HvigorHarImportees, HvigorModuleRequestRewritePlan, PreloadSystemSoTask,
-    SourceMapInputFingerprint,
+    BundleOutput, HvigorHarImportees, HvigorModuleRequestRewritePlan, InsightIntentModuleSource,
+    PreloadSystemSoTask, SourceMapInputFingerprint,
 };
 
 pub(crate) use bytecode_har_imports::HvigorBytecodeHarImports;
@@ -323,6 +323,13 @@ impl Bundler {
             module_source_state.source_maps.clear();
             FxHashMap::default()
         };
+        let insight_intent_sources = Self::insight_intent_sources(
+            module_source_state.take_insight_intent_sources(),
+            &input_plan.module_path_map,
+            &plan.input.runtime_packages,
+            plan.input.module_name.as_str(),
+            plan.use_normalized_ohm_url,
+        )?;
         let module_source_write_start = Instant::now();
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump("bundle:before-module-source-write");
@@ -444,6 +451,7 @@ impl Bundler {
             modules_abc_path,
             source_maps_path,
             source_map_input_fingerprints,
+            insight_intent_sources,
         })
     }
 
@@ -461,6 +469,105 @@ impl Bundler {
                     )
                 }
             })
+    }
+
+    fn insight_intent_sources(
+        sources: FxHashMap<String, arkdown_ets_transform::InsightIntentSourceMetadata>,
+        module_path_map: &HvigorModulePathMap,
+        runtime_packages: &crate::plan::BundleRuntimePackageInfo,
+        module_name: &str,
+        use_normalized_ohm_url: bool,
+    ) -> Result<Vec<InsightIntentModuleSource>, ArkdownError> {
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !use_normalized_ohm_url {
+            if sources.values().all(|metadata| metadata.is_empty()) {
+                let mut sources = sources.into_iter().collect::<Vec<_>>();
+                sources.retain(|(_, metadata)| metadata.has_obfuscation_keep());
+                sources.sort_by(|left, right| left.0.cmp(&right.0));
+                return Ok(sources
+                    .into_iter()
+                    .map(|(module_id, metadata)| InsightIntentModuleSource {
+                        source_file_path: Self::canonical_project_root(Path::new(&module_id)),
+                        module_id,
+                        decorator_file: String::new(),
+                        metadata,
+                    })
+                    .collect());
+            }
+            return Err(ArkdownError::Bundler(
+                "[10111027] InsightIntent failed to generate a standard OHM URL; enable useNormalizedOHMUrl"
+                    .to_string(),
+            ));
+        }
+
+        let mut sources = sources.into_iter().collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+        sources
+            .into_iter()
+            .map(|(module_id, mut metadata)| {
+                let ownership = module_path_map.source_file_for_entry(&module_id)?;
+                let decorator_file = ownership.to_normalized_request(runtime_packages, module_name)?;
+                for intent in &mut metadata.intents {
+                    intent.data.insert(
+                        "decoratorFile".to_string(),
+                        serde_json::Value::String(decorator_file.clone()),
+                    );
+                    if intent.data.get("decoratorType").and_then(serde_json::Value::as_str)
+                        == Some("@InsightIntentPage")
+                    {
+                        let page_path = intent
+                            .data
+                            .get("pagePath")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                ArkdownError::Bundler(format!(
+                                    "[10110017] InsightIntent pagePath is missing in {module_id}"
+                                ))
+                            })?;
+                        let package_root = module_path_map
+                            .package_root_for_entry(&module_id)
+                            .ok_or_else(|| {
+                                ArkdownError::Bundler(format!(
+                                    "[10110017] cannot resolve InsightIntent package root for {module_id}"
+                                ))
+                            })?;
+                        let page_source = package_root
+                            .join("src")
+                            .join("main")
+                            .join(page_path)
+                            .with_extension("ets");
+                        if !page_source.is_file() {
+                            return Err(ArkdownError::Bundler(format!(
+                                "[10110017] PagePath in @InsightIntentPage does not match the actual page path: {}",
+                                page_source.display()
+                            )));
+                        }
+                        let page_ownership = module_path_map
+                            .source_file_for_entry(page_source.to_string_lossy().as_ref())?;
+                        let normalized_page = page_ownership
+                            .to_normalized_request(runtime_packages, module_name)?;
+                        intent.data.insert(
+                            "pagePath".to_string(),
+                            serde_json::Value::String(normalized_page),
+                        );
+                    }
+                }
+                for entity in &mut metadata.entities {
+                    entity.data.insert(
+                        "decoratorFile".to_string(),
+                        serde_json::Value::String(decorator_file.clone()),
+                    );
+                }
+                Ok(InsightIntentModuleSource {
+                    source_file_path: Self::canonical_project_root(Path::new(&module_id)),
+                    module_id,
+                    decorator_file,
+                    metadata,
+                })
+            })
+            .collect()
     }
 
     fn source_map_input_fingerprints(

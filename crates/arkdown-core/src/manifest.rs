@@ -107,6 +107,18 @@ pub struct ExtensionAbilityEntry {
     pub metadata: Vec<MetadataEntry>,
 }
 
+/// Immutable form-extension metadata needed by the InsightIntent transform.
+///
+/// The source path identifies the extension ability implementation, while
+/// `form_names` comes from every profile referenced by that ability's
+/// `ohos.extension.form` metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsightIntentFormBinding {
+    pub source: String,
+    pub ability_name: String,
+    pub form_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HspDependency {
     pub module_name: String,
