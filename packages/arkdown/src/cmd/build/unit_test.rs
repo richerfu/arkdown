@@ -31,7 +31,7 @@ use arkdown_session::dependency_graph::snapshot::{
   DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeType,
 };
 
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 
 /// `CommonConst.TEST_ABILITY` — synthetic ability name.
 const TEST_ABILITY: &str = "TestAbility";

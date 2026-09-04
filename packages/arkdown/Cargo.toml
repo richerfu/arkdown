@@ -17,6 +17,7 @@ napi-derive = { workspace = true }
 # arkdown core crates (workspace = true)
 arkdown = { workspace = true }
 arkdown-abc = { workspace = true }
+arkdown-build = { workspace = true }
 arkdown-cache = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-config = { workspace = true }
@@ -67,7 +68,6 @@ sha2 = { workspace = true }
 time = { workspace = true }
 dhat = { workspace = true, optional = true }
 dunce = { workspace = true }
-jsonschema = "0.49.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mimalloc-safe = { workspace = true, optional = true, features = ["skip_collect_on_exit"] }

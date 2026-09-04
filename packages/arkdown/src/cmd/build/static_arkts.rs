@@ -14,7 +14,7 @@ use arkdown_profile::LoaderJson;
 use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
 use arkdown_session::ModuleCompileContext;
 
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 
 pub(super) struct StaticArktsCompileInput<'a> {
   pub config: &'a ArkdownConfig,

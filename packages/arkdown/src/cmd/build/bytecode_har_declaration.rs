@@ -36,7 +36,7 @@ use arkdown_path::{ArtifactPathSerializer, OhmUrl};
 use arkdown_profile::{PkgContextInfoInput, PkgContextInfoOpt};
 use serde::Deserialize;
 
-use super::layout::{ModuleBuildLayout, ModuleSourceLayout};
+use arkdown_build::layout::{ModuleBuildLayout, ModuleSourceLayout};
 
 // ---------------------------------------------------------------------------
 // ByteCodeHarDeclarationEntry

@@ -22,11 +22,9 @@ mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
 mod intermediates;
-mod layout;
 mod module_plan;
 mod native_stage;
 mod packing_check;
-mod pre_build;
 mod preload_system_so;
 mod preview;
 #[cfg(test)]

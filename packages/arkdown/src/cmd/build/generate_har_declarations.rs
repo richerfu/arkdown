@@ -22,7 +22,7 @@ use oxc_parser::Parser;
 use oxc_span::GetSpan;
 use walkdir::WalkDir;
 
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 
 pub(super) struct HarDeclarationGenerator<'a> {
   module_root: &'a Path,

@@ -13,6 +13,7 @@ members = [
     "crates/arkdown-pack",
     "crates/arkdown-cache",
     "crates/arkdown-abc",
+    "crates/arkdown-build",
     "crates/arkdown-sign",
     "crates/arkdown-obfuscate",
     "crates/arkdown-watcher",
@@ -28,6 +29,7 @@ members = [
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
 arkdown-abc = { path = "crates/arkdown-abc" }
+arkdown-build = { path = "crates/arkdown-build" }
 arkdown-cache = { path = "crates/arkdown-cache" }
 arkdown-config = { path = "crates/arkdown-config" }
 arkdown-core = { path = "crates/arkdown-core" }
@@ -104,6 +106,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 json5 = "0.4"
+jsonschema = "0.49.7"
 toml = { version = "1.1.4", features = ["preserve_order"] }
 
 # HTTP client (OHPM registry integration)

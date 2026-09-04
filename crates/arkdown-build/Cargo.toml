@@ -1,0 +1,18 @@
+[package]
+name = "arkdown-build"
+version = "0.1.0"
+edition = "2021"
+description = "Typed application orchestration for arkdown builds"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+arkdown-core = { workspace = true }
+arkdown-session = { workspace = true }
+json5 = { workspace = true }
+jsonschema = { workspace = true }
+rustc-hash = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

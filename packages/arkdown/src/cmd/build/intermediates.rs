@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::layout::{
-  ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout, RestoolLayout,
-};
 use anyhow::{Context, Result};
 use arkdown::SourceMapInputFingerprint;
+use arkdown_build::layout::{
+  ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout, RestoolLayout,
+};
 use arkdown_core::{ArkdownConfig, ModuleConfig, OhosModuleType, OutputTarget};
 use arkdown_pack::minify_package_intermediate_module_json;
 use arkdown_path::{
