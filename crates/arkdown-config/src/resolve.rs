@@ -470,7 +470,7 @@ mod tests {
                 assert_eq!(cfg.modules[0].name, "entry");
                 assert_eq!(
                     cfg.modules[0].src_path,
-                    arkdown_path::lexical_normalize(&tmp).join("entry")
+                    std::fs::canonicalize(&tmp).unwrap().join("entry")
                 );
                 assert_eq!(
                     cfg.modules[0].module_type,

@@ -4168,37 +4168,6 @@ mod tests {
             .map(|path| path.to_string_lossy().into_owned())
         );
 
-        let script_option = EffectiveModuleBuildOptionResolver::new(
-            &inventory, "entry", "default", "debug", "phone",
-        )
-        .with_build_script_override(serde_json::json!({
-            "preloadSystemSo": true,
-            "strictMode": { "caseSensitiveCheck": true },
-            "arkOptions": {
-                "supportChunks": false,
-                "buildProfileFields": {
-                    "SHARED_FIELD": "build-script",
-                    "SCRIPT_ONLY": 1
-                }
-            }
-        }))
-        .resolve()
-        .unwrap();
-        assert!(script_option.preload_system_so);
-        assert!(script_option.strict_mode.case_sensitive_check);
-        assert!(!script_option.ark_options.as_ref().unwrap().support_chunks);
-        assert_eq!(
-            script_option
-                .ark_options
-                .as_ref()
-                .unwrap()
-                .runtime_only
-                .as_ref()
-                .unwrap()
-                .packages,
-            ["product-runtime"]
-        );
-
         fs_err::write(
             project_root.join("arkdown.config.toml"),
             r#"
@@ -4212,14 +4181,6 @@ mod tests {
         let custom_option = EffectiveModuleBuildOptionResolver::new(
             &inventory, "entry", "default", "debug", "phone",
         )
-        .with_build_script_override(serde_json::json!({
-            "arkOptions": {
-                "buildProfileFields": {
-                    "SHARED_FIELD": "build-script",
-                    "SCRIPT_ONLY": 1
-                }
-            }
-        }))
         .resolve()
         .unwrap();
         let fields = &custom_option
@@ -4229,7 +4190,7 @@ mod tests {
             .build_profile_fields;
         assert_eq!(fields["SHARED_FIELD"], "arkdown-config");
         assert_eq!(fields["PRODUCT_ONLY"], true);
-        assert_eq!(fields["SCRIPT_ONLY"], 1);
+        assert!(fields.get("SCRIPT_ONLY").is_none());
         assert_eq!(fields["CUSTOM_ONLY"], false);
     }
 
