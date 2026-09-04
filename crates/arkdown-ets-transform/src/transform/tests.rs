@@ -5076,6 +5076,71 @@ struct Parent {
 }
 
 #[test]
+fn test_builder_param_call_result_uses_hvigor_function_fallback() {
+    // Upstream source/golden:
+    // compiler/test/transform_ut/application/entry/src/main/ets/pages/
+    // utForPartialUpdate/render_decorator/@builderParam/@BuilderParamReturnType.ets
+    // A call assigned to @BuilderParam may return a builder function, or may
+    // itself render UI and return void. Hvigor evaluates that call in a typeof
+    // guard and wraps only the latter case in an arrow function.
+    let src = r#"
+@Entry
+@Component
+struct ComA {
+  uiModule = new TestUlModule4()
+
+  build() {
+    Row() {
+      FeedComponent({ createView: this.uiModule.createView() })
+    }
+  }
+}
+
+@Component
+struct FeedComponent {
+  @BuilderParam createView: () => void
+
+  build() {
+    this.createView()
+  }
+}
+
+class TestUlModule4 {
+  builderVar
+
+  createView(): () => void {
+    return this.builderVar.builder
+  }
+}
+"#;
+
+    let options = TransformOptions {
+        project_path: Some(PathBuf::from("/project/entry/src/main/ets")),
+        project_root: Some(PathBuf::from("/project")),
+        ..Default::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &make_source(
+            "/project/entry/src/main/ets/pages/BuilderParamReturnType.ets",
+            src,
+        ),
+        &options,
+    )
+    .expect("builder-param call result must lower like the upstream golden");
+
+    assert!(
+        result.contains(
+            "createView: typeof this.uiModule.createView() === \"function\" ? this.uiModule.createView() : () => {"
+        ) && result.contains("this.uiModule.createView();"),
+        "call-valued @BuilderParam must preserve hvigor's runtime return-type fallback:\n{result}"
+    );
+    assert!(
+        result.contains("this.createView.bind(this)();"),
+        "invoking the @BuilderParam inside build() must retain the bound receiver:\n{result}"
+    );
+}
+
+#[test]
 fn test_imported_custom_component_trailing_lambda_populates_sole_builder_param() {
     // Upstream refs:
     // - ets-loader process_component_build.js processExpressionStatementChange

@@ -152,6 +152,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkdown-abc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arkdown-core",
+ "arkdown-path",
+ "arkdown-session",
+ "fs-err",
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "arkdown-cache"
 version = "0.1.0"
 dependencies = [
@@ -232,6 +248,7 @@ version = "0.0.1-beta.11"
 dependencies = [
  "anyhow",
  "arkdown",
+ "arkdown-abc",
  "arkdown-cache",
  "arkdown-config",
  "arkdown-core",

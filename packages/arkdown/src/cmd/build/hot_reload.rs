@@ -8,13 +8,13 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
+use arkdown_abc::bytecode::{Ts2abcReloadMode, Ts2abcReloadPlan};
 use arkdown_core::HvigorModuleSourceFile;
 use arkdown_path::lexical_normalize;
 use arkdown_watcher::{WatchEvent, WatchEventKind};
 use indexmap::IndexSet;
 
 use super::args::NativeTaskRoot;
-use super::bytecode::{Ts2abcReloadMode, Ts2abcReloadPlan};
 use super::layout::ModuleBuildLayout;
 
 #[derive(Debug, thiserror::Error)]

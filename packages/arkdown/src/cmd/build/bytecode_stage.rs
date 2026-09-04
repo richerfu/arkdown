@@ -7,9 +7,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use arkdown_abc::bytecode::{
+  BytecodeAbcInput, RolldownBytecodeCompileInput, RolldownBytecodeCompiler,
+};
 use arkdown_core::{HvigorModuleSourceFile, HvigorNpmEntry};
-
-use super::bytecode::{BytecodeAbcInput, RolldownBytecodeCompileInput, RolldownBytecodeCompiler};
 
 /// Input for the bytecode compilation stage for one module.
 pub(super) struct BytecodeStageInput {

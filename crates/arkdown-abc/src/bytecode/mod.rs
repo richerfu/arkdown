@@ -4,16 +4,16 @@
 //! [`Ts2abcPlan`] and [`Ts2abcCompiler`]
 //! entry points for the build coordinator.
 //!
-//! # SPEC-048 Architecture
+//! # Architecture
 //!
 //! ```text
-//! Ts2abcPlan           ← CLI BuildPlanBuilder assembles this
+//! Ts2abcPlan           ← build coordinator assembles this
 //!   -> Ts2abcCompiler::compile()
 //!      -> SdkEs2abcBackend::compile()         → es2abc subprocess
 //!      -> Ts2abcOutput
 //! ```
 //!
-//! # File structure (SPEC-048)
+//! # File structure
 //!
 //! | File | Responsibility |
 //! |------|---------------|
@@ -36,14 +36,14 @@ mod plan;
 // ---------------------------------------------------------------------------
 
 // compiler
-pub(crate) use compiler::{
-  BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompileInput,
-  RolldownBytecodeCompiler,
+pub use compiler::{
+    BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompileInput,
+    RolldownBytecodeCompiler,
 };
 
 // SDK driver output
-pub(crate) use driver::Ts2abcOutput;
-pub(crate) use plan::{Ts2abcReloadMode, Ts2abcReloadPlan};
+pub use driver::Ts2abcOutput;
+pub use plan::{Ts2abcReloadMode, Ts2abcReloadPlan};
 
-// Plan and manifest helpers are consumed inside this module; keep them private
-// to avoid recreating the old standalone crate boundary.
+// Plan and manifest helpers remain private until another build-domain caller
+// needs their typed API.
