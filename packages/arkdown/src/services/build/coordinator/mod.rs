@@ -62,10 +62,6 @@ use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
 };
-use super::quickfix::{
-  ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
-  QuickFixTaskPlan, QuickFixVersionStore,
-};
 use super::static_arkts::{StaticArktsCompileInput, StaticArktsCompiler};
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
@@ -99,6 +95,10 @@ use arkdown_build::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
 };
 use arkdown_build::module_plan::ModuleSelectionPlanner;
+use arkdown_build::quickfix::{
+  ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
+  QuickFixTaskPlan, QuickFixVersionStore,
+};
 use arkdown_build::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
 use arkdown_build::request::{
   AbcBackendChoice, BuildRequest, HvigorRuntimeProperties, NativeTaskRoot,
