@@ -144,6 +144,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
       .cloned()
       .ok_or_else(|| anyhow::anyhow!("loader.json must serialize as an object"))?;
     project_config.extend(effective);
+    project_config.insert("perf".into(), self.args.analyze.perf_value().into());
     project_config.insert(
       "moduleRootPath".into(),
       self.loader_json.module_root_path.clone().into(),

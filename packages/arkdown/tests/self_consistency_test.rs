@@ -186,6 +186,7 @@ impl SelfConsistencyOracle {
       BuildCommand::new(BuildArgs {
         target: "hap".to_string(),
         mode: "debug".to_string(),
+        analyze: Default::default(),
         arkts_version: arkdown_core::ArktsLanguageVersion::default(),
         module: None,
         product: None,

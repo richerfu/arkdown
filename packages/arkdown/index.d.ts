@@ -97,6 +97,11 @@ export interface BuildConfig {
   project?: string
   target?: string
   mode?: string
+  /**
+   * Hvigor-compatible performance analysis mode. Hook event factories are
+   * active only for verbose and trace.
+   */
+  analyze?: 'normal' | 'default' | 'verbose' | 'false' | 'trace'
   /** Explicit ArkTS compiler language. Omitted means ArkTS 1.1. */
   arktsVersion?: '1.1' | '1.2'
   /** OHPM package acquisition policy. Omitted matches hvigor's online wrapper. */
@@ -159,6 +164,37 @@ export interface HvigorCachedFileInfo {
   size: number
 }
 
+/**
+ * Function shape returned by a Hvigor hook-event factory. JavaScript creates
+ * the callable compatibility object; every event operation is recorded by
+ * the native observability pipeline.
+ */
+export interface HvigorHookEvent {
+  createEvent: (name: string) => HvigorHookEvent
+  createSubEvent: (name: string) => HvigorHookEvent
+  start: (time?: number) => HvigorHookEvent
+  stop: (state?: string, time?: number) => void
+  startAsyncEvent: (time?: number) => HvigorHookEvent
+  stopAsyncEvent: (state?: string, time?: number) => void
+  setTotalTime: (time: number) => void
+}
+
+export interface HvigorHookEventFactory {
+  createEvent: (name: string) => HvigorHookEvent
+}
+
+export interface HvigorHookEventRecord {
+  eventId: string
+  parentEventId?: string
+  pluginName: string
+  hookName: string
+  eventName: string
+  operation: string
+  timestampMs?: number
+  state?: string
+  totalTimeMs?: number
+}
+
 export interface HvigorImportResolution {
   normalizedPath: string
   packageName: string
@@ -214,12 +250,14 @@ block?: () => Promise<void>
 /**
  * Project config metadata available as `this.share.projectConfig` inside plugin hooks.
  *
- * This corresponds to the subset of hvigor's `projectConfig` that arkdown
- * serializes from the Rust build coordinator and passes through `js/runtime.js`.
+ * Rust builds the complete effective object; the JavaScript adapter only
+ * restores collection types required by the TS/JS plugin ABI.
  */
 export interface HvigorProjectConfig {
   bundleName?: string
   moduleType?: string
+  /** ets-loader AnalyzeMode: 0 default, 1 verbose, 2 false, 3 trace. */
+  perf?: number
   buildMode?: string
   buildArkMode?: string
   compileMode?: string
@@ -295,6 +333,7 @@ getSourceFiles?: () => string[]
 importResolver?: (request: string) => HvigorImportResolution | undefined
 getLogger?: (prefix: string) => unknown
 getHvigorConsoleLogger?: (prefix: string) => unknown
+getHookEventFactory?: (pluginName: string, hookName: string) => HvigorHookEventFactory | undefined
 throwArkTsCompilerError?: (error: unknown) => never
 recordErrorFileId?: (id: string) => void
 }

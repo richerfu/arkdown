@@ -31,6 +31,7 @@ const state = {
   projectConfig: undefined as unknown,
   projectConfigShape: undefined as unknown,
   depInfo: undefined as unknown,
+  hookEventFactoryEnabled: false,
   sourceFileCount: 0,
   sourceHash: undefined as string | undefined,
   sourceMtimeMs: undefined as number | undefined,
@@ -58,6 +59,15 @@ export default {
       permissionDefineCount: this.share.projectConfig.permission?.definePermissions?.length ?? -1,
     };
     state.depInfo = this.share.depInfo;
+    const hookEventFactory = this.share.getHookEventFactory("fixture", "buildStart");
+    state.hookEventFactoryEnabled = hookEventFactory !== undefined;
+    const hookEvent = hookEventFactory?.createEvent("fixtureBuildStart");
+    hookEvent?.start();
+    const hookSubEvent = hookEvent?.createSubEvent("fixtureContext");
+    hookSubEvent?.startAsyncEvent();
+    hookSubEvent?.stopAsyncEvent("success");
+    hookEvent?.stop("success");
+    hookEvent?.setTotalTime(1);
     const sourceFiles: string[] = this.share.getSourceFiles();
     const entry = sourceFiles.find((file) => file.endsWith("/Index.ets"));
     state.sourceFileCount = sourceFiles.length;

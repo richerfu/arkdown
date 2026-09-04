@@ -1327,13 +1327,15 @@ impl HvigorPluginGapHooks for JsPlugin {
 
 /// Project config metadata available as `this.share.projectConfig` inside plugin hooks.
 ///
-/// This corresponds to the subset of hvigor's `projectConfig` that arkdown
-/// serializes from the Rust build coordinator and passes through `js/runtime.js`.
+/// Rust builds the complete effective object; the JavaScript adapter only
+/// restores collection types required by the TS/JS plugin ABI.
 #[derive(Clone)]
 #[napi(object)]
 pub struct HvigorProjectConfig {
   pub bundle_name: Option<String>,
   pub module_type: Option<String>,
+  /// ets-loader AnalyzeMode: 0 default, 1 verbose, 2 false, 3 trace.
+  pub perf: Option<u8>,
   pub build_mode: Option<String>,
   pub build_ark_mode: Option<String>,
   pub compile_mode: Option<String>,
@@ -1437,6 +1439,8 @@ pub struct HvigorShareContext {
   pub get_logger: Option<String>,
   #[napi(ts_type = "(prefix: string) => unknown")]
   pub get_hvigor_console_logger: Option<String>,
+  #[napi(ts_type = "(pluginName: string, hookName: string) => HvigorHookEventFactory | undefined")]
+  pub get_hook_event_factory: Option<String>,
   #[napi(ts_type = "(error: unknown) => never")]
   pub throw_ark_ts_compiler_error: Option<String>,
   #[napi(ts_type = "(id: string) => void")]
@@ -1444,6 +1448,7 @@ pub struct HvigorShareContext {
 }
 
 pub struct HvigorNativeShareContext {
+  build_instance_id: u64,
   source_files: Arc<FxHashMap<PathBuf, HvigorCompilePluginSourceFile>>,
   import_resolver_entries: Arc<[HvigorCompilePluginImportEntry]>,
 }
@@ -1454,6 +1459,7 @@ impl From<&HvigorCompilePluginShare> for HvigorShareContext {
       build_instance_id: share.build_instance_id.to_string(),
       project_config: serde_json::Value::Object(share.project_config.as_ref().clone()),
       native_share: External::new(HvigorNativeShareContext {
+        build_instance_id: share.build_instance_id,
         source_files: Arc::clone(&share.source_files),
         import_resolver_entries: Arc::clone(&share.import_resolver_entries),
       }),
@@ -1498,6 +1504,7 @@ impl From<&HvigorCompilePluginShare> for HvigorShareContext {
       import_resolver: None,
       get_logger: None,
       get_hvigor_console_logger: None,
+      get_hook_event_factory: None,
       throw_ark_ts_compiler_error: None,
       record_error_file_id: None,
     }
@@ -1520,7 +1527,65 @@ pub struct HvigorImportResolution {
   pub package_path: String,
 }
 
+/// Function shape returned by a Hvigor hook-event factory. JavaScript creates
+/// the callable compatibility object; every event operation is recorded by
+/// the native observability pipeline.
+#[napi(object, object_from_js = false)]
+pub struct HvigorHookEvent {
+  #[napi(ts_type = "(name: string) => HvigorHookEvent")]
+  pub create_event: String,
+  #[napi(ts_type = "(name: string) => HvigorHookEvent")]
+  pub create_sub_event: String,
+  #[napi(ts_type = "(time?: number) => HvigorHookEvent")]
+  pub start: String,
+  #[napi(ts_type = "(state?: string, time?: number) => void")]
+  pub stop: String,
+  #[napi(ts_type = "(time?: number) => HvigorHookEvent")]
+  pub start_async_event: String,
+  #[napi(ts_type = "(state?: string, time?: number) => void")]
+  pub stop_async_event: String,
+  #[napi(ts_type = "(time: number) => void")]
+  pub set_total_time: String,
+}
+
+#[napi(object, object_from_js = false)]
+pub struct HvigorHookEventFactory {
+  #[napi(ts_type = "(name: string) => HvigorHookEvent")]
+  pub create_event: String,
+}
+
+#[napi(object)]
+pub struct HvigorHookEventRecord {
+  pub event_id: String,
+  pub parent_event_id: Option<String>,
+  pub plugin_name: String,
+  pub hook_name: String,
+  pub event_name: String,
+  pub operation: String,
+  pub timestamp_ms: Option<f64>,
+  pub state: Option<String>,
+  pub total_time_ms: Option<f64>,
+}
+
 impl HvigorNativeShareContext {
+  fn record_hook_event(&self, record: HvigorHookEventRecord) {
+    tracing::info!(
+      target: "arkdown_napi::metric",
+      metric = "hvigor_compile_event",
+      build_instance_id = self.build_instance_id,
+      event_id = record.event_id,
+      parent_event_id = record.parent_event_id.as_deref(),
+      plugin_name = record.plugin_name,
+      hook_name = record.hook_name,
+      event_name = record.event_name,
+      operation = record.operation,
+      timestamp_ms = record.timestamp_ms,
+      state = record.state.as_deref(),
+      total_time_ms = record.total_time_ms,
+      "compile plugin performance event"
+    );
+  }
+
   fn get_hash_by_file_path(&self, path: String) -> Option<String> {
     self
       .source_file(PathBuf::from(path).as_path())
@@ -1677,6 +1742,19 @@ pub fn hvigor_share_import_resolver(
   request: String,
 ) -> napi::Result<Option<HvigorImportResolution>> {
   share.import_resolver(request)
+}
+
+/// Record one operation on a source-compatible Hvigor `CompileEvent`.
+///
+/// Event objects must live in V8 because TS/JS plugins call their methods
+/// directly. The compatibility adapter sends each typed operation here, so
+/// timing ownership and build-log output stay in Rust.
+#[napi(skip_typescript)]
+pub fn hvigor_share_record_hook_event(
+  share: &External<HvigorNativeShareContext>,
+  record: HvigorHookEventRecord,
+) {
+  share.record_hook_event(record);
 }
 
 /// Dependency info returned by `this.getModuleInfo(id)` inside plugin hooks.
@@ -1872,6 +1950,10 @@ pub struct BuildConfig {
   pub project: Option<String>,
   pub target: Option<String>,
   pub mode: Option<String>,
+  /// Hvigor-compatible performance analysis mode. Hook event factories are
+  /// active only for verbose and trace.
+  #[napi(ts_type = "'normal' | 'default' | 'verbose' | 'false' | 'trace'")]
+  pub analyze: Option<String>,
   /// Explicit ArkTS compiler language. Omitted means ArkTS 1.1.
   #[napi(ts_type = "'1.1' | '1.2'")]
   pub arkts_version: Option<String>,
@@ -1989,6 +2071,7 @@ pub fn build<'a>(
     project,
     target,
     mode,
+    analyze,
     arkts_version,
     ohpm_mode,
     module,
@@ -2036,6 +2119,15 @@ pub fn build<'a>(
         )))
       }
     },
+    analyze: crate::cmd::build::args::AnalyzeModeChoice::from_name(
+      analyze.as_deref().unwrap_or("normal"),
+    )
+    .ok_or_else(|| {
+      napi::Error::from_reason(format!(
+        "invalid analyze mode '{}'; expected normal, verbose, false, or trace",
+        analyze.as_deref().unwrap_or("normal")
+      ))
+    })?,
     build_target_name,
     build_version,
     watch: watch.unwrap_or(false),
@@ -2101,6 +2193,7 @@ pub fn parse_plugin_ast(
 struct PackageBuildArgs {
   arkts_language_version: arkdown_core::ArktsLanguageVersion,
   ohpm_mode: arkdown_session::package::acquisition::AcquisitionMode,
+  analyze: crate::cmd::build::args::AnalyzeModeChoice,
   build_target_name: Option<String>,
   build_version: Option<String>,
   watch: bool,
@@ -2197,6 +2290,7 @@ async fn run_build(
   let args = BuildArgs {
     target,
     mode,
+    analyze: package_args.analyze,
     arkts_version: package_args.arkts_language_version,
     ohpm_mode: match package_args.ohpm_mode {
       arkdown_session::package::acquisition::AcquisitionMode::Offline => {

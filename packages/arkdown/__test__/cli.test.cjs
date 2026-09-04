@@ -16,6 +16,8 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     './compile-b.mjs',
     '--arkts-version',
     '1.2',
+    '--analyze',
+    'trace',
     '--check-entry',
   ])
 
@@ -23,6 +25,7 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     project: '/tmp/app',
     compilePluginPath: ['./compile-a.ts', './compile-b.mjs'],
     arktsVersion: '1.2',
+    analyze: 'trace',
     checkEntry: true,
   })
 })

@@ -83,6 +83,7 @@ Options:
   --project <dir>     Project root. Defaults to current directory.
   --target <kind>     Output artifact: hap, hsp, har, app, or test. Defaults to hap.
   --mode <mode>       Build mode: debug or release. Defaults to debug.
+  --analyze <mode>    Hook metrics: normal, verbose, false, or trace.
   --module, -m <name> Scope build to one module.
   --product <name>    Product name from build-profile.json5.
   --build-target-name <name>
