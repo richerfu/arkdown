@@ -824,7 +824,6 @@ pub struct HvigorModuleCleanStage<'a> {
   pub(crate) module_root: &'a Path,
   pub(crate) ninja: Option<&'a Path>,
   pub(crate) project_task: bool,
-  pub(crate) configured_build_dir: Option<PathBuf>,
   pub(crate) native_product_names: Vec<String>,
   pub(crate) native_target_names: Vec<String>,
   pub(crate) native_build_mode: String,
@@ -841,7 +840,6 @@ impl<'a> HvigorModuleCleanStage<'a> {
       module_root,
       ninja: sdk_toolchain.ninja_path(),
       project_task: false,
-      configured_build_dir: None,
       native_product_names: vec!["default".to_string()],
       native_target_names: vec!["default".to_string()],
       native_build_mode: "debug".to_string(),
@@ -854,30 +852,10 @@ impl<'a> HvigorModuleCleanStage<'a> {
       module_root: project_root,
       ninja: None,
       project_task: true,
-      configured_build_dir: None,
       native_product_names: Vec::new(),
       native_target_names: Vec::new(),
       native_build_mode: String::new(),
     }
-  }
-
-  pub fn with_configured_build_dir(
-    mut self,
-    configured_build_dir: Option<&Path>,
-  ) -> NativeBuildResult<Self> {
-    self.configured_build_dir = match configured_build_dir.filter(|path| path.is_absolute()) {
-      Some(path) if path.exists() => {
-        Some(
-          dunce::canonicalize(path).map_err(|error| NativeBuildError::CleanFailed {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-          })?,
-        )
-      }
-      Some(path) => Some(path.to_path_buf()),
-      None => None,
-    };
-    Ok(self)
   }
 
   pub fn with_native_variants(
@@ -901,25 +879,7 @@ impl<'a> HvigorModuleCleanStage<'a> {
     if !self.project_task {
       directories.push(self.module_root.join("build"));
       directories.push(self.module_root.join(".test"));
-    }
-    let normal_build_directories = directories
-      .iter()
-      .filter(|directory| directory.file_name() == Some(OsStr::new("build")))
-      .cloned()
-      .collect::<Vec<_>>();
-    for directory in normal_build_directories {
-      if let Some(configured) = self.configured_build_directory(&directory) {
-        if configured != directory {
-          if Self::is_ci_environment() {
-            directories.push(
-              configured
-                .parent()
-                .map_or_else(|| configured.join(".cxx"), |parent| parent.join(".cxx")),
-            );
-          }
-          directories.push(configured);
-        }
-      }
+      directories.push(self.module_root.join(".preview"));
     }
     directories.sort();
     directories.dedup();
@@ -930,32 +890,6 @@ impl<'a> HvigorModuleCleanStage<'a> {
       self.clean_native_trees();
     }
     Ok(())
-  }
-
-  pub(crate) fn configured_build_directory(&self, build_directory: &Path) -> Option<PathBuf> {
-    let configured = self.configured_build_dir.as_ref()?;
-    let project_name = self.project_root.file_name()?;
-    let relative = build_directory.strip_prefix(self.project_root).ok()?;
-    Some(configured.join(project_name).join(relative))
-  }
-
-  pub(crate) fn is_ci_environment() -> bool {
-    if std::env::var_os("CI").as_deref() == Some(OsStr::new("false")) {
-      return false;
-    }
-    [
-      "BUILD_ID",
-      "BUILD_NUMBER",
-      "CI",
-      "CI_APP_ID",
-      "CI_BUILD_ID",
-      "CI_BUILD_NUMBER",
-      "CI_NAME",
-      "CONTINUOUS_INTEGRATION",
-      "RUN_ID",
-    ]
-    .into_iter()
-    .any(|variable| std::env::var_os(variable).is_some())
   }
 
   pub(crate) fn remove_directory(&self, directory: &Path) -> NativeBuildResult<()> {

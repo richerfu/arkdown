@@ -10,7 +10,7 @@ impl TargetBuildExecutionPlan {
   pub(super) fn new(
     config: &ArkdownConfig,
     build_options: &BuildOptionProfileInventory,
-    args: &BuildArgs,
+    args: &BuildRequest,
   ) -> Self {
     if Self::is_device_test(args) {
       let has_ohos_test = config.modules.iter().any(|module| {
@@ -56,7 +56,7 @@ impl TargetBuildExecutionPlan {
     Self::from_implicit_targets(applicable_target_names)
   }
 
-  pub(super) fn is_device_test(args: &BuildArgs) -> bool {
+  pub(super) fn is_device_test(args: &BuildRequest) -> bool {
     args.native_task_roots.iter().any(|root| {
       matches!(
         root.task_name.as_str(),
@@ -67,7 +67,7 @@ impl TargetBuildExecutionPlan {
 
   pub(super) fn aligned_target_for_action(
     output_target: &OutputTarget,
-    args: &BuildArgs,
+    args: &BuildRequest,
   ) -> Option<String> {
     let test_action = matches!(output_target, OutputTarget::Test)
       || args.build_target_name.as_deref() == Some("ohosTest");
@@ -333,7 +333,7 @@ impl ModuleBuildConfiguration {
 pub(super) struct NativeCmakeLocalDependencyInventoryBuilder<'a> {
   pub(super) config: &'a ArkdownConfig,
   pub(super) session: &'a BuildSession,
-  pub(super) args: &'a BuildArgs,
+  pub(super) args: &'a BuildRequest,
   pub(super) target_name: &'a str,
   pub(super) dependencies: &'a DependencyGraphSnapshot,
 }
@@ -342,7 +342,7 @@ impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
   pub(super) fn new(
     config: &'a ArkdownConfig,
     session: &'a BuildSession,
-    args: &'a BuildArgs,
+    args: &'a BuildRequest,
     target_name: &'a str,
     dependencies: &'a DependencyGraphSnapshot,
   ) -> Self {
@@ -414,14 +414,14 @@ impl<'a> NativeCmakeLocalDependencyInventoryBuilder<'a> {
 pub(super) struct NativeDependencyStagePlanBuilder<'a> {
   pub(super) config: &'a ArkdownConfig,
   pub(super) session: &'a BuildSession,
-  pub(super) args: &'a BuildArgs,
+  pub(super) args: &'a BuildRequest,
 }
 
 impl<'a> NativeDependencyStagePlanBuilder<'a> {
   pub(super) fn new(
     config: &'a ArkdownConfig,
     session: &'a BuildSession,
-    args: &'a BuildArgs,
+    args: &'a BuildRequest,
   ) -> Self {
     Self {
       config,

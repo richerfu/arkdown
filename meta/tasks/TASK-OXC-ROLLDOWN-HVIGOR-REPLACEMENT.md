@@ -136,6 +136,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 强制所有权规则：
 
 - JS 不能解析项目配置、组织任务图、决定缓存、构造 SDK 命令或生成构建产物。
+- 唯一 CLI 入口是 npm `bin` 指向的 `packages/arkdown/js/arkdown-cli.js`；JS 只拥有 argv/help/stdout/stderr/exit code，Rust 不得提供 binary、Clap、argv parser 或 CLI-shaped N-API export。
 - N-API 不能拥有构建业务；它只做值转换、异步调用和插件函数句柄管理。
 - BuildSession 是一次构建唯一的文件、包、SDK、依赖和 SourceStore 快照。
 - Rolldown hook 不做目录扫描、重复读文件或包根向上查找。
@@ -146,7 +147,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 | 能力域 | 当前状态 | 证据与实际差异 | 重构结论 |
 |---|---|---|---|
-| 项目模型/CLI/任务编排 | Hvigor runtime facade 已删除 | npm CLI 只接受 native `build`；JS runtime 以及 Rust `runtime_task`、project/task/worker N-API export 均已删除，`build(config, plugins)` 是唯一 package 构建入口；构建 application 仍位于 N-API crate | 抽出 `arkdown-build`；CLI/N-API 共用同一原生 `BuildRequest` |
+| 项目模型/CLI/任务编排 | Hvigor runtime facade 与 Rust CLI 已删除 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不再包含 binary、Clap 或 CLI parser export；`build/check/clean` 以 typed N-API service 暴露，构建 application 仍位于 N-API crate | 抽出 `arkdown-build`；JS CLI 和 programmatic N-API 共用同一原生 `BuildRequest` |
 | 配置和 build script | 旧脚本 runtime 已删除 | `build()` 不发现或执行 `hvigorfile.ts`/`hvigorconfig.ts`；build-script model、config merge、sync/dependency workspace facade 已删除；旧 task/config 参数用 `ARKDOWN_HVIGOR_RUNTIME_UNSUPPORTED` 拒绝 | `arkdown-config` 产出单一结构化配置；TS 只用于插件模块 |
 | OHPM/依赖获取 | 启动链已接入，真实项目语料待扩展 | 生产 `BuildSessionBuilder` 在项目快照前执行 lockfile 驱动的 local/cache/registry acquire；支持 offline/prefer-offline/online、semver range、完整性校验、同包去重并行和原子 cache publish，获取结果直接种入依赖图；仍需以真实 OHPM lockfile/store 变体扩展语料 | 保持 package inventory 只构建一次；补 registry/auth/lockfile 真实工程金标，不再回退为静默扫描 |
 | BuildSession/输入快照 | 主链已冻结，领域重复库存待收敛 | SourceStore 已在 startup 并行冻结源码内容/hash/mtime，package manifest/acquired roots、SDK/profile/build option 同样由 session 提供；profile 仍维护一套 `LocalDependencyGraph`，部分领域仍有二次目录读取 | 只保留 session graph/source store/package index；删除 profile 重复图和剩余 stage I/O |
@@ -196,7 +197,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 1. `runtime-entry.js`：加载 `.node`，转发 `build/check/clean`。
 2. `plugin-adapter.js`：把已加载的 JS/TS plugin 对象标准化为 native descriptor，并把 hook 调度到 TSFN。
-3. `arkdown-cli.js`：必要时作为 npm bin trampoline，立即进入 Rust CLI；如果发布原生二进制，则可删除。
+3. `arkdown-cli.js`：唯一 CLI 入口，负责轻量 argv 解析、帮助/版本文本、stdout/stderr 和退出码，然后调用 typed N-API service。
 
 生成的 N-API `index.js` loader 不属于业务层，可继续由 napi-rs 生成。
 
@@ -303,9 +304,9 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 唯一 application service，拥有 `BuildApplication`、`BuildCoordinator`、`StageExecutor`、build waves 和产物提交。它组合 domain crates，但不暴露 N-API 类型。
 
-### 新增 `arkdown-cli`
+### JS CLI
 
-只负责 clap、日志和退出码，调用 `arkdown-build`。`arkdown-napi` 同样调用 `arkdown-build`，两者之间不能互相依赖。
+不新增 Rust `arkdown-cli` crate。npm `arkdown-cli.js` 是唯一可执行入口，负责 argv/help/stdout/stderr/exit code，并调用 `arkdown-napi` 的 typed service。Rust workspace 不得依赖 Clap 或暴露 argv parser。
 
 ### `arkdown-napi`
 
@@ -332,13 +333,13 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 工作：
 
 - 新建 `arkdown-build`，把 `packages/arkdown/src/cmd/build/coordinator`、prebuild、layout、intermediates、package/sign orchestration 按 owner 迁出。
-- 新建 `arkdown-cli`；npm CLI 只做 trampoline。
+- 保留唯一 npm JS CLI，删除 Rust binary/Clap/argv parser，并让 JS 将轻量解析后的 typed request 交给 N-API。
 - 定义 `BuildRequest`、`BuildResult`、`PluginDescriptor`、`PluginHookHandle` 和 `BuildDiagnostic`，禁止 application crate 依赖 napi。
 - 用 OXC 提供 TS plugin module transpile；建立最小 `plugin-adapter.js`。
 - 删除 hvigor public/task/worker/config runtime 以及相关 N-API export、`.d.ts` 和 npm `typescript` 依赖。
 - 对 hvigorfile 自定义 task/config 给出迁移诊断，不能静默忽略。
 
-退出条件：CLI 和 N-API 对同一 request 产生相同 build plan；业务 JS 仅剩三类允许文件；内建构建在没有 `typescript` npm 包时可运行。
+退出条件：只有 npm JS CLI 可执行；Rust 无 binary/Clap/argv parser；JS CLI 与 programmatic N-API 对同一 typed request 产生相同 build plan；业务 JS 仅剩三类允许文件；内建构建在没有 `typescript` npm 包时可运行。
 
 ### Phase 2：统一配置、依赖和 BuildSession
 

@@ -9,10 +9,6 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[[bin]]
-name = "arkdown"
-path = "src/main.rs"
-
 [dependencies]
 # NAPI-RS bridge (workspace = true — versions managed in root Cargo.toml)
 napi = { workspace = true }
@@ -38,7 +34,6 @@ rolldown_plugin = { workspace = true }
 rolldown_common = { workspace = true }
 rolldown_sourcemap = { workspace = true }
 
-clap = { workspace = true }
 fs-err = { workspace = true }
 indexmap = { workspace = true }
 json5 = { workspace = true }

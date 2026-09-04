@@ -6,9 +6,9 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use arkdown_core::{BuildMode, OutputTarget};
+use arkdown_napi::cmd::check::{self, CheckRequest};
 use walkdir::WalkDir;
 
 #[test]
@@ -40,22 +40,16 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
   )
   .expect("inject TypeScript semantic error");
 
-  let output = Command::new(env!("CARGO_BIN_EXE_arkdown"))
-    .args(["check", "--project"])
-    .arg(temp.path())
-    .args(["--checker", "sdk"])
-    .output()
-    .expect("run arkdown check");
-  let diagnostics = format!(
-    "{}{}",
-    String::from_utf8_lossy(&output.stdout),
-    String::from_utf8_lossy(&output.stderr)
-  );
+  let error = check::run(CheckRequest {
+    target: "hap".to_string(),
+    module: None,
+    project: Some(temp.path().to_path_buf()),
+    node_executable: None,
+    checker: "sdk".to_string(),
+  })
+  .expect_err("SDK etsChecker must reject a TypeScript type mismatch");
+  let diagnostics = format!("{error:#}");
 
-  assert!(
-    !output.status.success(),
-    "SDK etsChecker must reject a TypeScript type mismatch; output:\n{diagnostics}"
-  );
   assert!(
     diagnostics.contains("ARKDOWN_ETS_CHECK_FAILED"),
     "check must report its semantic-check failure boundary; output:\n{diagnostics}"
@@ -71,22 +65,14 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
 #[test]
 fn check_defaults_to_native_oxc_without_a_node_runtime() {
   let fixture = repo_root().join("tests/fixtures/minimal-hap");
-  let output = Command::new(env!("CARGO_BIN_EXE_arkdown"))
-    .args(["check", "--project"])
-    .arg(&fixture)
-    .env("NODE_HOME", fixture.join("missing-node-runtime"))
-    .output()
-    .expect("run native arkdown check");
-  let diagnostics = format!(
-    "{}{}",
-    String::from_utf8_lossy(&output.stdout),
-    String::from_utf8_lossy(&output.stderr)
-  );
-
-  assert!(
-    output.status.success(),
-    "default OXC check must not require Node: {diagnostics}"
-  );
+  check::run(CheckRequest {
+    target: "hap".to_string(),
+    module: None,
+    project: Some(fixture.clone()),
+    node_executable: Some(fixture.join("missing-node-runtime/node")),
+    checker: "oxc".to_string(),
+  })
+  .expect("default OXC check must not require Node");
 }
 
 fn sdk_ets_checker_available(project_root: &Path) -> bool {

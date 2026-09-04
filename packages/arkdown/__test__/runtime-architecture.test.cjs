@@ -84,7 +84,7 @@ test('runtime entry performs no project, task, cache, or worker orchestration', 
   assert.match(entry, /createBuild/)
 })
 
-test('native package exposes only build and plugin bridges, not a Hvigor runtime', () => {
+test('native package exposes direct commands and plugin bridges, not a Hvigor runtime', () => {
   const packageRoot = path.resolve(__dirname, '..')
   const sourceRoot = path.join(packageRoot, 'src')
   const napi = fs.readFileSync(path.join(sourceRoot, 'lib.rs'), 'utf8')
@@ -106,4 +106,22 @@ test('native package exposes only build and plugin bridges, not a Hvigor runtime
   assert.doesNotMatch(napi, /run_runtime_tasks|RuntimeTaskBridgeSeed|RuntimeBuildScriptSession/)
   assert.doesNotMatch(declarations, /runRuntimeTasks|RuntimeHvigor|RuntimeBuildScriptSession/)
   assert.match(declarations, /build\(config: BuildConfig, plugins\?: Array<ArkdownPlugin>/)
+  assert.match(declarations, /clean\(config: CleanConfig\): Promise<void>/)
+  assert.match(declarations, /check\(config: CheckConfig\): Promise<void>/)
+})
+
+test('the npm JavaScript file is the only CLI entrypoint', () => {
+  const packageRoot = path.resolve(__dirname, '..')
+  const manifest = fs.readFileSync(path.join(packageRoot, 'Cargo.toml'), 'utf8')
+  const workspaceManifest = fs.readFileSync(path.resolve(packageRoot, '../../Cargo.toml'), 'utf8')
+  const napi = fs.readFileSync(path.join(packageRoot, 'src/lib.rs'), 'utf8')
+  const declarations = fs.readFileSync(path.join(packageRoot, 'index.d.ts'), 'utf8')
+  const cli = fs.readFileSync(path.join(packageRoot, 'js/arkdown-cli.js'), 'utf8')
+
+  assert.equal(fs.existsSync(path.join(packageRoot, 'src/main.rs')), false)
+  assert.doesNotMatch(manifest, /\[\[bin\]\]|clap\s*=/)
+  assert.doesNotMatch(workspaceManifest, /^clap\s*=/m)
+  assert.doesNotMatch(napi, /parse_arkdown_.*cli_args|clap::/)
+  assert.doesNotMatch(declarations, /parseArkdown.*CliArgs/)
+  assert.match(cli, /class JsCliArgumentParser/)
 })

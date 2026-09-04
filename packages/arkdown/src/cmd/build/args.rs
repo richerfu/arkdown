@@ -7,7 +7,6 @@ use anyhow::Result;
 use arkdown::plugins::factory::PackagePlugin;
 use arkdown_core::ArktsLanguageVersion;
 use arkdown_watcher::WatchInvalidationBatch;
-use clap::{Args, ValueEnum};
 
 /// Properties read directly by hvigor-ohos-plugin from the global Hvigor
 /// parameter map. They cross the JS/native boundary as one typed value so a
@@ -74,14 +73,14 @@ impl HvigorRuntimeProperties {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AbcBackendChoice {
   Auto,
   #[default]
   Sdk,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OhpmModeChoice {
   Offline,
   PreferOffline,
@@ -91,10 +90,9 @@ pub enum OhpmModeChoice {
 
 /// Hvigor analyze mode serialized as `projectConfig.perf` for compile plugins.
 /// Numeric values are defined by ets-loader's `AnalyzeMode` enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnalyzeModeChoice {
   #[default]
-  #[value(alias = "default")]
   Normal,
   Verbose,
   False,
@@ -145,8 +143,8 @@ pub struct NativeTaskRoot {
   pub task_name: String,
 }
 
-#[derive(Args, Clone, Default)]
-pub struct BuildArgs {
+#[derive(Clone, Default)]
+pub struct BuildRequest {
   /// Build target: hap, hsp, har, app, preview, test
   ///
   /// `test` mirrors hvigor's `hvigorw test` task: local unit-test build root
@@ -155,61 +153,46 @@ pub struct BuildArgs {
   /// `isLocalTest=true`, `unitTestMode=true`, `ohos-test-coverage=true` and
   /// `unit.test.replace.page` defaults for the `test` task; arkdown derives
   /// the same behavior from the target alone.
-  #[arg(long, default_value = "hap")]
   pub target: String,
   /// Scope filter for local unit tests (`-s class` parameter in the generated
   /// `Index.ets`; hvigor extra config `scope`). Optional — hvigor leaves the
   /// template parameter empty when unset.
-  #[arg(long, default_value = None)]
   pub scope: Option<String>,
   /// Code-coverage instrumentation for local unit tests (hvigor extra config
   /// `ohos-test-coverage`). Defaults to `true` for `--target test`, matching
   /// hvigor's `setTestDefaultParameters` injection.
-  #[arg(long, default_value = None)]
   pub ohos_test_coverage: Option<bool>,
   /// Optional source-path filter forwarded to hvigor's
   /// `testFrameworkPar.coveragePathFilter`.
-  #[arg(long = "coverage-path-filter")]
   pub coverage_path_filter: Option<String>,
   /// Hvigor coverage selection mode: `black`, `white`, or `full`.
-  #[arg(long = "coverage-mode", value_parser = ["black", "white", "full"])]
   pub coverage_mode: Option<String>,
   /// Replacement page used by `ReplaceUnitTestIndexFile` and Previewer.
-  #[arg(long = "unit-test-replace-page")]
   pub unit_test_replace_page: Option<String>,
   /// Fast build app: hvigor `packOptions.fastBuildApp` — skip the normal HAP
   /// packaging and copy the compiled intermediates into
   /// `intermediates/fastApp/<target>/` for IDE fast deployment
   /// (hvigor `FastPackageHap`).
-  #[arg(long = "fast-build-app", default_value = "false")]
   pub fast_build_app: bool,
   /// Hvigor `enableSignTask`; false keeps signing tasks in the graph but makes
   /// their actions no-op and leaves unsigned package outputs selected.
-  #[arg(long = "enable-sign-task", default_value_t = true, action = clap::ArgAction::Set)]
   pub enable_sign_task: bool,
   /// Build mode: debug, release, test
-  #[arg(long, default_value = "debug")]
   pub mode: String,
   /// Hook performance analysis level. Only `verbose` and `trace` enable
   /// Hvigor's compile-event factory.
-  #[arg(long, value_enum, default_value = "normal")]
   pub analyze: AnalyzeModeChoice,
   /// ArkTS compiler language. ArkTS 1.2 is opt-in; omitted builds retain the
   /// existing ArkTS 1.1 parser and transform pipeline.
-  #[arg(long = "arkts-version", default_value_t = ArktsLanguageVersion::default())]
   pub arkts_version: ArktsLanguageVersion,
   /// OHPM dependency acquisition policy used before the build session freezes
   /// package roots. Online matches the normal hvigor wrapper invocation.
-  #[arg(long = "ohpm-mode", value_enum, default_value = "online")]
   pub ohpm_mode: OhpmModeChoice,
   /// Scope to a specific module
-  #[arg(long)]
   pub module: Option<String>,
   /// Product name
-  #[arg(long)]
   pub product: Option<String>,
   /// Project root (default: current directory)
-  #[arg(long)]
   pub project: Option<PathBuf>,
   /// Named target configuration to use (from build-profile.json5 targets[].name).
   ///
@@ -219,63 +202,50 @@ pub struct BuildArgs {
   /// be built separately to produce multiple artifacts from the same source.
   ///
   /// Example: `arkdown build --build-target-name phone` uses the "phone" target.
-  #[arg(long)]
   pub build_target_name: Option<String>,
   /// Override the application build version for this invocation.
   ///
   /// Mirrors hvigor extra config `buildVersion` and takes precedence over the
   /// selected product and `AppScope/app.json5`.
-  #[arg(long = "build-version")]
   pub build_version: Option<String>,
   /// Watch mode: rebuild on source file changes (M1 — SPEC-023)
-  #[arg(long, default_value = "false")]
   pub watch: bool,
   /// Coverage instrumentation mode: inject the Hvigor-compatible BJC coverage runtime
   /// and counters used by `collectCoverage` (F20).
-  #[arg(long, default_value = "false")]
   pub coverage: bool,
   /// Enable AddressSanitizer for the generated package.
   ///
   /// Mirrors hvigor extra config `ohos-debug-asan=true`.
-  #[arg(long = "ohos-debug-asan", default_value = "false")]
   pub ohos_debug_asan: bool,
   /// Enable HWAddressSanitizer for the generated package.
   ///
   /// Mirrors hvigor extra config `ohos-enable-hwasan=true`.
-  #[arg(long = "ohos-enable-hwasan", default_value = "false")]
   pub ohos_enable_hwasan: bool,
   /// Enable ThreadSanitizer (`ohos-enable-tsan=true`).
-  #[arg(long = "ohos-enable-tsan", default_value = "false")]
   pub ohos_enable_tsan: bool,
   /// Enable UndefinedBehaviorSanitizer (`ohos-enable-ubsan=true`).
-  #[arg(long = "ohos-enable-ubsan", default_value = "false")]
   pub ohos_enable_ubsan: bool,
   /// Enable the HMS BinXO native post-processor.
   ///
   /// Mirrors hvigor extra config `ohos-enable-binxo=true`. BinXO also
   /// requires HWASan; requesting BinXO without HWASan reaches
   /// `DoNativeBinxo` and fails with the same validation boundary as hvigor.
-  #[arg(long = "ohos-enable-binxo", default_value = "false")]
   pub ohos_enable_binxo: bool,
   /// Compile native C/C++ sources through `zig cc` and `zig c++` while
   /// retaining the selected OHOS SDK sysroot, ABI, CMake, and Ninja setup.
   ///
   /// Zig must be available on `PATH`. Disabled by default so the native
   /// command remains identical to hvigor unless explicitly requested.
-  #[arg(long = "enable-zig", default_value = "false")]
   pub enable_zig: bool,
   /// Preview mode: watch resource directories and trigger resource recompilation (M3).
   /// Implies --watch; focuses change detection on src/main/resources/ for faster
   /// resource-only rebuilds during DevEco IDE preview sessions.
-  #[arg(long, default_value = "false")]
   pub preview: bool,
   /// Require the previewed page to use exactly one `@Entry`, matching the
   /// source compiler's `projectConfig.checkEntry` override.
-  #[arg(long = "check-entry", default_value = "false")]
   pub check_entry: bool,
   /// Internal Preview transform state retained by incremental rebuilds without
   /// recursively starting another watcher.
-  #[arg(skip)]
   #[doc(hidden)]
   pub preview_transform_mode: bool,
   /// Disable the ABC compile cache (parity mode).
@@ -288,7 +258,6 @@ pub struct BuildArgs {
   /// Use this flag when comparing arkdown ABC output with hvigor's output to
   /// ensure both tools run the full compilation pipeline rather than returning
   /// a cached artifact.
-  #[arg(long = "disable-abc-cache", default_value = "false")]
   pub disable_abc_cache: bool,
   /// Override the ABC ProgramCache `.protoBin` file path (upstream `es2abc --cache-file`).
   ///
@@ -298,18 +267,14 @@ pub struct BuildArgs {
   /// (`@modules.cache`) matching upstream es2abc semantics.
   ///
   /// Section 3.6: "实现 upstream ProgramCache/protoBin".
-  #[arg(long = "cache-file")]
   pub cache_file: Option<PathBuf>,
   /// ABC compiler backend. `auto` and `sdk` both use SDK es2abc for hvigor parity.
-  #[arg(long = "abc-backend", value_enum, default_value = "sdk")]
   pub abc_backend: AbcBackendChoice,
   /// ArkTS checker mode. `oxc` is the native default; `sdk` is retained only
   /// as an explicit comparison backend while its remaining semantic corpus is
   /// migrated. `off` disables checker diagnostics while preserving transforms.
-  #[arg(long, default_value = "oxc")]
   pub checker: Option<String>,
   /// Enable coarse build cache and ABC ProgramCache handoff.
-  #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
   pub cache: bool,
 
   // ── Watch-mode hot-rebuild flags ──────────────────────────────────────────
@@ -319,87 +284,71 @@ pub struct BuildArgs {
   ///
   /// Set by the watch stage when only ETS/TS source files changed and no
   /// resource files need recompilation.  Mirrors hvigor's hot rebuild path.
-  #[clap(skip)]
   pub skip_resource: bool,
 
   /// Skip profile processing in this rebuild (hot-reload optimization).
   ///
   /// Set by the watch stage when only ETS/TS source files changed and
   /// `module.json5`/`build-profile.json5` have not been modified.
-  #[clap(skip)]
   pub skip_profile: bool,
 
   /// Typed changed-file batch supplied by the watch coordinator.
   ///
   /// This is intentionally internal: hvigor passes the watcher change set to
   /// `shouldInvalidCache`; it is not a user-facing command-line option.
-  #[clap(skip)]
   pub watch_invalidation: Option<WatchInvalidationBatch>,
 
   /// Custom task input paths declared through Hvigor TaskInput. The Rust
   /// watcher adds these to its typed watch inventory.
-  #[clap(skip)]
   pub custom_task_input_paths: Vec<PathBuf>,
 
   /// Numeric SDK compression level mapped from hvigor-config's
   /// `ohos.pack.compressLevel` (`fast`/`standard`/`ultimate`).
-  #[clap(skip)]
   pub pack_compress_level: Option<u32>,
 
   /// Device types injected by DevEco through `ohos.align.deviceTypes`.
-  #[clap(skip)]
   pub align_device_types: Vec<String>,
 
   /// Explicit `ohos.collect.debugSymbol` override.
-  #[clap(skip)]
   pub collect_debug_symbol: Option<bool>,
 
   /// Runtime-owned `ohos.uiTransform.Optimization` property.
-  #[clap(skip)]
   pub ui_transform_optimization: bool,
 
   /// Runtime-owned `ohos.integratedHsp.useGetCurrentBundleName` property.
-  #[clap(skip)]
   pub integrated_hsp_use_get_current_bundle_name: bool,
 
   /// Runtime-owned `ohos.byteCodeHar.integratedOptimization` property.
-  #[clap(skip)]
   pub byte_code_har_integrated_optimization: bool,
 
   /// Runtime-owned `hvigor.keepDependency` property.
-  #[clap(skip = true)]
   pub keep_dependency: bool,
 
   /// Remaining typed OHOS plugin properties supplied by the JS runtime.
-  #[clap(skip)]
   pub hvigor_properties: HvigorRuntimeProperties,
 
-  /// Hvigor CLI `parameterFile` extra-parameter override.
-  #[clap(skip)]
+  /// Hvigor `parameterFile` extra-parameter override supplied by the JS entry.
   pub parameter_file_override: Option<PathBuf>,
 
   /// Node executable supplied by the same-process JavaScript runtime.
-  #[clap(skip)]
   pub node_executable: Option<PathBuf>,
 
   /// Project-scoped Hvigor cache directory resolved by `PathUtil` in the JS
-  /// runtime. Direct CLI builds derive `<project>/.hvigor` at the use site.
-  #[clap(skip)]
+  /// runtime. Direct package builds derive `<project>/.hvigor` at the use site.
   pub hvigor_cache_dir: Option<PathBuf>,
 
   /// Explicit partial hvigor roots selected by the Node task graph.
-  #[clap(skip)]
   pub native_task_roots: Vec<NativeTaskRoot>,
 }
 
 pub struct BuildCommand {
-  args: BuildArgs,
+  args: BuildRequest,
   package_plugins: Vec<PackagePlugin>,
   task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
 }
 
 impl BuildCommand {
-  pub fn new(args: BuildArgs) -> Self {
+  pub fn new(args: BuildRequest) -> Self {
     Self {
       args,
       package_plugins: Vec::new(),
@@ -482,7 +431,7 @@ impl BuildCommand {
   }
 }
 
-impl BuildArgs {
+impl BuildRequest {
   pub(crate) fn resolved_node_executable(&self) -> PathBuf {
     if let Some(executable) = self.node_executable.as_ref() {
       return executable.clone();

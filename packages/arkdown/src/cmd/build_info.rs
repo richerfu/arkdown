@@ -9,51 +9,17 @@
 //! hvigor prints a formatted tree under "All build information from hvigor
 //! node '<node>'".
 //!
-//! ## Usage
-//!
-//! ```text
-//! arkdown build-info --project .                      # formatted tree
-//! arkdown build-info --project . --json               # JSON (`-p json=`)
-//! arkdown build-info --project . --json --resolve     # JSON + resolved options (`-p buildOption=`)
-//! arkdown build-info --project . --module entry       # module projection (`-p module=entry`)
-//! ```
-//!
-//! The `--json` output can be diffed against `hvigorw build-info -p json=`
-//! for oracle parity.
+//! This is a typed in-process projection used by parity and plugin services;
+//! it is deliberately not a Rust command-line entry.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use arkdown_config::build_profile::{
   BuildOptionProfileInventory, EffectiveModuleBuildOptionResolver, RawBuildProfile,
 };
-
-/// hvigor `BuildInfo` task arguments.
-#[derive(Args, Debug)]
-pub struct BuildInfoArgs {
-  /// Project root (default: current directory)
-  #[arg(long)]
-  pub project: Option<PathBuf>,
-
-  /// Module projection (`-p module=<name>@<product>` — only the module part
-  /// is used, matching `module.split("@")[0]`).
-  #[arg(long)]
-  pub module: Option<String>,
-
-  /// JSON output (`-p json=`). Without this flag hvigor prints the
-  /// indented "All build information" tree.
-  #[arg(long)]
-  pub json: bool,
-
-  /// Resolve effective build options for every entry (`-p buildOption=`).
-  /// Without this flag every buildInfo entry is `{}`.
-  #[arg(long)]
-  pub resolve: bool,
-}
 
 /// Same-process request for Hvigor's built-in `buildInfo` task.
 #[derive(Debug, Deserialize)]
@@ -126,22 +92,6 @@ impl HvigorBuildInfoRunner {
     };
     Ok(vec![output])
   }
-}
-
-pub fn run(args: BuildInfoArgs) -> anyhow::Result<()> {
-  let project_root = args
-    .project
-    .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
-  let info = build_info_value(&project_root, args.module.as_deref(), args.resolve)?;
-
-  if args.json {
-    let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer_pretty(&mut stdout, &info)?;
-    writeln!(stdout)?;
-  } else {
-    print_formatted(&project_root, args.module.as_deref(), &info)?;
-  }
-  Ok(())
 }
 
 /// Build the `BuildInfo` projection for a project root (hvigor
@@ -354,24 +304,6 @@ fn build_option_entry(
     Ok(value) => value,
     Err(error) => json!({ "_error": error.to_string() }),
   }
-}
-
-/// hvigor's formatted output: an indented key/value tree under the
-/// "All build information from hvigor node '<node>'" banner. The node is
-/// `:<module>` for module projections and `:` for the project.
-fn print_formatted(
-  project_root: &std::path::Path,
-  module_param: Option<&str>,
-  info: &Value,
-) -> Result<(), anyhow::Error> {
-  let node = module_param
-    .map(|param| param.split('@').next().unwrap_or(param).to_string())
-    .unwrap_or_else(|| ":".to_string());
-  let output = formatted_text(&node, info);
-  let mut stdout = std::io::stdout().lock();
-  writeln!(stdout, "{output}")?;
-  let _ = project_root;
-  Ok(())
 }
 
 fn formatted_text(node: &str, info: &Value) -> String {

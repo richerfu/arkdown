@@ -26,7 +26,7 @@ use arkdown_sign::SignBackendRunner;
 
 use crate::cmd::native_build::ProjectDebugSymbolCollector;
 
-use super::args::BuildArgs;
+use super::args::BuildRequest;
 use super::coordinator::{
   BuildCoordinator, BuildOutput, BuildTaskLifecycle, BuildTaskObserver, NativeTaskCutoffReached,
 };
@@ -35,13 +35,13 @@ use super::layout::ModuleBuildLayout;
 pub struct AppBuildCoordinator {
   session: Arc<BuildSession>,
   config: Arc<ArkdownConfig>,
-  args: BuildArgs,
+  args: BuildRequest,
   package_plugins: Vec<PackagePlugin>,
   task_observer: Option<Arc<dyn BuildTaskObserver>>,
 }
 
 impl AppBuildCoordinator {
-  pub fn new(session: Arc<BuildSession>, config: Arc<ArkdownConfig>, args: BuildArgs) -> Self {
+  pub fn new(session: Arc<BuildSession>, config: Arc<ArkdownConfig>, args: BuildRequest) -> Self {
     Self {
       session,
       config,

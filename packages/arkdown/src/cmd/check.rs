@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use clap::Args;
 use walkdir::WalkDir;
 
 use arkdown::plugins::ets_transform::{
@@ -20,36 +19,31 @@ use super::ets_checker::{
 };
 use super::package_resolution::{LocalPackageSourceRootInventory, ModulePackageResolutionPlanner};
 
-#[derive(Args, Debug)]
-pub struct CheckArgs {
+#[derive(Debug)]
+pub struct CheckRequest {
   /// Build target context: hap, hsp, har
-  #[arg(long, default_value = "hap")]
   pub target: String,
   /// Scope to a specific module
-  #[arg(long)]
   pub module: Option<String>,
   /// Project root (default: current directory)
-  #[arg(long)]
   pub project: Option<PathBuf>,
   /// Node executable used to invoke the SDK semantic checker.
-  #[arg(long)]
   pub node_executable: Option<PathBuf>,
   /// ArkTS checker backend. `oxc` runs without Node. `sdk` is an explicit
   /// comparison backend while the remaining TypeScript semantic corpus moves.
-  #[arg(long, default_value = "oxc")]
   pub checker: String,
 }
 
-pub fn run(args: CheckArgs) -> Result<()> {
+pub fn run(args: CheckRequest) -> Result<()> {
   CheckCommandRunner::new(args).run()
 }
 
 struct CheckCommandRunner {
-  args: CheckArgs,
+  args: CheckRequest,
 }
 
 impl CheckCommandRunner {
-  fn new(args: CheckArgs) -> Self {
+  fn new(args: CheckRequest) -> Self {
     Self { args }
   }
 
@@ -98,10 +92,16 @@ impl CheckCommandRunner {
       summary.merge(module_summary);
     }
     if summary.errors > 0 {
+      let details = if summary.diagnostics.is_empty() {
+        String::new()
+      } else {
+        format!("\n{}", summary.diagnostics.join("\n"))
+      };
       anyhow::bail!(
-        "ARKDOWN_ETS_CHECK_FAILED: {} error(s) across {} source file(s)",
+        "ARKDOWN_ETS_CHECK_FAILED: {} error(s) across {} source file(s){}",
         summary.errors,
-        summary.files
+        summary.files,
+        details
       );
     }
     tracing::info!(files = summary.files, "check passed");
@@ -162,13 +162,17 @@ impl<'a> CheckModuleRunner<'a> {
       ..CheckSummary::default()
     };
     if self.checker_backend.runs_sdk() {
-      summary.errors += self.run_sdk_semantic_checker(&sources)?;
+      self.run_sdk_semantic_checker(&sources, &mut summary)?;
     }
-    summary.errors += self.run_oxc_structural_checker(&sources)?;
+    self.run_oxc_structural_checker(&sources, &mut summary)?;
     Ok(summary)
   }
 
-  fn run_sdk_semantic_checker(&self, sources: &[PathBuf]) -> Result<usize> {
+  fn run_sdk_semantic_checker(
+    &self,
+    sources: &[PathBuf],
+    summary: &mut CheckSummary,
+  ) -> Result<()> {
     let module_json_path = self
       .module_context
       .module
@@ -218,11 +222,16 @@ impl<'a> CheckModuleRunner<'a> {
     let output = SdkEtsCheckerRunner::new(&plan).run()?;
     for diagnostic in &output.diagnostics {
       match diagnostic.level.to_ascii_lowercase().as_str() {
-        "error" => tracing::error!(
-          module = %output.module_name,
-          "ArkTS semantic check: {}",
-          diagnostic.message
-        ),
+        "error" => {
+          tracing::error!(
+            module = %output.module_name,
+            "ArkTS semantic check: {}",
+            diagnostic.message
+          );
+          summary
+            .diagnostics
+            .push(format!("[{}] {}", output.module_name, diagnostic.message));
+        }
         "warn" | "warning" => tracing::warn!(
           module = %output.module_name,
           "ArkTS semantic check: {}",
@@ -236,14 +245,18 @@ impl<'a> CheckModuleRunner<'a> {
         ),
       }
     }
-    Ok(output.error_count())
+    summary.errors += output.error_count();
+    Ok(())
   }
 
-  fn run_oxc_structural_checker(&self, sources: &[PathBuf]) -> Result<usize> {
+  fn run_oxc_structural_checker(
+    &self,
+    sources: &[PathBuf],
+    summary: &mut CheckSummary,
+  ) -> Result<()> {
     let component_metadata = Arc::new(ComponentMetadata::from_ets_loader_path(
       &self.config.sdk_config.ets_loader_path,
     )?);
-    let mut errors = 0usize;
     let module_roots: Vec<(String, PathBuf)> = self
       .config
       .modules
@@ -321,7 +334,10 @@ impl<'a> CheckModuleRunner<'a> {
         Ok(source_id) => source_id,
         Err(error) => {
           tracing::error!(path = %path.display(), error = %error, "check cannot encode source path");
-          errors += 1;
+          summary.errors += 1;
+          summary
+            .diagnostics
+            .push(format!("[{}] {error}", path.display()));
           continue;
         }
       };
@@ -329,13 +345,16 @@ impl<'a> CheckModuleRunner<'a> {
       for diagnostic in report.diagnostics() {
         if diagnostic.is_error() {
           tracing::error!(path = %path.display(), diagnostic = %diagnostic, "ArkTS OXC check failed");
+          summary
+            .diagnostics
+            .push(format!("[{}] {diagnostic}", path.display()));
         } else {
           tracing::warn!(path = %path.display(), diagnostic = %diagnostic, "ArkTS OXC check warning");
         }
       }
-      errors += report.error_count();
+      summary.errors += report.error_count();
     }
-    Ok(errors)
+    Ok(())
   }
 }
 
@@ -416,11 +435,13 @@ impl<'a> CheckSourceInventory<'a> {
 struct CheckSummary {
   files: usize,
   errors: usize,
+  diagnostics: Vec<String>,
 }
 
 impl CheckSummary {
   fn merge(&mut self, other: Self) {
     self.files += other.files;
     self.errors += other.errors;
+    self.diagnostics.extend(other.diagnostics);
   }
 }

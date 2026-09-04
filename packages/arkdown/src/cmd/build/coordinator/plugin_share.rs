@@ -4,7 +4,7 @@ use super::*;
 
 pub(crate) struct HvigorCompilePluginShareBuilder<'a> {
   pub(crate) config: &'a ArkdownConfig,
-  pub(crate) args: &'a BuildArgs,
+  pub(crate) args: &'a BuildRequest,
   pub(crate) module: &'a ModuleConfig,
   pub(crate) session: &'a BuildSession,
   pub(crate) module_context: &'a ModuleCompileContext,
@@ -20,7 +20,7 @@ pub(crate) struct HvigorCompilePluginShareBuilder<'a> {
 impl<'a> HvigorCompilePluginShareBuilder<'a> {
   pub(crate) fn new(
     config: &'a ArkdownConfig,
-    args: &'a BuildArgs,
+    args: &'a BuildRequest,
     module: &'a ModuleConfig,
     session: &'a BuildSession,
     module_context: &'a ModuleCompileContext,

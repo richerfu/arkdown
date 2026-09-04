@@ -26,13 +26,15 @@ use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalida
 
 use arkdown::plugins::factory::PackagePlugin;
 
-use super::args::{AbcBackendChoice, AnalyzeModeChoice, BuildArgs, BuildCommand, OhpmModeChoice};
+use super::args::{
+  AbcBackendChoice, AnalyzeModeChoice, BuildCommand, BuildRequest, OhpmModeChoice,
+};
 use super::layout::ModuleBuildLayout;
 
 /// Input for the watch stage.
 ///
-/// Individual fields are used rather than a `BuildArgs` reference because
-/// `BuildArgs` does not implement `Clone` (it is a clap `Args` struct).
+/// Individual fields keep the long-lived watcher independent from transient
+/// N-API request values and avoid retaining unrelated build state.
 pub(super) struct WatchStageInput {
   pub(super) config: Arc<ArkdownConfig>,
   pub(super) session: Arc<BuildSession>,
@@ -90,7 +92,7 @@ impl WatchStageInput {
   pub(super) fn from_build(
     config: Arc<ArkdownConfig>,
     session: Arc<BuildSession>,
-    args: &BuildArgs,
+    args: &BuildRequest,
     project_root: PathBuf,
     abc_backend: AbcBackendChoice,
     coverage: bool,
@@ -321,7 +323,7 @@ impl WatchStage {
         // For hot changes, skip resource and profile stages to only
         // rerun the bundle → bytecode → package pipeline.
         let is_hot = hot_reload_mode || matches!(change_kind, WatchChangeKind::Hot);
-        let rebuild_args = BuildArgs {
+        let rebuild_args = BuildRequest {
           ohpm_mode,
           target: target.clone(),
           mode: mode.clone(),

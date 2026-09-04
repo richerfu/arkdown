@@ -507,12 +507,6 @@ mod tests {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path().join("project");
     let module_root = project_root.join("entry");
-    let configured_build_root = tmp.path().join("custom-build");
-    let configured_project_build = configured_build_root.join("project").join("build");
-    let configured_module_build = configured_build_root
-      .join("project")
-      .join("entry")
-      .join("build");
     let native_tree = module_root
       .join(".cxx/default/default/debug")
       .join("arm64-v8a");
@@ -523,9 +517,7 @@ mod tests {
       project_root.join("build"),
       module_root.join("build"),
       module_root.join(".test"),
-      configured_build_root.clone(),
-      configured_project_build.clone(),
-      configured_module_build.clone(),
+      module_root.join(".preview"),
       native_tree.clone(),
       inactive_native_tree.clone(),
     ] {
@@ -534,8 +526,7 @@ mod tests {
     fs::write(project_root.join("build/project.bin"), b"project").unwrap();
     fs::write(module_root.join("build/module.bin"), b"module").unwrap();
     fs::write(module_root.join(".test/result.bin"), b"test").unwrap();
-    fs::write(configured_project_build.join("project.bin"), b"project").unwrap();
-    fs::write(configured_module_build.join("module.bin"), b"module").unwrap();
+    fs::write(module_root.join(".preview/result.bin"), b"preview").unwrap();
     fs::write(native_tree.join("CMakeCache.txt"), b"cache").unwrap();
     fs::write(native_tree.join("build.ninja"), b"ninja").unwrap();
     fs::write(native_tree.join("rules.ninja"), b"rules").unwrap();
@@ -545,16 +536,13 @@ mod tests {
 
     let toolchain = NativeSdkToolchain::for_clean(Some(std::env::current_exe().unwrap()));
     HvigorModuleCleanStage::new(&project_root, &module_root, &toolchain)
-      .with_configured_build_dir(Some(&configured_build_root))
-      .unwrap()
       .execute()
       .expect("hvigor clean stage must remove build outputs");
 
     assert!(!project_root.join("build").exists());
     assert!(!module_root.join("build").exists());
     assert!(!module_root.join(".test").exists());
-    assert!(!configured_project_build.exists());
-    assert!(!configured_module_build.exists());
+    assert!(!module_root.join(".preview").exists());
     assert!(!native_tree.join("CMakeCache.txt").exists());
     assert!(native_tree.join("build.ninja").is_file());
     // DevEco Studio 6.1.1 Clean.getArchDirectories only visits the active

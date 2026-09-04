@@ -52,7 +52,7 @@ use arkdown_session::{
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
 use super::aot::AotArtifactWriter;
-use super::args::{AbcBackendChoice, BuildArgs, HvigorRuntimeProperties, NativeTaskRoot};
+use super::args::{AbcBackendChoice, BuildRequest, HvigorRuntimeProperties, NativeTaskRoot};
 use super::bundle_plan::{
   make_bundle_plan, BundlePackageOutput, BundlePlanPackageInfo, BundleRuntimePackageInfoBuilder,
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
@@ -2057,11 +2057,11 @@ fn build_cache_group_snapshots(
 ///
 /// Owns the explicit coarse sequencing of all build stages for a single
 /// `arkdown build` invocation.  Constructed from a parsed [`BuildSession`]
-/// and the CLI [`BuildArgs`]; call [`BuildCoordinator::execute`] to run.
+/// and the CLI [`BuildRequest`]; call [`BuildCoordinator::execute`] to run.
 pub struct BuildCoordinator {
   session: Arc<BuildSession>,
   config: Arc<ArkdownConfig>,
-  args: BuildArgs,
+  args: BuildRequest,
   package_plugins: Vec<PackagePlugin>,
   task_observer: Option<Arc<dyn BuildTaskObserver>>,
   owns_task_cycle: bool,
@@ -2070,7 +2070,8 @@ pub struct BuildCoordinator {
 #[cfg(test)]
 mod target_build_execution_plan_tests {
   use super::{
-    BuildArgs, EffectiveTargetConfig, ModuleTargetSelection, OutputTarget, TargetBuildExecutionPlan,
+    BuildRequest, EffectiveTargetConfig, ModuleTargetSelection, OutputTarget,
+    TargetBuildExecutionPlan,
   };
 
   #[test]
@@ -2087,7 +2088,7 @@ mod target_build_execution_plan_tests {
 
   #[test]
   fn hvigor_align_target_overrides_normal_target_but_not_test_actions() {
-    let mut args = BuildArgs::default();
+    let mut args = BuildRequest::default();
     args.build_target_name = Some("phone".to_string());
     args.hvigor_properties.align_target = Some("aligned".to_string());
 
@@ -2209,7 +2210,7 @@ mod target_build_execution_plan_tests {
       &[],
     )
     .expect("empty startup build-profile inventory");
-    let mut args = BuildArgs::default();
+    let mut args = BuildRequest::default();
     args.build_target_name = Some("phone".to_string());
     args.native_task_roots.push(super::NativeTaskRoot {
       module_name: "entry".to_string(),
@@ -2851,7 +2852,7 @@ struct PackageSignHarPlan {
 
 impl PackageSignHarPlan {
   fn resolve(
-    args: &BuildArgs,
+    args: &BuildRequest,
     config: &ArkdownConfig,
     loader_json: &LoaderJson,
     session: &BuildSession,

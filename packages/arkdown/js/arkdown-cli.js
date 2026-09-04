@@ -1,16 +1,150 @@
 #!/usr/bin/env node
 
 const packageManifest = require('../package.json')
-const { parseArkdownBuildCliArgs } = require('../index.js')
 
-function decodeCliPlan(response) {
-  const plan = JSON.parse(response)
-  if (plan.error) {
-    const error = new Error(plan.error.message)
-    error.code = plan.error.code
+const BUILD_VALUE_OPTIONS = new Map([
+  ['--project', 'project'],
+  ['--target', 'target'],
+  ['--mode', 'mode'],
+  ['--analyze', 'analyze'],
+  ['--module', 'module'],
+  ['-m', 'module'],
+  ['--product', 'product'],
+  ['--build-target-name', 'buildTargetName'],
+  ['--build-version', 'buildVersion'],
+  ['--arkts-version', 'arktsVersion'],
+  ['--ohpm-mode', 'ohpmMode'],
+  ['--scope', 'scope'],
+  ['--ohos-test-coverage', 'ohosTestCoverage'],
+  ['--coverage-path-filter', 'coveragePathFilter'],
+  ['--coverage-mode', 'coverageMode'],
+  ['--unit-test-replace-page', 'unitTestReplacePage'],
+  ['--cache-file', 'cacheFile'],
+  ['--checker', 'checker'],
+])
+const BUILD_FLAG_OPTIONS = new Map([
+  ['--watch', 'watch'],
+  ['--preview', 'preview'],
+  ['--check-entry', 'checkEntry'],
+  ['--coverage', 'coverage'],
+  ['--ohos-debug-asan', 'ohosDebugAsan'],
+  ['--ohos-enable-hwasan', 'ohosEnableHwasan'],
+  ['--ohos-enable-tsan', 'ohosEnableTsan'],
+  ['--ohos-enable-ubsan', 'ohosEnableUbsan'],
+  ['--ohos-enable-binxo', 'ohosEnableBinxo'],
+  ['--enable-zig', 'enableZig'],
+  ['--disable-abc-cache', 'disableAbcCache'],
+  ['--cache', 'cache'],
+])
+const BUILD_APPEND_OPTIONS = new Map([
+  ['--hvigor-plugin-file', 'hvigorPluginFile'],
+  ['--compile-plugin-path', 'compilePluginPath'],
+])
+
+class JsCliArgumentParser {
+  constructor(command, args) {
+    this.command = command
+    this.args = args
+  }
+
+  build() {
+    const config = {}
+    for (let index = 0; index < this.args.length; index += 1) {
+      const option = this.args[index]
+      if (option === '--help' || option === '-h') continue
+      if (BUILD_VALUE_OPTIONS.has(option)) {
+        const key = BUILD_VALUE_OPTIONS.get(option)
+        config[key] = this.value(++index, option)
+        continue
+      }
+      if (BUILD_FLAG_OPTIONS.has(option)) {
+        config[BUILD_FLAG_OPTIONS.get(option)] = true
+        continue
+      }
+      if (BUILD_APPEND_OPTIONS.has(option)) {
+        const key = BUILD_APPEND_OPTIONS.get(option)
+        const value = this.value(++index, option)
+        config[key] = config[key] === undefined ? value : [config[key]].flat().concat(value)
+        continue
+      }
+      if (option === '--no-cache') {
+        config.cache = false
+        continue
+      }
+      this.unknown(option)
+    }
+    this.oneOf(config, 'analyze', ['normal', 'default', 'verbose', 'false', 'trace'])
+    this.oneOf(config, 'arktsVersion', ['1.1', '1.2'])
+    this.oneOf(config, 'ohpmMode', ['offline', 'prefer-offline', 'online'])
+    this.oneOf(config, 'coverageMode', ['black', 'white', 'full'])
+    if (config.ohosTestCoverage !== undefined) {
+      if (!['true', 'false'].includes(config.ohosTestCoverage)) {
+        this.invalid('--ohos-test-coverage', config.ohosTestCoverage, 'true or false')
+      }
+      config.ohosTestCoverage = config.ohosTestCoverage === 'true'
+    }
+    return config
+  }
+
+  check() {
+    const config = {}
+    const values = new Map([
+      ['--project', 'project'],
+      ['--target', 'target'],
+      ['--module', 'module'],
+      ['-m', 'module'],
+      ['--node-executable', 'nodeExecutable'],
+      ['--checker', 'checker'],
+    ])
+    this.parseValues(config, values)
+    this.oneOf(config, 'target', ['hap', 'hsp', 'har'])
+    this.oneOf(config, 'checker', ['oxc', 'sdk'])
+    return config
+  }
+
+  clean() {
+    const config = {}
+    this.parseValues(config, new Map([['--project', 'project']]))
+    return config
+  }
+
+  parseValues(config, values) {
+    for (let index = 0; index < this.args.length; index += 1) {
+      const option = this.args[index]
+      if (option === '--help' || option === '-h') continue
+      const key = values.get(option)
+      if (key === undefined) this.unknown(option)
+      config[key] = this.value(++index, option)
+    }
+  }
+
+  value(index, option) {
+    const value = this.args[index]
+    if (value === undefined || value.length === 0 || value.startsWith('-')) {
+      const error = new Error(`${option} requires a value`)
+      error.code = 'MISSING_ARKDOWN_CLI_OPTION_VALUE'
+      throw error
+    }
+    return value
+  }
+
+  oneOf(config, key, allowed) {
+    if (config[key] !== undefined && !allowed.includes(config[key])) {
+      this.invalid(key, config[key], allowed.join(', '))
+    }
+  }
+
+  invalid(option, value, expected) {
+    const error = new Error(`${option} must be ${expected}: ${value}`)
+    error.code = 'INVALID_ARKDOWN_CLI_OPTION'
     throw error
   }
-  return plan.config
+
+  unknown(option) {
+    const error = new Error(`unknown ${this.command} option '${option}'`)
+    error.code = `UNKNOWN_ARKDOWN_${this.command.toUpperCase()}_OPTION`
+    throw error
+  }
 }
 
 function createPackageRuntime() {
@@ -26,9 +160,9 @@ function writeStderr(message) {
 }
 
 class ArkdownPackageCli {
-  constructor(argv, build) {
+  constructor(argv, operations) {
     this.argv = argv
-    this.build = build
+    this.operations = typeof operations === 'function' ? { build: operations } : (operations ?? {})
   }
 
   async run() {
@@ -39,8 +173,24 @@ class ArkdownPackageCli {
         return 0
       }
       const config = this.parseBuildArgs(args)
-      const result = await (this.build || createPackageRuntime().build)(config)
+      const result = await this.operation('build')(config)
       for (const artifact of result.artifacts ?? []) writeStdout(artifact)
+      return 0
+    }
+    if (command === 'check') {
+      if (args.includes('--help') || args.includes('-h')) {
+        this.printCheckHelp()
+        return 0
+      }
+      await this.operation('check')(this.parseCheckArgs(args))
+      return 0
+    }
+    if (command === 'clean') {
+      if (args.includes('--help') || args.includes('-h')) {
+        this.printCleanHelp()
+        return 0
+      }
+      await this.operation('clean')(this.parseCleanArgs(args))
       return 0
     }
     if (this.argv.includes('--help') || this.argv.includes('-h') || command === undefined) {
@@ -51,13 +201,25 @@ class ArkdownPackageCli {
       writeStdout(packageManifest.version)
       return 0
     }
-    const error = new Error(`Unknown arkdown command "${command}". Only "build" is supported.`)
+    const error = new Error(`Unknown arkdown command "${command}". Supported commands: build, check, clean.`)
     error.code = 'ARKDOWN_CLI_COMMAND_UNSUPPORTED'
     throw error
   }
 
   parseBuildArgs(args) {
-    return decodeCliPlan(parseArkdownBuildCliArgs(args))
+    return new JsCliArgumentParser('build', args).build()
+  }
+
+  parseCheckArgs(args) {
+    return new JsCliArgumentParser('check', args).check()
+  }
+
+  parseCleanArgs(args) {
+    return new JsCliArgumentParser('clean', args).clean()
+  }
+
+  operation(name) {
+    return this.operations[name] || createPackageRuntime()[name]
   }
 
   printHelp() {
@@ -69,11 +231,15 @@ Options:
 
 Commands:
   build              Build an OpenHarmony artifact.
+  check              Check ArkTS sources without building.
+  clean              Remove generated project and module outputs.
   version            Show the arkdown package version.
 
 Examples:
   arkdown build --project . --target hap
-  arkdown build --project . --arkts-version 1.2`)
+  arkdown build --project . --arkts-version 1.2
+  arkdown check --project .
+  arkdown clean --project .`)
   }
 
   printBuildHelp() {
@@ -110,6 +276,25 @@ Options:
   --compile-plugin-path <path>
                       Load a TS/JS compile-plugin module. May be repeated.
   --no-cache          Disable coarse build cache and ABC cache.`)
+  }
+
+  printCheckHelp() {
+    writeStdout(`arkdown check
+
+Options:
+  --project <dir>     Project root. Defaults to current directory.
+  --target <kind>     Check context: hap, hsp, or har. Defaults to hap.
+  --module, -m <name> Scope checking to one module.
+  --checker <mode>    Checker backend: oxc or sdk. Defaults to oxc.
+  --node-executable <path>
+                      Node executable for the optional SDK comparison backend.`)
+  }
+
+  printCleanHelp() {
+    writeStdout(`arkdown clean
+
+Options:
+  --project <dir>     Project root. Defaults to current directory.`)
   }
 }
 
