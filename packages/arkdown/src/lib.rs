@@ -102,7 +102,7 @@ pub async fn clean(config: CleanConfig) -> napi::Result<()> {
 /// Run the native ArkTS source checker without entering the build pipeline.
 #[napi]
 pub async fn check(config: CheckConfig) -> napi::Result<()> {
-  let args = services::check::CheckRequest {
+  let args = arkdown_build::check::CheckRequest {
     target: config.target.unwrap_or_else(|| "hap".to_string()),
     module: config.module,
     project: config.project.map(PathBuf::from),
@@ -111,7 +111,7 @@ pub async fn check(config: CheckConfig) -> napi::Result<()> {
     ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
     checker: config.checker.unwrap_or_else(|| "oxc".to_string()),
   };
-  tokio::task::spawn_blocking(move || services::check::run(args))
+  tokio::task::spawn_blocking(move || arkdown_build::check::CheckApplication::new(args).execute())
     .await
     .map_err(|error| napi::Error::from_reason(format!("Arkdown check task failed: {error}")))?
     .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
