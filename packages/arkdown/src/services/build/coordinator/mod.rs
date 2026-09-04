@@ -36,8 +36,8 @@ use arkdown_abc::bytecode::{
 };
 use arkdown_build::pre_build::PreBuildValidator;
 use arkdown_core::{
-  ArkdownConfig, ArktsLanguageVersion, BuildMode, HapManifest, HarArtifactType, ModuleConfig,
-  OhosModuleType, OutputTarget,
+  ArkdownConfig, BuildMode, HapManifest, HarArtifactType, ModuleConfig, OhosModuleType,
+  OutputTarget,
 };
 use arkdown_pack::PackingCheck;
 use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
@@ -48,17 +48,13 @@ use arkdown_profile::{
 use arkdown_session::dependency_graph::snapshot::{
   DependencyEdgeKind, DependencyNodeSnapshot, DependencyNodeType,
 };
-use arkdown_session::{BuildSession, ModuleCompileContext, ProjectSnapshot, SdkToolKind};
+use arkdown_session::{BuildSession, ProjectSnapshot, SdkToolKind};
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
 use super::native_stage::NativeDependencyStageExecutor;
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
-};
-use arkdown::plugins::hvigor_compile::{
-  HvigorCompilePluginDependencyInfo, HvigorCompilePluginImportEntry, HvigorCompilePluginShare,
-  HvigorCompilePluginSourceFile,
 };
 use arkdown::{
   BundleCacheBridge, BundleMockDependency, CrossplatformCollectionWriter,
@@ -149,8 +145,6 @@ use arkdown_resource::{
 
 mod bundle_stage;
 mod bytecode_stage;
-mod plugin_share;
-
 use arkdown_build::obfuscation::{
   ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
 };
@@ -160,8 +154,9 @@ use arkdown_build::planning::{
   NativeCmakeLocalDependencyInventoryBuilder, NativeDependencyStagePlanBuilder,
   TargetBuildExecutionPlan,
 };
-pub(crate) use plugin_share::{
-  HvigorCompilePluginShareBuilder, PluginCacheInvalidationRunner, PluginContextCacheRunner,
+use arkdown_build::plugin_share::{
+  HvigorCompilePluginShareBuilder, HvigorCompilePluginShareInput, PluginCacheInvalidationRunner,
+  PluginContextCacheRunner,
 };
 
 mod entry;

@@ -211,19 +211,19 @@ impl BuildCoordinator {
       // only the plugins participating in this module before cache hooks or
       // Rolldown hooks execute.
       let loader_json_path = module_layout.loader_json();
-      let share = HvigorCompilePluginShareBuilder::new(
-        module_config.as_ref(),
+      let share = HvigorCompilePluginShareBuilder::new(HvigorCompilePluginShareInput {
+        config: module_config.as_ref(),
         args,
         module,
-        session.as_ref(),
-        &module_context,
-        module_package_resolution.as_ref(),
+        session: session.as_ref(),
+        module_context: &module_context,
+        package_resolution: module_package_resolution.as_ref(),
         loader_json,
-        &loader_json_path,
-        module_target_name,
-        coverage_mode,
-        session.arkts_language_version,
-      )
+        loader_json_path: &loader_json_path,
+        target_name: module_target_name,
+        coverage_enabled: coverage_mode,
+        arkts_language_version: session.arkts_language_version,
+      })
       .with_plugin_cache_snapshot(plugin_context_cache.load()?)
       .build()?;
       for plugin in &module_package_plugins {
