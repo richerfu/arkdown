@@ -98,19 +98,19 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
     } else {
       module_layout.source().src_main().join("supervisual")
     };
-    let paths = SdkEtsCheckerPaths::build(
-      module_layout.res_profile_dir(),
-      module_layout.res_ark_module_json(),
-      module_layout.resource_table_txt(),
-      module_layout.res_resources_dir().join("rawfile"),
-      ace_module_root.clone(),
+    let paths = SdkEtsCheckerPaths::build(SdkEtsCheckerBuildPaths {
+      ace_profile_path: module_layout.res_profile_dir(),
+      ace_module_json_path: module_layout.res_ark_module_json(),
+      app_resource_path: module_layout.resource_table_txt(),
+      raw_file_resource_path: module_layout.res_resources_dir().join("rawfile"),
+      ace_module_root: ace_module_root.clone(),
       ace_super_visual_path,
-      self.loader_json_path.to_path_buf(),
-      PathBuf::from(&self.loader_json.cache_path),
-      PathBuf::from(&self.loader_json.ace_module_build),
+      ace_build_json_path: self.loader_json_path.to_path_buf(),
+      cache_path: PathBuf::from(&self.loader_json.cache_path),
+      ace_module_build: PathBuf::from(&self.loader_json.ace_module_build),
       generated_profile_path,
-      module_layout.generated_resource_table_typescript(),
-    );
+      resource_table_typescript_path: module_layout.generated_resource_table_typescript(),
+    });
     let entries = SdkEtsCheckerEntryCollector::new(self.loader_json, &ace_module_root).collect();
     let value = SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
       config: self.config,

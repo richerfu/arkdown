@@ -1,7 +1,7 @@
 'use strict'
 
 // The Rust stage owns configuration and diagnostics. This runtime bridge mirrors the
-// two SDK checker entries selected by Hvigor: CompileArkTS runs the SDK
+// two SDK checker entries whose observable behavior arkdown must preserve:
 // `etsChecker` plugin's buildStart hook, while ArkLint uses
 // `runEtsStandaloneChecker`.
 
