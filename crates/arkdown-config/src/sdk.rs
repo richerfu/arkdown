@@ -250,13 +250,13 @@ pub fn discover_sdk_api_version(ohos_base: &Path) -> Option<u32> {
     discover_sdk_metadata(ohos_base).api_version
 }
 
-/// Discover the raw Ark VM version from the same SDK tooling hvigor uses.
+/// Discover the raw Ark VM version from the SDK's native compiler.
 ///
-/// hvigor calls `ets-loader/bin/ark/ts2abc.js --target-api-version <api>` and,
-/// when the SDK exposes a compatible API stage, passes
-/// `--target-api-sub-version <stage>`. The stage is read from the SDK
-/// `oh-uni-package.json` metadata here, so the local SDK decides the exact
-/// mapping.
+/// The current ets2bundle `bin/ark/ts2abc.js` version branch is only a Node
+/// launcher around `es2abc --target-bc-version`: API 8 returns the historical
+/// fixed value and every later API forwards the target API and sub-version to
+/// the native binary. Reproduce that behavior directly so configuration
+/// discovery never starts Node.
 pub fn discover_ark_vm_version(ets_loader_path: &Path, compile_api_version: u32) -> Option<String> {
     let stage = discover_sdk_release_type_from_ets_loader(ets_loader_path);
     discover_ark_vm_version_with_stage(ets_loader_path, compile_api_version, stage.as_deref())
@@ -267,9 +267,11 @@ fn discover_ark_vm_version_with_stage(
     compile_api_version: u32,
     stage: Option<&str>,
 ) -> Option<String> {
-    discover_ark_vm_version_from_ts2abc(ets_loader_path, compile_api_version, stage).or_else(|| {
-        discover_ark_vm_version_from_es2abc(ets_loader_path, compile_api_version, stage)
-    })
+    if compile_api_version == 8 {
+        return Some("0.0.0.2".to_string());
+    }
+
+    discover_ark_vm_version_from_es2abc(ets_loader_path, compile_api_version, stage)
 }
 
 fn openharmony_base_from_root(sdk_root: &Path) -> PathBuf {
@@ -351,27 +353,6 @@ fn default_compile_sdk_version() -> String {
 fn discover_sdk_release_type_from_ets_loader(ets_loader_path: &Path) -> Option<String> {
     let ets_component = ets_loader_path.parent()?.parent()?;
     read_json_string_field(&ets_component.join("oh-uni-package.json"), "releaseType")
-}
-
-fn discover_ark_vm_version_from_ts2abc(
-    ets_loader_path: &Path,
-    compile_api_version: u32,
-    stage: Option<&str>,
-) -> Option<String> {
-    let ts2abc_path = ets_loader_path.join("bin").join("ark").join("ts2abc.js");
-    if !ts2abc_path.exists() {
-        return None;
-    }
-
-    let mut command = Command::new("node");
-    command
-        .arg(ts2abc_path)
-        .arg("--target-api-version")
-        .arg(compile_api_version.to_string());
-    if let Some(stage) = non_empty_stage(stage) {
-        command.arg("--target-api-sub-version").arg(stage);
-    }
-    run_ark_version_command(command)
 }
 
 fn discover_ark_vm_version_from_es2abc(
@@ -836,11 +817,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_discover_ark_vm_version_uses_sdk_release_type() {
+    fn test_discover_ark_vm_version_uses_native_es2abc_and_sdk_release_type() {
         let root = temp_root("ark-vm");
         let ets_dir = root.join("ets");
         let ets_loader = ets_dir.join("build-tools").join("ets-loader");
         let es2abc = SdkToolResolver::new(&ets_loader).platform_es2abc_path();
+        let ts2abc = ets_loader.join("bin").join("ark").join("ts2abc.js");
 
         fs::create_dir_all(&ets_dir).expect("create ets dir");
         fs::create_dir_all(es2abc.parent().expect("es2abc parent")).expect("create es2abc dir");
@@ -849,6 +831,8 @@ mod tests {
             r#"{"version":"6.0.1.112","releaseType":"Release"}"#,
         )
         .expect("write ets metadata");
+        fs::write(&ts2abc, "process.stdout.write('99.0.0.0\\n');\n")
+            .expect("write sentinel ts2abc launcher");
         fs::write(
             &es2abc,
             r#"#!/bin/sh
@@ -877,6 +861,19 @@ fi
         let ark_vm_version = discover_ark_vm_version(&ets_loader, 12);
 
         assert_eq!(ark_vm_version.as_deref(), Some("12.0.6.0"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_discover_ark_vm_version_preserves_api8_legacy_value_without_sdk_tools() {
+        let root = temp_root("ark-vm-api8");
+        let ets_loader = root.join("ets").join("build-tools").join("ets-loader");
+
+        assert_eq!(
+            discover_ark_vm_version_with_stage(&ets_loader, 8, None).as_deref(),
+            Some("0.0.0.2")
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -16,12 +16,13 @@
 - 已从 SDK `components/*.json` 一次性加载 atomic/single/specific-child/style/systemApi grammar，补齐 10905219–10905223、10905228、10905348、10905363、10905365、10905367、10905372，并通过无 cache 的真实 ArkTS 1.1 OXC/Rolldown HAP 构建。
 - 已按 `processResourceData` 建立原生资源查询库存：当前模块 rawfile、HSP `ResourceTable.txt`/rawfile 在 bundle 启动边界读取并跨模块复用，Rolldown hook 只读 `Arc` 快照；普通资源的 format/source/type/name、unsupported type、rawfile 错误码和模板/HSP warning 降级行为已接入生产变换。
 - 默认 build/check checker 已切换为 `oxc`，不再启动 SDK Node checker；`sdk` 仅作为显式对比后端暂留，待重载/复杂泛型类型流、crossplatform 外部依赖收集和其余跨文件类型推导完成后连同 bridge 删除。system API 已以 SDK declaration JSDoc、OXC `SymbolId` 和 import/export 闭包接入生产 build/check，并从 `SdkSnapshot` 消费一次读取的 device capability inventory。
+- Ark VM 版本探测已按新 ets2bundle `ts2abc.js` 的实际转发语义改为 Rust 直接调用原生 `es2abc --target-bc-version`；API 8 固定值由 Rust 返回，配置加载不再为该探测启动 Node。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
 
 - 5 个已经形成可用的 Rust 主体：资源/Profile/Loader、解析与打包图、ArkTS 1.1 主干变换、ABC 原生工具适配、打包与签名。
 - 8 个只完成了部分行为或所有权仍然错误：配置与任务入口、依赖安装、BuildSession、语义检查、缓存/Watch、插件桥、诊断、对齐测试。
-- 5 个仍是阻断项或由 SDK JavaScript 代跑：系统 API 检查、Visual 代码生成、ArkTS 1.2 UI/Interop/Memo 全阶段、ArkGuard、真正的并行 StageExecutor。
+- 4 个仍是阻断项或由 SDK JavaScript 代跑：系统 API 深层类型流、ArkTS 1.2 UI/Interop/Memo 全阶段、ArkGuard、真正的并行 StageExecutor。
 
 这不是完成度百分比；不同能力域的规模相差很大。尤其 ArkTS 1.2 的 4 组插件、62 个 UI 校验规则和 42 个 property-translator 相关文件，工作量显著高于一个普通构建阶段。
 
@@ -31,7 +32,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 2. `packages/arkdown/js` 已从约 4,454 行收敛到 790 行：只保留原生入口、CLI trampoline、完整 TS/JS compile-plugin 适配，以及尚待 OXC 语义尾项完成后删除的 checker 对比 bridge。
 3. 默认 checker 已改为 OXC；显式 `checker=sdk` 对比后端及其 Node bridge 仍待最后一批语义用例迁移后删除。
 4. ArkTS 1.2 虽然已经按参数正确分流，但 Rust 只解析并投影模块请求，真正的 UI、语法检查、Memo 和 ABC 驱动仍由 Node 加载 SDK 插件执行。
-5. Visual 和源码/字节码混淆仍通过 Node 桥调用 SDK JavaScript。
+5. Visual 已完成 Rust 原生 parser/codegen 与确定性插入；源码/字节码混淆仍通过 Node 桥调用 SDK JavaScript。
 6. 之前的 `rollup_cache.json` 写入为空内容，且 `RollupCacheStore` 没有生产调用，不能代表 Rolldown 图缓存。
 
 因此，后续工作的重点不是继续扩大 hvigor 兼容外壳，而是把已有 Rust 能力重新收口到一个原生 BuildApplication，并按源码逐阶段补齐编译行为。
@@ -156,7 +157,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | ArkTS 1.1 UI transform | 主干可用，未完全覆盖 | 已覆盖 V1/V2、state、Builder/Styles/Extend、WrapBuilder/MutableBuilder、ForEach/Repeat、常见组件和 source map；仍缺 InsightIntent、worker 专用变换、declaration merger、部分 interop/边界 | 直接移植源码测试语料；按 OXC pass 补齐，不以名称或行数判断完成 |
 | ArkTS checker | OXC 已默认，语义尾项待补 | 默认 build/check 不再启动 Node；125 个源码契约及独立跨文件 checker 回归已原生化，显式 `sdk` 对比后端仍保留 | 补完重载/泛型/跨文件类型推导后移除 `sdk` 模式和 `ets-checker-bridge.cjs`；`off` 仅保留为显式调试选项 |
 | System API/syscap/permission | 主干完成，深层类型流待补 | 已建立 `SystemApiInventory`，解析 SDK JSDoc、namespace/class/interface/type 引用和 barrel export；生产链路已接入 version/permission/syscap/device、suppressor、直接返回值和局部变量类型流。尚缺重载/复杂泛型的精确签名选择，以及 crossplatform 外部依赖配置 | 扩展 OXC typed semantic API 后补重载/泛型链；接入 external SDK crossplatform config；以源码诊断顺序做 corpus 金标 |
-| Visual/SuperVisual | JS 托管 | Rust 只做发现、验证和 OXC 插入，生成片段由 Node 调 `codegen_ets.js` | 把 `.visual` parser/codegen 和 deterministic insertion 全部迁入 Rust/OXC；删除 Node generator |
+| Visual/SuperVisual | Rust 原生主链完成 | `.visual` parser/codegen、组件事件/属性序列化和 OXC 确定性插入均在 Rust 内完成，生产构建不再启动 Node generator | 继续用新源码 Visual/SuperVisual 语料扩展边界回归，并核对大工程生成片段与运行时行为 |
 | ArkTS 1.2 | Rust 行为基本缺失 | OXC 使用 `SourceType::ets_static()` 并生成图投影，但生产编译仍由 Node static driver 加载 UI/syntax/memo 插件；interop 未完整接入，多个 config 字段为空 | 按源码固定阶段在 OXC 实现 interop parsed/checked、UI parsed/checked、UI syntax checked、memo checked+recheck；Rust 直接调用原生后端 |
 | ABC/AOT/中间文件 | 基本可用但散落 | dynamic es2abc、filesInfo、sourceMaps、AOT/quickfix 有较多实现，static 仍被 JS driver 包住，代码位于 N-API crate | 抽出 `arkdown-abc`；统一动态/静态/preview/reload command plan 和缓存键 |
 | 源码与字节码混淆 | JS 托管 | `arkdown-obfuscate` 把 `arkguard_bridge.cjs` 写入缓存并启动 Node；bytecode 同样走 CJS bridge | 源码混淆使用 OXC minifier/mangler/name cache；字节码走 native panda_guard adapter |
