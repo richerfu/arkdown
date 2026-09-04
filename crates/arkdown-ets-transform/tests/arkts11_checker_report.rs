@@ -929,6 +929,185 @@ fn arkts11_system_api_selects_overload_contracts_by_arity() {
 }
 
 #[test]
+fn arkts11_system_api_selects_same_arity_overloads_by_argument_type() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "export interface Options { mode?: string; }\n\
+             export interface Callback<T> { (value: T): void; }\n\
+             export type Text = string;\n\
+             interface FutureManager {\n\
+               /** @since 13 */\n\
+               run(): void;\n\
+             }\n\
+             interface LegacyManager {}\n\
+             /** @since 13 */\n\
+             export declare function select(value: string): void;\n\
+             /** @since 10 */\n\
+             export declare function select(value: number): void;\n\
+             /** @since 13 */\n\
+             export declare function load(value: Options): void;\n\
+             /** @since 10 */\n\
+             export declare function load(value: Callback<void>): void;\n\
+             /** @since 10 */\n\
+             export declare function make(value: string): FutureManager;\n\
+             /** @since 10 */\n\
+             export declare function make(value: number): LegacyManager;\n\
+             /** @since 13 */\n\
+             export declare function event(type: 'future'): void;\n\
+             /** @since 10 */\n\
+             export declare function event(type: 'stable'): void;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { select, load, make, event, type Options, type Callback, type Text } from '@ohos.demo';\n\
+         const label: string = 'future';\n\
+         const labelAlias = label;\n\
+         const typedAlias: Text = 'future';\n\
+         const count: number = 1;\n\
+         const options: Options = {};\n\
+         const callback: Callback<void> = () => {};\n\
+         select('future');\n\
+         select(1);\n\
+         select(label);\n\
+         select(labelAlias);\n\
+         select(typedAlias);\n\
+         select(count);\n\
+         load({});\n\
+         load(() => {});\n\
+         load(options);\n\
+         load(callback);\n\
+         make('future').run();\n\
+         make(1).run();\n\
+         event('future');\n\
+         event('stable');\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(
+        since,
+        8,
+        "literal, annotated, object, and callable arguments must select matching overload contracts and return shapes: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
+fn arkts11_system_api_resolves_imported_callback_shapes_for_overloads() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.base.d.ts"),
+        Arc::<str>::from("export interface Callback<T> { (value: T): void; }\n"),
+    );
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "import type { Callback } from './@ohos.base';\n\
+             /** @since 13 */\n\
+             export declare function route<T>(value: T): void;\n\
+             /** @since 10 */\n\
+             export declare function route(value: Callback<void>): void;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { route } from '@ohos.demo';\n\
+         import type { Callback as RenamedCallback } from '@ohos.base';\n\
+         type LocalCallback = RenamedCallback<void>;\n\
+         const importedCallback: RenamedCallback<void> = () => {};\n\
+         const localCallback: LocalCallback = importedCallback;\n\
+         route(() => {});\n\
+         route(importedCallback);\n\
+         route(localCallback);\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(
+        since,
+        0,
+        "the imported callback declaration must outrank an unconstrained generic overload: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
+fn arkts11_system_api_converges_local_overload_result_types() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "interface FutureInput {}\n\
+             interface LegacyInput {}\n\
+             export declare function makeInput(value: string): FutureInput;\n\
+             export declare function makeInput(value: number): LegacyInput;\n\
+             export declare function forward(value: FutureInput): FutureInput;\n\
+             export declare function forward(value: LegacyInput): LegacyInput;\n\
+             /** @since 13 */\n\
+             export declare function dispatch(value: FutureInput): void;\n\
+             /** @since 10 */\n\
+             export declare function dispatch(value: LegacyInput): void;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { makeInput, forward, dispatch } from '@ohos.demo';\n\
+         const first = makeInput('future');\n\
+         const second = forward(first);\n\
+         const third = forward(second);\n\
+         dispatch(third);\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(
+        since,
+        1,
+        "local call-result types must converge before downstream overload selection: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
 fn arkts11_system_api_propagates_generic_arguments_through_named_wrappers() {
     let sdk_root = PathBuf::from("/sdk/api");
     let mut files = rustc_hash::FxHashMap::default();

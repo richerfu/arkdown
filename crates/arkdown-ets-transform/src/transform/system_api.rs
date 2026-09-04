@@ -6,17 +6,21 @@ use std::{
 
 use oxc_ast::{
     ast::{
-        Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression,
-        FormalParameters, ImportDeclarationSpecifier, ModuleExportName, Program, PropertyKey,
-        Statement, TSInterfaceDeclaration, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
-        TSSignature, TSType, TSTypeAnnotation, TSTypeName, TSTypeParameterDeclaration,
+        Argument, Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind,
+        Expression, FormalParameters, ImportDeclarationSpecifier, ModuleExportName, Program,
+        PropertyKey, Statement, TSInterfaceDeclaration, TSLiteral, TSNamespaceDeclaration,
+        TSNamespaceDeclarationBody, TSSignature, TSType, TSTypeAnnotation, TSTypeName,
+        TSTypeParameterDeclaration,
     },
     AstKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_semantic::{JSDoc, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::{operator::BinaryOperator, symbol::SymbolId};
+use oxc_syntax::{
+    operator::{BinaryOperator, UnaryOperator},
+    symbol::SymbolId,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -322,6 +326,7 @@ pub(super) struct SystemApiSymbol {
     members: FxHashMap<Box<str>, SystemApiSymbol>,
     references: Vec<SystemApiTypeProjection>,
     type_parameters: Vec<SystemApiTypeParameter>,
+    value_type: Option<SystemApiValueType>,
     call_signatures: Vec<SystemApiCallSignature>,
     awaited: Option<Box<SystemApiSymbol>>,
     type_table: Option<Arc<FxHashMap<Box<str>, SystemApiSymbol>>>,
@@ -333,6 +338,7 @@ impl PartialEq for SystemApiSymbol {
             && self.members == other.members
             && self.references == other.references
             && self.type_parameters == other.type_parameters
+            && self.value_type == other.value_type
             && self.call_signatures == other.call_signatures
             && self.awaited == other.awaited
     }
@@ -346,6 +352,7 @@ impl SystemApiSymbol {
             && self.members.is_empty()
             && self.references.is_empty()
             && self.type_parameters.is_empty()
+            && self.value_type.is_none()
             && self.call_signatures.is_empty()
             && self.awaited.is_none()
     }
@@ -363,6 +370,7 @@ impl SystemApiSymbol {
         if self.type_parameters.is_empty() {
             self.type_parameters.clone_from(&other.type_parameters);
         }
+        SystemApiValueType::merge_optional(&mut self.value_type, &other.value_type);
         for signature in &other.call_signatures {
             if !self.call_signatures.contains(signature) {
                 self.call_signatures.push(signature.clone());
@@ -402,6 +410,7 @@ impl SystemApiSymbol {
             members: self.members.clone(),
             call_signatures: self.call_signatures.clone(),
             awaited: self.awaited.clone(),
+            value_type: self.value_type.clone(),
             type_table: self.type_table.clone(),
             ..Self::default()
         }
@@ -450,6 +459,10 @@ impl SystemApiSymbol {
     }
 
     fn add_type_projection(&mut self, projection: SystemApiTypeProjection) {
+        SystemApiValueType::merge_optional(
+            &mut self.value_type,
+            &Some(SystemApiValueType::from_projection(&projection)),
+        );
         match projection {
             SystemApiTypeProjection::Named { path, arguments } => {
                 let reference = SystemApiTypeProjection::Named { path, arguments };
@@ -493,6 +506,9 @@ impl SystemApiSymbol {
         for reference in &mut self.references {
             *reference = reference.substitute_parameters(parameters, arguments, protected);
         }
+        if let Some(value_type) = self.value_type.as_mut() {
+            *value_type = value_type.substitute_parameters(parameters, arguments, protected);
+        }
         for signature in &mut self.call_signatures {
             signature.substitute_outer(parameters, arguments);
         }
@@ -505,10 +521,10 @@ impl SystemApiSymbol {
     }
 
     fn call_result(&self, call: &SystemApiCall) -> Option<Self> {
-        let mut matches = self
-            .call_signatures
-            .iter()
-            .filter(|signature| signature.accepts(call.argument_count));
+        let best_score = self.best_call_score(call)?;
+        let mut matches = self.call_signatures.iter().filter(|signature| {
+            signature.match_score(call, self.type_table.as_deref()) == Some(best_score)
+        });
         let first = matches.next()?;
         let Some(second) = matches.next() else {
             let mut result = first.result(call);
@@ -525,15 +541,22 @@ impl SystemApiSymbol {
     }
 
     fn call_contract(&self, call: &SystemApiCall) -> Option<SystemApiContract> {
-        let mut matches = self
-            .call_signatures
-            .iter()
-            .filter(|signature| signature.accepts(call.argument_count));
+        let best_score = self.best_call_score(call)?;
+        let mut matches = self.call_signatures.iter().filter(|signature| {
+            signature.match_score(call, self.type_table.as_deref()) == Some(best_score)
+        });
         let mut contract = matches.next()?.contract.clone();
         for signature in matches {
             contract.merge(&signature.contract);
         }
         Some(contract)
+    }
+
+    fn best_call_score(&self, call: &SystemApiCall) -> Option<u32> {
+        self.call_signatures
+            .iter()
+            .filter_map(|signature| signature.match_score(call, self.type_table.as_deref()))
+            .max()
     }
 
     fn awaited_result(&self) -> Option<Self> {
@@ -547,6 +570,8 @@ impl SystemApiSymbol {
 struct SystemApiCallSignature {
     min_arguments: usize,
     max_arguments: Option<usize>,
+    parameters: Vec<SystemApiValueType>,
+    rest_parameter: Option<SystemApiValueType>,
     type_parameters: Vec<SystemApiTypeParameter>,
     result: Option<SystemApiTypeProjection>,
     contract: SystemApiContract,
@@ -568,6 +593,26 @@ impl SystemApiCallSignature {
         Self {
             min_arguments,
             max_arguments,
+            parameters: params
+                .items
+                .iter()
+                .map(|parameter| {
+                    parameter
+                        .type_annotation
+                        .as_ref()
+                        .map_or(SystemApiValueType::Unknown, |annotation| {
+                            SystemApiValueType::new(&annotation.type_annotation)
+                        })
+                })
+                .collect(),
+            rest_parameter: params.rest.as_ref().map(|parameter| {
+                parameter
+                    .type_annotation
+                    .as_ref()
+                    .map_or(SystemApiValueType::Unknown, |annotation| {
+                        SystemApiValueType::new_rest(&annotation.type_annotation)
+                    })
+            }),
             type_parameters: SystemApiTypeParameter::from_declaration(type_parameters),
             result: return_type
                 .and_then(|annotation| SystemApiTypeProjection::new(&annotation.type_annotation)),
@@ -580,6 +625,30 @@ impl SystemApiCallSignature {
             && self
                 .max_arguments
                 .is_none_or(|maximum| argument_count <= maximum)
+    }
+
+    fn match_score(
+        &self,
+        call: &SystemApiCall,
+        type_table: Option<&FxHashMap<Box<str>, SystemApiSymbol>>,
+    ) -> Option<u32> {
+        if !self.accepts(call.arguments.len()) {
+            return None;
+        }
+        let mut score = 0u32;
+        for (index, argument) in call.arguments.iter().enumerate() {
+            let parameter = self
+                .parameters
+                .get(index)
+                .or(self.rest_parameter.as_ref())?;
+            score = score.checked_add(parameter.match_score(
+                argument,
+                type_table,
+                &self.type_parameters,
+                &mut FxHashSet::default(),
+            )?)?;
+        }
+        Some(score)
     }
 
     fn result(&self, call: &SystemApiCall) -> SystemApiSymbol {
@@ -599,6 +668,13 @@ impl SystemApiCallSignature {
         parameters: &[SystemApiTypeParameter],
         arguments: &[Option<SystemApiTypeProjection>],
     ) {
+        for parameter in &mut self.parameters {
+            *parameter =
+                parameter.substitute_parameters(parameters, arguments, Some(&self.type_parameters));
+        }
+        if let Some(rest) = self.rest_parameter.as_mut() {
+            *rest = rest.substitute_parameters(parameters, arguments, Some(&self.type_parameters));
+        }
         if let Some(result) = self.result.as_mut() {
             *result =
                 result.substitute_parameters(parameters, arguments, Some(&self.type_parameters));
@@ -658,6 +734,440 @@ impl SystemApiTypeParameter {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SystemApiValueType {
+    Unknown,
+    Never,
+    Nullish,
+    String(Option<Box<str>>),
+    Number(Option<u64>),
+    Boolean(Option<bool>),
+    BigInt(Option<Box<str>>),
+    Symbol,
+    Callable,
+    Object,
+    Array,
+    Named(Vec<Box<str>>),
+    Union(Vec<SystemApiValueType>),
+    Intersection(Vec<SystemApiValueType>),
+}
+
+impl SystemApiValueType {
+    fn new(ty: &TSType<'_>) -> Self {
+        match ty {
+            TSType::TSAnyKeyword(_) | TSType::TSUnknownKeyword(_) | TSType::JSDocUnknownType(_) => {
+                Self::Unknown
+            }
+            TSType::TSNeverKeyword(_) => Self::Never,
+            TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_) | TSType::TSVoidKeyword(_) => {
+                Self::Nullish
+            }
+            TSType::TSStringKeyword(_) | TSType::TSTemplateLiteralType(_) => Self::String(None),
+            TSType::TSNumberKeyword(_) => Self::Number(None),
+            TSType::TSBooleanKeyword(_) => Self::Boolean(None),
+            TSType::TSBigIntKeyword(_) => Self::BigInt(None),
+            TSType::TSSymbolKeyword(_) => Self::Symbol,
+            TSType::TSObjectKeyword(_) | TSType::TSTypeLiteral(_) | TSType::TSMappedType(_) => {
+                Self::Object
+            }
+            TSType::TSFunctionType(_) | TSType::TSConstructorType(_) => Self::Callable,
+            TSType::TSArrayType(_) | TSType::TSTupleType(_) => Self::Array,
+            TSType::TSTypeReference(reference) => {
+                Self::Named(SystemApiTypeName::new(&reference.type_name).path())
+            }
+            TSType::TSLiteralType(literal) => match &literal.literal {
+                TSLiteral::StringLiteral(value) => Self::String(Some(value.value.as_str().into())),
+                TSLiteral::NumericLiteral(value) => Self::Number(Some(value.value.to_bits())),
+                TSLiteral::BooleanLiteral(value) => Self::Boolean(Some(value.value)),
+                TSLiteral::BigIntLiteral(value) => Self::BigInt(Some(value.value.as_str().into())),
+                TSLiteral::TemplateLiteral(_) => Self::String(None),
+                TSLiteral::UnaryExpression(unary)
+                    if matches!(
+                        unary.operator,
+                        UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus
+                    ) && matches!(&unary.argument, Expression::NumericLiteral(_)) =>
+                {
+                    Self::Number(None)
+                }
+                TSLiteral::UnaryExpression(_) => Self::Unknown,
+            },
+            TSType::TSUnionType(union) => Self::Union(union.types.iter().map(Self::new).collect()),
+            TSType::TSIntersectionType(intersection) => {
+                Self::Intersection(intersection.types.iter().map(Self::new).collect())
+            }
+            TSType::TSParenthesizedType(parenthesized) => Self::new(&parenthesized.type_annotation),
+            TSType::TSTypeOperatorType(operator) => Self::new(&operator.type_annotation),
+            TSType::JSDocNullableType(nullable) => {
+                Self::Union(vec![Self::new(&nullable.type_annotation), Self::Nullish])
+            }
+            TSType::JSDocNonNullableType(non_nullable) => Self::new(&non_nullable.type_annotation),
+            TSType::TSConditionalType(_)
+            | TSType::TSImportType(_)
+            | TSType::TSIndexedAccessType(_)
+            | TSType::TSInferType(_)
+            | TSType::TSNamedTupleMember(_)
+            | TSType::TSThisType(_)
+            | TSType::TSTypePredicate(_)
+            | TSType::TSTypeQuery(_)
+            | TSType::TSIntrinsicKeyword(_) => Self::Unknown,
+        }
+    }
+
+    fn new_rest(ty: &TSType<'_>) -> Self {
+        match ty {
+            TSType::TSArrayType(array) => Self::new(&array.element_type),
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::new_rest(&parenthesized.type_annotation)
+            }
+            _ => Self::Unknown,
+        }
+    }
+
+    fn from_local_type(
+        ty: &TSType<'_>,
+        scoping: &Scoping,
+        known: &FxHashMap<SymbolId, SystemApiValueType>,
+        imported_types: &FxHashMap<SymbolId, SystemApiSymbol>,
+    ) -> Self {
+        match ty {
+            TSType::TSTypeReference(reference) => {
+                let type_name = SystemApiTypeName::new(&reference.type_name);
+                let Some(root) = type_name.root_reference() else {
+                    return Self::new(ty);
+                };
+                let Some(symbol_id) = root
+                    .reference_id
+                    .get()
+                    .and_then(|reference_id| scoping.get_reference(reference_id).symbol_id())
+                else {
+                    return Self::new(ty);
+                };
+                let path = type_name.path();
+                if path.len() == 1 {
+                    if let Some(value_type) = known.get(&symbol_id) {
+                        return value_type.clone();
+                    }
+                }
+                let Some(mut symbol) = imported_types.get(&symbol_id).cloned() else {
+                    return Self::new(ty);
+                };
+                for segment in &path[1..] {
+                    let Some(member) = symbol.resolved_member(segment) else {
+                        return Self::new(ty);
+                    };
+                    symbol = member;
+                }
+                symbol.value_type.unwrap_or_else(|| Self::new(ty))
+            }
+            TSType::TSUnionType(union) => Self::Union(
+                union
+                    .types
+                    .iter()
+                    .map(|ty| Self::from_local_type(ty, scoping, known, imported_types))
+                    .collect(),
+            ),
+            TSType::TSIntersectionType(intersection) => Self::Intersection(
+                intersection
+                    .types
+                    .iter()
+                    .map(|ty| Self::from_local_type(ty, scoping, known, imported_types))
+                    .collect(),
+            ),
+            TSType::TSParenthesizedType(parenthesized) => Self::from_local_type(
+                &parenthesized.type_annotation,
+                scoping,
+                known,
+                imported_types,
+            ),
+            TSType::TSTypeOperatorType(operator) => {
+                Self::from_local_type(&operator.type_annotation, scoping, known, imported_types)
+            }
+            TSType::JSDocNullableType(nullable) => Self::Union(vec![
+                Self::from_local_type(&nullable.type_annotation, scoping, known, imported_types),
+                Self::Nullish,
+            ]),
+            TSType::JSDocNonNullableType(non_nullable) => Self::from_local_type(
+                &non_nullable.type_annotation,
+                scoping,
+                known,
+                imported_types,
+            ),
+            _ => Self::new(ty),
+        }
+    }
+
+    fn from_argument(
+        argument: &Argument<'_>,
+        scoping: &Scoping,
+        local: &FxHashMap<SymbolId, SystemApiValueType>,
+    ) -> Self {
+        argument
+            .as_expression()
+            .map_or(Self::Unknown, |expression| {
+                Self::from_expression(expression, scoping, local)
+            })
+    }
+
+    fn from_enum(enumeration: &oxc_ast::ast::TSEnumDeclaration<'_>) -> Self {
+        let mut has_string = false;
+        let mut has_number = false;
+        for member in &enumeration.body.members {
+            match member.initializer.as_ref() {
+                Some(Expression::StringLiteral(_)) => has_string = true,
+                Some(Expression::NumericLiteral(_)) => has_number = true,
+                Some(Expression::UnaryExpression(unary))
+                    if matches!(
+                        unary.operator,
+                        UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus
+                    ) && matches!(&unary.argument, Expression::NumericLiteral(_)) =>
+                {
+                    has_number = true;
+                }
+                Some(_) => return Self::Unknown,
+                None => has_number = true,
+            }
+        }
+        match (has_string, has_number) {
+            (true, true) => Self::Union(vec![Self::String(None), Self::Number(None)]),
+            (true, false) => Self::String(None),
+            _ => Self::Number(None),
+        }
+    }
+
+    fn from_projection(projection: &SystemApiTypeProjection) -> Self {
+        match projection {
+            SystemApiTypeProjection::Named { path, .. } => Self::Named(path.clone()),
+            SystemApiTypeProjection::Awaited(_) => Self::Object,
+            SystemApiTypeProjection::Composite(projections) => {
+                Self::Union(projections.iter().map(Self::from_projection).collect())
+            }
+        }
+    }
+
+    fn from_expression(
+        expression: &Expression<'_>,
+        scoping: &Scoping,
+        local: &FxHashMap<SymbolId, SystemApiValueType>,
+    ) -> Self {
+        match expression {
+            Expression::StringLiteral(value) => Self::String(Some(value.value.as_str().into())),
+            Expression::NumericLiteral(value) => Self::Number(Some(value.value.to_bits())),
+            Expression::BooleanLiteral(value) => Self::Boolean(Some(value.value)),
+            Expression::BigIntLiteral(value) => Self::BigInt(Some(value.value.as_str().into())),
+            Expression::NullLiteral(_) => Self::Nullish,
+            Expression::TemplateLiteral(_) => Self::String(None),
+            Expression::ArrowFunctionExpression(_)
+            | Expression::FunctionExpression(_)
+            | Expression::ClassExpression(_) => Self::Callable,
+            Expression::ObjectExpression(_) => Self::Object,
+            Expression::ArrayExpression(_) => Self::Array,
+            Expression::RegExpLiteral(_) => Self::Object,
+            Expression::Identifier(identifier) if identifier.name == "undefined" => Self::Nullish,
+            Expression::Identifier(identifier) => identifier
+                .reference_id
+                .get()
+                .and_then(|reference_id| scoping.get_reference(reference_id).symbol_id())
+                .and_then(|symbol_id| local.get(&symbol_id))
+                .cloned()
+                .unwrap_or(Self::Unknown),
+            Expression::StaticMemberExpression(member) => {
+                match Self::from_expression(&member.object, scoping, local) {
+                    primitive @ (Self::String(_)
+                    | Self::Number(_)
+                    | Self::Boolean(_)
+                    | Self::BigInt(_)) => primitive,
+                    _ => Self::Unknown,
+                }
+            }
+            Expression::ComputedMemberExpression(member) => {
+                match Self::from_expression(&member.object, scoping, local) {
+                    primitive @ (Self::String(_)
+                    | Self::Number(_)
+                    | Self::Boolean(_)
+                    | Self::BigInt(_)) => primitive,
+                    _ => Self::Unknown,
+                }
+            }
+            Expression::ParenthesizedExpression(parenthesized) => {
+                Self::from_expression(&parenthesized.expression, scoping, local)
+            }
+            Expression::TSAsExpression(assertion) => Self::new(&assertion.type_annotation),
+            Expression::TSSatisfiesExpression(assertion) => Self::new(&assertion.type_annotation),
+            Expression::TSTypeAssertion(assertion) => Self::new(&assertion.type_annotation),
+            Expression::TSNonNullExpression(non_null) => {
+                Self::from_expression(&non_null.expression, scoping, local)
+            }
+            Expression::UnaryExpression(unary)
+                if matches!(
+                    unary.operator,
+                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus
+                ) && matches!(&unary.argument, Expression::NumericLiteral(_)) =>
+            {
+                Self::Number(None)
+            }
+            _ => Self::Unknown,
+        }
+    }
+
+    fn merge_optional(target: &mut Option<Self>, source: &Option<Self>) {
+        let Some(source) = source else {
+            return;
+        };
+        match target {
+            None => *target = Some(source.clone()),
+            Some(current) if current == source => {}
+            Some(Self::Union(types)) => {
+                if !types.contains(source) {
+                    types.push(source.clone());
+                }
+            }
+            Some(current) => {
+                *current = Self::Union(vec![current.clone(), source.clone()]);
+            }
+        }
+    }
+
+    fn substitute_parameters(
+        &self,
+        parameters: &[SystemApiTypeParameter],
+        arguments: &[Option<SystemApiTypeProjection>],
+        protected: Option<&[SystemApiTypeParameter]>,
+    ) -> Self {
+        match self {
+            Self::Named(path)
+                if path.len() == 1
+                    && !protected.is_some_and(|protected| {
+                        protected.iter().any(|parameter| parameter.name == path[0])
+                    }) =>
+            {
+                parameters
+                    .iter()
+                    .position(|parameter| parameter.name == path[0])
+                    .and_then(|index| arguments.get(index))
+                    .and_then(Option::as_ref)
+                    .map_or_else(|| self.clone(), Self::from_projection)
+            }
+            Self::Union(types) => Self::Union(
+                types
+                    .iter()
+                    .map(|ty| ty.substitute_parameters(parameters, arguments, protected))
+                    .collect(),
+            ),
+            Self::Intersection(types) => Self::Intersection(
+                types
+                    .iter()
+                    .map(|ty| ty.substitute_parameters(parameters, arguments, protected))
+                    .collect(),
+            ),
+            _ => self.clone(),
+        }
+    }
+
+    fn match_score(
+        &self,
+        argument: &Self,
+        type_table: Option<&FxHashMap<Box<str>, SystemApiSymbol>>,
+        type_parameters: &[SystemApiTypeParameter],
+        active: &mut FxHashSet<Vec<Box<str>>>,
+    ) -> Option<u32> {
+        if matches!(argument, Self::Unknown) || matches!(self, Self::Unknown) {
+            return Some(0);
+        }
+        if let Self::Named(argument_path) = argument {
+            let exact_named = matches!(self, Self::Named(path) if path == argument_path);
+            if !exact_named && active.insert(argument_path.clone()) {
+                if let Some(resolved) = Self::resolve_named(argument_path, type_table) {
+                    let result = self.match_score(resolved, type_table, type_parameters, active);
+                    active.remove(argument_path);
+                    return result;
+                }
+                active.remove(argument_path);
+            }
+        }
+        match self {
+            Self::Never => None,
+            Self::Nullish => matches!(argument, Self::Nullish).then_some(4),
+            Self::String(expected) => match argument {
+                Self::String(actual) if expected.is_none() => Some(4),
+                Self::String(actual) if expected == actual => Some(8),
+                _ => None,
+            },
+            Self::Number(expected) => match argument {
+                Self::Number(actual) if expected.is_none() => Some(4),
+                Self::Number(actual) if expected == actual => Some(8),
+                _ => None,
+            },
+            Self::Boolean(expected) => match argument {
+                Self::Boolean(actual) if expected.is_none() => Some(4),
+                Self::Boolean(actual) if expected == actual => Some(8),
+                _ => None,
+            },
+            Self::BigInt(expected) => match argument {
+                Self::BigInt(actual) if expected.is_none() => Some(4),
+                Self::BigInt(actual) if expected == actual => Some(8),
+                _ => None,
+            },
+            Self::Symbol => matches!(argument, Self::Symbol).then_some(4),
+            Self::Callable => matches!(argument, Self::Callable).then_some(6),
+            Self::Object => matches!(
+                argument,
+                Self::Object | Self::Array | Self::Callable | Self::Named(_)
+            )
+            .then_some(3),
+            Self::Array => matches!(argument, Self::Array).then_some(5),
+            Self::Named(path) => {
+                if path.len() == 1
+                    && type_parameters
+                        .iter()
+                        .any(|parameter| parameter.name == path[0])
+                {
+                    return Some(1);
+                }
+                if matches!(argument, Self::Named(argument_path) if argument_path == path) {
+                    return Some(9);
+                }
+                if !active.insert(path.clone()) {
+                    return Some(0);
+                }
+                let result = Self::resolve_named(path, type_table).map_or(Some(0), |resolved| {
+                    resolved.match_score(argument, type_table, type_parameters, active)
+                });
+                active.remove(path);
+                result
+            }
+            Self::Union(types) => types
+                .iter()
+                .filter_map(|ty| ty.match_score(argument, type_table, type_parameters, active))
+                .max(),
+            Self::Intersection(types) => {
+                let mut score = 0u32;
+                for ty in types {
+                    score = score.checked_add(ty.match_score(
+                        argument,
+                        type_table,
+                        type_parameters,
+                        active,
+                    )?)?;
+                }
+                Some(score)
+            }
+            Self::Unknown => Some(0),
+        }
+    }
+
+    fn resolve_named<'a>(
+        path: &[Box<str>],
+        type_table: Option<&'a FxHashMap<Box<str>, SystemApiSymbol>>,
+    ) -> Option<&'a Self> {
+        let table = type_table?;
+        let mut symbol = table.get(path.first()?)?;
+        for segment in &path[1..] {
+            symbol = symbol.members.get(segment)?;
+        }
+        symbol.value_type.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct ExportedSystemApiSymbols {
     pub(super) named: FxHashMap<Box<str>, SystemApiSymbol>,
@@ -701,6 +1211,18 @@ impl ExportedSystemApiSymbols {
         }
     }
 
+    pub(super) fn bind_type_table(
+        &mut self,
+        type_table: &Arc<FxHashMap<Box<str>, SystemApiSymbol>>,
+    ) {
+        for symbol in self.named.values_mut() {
+            symbol.type_table = Some(Arc::clone(type_table));
+        }
+        if let Some(symbol) = self.default.as_mut() {
+            symbol.type_table = Some(Arc::clone(type_table));
+        }
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.named.is_empty() && self.default.is_none()
     }
@@ -740,11 +1262,14 @@ impl SystemApiModuleFacts {
         collector.finish()
     }
 
-    pub(super) fn resolve_local_references(local: &mut FxHashMap<Box<str>, SystemApiSymbol>) {
+    pub(super) fn resolve_local_references(
+        local: &mut FxHashMap<Box<str>, SystemApiSymbol>,
+    ) -> Arc<FxHashMap<Box<str>, SystemApiSymbol>> {
         let type_table = Arc::new(local.clone());
         for symbol in local.values_mut() {
             symbol.type_table = Some(Arc::clone(&type_table));
         }
+        type_table
     }
 }
 
@@ -1010,6 +1535,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                     self.symbol_for_spans(alias.id.name.as_str(), [wrapper_span, Some(alias.span)]);
                 symbol.type_parameters =
                     SystemApiTypeParameter::from_declaration(alias.type_parameters.as_deref());
+                symbol.value_type = Some(SystemApiValueType::new(&alias.type_annotation));
                 if let Some(projection) = SystemApiTypeProjection::new(&alias.type_annotation) {
                     symbol.add_type_projection(projection);
                 }
@@ -1026,6 +1552,8 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                         [wrapper_span, Some(declaration.span), Some(variable.span)],
                     );
                     if let Some(annotation) = &declaration.type_annotation {
+                        symbol.value_type =
+                            Some(SystemApiValueType::new(&annotation.type_annotation));
                         if let Some(projection) =
                             SystemApiTypeProjection::new(&annotation.type_annotation)
                         {
@@ -1041,6 +1569,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                     enumeration.id.name.as_str(),
                     [wrapper_span, Some(enumeration.span)],
                 );
+                symbol.value_type = Some(SystemApiValueType::from_enum(enumeration));
                 for member in &enumeration.body.members {
                     let member_function = format!(
                         "{}#{}",
@@ -1096,6 +1625,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
             namespace.id.name.as_str(),
             [wrapper_span, Some(namespace.span)],
         );
+        symbol.value_type = Some(SystemApiValueType::Object);
         SystemApiModuleFacts::resolve_local_references(&mut nested.facts.local);
         for (local, exported_name) in &nested.facts.direct_bindings {
             if let Some(member) = nested.facts.local.get(local) {
@@ -1125,6 +1655,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                 .map_or("unnamed", |identifier| identifier.name.as_str()),
             [wrapper_span, Some(class.span)],
         );
+        symbol.value_type = Some(SystemApiValueType::Object);
         symbol.type_parameters =
             SystemApiTypeParameter::from_declaration(class.type_parameters.as_deref());
         if let Some(heritage) = &class.heritage {
@@ -1184,6 +1715,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
             interface.id.name.as_str(),
             [wrapper_span, Some(interface.span)],
         );
+        symbol.value_type = Some(SystemApiValueType::Object);
         symbol.type_parameters =
             SystemApiTypeParameter::from_declaration(interface.type_parameters.as_deref());
         for heritage in &interface.extends {
@@ -1248,6 +1780,9 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                 TSSignature::ETSOverloadDeclaration(overload) => {
                     self.insert_member(&mut symbol, &overload.key, overload.span, None);
                 }
+                TSSignature::TSCallSignatureDeclaration(_) => {
+                    symbol.value_type = Some(SystemApiValueType::Callable);
+                }
                 _ => {}
             }
         }
@@ -1269,6 +1804,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         );
         let mut symbol = SystemApiSymbol {
             contract: contract.clone(),
+            value_type: Some(SystemApiValueType::Callable),
             ..SystemApiSymbol::default()
         };
         symbol.call_signatures.push(SystemApiCallSignature::new(
@@ -1316,6 +1852,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         let member_function =
             Self::member_function(owner, &name).unwrap_or_else(|| self.function(&name));
         let member = owner.members.entry(name.into_owned().into()).or_default();
+        member.value_type = Some(SystemApiValueType::Callable);
         let contract = self.contract_for_spans(&member_function, [Some(span)]);
         member.contract.merge(&contract);
         let signature = SystemApiCallSignature::new(type_parameters, params, return_type, contract);
@@ -1640,6 +2177,14 @@ impl<'a> SystemApiTypeName<'a> {
             TSTypeName::ThisExpression(_) => Vec::new(),
         }
     }
+
+    fn root_reference(&self) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+        match self.name {
+            TSTypeName::IdentifierReference(identifier) => Some(identifier),
+            TSTypeName::QualifiedName(qualified) => Self::new(&qualified.left).root_reference(),
+            TSTypeName::ThisExpression(_) => None,
+        }
+    }
 }
 
 struct SystemApiExpressionPath {
@@ -1669,6 +2214,8 @@ impl SystemApiExportName {
 #[derive(Clone, Debug, Default)]
 pub(super) struct ImportedSystemApiBindings {
     symbols: FxHashMap<SymbolId, SystemApiSymbol>,
+    type_symbols: FxHashMap<SymbolId, SystemApiSymbol>,
+    argument_types: FxHashMap<SymbolId, SystemApiValueType>,
 }
 
 impl ImportedSystemApiBindings {
@@ -1686,9 +2233,6 @@ impl ImportedSystemApiBindings {
             let Statement::ImportDeclaration(import) = statement else {
                 continue;
             };
-            if import.import_kind.is_type() {
-                continue;
-            }
             let Some(target) = resolver.resolve(import.source.value.as_str()) else {
                 continue;
             };
@@ -1700,34 +2244,38 @@ impl ImportedSystemApiBindings {
             };
             for specifier in specifiers {
                 match specifier {
-                    ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                        if !specifier.import_kind.is_type() =>
-                    {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
                         if let Some(symbol) =
                             exports.get(SystemApiExportName::value(&specifier.imported))
                         {
-                            bindings
-                                .symbols
-                                .insert(specifier.local.symbol_id(), symbol.clone());
+                            let symbol_id = specifier.local.symbol_id();
+                            bindings.type_symbols.insert(symbol_id, symbol.clone());
+                            if !import.import_kind.is_type() && !specifier.import_kind.is_type() {
+                                bindings.symbols.insert(symbol_id, symbol.clone());
+                            }
                         }
                     }
                     ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
                         if let Some(symbol) = exports.default.as_ref() {
-                            bindings
-                                .symbols
-                                .insert(specifier.local.symbol_id(), symbol.clone());
+                            let symbol_id = specifier.local.symbol_id();
+                            bindings.type_symbols.insert(symbol_id, symbol.clone());
+                            if !import.import_kind.is_type() {
+                                bindings.symbols.insert(symbol_id, symbol.clone());
+                            }
                         }
                     }
                     ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                        bindings
-                            .symbols
-                            .insert(specifier.local.symbol_id(), exports.namespace());
+                        let symbol_id = specifier.local.symbol_id();
+                        let symbol = exports.namespace();
+                        bindings.type_symbols.insert(symbol_id, symbol.clone());
+                        if !import.import_kind.is_type() {
+                            bindings.symbols.insert(symbol_id, symbol);
+                        }
                     }
-                    _ => {}
                 }
             }
         }
-        bindings.collect_local_value_bindings(program, scoping);
+        bindings.collect_local_bindings(program, scoping);
         bindings
     }
 
@@ -1752,7 +2300,7 @@ impl ImportedSystemApiBindings {
         expression: &Expression<'_>,
         scoping: &Scoping,
     ) -> Option<SystemApiSymbol> {
-        let path = SystemApiValuePath::new(expression)?;
+        let path = SystemApiValuePath::new(expression, scoping, &self.argument_types)?;
         let mut symbol = self.root_symbol(path.root, scoping)?.clone();
         for segment in path.segments {
             symbol = match segment {
@@ -1781,7 +2329,17 @@ impl ImportedSystemApiBindings {
                 let mut symbol = self.resolve_value(&call.callee, scoping)?;
                 if !symbol.call_signatures.is_empty() {
                     symbol.contract = symbol.call_contract(&SystemApiCall {
-                        argument_count: call.arguments.len(),
+                        arguments: call
+                            .arguments
+                            .iter()
+                            .map(|argument| {
+                                SystemApiValueType::from_argument(
+                                    argument,
+                                    scoping,
+                                    &self.argument_types,
+                                )
+                            })
+                            .collect(),
                         type_arguments: Vec::new(),
                     })?;
                 }
@@ -1791,7 +2349,17 @@ impl ImportedSystemApiBindings {
                 let mut symbol = self.resolve_value(&constructor.callee, scoping)?;
                 if !symbol.call_signatures.is_empty() {
                     symbol.contract = symbol.call_contract(&SystemApiCall {
-                        argument_count: constructor.arguments.len(),
+                        arguments: constructor
+                            .arguments
+                            .iter()
+                            .map(|argument| {
+                                SystemApiValueType::from_argument(
+                                    argument,
+                                    scoping,
+                                    &self.argument_types,
+                                )
+                            })
+                            .collect(),
                         type_arguments: Vec::new(),
                     })?;
                 }
@@ -1801,26 +2369,198 @@ impl ImportedSystemApiBindings {
         }
     }
 
-    fn collect_local_value_bindings(&mut self, program: &Program<'_>, scoping: &Scoping) {
-        let mut rounds = 0usize;
-        loop {
-            let facts = SystemApiLocalValueCollector::new(self, scoping).collect(program);
-            let mut changed = false;
-            for fact in facts {
-                changed |= self.symbols.insert(fact.symbol_id, fact.symbol) != Some(fact.previous);
-            }
-            rounds += 1;
-            if !changed || rounds > self.symbols.len().saturating_add(1) {
+    fn collect_local_bindings(&mut self, program: &Program<'_>, scoping: &Scoping) {
+        for _ in 0..scoping.symbols_len().max(1) {
+            let mut changed = self.seed_argument_types_from_symbols();
+            changed |= self.collect_local_argument_types(program, scoping);
+            changed |= self.collect_local_value_bindings(program, scoping);
+            if !changed {
                 break;
             }
         }
+    }
+
+    fn collect_local_value_bindings(&mut self, program: &Program<'_>, scoping: &Scoping) -> bool {
+        let facts = SystemApiLocalValueCollector::new(self, scoping).collect(program);
+        let mut changed = false;
+        for fact in facts {
+            if self.symbols.get(&fact.symbol_id) != Some(&fact.symbol) {
+                self.symbols.insert(fact.symbol_id, fact.symbol);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn collect_local_argument_types(&mut self, program: &Program<'_>, scoping: &Scoping) -> bool {
+        let facts = SystemApiLocalArgumentTypeCollector::new(
+            &self.argument_types,
+            &self.type_symbols,
+            scoping,
+        )
+        .collect(program);
+        let mut changed = false;
+        for (symbol_id, value_type) in facts {
+            if self.argument_types.get(&symbol_id) != Some(&value_type) {
+                self.argument_types.insert(symbol_id, value_type);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn seed_argument_types_from_symbols(&mut self) -> bool {
+        let mut changed = false;
+        for (&symbol_id, symbol) in self.type_symbols.iter().chain(&self.symbols) {
+            if let Some(value_type) = symbol.value_type.as_ref() {
+                if self.argument_types.get(&symbol_id) != Some(value_type) {
+                    self.argument_types.insert(symbol_id, value_type.clone());
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+}
+
+struct SystemApiLocalArgumentTypeCollector<'a> {
+    known: &'a FxHashMap<SymbolId, SystemApiValueType>,
+    imported_types: &'a FxHashMap<SymbolId, SystemApiSymbol>,
+    scoping: &'a Scoping,
+    facts: Vec<(SymbolId, SystemApiValueType)>,
+}
+
+impl<'a> SystemApiLocalArgumentTypeCollector<'a> {
+    fn new(
+        known: &'a FxHashMap<SymbolId, SystemApiValueType>,
+        imported_types: &'a FxHashMap<SymbolId, SystemApiSymbol>,
+        scoping: &'a Scoping,
+    ) -> Self {
+        Self {
+            known,
+            imported_types,
+            scoping,
+            facts: Vec::new(),
+        }
+    }
+
+    fn collect(mut self, program: &Program<'_>) -> Vec<(SymbolId, SystemApiValueType)> {
+        self.visit_program(program);
+        self.facts
+    }
+
+    fn record(
+        &mut self,
+        identifier: &oxc_ast::ast::BindingIdentifier<'_>,
+        value_type: SystemApiValueType,
+    ) {
+        self.facts.push((identifier.symbol_id(), value_type));
+    }
+}
+
+impl<'program> Visit<'program> for SystemApiLocalArgumentTypeCollector<'_> {
+    fn visit_variable_declarator(
+        &mut self,
+        declaration: &oxc_ast::ast::VariableDeclarator<'program>,
+    ) {
+        if let Some(identifier) = declaration.id.get_binding_identifier() {
+            let value_type = declaration
+                .type_annotation
+                .as_ref()
+                .map(|annotation| {
+                    SystemApiValueType::from_local_type(
+                        &annotation.type_annotation,
+                        self.scoping,
+                        self.known,
+                        self.imported_types,
+                    )
+                })
+                .or_else(|| {
+                    declaration.init.as_ref().map(|initializer| {
+                        SystemApiValueType::from_expression(initializer, self.scoping, self.known)
+                    })
+                });
+            if let Some(value_type) = value_type {
+                self.record(identifier, value_type);
+            }
+        }
+        walk::walk_variable_declarator(self, declaration);
+    }
+
+    fn visit_formal_parameter(&mut self, parameter: &oxc_ast::ast::FormalParameter<'program>) {
+        if let (Some(identifier), Some(annotation)) = (
+            parameter.pattern.get_binding_identifier(),
+            parameter.type_annotation.as_ref(),
+        ) {
+            self.record(
+                identifier,
+                SystemApiValueType::from_local_type(
+                    &annotation.type_annotation,
+                    self.scoping,
+                    self.known,
+                    self.imported_types,
+                ),
+            );
+        }
+        walk::walk_formal_parameter(self, parameter);
+    }
+
+    fn visit_function(
+        &mut self,
+        function: &oxc_ast::ast::Function<'program>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        if let Some(identifier) = function.id.as_ref() {
+            self.record(identifier, SystemApiValueType::Callable);
+        }
+        walk::walk_function(self, function, flags);
+    }
+
+    fn visit_ts_type_alias_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::TSTypeAliasDeclaration<'program>,
+    ) {
+        self.record(
+            &declaration.id,
+            SystemApiValueType::from_local_type(
+                &declaration.type_annotation,
+                self.scoping,
+                self.known,
+                self.imported_types,
+            ),
+        );
+        walk::walk_ts_type_alias_declaration(self, declaration);
+    }
+
+    fn visit_ts_interface_declaration(&mut self, interface: &TSInterfaceDeclaration<'program>) {
+        let callable = interface
+            .body
+            .body
+            .iter()
+            .any(|signature| matches!(signature, TSSignature::TSCallSignatureDeclaration(_)));
+        self.record(
+            &interface.id,
+            if callable {
+                SystemApiValueType::Callable
+            } else {
+                SystemApiValueType::Object
+            },
+        );
+        walk::walk_ts_interface_declaration(self, interface);
+    }
+
+    fn visit_ts_enum_declaration(
+        &mut self,
+        enumeration: &oxc_ast::ast::TSEnumDeclaration<'program>,
+    ) {
+        self.record(&enumeration.id, SystemApiValueType::from_enum(enumeration));
+        walk::walk_ts_enum_declaration(self, enumeration);
     }
 }
 
 struct SystemApiLocalValueFact {
     symbol_id: SymbolId,
     symbol: SystemApiSymbol,
-    previous: SystemApiSymbol,
 }
 
 struct SystemApiLocalValueCollector<'a> {
@@ -1855,16 +2595,8 @@ impl<'program> Visit<'program> for SystemApiLocalValueCollector<'_> {
         ) {
             if let Some(symbol) = self.bindings.resolve_value(initializer, self.scoping) {
                 let symbol_id = identifier.symbol_id();
-                self.facts.push(SystemApiLocalValueFact {
-                    previous: self
-                        .bindings
-                        .symbols
-                        .get(&symbol_id)
-                        .cloned()
-                        .unwrap_or_default(),
-                    symbol_id,
-                    symbol,
-                });
+                self.facts
+                    .push(SystemApiLocalValueFact { symbol_id, symbol });
             }
         }
         walk::walk_variable_declarator(self, declaration);
@@ -2294,19 +3026,23 @@ enum SystemApiValueSegment {
 }
 
 struct SystemApiCall {
-    argument_count: usize,
+    arguments: Vec<SystemApiValueType>,
     type_arguments: Vec<Option<SystemApiTypeProjection>>,
 }
 
 impl<'a> SystemApiValuePath<'a> {
-    fn new(expression: &'a Expression<'a>) -> Option<Self> {
+    fn new(
+        expression: &'a Expression<'a>,
+        scoping: &Scoping,
+        local_types: &FxHashMap<SymbolId, SystemApiValueType>,
+    ) -> Option<Self> {
         match expression {
             Expression::Identifier(root) => Some(Self {
                 root,
                 segments: Vec::new(),
             }),
             Expression::StaticMemberExpression(member) => {
-                let mut path = Self::new(&member.object)?;
+                let mut path = Self::new(&member.object, scoping, local_types)?;
                 path.segments.push(SystemApiValueSegment::Member(
                     member.property.name.as_str().into(),
                 ));
@@ -2316,14 +3052,14 @@ impl<'a> SystemApiValuePath<'a> {
                 let Expression::StringLiteral(property) = &member.expression else {
                     return None;
                 };
-                let mut path = Self::new(&member.object)?;
+                let mut path = Self::new(&member.object, scoping, local_types)?;
                 path.segments.push(SystemApiValueSegment::Member(
                     property.value.as_str().into(),
                 ));
                 Some(path)
             }
             Expression::CallExpression(call) => {
-                let mut path = Self::new(&call.callee)?;
+                let mut path = Self::new(&call.callee, scoping, local_types)?;
                 let type_arguments = call
                     .type_arguments
                     .as_ref()
@@ -2349,13 +3085,19 @@ impl<'a> SystemApiValuePath<'a> {
                 }
                 path.segments
                     .push(SystemApiValueSegment::Call(SystemApiCall {
-                        argument_count: call.arguments.len(),
+                        arguments: call
+                            .arguments
+                            .iter()
+                            .map(|argument| {
+                                SystemApiValueType::from_argument(argument, scoping, local_types)
+                            })
+                            .collect(),
                         type_arguments,
                     }));
                 Some(path)
             }
             Expression::NewExpression(constructor) => {
-                let mut path = Self::new(&constructor.callee)?;
+                let mut path = Self::new(&constructor.callee, scoping, local_types)?;
                 let type_arguments = constructor
                     .type_arguments
                     .as_ref()
@@ -2381,25 +3123,39 @@ impl<'a> SystemApiValuePath<'a> {
                 }
                 path.segments
                     .push(SystemApiValueSegment::Call(SystemApiCall {
-                        argument_count: constructor.arguments.len(),
+                        arguments: constructor
+                            .arguments
+                            .iter()
+                            .map(|argument| {
+                                SystemApiValueType::from_argument(argument, scoping, local_types)
+                            })
+                            .collect(),
                         type_arguments,
                     }));
                 Some(path)
             }
             Expression::AwaitExpression(await_expression) => {
-                let mut path = Self::new(&await_expression.argument)?;
+                let mut path = Self::new(&await_expression.argument, scoping, local_types)?;
                 path.segments.push(SystemApiValueSegment::Await);
                 Some(path)
             }
             Expression::ParenthesizedExpression(parenthesized) => {
-                Self::new(&parenthesized.expression)
+                Self::new(&parenthesized.expression, scoping, local_types)
             }
-            Expression::TSAsExpression(as_expression) => Self::new(&as_expression.expression),
-            Expression::TSSatisfiesExpression(satisfies) => Self::new(&satisfies.expression),
-            Expression::TSNonNullExpression(non_null) => Self::new(&non_null.expression),
-            Expression::TSTypeAssertion(assertion) => Self::new(&assertion.expression),
+            Expression::TSAsExpression(as_expression) => {
+                Self::new(&as_expression.expression, scoping, local_types)
+            }
+            Expression::TSSatisfiesExpression(satisfies) => {
+                Self::new(&satisfies.expression, scoping, local_types)
+            }
+            Expression::TSNonNullExpression(non_null) => {
+                Self::new(&non_null.expression, scoping, local_types)
+            }
+            Expression::TSTypeAssertion(assertion) => {
+                Self::new(&assertion.expression, scoping, local_types)
+            }
             Expression::TSInstantiationExpression(instantiation) => {
-                let mut path = Self::new(&instantiation.expression)?;
+                let mut path = Self::new(&instantiation.expression, scoping, local_types)?;
                 path.segments.push(SystemApiValueSegment::TypeArguments(
                     instantiation
                         .type_arguments

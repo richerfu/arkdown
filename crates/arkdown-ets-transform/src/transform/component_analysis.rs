@@ -2722,7 +2722,9 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
             }
         }
 
-        SystemApiModuleFacts::resolve_local_references(&mut local_system_apis);
+        let system_api_type_table =
+            SystemApiModuleFacts::resolve_local_references(&mut local_system_apis);
+        entry.system_apis.bind_type_table(&system_api_type_table);
         for (local, exported) in &facts.direct_system_api_bindings {
             if let Some(symbol) = local_system_apis.get(local) {
                 entry.system_apis.insert(exported.clone(), symbol.clone());
