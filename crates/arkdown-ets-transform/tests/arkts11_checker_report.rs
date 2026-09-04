@@ -844,7 +844,7 @@ fn arkts11_system_api_selects_overloads_and_unwraps_awaited_generic_results() {
     files.insert(
         sdk_root.join("@ohos.demo.d.ts"),
         Arc::<str>::from(
-            "interface Manager {\n\
+            "export interface Manager {\n\
              /** @since 13 */\n\
              run(): void;\n\
              }\n\
@@ -888,13 +888,64 @@ fn arkts11_system_api_selects_overloads_and_unwraps_awaited_generic_results() {
 }
 
 #[test]
+fn arkts11_system_api_propagates_generic_arguments_through_named_wrappers() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "export interface Manager {\n\
+             /** @since 13 */\n\
+             run(): void;\n\
+             }\n\
+             export interface Legacy {}\n\
+             interface Envelope<T> { value: T; }\n\
+             type EnvelopeAlias<T> = Envelope<T>;\n\
+             interface DerivedEnvelope<T> extends EnvelopeAlias<T> {}\n\
+             interface DefaultEnvelope<T = Manager> { value: T; }\n\
+             export declare function wrapped<T>(): Promise<DerivedEnvelope<T>>;\n\
+             export declare function defaultWrapped(): DefaultEnvelope;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { wrapped, defaultWrapped, Manager, Legacy } from '@ohos.demo';\n\
+         async function useManagers(): Promise<void> {\n\
+           (await wrapped<Manager>()).value.run();\n\
+           (await wrapped<Legacy>()).value.run();\n\
+           defaultWrapped().value.run();\n\
+         }\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(
+        since,
+        2,
+        "generic aliases, inheritance, and declaration defaults must retain the instantiated SDK type: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
 fn arkts11_system_api_applies_explicit_function_and_method_type_arguments() {
     let sdk_root = PathBuf::from("/sdk/api");
     let mut files = rustc_hash::FxHashMap::default();
     files.insert(
         sdk_root.join("@ohos.demo.d.ts"),
         Arc::<str>::from(
-            "interface Manager {\n\
+            "export interface Manager {\n\
              /** @since 13 */\n\
              run(): void;\n\
              }\n\
