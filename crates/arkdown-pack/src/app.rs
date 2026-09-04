@@ -1,6 +1,6 @@
 //! Project-level APP packaging compatible with hvigor 6.24.3.
 //!
-//! The project task graph keeps orchestration in the CLI, while this module
+//! The project task graph keeps orchestration in the build service, while this module
 //! owns the typed inputs, pack-info merge, module staging, and SDK packing
 //! command. The external SDK JAR is intentionally retained for APP archives:
 //! it replaces each embedded HAP/HSP `pack.info` with the project document,

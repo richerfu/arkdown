@@ -68,7 +68,7 @@ impl OhosModuleType {
 /// Immutable per-module snapshot.
 ///
 /// Replaces repeated `read_module_json5`, `read_module_router_map_ref`,
-/// `module_resource_dirs`, and module-package lookups in CLI/profile/loader code.
+/// `module_resource_dirs`, and module-package lookups in build/profile/loader code.
 #[derive(Debug, Clone)]
 pub struct ModuleSnapshot {
     /// Module name (from `module.json5` `module.name`).

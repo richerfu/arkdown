@@ -6,7 +6,7 @@
 //!
 //! The DevEco Studio IDE communicates with the build system via a proprietary
 //! WebSocket protocol that requires protocol specification documents and SDK
-//! access.  This module implements the **CLI-side** event bus that:
+//! access. This module implements the build-service event bus that:
 //!
 //! 1. Emits JSON build-status events to stdout (for piping to IDE adapters).
 //! 2. Writes events to a lock-free event file that IDE extensions can poll.

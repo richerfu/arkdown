@@ -57,7 +57,7 @@ pub struct ArkChunk {
     ///
     /// hvigor's CompileArkTS module-mode backend compiles the full Rollup
     /// module graph (`getModuleIds()`), not just entry chunks. Preserve the
-    /// original string IDs so the CLI can generate `filesInfo.txt` from the
+    /// original string IDs so the build service can generate `filesInfo.txt` from the
     /// same graph surface.
     pub module_ids: Vec<String>,
     /// Whether this chunk is an entry chunk.

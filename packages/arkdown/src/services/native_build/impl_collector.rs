@@ -22,8 +22,8 @@ const KNOWN_ABI_DIRS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64", "x86", "
 /// hvigor `BuildDirConst.LIBS`, used by `dependency.getDefaultLibsDir()`.
 const HVIGOR_LIBS_DIR: &str = "libs";
 
-use crate::cmd::native_build::impl_types::*;
-use crate::cmd::native_build::zig::{NativeCmakeCompilerState, NativeZigToolchainWriter};
+use crate::services::native_build::impl_types::*;
+use crate::services::native_build::zig::{NativeCmakeCompilerState, NativeZigToolchainWriter};
 
 pub struct NativeLibCollector<'a> {
   pub(crate) module: &'a ModuleConfig,

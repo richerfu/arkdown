@@ -82,7 +82,7 @@ pub struct PackInput {
     pub output_path: PathBuf,
     /// Directory whose contents are copied into HAP under `resources/`.
     ///
-    /// The CLI passes the resource compiler's processed `.../res/default/resources`
+    /// The build-service passes the resource compiler's processed `.../res/default/resources`
     /// directory so the archive contains restool-style resource files rather than
     /// raw source `element/*.json` inputs.
     pub resources_src_dir: Option<PathBuf>,

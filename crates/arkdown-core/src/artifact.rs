@@ -88,7 +88,7 @@ impl ArtifactMeta {
 /// The kind of intermediate or final output produced by a build stage.
 ///
 /// `StageOutputKind` categorizes the outputs of each pipeline stage so that
-/// subsequent stages and the CLI runner can locate and consume them without
+/// subsequent stages and the build service can locate and consume them without
 /// hard-coding filesystem paths.
 ///
 /// # Upstream correspondence

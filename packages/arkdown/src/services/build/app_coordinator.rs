@@ -24,13 +24,13 @@ use arkdown_profile::{
 use arkdown_session::{BuildSession, DuplicateDependencyValidator, SdkToolKind};
 use arkdown_sign::SignBackendRunner;
 
-use crate::cmd::native_build::ProjectDebugSymbolCollector;
+use crate::services::native_build::ProjectDebugSymbolCollector;
 
-use super::args::BuildRequest;
 use super::coordinator::{
   BuildCoordinator, BuildOutput, BuildTaskLifecycle, BuildTaskObserver, NativeTaskCutoffReached,
 };
 use arkdown_build::layout::ModuleBuildLayout;
+use arkdown_build::request::BuildRequest;
 
 pub struct AppBuildCoordinator {
   session: Arc<BuildSession>,

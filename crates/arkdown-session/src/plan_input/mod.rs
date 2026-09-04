@@ -1,4 +1,4 @@
-//! Narrow plan input views for the CLI `BuildPlanBuilder`.
+//! Narrow plan input views for the application `BuildPlanBuilder`.
 //!
 //! Each `*PlanInput` type provides a narrow, stage-specific view of the
 //! session context for use by domain crates.  Domain crates receive these

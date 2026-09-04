@@ -62,9 +62,9 @@ impl WatchEvent {
 // WatchInput
 // ---------------------------------------------------------------------------
 
-/// Typed input for `SessionWatcher`, constructed by the CLI from session data.
+/// Typed input for `SessionWatcher`, constructed by the build service from session data.
 ///
-/// The CLI builds this from `BuildSession.input_inventory` so that the watcher
+/// The build service creates this from `BuildSession.input_inventory` so that the watcher
 /// crate does not need to import `arkdown-session` directly.
 #[derive(Debug, Clone, Default)]
 pub struct WatchInput {
@@ -76,7 +76,7 @@ pub struct WatchInput {
     /// Empty means "accept all extensions".
     pub watch_extensions: Vec<String>,
     /// Initial fingerprints keyed by file path, used for change detection.
-    /// Populated by the CLI before the first watch cycle.
+    /// Populated by the build service before the first watch cycle.
     pub fingerprint_baseline: HashMap<PathBuf, u64>,
 }
 
@@ -129,7 +129,7 @@ impl WatchInput {
 /// Session-aware filesystem watcher backed by the `notify` crate.
 ///
 /// Unlike the legacy `FileWatcher`, `SessionWatcher` receives its watch
-/// directories from a `WatchInput` that is constructed by the CLI from
+/// directories from a `WatchInput` that is constructed by the build service from
 /// `BuildSession.input_inventory`.  This avoids hard-coded path guessing and
 /// lets the session layer control what is observed.
 ///

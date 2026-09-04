@@ -56,7 +56,6 @@ use arkdown_session::{
 };
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
-use super::args::{AbcBackendChoice, BuildRequest, HvigorRuntimeProperties, NativeTaskRoot};
 use super::bundle_plan::{
   make_bundle_plan, BundlePackageOutput, BundlePlanPackageInfo, BundleRuntimePackageInfoBuilder,
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
@@ -72,7 +71,6 @@ use super::hot_reload::{
   HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
   ReloadResourceTaskPlan,
 };
-use super::module_plan::ModuleSelectionPlanner;
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
 };
@@ -105,19 +103,23 @@ use arkdown_build::intermediates::{
 use arkdown_build::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
 };
+use arkdown_build::module_plan::ModuleSelectionPlanner;
+use arkdown_build::request::{
+  AbcBackendChoice, BuildRequest, HvigorRuntimeProperties, NativeTaskRoot,
+};
 
-use crate::cmd::ets_checker::{
+use crate::progress::Progress;
+use crate::services::ets_checker::{
   ArkLinterEntryResolver, SdkEtsCheckerBatch, SdkEtsCheckerEntryCollector, SdkEtsCheckerInput,
   SdkEtsCheckerPaths, SdkEtsCheckerPlan, SdkEtsCheckerPlanBuilder,
 };
-use crate::cmd::native_build::{
+use crate::services::native_build::{
   DebugSymbolCollector, HvigorModuleCleanStage, NativeBuildSanitizers, NativeCmakeLocalDependency,
   NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
 };
-use crate::cmd::package_resolution::{
+use crate::services::package_resolution::{
   LocalPackageSourceRootInventory, ModulePackageResolutionPlanner,
 };
-use crate::progress::Progress;
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 
 use arkdown::plugins::ets_transform::{
@@ -2061,7 +2063,7 @@ fn build_cache_group_snapshots(
 ///
 /// Owns the explicit coarse sequencing of all build stages for a single
 /// `arkdown build` invocation.  Constructed from a parsed [`BuildSession`]
-/// and the CLI [`BuildRequest`]; call [`BuildCoordinator::execute`] to run.
+/// and a typed [`BuildRequest`]; call [`BuildCoordinator::execute`] to run.
 pub struct BuildCoordinator {
   session: Arc<BuildSession>,
   config: Arc<ArkdownConfig>,

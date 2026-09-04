@@ -14,8 +14,8 @@ use arkdown_path::lexical_normalize;
 use arkdown_watcher::{WatchEvent, WatchEventKind};
 use indexmap::IndexSet;
 
-use super::args::NativeTaskRoot;
 use arkdown_build::layout::ModuleBuildLayout;
+use arkdown_build::request::NativeTaskRoot;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum HotReloadError {

@@ -132,7 +132,7 @@ impl WatchEventNameMapper {
 
     /// Create a mapper from session data.
     ///
-    /// The CLI calls this with the project root so that event names are
+    /// The build service calls this with the project root so that event names are
     /// project-relative (matching hvigor's behaviour).
     pub fn from_session() -> Self {
         WatchEventNameMapper { project_root: None }

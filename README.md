@@ -8,7 +8,8 @@ is the only supported entry point and provides both the npm CLI and Node.js API.
 
 ```mermaid
 flowchart LR
-    A["packages/arkdown<br/>npm CLI / Node.js API"] --> B["BuildCoordinator"]
+    A["packages/arkdown<br/>JS CLI / Node.js API"] --> N["typed N-API services"]
+    N --> B["BuildCoordinator"]
     B --> C["BuildSession<br/>config, SDK, project snapshots"]
     C --> D["Resolve and transform<br/>arkdown-resolver + OXC"]
     D --> E["Bundle<br/>Rolldown + built-in plugins"]
@@ -21,12 +22,13 @@ flowchart LR
 
 The Rust crates under `crates/` are internal implementations of the individual build domains;
 `arkdown-abc` owns typed bytecode plans, SDK handoff manifests, and `es2abc` execution, while
-`arkdown-build` owns typed build-application layout, pre-build validation, and intermediate
-artifact handoffs and will receive the remaining coordinator.
+`arkdown-build` owns typed build requests, module selection, build-application layout,
+pre-build validation, and intermediate artifact handoffs and will receive the remaining coordinator.
 `packages/arkdown` owns the public JS/N-API entry point and currently retains the coarse
 `BuildCoordinator` during that migration.
 The npm JavaScript CLI is the only command-line entry: Rust crates must not add binaries, argv
-parsers, or command-line lifecycle APIs.
+parsers, command-line lifecycle APIs, or Rust `cmd`/`BuildCommand` facades. N-API accepts typed
+service requests only.
 
 ## Benchmark
 

@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use arkdown_core::{BuildMode, OutputTarget};
-use arkdown_napi::cmd::check::{self, CheckRequest};
+use arkdown_napi::services::check::{self, CheckRequest};
 use walkdir::WalkDir;
 
 #[test]

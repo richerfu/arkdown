@@ -69,7 +69,7 @@ impl BuildCoordinator {
       for (module, _manifest, _loader_json, _resource_refs, module_target_name, module_config) in
         loader_jsons.iter()
       {
-        let artifacts = crate::cmd::build::unit_test::UnitTestArtifactWriter::new(
+        let artifacts = crate::services::build::unit_test::UnitTestArtifactWriter::new(
           &module.src_path,
           &module_config.product.name,
         );
@@ -135,7 +135,7 @@ impl BuildCoordinator {
           let module_context = session
             .module_context(&module.name)
             .ok_or_else(|| anyhow::anyhow!("missing module compile context for {}", module.name))?;
-          crate::cmd::build::unit_test::UnitTestExecutionPlan::from_build(
+          crate::services::build::unit_test::UnitTestExecutionPlan::from_build(
             &config.sdk_config,
             &config.product.runtime_os,
             &module.src_path,
@@ -743,7 +743,7 @@ impl BuildCoordinator {
             )
             .await?
         {
-          crate::cmd::build::unit_test::UnitTestArtifactWriter::for_ohos_test(
+          crate::services::build::unit_test::UnitTestArtifactWriter::for_ohos_test(
             &module.src_path,
             &module_config.product.name,
             artifact_target_label,
@@ -1694,8 +1694,8 @@ impl BuildCoordinator {
                 .bundle_type
                 .as_deref()
                 .unwrap_or(&session.project.bundle_type);
-              crate::cmd::build::device_test::DeviceTestExecutionPlan::from_build(
-                crate::cmd::build::device_test::DeviceTestExecutionInput {
+              crate::services::build::device_test::DeviceTestExecutionPlan::from_build(
+                crate::services::build::device_test::DeviceTestExecutionInput {
                   sdk_config: &module_config.sdk_config,
                   sdk_root: &session.sdk.sdk_root,
                   project_path: &config.project_root,

@@ -53,7 +53,7 @@ impl BuildCoordinator {
     }
     // Local and on-device test builds default to code-coverage
     // instrumentation: hvigor injects `ohos-test-coverage=true` for `test`
-    // and `onDeviceTest`; the CLI flag can still override it.
+    // and `onDeviceTest`; the typed request can still override it.
     let ohos_test_coverage = args.ohos_test_coverage.unwrap_or_else(|| {
       matches!(config.output_target, OutputTarget::Test)
         || TargetBuildExecutionPlan::is_device_test(args)
@@ -443,10 +443,10 @@ impl BuildCoordinator {
             config.project_root.join(&module.src_path)
           };
           let module_path = canonicalize_or_owned(&configured_module_path);
-          crate::cmd::build::unit_test::generate_unit_test_template(
+          crate::services::build::unit_test::generate_unit_test_template(
             &module_path,
             &module_config.product.name,
-            &crate::cmd::build::unit_test::UnitTestTemplateParams {
+            &crate::services::build::unit_test::UnitTestTemplateParams {
               bundle_name: &config.product.bundle_name,
               module_name: &module.name,
               scope,
@@ -482,11 +482,11 @@ impl BuildCoordinator {
           .await?
       {
         let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
-        if !crate::cmd::build::unit_test::has_ohos_test_template(
+        if !crate::services::build::unit_test::has_ohos_test_template(
           &module.src_path,
           &module_config.product.name,
         ) {
-          crate::cmd::build::unit_test::generate_ohos_test_template(
+          crate::services::build::unit_test::generate_ohos_test_template(
             &module.src_path,
             &module_config.product.name,
             config.sdk_config.compile_api_version,
@@ -1695,7 +1695,7 @@ impl BuildCoordinator {
                 process_profile_json.display()
               )
             })?;
-          crate::cmd::build::unit_test::inject_unit_test_ability(
+          crate::services::build::unit_test::inject_unit_test_ability(
             &mut document,
             module_json5.module.type_.as_str(),
           )
@@ -2090,7 +2090,7 @@ impl BuildCoordinator {
           .map(|package| package.name.as_str())
           .filter(|name| !name.is_empty())
           .unwrap_or(&module.name);
-        let preview = crate::cmd::build::preview::PreviewAssetProcessor::new(
+        let preview = crate::services::build::preview::PreviewAssetProcessor::new(
           &project_root,
           &module.src_path,
           &module.name,
@@ -2319,7 +2319,7 @@ impl BuildCoordinator {
             .map(|package| package.name.as_str())
             .filter(|name| !name.is_empty())
             .unwrap_or(&module.name);
-          crate::cmd::build::preview::PreviewAssetProcessor::new(
+          crate::services::build::preview::PreviewAssetProcessor::new(
             &project_root,
             &module.src_path,
             &module.name,
@@ -2347,7 +2347,7 @@ impl BuildCoordinator {
         let process_profile_json = module_layout.process_profile_module_json();
         let process_value = std::fs::read_to_string(&process_profile_json)?;
         let document: serde_json::Value = serde_json::from_str(&process_value)?;
-        crate::cmd::build::unit_test::replace_unit_test_index_file(
+        crate::services::build::unit_test::replace_unit_test_index_file(
           &module_layout.res_module_json(),
           &document,
           &module_layout.res_profile_dir(),
@@ -2355,7 +2355,7 @@ impl BuildCoordinator {
           args
             .unit_test_replace_page
             .as_deref()
-            .unwrap_or(crate::cmd::build::unit_test::UNIT_TEST_REPLACE_PAGE),
+            .unwrap_or(crate::services::build::unit_test::UNIT_TEST_REPLACE_PAGE),
         )
         .map_err(|error| {
           anyhow::anyhow!(
@@ -2745,9 +2745,9 @@ impl BuildCoordinator {
     if coverage_mode {
       if ohos_test_coverage {
         let test_mode = if matches!(config.output_target, OutputTarget::Test) {
-          crate::cmd::build::unit_test::TestCoverageMode::UnitTest
+          crate::services::build::unit_test::TestCoverageMode::UnitTest
         } else {
-          crate::cmd::build::unit_test::TestCoverageMode::OhosTest
+          crate::services::build::unit_test::TestCoverageMode::OhosTest
         };
         for (
           (module, _manifest, _loader_json, _resource_refs, _module_target_name, _module_config),
@@ -2757,7 +2757,7 @@ impl BuildCoordinator {
           if bundle_out.bundle_output.module_source_files.is_empty() {
             continue;
           }
-          crate::cmd::build::unit_test::TestCoverageInstrumentationPlan::from_build(
+          crate::services::build::unit_test::TestCoverageInstrumentationPlan::from_build(
             &config.sdk_config,
             &config.project_root,
             &module.src_path,

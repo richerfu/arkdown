@@ -221,7 +221,7 @@ impl BuildModeInventory {
     /// Reads mode flags from the project's build options and populates the
     /// appropriate sub-inventory.
     ///
-    /// Upstream: mode dispatch in CLI `BuildCommand`.
+    /// Upstream: mode dispatch at the JavaScript build entry.
     pub fn from_project(project: &ProjectSnapshot) -> Self {
         let _ = project;
         Self::default()

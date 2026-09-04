@@ -337,7 +337,7 @@ impl InvalidationEvent {
     /// - The fingerprint has not actually changed (content-identical write).
     ///
     /// `fingerprint_baseline` maps file paths to their last-known FNV-1a
-    /// fingerprint (provided by the CLI from `BuildSession`).
+    /// fingerprint (provided by the build service from `BuildSession`).
     pub fn from_file_event(
         path: &Path,
         fingerprint_baseline: &HashMap<PathBuf, u64>,

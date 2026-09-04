@@ -84,7 +84,7 @@ test('runtime entry performs no project, task, cache, or worker orchestration', 
   assert.match(entry, /createBuild/)
 })
 
-test('native package exposes direct commands and plugin bridges, not a Hvigor runtime', () => {
+test('native package exposes typed services and plugin bridges, not a command runtime', () => {
   const packageRoot = path.resolve(__dirname, '..')
   const sourceRoot = path.join(packageRoot, 'src')
   const napi = fs.readFileSync(path.join(sourceRoot, 'lib.rs'), 'utf8')
@@ -121,11 +121,14 @@ test('the npm JavaScript file is the only CLI entrypoint', () => {
   const observability = fs.readFileSync(path.join(packageRoot, 'src/runtime_observe/observability.rs'), 'utf8')
 
   assert.equal(fs.existsSync(path.join(packageRoot, 'src/main.rs')), false)
+  assert.equal(fs.existsSync(path.join(packageRoot, 'src/cmd')), false)
+  assert.equal(fs.existsSync(path.join(packageRoot, 'src/services/build/args.rs')), false)
   assert.equal(fs.existsSync(path.join(packageRoot, 'src/runtime_observe/napi.rs')), false)
   assert.equal(fs.existsSync(path.join(packageRoot, 'src/runtime_observe/process_monitor.rs')), false)
   assert.doesNotMatch(manifest, /\[\[bin\]\]|clap\s*=/)
   assert.doesNotMatch(workspaceManifest, /^clap\s*=/m)
   assert.doesNotMatch(napi, /parse_arkdown_.*cli_args|clap::/)
+  assert.doesNotMatch(napi, /pub mod cmd|\bBuildCommand\b/)
   assert.doesNotMatch(observability, /install_cli|ObservabilityMode::Cli|FormatStyle::Cli/)
   assert.doesNotMatch(
     declarations,
@@ -151,6 +154,7 @@ test('the npm JavaScript file is the only CLI entrypoint', () => {
       .filter((name) => name.endsWith('.rs'))) {
       const rust = fs.readFileSync(path.join(rustPackage, 'src', source), 'utf8')
       assert.doesNotMatch(rust, /std::env::args(?:_os)?\s*\(|clap::/, `${rustPackage}/${source}`)
+      assert.doesNotMatch(rust, /\bBuildCommand\b/, `${rustPackage}/${source}`)
     }
   }
 })

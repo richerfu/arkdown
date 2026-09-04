@@ -13,6 +13,7 @@ arkdown-pack = { workspace = true }
 arkdown-path = { workspace = true }
 arkdown-profile = { workspace = true }
 arkdown-session = { workspace = true }
+arkdown-watcher = { workspace = true }
 fast-glob = { workspace = true }
 fs-err = { workspace = true }
 globset = { workspace = true }

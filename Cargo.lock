@@ -178,6 +178,7 @@ dependencies = [
  "arkdown-path",
  "arkdown-profile",
  "arkdown-session",
+ "arkdown-watcher",
  "fast-glob",
  "fs-err",
  "globset",

@@ -9,7 +9,7 @@ use crate::paths::PathResolver;
 /// Per-module artifact output layout.
 ///
 /// Provides typed accessors for all output paths rather than constructing
-/// path strings inline throughout the CLI.
+/// path strings inline throughout the build service.
 #[derive(Debug, Clone)]
 pub struct ArtifactLayout {
     /// Root output directory for this module (`.hvigor/default/cache/entry/`).

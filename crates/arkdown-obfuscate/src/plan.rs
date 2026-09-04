@@ -5,12 +5,12 @@
 //!
 //! `ObfuscationPlan` is the pure-data counterpart to hvigor's
 //! `ArkCompile.getObfuscationOptions()` and `computeObfuscationFileHash()`.
-//! It is constructed by the CLI's `BuildPlanBuilder` (which has access to the
+//! It is constructed by the build service's `BuildPlanBuilder` (which has access to the
 //! session, SDK paths, and resolved file inventories) and then handed to
 //! [`crate::Obfuscator`] for execution.
 //!
 //! **Domain constraint**: this file must NOT depend on `arkdown-session`,
-//! `arkdown-config`, or any other session/CLI crate.  All paths are
+//! `arkdown-config`, or any other session/build-service crate.  All paths are
 //! pre-resolved by the caller before the plan is constructed.
 //!
 //! # hvigor equivalents
@@ -160,7 +160,7 @@ impl ConsumerObfuscationPlan {
 /// A fully resolved, validated plan describing the obfuscation pass for a
 /// single build.
 ///
-/// Constructed by the CLI's `BuildPlanBuilder` from the parsed
+/// Constructed by the build service's `BuildPlanBuilder` from the parsed
 /// `build-profile.json5` and session state.  Passed to [`crate::Obfuscator`]
 /// for execution.
 ///

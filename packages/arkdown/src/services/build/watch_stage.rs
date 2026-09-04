@@ -11,7 +11,7 @@
 //!    (config/resource change) using `classify_watch_change`.
 //!    - Hot → skips resource + profile stages (bundle-only rebuild).
 //!    - Cold → full pipeline rebuild.
-//! 4. Calls `BuildCommand::execute` with the appropriate `skip_*` flags set.
+//! 4. Calls `BuildService::execute` with the appropriate `skip_*` flags set.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,10 +26,10 @@ use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalida
 
 use arkdown::plugins::factory::PackagePlugin;
 
-use super::args::{
-  AbcBackendChoice, AnalyzeModeChoice, BuildCommand, BuildRequest, OhpmModeChoice,
-};
 use arkdown_build::layout::ModuleBuildLayout;
+use arkdown_build::request::{AbcBackendChoice, AnalyzeModeChoice, BuildRequest, OhpmModeChoice};
+
+use super::BuildService;
 
 /// Input for the watch stage.
 ///
@@ -78,11 +78,11 @@ pub(super) struct WatchStageInput {
   pub(super) integrated_hsp_use_get_current_bundle_name: bool,
   pub(super) byte_code_har_integrated_optimization: bool,
   pub(super) keep_dependency: bool,
-  pub(super) hvigor_properties: super::args::HvigorRuntimeProperties,
+  pub(super) hvigor_properties: arkdown_build::request::HvigorRuntimeProperties,
   pub(super) parameter_file_override: Option<PathBuf>,
   pub(super) task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
   pub(super) hvigor_cache_dir: Option<PathBuf>,
-  pub(super) native_task_roots: Vec<super::args::NativeTaskRoot>,
+  pub(super) native_task_roots: Vec<arkdown_build::request::NativeTaskRoot>,
   /// When `true`, only `src/main/resources/` directories are watched.
   pub(super) preview_mode: bool,
   pub(super) check_entry: bool,
@@ -383,7 +383,7 @@ impl WatchStage {
           native_task_roots: native_task_roots.clone(),
         };
         let mut command =
-          BuildCommand::new(rebuild_args).with_package_plugins(package_plugins.clone());
+          BuildService::new(rebuild_args).with_package_plugins(package_plugins.clone());
         if !hot_reload_mode {
           if let Some(observer) = task_observer.clone() {
             command = command.with_task_observer(observer);

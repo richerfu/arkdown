@@ -3,7 +3,7 @@
 //! `PluginFactory` owns the construction logic that was previously in
 //! `packages/arkdown/src/cmd/build/plugin_factory.rs`. Moving it here makes the
 //! ordered plugin set an internal concern of the bundler crate rather than
-//! a CLI concern, and allows the CLI to depend only on `arkdown` for plugin
+//! a build-service concern, and allows the build-service to depend only on `arkdown` for plugin
 //! instantiation.
 //!
 //! # Plugin order
@@ -35,7 +35,7 @@
 //!
 //! # Upstream correspondence
 //!
-//! Replaces `packages/arkdown/src/cmd/build/plugin_factory.rs`. The CLI shim
+//! Replaces `packages/arkdown/src/cmd/build/plugin_factory.rs`. The build-service shim
 //! delegates to this factory once the migration is complete.
 
 use std::future::Future;
@@ -95,10 +95,9 @@ pub enum HvigorPluginOrder {
 /// Input data for `PluginFactory` that supplements `BundlePlan` with
 /// session-level information not yet captured in the plan itself.
 ///
-/// These fields come from `BuildSession` / `ModuleCompileContext` at the CLI
-/// layer and are passed down to the factory. Once `BundlePlan` is extended to
-/// carry full session data (SPEC-048 Phase 5+), this struct can be collapsed
-/// into `BundlePlan`.
+/// These fields come from `BuildSession` / `ModuleCompileContext` at the
+/// build-service layer and are passed down to the factory. Once `BundlePlan`
+/// carries the full session data, this struct can be collapsed into it.
 #[derive(Clone)]
 pub struct PluginFactoryInput {
     /// Effective module target currently being bundled.
@@ -149,7 +148,7 @@ pub struct PluginFactoryInput {
     ///
     /// Each entry is `(src_main_ets_root, target_ets_root)`.
     pub source_set_overlays: Vec<(PathBuf, PathBuf)>,
-    /// ArkTS checker mode forwarded from package/CLI config.
+    /// ArkTS checker mode forwarded from package/build-service config.
     pub checker_mode: CheckerMode,
     /// `arkOptions.tscConfig.targetESVersion` selected for source emission.
     pub tsc_target: ArkTscTarget,
@@ -226,7 +225,7 @@ impl PluginFactoryInput {
     }
 }
 
-/// HAR deduplication phase selected by the CLI coordinator.
+/// HAR deduplication phase selected by the build-service coordinator.
 ///
 /// The plugin factory never infers a phase from stale files on disk. Hvigor
 /// schedules both tasks explicitly in one build, so arkdown does the same.

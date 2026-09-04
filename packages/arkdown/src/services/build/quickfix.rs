@@ -18,8 +18,8 @@ use arkdown_path::lexical_normalize;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::args::NativeTaskRoot;
 use arkdown_build::layout::ModuleBuildLayout;
+use arkdown_build::request::NativeTaskRoot;
 
 const INITIAL_PATCH_VERSION: u64 = 3_000_000;
 

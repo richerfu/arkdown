@@ -203,7 +203,7 @@ pub struct ModuleJson5Module {
     ///
     /// Valid hvigor values are `"esmodule"` (default, Stage model) and
     /// `"jsbundle"` (legacy FA model).  arkdown only supports `"esmodule"`.
-    /// The value is stored as a raw `Option<String>` so the CLI can detect
+    /// The value is stored as a raw `Option<String>` so the build service can detect
     /// and reject `"jsbundle"` before starting the build pipeline.
     #[serde(rename = "compileMode", default)]
     pub compile_mode: Option<String>,
