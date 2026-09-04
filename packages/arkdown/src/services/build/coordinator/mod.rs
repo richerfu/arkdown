@@ -98,7 +98,6 @@ use arkdown_build::request::{AbcBackendChoice, BuildRequest, NativeTaskRoot};
 use arkdown_build::source_snapshot::TransformSourceSnapshotBuilder;
 
 use crate::progress::Progress;
-use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 use arkdown_build::package_resolution::{
   LocalPackageSourceRootInventory, ModulePackageResolutionPlanner,
 };
@@ -106,6 +105,7 @@ use arkdown_build::sdk_checker::{
   ArkLinterEntryResolver, SdkEtsCheckerBatch, SdkEtsCheckerBuildPaths, SdkEtsCheckerEntryCollector,
   SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlan, SdkEtsCheckerPlanBuilder,
 };
+use arkdown_build::task_cache::{TaskInputSnapshot, TaskInputs};
 use arkdown_native::{
   DebugSymbolCollector, NativeCleanStage, NativeCmakeLocalDependency, NativeLibCollectionPolicy,
   NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
