@@ -31,7 +31,6 @@ mod plugin_module;
 pub mod progress;
 mod runtime_observe;
 pub mod services;
-pub mod task_cache;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
