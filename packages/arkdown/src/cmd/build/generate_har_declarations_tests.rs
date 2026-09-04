@@ -190,3 +190,45 @@ fn bytecode_har_declarations_match_sdk_generated_entries_and_printer() {
     )
   );
 }
+
+#[test]
+fn bundled_declarations_replace_source_tree_with_self_contained_entry() {
+  let temp = tempfile::tempdir().expect("create module root");
+  let source_dir = temp.path().join("src/main/ets");
+  std::fs::create_dir_all(source_dir.join("model")).expect("create source tree");
+  std::fs::write(
+    source_dir.join("Index.ets"),
+    "export { UserStore as Store } from './model/UserStore';\n",
+  )
+  .expect("write entry");
+  std::fs::write(
+    source_dir.join("model/UserStore.ets"),
+    concat!(
+      "import { User } from './User';\n",
+      "export class UserStore { get(): User { return { id: 1 }; } }\n"
+    ),
+  )
+  .expect("write exported declaration");
+  std::fs::write(
+    source_dir.join("model/User.ets"),
+    "export interface User { id: number }\n",
+  )
+  .expect("write private type");
+
+  HarDeclarationGenerator::new_har(temp.path(), "default", &source_dir, "library")
+    .with_package_bundled_declarations(true, Some("src/main/ets/Index.ets"), None)
+    .generate()
+    .expect("generate bundled declarations");
+
+  let declaration_root = ModuleBuildLayout::new(temp.path())
+    .declarations_dir()
+    .join("library/src/main/ets");
+  let entry =
+    std::fs::read_to_string(declaration_root.join("Index.d.ets")).expect("read bundled entry");
+  assert!(entry.contains("export declare class UserStore"), "{entry}");
+  assert!(entry.contains("export { UserStore as Store }"), "{entry}");
+  assert!(entry.contains("declare namespace _User"), "{entry}");
+  assert!(entry.contains("get(): _User.User"), "{entry}");
+  assert!(!declaration_root.join("model/UserStore.d.ets").exists());
+  assert!(!declaration_root.join("model/User.d.ets").exists());
+}

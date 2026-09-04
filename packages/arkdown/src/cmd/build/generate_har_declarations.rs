@@ -8,11 +8,13 @@
 //! imports, exports, overloads and JSDoc instead of synthesizing placeholder
 //! `unknown` declarations.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use arkdown_core::ArktsLanguageVersion;
-use arkdown_ets_transform::CompileArktsSourceType;
+use arkdown_ets_transform::{declaration_merge::DeclarationMerger, CompileArktsSourceType};
+use arkdown_session::dependency_graph::snapshot::DependencyGraphSnapshot;
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc_isolated_declarations::{IsolatedDeclarations, IsolatedDeclarationsOptions};
@@ -29,6 +31,8 @@ pub(super) struct HarDeclarationGenerator<'a> {
   module_output_prefix: PathBuf,
   output_prefix: PathBuf,
   generated_sources: Vec<&'a Path>,
+  bundled_entries: Vec<PathBuf>,
+  dependency_packages: BTreeMap<String, (PathBuf, PathBuf)>,
   arkts_language_version: ArktsLanguageVersion,
 }
 
@@ -47,6 +51,8 @@ impl<'a> HarDeclarationGenerator<'a> {
       output_prefix: module_output_prefix.join("src/main/ets"),
       module_output_prefix,
       generated_sources: Vec::new(),
+      bundled_entries: Vec::new(),
+      dependency_packages: BTreeMap::new(),
       arkts_language_version: ArktsLanguageVersion::default(),
     }
   }
@@ -68,6 +74,8 @@ impl<'a> HarDeclarationGenerator<'a> {
       output_prefix: module_output_prefix.join("src/main/ets"),
       module_output_prefix,
       generated_sources: Vec::new(),
+      bundled_entries: Vec::new(),
+      dependency_packages: BTreeMap::new(),
       arkts_language_version: ArktsLanguageVersion::default(),
     }
   }
@@ -84,6 +92,84 @@ impl<'a> HarDeclarationGenerator<'a> {
   pub(super) fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
     self.arkts_language_version = version;
     self
+  }
+
+  /// Enable SDK `arkOptions.bundle.bundledDeclare` for the package's public
+  /// module-relative entry paths (`main` or `oh-exports`).
+  pub(super) fn with_bundled_declaration_entries<I, P>(mut self, entries: I) -> Self
+  where
+    I: IntoIterator<Item = P>,
+    P: Into<PathBuf>,
+  {
+    self.bundled_entries = entries.into_iter().map(Into::into).collect();
+    self
+  }
+
+  pub(super) fn with_package_bundled_declarations(
+    self,
+    enabled: bool,
+    main: Option<&str>,
+    oh_exports: Option<&[String]>,
+  ) -> Self {
+    if !enabled {
+      return self;
+    }
+    if let Some(exports) = oh_exports.filter(|exports| !exports.is_empty()) {
+      return self.with_bundled_declaration_entries(exports.iter().map(PathBuf::from));
+    }
+    match main.filter(|main| !main.is_empty()) {
+      Some(main) => self.with_bundled_declaration_entries([PathBuf::from(main)]),
+      None => self,
+    }
+  }
+
+  /// Add package declaration roots from the already-resolved dependency
+  /// graph. Collection happens only for bundled declarations.
+  pub(super) fn with_dependency_declaration_packages<I, S, P, E>(mut self, packages: I) -> Self
+  where
+    I: IntoIterator<Item = (S, P, E)>,
+    S: Into<String>,
+    P: Into<PathBuf>,
+    E: Into<PathBuf>,
+  {
+    self.dependency_packages = packages
+      .into_iter()
+      .map(|(name, root, entry)| {
+        let root = root.into();
+        let entry = Self::declaration_relative_path(&root.join(entry.into()));
+        (name.into(), (root, entry))
+      })
+      .collect();
+    self
+  }
+
+  pub(super) fn with_dependency_graph(self, dependencies: &DependencyGraphSnapshot) -> Self {
+    let packages = dependencies.nodes.values().flat_map(|node| {
+      let Some(root) = node.package_root.as_ref() else {
+        return Vec::new();
+      };
+      let entry = node
+        .package
+        .as_deref()
+        .and_then(|package| {
+          package
+            .package_json
+            .types
+            .as_ref()
+            .or(package.package_json.main.as_ref())
+        })
+        .cloned()
+        .unwrap_or_else(|| "Index.d.ets".to_string());
+      let mut names = vec![node.package_name.clone()];
+      if node.alias != node.package_name {
+        names.push(node.alias.clone());
+      }
+      names
+        .into_iter()
+        .map(|name| (name, root.clone(), PathBuf::from(&entry)))
+        .collect::<Vec<_>>()
+    });
+    self.with_dependency_declaration_packages(packages)
   }
 
   pub(super) fn generate(&self) -> Result<()> {
@@ -113,6 +199,7 @@ impl<'a> HarDeclarationGenerator<'a> {
     sources.retain(|entry| entry.file_type().is_file() && Self::is_typescript_source(entry.path()));
     sources.sort_by(|left, right| left.path().cmp(right.path()));
 
+    let mut declarations = BTreeMap::new();
     for entry in sources {
       let source_path = entry.path();
       let relative = source_path.strip_prefix(self.source_dir).with_context(|| {
@@ -122,10 +209,11 @@ impl<'a> HarDeclarationGenerator<'a> {
           self.source_dir.display()
         )
       })?;
-      self.emit_source(
+      let (path, declaration) = self.emit_source(
         source_path,
         output_dir.join(&self.output_prefix).join(relative),
       )?;
+      declarations.insert(path, declaration);
     }
 
     for source_path in &self.generated_sources {
@@ -138,26 +226,74 @@ impl<'a> HarDeclarationGenerator<'a> {
             self.module_root.display()
           )
         })?;
-      self.emit_source(
+      let (path, declaration) = self.emit_source(
         source_path,
         output_dir.join(&self.module_output_prefix).join(relative),
       )?;
+      declarations.insert(path, declaration);
+    }
+
+    if !self.bundled_entries.is_empty() {
+      for (root, _) in self.dependency_packages.values() {
+        if !root.is_dir() {
+          continue;
+        }
+        let mut dependency_declarations = WalkDir::new(root)
+          .min_depth(1)
+          .into_iter()
+          .collect::<std::result::Result<Vec<_>, _>>()?;
+        dependency_declarations.retain(|entry| {
+          entry.file_type().is_file()
+            && arkdown_path::SourceFileName::new(entry.path()).is_declaration()
+        });
+        dependency_declarations.sort_by(|left, right| left.path().cmp(right.path()));
+        for entry in dependency_declarations {
+          declarations.insert(
+            entry.path().to_path_buf(),
+            fs_err::read_to_string(entry.path())?,
+          );
+        }
+      }
+      let entries = self
+        .bundled_entries
+        .iter()
+        .map(|entry| {
+          output_dir
+            .join(&self.module_output_prefix)
+            .join(Self::declaration_relative_path(entry))
+        })
+        .collect::<Vec<_>>();
+      declarations = DeclarationMerger::new(declarations)
+        .with_package_declarations(
+          self
+            .dependency_packages
+            .iter()
+            .map(|(name, (root, entry))| (name.clone(), root.clone(), entry.clone())),
+        )
+        .merge(&entries)?
+        .files;
+    }
+
+    for (path, declaration) in declarations {
+      if let Some(parent) = path.parent() {
+        fs_err::create_dir_all(parent)?;
+      }
+      fs_err::write(path, declaration)?;
     }
     Ok(())
   }
 
-  fn emit_source(&self, source_path: &Path, output_source_path: PathBuf) -> Result<()> {
+  fn emit_source(
+    &self,
+    source_path: &Path,
+    output_source_path: PathBuf,
+  ) -> Result<(PathBuf, String)> {
     let output_path = Self::declaration_relative_path(&output_source_path);
-    if let Some(parent) = output_path.parent() {
-      fs_err::create_dir_all(parent)?;
-    }
     if arkdown_path::SourceFileName::new(source_path).is_declaration() {
-      fs_err::copy(source_path, &output_path)?;
-      return Ok(());
+      return Ok((output_path, fs_err::read_to_string(source_path)?));
     }
     let declaration = HarSourceDeclaration::new(source_path, self.arkts_language_version).emit()?;
-    fs_err::write(&output_path, declaration)?;
-    Ok(())
+    Ok((output_path, declaration))
   }
 
   fn is_typescript_source(path: &Path) -> bool {

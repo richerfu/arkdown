@@ -1025,6 +1025,23 @@ impl BuildCoordinator {
           &module.name,
         )
         .with_arkts_language_version(self.session.arkts_language_version)
+        .with_dependency_graph(&module_context.deps)
+        .with_package_bundled_declarations(
+          module_build_option
+            .ark_options
+            .as_ref()
+            .is_some_and(|options| options.bundled_declare),
+          module_context
+            .module
+            .package
+            .as_deref()
+            .and_then(|package| package.package_json.main.as_deref()),
+          module_context
+            .module
+            .package
+            .as_deref()
+            .and_then(|package| package.package_json.oh_exports.as_deref()),
+        )
         .generate()
         .map_err(|error| anyhow::anyhow!("generate HSP declarations failed: {error}"))?;
       }
