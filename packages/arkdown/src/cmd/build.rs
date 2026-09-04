@@ -21,7 +21,6 @@ mod har_importee_cache_tests;
 mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
-mod intermediates;
 mod module_plan;
 mod native_stage;
 mod packing_check;

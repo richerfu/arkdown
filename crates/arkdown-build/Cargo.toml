@@ -7,12 +7,22 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+arkdown = { workspace = true }
 arkdown-core = { workspace = true }
+arkdown-pack = { workspace = true }
+arkdown-path = { workspace = true }
+arkdown-profile = { workspace = true }
 arkdown-session = { workspace = true }
+fast-glob = { workspace = true }
+fs-err = { workspace = true }
+globset = { workspace = true }
 json5 = { workspace = true }
 jsonschema = { workspace = true }
 rustc-hash = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+zip = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

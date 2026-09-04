@@ -72,9 +72,6 @@ use super::hot_reload::{
   HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
   ReloadResourceTaskPlan,
 };
-use super::intermediates::{
-  IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, SourceMapPackageHandoff,
-};
 use super::module_plan::ModuleSelectionPlanner;
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
@@ -100,6 +97,10 @@ use arkdown::{
   BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo,
   CrossplatformCollectionWriter, PluginCacheModuleInventory, ShouldInvalidCacheRequest,
   SourceMapPolicy,
+};
+use arkdown_build::intermediates::{
+  IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, ResourceConfigInput,
+  SourceMapPackageHandoff,
 };
 use arkdown_build::layout::{
   ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,

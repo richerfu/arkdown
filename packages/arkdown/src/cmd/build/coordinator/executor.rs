@@ -1768,18 +1768,20 @@ impl BuildCoordinator {
           )?;
         } else {
           intermediate_writer.write_resource_config_files_with_dirs_and_names(
-            &project_root,
-            module,
-            module_config.as_ref(),
-            &res_out,
-            &module_res_dirs,
-            &[],
-            if module_target_name == "ohosTest" {
-              std::slice::from_ref(&module_json5.module.name)
-            } else {
-              &[]
+            ResourceConfigInput {
+              project_root: &project_root,
+              module,
+              config: module_config.as_ref(),
+              res_out: &res_out,
+              module_res_dirs: &module_res_dirs,
+              dependency_res_dirs: &[],
+              explicit_module_names: if module_target_name == "ohosTest" {
+                std::slice::from_ref(&module_json5.module.name)
+              } else {
+                &[]
+              },
+              target_name: &module_target_name,
             },
-            &module_target_name,
           )?;
         }
       }
@@ -1890,18 +1892,20 @@ impl BuildCoordinator {
           .cloned()
           .collect();
         intermediate_writer.write_resource_config_files_with_dirs_and_names(
-          &project_root,
-          module,
-          module_config.as_ref(),
-          &res_out,
-          &current_module_resource_dirs,
-          &dependency_resource_dirs,
-          if module_target_name == "ohosTest" {
-            std::slice::from_ref(&module_json5.module.name)
-          } else {
-            &[]
+          ResourceConfigInput {
+            project_root: &project_root,
+            module,
+            config: module_config.as_ref(),
+            res_out: &res_out,
+            module_res_dirs: &current_module_resource_dirs,
+            dependency_res_dirs: &dependency_resource_dirs,
+            explicit_module_names: if module_target_name == "ohosTest" {
+              std::slice::from_ref(&module_json5.module.name)
+            } else {
+              &[]
+            },
+            target_name: &module_target_name,
           },
-          &module_target_name,
         )?;
       }
       if process_resource_enabled {
