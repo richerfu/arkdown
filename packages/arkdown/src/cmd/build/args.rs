@@ -449,11 +449,14 @@ impl BuildCommand {
     if let Some(parameter_file_override) = args.parameter_file_override.clone() {
       session_builder = session_builder.with_parameter_file_override(parameter_file_override);
     }
-    let session = std::sync::Arc::new(
+    let session = tokio::task::spawn_blocking(move || {
       session_builder
         .build()
-        .map_err(|e| anyhow::anyhow!("{}", e))?,
-    );
+        .map(Arc::new)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("build startup worker failed: {error}"))??;
     // `assembleApp` routes to the project-level coordinator; every other
     // target runs the module coordinator.
     if args.target == "app" {

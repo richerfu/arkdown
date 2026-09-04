@@ -2366,11 +2366,14 @@ async fn run_build(
   let session_builder = BuildSessionBuilder::new(config.clone())
     .with_arkts_language_version(package_args.arkts_language_version)
     .with_ohpm_mode(package_args.ohpm_mode);
-  let session = std::sync::Arc::new(
+  let session = tokio::task::spawn_blocking(move || {
     session_builder
       .build()
-      .map_err(|e| anyhow::anyhow!("session: {e}"))?,
-  );
+      .map(Arc::new)
+      .map_err(|error| anyhow::anyhow!("session: {error}"))
+  })
+  .await
+  .map_err(|error| anyhow::anyhow!("build startup worker failed: {error}"))??;
 
   let args = BuildArgs {
     target,
