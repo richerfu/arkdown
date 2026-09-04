@@ -24,6 +24,7 @@ pub mod native_dependency;
 pub mod obfuscation;
 pub mod package_resolution;
 pub mod planning;
+pub mod plugin_share;
 pub mod pre_build;
 pub mod preview;
 pub mod quickfix;
