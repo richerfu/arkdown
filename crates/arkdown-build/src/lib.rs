@@ -4,6 +4,9 @@
 //! owns Rust build planning and orchestration without depending on N-API or
 //! exposing argv/process lifecycle behavior.
 
+pub mod app_coordinator;
+#[cfg(test)]
+mod application_tests;
 pub mod bundle_plan;
 pub mod bytecode_har_declaration;
 pub mod check;
@@ -12,6 +15,7 @@ pub mod clean;
 mod clean_tests;
 pub mod code_resource;
 pub mod compile_context;
+pub mod coordinator;
 pub mod device_test;
 pub mod har_dedup;
 pub mod hot_reload;
@@ -21,12 +25,14 @@ pub mod intermediates;
 pub mod layout;
 pub mod module_plan;
 pub mod native_dependency;
+mod native_stage;
 pub mod obfuscation;
 pub mod package_resolution;
 pub mod planning;
 pub mod plugin_share;
 pub mod pre_build;
 pub mod preview;
+mod progress;
 pub mod quickfix;
 #[cfg(test)]
 mod quickfix_tests;
@@ -42,6 +48,10 @@ pub mod unit_test;
 #[cfg(test)]
 mod unit_test_tests;
 pub mod visual_codegen;
+mod watch_stage;
+
+mod service;
+pub use service::BuildService;
 
 #[cfg(test)]
 mod code_resource_tests;

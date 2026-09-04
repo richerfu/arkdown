@@ -28,9 +28,7 @@ static ALLOC: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 mod hvigor_plugin_plan;
 mod js_callback;
 mod plugin_module;
-pub mod progress;
 mod runtime_observe;
-pub mod services;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -2498,8 +2496,8 @@ async fn run_build(
   package_args: PackageBuildArgs,
   js_plugins: Vec<PackagePlugin>,
 ) -> anyhow::Result<Vec<String>> {
-  use crate::services::build::BuildRequest;
   use arkdown_build::request::AbcBackendChoice;
+  use arkdown_build::request::BuildRequest;
   use arkdown_config::ArkdownConfigLoader;
   use arkdown_core::{BuildMode, OutputTarget};
   use arkdown_session::BuildSessionBuilder;
@@ -2629,12 +2627,12 @@ async fn run_build(
   };
 
   let output = if is_app_build {
-    crate::services::build::app_coordinator::AppBuildCoordinator::new(session, config, args)
+    arkdown_build::app_coordinator::AppBuildCoordinator::new(session, config, args)
       .with_package_plugins(js_plugins)
       .execute()
       .await?
   } else {
-    crate::services::build::coordinator::BuildCoordinator::new(session, config, args)
+    arkdown_build::coordinator::BuildCoordinator::new(session, config, args)
       .with_package_plugins(js_plugins)
       .execute()
       .await?

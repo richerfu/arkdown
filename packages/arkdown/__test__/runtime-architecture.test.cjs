@@ -87,7 +87,10 @@ test('native package exposes typed services and plugin bridges, not a command ru
   const packageRoot = path.resolve(__dirname, '..')
   const sourceRoot = path.join(packageRoot, 'src')
   const napi = fs.readFileSync(path.join(sourceRoot, 'lib.rs'), 'utf8')
-  const coordinator = fs.readFileSync(path.join(sourceRoot, 'services/build/coordinator/mod.rs'), 'utf8')
+  const coordinator = fs.readFileSync(
+    path.resolve(packageRoot, '../../crates/arkdown-build/src/coordinator/mod.rs'),
+    'utf8',
+  )
   const declarations = fs.readFileSync(path.join(packageRoot, 'index.d.ts'), 'utf8')
 
   for (const removed of [
@@ -106,6 +109,9 @@ test('native package exposes typed services and plugin bridges, not a command ru
     'services/build/coordinator/obfuscation.rs',
     'services/build/coordinator/plugin_share.rs',
     'services/build/static_arkts.rs',
+    'services/build.rs',
+    'services/mod.rs',
+    'progress.rs',
     'task_cache.rs',
     'services/build/bytecode_har_declaration.rs',
     'services/check.rs',
@@ -119,9 +125,17 @@ test('native package exposes typed services and plugin bridges, not a command ru
   }
 
   const nativeDomain = path.resolve(packageRoot, '../../crates/arkdown-native')
+  const buildManifest = fs.readFileSync(
+    path.resolve(packageRoot, '../../crates/arkdown-build/Cargo.toml'),
+    'utf8',
+  )
   assert.equal(fs.existsSync(path.join(nativeDomain, 'Cargo.toml')), true)
   assert.equal(fs.existsSync(path.join(nativeDomain, 'src/lib.rs')), true)
-  assert.match(fs.readFileSync(path.join(packageRoot, 'Cargo.toml'), 'utf8'), /arkdown-native\s*=\s*\{\s*workspace\s*=\s*true\s*\}/)
+  assert.match(buildManifest, /arkdown-native\s*=\s*\{\s*workspace\s*=\s*true\s*\}/)
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(packageRoot, 'Cargo.toml'), 'utf8'),
+    /arkdown-native\s*=\s*\{\s*workspace\s*=\s*true\s*\}/,
+  )
   assert.equal(fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/clean.rs')), true)
 
   assert.doesNotMatch(napi, /run_runtime_tasks|RuntimeTaskBridgeSeed|RuntimeBuildScriptSession/)

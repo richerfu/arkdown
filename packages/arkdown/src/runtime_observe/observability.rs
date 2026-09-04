@@ -30,12 +30,10 @@ pub(crate) enum ConsoleOwner {
 pub(crate) struct ObservabilityInstallPlan {
   pub console_owner: ConsoleOwner,
   pub cache_dir: PathBuf,
-  pub build_id: Arc<str>,
 }
 
 struct ObservabilityState {
   active: bool,
-  build_id: Arc<str>,
 }
 
 pub(crate) struct RuntimeObservability {
@@ -58,20 +56,11 @@ impl RuntimeObservability {
     Self::install(ObservabilityInstallPlan {
       console_owner: Self::console_owner_from_env(),
       cache_dir: project.join(".hvigor"),
-      build_id: Arc::from("napi-build"),
     })
   }
 
   pub(crate) fn global() -> Option<Arc<Self>> {
     GLOBAL.get().cloned()
-  }
-
-  pub(crate) fn build_id(&self) -> Arc<str> {
-    self
-      .state
-      .read()
-      .map(|state| Arc::clone(&state.build_id))
-      .unwrap_or_else(|_| Arc::from(""))
   }
 
   pub(crate) fn has_active_plan(&self) -> bool {
@@ -102,10 +91,7 @@ impl RuntimeObservability {
     }
 
     let installed = Arc::new(Self {
-      state: RwLock::new(ObservabilityState {
-        active: true,
-        build_id: Arc::clone(&plan.build_id),
-      }),
+      state: RwLock::new(ObservabilityState { active: true }),
       stderr_filter: Arc::new(RwLock::new(ObservabilityFilterState::parse(&stderr_spec)?)),
       file_filter: Arc::new(RwLock::new(ObservabilityFilterState::parse(&file_spec)?)),
       file_writer: Arc::clone(&file_writer),
@@ -140,7 +126,6 @@ impl RuntimeObservability {
         .write()
         .map_err(|_| anyhow::anyhow!("observability state lock was poisoned"))?;
       state.active = true;
-      state.build_id = Arc::clone(&plan.build_id);
     }
     self.swap_filter(&self.stderr_filter, stderr_spec)?;
     self.swap_filter(&self.file_filter, file_spec)?;
