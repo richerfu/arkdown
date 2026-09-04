@@ -197,6 +197,8 @@ pub(crate) struct SdkEtsCheckerInput<'a> {
   pub(crate) byte_code_har_integrated_optimization: bool,
   pub(crate) single_file_emit: bool,
   pub(crate) rollup_cache_use_source_hash: bool,
+  pub(crate) is_crossplatform: bool,
+  pub(crate) ignore_crossplatform_check: bool,
 }
 
 struct SdkEtsCheckerModuleLayout<'a> {
@@ -636,7 +638,10 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
           .unwrap_or_default(),
       ),
     );
-    extras.insert("ignoreCrossplatformCheck".to_string(), Value::Bool(false));
+    extras.insert(
+      "ignoreCrossplatformCheck".to_string(),
+      Value::Bool(self.input.ignore_crossplatform_check),
+    );
     extras.insert(
       "skipOhModulesLint".to_string(),
       Value::Bool(
@@ -920,7 +925,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
             .map(|options| options.types.clone())
             .unwrap_or_default()
         }),
-      is_crossplatform: false,
+      is_crossplatform: self.input.is_crossplatform,
       build_generated_profile_path: self.path(&self.input.paths.generated_profile_path)?,
       bundle_type: self.input.session.project.bundle_type.clone(),
       api_version: self.input.config.sdk_config.compile_api_version,

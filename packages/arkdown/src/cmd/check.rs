@@ -29,6 +29,10 @@ pub struct CheckRequest {
   pub project: Option<PathBuf>,
   /// Node executable used to invoke the SDK semantic checker.
   pub node_executable: Option<PathBuf>,
+  /// Enable ArkUI-X cross-platform API validation.
+  pub is_crossplatform: bool,
+  /// Downgrade cross-platform API diagnostics to warnings.
+  pub ignore_crossplatform_check: bool,
   /// ArkTS checker backend. `oxc` runs without Node. `sdk` is an explicit
   /// comparison backend while the remaining TypeScript semantic corpus moves.
   pub checker: String,
@@ -87,6 +91,8 @@ impl CheckCommandRunner {
         &module_context,
         self.node_executable(),
         checker_backend,
+        self.args.is_crossplatform,
+        self.args.ignore_crossplatform_check,
       )
       .run()?;
       summary.merge(module_summary);
@@ -134,6 +140,8 @@ struct CheckModuleRunner<'a> {
   module_context: &'a ModuleCompileContext,
   node_executable: PathBuf,
   checker_backend: CheckBackend,
+  is_crossplatform: bool,
+  ignore_crossplatform_check: bool,
 }
 
 impl<'a> CheckModuleRunner<'a> {
@@ -144,6 +152,8 @@ impl<'a> CheckModuleRunner<'a> {
     module_context: &'a ModuleCompileContext,
     node_executable: PathBuf,
     checker_backend: CheckBackend,
+    is_crossplatform: bool,
+    ignore_crossplatform_check: bool,
   ) -> Self {
     Self {
       config,
@@ -152,6 +162,8 @@ impl<'a> CheckModuleRunner<'a> {
       module_context,
       node_executable,
       checker_backend,
+      is_crossplatform,
+      ignore_crossplatform_check,
     }
   }
 
@@ -217,6 +229,8 @@ impl<'a> CheckModuleRunner<'a> {
       byte_code_har_integrated_optimization: false,
       single_file_emit: false,
       rollup_cache_use_source_hash: false,
+      is_crossplatform: self.is_crossplatform,
+      ignore_crossplatform_check: self.ignore_crossplatform_check,
     })
     .build()?;
     let output = SdkEtsCheckerRunner::new(&plan).run()?;
@@ -287,6 +301,7 @@ impl<'a> CheckModuleRunner<'a> {
       .with_compile_sdk_version(self.config.sdk_config.compile_api_version.to_string())
       .with_runtime_os(self.config.product.runtime_os.clone())
       .with_atomic_service(self.session.project.bundle_type == "atomicService")
+      .with_crossplatform(self.is_crossplatform, self.ignore_crossplatform_check)
       .with_strict_api_compatibility(matches!(
         self
           .config

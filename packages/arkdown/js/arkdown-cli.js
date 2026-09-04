@@ -34,6 +34,8 @@ const BUILD_FLAG_OPTIONS = new Map([
   ['--ohos-enable-binxo', 'ohosEnableBinxo'],
   ['--enable-zig', 'enableZig'],
   ['--disable-abc-cache', 'disableAbcCache'],
+  ['--crossplatform', 'isCrossplatform'],
+  ['--ignore-crossplatform-check', 'ignoreCrossplatformCheck'],
   ['--cache', 'cache'],
 ])
 const BUILD_APPEND_OPTIONS = new Map([
@@ -96,7 +98,14 @@ class JsCliArgumentParser {
       ['--node-executable', 'nodeExecutable'],
       ['--checker', 'checker'],
     ])
-    this.parseValues(config, values)
+    this.parseValues(
+      config,
+      values,
+      new Map([
+        ['--crossplatform', 'isCrossplatform'],
+        ['--ignore-crossplatform-check', 'ignoreCrossplatformCheck'],
+      ]),
+    )
     this.oneOf(config, 'target', ['hap', 'hsp', 'har'])
     this.oneOf(config, 'checker', ['oxc', 'sdk'])
     return config
@@ -108,10 +117,14 @@ class JsCliArgumentParser {
     return config
   }
 
-  parseValues(config, values) {
+  parseValues(config, values, flags = new Map()) {
     for (let index = 0; index < this.args.length; index += 1) {
       const option = this.args[index]
       if (option === '--help' || option === '-h') continue
+      if (flags.has(option)) {
+        config[flags.get(option)] = true
+        continue
+      }
       const key = values.get(option)
       if (key === undefined) this.unknown(option)
       config[key] = this.value(++index, option)
@@ -269,6 +282,9 @@ Options:
                       Enable HWAddressSanitizer for the generated package.
   --enable-zig        Compile native C/C++ with zig cc and zig c++.
   --disable-abc-cache Disable CompileArkTS cache.
+  --crossplatform     Enable ArkUI-X cross-platform API validation.
+  --ignore-crossplatform-check
+                      Downgrade cross-platform API errors to warnings.
   --cache-file <path> Override es2abc cache file.
   --checker <mode>    Checker mode: oxc or off. Defaults to oxc.
   --hvigor-plugin-file <path>
@@ -286,6 +302,9 @@ Options:
   --target <kind>     Check context: hap, hsp, or har. Defaults to hap.
   --module, -m <name> Scope checking to one module.
   --checker <mode>    Checker backend: oxc or sdk. Defaults to oxc.
+  --crossplatform     Enable ArkUI-X cross-platform API validation.
+  --ignore-crossplatform-check
+                      Downgrade cross-platform API errors to warnings.
   --node-executable <path>
                       Node executable for the optional SDK comparison backend.`)
   }

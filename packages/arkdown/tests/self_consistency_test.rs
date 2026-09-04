@@ -210,6 +210,8 @@ impl SelfConsistencyOracle {
         enable_zig: false,
         preview: false,
         check_entry: false,
+        is_crossplatform: false,
+        ignore_crossplatform_check: false,
         preview_transform_mode: false,
         disable_abc_cache,
         cache_file: None,

@@ -281,6 +281,7 @@ impl BuildCoordinator {
           || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
       )
       .with_check_entry(args.check_entry)
+      .with_crossplatform(args.is_crossplatform, args.ignore_crossplatform_check)
       .with_ui_transform_optimization(args.ui_transform_optimization)
       .with_use_get_current_bundle_name(args.integrated_hsp_use_get_current_bundle_name)
       .build()?;
@@ -686,6 +687,7 @@ impl BuildCoordinator {
         .with_runtime_os(module_config.product.runtime_os.clone())
         .with_atomic_service(session.project.bundle_type == "atomicService")
         .with_ohos_test_source(module_target_name == "ohosTest")
+        .with_crossplatform(args.is_crossplatform, args.ignore_crossplatform_check)
         .with_strict_api_compatibility(matches!(
           module_build_option.strict_mode.api_compatibility_check,
           Some(arkdown_core::ApiCompatibilityCheckLevel::Error)
@@ -1070,7 +1072,7 @@ impl BuildCoordinator {
           let page_entries = serde_json::to_string(&loader_json.page_entry_sources)
             .context("serialize page entry sources for bundle cache")?;
           let key_str = format!(
-            "{}#{}#{:?}#{}#arkts={}#preview={}#checkEntry={}#uiTransformOptimization={}#pageEntries={}#preloadSystemSo={}",
+            "{}#{}#{:?}#{}#arkts={}#preview={}#checkEntry={}#crossplatform={}#ignoreCrossplatformCheck={}#uiTransformOptimization={}#pageEntries={}#preloadSystemSo={}",
             config.sdk_config.compile_sdk_version,
             config.build_mode.as_str(),
             config.output_target,
@@ -1080,6 +1082,8 @@ impl BuildCoordinator {
               || args.preview_transform_mode
               || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
             args.check_entry,
+            args.is_crossplatform,
+            args.ignore_crossplatform_check,
             args.ui_transform_optimization,
             page_entries,
             module_build_option.preload_system_so

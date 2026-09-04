@@ -12,6 +12,8 @@ pub(crate) struct CompileEnvKeyBuilder<'a> {
   pub(crate) arkts_language_version: arkdown_core::ArktsLanguageVersion,
   pub(crate) preview_mode: bool,
   pub(crate) check_entry: bool,
+  pub(crate) is_crossplatform: bool,
+  pub(crate) ignore_crossplatform_check: bool,
   pub(crate) ui_transform_optimization: bool,
   pub(crate) use_get_current_bundle_name: bool,
 }
@@ -36,6 +38,8 @@ impl<'a> CompileEnvKeyBuilder<'a> {
       arkts_language_version,
       preview_mode: false,
       check_entry: false,
+      is_crossplatform: false,
+      ignore_crossplatform_check: false,
       ui_transform_optimization: false,
       use_get_current_bundle_name: false,
     }
@@ -48,6 +52,12 @@ impl<'a> CompileEnvKeyBuilder<'a> {
 
   pub(crate) fn with_check_entry(mut self, check_entry: bool) -> Self {
     self.check_entry = check_entry;
+    self
+  }
+
+  pub(crate) fn with_crossplatform(mut self, enabled: bool, ignore_check: bool) -> Self {
+    self.is_crossplatform = enabled;
+    self.ignore_crossplatform_check = ignore_check;
     self
   }
 
@@ -70,7 +80,7 @@ impl<'a> CompileEnvKeyBuilder<'a> {
     let compiler_cache_path = arkdown_cache::compiler_cache_path(&self.loader_json.cache_path);
 
     Ok(format!(
-      "{}#target={}#useSourceHash={}#arkts={}#preview={}#checkEntry={}#uiTransformOptimization={}#useGetCurrentBundleName={}",
+      "{}#target={}#useSourceHash={}#arkts={}#preview={}#checkEntry={}#crossplatform={}#ignoreCrossplatformCheck={}#uiTransformOptimization={}#useGetCurrentBundleName={}",
       arkdown_cache::CompileEnv::from_plan(
         self.config.sdk_config.compile_sdk_version.clone(),
         self.config.product.compatible_sdk_version.clone(),
@@ -86,6 +96,8 @@ impl<'a> CompileEnvKeyBuilder<'a> {
       self.arkts_language_version,
       self.preview_mode,
       self.check_entry,
+      self.is_crossplatform,
+      self.ignore_crossplatform_check,
       self.ui_transform_optimization,
       self.use_get_current_bundle_name,
     ))

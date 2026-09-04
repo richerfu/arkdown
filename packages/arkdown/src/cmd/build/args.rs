@@ -274,6 +274,11 @@ pub struct BuildRequest {
   /// as an explicit comparison backend while its remaining semantic corpus is
   /// migrated. `off` disables checker diagnostics while preserving transforms.
   pub checker: Option<String>,
+  /// Enable the ArkUI-X `projectConfig.isCrossplatform` source contract.
+  pub is_crossplatform: bool,
+  /// Downgrade cross-platform API contract errors to warnings, matching
+  /// `projectConfig.ignoreCrossplatformCheck`.
+  pub ignore_crossplatform_check: bool,
   /// Enable coarse build cache and ABC ProgramCache handoff.
   pub cache: bool,
 

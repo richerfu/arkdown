@@ -1,8 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use arkdown_ets_transform::{
-    error::EtsTransformError, transform::component_meta::ComponentMetadata, ArktsSourceChecker,
-    EtsChecker, SystemApiCheckOptions, TransformSourceSnapshot,
+    error::{DiagnosticSeverity, EtsTransformError},
+    transform::component_meta::ComponentMetadata,
+    ArktsSourceChecker, EtsChecker, SystemApiCheckOptions, TransformSourceSnapshot,
 };
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
@@ -674,6 +675,124 @@ fn arkts11_system_api_enforces_stage_form_atomic_and_test_tags() {
             diagnostic,
             EtsTransformError::Diagnostic { message, .. }
                 if message.contains("testing directories")
+        )
+    }));
+}
+
+#[test]
+fn arkts11_system_api_enforces_crossplatform_tag_and_version_range() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "/** @crossplatform */ export declare function supported(): void;\n\
+             /** @crossplatform [since 10 - 12] */ export declare function supportedAtTwelve(): void;\n\
+             /** @crossplatform [since 13 - 15] */ export declare function future(): void;\n\
+             export declare function unsupported(): void;\n",
+        ),
+    );
+    let sources = TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]);
+    let source =
+        "import { supported, supportedAtTwelve, future, unsupported } from '@ohos.demo';\n\
+                  supported(); supportedAtTwelve(); future(); unsupported();\n";
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(sources.clone(), Vec::new())
+        .with_system_api_context(
+            SystemApiCheckOptions::default()
+                .with_compile_sdk_version("12")
+                .with_crossplatform(true, false),
+        );
+    let report = checker.check("/project/Page.ets", source);
+    let diagnostics = report
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            EtsTransformError::CodedDiagnostic {
+                code,
+                severity,
+                message,
+                ..
+            } if code == "11706007" => Some((severity, message.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 2, "{:?}", report.diagnostics());
+    assert!(diagnostics
+        .iter()
+        .all(|(severity, _)| **severity == DiagnosticSeverity::Error));
+    assert!(diagnostics
+        .iter()
+        .any(|(_, message)| message.contains("future")));
+    assert!(diagnostics
+        .iter()
+        .any(|(_, message)| message.contains("unsupported")));
+
+    let ignored = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(sources, Vec::new())
+        .with_system_api_context(
+            SystemApiCheckOptions::default()
+                .with_compile_sdk_version("12")
+                .with_crossplatform(true, true),
+        )
+        .check("/project/Page.ets", source);
+    assert_eq!(ignored.error_count(), 0);
+    assert_eq!(
+        ignored
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic,
+                    EtsTransformError::CodedDiagnostic {
+                        code,
+                        severity: DiagnosticSeverity::Warning,
+                        ..
+                    } if code == "11706007"
+                )
+            })
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn arkts11_system_api_resolves_recursive_sdk_types_without_unbounded_expansion() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut declaration = String::from(
+        "export interface Transform {\n\
+         /** @since 13 */ rotateY: Transform;\n\
+         }\n\
+         export declare function currentTransform(): Transform;\n",
+    );
+    // A real SDK declaration inventory contains thousands of symbols. The
+    // source compiler resolves its type graph, so a recursive type must not be
+    // expanded once per unrelated declaration in that inventory.
+    for index in 0..2_048 {
+        declaration.push_str(&format!("interface Unrelated{index} {{ value: number }}\n"));
+    }
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(declaration),
+    );
+    let sources = TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]);
+    let report = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(sources, Vec::new())
+        .with_system_api_context(
+            SystemApiCheckOptions::default()
+                .with_compatible_sdk_version("12")
+                .with_strict_api_compatibility(true),
+        )
+        .check(
+            "/project/Page.ets",
+            "import { currentTransform } from '@ohos.demo'; currentTransform().rotateY.rotateY.rotateY;",
+        );
+
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011"
         )
     }));
 }

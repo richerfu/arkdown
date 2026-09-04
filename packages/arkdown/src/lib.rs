@@ -84,6 +84,8 @@ pub struct CheckConfig {
   pub target: Option<String>,
   pub module: Option<String>,
   pub node_executable: Option<String>,
+  pub is_crossplatform: Option<bool>,
+  pub ignore_crossplatform_check: Option<bool>,
   #[napi(ts_type = "'oxc' | 'sdk'")]
   pub checker: Option<String>,
 }
@@ -109,6 +111,8 @@ pub async fn check(config: CheckConfig) -> napi::Result<()> {
     module: config.module,
     project: config.project.map(PathBuf::from),
     node_executable: config.node_executable.map(PathBuf::from),
+    is_crossplatform: config.is_crossplatform.unwrap_or(false),
+    ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
     checker: config.checker.unwrap_or_else(|| "oxc".to_string()),
   };
   tokio::task::spawn_blocking(move || cmd::check::run(args))
@@ -2247,6 +2251,10 @@ pub struct BuildConfig {
   pub disable_abc_cache: Option<bool>,
   pub cache_file: Option<String>,
   pub checker: Option<String>,
+  /// Enable the source compiler's ArkUI-X cross-platform API contract.
+  pub is_crossplatform: Option<bool>,
+  /// Match `ignoreCrossplatformCheck`: emit 11706007 as a warning instead of an error.
+  pub ignore_crossplatform_check: Option<bool>,
   pub cache: Option<bool>,
   #[napi(ts_type = "string | string[]")]
   pub compile_plugin_path: Option<String>,
@@ -2359,6 +2367,8 @@ pub fn build<'a>(
     disable_abc_cache,
     cache_file,
     checker,
+    is_crossplatform,
+    ignore_crossplatform_check,
     cache,
     compile_plugin_path: _,
     hvigor_plugin_file: _,
@@ -2411,6 +2421,8 @@ pub fn build<'a>(
     disable_abc_cache: disable_abc_cache.unwrap_or(false),
     cache_file,
     checker,
+    is_crossplatform: is_crossplatform.unwrap_or(false),
+    ignore_crossplatform_check: ignore_crossplatform_check.unwrap_or(false),
     cache: cache.unwrap_or(true),
   };
 
@@ -2477,6 +2489,8 @@ struct PackageBuildArgs {
   disable_abc_cache: bool,
   cache_file: Option<String>,
   checker: Option<String>,
+  is_crossplatform: bool,
+  ignore_crossplatform_check: bool,
   cache: bool,
 }
 
@@ -2596,6 +2610,8 @@ async fn run_build(
     cache_file: package_args.cache_file.map(std::path::PathBuf::from),
     abc_backend: AbcBackendChoice::Sdk,
     checker: package_args.checker.or_else(|| Some("oxc".to_string())),
+    is_crossplatform: package_args.is_crossplatform,
+    ignore_crossplatform_check: package_args.ignore_crossplatform_check,
     cache: package_args.cache,
     // Hot-rebuild flags are always false when invoked via the Node.js API
     // — only the watch stage sets them for incremental rebuilds.

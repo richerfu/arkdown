@@ -267,6 +267,7 @@ impl BuildCoordinator {
             || args.preview_transform_mode
             || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
           check_entry: args.check_entry,
+          is_crossplatform: args.is_crossplatform,
           ui_transform_optimization: args.ui_transform_optimization,
           bundle_type: &session.project.bundle_type,
         })?
@@ -567,6 +568,7 @@ impl BuildCoordinator {
           || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
       )
       .with_check_entry(args.check_entry)
+      .with_crossplatform(args.is_crossplatform, args.ignore_crossplatform_check)
       .with_ui_transform_optimization(args.ui_transform_optimization)
       .with_use_get_current_bundle_name(args.integrated_hsp_use_get_current_bundle_name)
       .build()?;
