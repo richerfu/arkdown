@@ -388,15 +388,6 @@ impl BuildCoordinator {
         )
         .generate(&bundle_out.bundle_output.modules_abc_path)?;
 
-        task_lifecycle
-          .transform_abc(
-            &module.name,
-            module_target_name,
-            &bundle_out.bundle_output.modules_abc_path,
-            module_obfuscation.is_enabled(&config.build_mode),
-          )
-          .await?;
-
         if let Some(pending) = pending_bytecode_obfuscations[bundle_index].take() {
           pending.run(&module.name)?;
         }
@@ -672,9 +663,6 @@ impl BuildCoordinator {
         // Incremental callbacks execute inside the lifetime of the initial
         // HotReloadArkTS task and therefore never emit a second task cycle or
         // enter packaging.
-        if self.owns_task_cycle {
-          task_lifecycle.finish_cycle().await?;
-        }
         return Ok(CoordinatorBytecodeStageOutput {
           early_output: Some(BuildOutput {
             artifact_paths: Vec::new(),
@@ -693,7 +681,6 @@ impl BuildCoordinator {
         disable_abc_cache,
         cli_cache_file.as_ref().cloned(),
         package_plugins.to_vec(),
-        None,
         false,
         true,
       ))
@@ -718,9 +705,6 @@ impl BuildCoordinator {
             .marker(&module.name, None, "HotReloadBuild")
             .await?;
         }
-      }
-      if self.owns_task_cycle {
-        task_lifecycle.finish_cycle().await?;
       }
       return Ok(CoordinatorBytecodeStageOutput {
         early_output: Some(BuildOutput {

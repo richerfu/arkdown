@@ -47,7 +47,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 walkdir = { workspace = true }
 fast-glob = { workspace = true }
 oxc_index = { workspace = true }

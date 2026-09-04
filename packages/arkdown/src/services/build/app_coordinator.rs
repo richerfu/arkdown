@@ -27,7 +27,7 @@ use arkdown_sign::SignBackendRunner;
 use arkdown_native::ProjectDebugSymbolCollector;
 
 use super::coordinator::{
-  BuildCoordinator, BuildOutput, BuildTaskLifecycle, BuildTaskObserver, NativeTaskCutoffReached,
+  BuildCoordinator, BuildOutput, BuildTaskLifecycle, NativeTaskCutoffReached,
 };
 use arkdown_build::layout::ModuleBuildLayout;
 use arkdown_build::request::BuildRequest;
@@ -37,7 +37,6 @@ pub struct AppBuildCoordinator {
   config: Arc<ArkdownConfig>,
   args: BuildRequest,
   package_plugins: Vec<PackagePlugin>,
-  task_observer: Option<Arc<dyn BuildTaskObserver>>,
 }
 
 impl AppBuildCoordinator {
@@ -47,7 +46,6 @@ impl AppBuildCoordinator {
       config,
       args,
       package_plugins: Vec::new(),
-      task_observer: None,
     }
   }
 
@@ -56,23 +54,12 @@ impl AppBuildCoordinator {
     self
   }
 
-  pub fn with_task_observer(mut self, observer: Arc<dyn BuildTaskObserver>) -> Self {
-    self.task_observer = Some(observer);
-    self
-  }
-
   pub async fn execute(self) -> Result<BuildOutput> {
-    let observer = self.task_observer.clone();
     match self.execute_impl().await {
       Ok(output) => Ok(output),
-      Err(error) if error.is::<NativeTaskCutoffReached>() => {
-        BuildTaskLifecycle::new(observer, Vec::new())
-          .finish_cycle()
-          .await?;
-        Ok(BuildOutput {
-          artifact_paths: Vec::new(),
-        })
-      }
+      Err(error) if error.is::<NativeTaskCutoffReached>() => Ok(BuildOutput {
+        artifact_paths: Vec::new(),
+      }),
       Err(error) => Err(error),
     }
   }
@@ -84,12 +71,8 @@ impl AppBuildCoordinator {
       );
     }
 
-    let mut lifecycle = BuildTaskLifecycle::new(
-      self.task_observer.clone(),
-      self.args.native_task_roots.clone(),
-    );
+    let mut lifecycle = BuildTaskLifecycle::new(self.args.native_task_roots.clone());
     let project_name = self.project_name()?;
-    lifecycle.begin_cycle().await?;
 
     lifecycle.marker(&project_name, None, "PreBuildApp").await?;
     if lifecycle
@@ -239,7 +222,6 @@ impl AppBuildCoordinator {
     };
 
     lifecycle.marker(&project_name, None, "assembleApp").await?;
-    lifecycle.finish_cycle().await?;
     Ok(BuildOutput {
       artifact_paths: final_apps,
     })
@@ -264,12 +246,9 @@ impl AppBuildCoordinator {
     args.target = target.to_string();
     args.watch = false;
     args.preview = false;
-    let mut coordinator = BuildCoordinator::new(self.session.clone(), config, args)
+    let coordinator = BuildCoordinator::new(self.session.clone(), config, args)
       .with_package_plugins(self.package_plugins.clone())
       .within_task_cycle();
-    if let Some(observer) = self.task_observer.clone() {
-      coordinator = coordinator.with_task_observer(observer);
-    }
     Ok(coordinator.execute().await?.artifact_paths)
   }
 

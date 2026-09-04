@@ -497,7 +497,6 @@ impl BuildCoordinator {
       config,
       args,
       package_plugins: vec![],
-      task_observer: None,
       owns_task_cycle: true,
     }
   }
@@ -505,12 +504,6 @@ impl BuildCoordinator {
   /// Attach package-supplied Rolldown plugins collected by the Node.js API.
   pub fn with_package_plugins(mut self, package_plugins: Vec<PackagePlugin>) -> Self {
     self.package_plugins = package_plugins;
-    self
-  }
-
-  /// Attach the same-process task observer used by the Node hvigor runtime.
-  pub fn with_task_observer(mut self, task_observer: Arc<dyn BuildTaskObserver>) -> Self {
-    self.task_observer = Some(task_observer);
     self
   }
 
@@ -527,18 +520,12 @@ impl BuildCoordinator {
   /// Execute the full build pipeline and return the produced artifacts.
   ///
   pub async fn execute(self) -> Result<BuildOutput> {
-    let observer = self.task_observer.clone();
     let owns_task_cycle = self.owns_task_cycle;
     match self.execute_targets().await {
       Ok(output) => Ok(output),
-      Err(error) if owns_task_cycle && error.is::<NativeTaskCutoffReached>() => {
-        BuildTaskLifecycle::new(observer, Vec::new())
-          .finish_cycle()
-          .await?;
-        Ok(BuildOutput {
-          artifact_paths: Vec::new(),
-        })
-      }
+      Err(error) if owns_task_cycle && error.is::<NativeTaskCutoffReached>() => Ok(BuildOutput {
+        artifact_paths: Vec::new(),
+      }),
       Err(error) => Err(error),
     }
   }
@@ -557,13 +544,6 @@ impl BuildCoordinator {
       targets = ?target_plan.target_names,
       "multi-target: executing the complete build pipeline once per target"
     );
-    let cycle_lifecycle = BuildTaskLifecycle::new(
-      self.task_observer.clone(),
-      self.args.native_task_roots.clone(),
-    );
-    if self.owns_task_cycle {
-      cycle_lifecycle.begin_cycle().await?;
-    }
     let mut artifact_paths = Vec::new();
     for target_name in target_plan.target_names {
       let mut args = self.args.clone();
@@ -574,15 +554,11 @@ impl BuildCoordinator {
         config: self.config.clone(),
         args,
         package_plugins: self.package_plugins.clone(),
-        task_observer: self.task_observer.clone(),
         owns_task_cycle: false,
       }
       .execute_impl()
       .await?;
       artifact_paths.extend(output.artifact_paths);
-    }
-    if self.owns_task_cycle {
-      cycle_lifecycle.finish_cycle().await?;
     }
     Ok(BuildOutput { artifact_paths })
   }

@@ -1,7 +1,7 @@
 # OXC/Rolldown 完整替换 hvigor 重构计划
 
 状态：实施中（优先收口 ArkTS 1.1）
-更新时间：2026-09-04
+更新时间：2026-09-05
 适用范围：Stage 模型、ESMODULE、ArkTS 1.1 默认编译、显式 ArkTS 1.2 编译，以及 HAP/HSP/HAR/APP 的现代构建链路
 
 ## 1. 结论
@@ -31,7 +31,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 
 当前最明显的架构偏差是：
 
-1. `arkdown-napi` 已从约 6.6 万行降至约 2.46 万行 Rust：Hvigor project/task/worker/build-script runtime，以及零调用的 CLI observability/process-monitor/report lifecycle N-API facade 已删除；动态 ABC 的 typed plan、filesInfo/npmEntries/cache manifest、`es2abc` 执行和 AOT writer 已完整迁入 `arkdown-abc`，N-API 内重复包装同一 ABC input 的 `BytecodeStage` 已删除；typed `BuildRequest`、module selection、全部 build layout、pre-build validator、intermediate artifact writer、code-resource、preview、hot reload、quickfix、remote HSP signing、device test 和 unit-test 行为已迁入无 N-API 依赖的 `arkdown-build`；CMake/Ninja、native library、strip/binxo 和 debug-symbol 行为已从 N-API 删除并迁入 `arkdown-native`；packing check 已迁入 `arkdown-pack`。N-API 的旧 `cmd`/`args`/`BuildCommand` 表象已删除，内部只保留 `services::build::BuildService`。构建 coordinator、static ABC 和 package/sign orchestration 仍待迁入对应 application/domain crate，当前还不是薄绑定层。
+1. `arkdown-napi` 已从约 6.6 万行降至约 1.63 万行 Rust：Hvigor project/task/worker/build-script runtime、零调用的 task observer/event 桥，以及 CLI observability/process-monitor/report lifecycle N-API facade 已删除；动态 ABC 的 typed plan、filesInfo/npmEntries/cache manifest、`es2abc` 执行和 AOT writer 已完整迁入 `arkdown-abc`，N-API 内重复包装同一 ABC input 的 `BytecodeStage` 已删除；typed `BuildRequest`、module/target/native execution planning、全部 build layout、pre-build validator、intermediate artifact writer、code-resource、preview、hot reload、quickfix、remote HSP signing、device test、unit-test、compile task cache、SDK checker planning、static ArkTS backend planning、obfuscation planning 与 plugin share/cache planning 已迁入无 N-API 依赖的 `arkdown-build`；CMake/Ninja、native library、strip/binxo 和 debug-symbol 行为已从 N-API 删除并迁入 `arkdown-native`；packing check 已迁入 `arkdown-pack`。N-API 的旧 `cmd`/`args`/`BuildCommand` 表象已删除，内部只保留 `services::build::BuildService`。主 coordinator 和 package/sign orchestration 仍待整体迁入 application/domain crate，当前还不是薄绑定层。
 2. `packages/arkdown/js` 当前约 1,419 行：只保留原生入口、CLI trampoline、完整 TS/JS compile-plugin 适配，以及尚待 OXC 语义尾项完成后删除的 checker 对比 bridge。插件适配占其中约 928 行，是原有 TS/JS 插件 ABI 的兼容边界，不应下沉为 Rust CLI 或伪造为内建业务逻辑。
 3. 默认 checker 已改为 OXC；显式 `checker=sdk` 对比后端及其 Node bridge 仍待最后一批语义用例迁移后删除。
 4. ArkTS 1.2 虽然已经按参数正确分流，但 Rust 只解析并投影模块请求，真正的 UI、语法检查、Memo 和 ABC 驱动仍由 Node 加载 SDK 插件执行。

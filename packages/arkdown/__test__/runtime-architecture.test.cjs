@@ -87,6 +87,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
   const packageRoot = path.resolve(__dirname, '..')
   const sourceRoot = path.join(packageRoot, 'src')
   const napi = fs.readFileSync(path.join(sourceRoot, 'lib.rs'), 'utf8')
+  const coordinator = fs.readFileSync(path.join(sourceRoot, 'services/build/coordinator/mod.rs'), 'utf8')
   const declarations = fs.readFileSync(path.join(packageRoot, 'index.d.ts'), 'utf8')
 
   for (const removed of [
@@ -124,6 +125,10 @@ test('native package exposes typed services and plugin bridges, not a command ru
   assert.equal(fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/clean.rs')), true)
 
   assert.doesNotMatch(napi, /run_runtime_tasks|RuntimeTaskBridgeSeed|RuntimeBuildScriptSession/)
+  assert.doesNotMatch(
+    coordinator,
+    /BuildTaskObserver|BuildTaskEvent|BuildCycleEvent|BuildNativeCommandEvent|BuildAbcTransformEvent/,
+  )
   assert.doesNotMatch(declarations, /runRuntimeTasks|RuntimeHvigor|RuntimeBuildScriptSession/)
   assert.match(declarations, /build\(config: BuildConfig, plugins\?: Array<ArkdownPlugin>/)
   assert.match(declarations, /clean\(config: CleanConfig\): Promise<void>/)
