@@ -1,4 +1,5 @@
 use super::*;
+use arkdown_ets_transform::{CrossplatformSourceCollection, InsightIntentSourceMetadata};
 
 #[test]
 fn transform_collector_excludes_rollup_virtual_runtime_source_maps() {
@@ -44,4 +45,31 @@ fn transform_collector_restores_sdk_javascript_mapping_line_boundaries() {
     let value: serde_json::Value =
         serde_json::from_str(&emitted_with_boundary).expect("source map JSON with boundary");
     assert_eq!(value["mappings"], "AAAA;");
+}
+
+#[test]
+fn transform_store_hands_crossplatform_facts_to_bundle_state() {
+    let store = HvigorModuleTransformStore::default();
+    store.record(
+        "/project/entry/src/main/ets/model/Router.js".to_string(),
+        None,
+        None,
+        false,
+        false,
+        InsightIntentSourceMetadata::default(),
+        CrossplatformSourceCollection {
+            modules: vec!["ohos.router".to_string()],
+            components: Vec::new(),
+        },
+    );
+
+    let snapshot = store.finish();
+    assert_eq!(
+        snapshot
+            .crossplatform_collections
+            .get("/project/entry/src/main/ets/model/Router.js")
+            .expect("crossplatform facts")
+            .modules,
+        ["ohos.router".to_string()]
+    );
 }

@@ -370,6 +370,7 @@ impl TransformSourceSnapshot {
         let filenames = specifier
             .sdk_api_filenames()
             .into_iter()
+            .chain(specifier.sdk_component_api_filenames())
             .chain(specifier.sdk_kit_filenames())
             .chain(specifier.sdk_arkts_filenames())
             .chain(specifier.sdk_runtime_declaration_filenames());
@@ -872,9 +873,15 @@ mod tests {
         let api_root = tmp.path().join("ets/api");
         std::fs::create_dir_all(&api_root).unwrap();
         let declaration = api_root.join("@ohos.multimedia.media.d.ts");
+        let external_declaration = api_root.join("@arkui-x.telephony.d.ts");
         std::fs::write(
             &declaration,
             "declare namespace media {}\nexport default media;",
+        )
+        .unwrap();
+        std::fs::write(
+            &external_declaration,
+            "export declare function dial(): void;",
         )
         .unwrap();
 
@@ -882,6 +889,10 @@ mod tests {
         files.insert(
             declaration.clone(),
             Arc::<str>::from("declare namespace media {}\nexport default media;"),
+        );
+        files.insert(
+            external_declaration.clone(),
+            Arc::<str>::from("export declare function dial(): void;"),
         );
         let sources =
             TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![api_root]);
@@ -896,6 +907,13 @@ mod tests {
                 arkdown_path::canonicalize_or_owned(&declaration)
             );
         }
+        let external = sources
+            .resolve_static_with_declarations(&importer, "@arkui-x.telephony")
+            .expect("external SDK component declaration must resolve");
+        assert_eq!(
+            external.path,
+            arkdown_path::canonicalize_or_owned(&external_declaration)
+        );
     }
 
     #[test]

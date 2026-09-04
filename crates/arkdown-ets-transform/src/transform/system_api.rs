@@ -28,8 +28,14 @@ use super::{
     api_available::{ApiAvailableSdkBindings, ApiAvailableTransformOptions, ApiAvailableValidator},
     available_annotation::{AvailableAnnotationValidator, AvailableSdkBindings},
     component_analysis::ImportTargetResolver,
-    ModuleExportIndex,
+    CrossplatformSourceCollection, ModuleExportIndex,
 };
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct CrossplatformDependencyKey {
+    api_module: Box<str>,
+    function: Box<str>,
+}
 
 /// Immutable build context consumed by ArkTS 1.1 system-API diagnostics.
 ///
@@ -51,7 +57,11 @@ pub struct SystemApiCheckOptions {
     atomic_service: bool,
     ohos_test_source: bool,
     crossplatform: bool,
+    collect_crossplatform: bool,
     ignore_crossplatform_check: bool,
+    module_prefixes: Arc<[Box<str>]>,
+    crossplatform_dependencies:
+        Arc<FxHashMap<CrossplatformDependencyKey, CrossplatformSourceCollection>>,
 }
 
 impl Default for SystemApiCheckOptions {
@@ -69,7 +79,14 @@ impl Default for SystemApiCheckOptions {
             atomic_service: false,
             ohos_test_source: false,
             crossplatform: false,
+            collect_crossplatform: false,
             ignore_crossplatform_check: false,
+            module_prefixes: ["ohos", "system", "kit", "arkts"]
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<_>>()
+                .into(),
+            crossplatform_dependencies: Arc::default(),
         }
     }
 }
@@ -137,6 +154,72 @@ impl SystemApiCheckOptions {
         self
     }
 
+    /// Enable ArkUI-X module/component artifact collection for full builds.
+    /// This is separate from cross-platform diagnostics because hvigor skips
+    /// collection in watch mode and standalone checks.
+    pub fn with_crossplatform_collection(mut self, enabled: bool) -> Self {
+        self.collect_crossplatform = enabled;
+        self
+    }
+
+    pub fn with_module_prefixes<I, S>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Box<str>>,
+    {
+        self.module_prefixes = prefixes
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>()
+            .into();
+        self
+    }
+
+    pub fn with_crossplatform_dependency<M, F, MI, CI, S>(
+        mut self,
+        api_module: M,
+        function: F,
+        modules: MI,
+        components: CI,
+    ) -> Self
+    where
+        M: Into<Box<str>>,
+        F: Into<Box<str>>,
+        MI: IntoIterator<Item = S>,
+        CI: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Arc::make_mut(&mut self.crossplatform_dependencies)
+            .entry(CrossplatformDependencyKey {
+                api_module: api_module.into(),
+                function: function.into(),
+            })
+            .or_insert_with(|| CrossplatformSourceCollection {
+                modules: modules.into_iter().map(Into::into).collect(),
+                components: components.into_iter().map(Into::into).collect(),
+            });
+        self
+    }
+
+    pub(crate) fn collects_crossplatform(&self) -> bool {
+        self.collect_crossplatform
+    }
+
+    pub(crate) fn module_prefixes(&self) -> &[Box<str>] {
+        &self.module_prefixes
+    }
+
+    fn crossplatform_dependency(
+        &self,
+        declaration: &SystemApiDeclarationKey,
+    ) -> Option<&CrossplatformSourceCollection> {
+        self.crossplatform_dependencies
+            .get(&CrossplatformDependencyKey {
+                api_module: declaration.api_module.clone(),
+                function: declaration.function.clone(),
+            })
+    }
+
     fn severity(&self) -> DiagnosticSeverity {
         if self.strict_api_compatibility {
             DiagnosticSeverity::Error
@@ -162,6 +245,13 @@ pub(super) struct SystemApiContract {
     atomic_service: Option<Box<str>>,
     fa_model_only: Option<Box<str>>,
     test_only: Option<Box<str>>,
+    declarations: Vec<SystemApiDeclarationKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SystemApiDeclarationKey {
+    api_module: Box<str>,
+    function: Box<str>,
 }
 
 impl SystemApiContract {
@@ -215,6 +305,11 @@ impl SystemApiContract {
         }
         if self.test_only.is_none() {
             self.test_only.clone_from(&other.test_only);
+        }
+        for declaration in &other.declarations {
+            if !self.declarations.contains(declaration) {
+                self.declarations.push(declaration.clone());
+            }
         }
     }
 }
@@ -635,6 +730,7 @@ struct SystemApiJsDocTag {
 
 struct SystemApiDeclarationCollector<'a> {
     declaration_path: &'a Path,
+    api_module: Box<str>,
     jsdoc: Option<SystemApiJsDocInventory>,
     available_contracts: FxHashMap<u32, Box<str>>,
     facts: SystemApiModuleFacts,
@@ -648,6 +744,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
     ) -> Self {
         Self {
             declaration_path,
+            api_module: Self::api_module(declaration_path),
             jsdoc,
             available_contracts,
             facts: SystemApiModuleFacts::default(),
@@ -774,7 +871,8 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                 self.record_direct_binding(interface.id.name.as_str(), exported);
             }
             Declaration::TSTypeAliasDeclaration(alias) => {
-                let mut symbol = self.symbol_for_spans([wrapper_span, Some(alias.span)]);
+                let mut symbol =
+                    self.symbol_for_spans(alias.id.name.as_str(), [wrapper_span, Some(alias.span)]);
                 if let Some(projection) = SystemApiTypeProjection::new(&alias.type_annotation) {
                     symbol.add_type_projection(projection);
                 }
@@ -786,11 +884,10 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                     let Some(id) = declaration.id.get_binding_identifier() else {
                         continue;
                     };
-                    let mut symbol = self.symbol_for_spans([
-                        wrapper_span,
-                        Some(declaration.span),
-                        Some(variable.span),
-                    ]);
+                    let mut symbol = self.symbol_for_spans(
+                        id.name.as_str(),
+                        [wrapper_span, Some(declaration.span), Some(variable.span)],
+                    );
                     if let Some(annotation) = &declaration.type_annotation {
                         if let Some(projection) =
                             SystemApiTypeProjection::new(&annotation.type_annotation)
@@ -803,9 +900,17 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                 }
             }
             Declaration::TSEnumDeclaration(enumeration) => {
-                let mut symbol = self.symbol_for_spans([wrapper_span, Some(enumeration.span)]);
+                let mut symbol = self.symbol_for_spans(
+                    enumeration.id.name.as_str(),
+                    [wrapper_span, Some(enumeration.span)],
+                );
                 for member in &enumeration.body.members {
-                    let contract = self.contract_for_spans([Some(member.span)]);
+                    let member_function = format!(
+                        "{}#{}",
+                        self.function(enumeration.id.name.as_str()),
+                        member.id.static_name()
+                    );
+                    let contract = self.contract_for_spans(&member_function, [Some(member.span)]);
                     if !contract.is_empty() {
                         symbol
                             .members
@@ -837,6 +942,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
     ) {
         let mut nested = Self {
             declaration_path: self.declaration_path,
+            api_module: self.api_module.clone(),
             jsdoc: self.jsdoc.clone(),
             available_contracts: self.available_contracts.clone(),
             facts: SystemApiModuleFacts::default(),
@@ -849,7 +955,10 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                 nested.collect_namespace(child, None, true);
             }
         }
-        let mut symbol = self.symbol_for_spans([wrapper_span, Some(namespace.span)]);
+        let mut symbol = self.symbol_for_spans(
+            namespace.id.name.as_str(),
+            [wrapper_span, Some(namespace.span)],
+        );
         SystemApiModuleFacts::resolve_local_references(&mut nested.facts.local);
         for (local, exported_name) in &nested.facts.direct_bindings {
             if let Some(member) = nested.facts.local.get(local) {
@@ -872,7 +981,13 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         class: &'program Class<'program>,
         wrapper_span: Option<Span>,
     ) -> SystemApiSymbol {
-        let mut symbol = self.symbol_for_spans([wrapper_span, Some(class.span)]);
+        let mut symbol = self.symbol_for_spans(
+            class
+                .id
+                .as_ref()
+                .map_or("unnamed", |identifier| identifier.name.as_str()),
+            [wrapper_span, Some(class.span)],
+        );
         if let Some(heritage) = &class.heritage {
             if let Some(reference) = SystemApiExpressionPath::new(&heritage.expression) {
                 symbol.references.push(reference.path);
@@ -922,7 +1037,10 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         interface: &'program TSInterfaceDeclaration<'program>,
         wrapper_span: Option<Span>,
     ) -> SystemApiSymbol {
-        let mut symbol = self.symbol_for_spans([wrapper_span, Some(interface.span)]);
+        let mut symbol = self.symbol_for_spans(
+            interface.id.name.as_str(),
+            [wrapper_span, Some(interface.span)],
+        );
         for heritage in &interface.extends {
             symbol
                 .references
@@ -988,7 +1106,13 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         function: &'program oxc_ast::ast::Function<'program>,
         wrapper_span: Option<Span>,
     ) -> SystemApiSymbol {
-        let mut symbol = self.symbol_for_spans([wrapper_span, Some(function.span)]);
+        let mut symbol = self.symbol_for_spans(
+            function
+                .id
+                .as_ref()
+                .map_or("unnamed", |identifier| identifier.name.as_str()),
+            [wrapper_span, Some(function.span)],
+        );
         symbol.call_signatures.push(SystemApiCallSignature::new(
             &function.params,
             function.return_type.as_deref(),
@@ -1006,10 +1130,12 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         let Some(name) = key.static_name() else {
             return;
         };
+        let member_function =
+            Self::member_function(owner, &name).unwrap_or_else(|| self.function(&name));
         let member = owner.members.entry(name.into_owned().into()).or_default();
         member
             .contract
-            .merge(&self.contract_for_spans([Some(span)]));
+            .merge(&self.contract_for_spans(&member_function, [Some(span)]));
         if let Some(projection) = projection {
             member.add_type_projection(projection);
         }
@@ -1026,28 +1152,44 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         let Some(name) = key.static_name() else {
             return;
         };
+        let member_function =
+            Self::member_function(owner, &name).unwrap_or_else(|| self.function(&name));
         let member = owner.members.entry(name.into_owned().into()).or_default();
         member
             .contract
-            .merge(&self.contract_for_spans([Some(span)]));
+            .merge(&self.contract_for_spans(&member_function, [Some(span)]));
         let signature = SystemApiCallSignature::new(params, return_type);
         if !member.call_signatures.contains(&signature) {
             member.call_signatures.push(signature);
         }
     }
 
-    fn symbol_for_spans<const N: usize>(&self, spans: [Option<Span>; N]) -> SystemApiSymbol {
+    fn symbol_for_spans<const N: usize>(
+        &self,
+        name: &str,
+        spans: [Option<Span>; N],
+    ) -> SystemApiSymbol {
         SystemApiSymbol {
-            contract: self.contract_for_spans(spans),
+            contract: self.contract_for_spans(&self.function(name), spans),
             ..SystemApiSymbol::default()
         }
     }
 
-    fn contract_for_spans<const N: usize>(&self, spans: [Option<Span>; N]) -> SystemApiContract {
+    fn contract_for_spans<const N: usize>(
+        &self,
+        function: &str,
+        spans: [Option<Span>; N],
+    ) -> SystemApiContract {
         let mut contract = SystemApiContract {
             sdk_declaration: self.jsdoc.is_some(),
             ..SystemApiContract::default()
         };
+        if self.jsdoc.is_some() {
+            contract.declarations.push(SystemApiDeclarationKey {
+                api_module: self.api_module.clone(),
+                function: function.into(),
+            });
+        }
         for span in spans.into_iter().flatten() {
             if contract.available.is_none() {
                 contract.available = self.available_contracts.get(&span.start).cloned();
@@ -1093,6 +1235,30 @@ impl<'a> SystemApiDeclarationCollector<'a> {
             }
         }
         contract
+    }
+
+    fn api_module(path: &Path) -> Box<str> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        file_name
+            .strip_suffix(".d.ets")
+            .or_else(|| file_name.strip_suffix(".d.ts"))
+            .unwrap_or(file_name)
+            .into()
+    }
+
+    fn function(&self, name: &str) -> String {
+        name.to_string()
+    }
+
+    fn member_function(owner: &SystemApiSymbol, name: &str) -> Option<String> {
+        owner
+            .contract
+            .declarations
+            .first()
+            .map(|declaration| format!("{}#{name}", declaration.function))
     }
 
     fn insert_local(&mut self, name: &str, mut symbol: SystemApiSymbol) {
@@ -1439,6 +1605,11 @@ pub(crate) struct Arkts11SystemApiValidator<'a> {
     module_roots: &'a [(String, PathBuf)],
 }
 
+pub(crate) struct SystemApiValidationOutput {
+    pub(crate) diagnostics: Vec<EtsTransformError>,
+    pub(crate) crossplatform_dependencies: CrossplatformSourceCollection,
+}
+
 impl<'a> Arkts11SystemApiValidator<'a> {
     pub(crate) fn new(
         source_id: &'a str,
@@ -1469,8 +1640,18 @@ impl<'a> Arkts11SystemApiValidator<'a> {
         &self,
         program: &'program Program<'program>,
     ) -> Vec<EtsTransformError> {
+        self.validate(program).diagnostics
+    }
+
+    pub(crate) fn validate<'program>(
+        &self,
+        program: &'program Program<'program>,
+    ) -> SystemApiValidationOutput {
         if !self.is_required() {
-            return Vec::new();
+            return SystemApiValidationOutput {
+                diagnostics: Vec::new(),
+                crossplatform_dependencies: CrossplatformSourceCollection::default(),
+            };
         }
         let semantic = SemanticBuilder::new().build(program).semantic;
         let scoping = semantic.scoping();
@@ -1508,9 +1689,17 @@ impl<'a> Arkts11SystemApiValidator<'a> {
                 options: self.options,
             });
             validator.visit_program(program);
-            diagnostics.extend(validator.finish());
+            let validation = validator.finish();
+            diagnostics.extend(validation.diagnostics);
+            return SystemApiValidationOutput {
+                diagnostics,
+                crossplatform_dependencies: validation.crossplatform_dependencies,
+            };
         }
-        diagnostics
+        SystemApiValidationOutput {
+            diagnostics,
+            crossplatform_dependencies: CrossplatformSourceCollection::default(),
+        }
     }
 }
 
@@ -1525,6 +1714,7 @@ struct SystemApiUseValidator<'a, 'program> {
     options: &'a SystemApiCheckOptions,
     ancestors: Vec<AstKind<'program>>,
     diagnostics: Vec<EtsTransformError>,
+    crossplatform_dependencies: CrossplatformSourceCollection,
 }
 
 struct SystemApiUseValidatorInput<'a, 'program> {
@@ -1551,6 +1741,7 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
             options: input.options,
             ancestors: Vec::new(),
             diagnostics: Vec::new(),
+            crossplatform_dependencies: CrossplatformSourceCollection::default(),
         }
     }
 
@@ -1570,6 +1761,15 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
     }
 
     fn validate_contract(&mut self, contract: &SystemApiContract, api_name: &str, span: Span) {
+        if self.options.collect_crossplatform {
+            for declaration in &contract.declarations {
+                if let Some(dependency) =
+                    self.options.crossplatform_dependency(declaration).cloned()
+                {
+                    self.crossplatform_dependencies.merge(&dependency);
+                }
+            }
+        }
         let suppression = SystemApiWarningSuppression::new(SystemApiWarningSuppressionInput {
             source: self.source,
             program: self.program,
@@ -1761,8 +1961,11 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
         }
     }
 
-    fn finish(self) -> Vec<EtsTransformError> {
-        self.diagnostics
+    fn finish(self) -> SystemApiValidationOutput {
+        SystemApiValidationOutput {
+            diagnostics: self.diagnostics,
+            crossplatform_dependencies: self.crossplatform_dependencies,
+        }
     }
 
     fn push_profile_error(&mut self, code: &str, message: String, span: Span, solution: &str) {

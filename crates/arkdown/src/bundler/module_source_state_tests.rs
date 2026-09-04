@@ -778,6 +778,7 @@ textToSpeech.createEngine({});"#;
             javascript_module_ids: FxHashSet::default(),
             shared_module_ids: FxHashSet::default(),
             insight_intent_sources: FxHashMap::default(),
+            crossplatform_collections: FxHashMap::default(),
         },
     );
 
@@ -828,6 +829,7 @@ fn module_source_state_prefers_ets_transform_snapshot_over_rolldown_printer_outp
             javascript_module_ids: FxHashSet::default(),
             shared_module_ids: FxHashSet::default(),
             insight_intent_sources: FxHashMap::default(),
+            crossplatform_collections: FxHashMap::default(),
         },
     );
 
@@ -928,6 +930,7 @@ const dynamicHar = import("bytecode-har-dep");"#
             javascript_module_ids: FxHashSet::from_iter([importer.to_string()]),
             shared_module_ids: FxHashSet::default(),
             insight_intent_sources: FxHashMap::default(),
+            crossplatform_collections: FxHashMap::default(),
         },
     );
     assert_eq!(

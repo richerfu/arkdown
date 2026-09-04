@@ -55,9 +55,9 @@ pub use source::{
 };
 pub use sys_resource::SystemResourceReferenceLoader;
 pub use transform::{
-    ArktsTransformer, ArkuiComponentNameCollector, CheckerMode, InsightIntentDeclaration,
-    InsightIntentEntityDeclaration, InsightIntentSchemaCatalog, InsightIntentSourceMetadata,
-    NavigationRoute, NavigationRouteMap, SystemApiCheckOptions,
+    ArktsTransformer, ArkuiComponentNameCollector, CheckerMode, CrossplatformSourceCollection,
+    InsightIntentDeclaration, InsightIntentEntityDeclaration, InsightIntentSchemaCatalog,
+    InsightIntentSourceMetadata, NavigationRoute, NavigationRouteMap, SystemApiCheckOptions,
 };
 pub use typescript_emit::TypeScriptDirectiveFlags;
 pub use visual::VisualGeneratedSource;

@@ -10,7 +10,7 @@ pub use hvigor_details::{
     HvigorSdkComponentMetadata, HvigorSdkDetailsError, HvigorSdkDetailsInventory,
     HvigorSdkDetailsRequest, HvigorSdkDetailsSnapshot,
 };
-pub use snapshot::SdkSnapshot;
+pub use snapshot::{SdkCrossplatformDependency, SdkSnapshot};
 pub use system_capabilities::{
     SdkSystemCapabilityError, SdkSystemCapabilityInventory, SdkSystemCapabilitySelection,
 };

@@ -7,7 +7,7 @@ use arcstr::ArcStr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::ChunkGraph;
-use arkdown_ets_transform::InsightIntentSourceMetadata;
+use arkdown_ets_transform::{CrossplatformSourceCollection, InsightIntentSourceMetadata};
 use oxc_index::IndexVec;
 use rolldown::ModuleSourceScanOutput;
 
@@ -48,6 +48,7 @@ pub(crate) struct HvigorModuleSourceState {
     pub(crate) javascript_module_ids: FxHashSet<String>,
     pub(crate) shared_module_ids: FxHashSet<String>,
     pub(crate) insight_intent_sources: FxHashMap<String, InsightIntentSourceMetadata>,
+    pub(crate) crossplatform_collections: FxHashMap<String, CrossplatformSourceCollection>,
 }
 
 impl HvigorModuleSourceState {
@@ -60,6 +61,7 @@ impl HvigorModuleSourceState {
             javascript_module_ids: transform.javascript_module_ids,
             shared_module_ids: transform.shared_module_ids,
             insight_intent_sources: transform.insight_intent_sources,
+            crossplatform_collections: transform.crossplatform_collections,
             ..Self::default()
         };
         for module in scan.modules {
@@ -105,6 +107,12 @@ impl HvigorModuleSourceState {
         &mut self,
     ) -> FxHashMap<String, InsightIntentSourceMetadata> {
         std::mem::take(&mut self.insight_intent_sources)
+    }
+
+    pub(crate) fn take_crossplatform_collections(
+        &mut self,
+    ) -> FxHashMap<String, CrossplatformSourceCollection> {
+        std::mem::take(&mut self.crossplatform_collections)
     }
 
     pub(crate) fn record_module_id(&mut self, id: String) {
