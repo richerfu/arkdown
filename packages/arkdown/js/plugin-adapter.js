@@ -7,8 +7,13 @@ const v8 = require('node:v8')
 
 const nativeBinding = require('../index.js')
 
+const ESMODULE_DORMANT_HOOKS = Object.freeze(
+  'renderStart banner footer intro outro renderDynamicImport resolveFileUrl resolveImportMeta renderChunk augmentChunkHash renderError generateBundle writeBundle closeBundle closeWatcher'.split(' '),
+)
 const PLUGIN_HOOKS = Object.freeze(
-  'beforeBuild buildStart afterBuildStart resolveId load transform moduleParsed resolveDynamicImport beforeBuildEnd buildEnd afterBuildEnd bundleEnd cleanUp shouldInvalidCache'.split(' '),
+  'beforeBuild buildStart afterBuildStart resolveId load transform moduleParsed resolveDynamicImport watchChange beforeBuildEnd buildEnd afterBuildEnd bundleEnd cleanUp shouldInvalidCache'
+    .split(' ')
+    .concat(ESMODULE_DORMANT_HOOKS),
 )
 
 const COMPILE_PLUGIN_HOOKS = Object.freeze(PLUGIN_HOOKS.filter((name) => name !== 'resolveDynamicImport'))
@@ -22,7 +27,7 @@ const RESULT_FIELDS = Object.freeze({
 const TYPESCRIPT_EXTENSIONS = new Set(['.ts', '.mts', '.cts'])
 const JAVASCRIPT_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
 const UNSUPPORTED_ROLLUP_HOOKS = new Set(
-  'options outputOptions watchChange closeWatcher shouldTransformCachedModule renderStart banner footer intro outro renderDynamicImport resolveFileUrl resolveImportMeta renderChunk augmentChunkHash generateBundle writeBundle closeBundle'.split(' '),
+  'options outputOptions shouldTransformCachedModule'.split(' '),
 )
 const REMOVED_HVIGOR_CONFIG_KEYS = new Set(
   'tasks task executionMode prop configOverrides hvigorProperties extParams sync typeCheck enableBuildScriptTypeCheck parallel daemon'.split(
@@ -587,6 +592,8 @@ function hookArguments(hookName, request, compilePlugin) {
       return [request.code, request.id, request.transformOptions]
     case 'moduleParsed':
       return [request.moduleInfo]
+    case 'watchChange':
+      return [request.id, { event: request.watchEvent }]
     case 'beforeBuildEnd':
       return [undefined]
     case 'shouldInvalidCache':
@@ -599,6 +606,29 @@ function hookArguments(hookName, request, compilePlugin) {
       error.errors = errors
       return [error]
     }
+    case 'renderStart':
+      return [request.outputOptions]
+    case 'banner':
+    case 'footer':
+    case 'intro':
+    case 'outro':
+    case 'augmentChunkHash':
+      return [request.chunk]
+    case 'renderDynamicImport':
+    case 'resolveFileUrl':
+    case 'resolveImportMeta':
+      return [request.outputHookOptions]
+    case 'renderChunk':
+      return [request.code, request.chunk, request.outputOptions]
+    case 'renderError':
+      return [request.error]
+    case 'generateBundle':
+      return [request.outputOptions, request.bundle, request.isWrite === true]
+    case 'writeBundle':
+      return [request.outputOptions, request.bundle]
+    case 'closeBundle':
+    case 'closeWatcher':
+      return []
     default:
       throw arkdownError('ARKDOWN_PLUGIN_HOOK_UNKNOWN', `Unknown native plugin hook "${String(hookName)}"`)
   }
@@ -886,6 +916,7 @@ function createBuild(nativeBuild = nativeBinding.build, binding = nativeBinding)
 }
 
 module.exports = {
+  ESMODULE_DORMANT_HOOKS,
   PLUGIN_HOOKS,
   PluginAdapter,
   PluginModuleLoader,

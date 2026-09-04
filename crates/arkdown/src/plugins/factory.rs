@@ -65,7 +65,9 @@ use crate::plugins::ets_transform::{
     TransformEntrySourceId, TransformSourceSnapshot,
 };
 use crate::plugins::har_dedup::HarDedupPlugin;
-use crate::plugins::hvigor_compile::{HvigorCompilePluginShare, HvigorNativePluginSlot};
+use crate::plugins::hvigor_compile::{
+    HvigorCompilePluginShare, HvigorNativePluginSlot, HvigorWatchChange,
+};
 use crate::plugins::import_check::ImportCheckPlugin;
 use crate::plugins::json5::Json5Plugin;
 use crate::plugins::ohos_resolve::OhosResolvePlugin;
@@ -399,9 +401,11 @@ impl PackagePlugin {
 ///
 /// Standard hooks are deliberately not represented here: the wrapped plugin
 /// implements [`rolldown_plugin::Plugin`] and Rolldown owns their scheduling,
-/// context, diagnostics, and errors. Latest hvigor adds only two public custom
-/// compile-plugin hooks that Rolldown lacks. `seed_hvigor_context` supplies the latest-hvigor `share`
-/// object before Rolldown starts and is not user-visible lifecycle behavior.
+/// context, diagnostics, and errors. Latest hvigor also adds lifecycle/cache
+/// hooks that Rolldown lacks. `seed_hvigor_context` supplies the latest-hvigor
+/// `share` object before Rolldown starts and is not user-visible lifecycle
+/// behavior. The watch methods bridge the external Rust watcher into the live
+/// Rolldown context before the next `beforeBuild` hook.
 /// Future returned by [`HvigorPluginGapHooks`] async methods.
 ///
 /// Boxed by hand — matching rolldown's internal `Pluginable` trait — because
@@ -474,6 +478,26 @@ pub trait HvigorPluginGapHooks: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
+    fn take_watch_changes(&self) -> anyhow::Result<Arc<[HvigorWatchChange]>> {
+        Ok(Arc::from([]))
+    }
+
+    fn watch_change_with_context(
+        &self,
+        _change: HvigorWatchChange,
+        _context: PluginContext,
+    ) -> HvigorHookFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn has_watch_change(&self) -> bool {
+        false
+    }
+
+    fn watch_change_order(&self) -> HvigorHookOrder {
+        HvigorHookOrder::Normal
+    }
+
     /// A latest-hvigor lifecycle hook with Rolldown's live plugin context.
     fn lifecycle_hook_with_context(
         &self,
@@ -527,8 +551,9 @@ impl PluginFactoryEntry {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum HvigorLifecycleBoundary {
+    WatchChange,
     BeforeBuild,
     AfterBuildStart,
     BeforeBuildEnd,
@@ -538,6 +563,7 @@ enum HvigorLifecycleBoundary {
 impl HvigorLifecycleBoundary {
     fn hooks(self) -> &'static [HvigorLifecycleHook] {
         match self {
+            Self::WatchChange => &[],
             Self::BeforeBuild => &[HvigorLifecycleHook::BeforeBuild],
             Self::AfterBuildStart => &[HvigorLifecycleHook::AfterBuildStart],
             Self::BeforeBuildEnd => &[HvigorLifecycleHook::BeforeBuildEnd],
@@ -593,6 +619,43 @@ impl HvigorLifecyclePlugin {
         }
         Ok(())
     }
+
+    async fn dispatch_watch_changes(
+        entries: Vec<HvigorPluginGapEntry>,
+        context: PluginContext,
+    ) -> anyhow::Result<()> {
+        let changes = entries
+            .first()
+            .map(|entry| entry.hooks.take_watch_changes())
+            .transpose()?
+            .unwrap_or_else(|| Arc::from([]));
+        for change in changes.iter().cloned() {
+            for order in [
+                HvigorHookOrder::Pre,
+                HvigorHookOrder::Normal,
+                HvigorHookOrder::Post,
+            ] {
+                for entry in &entries {
+                    if !entry.hooks.has_watch_change() || entry.hooks.watch_change_order() != order
+                    {
+                        continue;
+                    }
+                    entry
+                        .hooks
+                        .watch_change_with_context(change.clone(), context.clone())
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "watchChange hook for plugin '{}' failed for '{}': {error}",
+                                entry.name,
+                                change.path.display()
+                            )
+                        })?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for HvigorLifecyclePlugin {
@@ -614,6 +677,7 @@ impl std::fmt::Debug for HvigorLifecyclePlugin {
 impl Plugin for HvigorLifecyclePlugin {
     fn name(&self) -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed(match self.boundary {
+            HvigorLifecycleBoundary::WatchChange => "arkdown:hvigor-watch-change",
             HvigorLifecycleBoundary::BeforeBuild => "arkdown:hvigor-before-build",
             HvigorLifecycleBoundary::AfterBuildStart => "arkdown:hvigor-after-build-start",
             HvigorLifecycleBoundary::BeforeBuildEnd => "arkdown:hvigor-before-build-end",
@@ -623,9 +687,9 @@ impl Plugin for HvigorLifecyclePlugin {
 
     fn register_hook_usage(&self) -> HookUsage {
         match self.boundary {
-            HvigorLifecycleBoundary::BeforeBuild | HvigorLifecycleBoundary::AfterBuildStart => {
-                HookUsage::BuildStart
-            }
+            HvigorLifecycleBoundary::WatchChange
+            | HvigorLifecycleBoundary::BeforeBuild
+            | HvigorLifecycleBoundary::AfterBuildStart => HookUsage::BuildStart,
             HvigorLifecycleBoundary::BeforeBuildEnd | HvigorLifecycleBoundary::AfterBuildEnd => {
                 HookUsage::BuildEnd
             }
@@ -637,7 +701,8 @@ impl Plugin for HvigorLifecyclePlugin {
         context: &PluginContext,
         _args: &HookBuildStartArgs<'_>,
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
-        let hook = match self.boundary {
+        let boundary = self.boundary;
+        let hook = match boundary {
             HvigorLifecycleBoundary::BeforeBuild => Some(HvigorLifecycleHook::BeforeBuild),
             HvigorLifecycleBoundary::AfterBuildStart => Some(HvigorLifecycleHook::AfterBuildStart),
             _ => None,
@@ -645,6 +710,9 @@ impl Plugin for HvigorLifecyclePlugin {
         let entries = self.entries.clone();
         let context = context.clone();
         async move {
+            if matches!(boundary, HvigorLifecycleBoundary::WatchChange) {
+                return Self::dispatch_watch_changes(entries, context).await;
+            }
             let Some(hook) = hook else {
                 return Ok(());
             };
@@ -654,6 +722,9 @@ impl Plugin for HvigorLifecyclePlugin {
 
     fn build_start_meta(&self) -> Option<PluginHookMeta> {
         match self.boundary {
+            HvigorLifecycleBoundary::WatchChange => Some(PluginHookMeta {
+                order: Some(RolldownPluginOrder::Pre),
+            }),
             HvigorLifecycleBoundary::BeforeBuild => Some(PluginHookMeta {
                 order: Some(RolldownPluginOrder::Pre),
             }),
@@ -1059,9 +1130,10 @@ impl<'a> PluginFactory<'a> {
             let gap_entry = gap_hooks
                 .as_ref()
                 .filter(|hooks| {
-                    HvigorLifecycleHook::ALL
-                        .iter()
-                        .any(|hook| hooks.has_lifecycle_hook(*hook))
+                    hooks.has_watch_change()
+                        || HvigorLifecycleHook::ALL
+                            .iter()
+                            .any(|hook| hooks.has_lifecycle_hook(*hook))
                 })
                 .map(|hooks| HvigorPluginGapEntry {
                     name: plugin.call_name().to_string(),
@@ -1105,6 +1177,7 @@ impl<'a> PluginFactory<'a> {
             // Ordinary Rolldown plugins supply the four fork lifecycle
             // boundaries. Standard hooks remain owned by Rolldown itself.
             let boundaries = [
+                HvigorLifecycleBoundary::WatchChange,
                 HvigorLifecycleBoundary::BeforeBuild,
                 HvigorLifecycleBoundary::AfterBuildStart,
                 HvigorLifecycleBoundary::BeforeBuildEnd,
@@ -1115,10 +1188,14 @@ impl<'a> PluginFactory<'a> {
                 let entries = gap_entries
                     .iter()
                     .filter(|entry| {
-                        boundary
-                            .hooks()
-                            .iter()
-                            .any(|hook| entry.hooks.has_lifecycle_hook(*hook))
+                        if matches!(boundary, HvigorLifecycleBoundary::WatchChange) {
+                            entry.hooks.has_watch_change()
+                        } else {
+                            boundary
+                                .hooks()
+                                .iter()
+                                .any(|hook| entry.hooks.has_lifecycle_hook(*hook))
+                        }
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -1181,6 +1258,18 @@ mod tests {
     impl HvigorPluginGapHooks for EmptyGapHooks {
         fn has_lifecycle_hook(&self, hook: HvigorLifecycleHook) -> bool {
             hook == HvigorLifecycleHook::BeforeBuildEnd
+        }
+    }
+
+    struct WatchGapHooks;
+
+    impl HvigorPluginGapHooks for WatchGapHooks {
+        fn has_watch_change(&self) -> bool {
+            true
+        }
+
+        fn has_lifecycle_hook(&self, hook: HvigorLifecycleHook) -> bool {
+            hook == HvigorLifecycleHook::BeforeBuild
         }
     }
 
@@ -1450,6 +1539,42 @@ mod tests {
             Some(RolldownPluginOrder::Pre)
         );
         assert_eq!(plugins.last().expect("custom plugin").call_name(), "custom");
+    }
+
+    #[test]
+    fn external_watch_events_run_before_hvigor_before_build() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let plan = make_plan(&root);
+        let mut input = PluginFactoryInput::from_plan(&plan);
+        input.package_plugins = vec![PackagePlugin::with_gap_hooks(
+            Arc::new(NamedTestPlugin("watch-custom")),
+            HvigorPluginOrder::Last,
+            Arc::new(WatchGapHooks),
+        )];
+
+        let plugins = PluginFactory::new(&plan, input)
+            .build()
+            .expect("plugin factory");
+        let names = plugins
+            .iter()
+            .map(|plugin| plugin.call_name().to_string())
+            .collect::<Vec<_>>();
+        let watch = names
+            .iter()
+            .position(|name| name == "arkdown:hvigor-watch-change")
+            .expect("watch lifecycle plugin");
+        let before = names
+            .iter()
+            .position(|name| name == "arkdown:hvigor-before-build")
+            .expect("beforeBuild lifecycle plugin");
+        assert!(watch < before);
+        assert_eq!(
+            plugins[watch]
+                .call_build_start_meta()
+                .and_then(|meta| meta.order),
+            Some(RolldownPluginOrder::Pre)
+        );
     }
 
     #[test]

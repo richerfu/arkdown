@@ -41,6 +41,14 @@ pub struct HvigorCompilePluginShare {
     /// Dependency changes that can safely reuse the checker service. An empty
     /// or mixed invalidation batch disables incremental dependency reuse.
     pub dependency_info: HvigorCompilePluginDependencyInfo,
+    /// Debounced filesystem events delivered by the Rust watch coordinator.
+    ///
+    /// Latest ets2bundle's `rollup-plugin-watch-change.ts` receives these
+    /// through Rollup's `watchChange` hook before the next `beforeBuild`.
+    /// Keeping the batch on the immutable module share lets the internal
+    /// Rolldown lifecycle adapter preserve that ordering without moving watch
+    /// policy into JavaScript.
+    pub watch_changes: Arc<[HvigorWatchChange]>,
     /// Opaque V8 structured-clone payload loaded by Rust before hooks start.
     pub plugin_cache_snapshot: Option<Arc<[u8]>>,
 }
@@ -70,6 +78,29 @@ pub struct HvigorCompilePluginImportEntry {
 pub struct HvigorCompilePluginDependencyInfo {
     pub enable_incremental: bool,
     pub changed_dependencies: Arc<[String]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HvigorWatchChangeEvent {
+    Create,
+    Update,
+    Delete,
+}
+
+impl HvigorWatchChangeEvent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HvigorWatchChange {
+    pub path: PathBuf,
+    pub event: HvigorWatchChangeEvent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

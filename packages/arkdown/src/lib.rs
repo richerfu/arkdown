@@ -42,7 +42,7 @@ pub mod task_cache;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeCallContext;
@@ -69,7 +69,7 @@ use arkdown::plugins::factory::{
 };
 use arkdown::plugins::hvigor_compile::{
   HvigorCompilePluginImportEntry, HvigorCompilePluginPlanConfig, HvigorCompilePluginShare,
-  HvigorCompilePluginSourceFile, HvigorNativePluginSlot,
+  HvigorCompilePluginSourceFile, HvigorNativePluginSlot, HvigorWatchChange,
 };
 use arkdown::PluginCacheModule;
 
@@ -811,6 +811,7 @@ pub struct JsPluginDispatchRequest {
   pub build_start_options: Option<JsBuildStartOptions>,
   pub id: Option<String>,
   pub importer: Option<String>,
+  pub watch_event: Option<String>,
   pub resolve_options: Option<JsResolveIdOptions>,
   pub code: Option<String>,
   pub transform_options: Option<JsTransformHookExtraArgs>,
@@ -828,6 +829,7 @@ impl JsPluginDispatchRequest {
       build_start_options: None,
       id: None,
       importer: None,
+      watch_event: None,
       resolve_options: None,
       code: None,
       transform_options: None,
@@ -880,6 +882,7 @@ pub struct JsPlugin {
   hook_orders: HashMap<String, JsHookOrder>,
   cache_identity: String,
   usage: HookUsage,
+  watch_changes: Mutex<Arc<[HvigorWatchChange]>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1039,8 +1042,33 @@ impl JsPlugin {
         "transform" => HookUsage::Transform,
         "moduleParsed" => HookUsage::ModuleParsed,
         "buildEnd" => HookUsage::BuildEnd,
-        "beforeBuild" | "afterBuildStart" | "beforeBuildEnd" | "afterBuildEnd" | "bundleEnd"
-        | "cleanUp" | "shouldInvalidCache" => HookUsage::empty(),
+        // Arkdown's Rust watcher owns filesystem observation. Its internal
+        // lifecycle adapter forwards `watchChange` with a live Rolldown
+        // context before the next `beforeBuild`, so this JS plugin must not
+        // register a second Rolldown watcher hook.
+        "watchChange" => HookUsage::empty(),
+        "beforeBuild"
+        | "afterBuildStart"
+        | "beforeBuildEnd"
+        | "afterBuildEnd"
+        | "bundleEnd"
+        | "cleanUp"
+        | "shouldInvalidCache"
+        | "renderStart"
+        | "banner"
+        | "footer"
+        | "intro"
+        | "outro"
+        | "renderDynamicImport"
+        | "resolveFileUrl"
+        | "resolveImportMeta"
+        | "renderChunk"
+        | "augmentChunkHash"
+        | "renderError"
+        | "generateBundle"
+        | "writeBundle"
+        | "closeBundle"
+        | "closeWatcher" => HookUsage::empty(),
         other => {
           return Err(napi::Error::from_reason(format!(
             "plugin '{name}' has unsupported hook '{other}'"
@@ -1081,6 +1109,7 @@ impl JsPlugin {
         hook_orders,
         cache_identity,
         usage,
+        watch_changes: Mutex::new(Arc::from([])),
       }),
       order,
     ))
@@ -1333,6 +1362,11 @@ impl HvigorPluginGapHooks for JsPlugin {
     share: &'a HvigorCompilePluginShare,
   ) -> HvigorHookFuture<'a, anyhow::Result<()>> {
     Box::pin(async move {
+      *self
+        .watch_changes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("watch-change state lock is poisoned"))? =
+        Arc::clone(&share.watch_changes);
       let mut request = JsPluginDispatchRequest::new("seedContext", None);
       request.share = Some(HvigorShareContext::from(share));
       self
@@ -1380,6 +1414,49 @@ impl HvigorPluginGapHooks for JsPlugin {
         .map(|result| result.cache_snapshot.map(|buffer| buffer.to_vec()))
         .map_err(|error| anyhow::anyhow!("snapshot plugin context JS error: {error}"))
     })
+  }
+
+  fn take_watch_changes(&self) -> anyhow::Result<Arc<[HvigorWatchChange]>> {
+    let mut changes = self
+      .watch_changes
+      .lock()
+      .map_err(|_| anyhow::anyhow!("watch-change state lock is poisoned"))?;
+    Ok(std::mem::replace(&mut *changes, Arc::from([])))
+  }
+
+  fn watch_change_with_context(
+    &self,
+    change: HvigorWatchChange,
+    context: PluginContext,
+  ) -> HvigorHookFuture<'_, anyhow::Result<()>> {
+    Box::pin(async move {
+      let event = change.event.as_str();
+      let path = arkdown_path::ArtifactPathSerializer::path_to_slash_string(&change.path)
+        .map_err(|error| anyhow::anyhow!("serialize watchChange path failed: {error}"))?;
+      let mut request = JsPluginDispatchRequest::new("watchChange", Some(context.into()));
+      request.id = Some(path.clone());
+      request.watch_event = Some(event.to_string());
+      self
+        .dispatch_fn
+        .await_call(request)
+        .await
+        .map_err(|error| {
+          anyhow::anyhow!("watchChange JS error for path '{path}' event '{event}': {error}")
+        })?;
+      Ok(())
+    })
+  }
+
+  fn has_watch_change(&self) -> bool {
+    self.has_hook("watchChange")
+  }
+
+  fn watch_change_order(&self) -> HvigorHookOrder {
+    match self.hook_orders.get("watchChange") {
+      Some(JsHookOrder::Pre) => HvigorHookOrder::Pre,
+      Some(JsHookOrder::Post) => HvigorHookOrder::Post,
+      None => HvigorHookOrder::Normal,
+    }
   }
 
   fn lifecycle_hook_with_context(
@@ -2038,6 +2115,10 @@ pub struct ArkdownPlugin {
   )]
   pub resolve_dynamic_import: Option<String>,
   #[napi(
+    ts_type = "((this: HvigorPluginContext, id: string, change: { event: 'create' | 'update' | 'delete' }) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, id: string, change: { event: 'create' | 'update' | 'delete' }) => void | Promise<void> }"
+  )]
+  pub watch_change: Option<String>,
+  #[napi(
     ts_type = "((this: HvigorPluginContext, input?: unknown) => unknown) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, input?: unknown) => unknown }"
   )]
   pub before_build_end: Option<String>,
@@ -2061,6 +2142,70 @@ pub struct ArkdownPlugin {
     ts_type = "((request: PluginCacheRequest) => boolean | Promise<boolean>) | { order?: 'pre' | 'post'; handler: (request: PluginCacheRequest) => boolean | Promise<boolean> }"
   )]
   pub should_invalid_cache: Option<String>,
+  /// Accepted for Rollup plugin source compatibility. Stage/ESMODULE ArkTS
+  /// builds stop after module-graph collection, so output hooks remain dormant
+  /// just as they do when ets2bundle enables `generateModuleGraphOnly` and
+  /// `disableGenerateBundle`.
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, options: Record<string, unknown>) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>) => void | Promise<void> }"
+  )]
+  pub render_start: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }"
+  )]
+  pub banner: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }"
+  )]
+  pub footer: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }"
+  )]
+  pub intro: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }"
+  )]
+  pub outro: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, options: Record<string, unknown>) => unknown | Promise<unknown>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>) => unknown | Promise<unknown> }"
+  )]
+  pub render_dynamic_import: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }"
+  )]
+  pub resolve_file_url: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, property: string | null, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, property: string | null, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }"
+  )]
+  pub resolve_import_meta: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, code: string, chunk: Record<string, unknown>, options: Record<string, unknown>) => string | { code: string; map?: unknown } | null | undefined | Promise<string | { code: string; map?: unknown } | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, code: string, chunk: Record<string, unknown>, options: Record<string, unknown>) => string | { code: string; map?: unknown } | null | undefined | Promise<string | { code: string; map?: unknown } | null | undefined> }"
+  )]
+  pub render_chunk: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }"
+  )]
+  pub augment_chunk_hash: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, error: Error) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, error: Error) => void | Promise<void> }"
+  )]
+  pub render_error: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>, isWrite: boolean) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>, isWrite: boolean) => void | Promise<void> }"
+  )]
+  pub generate_bundle: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>) => void | Promise<void> }"
+  )]
+  pub write_bundle: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
+  pub close_bundle: Option<String>,
+  #[napi(
+    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+  )]
+  pub close_watcher: Option<String>,
 }
 
 #[napi(object)]

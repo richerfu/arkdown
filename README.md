@@ -167,6 +167,27 @@ const result = await build({
 console.log(result.artifacts);
 ```
 
+### TS/JS plugins
+
+The JavaScript API and CLI plugin options accept JavaScript, MJS, CJS, TS,
+MTS, and CTS plugin modules. TypeScript plugin modules are compiled by OXC and
+Rolldown; JavaScript remains only the live function/context compatibility
+boundary while Rust owns plugin ordering, watch events, cache state, and build
+lifecycle scheduling.
+
+For ArkTS 1.1 Stage/ESMODULE builds, graph hooks (`buildStart`, `resolveId`,
+`load`, `transform`, `moduleParsed`, `buildEnd`), Hvigor lifecycle hooks, cache
+hooks, and `watchChange` are active. `watchChange` receives `{ event: 'create'
+| 'update' | 'delete' }` before the next `beforeBuild`. Rollup output hooks such
+as `renderChunk`, `generateBundle`, and `writeBundle` are accepted for plugin
+source compatibility but remain dormant because the upstream ESMODULE path
+sets `generateModuleGraphOnly` and `disableGenerateBundle`; Arkdown must not
+manufacture JavaScript chunks merely to invoke them.
+
+The only executable entrypoint is `js/arkdown-cli.js`. Rust exposes typed N-API
+build/check/clean services and must not add a binary, argv parser, or CLI-shaped
+export.
+
 ### Build from source
 
 ```sh
