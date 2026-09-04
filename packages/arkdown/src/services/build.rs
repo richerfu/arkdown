@@ -19,7 +19,6 @@ mod static_arkts;
 #[cfg(test)]
 mod tests;
 mod unit_test;
-mod visual_codegen;
 mod watch_stage;
 
 pub use arkdown_build::request::{BuildRequest, HvigorRuntimeProperties};
