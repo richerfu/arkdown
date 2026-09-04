@@ -73,10 +73,13 @@ resources, manifests, packaging, signing, cache layout, command construction, or
 device startup compatibility, the implementation must be based on observed
 hvigor behavior rather than guesses.
 
-Before editing production code, identify the upstream hvigor owner and read the
-relevant source under `hvigor/`, `hvigor/ts-readable/`, SDK task code, or the
-matching generated cache/output from a real hvigor build. If a failure only
-appears in a large app, compare three artifacts before changing behavior:
+Before editing production code, identify the upstream behavior owner in the
+current `developtools_ace_ets2bundle` source checkout and read that source, its
+in-repository documentation, the relevant SDK task code, or the matching
+generated cache/output from a real hvigor build. Old hvigor decompilation trees
+and old specs are not implementation evidence and must not be used to recreate
+their internal architecture. If a failure only appears in a large app, compare
+three artifacts before changing behavior:
 original source, hvigor-generated output/cache, and arkdown-generated
 output/cache. Keep the comparison focused on the failing module or stage, but do
 not skip it.
