@@ -8,6 +8,9 @@ pub mod bundle_plan;
 pub mod code_resource;
 pub mod device_test;
 pub mod har_dedup;
+pub mod hot_reload;
+#[cfg(test)]
+mod hot_reload_tests;
 pub mod intermediates;
 pub mod layout;
 pub mod module_plan;

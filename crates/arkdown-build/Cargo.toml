@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 arkdown = { workspace = true }
+arkdown-abc = { workspace = true }
 arkdown-config = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-ets-transform = { workspace = true }
@@ -20,6 +21,7 @@ arkdown-watcher = { workspace = true }
 fast-glob = { workspace = true }
 fs-err = { workspace = true }
 globset = { workspace = true }
+indexmap = { workspace = true }
 json5 = { workspace = true }
 jsonschema = { workspace = true }
 rustc-hash = { workspace = true }

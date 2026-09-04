@@ -1,9 +1,6 @@
 pub mod app_coordinator;
 mod bytecode_har_declaration;
 pub mod coordinator;
-mod hot_reload;
-#[cfg(test)]
-mod hot_reload_tests;
 mod native_stage;
 mod quickfix;
 #[cfg(test)]
