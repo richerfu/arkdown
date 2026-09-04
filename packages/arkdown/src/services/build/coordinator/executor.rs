@@ -443,17 +443,17 @@ impl BuildCoordinator {
             config.project_root.join(&module.src_path)
           };
           let module_path = canonicalize_or_owned(&configured_module_path);
-          crate::services::build::unit_test::generate_unit_test_template(
+          arkdown_build::unit_test::UnitTestTemplateWriter::new(
             &module_path,
             &module_config.product.name,
-            &crate::services::build::unit_test::UnitTestTemplateParams {
-              bundle_name: &config.product.bundle_name,
-              module_name: &module.name,
-              scope,
-              coverage,
-              module_path: &module_path,
-            },
           )
+          .generate_local(&arkdown_build::unit_test::UnitTestTemplateParams {
+            bundle_name: &config.product.bundle_name,
+            module_name: &module.name,
+            scope,
+            coverage,
+            module_path: &module_path,
+          })
           .map_err(|error| {
             anyhow::anyhow!(
               "GenerateUnitTestTemplate failed for module '{}': {error}",
@@ -482,21 +482,19 @@ impl BuildCoordinator {
           .await?
       {
         let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
-        if !crate::services::build::unit_test::has_ohos_test_template(
+        let template_writer = arkdown_build::unit_test::UnitTestTemplateWriter::new(
           &module.src_path,
           &module_config.product.name,
-        ) {
-          crate::services::build::unit_test::generate_ohos_test_template(
-            &module.src_path,
-            &module_config.product.name,
-            config.sdk_config.compile_api_version,
-          )
-          .map_err(|error| {
-            anyhow::anyhow!(
-              "GenerateOhosTestTemplate failed for module '{}': {error}",
-              module.name
-            )
-          })?;
+        );
+        if !template_writer.has_ohos_test() {
+          template_writer
+            .generate_ohos_test(config.sdk_config.compile_api_version)
+            .map_err(|error| {
+              anyhow::anyhow!(
+                "GenerateOhosTestTemplate failed for module '{}': {error}",
+                module.name
+              )
+            })?;
         }
         task_lifecycle
           .after(
@@ -1695,7 +1693,7 @@ impl BuildCoordinator {
                 process_profile_json.display()
               )
             })?;
-          crate::services::build::unit_test::inject_unit_test_ability(
+          arkdown_build::unit_test::inject_unit_test_ability(
             &mut document,
             module_json5.module.type_.as_str(),
           )
@@ -2351,7 +2349,7 @@ impl BuildCoordinator {
         let process_profile_json = module_layout.process_profile_module_json();
         let process_value = std::fs::read_to_string(&process_profile_json)?;
         let document: serde_json::Value = serde_json::from_str(&process_value)?;
-        crate::services::build::unit_test::replace_unit_test_index_file(
+        arkdown_build::unit_test::UnitTestProfileWriter::new(
           &module_layout.res_module_json(),
           &document,
           &module_layout.res_profile_dir(),
@@ -2359,8 +2357,9 @@ impl BuildCoordinator {
           args
             .unit_test_replace_page
             .as_deref()
-            .unwrap_or(crate::services::build::unit_test::UNIT_TEST_REPLACE_PAGE),
+            .unwrap_or(arkdown_build::unit_test::UNIT_TEST_REPLACE_PAGE),
         )
+        .replace_index()
         .map_err(|error| {
           anyhow::anyhow!(
             "ReplaceUnitTestIndexFile failed for module '{}': {error}",
@@ -2749,9 +2748,9 @@ impl BuildCoordinator {
     if coverage_mode {
       if ohos_test_coverage {
         let test_mode = if matches!(config.output_target, OutputTarget::Test) {
-          crate::services::build::unit_test::TestCoverageMode::UnitTest
+          arkdown_build::unit_test::TestCoverageMode::UnitTest
         } else {
-          crate::services::build::unit_test::TestCoverageMode::OhosTest
+          arkdown_build::unit_test::TestCoverageMode::OhosTest
         };
         for (
           (module, _manifest, _loader_json, _resource_refs, _module_target_name, _module_config),
@@ -2761,7 +2760,7 @@ impl BuildCoordinator {
           if bundle_out.bundle_output.module_source_files.is_empty() {
             continue;
           }
-          crate::services::build::unit_test::TestCoverageInstrumentationPlan::from_build(
+          arkdown_build::unit_test::TestCoverageInstrumentationPlan::from_build(
             &config.sdk_config,
             &config.project_root,
             &module.src_path,
