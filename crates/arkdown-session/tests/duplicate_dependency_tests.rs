@@ -100,6 +100,7 @@ fn module(name: &str, root: &Path, module_type: OhosModuleType) -> ModuleSnapsho
         module_json_path: None,
         module_json: None,
         module_json_value: None,
+        syscap_value: None,
         ohos_test_module_json_value: None,
         module_type,
         package_path: None,

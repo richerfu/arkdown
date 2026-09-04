@@ -16,7 +16,6 @@ mod quickfix_tests;
 mod remote_hsp_sign;
 mod service;
 mod static_arkts;
-mod syscap;
 #[cfg(test)]
 mod tests;
 mod unit_test;

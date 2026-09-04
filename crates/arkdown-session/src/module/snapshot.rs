@@ -31,6 +31,10 @@ pub enum ModuleSnapshotError {
     /// Module `build-profile.json5` could not be parsed.
     #[error("failed to parse module build profile {path}: {message}")]
     BuildProfileParse { path: PathBuf, message: String },
+
+    /// Module `src/main/syscap.json` could not be parsed.
+    #[error("failed to parse module system-capability profile {path}: {message}")]
+    SyscapParse { path: PathBuf, message: String },
 }
 
 /// OHOS module type.
@@ -83,6 +87,8 @@ pub struct ModuleSnapshot {
     pub module_json: Option<ModuleJson5>,
     /// Complete `module.json5` value from the same immutable snapshot read.
     pub module_json_value: Option<Arc<serde_json::Value>>,
+    /// Parsed `src/main/syscap.json` from the same immutable snapshot read.
+    pub syscap_value: Option<Arc<serde_json::Value>>,
     /// Optional `src/ohosTest/module.json5` source-set value captured with the
     /// main module snapshot. Hvigor switches the complete source-set model for
     /// this target instead of overlaying it at packaging time.
@@ -191,6 +197,24 @@ impl ModuleSnapshot {
         } else {
             None
         };
+        let syscap_path = src_main.join("syscap.json");
+        let syscap_value = if syscap_path.is_file() {
+            let content = std::fs::read_to_string(&syscap_path).map_err(|source| {
+                ModuleSnapshotError::Io {
+                    path: syscap_path.clone(),
+                    source,
+                }
+            })?;
+            let value = json5::from_str::<serde_json::Value>(&content).map_err(|error| {
+                ModuleSnapshotError::SyscapParse {
+                    path: syscap_path,
+                    message: error.to_string(),
+                }
+            })?;
+            Some(Arc::new(value))
+        } else {
+            None
+        };
 
         // Default source roots: src/main/ets or src/main/js.
         let mut source_roots = Vec::new();
@@ -218,6 +242,7 @@ impl ModuleSnapshot {
             module_json_path: module_json_path_opt,
             module_json,
             module_json_value,
+            syscap_value,
             ohos_test_module_json_value,
             module_type,
             package_path,
@@ -262,5 +287,41 @@ impl ModuleSnapshot {
                 ModuleSnapshotError::PackageJsonParse { path, message }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syscap_profile_is_frozen_with_the_module_snapshot() {
+        let temp = tempfile::tempdir().expect("module root");
+        let src_main = temp.path().join("src/main");
+        std::fs::create_dir_all(&src_main).expect("source directory");
+        std::fs::write(
+            src_main.join("module.json5"),
+            r#"{ module: { name: "entry", type: "entry" } }"#,
+        )
+        .expect("module profile");
+        let syscap_path = src_main.join("syscap.json");
+        std::fs::write(
+            &syscap_path,
+            r#"{ devices: { custom: [{ phone: ["A"] }] } }"#,
+        )
+        .expect("syscap profile");
+
+        let snapshot = ModuleSnapshot::from_root(temp.path(), "entry").expect("snapshot");
+        std::fs::write(&syscap_path, r#"{ devices: { custom: [] } }"#)
+            .expect("mutate source after snapshot");
+
+        assert_eq!(
+            snapshot
+                .syscap_value
+                .as_deref()
+                .and_then(|value| value.pointer("/devices/custom/0/phone/0"))
+                .and_then(serde_json::Value::as_str),
+            Some("A")
+        );
     }
 }

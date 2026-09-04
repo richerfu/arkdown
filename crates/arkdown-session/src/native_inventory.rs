@@ -275,6 +275,7 @@ mod tests {
             module_json_path: None,
             module_json: None,
             module_json_value: None,
+            syscap_value: None,
             ohos_test_module_json_value: None,
             module_type: crate::module::snapshot::OhosModuleType::Entry,
             package_path: None,
