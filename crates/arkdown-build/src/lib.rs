@@ -35,6 +35,7 @@ pub mod sdk_checker;
 #[cfg(test)]
 mod sdk_checker_tests;
 pub mod source_snapshot;
+pub mod static_arkts;
 pub mod task_cache;
 pub mod unit_test;
 #[cfg(test)]
