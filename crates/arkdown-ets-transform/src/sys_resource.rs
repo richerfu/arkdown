@@ -22,14 +22,21 @@ use crate::resource_transform::{
 
 pub struct SystemResourceReferenceLoader<'a> {
     ets_loader_path: &'a Path,
+    external_api_paths: &'a [PathBuf],
     bundle_name: &'a str,
     module_name: &'a str,
 }
 
 impl<'a> SystemResourceReferenceLoader<'a> {
-    pub fn new(ets_loader_path: &'a Path, bundle_name: &'a str, module_name: &'a str) -> Self {
+    pub fn new(
+        ets_loader_path: &'a Path,
+        external_api_paths: &'a [PathBuf],
+        bundle_name: &'a str,
+        module_name: &'a str,
+    ) -> Self {
         Self {
             ets_loader_path,
+            external_api_paths,
             bundle_name,
             module_name,
         }
@@ -38,7 +45,9 @@ impl<'a> SystemResourceReferenceLoader<'a> {
     pub fn load(&self) -> Result<FxHashMap<String, ResourceReference>> {
         let mut refs = FxHashMap::default();
 
-        for path in SystemResourcePathInventory::new(self.ets_loader_path).paths() {
+        for path in
+            SystemResourcePathInventory::new(self.ets_loader_path, self.external_api_paths).paths()
+        {
             if !path.exists() {
                 continue;
             }
@@ -56,23 +65,24 @@ impl<'a> SystemResourceReferenceLoader<'a> {
 
 struct SystemResourcePathInventory<'a> {
     ets_loader_path: &'a Path,
+    external_api_paths: &'a [PathBuf],
 }
 
 impl<'a> SystemResourcePathInventory<'a> {
-    fn new(ets_loader_path: &'a Path) -> Self {
-        Self { ets_loader_path }
+    fn new(ets_loader_path: &'a Path, external_api_paths: &'a [PathBuf]) -> Self {
+        Self {
+            ets_loader_path,
+            external_api_paths,
+        }
     }
 
     fn paths(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.ets_loader_path.join("sysResource.js")];
-
-        if let Some(external_api_paths) = std::env::var_os("externalApiPaths") {
-            paths.extend(
-                std::env::split_paths(&external_api_paths)
-                    .map(|path| self.ets_loader_path.join(path).join("sysResource.js")),
-            );
-        }
-
+        paths.extend(
+            self.external_api_paths
+                .iter()
+                .map(|path| path.join("sysResource.js")),
+        );
         paths
     }
 }
@@ -247,7 +257,9 @@ impl<'a> SystemResourceId<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::SystemResourceSourceParser;
+    use std::fs;
+
+    use super::{SystemResourceReferenceLoader, SystemResourceSourceParser};
 
     #[test]
     fn parses_sdk_sys_resource_assignment() {
@@ -282,5 +294,37 @@ module.exports.sys = {
             "com.example.test"
         );
         assert_eq!(refs["sys.symbol.chevron_right"].module_name, "entry");
+    }
+
+    #[test]
+    fn loads_external_sdk_resources_from_explicit_snapshot_paths() {
+        let temp = tempfile::tempdir().expect("temporary SDK");
+        let loader = temp.path().join("openharmony/ets/build-tools/ets-loader");
+        let external = temp.path().join("vendor/ets");
+        fs::create_dir_all(&loader).expect("primary loader");
+        fs::create_dir_all(&external).expect("external ETS component");
+        fs::write(
+            loader.join("sysResource.js"),
+            "module.exports.sys = { color: { primary: 1, shared: 2 } };",
+        )
+        .expect("primary resources");
+        fs::write(
+            external.join("sysResource.js"),
+            "module.exports.sys = { color: { shared: 3, external: 4 } };",
+        )
+        .expect("external resources");
+
+        let refs = SystemResourceReferenceLoader::new(
+            &loader,
+            std::slice::from_ref(&external),
+            "com.example.test",
+            "entry",
+        )
+        .load()
+        .expect("system resources");
+
+        assert_eq!(refs["sys.color.primary"].id, 1);
+        assert_eq!(refs["sys.color.shared"].id, 3);
+        assert_eq!(refs["sys.color.external"].id, 4);
     }
 }

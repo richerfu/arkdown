@@ -135,7 +135,10 @@ impl BuildSessionBuilder {
         )?;
 
         // Phase 2: Build SDK snapshot.
-        let sdk = SdkSnapshot::from_config(&self.config.sdk_config)?;
+        let sdk = SdkSnapshot::from_config_for_runtime(
+            &self.config.sdk_config,
+            &self.config.product.runtime_os,
+        )?;
 
         // Phase 3: Build path resolver.
         let paths = PathResolver::new(self.config.project_root.clone());

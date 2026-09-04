@@ -292,14 +292,12 @@ impl BuildCoordinator {
     // declaration roots through `ets/sdkConfig.json`. The same snapshot must
     // feed both semantic metadata and the transform source store so SDK
     // `@Builder` functions are classified before ArkUI lowering.
-    let sdk_declaration_roots = config
-      .sdk_config
-      .arkguard_api_dirs(&config.product.runtime_os);
+    let sdk_declaration_roots = session.sdk.global_module_paths.as_ref();
     let component_metadata = {
       let _timer = BuildTimingProbe::global("component_metadata");
       ComponentMetadata::from_ets_loader_path_with_external_declaration_roots(
         &config.sdk_config.ets_loader_path,
-        &sdk_declaration_roots,
+        sdk_declaration_roots,
       )
       .map_err(|e| {
         anyhow::anyhow!(
@@ -2031,6 +2029,7 @@ impl BuildCoordinator {
         resource_refs.extend(
           SystemResourceReferenceLoader::new(
             &config.sdk_config.ets_loader_path,
+            session.sdk.external_api_paths.as_ref(),
             &config.product.bundle_name,
             &module.name,
           )
@@ -2641,7 +2640,7 @@ impl BuildCoordinator {
         package_resolution_plans: &package_resolution_plans,
         local_native_dependencies: &local_native_dependencies,
         all_bc_har_deps: &all_bc_har_deps,
-        sdk_declaration_roots: &sdk_declaration_roots,
+        sdk_declaration_roots,
         component_metadata: &component_metadata,
         insight_intent_schema_catalog: &insight_intent_schema_catalog,
       })

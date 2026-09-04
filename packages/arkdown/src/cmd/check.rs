@@ -254,16 +254,19 @@ impl<'a> CheckModuleRunner<'a> {
     sources: &[PathBuf],
     summary: &mut CheckSummary,
   ) -> Result<()> {
-    let component_metadata = Arc::new(ComponentMetadata::from_ets_loader_path(
-      &self.config.sdk_config.ets_loader_path,
-    )?);
+    let component_metadata = Arc::new(
+      ComponentMetadata::from_ets_loader_path_with_external_declaration_roots(
+        &self.config.sdk_config.ets_loader_path,
+        self.session.sdk.global_module_paths.as_ref(),
+      )?,
+    );
     let module_roots: Vec<(String, PathBuf)> = self
       .config
       .modules
       .iter()
       .map(|module| (module.name.clone(), module.src_path.clone()))
       .collect();
-    let sdk_declaration_roots = self
+    let mut sdk_declaration_roots = self
       .config
       .sdk_config
       .ets_api_dirs()
@@ -271,6 +274,11 @@ impl<'a> CheckModuleRunner<'a> {
       .chain(self.config.sdk_config.ets_kits_dirs())
       .chain(self.config.sdk_config.ets_arkts_dirs())
       .collect::<Vec<_>>();
+    for root in self.session.sdk.global_module_paths.iter() {
+      if !sdk_declaration_roots.contains(root) {
+        sdk_declaration_roots.push(root.clone());
+      }
+    }
     let project_sources = TransformSourceSnapshotBuilder::new(&module_roots, &[], &[], &[])
       .with_sdk_declaration_roots(&sdk_declaration_roots)
       .build()?;

@@ -149,10 +149,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
         .ets_loader_path
         .join("node_modules")
         .join("arkguard"),
-      sdk_api_paths: self
-        .config
-        .sdk_config
-        .arkguard_api_dirs(&self.config.product.runtime_os),
+      sdk_api_paths: self.session.sdk.global_module_paths.to_vec(),
       module_root: self.module.src_path.clone(),
       project_root: self.config.project_root.clone(),
       project_path: ModuleBuildLayout::new(&self.module.src_path).source().ets(),
