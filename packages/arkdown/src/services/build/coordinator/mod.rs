@@ -58,10 +58,6 @@ use arkdown_session::{
 };
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
-use super::bundle_plan::{
-  make_bundle_plan, BundlePackageOutput, BundlePlanPackageInfo, BundleRuntimePackageInfoBuilder,
-  BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
-};
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use super::hot_reload::{
   HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
@@ -87,6 +83,11 @@ use arkdown::{
   BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo,
   CrossplatformCollectionWriter, PluginCacheModuleInventory, ShouldInvalidCacheRequest,
   SourceMapPolicy,
+};
+use arkdown_build::bundle_plan::{
+  BundlePackageOutput, BundlePlanBuilder, BundlePlanBuilderInput, BundlePlanPackageInfo,
+  BundleRuntimePackageInfoBuilder, BundleStage, BundleStageInput, BundleStageOutput,
+  HvigorCompileTarget,
 };
 use arkdown_build::code_resource::CodeResourceCopyPlan;
 use arkdown_build::har_dedup::HarDedupProjectPlan;
@@ -1401,14 +1402,6 @@ mod compile_context_info_tests {
   use super::*;
   use arkdown_core::HvigorModuleSourceFile;
   use indexmap::IndexMap;
-
-  #[test]
-  fn compile_target_uses_hvigor_compatible_sdk_version_over_installed_sdk_api() {
-    let target = HvigorCompileTarget::from_compatible_sdk_version("5.0.0(12)", Some("beta3"), 24);
-
-    assert_eq!(target.api_version(), 12);
-    assert_eq!(target.api_sub_version().as_deref(), Some("beta3"));
-  }
 
   #[test]
   fn compile_entries_preserve_latest_hvigor_entry_obj_insertion_order() {

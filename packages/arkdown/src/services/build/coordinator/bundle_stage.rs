@@ -479,21 +479,23 @@ impl BuildCoordinator {
         .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
       module_record_roots.dedup();
 
-      let mut bundle_plan = make_bundle_plan(
+      let mut bundle_plan = BundlePlanBuilder::new(BundlePlanBuilderInput {
         loader_json,
-        &loader_json_out,
-        PathBuf::from(&loader_json.ace_module_build),
-        module_config.as_ref(),
+        loader_json_path: &loader_json_out,
+        output_dir: PathBuf::from(&loader_json.ace_module_build),
+        config: module_config.as_ref(),
         module_target_name,
-        Some(custom_cfg),
+        custom_config: Some(custom_cfg),
         module_analyzer,
-        self.session.arkts_language_version,
-        coverage_mode,
-        BundlePlanPackageInfo {
-          source_map: source_map_packages,
-          runtime: runtime_packages,
-        },
-      );
+        arkts_language_version: self.session.arkts_language_version,
+        should_emit_js: coverage_mode,
+        package_info: BundlePlanPackageInfo::from_module_context(
+          source_map_packages,
+          runtime_packages,
+          &module_context,
+        ),
+      })
+      .build();
       bundle_plan.preview_mode |= args.preview || args.preview_transform_mode;
       bundle_plan.check_entry = args.check_entry;
       if ohos_test_templates_after_migration {
