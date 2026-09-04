@@ -46,7 +46,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 
-use arkdown_core::{ArkTscTarget, OutputTarget};
+use arkdown_core::{ArkTscTarget, InsightIntentFormBinding, OutputTarget};
 use arkdown_path::{
     lexical_normalize, strip_relative_prefix, AbsPath, ModuleSpecifier, SpecifierKind,
 };
@@ -60,8 +60,8 @@ use crate::plan::BundlePlan;
 use crate::plugins::api_transform::ApiTransformPlugin;
 use crate::plugins::duplicate_check::DuplicateCheckPlugin;
 use crate::plugins::ets_transform::{
-    CheckerMode, ComponentMetadata, EtsTransformPlugin, NavigationRouteMap,
-    ResourceTransformContext, RolldownEtsTransformPlan, SystemApiCheckOptions,
+    CheckerMode, ComponentMetadata, EtsTransformPlugin, InsightIntentSchemaCatalog,
+    NavigationRouteMap, ResourceTransformContext, RolldownEtsTransformPlan, SystemApiCheckOptions,
     TransformEntrySourceId, TransformSourceSnapshot,
 };
 use crate::plugins::har_dedup::HarDedupPlugin;
@@ -126,6 +126,8 @@ pub struct PluginFactoryInput {
     pub resource_context: ResourceTransformContext,
     /// SDK ArkUI component metadata loaded before Rolldown hooks run.
     pub component_metadata: ComponentMetadata,
+    /// SDK built-in InsightIntent schemas loaded once before hook execution.
+    pub insight_intent_schema_catalog: InsightIntentSchemaCatalog,
     /// System-API compatibility inputs normalized before Rolldown starts.
     pub system_api: SystemApiCheckOptions,
     /// Source files loaded before Rolldown hooks run for cross-file AST analysis.
@@ -197,6 +199,7 @@ impl PluginFactoryInput {
             resource_refs: FxHashMap::default(),
             resource_context: ResourceTransformContext::default(),
             component_metadata: ComponentMetadata::default(),
+            insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
             system_api: SystemApiCheckOptions::default()
                 .with_compatible_sdk_version(plan.compatible_sdk_version.clone())
                 .with_compile_sdk_version(plan.target_api_version.to_string())
@@ -713,6 +716,20 @@ impl<'a> TransformEntrySources<'a> {
         self.source_ids_for(&self.plan.input.form_entry_sources)
     }
 
+    fn insight_intent_form_bindings(&self) -> FxHashMap<String, InsightIntentFormBinding> {
+        let mut bindings = FxHashMap::default();
+        for binding in &self.plan.input.insight_intent_form_bindings {
+            bindings.insert(binding.source.clone(), binding.clone());
+            if let Some(resolved) = self.resolved_entry_id(&binding.source) {
+                bindings.insert(
+                    TransformEntrySourceId::new(&resolved).normalized(),
+                    binding.clone(),
+                );
+            }
+        }
+        bindings
+    }
+
     fn source_ids_for(&self, entries: &[String]) -> FxHashSet<String> {
         let mut source_ids = FxHashSet::default();
         for entry in entries {
@@ -912,6 +929,7 @@ impl<'a> PluginFactory<'a> {
         // compile stage ordering.
         let transform_entry_sources = TransformEntrySources::new(self.plan);
         let form_entry_source_ids = transform_entry_sources.form_source_ids();
+        let insight_intent_form_bindings = transform_entry_sources.insight_intent_form_bindings();
         let entry_source_ids =
             transform_entry_sources.source_ids_for(&self.plan.input.page_entry_sources);
         let ets_transform_plan = RolldownEtsTransformPlan::new(
@@ -926,6 +944,8 @@ impl<'a> PluginFactory<'a> {
             self.input.transform_sources,
         )
         .with_form_entry_source_ids(form_entry_source_ids)
+        .with_insight_intent_form_bindings(insight_intent_form_bindings)
+        .with_insight_intent_schema_catalog(self.input.insight_intent_schema_catalog.clone())
         .with_entry_source_ids(entry_source_ids)
         .with_preview_mode(self.plan.preview_mode)
         .with_check_entry(self.plan.check_entry)
@@ -1179,6 +1199,7 @@ mod tests {
                 module_meta_info_files: Vec::new(),
                 entries: vec!["./ets/pages/Index.ets".to_string()],
                 form_entry_sources: Vec::new(),
+                insight_intent_form_bindings: Vec::new(),
                 runtime_entry_sources: Vec::new(),
                 page_entry_sources: Vec::new(),
                 support_chunks: false,

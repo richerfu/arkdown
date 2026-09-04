@@ -1,6 +1,6 @@
 //! Public output and handoff types produced by the bundler.
 
-pub use bundle_output::BundleOutput;
+pub use bundle_output::{BundleOutput, InsightIntentModuleSource};
 pub use har_importees::HvigorHarImportees;
 pub use module_request_rewrite_plan::HvigorModuleRequestRewritePlan;
 pub use preload_system_so_task::PreloadSystemSoTask;

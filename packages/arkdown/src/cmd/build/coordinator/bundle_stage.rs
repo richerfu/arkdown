@@ -98,6 +98,7 @@ pub(super) struct CoordinatorBundleStageInput<'a> {
   pub(super) all_bc_har_deps: &'a [Vec<ByteCodeHarScanEntry>],
   pub(super) sdk_declaration_roots: &'a [PathBuf],
   pub(super) component_metadata: &'a ComponentMetadata,
+  pub(super) insight_intent_schema_catalog: &'a InsightIntentSchemaCatalog,
 }
 
 pub(super) struct CoordinatorBundleStageOutput {
@@ -136,6 +137,7 @@ impl BuildCoordinator {
       all_bc_har_deps,
       sdk_declaration_roots,
       component_metadata,
+      insight_intent_schema_catalog,
     } = input;
 
     // ── Step 3: Bundling ──────────────────────────────────────────────
@@ -753,6 +755,7 @@ impl BuildCoordinator {
           resource_modules: transform_resource_inventory.modules,
         },
         component_metadata: component_metadata.clone(),
+        insight_intent_schema_catalog: insight_intent_schema_catalog.clone(),
         system_api,
         transform_sources,
         navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
@@ -874,6 +877,49 @@ impl BuildCoordinator {
         plan: bundle_plan,
       })
       .await?;
+      if args.arkts_version == arkdown_core::ArktsLanguageVersion::V1_1 {
+        let intent_modules = bundle_out
+          .bundle_output
+          .insight_intent_sources
+          .iter_mut()
+          .map(|source| InsightIntentModuleInput {
+            source_file_path: source.source_file_path.clone(),
+            decorator_file: source.decorator_file.clone(),
+            intents: std::mem::take(&mut source.metadata.intents)
+              .into_iter()
+              .map(|intent| InsightIntentInput {
+                data: intent.data,
+                entity_type_names: intent.entity_type_names,
+              })
+              .collect(),
+            entities: std::mem::take(&mut source.metadata.entities)
+              .into_iter()
+              .map(|entity| InsightIntentEntityInput {
+                class_name: entity.class_name,
+                data: entity.data,
+                parent_class_name: entity.parent_class_name,
+              })
+              .collect(),
+          })
+          .collect();
+        let dependency_profiles = loader_json
+          .byte_code_har_info
+          .values()
+          .filter_map(|dependency| dependency.insight_intent.as_deref())
+          .map(PathBuf::from)
+          .collect();
+        InsightIntentProfileProcessor::new()
+          .process(InsightIntentProfileInput {
+            profile_path: &module_layout.res_profile_dir().join("insight_intent.json"),
+            cache_path: &PathBuf::from(&loader_json.cache_path).join("insight_compile_cache.json"),
+            module_json_path: &module_layout.res_module_json(),
+            bundle_name: &config.product.bundle_name,
+            module_name: &module.name,
+            modules: intent_modules,
+            dependency_profiles,
+          })
+          .map_err(|error| anyhow::anyhow!("InsightIntent build-end processing failed: {error}"))?;
+      }
       // ets-loader's SourceMapGenerator runs during the Rollup pass, before
       // CompileArkTS. Stage the map at the same boundary so its previous cache
       // is still available for the current-pass-first merge.

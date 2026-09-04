@@ -11,6 +11,7 @@ tempfile = { workspace = true }
 junction = { workspace = true }
 
 [dependencies]
+anyhow = { workspace = true }
 rustc-hash = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-config = { workspace = true }

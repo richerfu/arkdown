@@ -1,7 +1,7 @@
 use super::*;
 use oxc_span::SourceType;
 
-use arkdown_core::{ArktsLanguageVersion, ModuleType, ResolvedId};
+use arkdown_core::{ArktsLanguageVersion, InsightIntentFormBinding, ModuleType, ResolvedId};
 
 fn make_source(id: &str, content: &str) -> ModuleSource {
     ModuleSource {
@@ -30,6 +30,13 @@ impl TransformHarness {
         ArktsTransformer::with_options(source, options).transform()
     }
 
+    fn transform_output_with_options(
+        source: &ModuleSource,
+        options: &TransformOptions,
+    ) -> Result<ArktsTransformOutput, EtsTransformError> {
+        ArktsTransformer::with_options(source, options).transform_with_source_map()
+    }
+
     fn collect_component_names(content: &str, id: &str) -> Result<Vec<String>, EtsTransformError> {
         ArkuiComponentNameCollector::new(content, id).collect()
     }
@@ -41,6 +48,346 @@ impl TransformHarness {
     ) -> Result<Vec<String>, EtsTransformError> {
         ArkuiComponentNameCollector::with_options(content, id, options).collect()
     }
+}
+
+#[test]
+fn insight_intent_link_is_consumed_and_emits_static_metadata() {
+    let source = make_source(
+        "/project/entry/src/main/ets/pages/Link.ets",
+        r#"const mapping = { paramName: 'song', paramMappingName: 'name' }
+const options = {
+  intentName: 'PlaySong', domain: 'Music', intentVersion: '1.0.0',
+  displayName: 'Play', uri: '/play', icon: $r('app.media.icon'),
+  keywords: [`music`], paramMappings: [mapping]
+}
+@InsightIntentLink(options)
+class LinkIntent {}"#,
+    );
+    let options = TransformOptions {
+        bundle_name: Some("com.example.intent".to_string()),
+        module_name: Some("entry".to_string()),
+        ..TransformOptions::default()
+    };
+    let output = TransformHarness::transform_output_with_options(&source, &options)
+        .expect("InsightIntent link must transform");
+
+    assert!(
+        !output.code.contains("@InsightIntentLink"),
+        "{}",
+        output.code
+    );
+    assert_eq!(output.insight_intent.intents.len(), 1);
+    let data = &output.insight_intent.intents[0].data;
+    assert_eq!(data["decoratorClass"], "LinkIntent");
+    assert_eq!(data["decoratorType"], "@InsightIntentLink");
+    assert_eq!(data["bundleName"], "com.example.intent");
+    assert_eq!(data["moduleName"], "entry");
+    assert_eq!(data["icon"], "$r('app.media.icon')");
+    assert_eq!(data["paramMappings"][0]["paramName"], "song");
+}
+
+#[test]
+fn insight_intent_entry_maps_execute_mode_and_records_inheritance() {
+    let source = make_source(
+        "/project/entry/src/main/ets/EntryExecutor.ets",
+        r#"@InsightIntentEntry({
+  intentName: 'PlaySong', domain: 'Music', intentVersion: '1.0.0',
+  displayName: 'Play', abilityName: 'EntryAbility',
+  executeMode: [InsightIntentExecuteMode.UI_ABILITY_BACKGROUND, 2]
+})
+export default class PlaySong extends InsightIntentEntryExecutor<string> {}"#,
+    );
+    let output =
+        TransformHarness::transform_output_with_options(&source, &TransformOptions::default())
+            .expect("InsightIntent entry must transform");
+    let data = &output.insight_intent.intents[0].data;
+
+    assert_eq!(
+        data["executeMode"],
+        serde_json::json!(["background", "uiextension"])
+    );
+    assert_eq!(
+        data["ClassInheritanceInfo"],
+        serde_json::json!({
+            "parentClassName": "InsightIntentEntryExecutor",
+            "definitionFilePath": "sdk",
+            "generics": [{"typeName": "string", "definitionFilePath": "lib.es5.d.ts"}]
+        })
+    );
+    assert!(
+        !output.code.contains("@InsightIntentEntry"),
+        "{}",
+        output.code
+    );
+}
+
+#[test]
+fn insight_intent_function_consumes_static_method_decorator() {
+    let source = make_source(
+        "/project/entry/src/main/ets/Function.ets",
+        r#"@InsightIntentFunction()
+export class MusicFunctions {
+  @InsightIntentFunctionMethod({
+    intentName: 'PlaySong', domain: 'Music', intentVersion: '1.0.0', displayName: 'Play'
+  })
+  static play(song: string, count?: number): void {}
+}"#,
+    );
+    let output =
+        TransformHarness::transform_output_with_options(&source, &TransformOptions::default())
+            .expect("InsightIntent function must transform");
+    let data = &output.insight_intent.intents[0].data;
+
+    assert_eq!(data["functionName"], "play");
+    assert_eq!(
+        data["functionParamList"],
+        serde_json::json!(["song", "count"])
+    );
+    assert_eq!(
+        output.insight_intent.obfuscation_global_names,
+        ["MusicFunctions"]
+    );
+    assert_eq!(
+        output.insight_intent.obfuscation_property_names,
+        ["MusicFunctions", "play"]
+    );
+    assert!(
+        !output.code.contains("@InsightIntentFunction"),
+        "{}",
+        output.code
+    );
+}
+
+#[test]
+fn insight_intent_structural_contracts_use_source_error_codes() {
+    let page_error = TransformHarness::transform(&make_source(
+        "Page.ets",
+        "@InsightIntentPage({ intentName: 'P', domain: 'D', intentVersion: '1', displayName: 'P', pagePath: 'ets/pages/P' }) class Page {}",
+    ))
+    .expect_err("page decorator on class must fail");
+    assert!(page_error.to_string().contains("10110016"), "{page_error}");
+
+    let method_error = TransformHarness::transform(&make_source(
+        "Function.ets",
+        "@InsightIntentFunction() export class F { @InsightIntentFunctionMethod({ intentName: 'P', domain: 'D', intentVersion: '1', displayName: 'P' }) run() {} }",
+    ))
+    .expect_err("intent function method must be static");
+    assert!(
+        method_error.to_string().contains("10110015"),
+        "{method_error}"
+    );
+}
+
+#[test]
+fn insight_intent_does_not_extract_source_local_or_non_sdk_decorator_bindings() {
+    for source_text in [
+        r#"function InsightIntentLink(_options: object) { return (_target: object) => {}; }
+@InsightIntentLink({ intentName: 'Local', domain: 'D', intentVersion: '1', displayName: 'Local', uri: '/local' })
+class LocalIntent {}"#,
+        r#"import { InsightIntentLink } from './fake-decorators';
+@InsightIntentLink({ intentName: 'Imported', domain: 'D', intentVersion: '1', displayName: 'Imported', uri: '/imported' })
+class ImportedIntent {}"#,
+    ] {
+        let output = TransformHarness::transform_output_with_options(
+            &make_source("Shadowed.ets", source_text),
+            &TransformOptions::default(),
+        )
+        .expect("non-SDK decorators must not produce InsightIntent metadata");
+
+        assert!(
+            !output.code.contains("@InsightIntentLink"),
+            "the source compiler consumes canonical owner decorator syntax before its origin guard: {}",
+            output.code
+        );
+        assert!(output.insight_intent.is_empty());
+    }
+}
+
+#[test]
+fn insight_intent_form_uses_extension_ability_profile_binding() {
+    let source = make_source(
+        "/project/entry/src/main/ets/EntryFormAbility.ets",
+        r#"@InsightIntentForm({
+  intentName: 'MusicForm', domain: 'Music', intentVersion: '1',
+  displayName: 'Music', formName: 'music_widget'
+})
+export default class EntryFormAbility extends FormExtensionAbility {}"#,
+    );
+    let options = TransformOptions {
+        insight_intent_form_binding: Some(InsightIntentFormBinding {
+            source: "./ets/EntryFormAbility.ets".to_string(),
+            ability_name: "EntryFormAbility".to_string(),
+            form_names: vec!["music_widget".to_string()],
+        }),
+        ..TransformOptions::default()
+    };
+    let output = TransformHarness::transform_output_with_options(&source, &options)
+        .expect("registered form extension intent must transform");
+
+    assert_eq!(
+        output.insight_intent.intents[0].data["abilityName"],
+        "EntryFormAbility"
+    );
+
+    let mismatch = source.content.replace("music_widget", "unknown_widget");
+    let error = match TransformHarness::transform_output_with_options(
+        &make_source(&source.id.id, &mismatch),
+        &options,
+    ) {
+        Ok(_) => panic!("unregistered form name must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("10110023"), "{error}");
+}
+
+#[test]
+fn insight_intent_validates_class_properties_against_parameter_schema() {
+    let missing_required = TransformHarness::transform(&make_source(
+        "Schema.ets",
+        r#"@InsightIntentLink({
+  intentName: 'Schema', domain: 'D', intentVersion: '1', displayName: 'Schema', uri: '/schema',
+  parameters: { type: 'object', properties: { song: { type: 'string' } }, required: ['song'] }
+})
+class SchemaIntent {}"#,
+    ))
+    .expect_err("missing required class property must fail");
+    assert!(
+        missing_required.to_string().contains("10110008"),
+        "{missing_required}"
+    );
+
+    let wrong_type = TransformHarness::transform(&make_source(
+        "Schema.ets",
+        r#"@InsightIntentLink({
+  intentName: 'Schema', domain: 'D', intentVersion: '1', displayName: 'Schema', uri: '/schema',
+  parameters: { type: 'object', properties: { song: { type: 'number' } } }
+})
+class SchemaIntent { song: string = '' }"#,
+    ))
+    .expect_err("mismatched class property type must fail");
+    assert!(wrong_type.to_string().contains("10110009"), "{wrong_type}");
+}
+
+#[test]
+fn insight_intent_resolves_imported_entity_types_and_canonical_class_names() {
+    let entity_path = std::path::PathBuf::from("/project/entry/src/main/ets/model/Song.ets");
+    let entry_path = std::path::PathBuf::from("/project/entry/src/main/ets/Entry.ets");
+    let entity_source = r#"@InsightIntentEntity({ entityCategory: 'music' })
+export class Song implements InsightIntent.IntentEntity {
+  entityId: string = 'song'
+}"#;
+    let entry_source = r#"import type { Song as Track } from './model/Song'
+@InsightIntentEntry({
+  intentName: 'PlaySong', domain: 'Music', intentVersion: '1.0.0',
+  displayName: 'Play', abilityName: 'EntryAbility', executeMode: [0],
+  parameters: {
+    type: 'object', additionalProperties: false,
+    properties: { song: { type: 'object' } }, required: ['song']
+  }
+})
+export default class PlaySong extends InsightIntentEntryExecutor {
+  song: Track
+}"#;
+    let mut source_files = rustc_hash::FxHashMap::default();
+    source_files.insert(entity_path, std::sync::Arc::<str>::from(entity_source));
+    source_files.insert(
+        entry_path.clone(),
+        std::sync::Arc::<str>::from(entry_source),
+    );
+    let sources = crate::TransformSourceSnapshot::new(source_files);
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
+        ..TransformOptions::default()
+    };
+    let output = TransformHarness::transform_output_with_options(
+        &make_source(entry_path.to_str().unwrap(), entry_source),
+        &options,
+    )
+    .expect("imported InsightIntent entity must satisfy object schema");
+
+    assert_eq!(output.insight_intent.intents[0].entity_type_names, ["Song"]);
+}
+
+#[test]
+fn insight_intent_entity_requires_direct_app_entity_id_and_valid_query_fields() {
+    let missing_id = TransformHarness::transform(&make_source(
+        "Entity.ets",
+        r#"@InsightIntentEntity({ entityCategory: 'music' })
+class Song extends AppIntentEntity {}"#,
+    ))
+    .expect_err("direct AppIntentEntity subclasses require entityId");
+    assert!(missing_id.to_string().contains("10110008"), "{missing_id}");
+
+    let invalid_query = TransformHarness::transform(&make_source(
+        "Entity.ets",
+        r#"@InsightIntentEntity({
+  entityCategory: 'music',
+  parameters: { type: 'object', properties: { title: { type: 'string' } } },
+  supportedQueryProperties: ['artist']
+})
+class Song extends AppIntentEntity {
+  entityId: string = 'song';
+  title: string = '';
+}"#,
+    ))
+    .expect_err("query fields must exist in the parameter schema");
+    assert!(
+        invalid_query.to_string().contains("10110003"),
+        "{invalid_query}"
+    );
+}
+
+#[test]
+fn insight_intent_rejects_decorators_outside_ets_sources() {
+    let error = TransformHarness::transform(&make_source(
+        "Intent.ts",
+        "@InsightIntentLink({ intentName: 'I', domain: 'D', intentVersion: '1', displayName: 'I', uri: '/i' }) class Intent {}",
+    ))
+    .expect_err("InsightIntent is restricted to ETS sources");
+    assert!(error.to_string().contains("10110001"), "{error}");
+}
+
+#[test]
+fn insight_intent_enriches_decorator_data_from_sdk_schema_catalog() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let schema_dir = temp.path().join("insight_intents/schema");
+    std::fs::create_dir_all(&schema_dir).expect("schema dir");
+    std::fs::write(
+        schema_dir.join("PlayAudio_1.0.1.json"),
+        r#"{
+  "intentName": "PlayAudio", "domain": "MediaDomain",
+  "llmDescription": "Play SDK audio", "keywords": ["PlayAudio"],
+  "parameters": { "type": "object", "properties": {} },
+  "result": { "type": "object" }
+}"#,
+    )
+    .expect("schema");
+    let options = TransformOptions {
+        insight_intent_schema_catalog: InsightIntentSchemaCatalog::from_ets_loader_path(
+            temp.path(),
+        )
+        .expect("catalog"),
+        ..TransformOptions::default()
+    };
+    let output = TransformHarness::transform_output_with_options(
+        &make_source(
+            "Audio.ets",
+            r#"@InsightIntentLink({
+  intentName: 'LocalName', domain: 'LocalDomain', intentVersion: '1.0.1',
+  displayName: 'Audio', uri: '/audio', schema: 'PlayAudio'
+})
+class AudioIntent {}"#,
+        ),
+        &options,
+    )
+    .expect("SDK schema intent");
+    let data = &output.insight_intent.intents[0].data;
+
+    assert_eq!(data["intentName"], "PlayAudio");
+    assert_eq!(data["domain"], "MediaDomain");
+    assert_eq!(data["keywords"], serde_json::json!(["PlayAudio"]));
+    assert_eq!(data["llmDescription"], "Play SDK audio");
 }
 
 #[test]
@@ -2664,6 +3011,8 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         module_exports: ModuleExportIndex::default(),
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
+        insight_intent_form_binding: None,
+        insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
         entry_source: true,
         preview_mode: false,
         check_entry: false,
@@ -2753,6 +3102,8 @@ export struct SecureModePage {
         module_exports: ModuleExportIndex::default(),
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
+        insight_intent_form_binding: None,
+        insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
         entry_source: true,
         preview_mode: false,
         check_entry: false,
@@ -2877,6 +3228,8 @@ export struct SecureModePage {
         sources,
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
+        insight_intent_form_binding: None,
+        insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
         entry_source: true,
         preview_mode: false,
         check_entry: false,
@@ -4932,6 +5285,8 @@ struct WidgetCard {
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: true,
+            insight_intent_form_binding: None,
+            insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
             entry_source: true,
             preview_mode: false,
             check_entry: false,
@@ -5084,6 +5439,8 @@ struct ModalPage {
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
+            insight_intent_form_binding: None,
+            insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
             entry_source: true,
             preview_mode: false,
             check_entry: false,

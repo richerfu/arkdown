@@ -7,6 +7,7 @@ use arcstr::ArcStr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::ChunkGraph;
+use arkdown_ets_transform::InsightIntentSourceMetadata;
 use oxc_index::IndexVec;
 use rolldown::ModuleSourceScanOutput;
 
@@ -46,6 +47,7 @@ pub(crate) struct HvigorModuleSourceState {
     pub(crate) full_module_is_commonjs: FxHashMap<String, bool>,
     pub(crate) javascript_module_ids: FxHashSet<String>,
     pub(crate) shared_module_ids: FxHashSet<String>,
+    pub(crate) insight_intent_sources: FxHashMap<String, InsightIntentSourceMetadata>,
 }
 
 impl HvigorModuleSourceState {
@@ -57,6 +59,7 @@ impl HvigorModuleSourceState {
             source_maps: transform.source_maps,
             javascript_module_ids: transform.javascript_module_ids,
             shared_module_ids: transform.shared_module_ids,
+            insight_intent_sources: transform.insight_intent_sources,
             ..Self::default()
         };
         for module in scan.modules {
@@ -96,6 +99,12 @@ impl HvigorModuleSourceState {
             }
         }
         state
+    }
+
+    pub(crate) fn take_insight_intent_sources(
+        &mut self,
+    ) -> FxHashMap<String, InsightIntentSourceMetadata> {
+        std::mem::take(&mut self.insight_intent_sources)
     }
 
     pub(crate) fn record_module_id(&mut self, id: String) {

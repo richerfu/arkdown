@@ -155,6 +155,7 @@ pub(super) fn make_bundle_plan(
       module_meta_info_files,
       entries,
       form_entry_sources: loader_json.form_entry_sources.clone(),
+      insight_intent_form_bindings: loader_json.insight_intent_form_bindings.clone(),
       runtime_entry_sources: loader_json.runtime_entry_sources.clone(),
       page_entry_sources: loader_json.page_entry_sources.clone(),
       support_chunks: loader_json.support_chunks,
@@ -551,6 +552,7 @@ impl BundleStageOutput {
         modules_abc_path,
         source_maps_path: None,
         source_map_input_fingerprints: vec![],
+        insight_intent_sources: vec![],
       },
       state: BundleStageState::CacheHit,
     }

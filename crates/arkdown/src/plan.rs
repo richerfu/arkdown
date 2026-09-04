@@ -26,7 +26,9 @@
 
 use std::path::PathBuf;
 
-use arkdown_core::{ArkdownError, ArktsLanguageVersion, BuildMode, OutputTarget};
+use arkdown_core::{
+    ArkdownError, ArktsLanguageVersion, BuildMode, InsightIntentFormBinding, OutputTarget,
+};
 use arkdown_ets_transform::ModuleAnalyzerKind;
 use rustc_hash::FxHashMap;
 
@@ -81,6 +83,9 @@ pub struct BundleInput {
     /// SDK `readCardForm()` records these separately in `cardObj` so the ETS
     /// transform emits `loadEtsCard` instead of ordinary page registration.
     pub form_entry_sources: Vec<String>,
+    /// Form-extension ability source ownership and the widget names registered
+    /// by its referenced form profiles.
+    pub insight_intent_form_bindings: Vec<InsightIntentFormBinding>,
     /// Runtime entries loaded directly by OHOS from `module.json`.
     pub runtime_entry_sources: Vec<String>,
     /// UI page entries from the module pages profile. Unlike abilities, these
@@ -501,6 +506,7 @@ mod tests {
                 module_meta_info_files: Vec::new(),
                 entries: vec!["./ets/pages/Index.ets".to_string()],
                 form_entry_sources: Vec::new(),
+                insight_intent_form_bindings: Vec::new(),
                 runtime_entry_sources: Vec::new(),
                 page_entry_sources: Vec::new(),
                 support_chunks: false,

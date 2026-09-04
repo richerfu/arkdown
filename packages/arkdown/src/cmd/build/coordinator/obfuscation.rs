@@ -52,6 +52,13 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
       })?;
     let source_maps: serde_json::Map<String, serde_json::Value> =
       serde_json::from_slice(&std::fs::read(&source_maps_path)?)?;
+    let insight_intent_keep = self
+      .bundle_out
+      .bundle_output
+      .insight_intent_sources
+      .iter()
+      .map(|source| (source.module_id.as_str(), &source.metadata))
+      .collect::<FxHashMap<_, _>>();
     let files = self
       .bundle_out
       .bundle_output
@@ -90,12 +97,19 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             original_path.display()
           );
         }
+        let insight_intent = insight_intent_keep.get(source.module_id.as_str());
         Ok(ObfuscationModuleFile {
           build_path: source.path.clone(),
           original_path,
           relative_path,
           source_map_key: source.source_file.clone(),
           previous_source_map: Some(previous_source_map),
+          insight_intent_global_names: insight_intent
+            .map(|metadata| metadata.obfuscation_global_names.clone())
+            .unwrap_or_default(),
+          insight_intent_property_names: insight_intent
+            .map(|metadata| metadata.obfuscation_property_names.clone())
+            .unwrap_or_default(),
         })
       })
       .collect::<Result<Vec<_>>>()?;

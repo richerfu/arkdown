@@ -459,6 +459,32 @@ impl LoaderJson {
                 }
             })
             .collect::<Vec<_>>();
+        let insight_intent_form_bindings = {
+            let mut bindings = IndexMap::<String, InsightIntentFormBinding>::new();
+            for form_source in &form_sources {
+                if form_source.ability_src_entry.is_empty() {
+                    continue;
+                }
+                let binding = bindings
+                    .entry(form_source.ability_src_entry.clone())
+                    .or_insert_with(|| InsightIntentFormBinding {
+                        source: form_source.ability_src_entry.clone(),
+                        ability_name: form_source.ability_name.clone(),
+                        form_names: Vec::new(),
+                    });
+                if let Some(name) = form_source.name.as_ref() {
+                    binding.form_names.push(name.clone());
+                }
+            }
+            bindings
+                .into_values()
+                .map(|mut binding| {
+                    binding.form_names.sort();
+                    binding.form_names.dedup();
+                    binding
+                })
+                .collect::<Vec<_>>()
+        };
 
         // Module-level srcEntry (used by HSP shared packages that export a single file
         // without declaring abilities).
@@ -947,6 +973,7 @@ impl LoaderJson {
 
             compile_entry,
             form_entry_sources,
+            insight_intent_form_bindings,
             runtime_entry_sources,
             page_entry_sources,
             module_root_path: src_main.clone(),

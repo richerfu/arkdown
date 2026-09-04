@@ -30,6 +30,7 @@ pub mod plan;
 pub(crate) mod dependency_graph;
 pub mod form_profile;
 pub mod har_abilities;
+pub mod insight_intent;
 pub(crate) mod layout;
 pub mod loader_json;
 pub(crate) mod module_json_writer;
@@ -58,6 +59,10 @@ pub use form_profile::{
     ModuleFormProfileInput,
 };
 pub use har_abilities::{HarAbility, HarAbilityCollector};
+pub use insight_intent::{
+    InsightIntentEntityInput, InsightIntentInput, InsightIntentModuleInput,
+    InsightIntentProfileInput, InsightIntentProfileOutput, InsightIntentProfileProcessor,
+};
 pub use loader_json::{ByteCodeHarEntry, LoaderJson};
 pub use process_distro_filter::{
     DistroFilterProcessor, DistroFilterProfileInput, DistroFilterProfileOutput,

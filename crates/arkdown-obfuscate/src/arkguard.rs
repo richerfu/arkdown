@@ -42,6 +42,10 @@ pub struct ObfuscationModuleFile {
     pub relative_path: String,
     pub source_map_key: String,
     pub previous_source_map: Option<serde_json::Value>,
+    /// InsightIntent class names registered in ArkGuard `arkUIKeepInfo`.
+    pub insight_intent_global_names: Vec<String>,
+    /// InsightIntent class/member names registered in ArkGuard `arkUIKeepInfo`.
+    pub insight_intent_property_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +162,8 @@ impl<'a> ArkguardModuleRunner<'a> {
                     relative_path: file.relative_path.clone(),
                     source_map_key: file.source_map_key.clone(),
                     previous_source_map: file.previous_source_map.clone(),
+                    insight_intent_global_names: file.insight_intent_global_names.clone(),
+                    insight_intent_property_names: file.insight_intent_property_names.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ObfuscationError>>()?;
@@ -254,6 +260,8 @@ struct ArkguardRequestFile {
     relative_path: String,
     source_map_key: String,
     previous_source_map: Option<serde_json::Value>,
+    insight_intent_global_names: Vec<String>,
+    insight_intent_property_names: Vec<String>,
 }
 
 #[derive(Deserialize)]
