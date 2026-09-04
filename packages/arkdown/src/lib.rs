@@ -376,6 +376,8 @@ impl TryFrom<JsTransformOutput> for HookTransformOutput {
 #[napi]
 pub struct ArkdownRolldownPluginContext {
   inner: PluginContext,
+  load_context: Option<SharedLoadPluginContext>,
+  transform_context: Option<SharedTransformPluginContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -509,7 +511,29 @@ impl From<JsPluginAstParseOptions> for arkdown::PluginAstParseOptions {
 
 impl From<PluginContext> for ArkdownRolldownPluginContext {
   fn from(inner: PluginContext) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      load_context: None,
+      transform_context: None,
+    }
+  }
+}
+
+impl ArkdownRolldownPluginContext {
+  fn from_load(inner: SharedLoadPluginContext) -> Self {
+    Self {
+      inner: inner.inner.clone(),
+      load_context: Some(inner),
+      transform_context: None,
+    }
+  }
+
+  fn from_transform(inner: SharedTransformPluginContext) -> Self {
+    Self {
+      inner: inner.inner.clone(),
+      load_context: None,
+      transform_context: Some(inner),
+    }
   }
 }
 
@@ -624,7 +648,24 @@ impl ArkdownRolldownPluginContext {
 
   #[napi]
   pub fn add_watch_file(&self, id: String) {
-    self.inner.add_watch_file(&id);
+    if let Some(context) = &self.transform_context {
+      context.add_watch_file(&id);
+    } else if let Some(context) = &self.load_context {
+      context.add_watch_file(&id);
+    } else {
+      self.inner.add_watch_file(&id);
+    }
+  }
+
+  /// Rolldown's transform-context source map chain, including every load and
+  /// transform result that ran before the current JavaScript plugin.
+  #[napi]
+  pub fn get_combined_sourcemap(&self) -> napi::Result<serde_json::Value> {
+    let context = self.transform_context.as_ref().ok_or_else(|| {
+      napi::Error::from_reason("getCombinedSourcemap is only available inside transform hooks")
+    })?;
+    serde_json::from_str(&context.get_combined_sourcemap().to_json_string())
+      .map_err(|error| napi::Error::from_reason(format!("invalid combined source map: {error}")))
   }
 
   #[napi]
@@ -703,6 +744,11 @@ pub struct JsBuildStartOptions {
 }
 
 #[napi(object)]
+pub struct JsTransformHookExtraArgs {
+  pub module_type: String,
+}
+
+#[napi(object)]
 pub struct JsPluginError {
   pub message: String,
   pub id: Option<String>,
@@ -723,6 +769,7 @@ pub struct JsPluginDispatchRequest {
   pub importer: Option<String>,
   pub resolve_options: Option<JsResolveIdOptions>,
   pub code: Option<String>,
+  pub transform_options: Option<JsTransformHookExtraArgs>,
   pub module_info: Option<HvigorModuleInfo>,
   pub build_end_context: Option<JsBuildEndContext>,
   pub cache_request: Option<serde_json::Value>,
@@ -739,6 +786,7 @@ impl JsPluginDispatchRequest {
       importer: None,
       resolve_options: None,
       code: None,
+      transform_options: None,
       module_info: None,
       build_end_context: None,
       cache_request: None,
@@ -1113,7 +1161,8 @@ impl Plugin for JsPlugin {
     args: &HookLoadArgs<'_>,
   ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
     let id = args.id.to_string();
-    let mut request = JsPluginDispatchRequest::new("load", Some(ctx.inner.clone().into()));
+    let mut request =
+      JsPluginDispatchRequest::new("load", Some(ArkdownRolldownPluginContext::from_load(ctx)));
     request.id = Some(id);
     let dispatch = self.dispatch_fn.clone();
     async move {
@@ -1140,9 +1189,15 @@ impl Plugin for JsPlugin {
     ctx: SharedTransformPluginContext,
     args: &HookTransformArgs<'_>,
   ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
-    let mut request = JsPluginDispatchRequest::new("transform", Some(ctx.inner.clone().into()));
+    let mut request = JsPluginDispatchRequest::new(
+      "transform",
+      Some(ArkdownRolldownPluginContext::from_transform(ctx)),
+    );
     request.code = Some(args.code.to_string());
     request.id = Some(args.id.to_string());
+    request.transform_options = Some(JsTransformHookExtraArgs {
+      module_type: args.module_type.to_string(),
+    });
     let dispatch = self.dispatch_fn.clone();
     async move {
       match dispatch.await_call(request).await {
@@ -1848,6 +1903,8 @@ pub struct HvigorPluginContext {
   pub get_module_ids: Option<String>,
   #[napi(ts_type = "(id: string) => HvigorModuleInfo | null")]
   pub get_module_info: Option<String>,
+  #[napi(ts_type = "() => Record<string, unknown>")]
+  pub get_combined_sourcemap: Option<String>,
   #[napi(ts_type = "(source: string, options?: unknown) => unknown")]
   pub parse: Option<String>,
   #[napi(ts_type = "(moduleRef: string) => string")]
@@ -1892,7 +1949,7 @@ pub struct ArkdownPlugin {
   )]
   pub before_build: Option<String>,
   #[napi(
-    ts_type = "((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }"
+    ts_type = "((this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void> }"
   )]
   pub build_start: Option<String>,
   #[napi(
@@ -1908,7 +1965,7 @@ pub struct ArkdownPlugin {
   )]
   pub load: Option<String>,
   #[napi(
-    ts_type = "((code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined> }"
+    ts_type = "((this: HvigorPluginContext, code: string, id: string, options: JsTransformHookExtraArgs) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, code: string, id: string, options: JsTransformHookExtraArgs) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined> }"
   )]
   pub transform: Option<String>,
   #[napi(

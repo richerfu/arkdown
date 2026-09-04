@@ -12,6 +12,11 @@ export declare class ArkdownRolldownPluginContext {
   load(options: JsPluginContextLoadOptions): Promise<HvigorModuleInfo | null>
   emitFile(file: JsEmittedFile): string
   addWatchFile(id: string): void
+  /**
+   * Rolldown's transform-context source map chain, including every load and
+   * transform result that ran before the current JavaScript plugin.
+   */
+  getCombinedSourcemap(): any
   info(message: string): void
   warn(message: string): void
   debug(message: string): void
@@ -44,11 +49,11 @@ export interface ArkdownPlugin {
   name?: string
   order?: 'first' | 'last' | ((nameToIndex: Record<string, number>) => number)
 beforeBuild?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
-buildStart?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+buildStart?: ((this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void> }
 afterBuildStart?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
 resolveId?: ((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }
 load?: ((id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined> }
-transform?: ((code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (code: string, id: string) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined> }
+transform?: ((this: HvigorPluginContext, code: string, id: string, options: JsTransformHookExtraArgs) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, code: string, id: string, options: JsTransformHookExtraArgs) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined> }
 moduleParsed?: ((moduleInfo: HvigorModuleInfo) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (moduleInfo: HvigorModuleInfo) => void | Promise<void> }
 resolveDynamicImport?: ((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }
 beforeBuildEnd?: ((this: HvigorPluginContext, input?: unknown) => unknown) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, input?: unknown) => unknown }
@@ -236,6 +241,7 @@ emitFile?: (file: JsEmittedFile) => string
 addWatchFile?: (id: string) => void
 getModuleIds?: () => IterableIterator<string>
 getModuleInfo?: (id: string) => HvigorModuleInfo | null
+getCombinedSourcemap?: () => Record<string, unknown>
 parse?: (source: string, options?: unknown) => unknown
 getFileName?: (moduleRef: string) => string
 info?: (value: unknown) => void
@@ -428,6 +434,7 @@ export interface JsPluginDispatchRequest {
   importer?: string
   resolveOptions?: JsResolveIdOptions
   code?: string
+  transformOptions?: JsTransformHookExtraArgs
   moduleInfo?: HvigorModuleInfo
   buildEndContext?: JsBuildEndContext
   cacheRequest?: any
@@ -480,6 +487,10 @@ export interface JsResolveIdOutput {
 
 export type JsSourceMap =
   string | JsJsonSourceMap
+
+export interface JsTransformHookExtraArgs {
+  moduleType: string
+}
 
 export interface JsTransformOutput {
   code?: string
