@@ -37,7 +37,7 @@ use arkdown_abc::bytecode::{
 use arkdown_build::pre_build::PreBuildValidator;
 use arkdown_core::{
   ArkdownConfig, ArktsLanguageVersion, BuildMode, HapManifest, HarArtifactType, ModuleConfig,
-  ObfuscationConfig, OhosModuleType, OutputTarget,
+  OhosModuleType, OutputTarget,
 };
 use arkdown_pack::PackingCheck;
 use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
@@ -126,9 +126,7 @@ use arkdown_ets_transform::{
   RolldownEtsTransformPlan,
 };
 use arkdown_obfuscate::{
-  ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
-  ConsumerObfuscationFileWriter, ObfuscationMode, ObfuscationModuleFile, ObfuscationModuleInput,
-  ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator,
+  ObfuscationMode, ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator,
 };
 use arkdown_pack::{
   AppPackageRunner, BundledHarResourceInput, HarBundledDependencyInput, HarPackInput,
@@ -150,17 +148,16 @@ use arkdown_resource::{
 
 mod bundle_stage;
 mod bytecode_stage;
-mod obfuscation;
 mod plugin_share;
 
+use arkdown_build::obfuscation::{
+  ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
+};
 use arkdown_build::planning::{
   BuildTimingProbe, DependencyCustomTypeInputBuilder, DirectoryTreeCopier,
   HarDeclarationDependencyPackageInventory, ModuleBuildConfiguration, ModuleTargetSelection,
   NativeCmakeLocalDependencyInventoryBuilder, NativeDependencyStagePlanBuilder,
   TargetBuildExecutionPlan,
-};
-use obfuscation::{
-  ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
 };
 pub(crate) use plugin_share::{
   HvigorCompilePluginShareBuilder, PluginCacheInvalidationRunner, PluginContextCacheRunner,
@@ -2445,119 +2442,6 @@ mod resource_input_root_collector_tests {
   #[cfg(windows)]
   fn link_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
     junction::create(source, destination)
-  }
-}
-
-struct ObfuscationDependencyRuleCollector<'a> {
-  deps: &'a arkdown_session::dependency_graph::snapshot::DependencyGraphSnapshot,
-}
-
-impl<'a> ObfuscationDependencyRuleCollector<'a> {
-  fn new(deps: &'a arkdown_session::dependency_graph::snapshot::DependencyGraphSnapshot) -> Self {
-    Self { deps }
-  }
-
-  fn collect(&self) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut seen = FxHashSet::default();
-    for node in self.deps.nodes.values() {
-      if !matches!(
-        node.node_type,
-        DependencyNodeType::SourceHar
-          | DependencyNodeType::BytecodeHar
-          | DependencyNodeType::IntegratedHsp
-          | DependencyNodeType::SharedHsp
-      ) {
-        continue;
-      }
-      let Some(package_root) = node.package_root.as_deref() else {
-        continue;
-      };
-      let path = package_root.join("obfuscation.txt");
-      if !path.is_file() {
-        continue;
-      }
-      let key = canonicalize_or_owned(&path);
-      if seen.insert(key.clone()) {
-        paths.push(key);
-      }
-    }
-    paths
-  }
-}
-
-#[cfg(test)]
-mod obfuscation_dependency_rule_collector_tests {
-  use super::*;
-
-  fn node(alias: &str, root: PathBuf, node_type: DependencyNodeType) -> DependencyNodeSnapshot {
-    DependencyNodeSnapshot {
-      alias: alias.to_string(),
-      package_name: alias.to_string(),
-      version_spec: None,
-      package_root: Some(root),
-      package: None,
-      module_profile: None,
-      node_type,
-      is_runtime_only: false,
-      is_dynamic: false,
-      is_transitive: false,
-      direct_deps: vec![],
-    }
-  }
-
-  #[test]
-  fn collects_hvigor_dependency_obfuscation_txt_only() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let har_root = temp.path().join("har");
-    let hsp_root = temp.path().join("hsp");
-    let source_root = temp.path().join("source");
-    fs_err::create_dir_all(&har_root).expect("har dir");
-    fs_err::create_dir_all(&hsp_root).expect("hsp dir");
-    fs_err::create_dir_all(&source_root).expect("source dir");
-    fs_err::write(
-      har_root.join("obfuscation.txt"),
-      "-keep-global-name\nHarApi\n",
-    )
-    .expect("har obfuscation");
-    fs_err::write(
-      hsp_root.join("obfuscation.txt"),
-      "-keep-property-name\nhspProp\n",
-    )
-    .expect("hsp obfuscation");
-    fs_err::write(
-      source_root.join("obfuscation.txt"),
-      "-keep-global-name\nIgnored\n",
-    )
-    .expect("source obfuscation");
-
-    let mut deps = arkdown_session::dependency_graph::snapshot::DependencyGraphSnapshot::default();
-    deps.nodes.insert(
-      "har".to_string(),
-      node("har", har_root.clone(), DependencyNodeType::SourceHar),
-    );
-    deps.nodes.insert(
-      "hsp".to_string(),
-      node("hsp", hsp_root.clone(), DependencyNodeType::SharedHsp),
-    );
-    deps.nodes.insert(
-      "source".to_string(),
-      node("source", source_root, DependencyNodeType::OhpmSource),
-    );
-    deps.nodes.insert(
-      "same-har".to_string(),
-      node(
-        "same-har",
-        har_root.clone(),
-        DependencyNodeType::BytecodeHar,
-      ),
-    );
-
-    let paths = ObfuscationDependencyRuleCollector::new(&deps).collect();
-
-    assert_eq!(paths.len(), 2, "paths: {paths:?}");
-    assert!(paths.contains(&canonicalize_or_owned(&har_root.join("obfuscation.txt"))));
-    assert!(paths.contains(&canonicalize_or_owned(&hsp_root.join("obfuscation.txt"))));
   }
 }
 

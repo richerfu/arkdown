@@ -102,6 +102,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
     'services/build/coordinator/transform.rs',
     'services/build/coordinator/compile_context.rs',
     'services/build/coordinator/planning.rs',
+    'services/build/coordinator/obfuscation.rs',
     'services/build/bytecode_har_declaration.rs',
     'services/check.rs',
     'services/clean.rs',

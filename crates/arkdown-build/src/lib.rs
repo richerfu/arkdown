@@ -21,6 +21,7 @@ pub mod intermediates;
 pub mod layout;
 pub mod module_plan;
 pub mod native_dependency;
+pub mod obfuscation;
 pub mod package_resolution;
 pub mod planning;
 pub mod pre_build;

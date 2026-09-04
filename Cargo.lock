@@ -179,6 +179,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-ets-transform",
  "arkdown-native",
+ "arkdown-obfuscate",
  "arkdown-pack",
  "arkdown-path",
  "arkdown-profile",
