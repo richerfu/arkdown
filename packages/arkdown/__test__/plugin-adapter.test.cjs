@@ -38,6 +38,7 @@ function dispatch(plugin, hookName, request = {}) {
 
 test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', async () => {
   const calls = []
+  const hookEvents = []
   const plugin = Object.fromEntries(
     PLUGIN_HOOKS.map((hookName) => [
       hookName,
@@ -54,8 +55,13 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   plugin.name = 'all-hooks'
   const normalized = normalizePlugin(plugin, fakeBinding())
   const share = {
+    __arkdownBuildInstanceId: 'event-build',
+    recordHookEvent(record) {
+      hookEvents.push(record)
+    },
     projectConfig: {
       moduleName: 'entry',
+      perf: 1,
       depName2DepInfo: { library: { pkgRootPath: '/project/library' } },
       dependencyAliasMap: { alias: 'library' },
       mockParams: { source2ModuleIdMap: { './mock': '/project/mock.ts' } },
@@ -74,6 +80,59 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   assert.equal(share.projectConfig.mockParams.source2ModuleIdMap instanceof Map, true)
   assert.deepEqual(share.depInfo, { enableIncre: true, changedDeps: ['library'] })
   assert.equal(typeof share.getLogger('fixture').printErrorAndExit, 'function')
+  const event = share.getHookEventFactory('fixture', 'buildStart').createEvent('compile')
+  const subEvent = event.createSubEvent('parse')
+  assert.equal(event.start(10), event)
+  assert.equal(subEvent.startAsyncEvent(11), subEvent)
+  subEvent.stopAsyncEvent('success', 12)
+  event.stop('warn', 20)
+  event.setTotalTime(7)
+  assert.deepEqual(hookEvents, [
+    {
+      eventId: 'event-build:1',
+      pluginName: 'fixture',
+      hookName: 'buildStart',
+      eventName: 'compile',
+      operation: 'start',
+      timestampMs: 10,
+    },
+    {
+      eventId: 'event-build:2',
+      parentEventId: 'event-build:1',
+      pluginName: 'fixture',
+      hookName: 'buildStart',
+      eventName: 'parse',
+      operation: 'startAsyncEvent',
+      timestampMs: 11,
+    },
+    {
+      eventId: 'event-build:2',
+      parentEventId: 'event-build:1',
+      pluginName: 'fixture',
+      hookName: 'buildStart',
+      eventName: 'parse',
+      operation: 'stopAsyncEvent',
+      timestampMs: 12,
+      state: 'success',
+    },
+    {
+      eventId: 'event-build:1',
+      pluginName: 'fixture',
+      hookName: 'buildStart',
+      eventName: 'compile',
+      operation: 'stop',
+      timestampMs: 20,
+      state: 'warn',
+    },
+    {
+      eventId: 'event-build:1',
+      pluginName: 'fixture',
+      hookName: 'buildStart',
+      eventName: 'compile',
+      operation: 'setTotalTime',
+      totalTimeMs: 7,
+    },
+  ])
   assert.deepEqual(await dispatch(normalized, 'beforeBuild'), {})
   assert.deepEqual((await dispatch(normalized, 'buildStart', { buildStartOptions: { input: 'index.ets' } })), {})
   assert.deepEqual(await dispatch(normalized, 'afterBuildStart'), {})
@@ -101,6 +160,31 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   )
   assert.equal(calls.length, PLUGIN_HOOKS.length)
   assert.equal(calls.every((call) => call.share === share), true)
+})
+
+test('hook event factories follow ets-loader AnalyzeMode gating', () => {
+  for (const [perf, enabled] of [
+    [0, false],
+    [1, true],
+    [2, false],
+    [3, true],
+  ]) {
+    let observedShare
+    const plugin = normalizePlugin(
+      {
+        name: `perf-${perf}`,
+        buildStart() {
+          observedShare = this.share
+        },
+      },
+      fakeBinding(),
+    )
+    dispatch(plugin, 'seedContext', {
+      share: { __arkdownBuildInstanceId: `perf-build-${perf}`, projectConfig: { perf } },
+    })
+    dispatch(plugin, 'buildStart')
+    assert.equal(observedShare.getHookEventFactory('fixture', 'buildStart') !== undefined, enabled)
+  }
 })
 
 test('plugins in one native build observe the same mutable hvigor share object', () => {

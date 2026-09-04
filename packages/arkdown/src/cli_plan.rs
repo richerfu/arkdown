@@ -26,6 +26,8 @@ pub struct ArkdownBuildCliConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub mode: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub analyze: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub module: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub product: Option<String>,
@@ -162,6 +164,19 @@ impl<'a> ArkdownBuildArgsParser<'a> {
         "--project" => self.config.project = Some(self.required_value(&mut index, arg)?),
         "--target" => self.config.target = Some(self.required_value(&mut index, arg)?),
         "--mode" => self.config.mode = Some(self.required_value(&mut index, arg)?),
+        "--analyze" => {
+          let value = self.required_value(&mut index, arg)?;
+          if !matches!(
+            value.as_str(),
+            "normal" | "default" | "verbose" | "false" | "trace"
+          ) {
+            return Err(CliDiagnostic::new(
+              "INVALID_ARKDOWN_ANALYZE_MODE",
+              format!("{arg} must be normal, verbose, false, or trace: {value}"),
+            ));
+          }
+          self.config.analyze = Some(value);
+        }
         "--module" | "-m" => self.config.module = Some(self.required_value(&mut index, arg)?),
         "--product" => self.config.product = Some(self.required_value(&mut index, arg)?),
         "--build-target-name" => {

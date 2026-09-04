@@ -89,6 +89,39 @@ pub enum OhpmModeChoice {
   Online,
 }
 
+/// Hvigor analyze mode serialized as `projectConfig.perf` for compile plugins.
+/// Numeric values are defined by ets-loader's `AnalyzeMode` enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum AnalyzeModeChoice {
+  #[default]
+  #[value(alias = "default")]
+  Normal,
+  Verbose,
+  False,
+  Trace,
+}
+
+impl AnalyzeModeChoice {
+  pub(crate) fn perf_value(self) -> u8 {
+    match self {
+      Self::Normal => 0,
+      Self::Verbose => 1,
+      Self::False => 2,
+      Self::Trace => 3,
+    }
+  }
+
+  pub(crate) fn from_name(value: &str) -> Option<Self> {
+    match value {
+      "normal" | "default" => Some(Self::Normal),
+      "verbose" => Some(Self::Verbose),
+      "false" => Some(Self::False),
+      "trace" => Some(Self::Trace),
+      _ => None,
+    }
+  }
+}
+
 impl From<OhpmModeChoice> for arkdown_session::package::acquisition::AcquisitionMode {
   fn from(value: OhpmModeChoice) -> Self {
     match value {
@@ -157,6 +190,10 @@ pub struct BuildArgs {
   /// Build mode: debug, release, test
   #[arg(long, default_value = "debug")]
   pub mode: String,
+  /// Hook performance analysis level. Only `verbose` and `trace` enable
+  /// Hvigor's compile-event factory.
+  #[arg(long, value_enum, default_value = "normal")]
+  pub analyze: AnalyzeModeChoice,
   /// ArkTS compiler language. ArkTS 1.2 is opt-in; omitted builds retain the
   /// existing ArkTS 1.1 parser and transform pipeline.
   #[arg(long = "arkts-version", default_value_t = ArktsLanguageVersion::default())]

@@ -44,6 +44,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
     project,
     target: 'hap',
     mode: 'debug',
+    analyze: 'verbose',
     module: 'entry',
     product: 'default',
     buildTargetName: 'default',
@@ -81,6 +82,8 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(firstTrace.projectConfig.compileMode, 'esmodule')
   assert.equal(firstTrace.projectConfig.arkTSVersion, '1.1')
   assert.equal(firstTrace.projectConfig.watchMode, 'false')
+  assert.equal(firstTrace.projectConfig.perf, 1)
+  assert.equal(firstTrace.hookEventFactoryEnabled, true)
   assert.equal(firstTrace.projectConfig.targetName, '.default')
   assert.equal(typeof firstTrace.projectConfig.compileSdkVersion, 'number')
   assert.equal(typeof firstTrace.projectConfig.compatibleSdkVersion, 'number')

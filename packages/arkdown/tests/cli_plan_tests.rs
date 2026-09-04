@@ -52,6 +52,20 @@ fn direct_build_selects_arkts_1_2_only_from_the_explicit_flag() {
 }
 
 #[test]
+fn direct_build_selects_hvigor_hook_analysis_mode() {
+  let defaults = PackageCliParser::parse_build(&args(&[])).expect("default build args");
+  assert_eq!(defaults.analyze, None);
+
+  let selected = PackageCliParser::parse_build(&args(&["--analyze", "trace"]))
+    .expect("trace analyze mode should parse");
+  assert_eq!(selected.analyze.as_deref(), Some("trace"));
+
+  let error = PackageCliParser::parse_build(&args(&["--analyze", "full"]))
+    .expect_err("unknown analyze mode must be rejected");
+  assert_eq!(error.code, "INVALID_ARKDOWN_ANALYZE_MODE");
+}
+
+#[test]
 fn direct_build_selects_the_ohpm_acquisition_policy() {
   let defaults = PackageCliParser::parse_build(&args(&[])).expect("default build args");
   assert_eq!(defaults.ohpm_mode, None);

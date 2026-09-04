@@ -7,9 +7,7 @@ const v8 = require('node:v8')
 
 const nativeBinding = require('../index.js')
 
-// This is the complete user-authored compile-plugin surface consumed by the
-// ArkTS 1.1 module pipeline. The standard hooks run inside Rolldown; the fork
-// lifecycle hooks are scheduled by Rust at their source-defined stages.
+// Rolldown runs standard hooks; Rust schedules the source-defined lifecycle hooks.
 const PLUGIN_HOOKS = Object.freeze(
   'beforeBuild buildStart afterBuildStart resolveId load transform moduleParsed resolveDynamicImport beforeBuildEnd buildEnd afterBuildEnd bundleEnd cleanUp shouldInvalidCache'.split(' '),
 )
@@ -126,8 +124,6 @@ function reviveOxcAst(envelope) {
       try {
         node.value = new RegExp(node.regex.pattern, node.regex.flags)
       } catch {
-        // Keep OXC's null value when the current Node runtime rejects the
-        // parser-accepted regular expression.
       }
     }
   }
@@ -308,6 +304,48 @@ function nativeShareMethod(share, binding, handle, localName, nativeName, fallba
   return fallback
 }
 
+function createHookEventFactory(record, state, buildInstanceId, pluginName, hookName) {
+  const createEvent = (eventName, parentEventId) => {
+    const eventId = `${String(buildInstanceId ?? 'plugin')}:${++state.hookEventSequence}`
+    const base = {
+      eventId,
+      pluginName: String(pluginName),
+      hookName: String(hookName),
+      eventName: String(eventName),
+    }
+    if (parentEventId) base.parentEventId = parentEventId
+    const emit = (operation, time, eventState, totalTime) => {
+      const value = {
+        ...base,
+        operation,
+      }
+      if (operation !== 'setTotalTime') {
+        value.timestampMs = Number(time ?? performance.timeOrigin + performance.now())
+      }
+      if (eventState !== undefined) value.state = String(eventState)
+      if (totalTime !== undefined) value.totalTimeMs = Number(totalTime)
+      record(value)
+    }
+    const event = {
+      createEvent: (name) => createEvent(name),
+      createSubEvent: (name) => createEvent(name, eventId),
+      start(time) {
+        emit('start', time)
+        return event
+      },
+      stop: (eventState, time) => emit('stop', time, eventState),
+      startAsyncEvent(time) {
+        emit('startAsyncEvent', time)
+        return event
+      },
+      stopAsyncEvent: (eventState, time) => emit('stopAsyncEvent', time, eventState),
+      setTotalTime: (time) => emit('setTotalTime', undefined, undefined, time),
+    }
+    return event
+  }
+  return { createEvent: (name) => createEvent(name) }
+}
+
 function restoreProjectConfigCollections(projectConfig) {
   for (const key of PROJECT_CONFIG_MAP_FIELDS) {
     const value = projectConfig[key]
@@ -337,6 +375,7 @@ function hydrateHvigorShare(rawShare, binding) {
       hashOverrides: new Map(),
       arkProjectConfig: {},
       pluginCaches: new Map(),
+      hookEventSequence: 0,
       snapshotLoaded: false,
     }
     hvigorShareStateByScope.set(scope, state)
@@ -378,6 +417,14 @@ function hydrateHvigorShare(rawShare, binding) {
     'hvigorShareImportResolver',
     () => undefined,
   )
+  const nativeRecordHookEvent = nativeShareMethod(
+    share,
+    binding,
+    handle,
+    'recordHookEvent',
+    'hvigorShareRecordHookEvent',
+    () => {},
+  )
   const pathKey = (value) => path.resolve(String(value)).split(path.sep).join('/')
   Object.defineProperty(share, 'projectConfig', { value: projectConfig, enumerable: true, configurable: true })
   Object.defineProperty(share, HVIGOR_SHARE_STATE, { value: state })
@@ -397,6 +444,16 @@ function hydrateHvigorShare(rawShare, binding) {
     setHashValueByFilePath: (file, hash) => state.hashOverrides.set(pathKey(file), String(hash)),
     getLogger: (prefix) => createHvigorLogger(String(prefix), state.errorFileIds),
     getHvigorConsoleLogger: (prefix) => createHvigorLogger(String(prefix), state.errorFileIds),
+    getHookEventFactory(pluginName, hookName) {
+      if (projectConfig.perf !== 1 && projectConfig.perf !== 3) return undefined
+      return createHookEventFactory(
+        nativeRecordHookEvent,
+        state,
+        buildInstanceId,
+        pluginName,
+        hookName,
+      )
+    },
     throwArkTsCompilerError(value) {
       const error = value instanceof Error ? value : new Error(pluginLogMessage(value))
       error.code ||= 'ARKTS_COMPILER_ERROR'
@@ -521,10 +578,7 @@ function normalizePlugin(plugin, binding, options = {}) {
     const hook = plugin[name]
     return typeof hook === 'function' || (hook && typeof hook === 'object' && typeof hook.handler === 'function')
   })
-  // Hvigor's waitAsyncPlugin always participates in compile-plugin builds.
-  // Keep an internal bundleEnd boundary even when a plugin does not declare
-  // one so `this.async`/`this.signal` operations are drained before cleanUp.
-  // The internal cleanUp boundary also releases failed build-instance state.
+  // Drain Hvigor async work at bundleEnd and release failed builds at cleanUp.
   if (compilePlugin && !hookNames.includes('bundleEnd')) hookNames.push('bundleEnd')
   if (compilePlugin && !hookNames.includes('cleanUp')) hookNames.push('cleanUp')
   const hookMeta = hookNames.flatMap((name) => {
