@@ -414,6 +414,16 @@ pub struct StartupTask {
     pub is_remote_byte_code_har: Option<bool>,
 }
 
+/// One `systemPreloadHintStartupTasks` item collected from the Ark compiler's
+/// reachable native-module imports.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreloadSystemSoTask {
+    pub name: String,
+    pub src_entry: String,
+    pub ohm_url: String,
+}
+
 /// Merged startup config written to Hvigor's startup intermediate.
 ///
 /// Aggregates `startupTasks` and `appPreloadHintStartupTasks` from the current

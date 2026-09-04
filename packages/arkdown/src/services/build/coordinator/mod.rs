@@ -70,7 +70,6 @@ use super::hot_reload::{
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
 };
-use super::preload_system_so::{PreloadSystemSoArtifactWriter, PreloadSystemSoPlan};
 use super::quickfix::{
   ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
   QuickFixTaskPlan, QuickFixVersionStore,
@@ -154,7 +153,7 @@ use arkdown_profile::{
   FormProfileProcessor, LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput,
   OhExportsProcessor, PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
   PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
-  ProfileProcessor,
+  PreloadSystemSoArtifactWriter, PreloadSystemSoPlan, ProfileProcessor,
 };
 use arkdown_resolver::{OhPackage, PackageResolutionPlan};
 use arkdown_resource::{

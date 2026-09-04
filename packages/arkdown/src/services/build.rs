@@ -7,7 +7,6 @@ mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
 mod native_stage;
-mod preload_system_so;
 mod preview;
 #[cfg(test)]
 mod preview_tests;

@@ -195,6 +195,25 @@ impl DependencySnapshotInventory {
             module_type: Option<String>,
             #[serde(default)]
             distro: Option<DependencyProfileDistro>,
+            #[serde(default)]
+            abilities: Vec<DependencyProfileAbility>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DependencyProfileAbility {
+            #[serde(default)]
+            src_entry: String,
+            #[serde(default)]
+            skills: Vec<DependencyProfileSkill>,
+        }
+
+        #[derive(Deserialize)]
+        struct DependencyProfileSkill {
+            #[serde(default)]
+            actions: Vec<String>,
+            #[serde(default)]
+            entities: Vec<String>,
         }
 
         #[derive(Deserialize)]
@@ -223,6 +242,27 @@ impl DependencySnapshotInventory {
             .next()
             .map(|profile| {
                 let app = profile.app;
+                let home_ability_src_entries = profile
+                    .module
+                    .abilities
+                    .iter()
+                    .filter(|ability| {
+                        !ability.src_entry.is_empty()
+                            && ability.skills.iter().any(|skill| {
+                                skill
+                                    .entities
+                                    .iter()
+                                    .any(|entity| entity == "entity.system.home")
+                                    && skill.actions.iter().any(|action| {
+                                        matches!(
+                                            action.as_str(),
+                                            "action.system.home" | "ohos.want.action.home"
+                                        )
+                                    })
+                            })
+                    })
+                    .map(|ability| ability.src_entry.clone())
+                    .collect();
                 DependencyModuleProfileSnapshot {
                     module_name: profile.module.name,
                     module_type: profile
@@ -233,6 +273,7 @@ impl DependencySnapshotInventory {
                     bundle_name: app.as_ref().and_then(|app| app.bundle_name.clone()),
                     bundle_type: app.as_ref().and_then(|app| app.bundle_type.clone()),
                     version_code: app.and_then(|app| app.version_code),
+                    home_ability_src_entries,
                 }
             });
         self.module_profiles
@@ -1261,6 +1302,58 @@ mod tests {
         assert_eq!(
             graph.nodes["source-har"].node_type,
             DependencyNodeType::SourceHar
+        );
+    }
+
+    #[test]
+    fn snapshots_source_har_home_ability_entries_for_preload_system_so() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "source-har": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/source-har",
+            r#"{ "name": "source-har", "version": "1.0.0" }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/source-har",
+            "module.json",
+            r#"{
+              "module": {
+                "name": "sourcehar",
+                "type": "har",
+                "abilities": [
+                  {
+                    "srcEntry": "ets/HomeAbility.ets",
+                    "skills": [{
+                      "entities": ["entity.system.home"],
+                      "actions": ["ohos.want.action.home"]
+                    }]
+                  },
+                  {
+                    "srcEntry": "ets/OtherAbility.ets",
+                    "skills": []
+                  }
+                ]
+              }
+            }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+
+        assert_eq!(
+            graph.nodes["source-har"]
+                .module_profile
+                .as_ref()
+                .expect("dependency module profile")
+                .home_ability_src_entries,
+            ["ets/HomeAbility.ets"]
         );
     }
 

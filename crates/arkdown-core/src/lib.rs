@@ -92,8 +92,8 @@ pub use manifest::{
     AbcArtifact, AbilityConfig, AbilityEntry, AppStartupProfile, BytecodeHarInfo,
     CrossAppSharedConfig, CrossAppSharedConfigEntry, ExtensionAbilityConfig, ExtensionAbilityEntry,
     HapManifest, HspDependency, InsightIntentFormBinding, MergedStartupConfig, MetadataEntry,
-    ModuleJson5, ModuleJson5Module, OhPackageJson5, OhosResource, ResourceProfile, SkillConfig,
-    SkillUri, StartupTask,
+    ModuleJson5, ModuleJson5Module, OhPackageJson5, OhosResource, PreloadSystemSoTask,
+    ResourceProfile, SkillConfig, SkillUri, StartupTask,
 };
 
 // module
