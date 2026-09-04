@@ -9,6 +9,7 @@ publish = false
 anyhow = { workspace = true }
 arkdown = { workspace = true }
 arkdown-abc = { workspace = true }
+arkdown-cache = { workspace = true }
 arkdown-config = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-ets-transform = { workspace = true }

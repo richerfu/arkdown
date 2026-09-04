@@ -11,6 +11,7 @@ pub mod clean;
 #[cfg(test)]
 mod clean_tests;
 pub mod code_resource;
+pub mod compile_context;
 pub mod device_test;
 pub mod har_dedup;
 pub mod hot_reload;
