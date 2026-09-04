@@ -25,6 +25,7 @@ pub mod quickfix;
 mod quickfix_tests;
 pub mod remote_hsp_sign;
 pub mod request;
+pub mod source_snapshot;
 pub mod unit_test;
 #[cfg(test)]
 mod unit_test_tests;

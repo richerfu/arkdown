@@ -100,6 +100,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
     'hvigor_sync.rs',
     'runtime_invocation.rs',
     'services/build_info.rs',
+    'services/build/coordinator/transform.rs',
     'services/clean.rs',
     'services/native_build',
     'services/package_resolution.rs',

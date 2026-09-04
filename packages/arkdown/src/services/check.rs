@@ -13,13 +13,13 @@ use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
 use arkdown_path::{ArtifactPathSerializer, HostPlatform};
 use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
 
-use super::build::coordinator::TransformSourceSnapshotBuilder;
 use super::ets_checker::{
   SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder, SdkEtsCheckerRunner,
 };
 use arkdown_build::package_resolution::{
   LocalPackageSourceRootInventory, ModulePackageResolutionPlanner,
 };
+use arkdown_build::source_snapshot::TransformSourceSnapshotBuilder;
 
 #[derive(Debug)]
 pub struct CheckRequest {

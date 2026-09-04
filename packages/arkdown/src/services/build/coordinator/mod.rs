@@ -27,7 +27,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 use indexmap::IndexMap;
-use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_abc::aot::AotArtifactWriter;
@@ -42,11 +41,10 @@ use arkdown_core::{
 };
 use arkdown_pack::PackingCheck;
 use arkdown_path::{
-  canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, HvigorSourceFileFilter,
-  NormalizedOhmUrl,
+  canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, NormalizedOhmUrl,
 };
 use arkdown_profile::{
-  InsightIntentEntityInput, InsightIntentInput, InsightIntentModuleInput,
+  FormWidgetAbilityMerger, InsightIntentEntityInput, InsightIntentInput, InsightIntentModuleInput,
   InsightIntentProfileInput, InsightIntentProfileProcessor,
 };
 use arkdown_session::dependency_graph::snapshot::{
@@ -103,6 +101,7 @@ use arkdown_build::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
 use arkdown_build::request::{
   AbcBackendChoice, BuildRequest, HvigorRuntimeProperties, NativeTaskRoot,
 };
+use arkdown_build::source_snapshot::TransformSourceSnapshotBuilder;
 
 use crate::progress::Progress;
 use crate::services::ets_checker::{
@@ -121,8 +120,7 @@ use arkdown_native::{
 use arkdown::plugins::ets_transform::{
   CheckerMode, ComponentMetadata, InsightIntentSchemaCatalog, ModuleAnalyzerKind,
   NavigationRouteMap, ResourceModuleReference, ResourceReference, ResourceTransformContext,
-  SystemApiCheckOptions, SystemResourceReferenceLoader, TransformResolvedStaticModule,
-  TransformSourceSnapshot,
+  SystemApiCheckOptions, SystemResourceReferenceLoader,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{
@@ -134,7 +132,7 @@ use arkdown_config::build_profile::{
 };
 use arkdown_ets_transform::{
   ArkuiComponentNameCollector, CoverageInstrumenter, HarDeclarationGenerator,
-  RolldownEtsTransformPlan, SourceClassifier,
+  RolldownEtsTransformPlan,
 };
 use arkdown_obfuscate::{
   ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
@@ -155,7 +153,7 @@ use arkdown_profile::{
   PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
   PreloadSystemSoArtifactWriter, PreloadSystemSoPlan, ProfileProcessor,
 };
-use arkdown_resolver::{OhPackage, PackageResolutionPlan};
+use arkdown_resolver::PackageResolutionPlan;
 use arkdown_resource::{
   IdDefinedFileProcessor, ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput,
   ResourceReferenceInventory, SyscapTransform, SyscapTransformInput,
@@ -167,7 +165,6 @@ mod compile_context;
 mod obfuscation;
 mod planning;
 mod plugin_share;
-mod transform;
 
 pub(crate) use compile_context::{
   CompileContextInfoWriter, CompileEnvKeyBuilder, PackageModuleJsonOptions,
@@ -185,7 +182,6 @@ use planning::{
 pub(crate) use plugin_share::{
   HvigorCompilePluginShareBuilder, PluginCacheInvalidationRunner, PluginContextCacheRunner,
 };
-pub(crate) use transform::{merge_form_widget_abilities, TransformSourceSnapshotBuilder};
 
 mod entry;
 mod executor;
