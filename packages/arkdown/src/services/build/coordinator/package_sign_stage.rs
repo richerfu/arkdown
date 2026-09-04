@@ -346,6 +346,9 @@ impl BuildCoordinator {
       let target_labels = [module_target_name.clone()];
 
       std::fs::create_dir_all(&output_dir)?;
+      let module_context = session.module_context(&module.name).ok_or_else(|| {
+        anyhow::anyhow!("missing build session module context for {}", module.name)
+      })?;
 
       for artifact_target_label in &target_labels {
         let interface_source_roots = all_applicable
@@ -388,17 +391,27 @@ impl BuildCoordinator {
           .before(&module.name, Some(artifact_target_label), "SyscapTransform")
           .await?;
         let syscap_path = if syscap_enabled {
-          let syscap_path = SyscapTransform::new(
-            &config.product.runtime_os,
-            &module.name,
-            &module.src_path,
-            &manifest.device_types,
-            config.sdk_config.compile_api_version,
-            &session.sdk.sdk_root,
-            &syscap_tool,
-            module_layout.syscap_dir(),
-            matches!(module_config.output_target, OutputTarget::Har),
-          )
+          let device_capabilities = session
+            .sdk
+            .system_capabilities
+            .select(&manifest.device_types)
+            .map(|selection| {
+              selection
+                .intersection
+                .into_iter()
+                .map(|capability| capability.to_string())
+                .collect()
+            });
+          let syscap_path = SyscapTransform::new(SyscapTransformInput {
+            runtime_os: &config.product.runtime_os,
+            module_name: &module.name,
+            compile_api_version: config.sdk_config.compile_api_version,
+            tool_path: &syscap_tool,
+            output_dir: module_layout.syscap_dir(),
+            is_har: matches!(module_config.output_target, OutputTarget::Har),
+            device_capabilities,
+            custom_syscap: module_context.module.syscap_value.as_deref(),
+          })
           .run()
           .map_err(|error| anyhow::anyhow!("SyscapTransform failed: {error}"))?;
           task_lifecycle
@@ -409,9 +422,6 @@ impl BuildCoordinator {
           None
         };
 
-        let module_context = session.module_context(&module.name).ok_or_else(|| {
-          anyhow::anyhow!("missing build session module context for {}", module.name)
-        })?;
         let bundle_version_code = session.project.version_code;
         let bundle_version_name = session.project.version_name.clone();
         let bundle_build_version = session.project.build_version.clone();

@@ -76,7 +76,6 @@ use super::quickfix::{
 };
 use super::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
 use super::static_arkts::{StaticArktsCompileInput, StaticArktsCompiler};
-use super::syscap::SyscapTransform;
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
@@ -158,7 +157,7 @@ use arkdown_profile::{
 use arkdown_resolver::{OhPackage, PackageResolutionPlan};
 use arkdown_resource::{
   IdDefinedFileProcessor, ResourceBackendRunner, ResourceCompileConfig, ResourceCompileInput,
-  ResourceReferenceInventory,
+  ResourceReferenceInventory, SyscapTransform, SyscapTransformInput,
 };
 
 mod bundle_stage;

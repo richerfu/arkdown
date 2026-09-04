@@ -30,6 +30,7 @@ pub mod backend;
 pub mod error;
 pub mod id_defined;
 pub mod plan;
+mod syscap;
 
 mod model;
 mod reference_inventory;
@@ -45,3 +46,4 @@ pub use plan::{
     ResourceOutputPaths, RestoolConfigInput, RestoolHarEntry,
 };
 pub use reference_inventory::ResourceReferenceInventory;
+pub use syscap::{SyscapTransform, SyscapTransformError, SyscapTransformInput};
