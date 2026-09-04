@@ -13,7 +13,6 @@ mod preview_tests;
 mod quickfix;
 #[cfg(test)]
 mod quickfix_tests;
-mod remote_hsp_sign;
 mod service;
 mod static_arkts;
 #[cfg(test)]

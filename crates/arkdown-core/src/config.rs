@@ -1075,6 +1075,9 @@ impl SdkConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningConfig {
+    /// Name of the selected `app.signingConfigs` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub cert_path: PathBuf,
     pub key_alias: String,
     /// Encrypted key password.
