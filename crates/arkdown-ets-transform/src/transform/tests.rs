@@ -468,6 +468,107 @@ fn observed_inheritance_resolves_import_aliases_defaults_namespaces_and_reexport
 }
 
 #[test]
+fn namespace_imported_components_preserve_callee_and_component_metadata() {
+    let component_path = PathBuf::from("/project/components/Children.ets");
+    let barrel_path = PathBuf::from("/project/components/Index.ets");
+    let nested_barrel_path = PathBuf::from("/project/components/NestedIndex.ets");
+    let page_path = PathBuf::from("/project/pages/NamespacePage.ets");
+    let component_source = r#"@Component
+struct Child {
+  @Link linked: number
+  @Prop value: number
+  build() {}
+}
+
+@Component
+struct DefaultChild {
+  @Link linked: number
+  build() {}
+}
+
+export { Child }
+export default DefaultChild
+"#;
+    let barrel_source = "export * as Widgets from './Children'\n";
+    let nested_barrel_source = "export * as Group from './Index'\n";
+    let page_source = r#"import * as Direct from '../components/Children'
+import { Widgets } from '../components/Index'
+import { Group } from '../components/NestedIndex'
+
+@Component
+struct NamespacePage {
+  @State linked: number = 1
+  @State value: number = 2
+
+  build() {
+    Column() {
+      Direct.Child({ linked: $linked, value: this.value }).width(100)
+      Direct.default({ linked: $linked })
+      Widgets.Child({ linked: $linked, value: this.value })
+      Group.Widgets.Child({ linked: $linked, value: this.value })
+    }
+  }
+}
+"#;
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(
+        component_path,
+        std::sync::Arc::<str>::from(component_source),
+    );
+    source_map.insert(barrel_path, std::sync::Arc::<str>::from(barrel_source));
+    source_map.insert(
+        nested_barrel_path,
+        std::sync::Arc::<str>::from(nested_barrel_source),
+    );
+    source_map.insert(page_path.clone(), std::sync::Arc::<str>::from(page_source));
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = std::sync::Arc::new(ComponentMetadata::default());
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &metadata),
+        component_metadata: metadata,
+        ..TransformOptions::default()
+    };
+
+    let result = TransformHarness::transform_with_options(
+        &make_source(page_path.to_str().unwrap(), page_source),
+        &options,
+    )
+    .expect("namespace component imports and namespace re-exports must lower like hvigor");
+
+    assert_eq!(
+        result.matches("new Direct.Child(this,").count(),
+        1,
+        "direct namespace import must remain a member-expression constructor:\n{result}"
+    );
+    assert!(
+        result.contains("new Direct.default(this,"),
+        "namespace default component must remain a member-expression constructor:\n{result}"
+    );
+    assert!(
+        result.contains("new Widgets.Child(this,"),
+        "export-star-as namespace component must remain a member-expression constructor:\n{result}"
+    );
+    assert!(
+        result.contains("new Group.Widgets.Child(this,"),
+        "nested export-star-as namespace component must preserve its complete callee:\n{result}"
+    );
+    assert_eq!(
+        result.matches("{ name: \"Child\" }").count(),
+        3,
+        "runtime metadata uses the component member name, not the namespace-qualified path:\n{result}"
+    );
+    assert!(
+        result.contains("linked: this.__linked"),
+        "namespace component @Link metadata must select the backing property:\n{result}"
+    );
+    assert!(
+        result.contains("this.updateStateVarsOfChildByElmtId(elmtId, { value: this.value })"),
+        "namespace component export metadata must retain @Prop update behavior:\n{result}"
+    );
+}
+
+#[test]
 fn api_available_calls_and_references_match_reference_compiler_lowering() {
     let src = r#"import deviceInfo from '@ohos.deviceInfo'
 const direct = deviceInfo.apiAvailable(25)
@@ -6223,5 +6324,138 @@ export default class EntryAbility extends UIAbility {
     assert!(
         ability_constant < ui_ability && ui_ability < want,
         "SDK kit import order must be retained:\n{code}"
+    );
+}
+
+#[test]
+fn component_runtime_options_match_partial_update_constructor_protocol() {
+    let source = make_source(
+        "entry/src/main/ets/pages/Freeze.ets",
+        r#"const inherited = true
+@Component({ freezeWhenInactive: inherited })
+struct Freeze {
+  value: number = 1
+  build() { Text('freeze') }
+}
+@Component({ memoryOptimizationStrategy: 'aggressive' })
+struct Memory {
+  build() {}
+}"#,
+    );
+    let output = TransformHarness::transform(&source).expect("component options must transform");
+
+    let field = output.find("this.value = 1").expect("field initializer");
+    let freeze = output
+        .find("super[\"initAllowComponentFreeze\"](inherited)")
+        .expect("freeze runtime call");
+    let memory = output
+        .find("super[\"__setReusableMemOptStrategy__Internal\"]('aggressive')")
+        .unwrap_or_else(|| panic!("memory optimization runtime call:\n{output}"));
+    let params = output
+        .find("this.setInitiallyProvidedValue(params)")
+        .expect("initial params call");
+    assert!(
+        field < freeze && freeze < params && params < memory,
+        "{output}"
+    );
+    assert!(
+        output.contains(
+            "super[\"initAllowComponentFreeze\"] && typeof super[\"initAllowComponentFreeze\"] === \"function\""
+        ),
+        "{output}"
+    );
+}
+
+#[test]
+fn component_v2_passes_freeze_to_finalize_and_enables_memory_optimization() {
+    let source = make_source(
+        "entry/src/main/ets/pages/FreezeV2.ets",
+        r#"@ComponentV2({ freezeWhenInactive: false })
+struct FreezeV2 {
+  @Local value: number = 1
+  build() { Text('freeze') }
+}
+@ComponentV2({ memoryOptimizationStrategy: 2 })
+struct MemoryV2 {
+  build() {}
+}"#,
+    );
+    let output = TransformHarness::transform(&source).expect("component V2 options must transform");
+
+    let field = output.find("this.value = 1").expect("V2 field initializer");
+    let finalize = output
+        .find("this.finalizeConstruction(false)")
+        .expect("freeze finalize argument");
+    let memory = output
+        .find("super[\"__setReusableMemOptStrategy__Internal\"](2)")
+        .expect("memory optimization runtime call");
+    let memory_finalize = output[memory..]
+        .find("this.finalizeConstruction()")
+        .map(|offset| memory + offset)
+        .expect("memory component finalize call");
+    assert!(
+        field < finalize && finalize < memory && memory < memory_finalize,
+        "{output}"
+    );
+}
+
+#[test]
+fn animatable_extend_emits_runtime_property_protocol_and_call_site_arguments() {
+    let source = make_source(
+        "entry/src/main/ets/pages/Animatable.ets",
+        r#"@AnimatableExtend(Polyline)
+function animatablePoints(points: number) {
+  .strokeOpacity(points)
+  .backgroundColor(Color.Red)
+}
+@AnimatableExtend(Text)
+function emptyAnimatable() {}
+@Component struct Animatable {
+  points: number = 1
+  build() {
+    Column() {
+      Polyline().animatablePoints(this.points).strokeWidth(3)
+      Text('value').emptyAnimatable()
+    }
+  }
+}"#,
+    );
+    let output = TransformHarness::transform(&source).expect("animatable extend must transform");
+
+    assert!(
+        output.contains(
+            "function animatablePoints(points: number, elmtId, isInitialRender, parent): void"
+        ),
+        "{output}"
+    );
+    assert!(
+        output.contains(
+            "Polyline.createAnimatableProperty(\"animatablePoints\", points, (points: number) =>"
+        ),
+        "{output}"
+    );
+    assert!(
+        output.contains("ViewStackProcessor.GetAndPushFrameNode(\"Polyline\", elmtId)"),
+        "{output}"
+    );
+    assert!(
+        output.contains("parent.finishUpdateFunc(elmtId)"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Polyline.updateAnimatableProperty(\"animatablePoints\", points)"),
+        "{output}"
+    );
+    assert!(
+        output.contains("animatablePoints(this.points, elmtId, isInitialRender, this)"),
+        "{output}"
+    );
+    assert!(
+        output.contains("function emptyAnimatable(elmtId, isInitialRender, parent): void {}"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("__Polyline__animatablePoints"),
+        "AnimatableExtend keeps the declared function name: {output}"
     );
 }

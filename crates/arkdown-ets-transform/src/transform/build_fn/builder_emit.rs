@@ -735,6 +735,54 @@ impl<'a> BuilderMethodCallEmitter<'a> {
         Statement::new_expression_statement(SPAN, call, ast)
     }
 
+    pub(super) fn optional_statement<'b>(
+        &self,
+        ast: &AstBuilder<'b>,
+        allocator: &'b Allocator,
+    ) -> Statement<'b> {
+        let target = Expression::from(MemberExpression::new_static_member_expression(
+            SPAN,
+            Expression::new_this_expression(SPAN, ast),
+            IdentifierName::new(SPAN, ast.allocator().alloc_str(self.name), ast),
+            false,
+            ast,
+        ));
+        let bind_member = MemberExpression::new_static_member_expression(
+            SPAN,
+            target,
+            IdentifierName::new(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(&self.context.runtime_names().method_bind),
+                ast,
+            ),
+            true,
+            ast,
+        );
+        let bind_call = Expression::new_call_expression(
+            SPAN,
+            Expression::from(bind_member),
+            None,
+            OxcVec::from_value_in(
+                Argument::from(Expression::new_this_expression(SPAN, ast)),
+                ast,
+            ),
+            false,
+            ast,
+        );
+        let call = CallExpression::boxed(
+            SPAN,
+            bind_call,
+            None,
+            self.arguments(ast, allocator),
+            true,
+            ast,
+        );
+        let expression =
+            Expression::new_chain_expression(SPAN, ChainElement::CallExpression(call), ast);
+        Statement::new_expression_statement(SPAN, expression, ast)
+    }
+
     pub(super) fn arguments<'b>(
         &self,
         ast: &AstBuilder<'b>,

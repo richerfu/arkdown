@@ -26,6 +26,7 @@ impl CustomComponentStatementEmitter {
     pub(super) fn common_wrapped<'a>(
         allocator: &'a Allocator,
         name: &str,
+        component_callee: &Expression<'_>,
         arguments: &[Argument<'_>],
         component_info: Option<&CustomComponentInfo>,
         builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
@@ -67,6 +68,7 @@ impl CustomComponentStatementEmitter {
         let mut custom_component_stmts = Self::custom(
             allocator,
             name,
+            component_callee,
             arguments,
             component_info,
             builder_param,
@@ -95,6 +97,7 @@ impl CustomComponentStatementEmitter {
     pub(super) fn custom<'a>(
         allocator: &'a Allocator,
         name: &str,
+        component_callee: &Expression<'_>,
         arguments: &[Argument<'_>],
         component_info: Option<&CustomComponentInfo>,
         builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
@@ -117,7 +120,14 @@ impl CustomComponentStatementEmitter {
             let ast = &AstBuilder::new(allocator);
             statements.push(
                 ReusableV2CustomComponentAstEmitter::new(
-                    allocator, ast, name, &page, line, col, context,
+                    allocator,
+                    ast,
+                    name,
+                    component_callee.clone_in(allocator),
+                    &page,
+                    line,
+                    col,
+                    context,
                 )
                 .statement(params.lambda, reuse_id),
             );
@@ -144,6 +154,7 @@ impl CustomComponentStatementEmitter {
             statements.push(Self::reusable(
                 allocator,
                 name,
+                component_callee,
                 arguments,
                 component_info,
                 builder_param,
@@ -178,6 +189,7 @@ impl CustomComponentStatementEmitter {
                 allocator,
                 ast,
                 name,
+                component_callee: component_callee.clone_in(allocator),
                 page: &page,
                 line,
                 col,
@@ -193,6 +205,7 @@ impl CustomComponentStatementEmitter {
     fn reusable<'a>(
         allocator: &'a Allocator,
         name: &str,
+        component_callee: &Expression<'_>,
         arguments: &[Argument<'_>],
         component_info: Option<&CustomComponentInfo>,
         builder_param: Option<(&str, OxcVec<'a, Statement<'a>>)>,
@@ -223,7 +236,7 @@ impl CustomComponentStatementEmitter {
         ReusableCustomComponentAstEmitter {
             allocator,
             ast,
-            name,
+            component_callee: component_callee.clone_in(allocator),
             page: &page,
             line,
             col,
@@ -238,6 +251,7 @@ struct ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
     allocator: &'a Allocator,
     ast: &'ast AstBuilder<'a>,
     name: &'b str,
+    component_callee: Expression<'a>,
     page: &'b str,
     line: usize,
     col: usize,
@@ -245,10 +259,12 @@ struct ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
 }
 
 impl<'a, 'ast, 'b> ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         allocator: &'a Allocator,
         ast: &'ast AstBuilder<'a>,
         name: &'b str,
+        component_callee: Expression<'a>,
         page: &'b str,
         line: usize,
         col: usize,
@@ -258,6 +274,7 @@ impl<'a, 'ast, 'b> ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
             allocator,
             ast,
             name,
+            component_callee,
             page,
             line,
             col,
@@ -280,11 +297,7 @@ impl<'a, 'ast, 'b> ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
         let options = self.object_expression([
             self.object_property(
                 GeneratedViewpuName::COMPONENT_CLASS,
-                Expression::new_identifier(
-                    SPAN,
-                    self.ast.allocator().alloc_str(self.name),
-                    self.ast,
-                ),
+                self.component_callee.clone_in(self.allocator),
             ),
             self.object_property(
                 GeneratedViewpuName::GET_PARAMS,
@@ -435,6 +448,7 @@ struct CustomComponentAstEmitter<'a, 'ast, 'b> {
     allocator: &'a Allocator,
     ast: &'ast AstBuilder<'a>,
     name: &'b str,
+    component_callee: Expression<'a>,
     page: &'b str,
     line: usize,
     col: usize,
@@ -543,7 +557,7 @@ impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
         arguments.push(Argument::from(self.source_info_expression()));
         let new_call = Expression::new_new_expression(
             SPAN,
-            Expression::new_identifier(SPAN, self.ast.allocator().alloc_str(self.name), self.ast),
+            self.component_callee.clone_in(self.allocator),
             None,
             arguments,
             self.ast,
@@ -870,7 +884,7 @@ impl<'a, 'ast, 'b> CustomComponentAstEmitter<'a, 'ast, 'b> {
 struct ReusableCustomComponentAstEmitter<'a, 'ast, 'b> {
     allocator: &'a Allocator,
     ast: &'ast AstBuilder<'a>,
-    name: &'b str,
+    component_callee: Expression<'a>,
     page: &'b str,
     line: usize,
     col: usize,
@@ -1006,7 +1020,7 @@ impl<'a, 'ast, 'b> ReusableCustomComponentAstEmitter<'a, 'ast, 'b> {
         arguments.push(Argument::from(self.source_info_expression()));
         let new_call = Expression::new_new_expression(
             SPAN,
-            Expression::new_identifier(SPAN, self.ast.allocator().alloc_str(self.name), self.ast),
+            self.component_callee.clone_in(self.allocator),
             None,
             arguments,
             self.ast,

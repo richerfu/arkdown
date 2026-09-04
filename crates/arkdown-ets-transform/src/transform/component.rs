@@ -109,6 +109,12 @@ pub struct GlobalReusePoolConfig<'a> {
     pub accepted_components: &'a ArrayExpression<'a>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ComponentRuntimeOptions<'a> {
+    pub(crate) freeze_when_inactive: Option<&'a Expression<'a>>,
+    pub(crate) memory_optimization_strategy: Option<&'a Expression<'a>>,
+}
+
 pub(crate) struct GlobalReusePoolPropertyEmitter<'a> {
     config: GlobalReusePoolConfig<'a>,
 }
@@ -779,6 +785,7 @@ pub struct ComponentInfo<'a> {
     /// intentionally file-scoped rather than component-scoped.
     pub has_local_builder_in_file: bool,
     pub global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
+    pub(crate) runtime_options: ComponentRuntimeOptions<'a>,
     /// True when the struct is decorated with `@CustomDialog`.
     ///
     /// When set, the emitter generates a `setController(ctr: CustomDialogController)` method
@@ -873,6 +880,7 @@ impl Default for ComponentInfo<'_> {
             is_reusable: Default::default(),
             has_local_builder_in_file: Default::default(),
             global_reuse_pool: Default::default(),
+            runtime_options: Default::default(),
             is_custom_dialog: Default::default(),
             state_fields: Default::default(),
             params_fields: Default::default(),
@@ -1138,6 +1146,18 @@ impl<'a> ViewPuClassEmitter<'a> {
                 self.push_state_constructor_init(&builder, &mut stmts, field);
                 self.push_provide_var_registration(&builder, &mut stmts, field);
             }
+        }
+        if let Some(freeze_when_inactive) = self.info.runtime_options.freeze_when_inactive {
+            stmts.push(builder.guarded_super_method_call_statement(
+                GeneratedViewpuName::INIT_ALLOW_COMPONENT_FREEZE,
+                freeze_when_inactive,
+            ));
+        }
+        if let Some(strategy) = self.info.runtime_options.memory_optimization_strategy {
+            stmts.push(builder.guarded_super_method_call_statement(
+                GeneratedViewpuName::SET_REUSABLE_MEMORY_OPTIMIZATION,
+                strategy,
+            ));
         }
         stmts.push(builder.this_call_statement(
             GeneratedViewpuName::SET_INITIALLY_PROVIDED_VALUE,

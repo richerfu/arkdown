@@ -14,6 +14,7 @@ mod entry;
 mod expand_import_path;
 mod global_rewrite;
 mod insight_intent;
+pub(crate) mod legacy_extend;
 mod local_builder;
 mod navigation;
 pub(crate) mod source_emit;
@@ -61,9 +62,9 @@ pub(crate) use crate::transform::build_fn::{
 };
 use crate::transform::builder_factory::BuilderFactoryValidator;
 use crate::transform::component::{
-    BuilderMethodInfo, BuilderMethodKind, ComponentInfo, ComponentSourceMember,
-    CustomDialogControllerLowerer, FieldExpression, GlobalReusePoolConfig, ParamField,
-    RegularField, RegularMember, StateField, ViewPuClassEmitter,
+    BuilderMethodInfo, BuilderMethodKind, ComponentInfo, ComponentRuntimeOptions,
+    ComponentSourceMember, CustomDialogControllerLowerer, FieldExpression, GlobalReusePoolConfig,
+    ParamField, RegularField, RegularMember, StateField, ViewPuClassEmitter,
 };
 use crate::transform::component_analysis::{
     BuilderFunctionNameCollector, CustomComponentNameCollector, ExtendAttributeIndex,
@@ -258,19 +259,21 @@ impl<'a> ArkuiComponentNameCollector<'a> {
     /// component expressions rather than source-text matching.
     pub fn collect(&self) -> Result<Vec<String>, EtsTransformError> {
         let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_id_with_version(
-            self.id,
-            self.options
-                .map(|options| options.arkts_language_version)
-                .unwrap_or_default(),
-        );
+        let arkts_language_version = self
+            .options
+            .map(|options| options.arkts_language_version)
+            .unwrap_or_default();
+        let parser_source =
+            legacy_extend::LegacyExtendSource::new(self.content, arkts_language_version);
+        let source_type =
+            CompileArktsSourceType::from_id_with_version(self.id, arkts_language_version);
         let parsed = match self.options {
-            Some(options) => {
-                options
-                    .component_metadata
-                    .parse_ets(&allocator, self.content, source_type)
-            }
-            None => Parser::new(&allocator, self.content, source_type).parse(),
+            Some(options) => options.component_metadata.parse_ets(
+                &allocator,
+                parser_source.as_str(),
+                source_type,
+            ),
+            None => Parser::new(&allocator, parser_source.as_str(), source_type).parse(),
         };
         if !parsed.diagnostics.is_empty() {
             return Err(EtsTransformError::Fatal {
@@ -352,7 +355,11 @@ impl<'a> ArktsTransformer<'a> {
     pub fn transform_with_source_map(&self) -> Result<ArktsTransformOutput, EtsTransformError> {
         let source = self.source;
         let options = self.options.as_ref();
-        let content = source.content.as_str();
+        let parser_source = legacy_extend::LegacyExtendSource::new(
+            source.content.as_str(),
+            options.arkts_language_version,
+        );
+        let content = parser_source.as_str();
 
         let allocator = Allocator::default();
         let source_type = CompileArktsSourceType::from_id_with_version(
@@ -935,6 +942,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             return Ok(None);
         }
         let global_reuse_pool = self.global_reuse_pool(struct_stmt)?;
+        let runtime_options = self.component_runtime_options(struct_stmt);
 
         match ComponentV2Lowerer::new(
             struct_stmt,
@@ -956,6 +964,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             }),
             emit_reusable_v2_helper,
             global_reuse_pool,
+            runtime_options,
             self.has_local_builder_in_file,
         )
         .lower()
@@ -1161,14 +1170,26 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     .find(|decorator| ArkuiDecorator::new(decorator).name() == decorator_kind)
                     .and_then(|decorator| ArkuiDecorator::new(decorator).identifier_arg())
                     .unwrap_or_else(|| "View".to_string());
-                TopLevelFunctionEmitter::extend_with_body_statement(
-                    self.allocator,
-                    exported,
-                    &component,
-                    name,
-                    &function.params,
-                    function.body.as_deref(),
-                )
+                if decorator_name == ArkuiDecoratorName::ANIMATABLE_EXTEND {
+                    TopLevelFunctionEmitter::animatable_extend_statement(
+                        self.allocator,
+                        exported,
+                        &component,
+                        name,
+                        &function.params,
+                        function.body.as_deref(),
+                        self.options.component_metadata.runtime_names(),
+                    )
+                } else {
+                    TopLevelFunctionEmitter::extend_with_body_statement(
+                        self.allocator,
+                        exported,
+                        &component,
+                        name,
+                        &function.params,
+                        function.body.as_deref(),
+                    )
+                }
             }
             _ => {
                 let raw_object_fields = FxHashSet::default();
@@ -1249,6 +1270,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             .iter()
             .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::REUSABLE);
         let global_reuse_pool = self.global_reuse_pool(statement)?;
+        let runtime_options = self.component_runtime_options(statement);
         let mut state_fields = Vec::new();
         let mut initial_render_body = BuildBodyInfo::default();
         let mut initial_render_method_span = SPAN;
@@ -1567,6 +1589,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             is_reusable,
             has_local_builder_in_file: self.has_local_builder_in_file,
             global_reuse_pool,
+            runtime_options,
             is_custom_dialog: statement.decorators.iter().any(|decorator| {
                 ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::CUSTOM_DIALOG
             }),
@@ -1707,6 +1730,46 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             ownership,
             accepted_components,
         }))
+    }
+
+    fn component_runtime_options<'s>(
+        &self,
+        component: &'s StructStatement<'s>,
+    ) -> ComponentRuntimeOptions<'s> {
+        let mut options = ComponentRuntimeOptions::default();
+        for decorator in &component.decorators {
+            let Expression::CallExpression(call) = &decorator.expression else {
+                continue;
+            };
+            for argument in &call.arguments {
+                let Argument::ObjectExpression(object) = argument else {
+                    continue;
+                };
+                for property in &object.properties {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        continue;
+                    };
+                    if property.shorthand {
+                        continue;
+                    }
+                    let Some(name) = property.key.static_name() else {
+                        continue;
+                    };
+                    match name.as_ref() {
+                        "freezeWhenInactive" if options.freeze_when_inactive.is_none() => {
+                            options.freeze_when_inactive = Some(&property.value);
+                        }
+                        "memoryOptimizationStrategy"
+                            if options.memory_optimization_strategy.is_none() =>
+                        {
+                            options.memory_optimization_strategy = Some(&property.value);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        options
     }
 
     fn builder_param_initializer_is_builder(

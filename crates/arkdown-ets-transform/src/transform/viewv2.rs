@@ -23,7 +23,8 @@ use crate::transform::build_fn::{
     StylesMethodInfo,
 };
 use crate::transform::component::{
-    BuilderMethodKind, GlobalReusePoolConfig, GlobalReusePoolPropertyEmitter,
+    BuilderMethodKind, ComponentRuntimeOptions, GlobalReusePoolConfig,
+    GlobalReusePoolPropertyEmitter,
 };
 use crate::transform::component_analysis::{ExtendAttributeIndex, StructMutableBuilderProperties};
 use crate::transform::component_meta::ArkuiRuntimeNames;
@@ -173,6 +174,7 @@ pub(super) struct ComponentV2Lowerer<'a, 'b> {
     is_entry: bool,
     emit_reusable_v2_helper: bool,
     global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
+    runtime_options: ComponentRuntimeOptions<'a>,
     has_local_builder_in_file: bool,
 }
 
@@ -196,6 +198,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         is_entry: bool,
         emit_reusable_v2_helper: bool,
         global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
+        runtime_options: ComponentRuntimeOptions<'a>,
         has_local_builder_in_file: bool,
     ) -> Self {
         Self {
@@ -216,6 +219,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             is_entry,
             emit_reusable_v2_helper,
             global_reuse_pool,
+            runtime_options,
             has_local_builder_in_file,
         }
     }
@@ -831,14 +835,24 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 stmts.push(statement.clone_in(self.allocator));
             }
         }
+        if let Some(strategy) = self.runtime_options.memory_optimization_strategy {
+            stmts.push(builder.guarded_super_method_call_statement(
+                GeneratedViewpuName::SET_REUSABLE_MEMORY_OPTIMIZATION,
+                strategy,
+            ));
+        }
         for field in fields {
             if let Some(statement) = self.constructor_field_statement(field) {
                 stmts.push(statement);
             }
         }
+        let finalize_arguments = self.runtime_options.freeze_when_inactive.map_or_else(
+            || builder.expressions(),
+            |value| builder.expressions_from_iter([builder.clone_expression(value)]),
+        );
         stmts.push(builder.this_call_statement(
             GeneratedViewpuName::FINALIZE_CONSTRUCTION,
-            builder.expressions(),
+            finalize_arguments,
         ));
 
         let params = builder.formal_parameters_from_iter([

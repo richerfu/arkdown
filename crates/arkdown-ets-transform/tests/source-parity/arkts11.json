@@ -884,6 +884,51 @@
       "expect": { "contains": ["class Parent extends ViewV2"] }
     },
     {
+      "id": "component-freeze-when-inactive-runtime-protocol",
+      "owner": "compiler/src/process_component_class.ts::decoratorComponentParam",
+      "file": "ComponentFreeze.ets",
+      "source": "const componentParent = true; @Component({ freezeWhenInactive: componentParent }) struct ComponentFreeze { build() {} }",
+      "expect": {
+        "contains": [
+          "super[\"initAllowComponentFreeze\"] && typeof super[\"initAllowComponentFreeze\"] === \"function\"",
+          "super[\"initAllowComponentFreeze\"](componentParent)"
+        ]
+      }
+    },
+    {
+      "id": "component-v2-freeze-finalize-argument",
+      "owner": "compiler/src/process_struct_componentV2.ts::updateConstructorBody",
+      "file": "ComponentFreezeV2.ets",
+      "source": "@ComponentV2({ freezeWhenInactive: false }) struct ComponentFreezeV2 { build() {} }",
+      "expect": { "contains": ["this.finalizeConstruction(false)"] }
+    },
+    {
+      "id": "animatable-extend-runtime-protocol",
+      "owner": "compiler/src/process_ui_syntax.ts::processAnimatableExtend",
+      "file": "AnimatableExtend.ets",
+      "source": "@AnimatableExtend(Text) function animatableSize(value: number) { .fontSize(value) } @Component struct Parent { build() { Text('value').animatableSize(20) } }",
+      "expect": {
+        "contains": [
+          "Text.createAnimatableProperty(\"animatableSize\", value",
+          "Text.updateAnimatableProperty(\"animatableSize\", value)",
+          "animatableSize(20, elmtId, isInitialRender, this)"
+        ]
+      }
+    },
+    {
+      "id": "original-extend-declaration-spelling",
+      "owner": "compiler/src/process_ui_syntax.ts::isOriginalExtend",
+      "file": "OriginalExtend.ets",
+      "source": "@Extend Text.fancy(color: Color) { .fontColor(color) } @Component struct Parent { build() { Text('value').fancy(Color.Red) } }",
+      "expect": {
+        "contains": [
+          "function __Text__fancy(color: Color)",
+          "Text.fontColor(color)",
+          "__Text__fancy(Color.Red)"
+        ]
+      }
+    },
+    {
       "id": "default-dynamic-viewpu-lowering",
       "owner": "compiler/src/fast_build/ets_ui/rollup-plugin-ets-typescript.ts::etsTransform",
       "file": "DynamicPage.ets",

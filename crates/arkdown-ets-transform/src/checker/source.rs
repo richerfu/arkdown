@@ -7,6 +7,7 @@ use crate::error::EtsTransformError;
 use crate::source::CompileArktsSourceType;
 use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::component_meta::ComponentMetadata;
+use crate::transform::legacy_extend::LegacyExtendSource;
 use crate::transform::system_api::Arkts11SystemApiValidator;
 use crate::transform::{
     CustomComponentSemanticInventory, ModuleExportIndex, SystemApiCheckOptions, TransformOptions,
@@ -114,11 +115,12 @@ impl ArktsSourceChecker {
 
     pub fn check(&self, source_id: &str, content: &str) -> EtsCheckReport {
         let allocator = Allocator::default();
+        let parser_source = LegacyExtendSource::new(content, self.arkts_language_version);
         let source_type =
             CompileArktsSourceType::from_id_with_version(source_id, self.arkts_language_version);
-        let parsed = self
-            .component_metadata
-            .parse_ets(&allocator, content, source_type);
+        let parsed =
+            self.component_metadata
+                .parse_ets(&allocator, parser_source.as_str(), source_type);
         if !parsed.diagnostics.is_empty() {
             let mut report = EtsCheckReport::default();
             report.extend([EtsTransformError::Fatal {
