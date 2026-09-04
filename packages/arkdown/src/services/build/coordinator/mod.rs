@@ -40,9 +40,7 @@ use arkdown_core::{
   ObfuscationConfig, OhosModuleType, OutputTarget,
 };
 use arkdown_pack::PackingCheck;
-use arkdown_path::{
-  canonicalize_or_owned, lexical_normalize, ArtifactPathSerializer, NormalizedOhmUrl,
-};
+use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
 use arkdown_profile::{
   FormWidgetAbilityMerger, InsightIntentEntityInput, InsightIntentInput, InsightIntentModuleInput,
   InsightIntentProfileInput, InsightIntentProfileProcessor,
@@ -50,10 +48,7 @@ use arkdown_profile::{
 use arkdown_session::dependency_graph::snapshot::{
   DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeSnapshot, DependencyNodeType,
 };
-use arkdown_session::module::snapshot::OhosModuleType as SessionOhosModuleType;
-use arkdown_session::{
-  BuildSession, ModuleCompileContext, PackageSnapshot, ProjectSnapshot, SdkToolKind,
-};
+use arkdown_session::{BuildSession, ModuleCompileContext, ProjectSnapshot, SdkToolKind};
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
 use super::native_stage::{
@@ -69,9 +64,8 @@ use arkdown::plugins::hvigor_compile::{
   HvigorCompilePluginSourceFile,
 };
 use arkdown::{
-  BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo,
-  CrossplatformCollectionWriter, PluginCacheModuleInventory, ShouldInvalidCacheRequest,
-  SourceMapPolicy,
+  BundleCacheBridge, BundleMockDependency, CrossplatformCollectionWriter,
+  PluginCacheModuleInventory, ShouldInvalidCacheRequest, SourceMapPolicy,
 };
 use arkdown_build::bundle_plan::{
   BundlePackageOutput, BundlePlanBuilder, BundlePlanBuilderInput, BundlePlanPackageInfo,
@@ -80,6 +74,10 @@ use arkdown_build::bundle_plan::{
 };
 use arkdown_build::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use arkdown_build::code_resource::CodeResourceCopyPlan;
+use arkdown_build::compile_context::{
+  CompileContextInfoWriter, CompileEnvKeyBuilder, PackageModuleJsonOptions,
+  PkgContextInfoInputBuilder, SanitizerProfileFlags,
+};
 use arkdown_build::har_dedup::HarDedupProjectPlan;
 use arkdown_build::hot_reload::{
   HotReloadCompileInput, HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary,
@@ -113,8 +111,8 @@ use arkdown_build::sdk_checker::{
   SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlan, SdkEtsCheckerPlanBuilder,
 };
 use arkdown_native::{
-  DebugSymbolCollector, NativeBuildSanitizers, NativeCleanStage, NativeCmakeLocalDependency,
-  NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
+  DebugSymbolCollector, NativeCleanStage, NativeCmakeLocalDependency, NativeLibCollectionPolicy,
+  NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
 };
 
 use arkdown::plugins::ets_transform::{
@@ -140,18 +138,17 @@ use arkdown_obfuscate::{
   ObfuscationOptions, ObfuscationOutputPaths, ObfuscationPlan, Obfuscator,
 };
 use arkdown_pack::{
-  minify_package_intermediate_module_json, AppPackageRunner, BundledHarResourceInput,
-  HarBundledDependencyInput, HarPackInput, HarPackageParameterInput, HarVariantInput,
-  HspInterfaceHarInput, HspTgzInput, IntegratedHspCandidate, IntegratedHspCollector, PackInfoInput,
-  PackInfoModuleInput, PackInput, Packager,
+  AppPackageRunner, BundledHarResourceInput, HarBundledDependencyInput, HarPackInput,
+  HarPackageParameterInput, HarVariantInput, HspInterfaceHarInput, HspTgzInput,
+  IntegratedHspCandidate, IntegratedHspCollector, PackInfoInput, PackInfoModuleInput, PackInput,
+  Packager,
 };
 use arkdown_profile::{
   BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarDependencyRoot,
   ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, DependencyCustomTypeInput,
   FormProfileProcessor, LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput,
-  OhExportsProcessor, PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
-  PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
-  PreloadSystemSoArtifactWriter, PreloadSystemSoPlan, ProfileProcessor,
+  OhExportsProcessor, PkgContextInfoGenerator, PreloadSystemSoArtifactWriter, PreloadSystemSoPlan,
+  ProfileProcessor,
 };
 use arkdown_resolver::PackageResolutionPlan;
 use arkdown_resource::{
@@ -161,15 +158,10 @@ use arkdown_resource::{
 
 mod bundle_stage;
 mod bytecode_stage;
-mod compile_context;
 mod obfuscation;
 mod planning;
 mod plugin_share;
 
-pub(crate) use compile_context::{
-  CompileContextInfoWriter, CompileEnvKeyBuilder, PackageModuleJsonOptions,
-  PkgContextInfoInputBuilder, SanitizerProfileFlags,
-};
 use obfuscation::{
   ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
 };
@@ -1397,6 +1389,7 @@ export const nativeCall: () => void;"#,
 mod compile_context_info_tests {
   use super::*;
   use arkdown_core::HvigorModuleSourceFile;
+  use arkdown_profile::PkgContextInfoOpt;
   use indexmap::IndexMap;
 
   #[test]

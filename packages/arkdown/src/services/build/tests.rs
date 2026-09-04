@@ -618,7 +618,7 @@ fn direct_legacy_compile_task_preserves_the_selected_hvigor_boundary() {
 
 #[test]
 fn sanitizer_profile_flags_merge_extra_config_and_cmake_arguments() {
-  use super::coordinator::SanitizerProfileFlags;
+  use arkdown_build::compile_context::SanitizerProfileFlags;
   use arkdown_core::ExternalNativeOptions;
 
   let native = ExternalNativeOptions {
