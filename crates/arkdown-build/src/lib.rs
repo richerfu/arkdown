@@ -11,6 +11,7 @@ pub mod layout;
 pub mod module_plan;
 pub mod pre_build;
 pub mod request;
+pub mod visual_codegen;
 
 #[cfg(test)]
 mod code_resource_tests;

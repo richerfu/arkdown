@@ -9,6 +9,7 @@ publish = false
 anyhow = { workspace = true }
 arkdown = { workspace = true }
 arkdown-core = { workspace = true }
+arkdown-ets-transform = { workspace = true }
 arkdown-pack = { workspace = true }
 arkdown-path = { workspace = true }
 arkdown-profile = { workspace = true }
@@ -20,6 +21,7 @@ globset = { workspace = true }
 json5 = { workspace = true }
 jsonschema = { workspace = true }
 rustc-hash = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zip = { workspace = true }
