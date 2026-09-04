@@ -63,7 +63,6 @@ use super::bundle_plan::{
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
 };
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
-use super::har_dedup::HarDedupProjectPlan;
 use super::hot_reload::{
   HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
   ReloadResourceTaskPlan,
@@ -93,6 +92,7 @@ use arkdown::{
   SourceMapPolicy,
 };
 use arkdown_build::code_resource::CodeResourceCopyPlan;
+use arkdown_build::har_dedup::HarDedupProjectPlan;
 use arkdown_build::intermediates::{
   IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, ResourceConfigInput,
   SourceMapPackageHandoff,

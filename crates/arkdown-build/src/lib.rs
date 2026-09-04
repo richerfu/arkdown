@@ -5,6 +5,7 @@
 //! exposing argv/process lifecycle behavior.
 
 pub mod code_resource;
+pub mod har_dedup;
 pub mod intermediates;
 pub mod layout;
 pub mod module_plan;
