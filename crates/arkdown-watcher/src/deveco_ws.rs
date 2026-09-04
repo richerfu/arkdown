@@ -1356,7 +1356,7 @@ fn base64_encode(input: &[u8]) -> String {
 /// A DevEco Studio workspace descriptor.
 ///
 /// Carries the project root and the list of OHOS module roots that should be
-/// watched for file changes.  The CLI constructs this from
+/// watched for file changes. The build service constructs this from
 /// `BuildSession.input_inventory` and passes it to `DevEcoWatchBridge`.
 ///
 /// Upstream: DevEco integration layer.

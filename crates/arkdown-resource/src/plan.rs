@@ -1,11 +1,11 @@
 //! Typed compilation plan for the resource compilation stage.
 //!
 //! [`ResourceCompilePlan`] is the single structured input to the resource
-//! compilation stage.  It is constructed by the CLI's `BuildPlanBuilder` from
+//! compilation stage.  It is constructed by the build service's `BuildPlanBuilder` from
 //! session data and passed to the SDK restool backend runner.
 //!
 //! No filesystem reads are performed in this module — all paths are
-//! pre-resolved by the CLI planner.
+//! pre-resolved by the build-service planner.
 //!
 //! # Upstream correspondence
 //!
@@ -130,7 +130,7 @@ impl ResourceDependencyInput {
 
 /// Pre-resolved output artifact paths for the resource compilation stage.
 ///
-/// All paths are absolute and pre-computed by the CLI's `BuildPlanBuilder`
+/// All paths are absolute and pre-computed by the build service's `BuildPlanBuilder`
 /// from the session `ArtifactLayout`.  The resource compiler writes to these
 /// paths without performing any path resolution of its own.
 ///
@@ -269,7 +269,7 @@ impl ResourceCompileOptions {
 /// Complete typed plan for the resource compilation stage.
 ///
 /// `ResourceCompilePlan` is the single input to the SDK restool backend runner.
-/// It is constructed by the CLI's `BuildPlanBuilder` after session startup is complete.  All inputs are
+/// It is constructed by the build service's `BuildPlanBuilder` after session startup is complete.  All inputs are
 /// pre-resolved; no filesystem reads are performed here.
 ///
 /// # Upstream correspondence
@@ -287,7 +287,7 @@ impl ResourceCompileOptions {
 /// # SPEC-048 constraint
 ///
 /// This type must NOT depend on `arkdown-session`.  All inputs are delivered
-/// by the CLI planner; the domain crate executes them without project
+/// by the build-service planner; the domain crate executes them without project
 /// discovery.
 #[derive(Debug, Clone)]
 pub struct ResourceCompilePlan {
@@ -338,7 +338,7 @@ impl ResourceCompilePlan {
     ///
     /// Returns a serializable value that matches the JSON written by
     /// `restool-file-config-builder.js` when `--config` is passed to restool.
-    /// The CLI can serialize this with `serde_json::to_string_pretty` and
+    /// The build-service can serialize this with `serde_json::to_string_pretty` and
     /// write it to a temp file.
     ///
     /// # Upstream correspondence

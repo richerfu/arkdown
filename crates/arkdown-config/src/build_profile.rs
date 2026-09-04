@@ -2003,15 +2003,14 @@ pub fn pick_effective_raw_target<'a>(
 /// Count how many targets in `targets` are applicable to the given product and
 /// build mode.
 ///
-/// Used by the CLI to detect when a project declares multiple targets that
+/// Used by the build service to detect when a project declares multiple targets that
 /// could apply to the current build, but only one is being used.  In hvigor's
 /// multi-target execution model, each applicable target produces a separate
 /// artifact; arkdown currently builds only the highest-priority target.
 ///
-/// When this returns > 1, the CLI should warn that only one target is built
+/// When this returns > 1, the build service should warn that only one target is built
 /// per invocation.
 ///
-/// Section 3.1: "多 target 产物执行模型：需 CLI 架构重构支持同 product 多 artifact"
 pub fn count_applicable_targets(
     targets: &[RawTarget],
     product_name: &str,
@@ -2041,7 +2040,7 @@ pub fn count_applicable_targets(
 /// Count applicable targets for a specific module, loading `build-profile.json5`
 /// from `project_root`.  Returns 0 when the file is absent or the module is
 /// not found.  This is a convenience wrapper over `count_applicable_targets`
-/// for use in the CLI build loop.
+/// for use in the build-service loop.
 pub fn count_applicable_targets_for_module(
     project_root: &Path,
     module_name: &str,
@@ -2072,7 +2071,7 @@ pub fn count_applicable_targets_for_module(
 ///
 /// ## Multi-artifact execution model (section 3.1)
 ///
-/// hvigor builds a separate artifact for each applicable target.  The CLI
+/// hvigor builds a separate artifact for each applicable target. The build service
 /// uses this function to iterate over all targets and produce one output
 /// artifact per target.  Each artifact path is disambiguated by appending
 /// the target name (e.g. `entry-default.hap`, `entry-phone.hap`).

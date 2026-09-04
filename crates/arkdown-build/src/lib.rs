@@ -6,7 +6,9 @@
 
 pub mod intermediates;
 pub mod layout;
+pub mod module_plan;
 pub mod pre_build;
+pub mod request;
 
 #[cfg(test)]
 mod layout_tests;

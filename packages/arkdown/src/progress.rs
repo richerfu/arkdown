@@ -23,7 +23,7 @@ impl Progress {
       Some(observability) => {
         let build_id = observability.build_id();
         tracing::info!(
-          target: "arkdown_napi::cmd::build::coordinator",
+          target: "arkdown_napi::services::build::coordinator",
           build_id = %build_id,
           step = n,
           total,
@@ -34,7 +34,7 @@ impl Progress {
       }
       None => {
         tracing::info!(
-          target: "arkdown_napi::cmd::build::coordinator",
+          target: "arkdown_napi::services::build::coordinator",
           step = n,
           total,
           label,
@@ -51,7 +51,7 @@ impl Progress {
       Some(observability) => {
         let build_id = observability.build_id();
         tracing::info!(
-          target: "arkdown_napi::cmd::build::coordinator",
+          target: "arkdown_napi::services::build::coordinator",
           build_id = %build_id,
           elapsed_ms = ms,
           source = "rust_stage",
@@ -60,7 +60,7 @@ impl Progress {
       }
       None => {
         tracing::info!(
-          target: "arkdown_napi::cmd::build::coordinator",
+          target: "arkdown_napi::services::build::coordinator",
           elapsed_ms = ms,
           source = "rust_stage",
           "build step completed"

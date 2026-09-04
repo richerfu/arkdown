@@ -35,7 +35,7 @@ pub struct BundleOutput {
     /// build step and consumed by ByteCode HAR artifact processing.
     pub har_importees: HvigorHarImportees,
     /// System/native imports reachable from hvigor preload entry roots.
-    /// Written by the CLI as `intermediates/preload/<target>/preload.json`.
+    /// Written by the build-service as `intermediates/preload/<target>/preload.json`.
     pub preload_system_so_tasks: Vec<PreloadSystemSoTask>,
     /// Package and local dependency mappings written to `npmEntries.txt`.
     pub npm_entries: Vec<HvigorNpmEntry>,
@@ -45,7 +45,7 @@ pub struct BundleOutput {
     /// `sourceMaps.map` if a real source map was produced from bundler inputs.
     pub source_maps_path: Option<PathBuf>,
     /// Content fingerprints for source-map entries whose original source was
-    /// already inventoried by the build session. The CLI cache handoff uses
+    /// already inventoried by the build session. The build-service cache handoff uses
     /// these to retain latest ets-loader's per-module incremental map order
     /// without re-reading source files after Rolldown finishes.
     pub source_map_input_fingerprints: Vec<SourceMapInputFingerprint>,

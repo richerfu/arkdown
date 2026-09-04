@@ -490,7 +490,7 @@ impl BuildCoordinator {
       .is_some_and(|json| json.module.form_extension_module.is_some())
   }
 
-  /// Construct a new coordinator from a completed build session and CLI args.
+  /// Construct a new coordinator from a completed build session and typed request.
   pub fn new(session: Arc<BuildSession>, config: Arc<ArkdownConfig>, args: BuildRequest) -> Self {
     Self {
       session,

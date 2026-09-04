@@ -1,7 +1,7 @@
 //! Typed plan for the profile processing stage.
 //!
 //! [`ProfileProcessPlan`] is the single typed input to the profile processing
-//! stage.  It is constructed by the CLI's `BuildPlanBuilder` from session
+//! stage.  It is constructed by the build service's `BuildPlanBuilder` from session
 //! data and passed to [`ProfileProcessor`].
 //!
 //! Profile processing consists of three sub-tasks:
@@ -190,7 +190,7 @@ pub struct PackageModuleJsonPlan {
 /// Complete typed plan for the profile processing stage.
 ///
 /// `ProfileProcessPlan` is the single input to [`ProfileProcessor`].
-/// It is constructed by the CLI's `BuildPlanBuilder` from session data
+/// It is constructed by the build service's `BuildPlanBuilder` from session data
 /// and encapsulates all inputs for the profile, loader.json, pkgContextInfo,
 /// and module.json generation.
 ///
@@ -225,7 +225,7 @@ pub struct ProfileProcessContextInput {
 impl ProfileProcessPlan {
     /// Construct a plan from pre-resolved context inputs.
     ///
-    /// This is called by the CLI's `BuildPlanBuilder` after session startup
+    /// This is called by the build service's `BuildPlanBuilder` after session startup
     /// is complete.  All inputs are pre-resolved; no filesystem reads are
     /// performed here.
     ///

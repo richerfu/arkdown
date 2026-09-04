@@ -623,7 +623,7 @@ impl BuildCoordinator {
       }
 
       if matches!(config.output_target, OutputTarget::Test) {
-        let artifacts = crate::cmd::build::unit_test::UnitTestArtifactWriter::new(
+        let artifacts = crate::services::build::unit_test::UnitTestArtifactWriter::new(
           &module.src_path,
           &module_config.product.name,
         );

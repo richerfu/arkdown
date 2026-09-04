@@ -566,8 +566,8 @@ fn merge_profile_precedes_dependency_extension_ability_collection() {
 
 #[tokio::test]
 async fn partial_hvigor_execution_stops_only_after_every_selected_root() {
-  use super::args::NativeTaskRoot;
   use super::coordinator::{BuildTaskLifecycle, NativeTaskCutoffReached};
+  use arkdown_build::request::NativeTaskRoot;
 
   let mut lifecycle = BuildTaskLifecycle::new(
     None,
@@ -603,8 +603,8 @@ async fn partial_hvigor_execution_stops_only_after_every_selected_root() {
 
 #[tokio::test]
 async fn unqualified_module_hook_root_matches_a_targetless_boundary() {
-  use super::args::NativeTaskRoot;
   use super::coordinator::{BuildTaskLifecycle, NativeTaskCutoffReached};
+  use arkdown_build::request::NativeTaskRoot;
 
   let mut lifecycle = BuildTaskLifecycle::new(
     None,
@@ -629,8 +629,8 @@ async fn unqualified_module_hook_root_matches_a_targetless_boundary() {
 
 #[test]
 fn direct_legacy_compile_task_preserves_the_selected_hvigor_boundary() {
-  use super::args::NativeTaskRoot;
   use super::coordinator::BuildCoordinator;
+  use arkdown_build::request::NativeTaskRoot;
   use arkdown_core::{OhosModuleType, OutputTarget};
 
   let roots = vec![NativeTaskRoot {

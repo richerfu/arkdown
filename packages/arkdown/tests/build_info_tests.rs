@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use arkdown_napi::cmd::build_info::{build_info_value, HvigorBuildInfoRunner};
+use arkdown_napi::services::build_info::{build_info_value, HvigorBuildInfoRunner};
 use serde_json::Value;
 
 fn fixture_root() -> PathBuf {

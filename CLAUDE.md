@@ -74,7 +74,7 @@ arkdown/
 │   ├── arkdown-cache/        ← fingerprint-based cache keys and records
 │   └── arkdown-watcher/      ← watch invalidation from session inventories
 └── packages/
-    └── arkdown/              ← NAPI binding + BuildCoordinator / CLI entry (`js/arkdown-cli.js`)
+    └── arkdown/              ← JS CLI + typed N-API services; temporary BuildCoordinator owner
 ```
 
 Separate `arkdown-plugin-*` crates are obsolete in the final design. Rollup plugin
@@ -145,7 +145,7 @@ projects building (upstream parity, see `test_load_config_old_format_bundle_name
 Signing configs live at `build-profile.json5#app.signingConfigs`; products reference
 them by name.
 
-**8. The CLI plugin order must match hvigor's compile stage.** `EtsTransformPlugin` must
+**8. The native build service plugin order must match hvigor's compile stage.** `EtsTransformPlugin` must
 run before resolution-sensitive plugins. Avoid injecting helper wrappers or rollup defaults
 that hvigor does not emit. For HAR builds use `pack_har()`, not `pack_hap()`.
 
@@ -165,7 +165,7 @@ or "just enough to compile" implementations. A change must either implement the
 owning behavior fully for its declared scope or explicitly reject unsupported behavior
 with typed diagnostics and focused coverage.
 
-**12. Do not recreate hvigor's task runtime.** The CLI uses coarse manual
+**12. Do not recreate hvigor's task runtime.** The native build service uses coarse manual
 orchestration through `BuildCoordinator`. Do not introduce a full `BuildStageGraph`,
 dynamic task API, string task dependencies, or user task runtime. Rolldown owns module
 graph, plugin lifecycle, chunk graph, render hooks, and generate-bundle behavior
@@ -265,7 +265,7 @@ implementation was removed when the backend moved to `hapsigner`.
 - `compact_str` — compact small strings for hot-path identifiers
 - `rustc-hash` (FxHashMap) — fast hashmaps for hot paths
 - `zip` — HAP/HSP/HAR archive creation
-- `clap` — CLI argument parsing (CLI crate only)
+- Rust CLI parsers and `clap` are forbidden. The npm JavaScript file owns argv parsing.
 - `notify` — filesystem watching (watcher crate only)
 
 ### Foundation crate layering

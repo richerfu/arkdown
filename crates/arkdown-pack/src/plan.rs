@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! profile/resource/bundle/abc outputs
-//!   → PackagePlan (assembled by CLI BuildPlanBuilder)
+//!   → PackagePlan (assembled by build-service BuildPlanBuilder)
 //!   → arkdown-pack::Packager
 //!   → unsigned HAP/HSP/HAR
 //!   → arkdown-sign
@@ -105,8 +105,8 @@ pub enum PackageToolMode {
     /// Delegate to the SDK `packing-tool` binary via subprocess.
     ///
     /// `tool_path` must point to the `packing-tool` executable from the OHOS
-    /// SDK. Used only when `ARKDOWN_PACKING_TOOL` env var is set or the CLI
-    /// passes `--packing-tool=<path>`.
+    /// SDK. Used only when `ARKDOWN_PACKING_TOOL` is set or the typed build
+    /// request selects the external tool.
     Subprocess {
         /// Absolute path to the SDK `packing-tool` binary.
         tool_path: PathBuf,
@@ -264,7 +264,7 @@ impl PackageOutput {
 
 /// The complete, pre-resolved input to the packaging stage.
 ///
-/// A `PackagePlan` is constructed by the CLI's `BuildPlanBuilder` after all
+/// A `PackagePlan` is constructed by the build service's `BuildPlanBuilder` after all
 /// upstream tasks (`ArkCompile`, `ProcessCompiledResources`,
 /// `GeneratePkgModuleJson`, `ProcessIntegratedHsp`, …) have completed.  All
 /// paths are absolute and already exist on disk (or will exist by the time
@@ -302,7 +302,7 @@ pub struct PackagePlan {
     pub output_path: PathBuf,
     /// Ordered list of entries to include in the archive.
     ///
-    /// The CLI populates this list in hvigor's archive-write order.  Callers
+    /// The build-service populates this list in hvigor's archive-write order.  Callers
     /// should use [`PackagePlan::ordered_entries`] to iterate rather than
     /// accessing this field directly.
     pub entries: Vec<PackageEntry>,
@@ -397,7 +397,7 @@ impl PackagePlan {
     /// The order matches hvigor's `PackageHap` / `PackageHar` write sequence
     /// to produce byte-for-byte reproducible archives.
     ///
-    /// Currently returns entries in declaration order (the CLI is responsible
+    /// Currently returns entries in declaration order (the build-service is responsible
     /// for inserting them in the correct sequence).  A future refactor may sort
     /// entries by a stable `PackEntryId` key.
     pub fn ordered_entries(&self) -> &[PackageEntry] {

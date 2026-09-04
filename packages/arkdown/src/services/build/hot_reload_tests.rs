@@ -5,12 +5,12 @@ use arkdown_core::HvigorModuleSourceFile;
 use arkdown_watcher::{WatchEvent, WatchEventKind};
 use serde_json::json;
 
-use super::args::NativeTaskRoot;
 use super::hot_reload::{
   HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
   ReloadResourceTaskPlan,
 };
 use arkdown_build::layout::ModuleBuildLayout;
+use arkdown_build::request::NativeTaskRoot;
 
 fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
   if let Some(parent) = path.parent() {

@@ -1,7 +1,7 @@
 //! Typed bundle plan for the rolldown bundler stage.
 //!
 //! [`BundlePlan`] is the single typed input to [`Bundler::bundle`].  It is
-//! constructed by the CLI's `BuildPlanBuilder` from session data (loader.json,
+//! constructed by the build service's `BuildPlanBuilder` from session data (loader.json,
 //! resource outputs, compile environment) and passed to the bundler.
 //!
 //! The plan covers the full `arkts-pack.js::generateConfig` observable fields:
@@ -108,7 +108,7 @@ pub struct BundleInput {
     pub preload_system_so_entries: Vec<PathBuf>,
     /// SDK `ModuleSourceFile` mock processing paths and activation state.
     ///
-    /// Paths are resolved by the CLI's typed module/cache layouts before the
+    /// Paths are resolved by the build service's typed module/cache layouts before the
     /// bundler starts. The bundler never reconstructs build-directory strings
     /// or assumes a host separator.
     pub mock_config: Option<BundleMockConfig>,
@@ -360,7 +360,7 @@ impl BundlePluginSet {
 /// The complete typed plan for the rolldown bundle stage.
 ///
 /// `BundlePlan` is the single input to [`crate::bundler::Bundler::bundle_with_plan`].
-/// It is constructed by the CLI's `BuildPlanBuilder` from session data and
+/// It is constructed by the build service's `BuildPlanBuilder` from session data and
 /// covers all fields observable in `arkts-pack.js::generateConfig`.
 ///
 /// # Upstream correspondence

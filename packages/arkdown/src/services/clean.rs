@@ -17,7 +17,7 @@ pub fn run(args: CleanRequest) -> Result<()> {
 }
 
 /// Owns the complete direct clean command. Module roots are read from the
-/// project model; JavaScript and the CLI boundary never inspect the project
+/// project model; the JavaScript boundary never inspects the project
 /// filesystem or construct output paths.
 struct CleanCommandRunner {
   args: CleanRequest,

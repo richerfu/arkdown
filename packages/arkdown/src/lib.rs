@@ -25,12 +25,12 @@
 #[global_allocator]
 static ALLOC: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
-pub mod cmd;
 mod hvigor_plugin_plan;
 mod js_callback;
 mod plugin_module;
 pub mod progress;
 mod runtime_observe;
+pub mod services;
 pub mod task_cache;
 
 use std::borrow::Cow;
@@ -88,10 +88,10 @@ pub struct CheckConfig {
 /// All project discovery and path ownership remain in Rust.
 #[napi]
 pub async fn clean(config: CleanConfig) -> napi::Result<()> {
-  let args = cmd::clean::CleanRequest {
+  let args = services::clean::CleanRequest {
     project: config.project.map(PathBuf::from),
   };
-  tokio::task::spawn_blocking(move || cmd::clean::run(args))
+  tokio::task::spawn_blocking(move || services::clean::run(args))
     .await
     .map_err(|error| napi::Error::from_reason(format!("Arkdown clean task failed: {error}")))?
     .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
@@ -100,7 +100,7 @@ pub async fn clean(config: CleanConfig) -> napi::Result<()> {
 /// Run the native ArkTS source checker without entering the build pipeline.
 #[napi]
 pub async fn check(config: CheckConfig) -> napi::Result<()> {
-  let args = cmd::check::CheckRequest {
+  let args = services::check::CheckRequest {
     target: config.target.unwrap_or_else(|| "hap".to_string()),
     module: config.module,
     project: config.project.map(PathBuf::from),
@@ -109,7 +109,7 @@ pub async fn check(config: CheckConfig) -> napi::Result<()> {
     ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
     checker: config.checker.unwrap_or_else(|| "oxc".to_string()),
   };
-  tokio::task::spawn_blocking(move || cmd::check::run(args))
+  tokio::task::spawn_blocking(move || services::check::run(args))
     .await
     .map_err(|error| napi::Error::from_reason(format!("Arkdown check task failed: {error}")))?
     .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
@@ -2386,7 +2386,7 @@ pub fn build<'a>(
         )))
       }
     },
-    analyze: crate::cmd::build::args::AnalyzeModeChoice::from_name(
+    analyze: arkdown_build::request::AnalyzeModeChoice::from_name(
       analyze.as_deref().unwrap_or("normal"),
     )
     .ok_or_else(|| {
@@ -2462,7 +2462,7 @@ pub fn parse_plugin_ast(
 struct PackageBuildArgs {
   arkts_language_version: arkdown_core::ArktsLanguageVersion,
   ohpm_mode: arkdown_session::package::acquisition::AcquisitionMode,
-  analyze: crate::cmd::build::args::AnalyzeModeChoice,
+  analyze: arkdown_build::request::AnalyzeModeChoice,
   build_target_name: Option<String>,
   build_version: Option<String>,
   watch: bool,
@@ -2497,8 +2497,8 @@ async fn run_build(
   package_args: PackageBuildArgs,
   js_plugins: Vec<PackagePlugin>,
 ) -> anyhow::Result<Vec<String>> {
-  use crate::cmd::build::args::AbcBackendChoice;
-  use crate::cmd::build::BuildRequest;
+  use crate::services::build::BuildRequest;
+  use arkdown_build::request::AbcBackendChoice;
   use arkdown_config::ArkdownConfigLoader;
   use arkdown_core::{BuildMode, OutputTarget};
   use arkdown_session::BuildSessionBuilder;
@@ -2568,13 +2568,13 @@ async fn run_build(
     arkts_version: package_args.arkts_language_version,
     ohpm_mode: match package_args.ohpm_mode {
       arkdown_session::package::acquisition::AcquisitionMode::Offline => {
-        crate::cmd::build::args::OhpmModeChoice::Offline
+        arkdown_build::request::OhpmModeChoice::Offline
       }
       arkdown_session::package::acquisition::AcquisitionMode::PreferOffline => {
-        crate::cmd::build::args::OhpmModeChoice::PreferOffline
+        arkdown_build::request::OhpmModeChoice::PreferOffline
       }
       arkdown_session::package::acquisition::AcquisitionMode::Online => {
-        crate::cmd::build::args::OhpmModeChoice::Online
+        arkdown_build::request::OhpmModeChoice::Online
       }
     },
     module,
@@ -2628,12 +2628,12 @@ async fn run_build(
   };
 
   let output = if is_app_build {
-    crate::cmd::build::app_coordinator::AppBuildCoordinator::new(session, config, args)
+    crate::services::build::app_coordinator::AppBuildCoordinator::new(session, config, args)
       .with_package_plugins(js_plugins)
       .execute()
       .await?
   } else {
-    crate::cmd::build::coordinator::BuildCoordinator::new(session, config, args)
+    crate::services::build::coordinator::BuildCoordinator::new(session, config, args)
       .with_package_plugins(js_plugins)
       .execute()
       .await?

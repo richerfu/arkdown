@@ -1,6 +1,6 @@
 use std::fs;
 
-use arkdown_napi::cmd::clean::{self, CleanRequest};
+use arkdown_napi::services::clean::{self, CleanRequest};
 
 #[test]
 fn clean_removes_every_rust_owned_project_and_module_build_root() {

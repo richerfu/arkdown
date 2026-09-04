@@ -92,7 +92,7 @@ pub use package::snapshot::PackageSnapshot;
 // paths
 pub use paths::PathResolver;
 
-// plan_input — narrow stage input views for CLI BuildPlanBuilder
+// plan_input — narrow stage input views for the application BuildPlanBuilder
 pub use plan_input::{
     BundlePlanInput, BytecodePlanInput, NativePlanInput, PackagePlanInput, ProfilePlanInput,
     ResourcePlanInput, SignPlanInput, WatchPlanInput,

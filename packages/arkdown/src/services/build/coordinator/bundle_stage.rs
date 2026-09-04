@@ -1,7 +1,7 @@
 //! Bundling stage implementation.
 
 use super::*;
-use crate::cmd::build::visual_codegen::VisualCodegenAdapter;
+use crate::services::build::visual_codegen::VisualCodegenAdapter;
 
 struct TransformResourceInventoryLoader {
   dependency_tables: FxHashMap<PathBuf, ResourceReferenceInventory>,

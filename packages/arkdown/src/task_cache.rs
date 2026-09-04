@@ -10,7 +10,7 @@ use arkdown_session::BuildSession;
 /// Session-derived, content-addressed inputs for one module compile task.
 ///
 /// Hvigor's `ArkCompile.declareInputFiles()` tracks actual input file content.
-/// The CLI builds this snapshot from `BuildSession` so cache checks do not
+/// The build service creates this snapshot from `BuildSession` so cache checks do not
 /// perform filesystem discovery or content reads during stage execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInputSnapshot {
