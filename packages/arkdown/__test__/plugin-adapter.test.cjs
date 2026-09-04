@@ -91,6 +91,87 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   assert.equal(calls.every((call) => call.share === share), true)
 })
 
+test('plugins in one native build observe the same mutable hvigor share object', () => {
+  let firstShare
+  let secondShare
+  let observedMarker
+  const first = normalizePlugin(
+    {
+      name: 'share-writer',
+      beforeBuild() {
+        firstShare = this.share
+        this.share.ModuleSourceFile = [{ id: 'Index.ets' }]
+        this.share.customMarker = 'visible-to-next-plugin'
+      },
+    },
+    fakeBinding(),
+    { compilePlugin: true, pluginFile: '/plugins/shared.ts' },
+  )
+  const second = normalizePlugin(
+    {
+      name: 'share-reader',
+      beforeBuild() {
+        secondShare = this.share
+        observedMarker = this.share.customMarker
+      },
+    },
+    fakeBinding(),
+    { compilePlugin: true, pluginFile: '/plugins/shared.ts' },
+  )
+
+  dispatch(first, 'seedContext', {
+    share: { __arkdownBuildInstanceId: 'shared-build', projectConfig: { projectTopDir: '/project' } },
+  })
+  dispatch(second, 'seedContext', {
+    share: { __arkdownBuildInstanceId: 'shared-build', projectConfig: { projectTopDir: '/project' } },
+  })
+  dispatch(first, 'beforeBuild')
+  dispatch(second, 'beforeBuild')
+
+  assert.equal(firstShare, secondShare)
+  assert.equal(observedMarker, 'visible-to-next-plugin')
+  assert.deepEqual(secondShare.ModuleSourceFile, [{ id: 'Index.ets' }])
+})
+
+test('plugin and share caches survive a V8 snapshot restored by a later build process scope', () => {
+  const createPlugin = (observed) =>
+    normalizePlugin(
+      {
+        name: 'persistent-cache',
+        buildStart() {
+          const count = (this.cache.get('count') || 0) + 1
+          this.cache.set('count', count)
+          this.share.cache.set('shared-count', (this.share.cache.get('shared-count') || 0) + 1)
+          observed.push([count, this.share.cache.get('shared-count')])
+        },
+      },
+      fakeBinding(),
+      { compilePlugin: true, pluginFile: '/plugins/persistent.ts' },
+    )
+
+  const firstObserved = []
+  const first = createPlugin(firstObserved)
+  dispatch(first, 'seedContext', {
+    share: { __arkdownBuildInstanceId: 'cache-build-1', projectConfig: { projectTopDir: '/scope-one' } },
+  })
+  dispatch(first, 'buildStart')
+  const snapshot = dispatch(first, 'snapshotContext').cacheSnapshot
+
+  const secondObserved = []
+  const second = createPlugin(secondObserved)
+  dispatch(second, 'seedContext', {
+    share: {
+      __arkdownBuildInstanceId: 'cache-build-2',
+      __arkdownPluginCacheSnapshot: snapshot,
+      projectConfig: { projectTopDir: '/scope-two' },
+    },
+  })
+  dispatch(second, 'buildStart')
+
+  assert.deepEqual(firstObserved, [[1, 1]])
+  assert.deepEqual(secondObserved, [[2, 2]])
+})
+
 test('ordered hook objects retain handler receiver and native order metadata', () => {
   const calls = []
   const plugin = normalizePlugin(

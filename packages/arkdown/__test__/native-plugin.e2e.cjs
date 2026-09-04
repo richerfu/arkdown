@@ -1,6 +1,7 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -86,6 +87,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.match(firstTrace.sourceHash, /^[0-9a-f]{16}$/)
   assert.equal(Number.isFinite(firstTrace.sourceMtimeMs), true)
   assert.equal(firstTrace.shareCacheBuildCount, 1)
+  assert.equal(firstTrace.pluginCacheBuildCount, 1)
   assert.equal(firstTrace.importPackageName, 'entry')
 
   process.env.ARKDOWN_PLUGIN_FORCE_INVALIDATE = '1'
@@ -96,6 +98,24 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(secondTrace.cacheRequest.code.length > 0, true)
   assert.equal(secondTrace.cacheRequest.astType, 'Program')
   assert.equal(secondTrace.shareCacheBuildCount, 2)
+  assert.equal(secondTrace.pluginCacheBuildCount, 2)
+
+  const child = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `require(${JSON.stringify(path.resolve(__dirname, '..'))}).build(JSON.parse(process.env.ARKDOWN_CHILD_CONFIG)).catch((error) => { console.error(error); process.exitCode = 1 })`,
+    ],
+    {
+      cwd: path.resolve(__dirname, '..'),
+      env: { ...process.env, ARKDOWN_CHILD_CONFIG: JSON.stringify(config) },
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`)
+  const childTrace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
+  assert.equal(childTrace.shareCacheBuildCount, 3)
+  assert.equal(childTrace.pluginCacheBuildCount, 3)
 })
 
 test('explicit JS plugins execute through the same native dispatcher', { skip: !enabled }, async (context) => {

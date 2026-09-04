@@ -199,6 +199,12 @@ impl BuildCoordinator {
             module.name
           )
         })?;
+      let module_context = session.module_context(&module.name).ok_or_else(|| {
+        anyhow::anyhow!("missing build session module context for {}", module.name)
+      })?;
+      let cache_dir = PathBuf::from(&loader_json.cache_path);
+      let plugin_context_cache =
+        PluginContextCacheRunner::new(&module_package_plugins, cache_dir.as_path());
       // `this.share.projectConfig` is module-specific in latest hvigor. Seed
       // only the plugins participating in this module before cache hooks or
       // Rolldown hooks execute.
@@ -209,16 +215,17 @@ impl BuildCoordinator {
         Some(module),
         &session.source_store,
         module_package_resolution.as_ref(),
+        module_context.deps.as_ref(),
         loader_json,
         &loader_json_path,
         session.arkts_language_version,
       )
+      .with_plugin_cache_snapshot(plugin_context_cache.load()?)
       .build()?;
       for plugin in &module_package_plugins {
         plugin.seed_hvigor_context(&share).await?;
       }
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
-      let cache_dir = PathBuf::from(&loader_json.cache_path);
       let output_dir = PathBuf::from(&loader_json.ace_module_build);
       let cached_abc = output_dir.join("modules.abc");
       if !BuildPolicy::new(module_config.as_ref()).module_requires_arkts_compilation(module)? {
@@ -363,6 +370,7 @@ impl BuildCoordinator {
       }
 
       if cache_hit {
+        plugin_context_cache.commit().await?;
         task_lifecycle
           .up_to_date(&module.name, Some(module_target_name), compile_task_name)
           .await?;
@@ -416,9 +424,6 @@ impl BuildCoordinator {
         }
       }
 
-      let module_context = session.module_context(&module.name).ok_or_else(|| {
-        anyhow::anyhow!("missing build session module context for {}", module.name)
-      })?;
       let ohos_test_templates_after_migration = module_target_name == "ohosTest"
         && module_context
           .module
@@ -913,6 +918,7 @@ impl BuildCoordinator {
       } else {
         None
       };
+      plugin_context_cache.commit().await?;
       #[cfg(feature = "memory-diagnostics")]
       arkdown::memory_diagnostics::dump_with(
         "build:after-bundle-stage",

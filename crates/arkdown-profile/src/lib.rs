@@ -795,6 +795,7 @@ mod tests {
                 version_spec: Some("1.0.0".to_string()),
                 package_name: alias.to_string(),
                 package_root: arkdown_path::canonicalize_or_owned(root),
+                installed_alias_path: None,
                 kind,
                 is_transitive: issuer != module && issuer != project,
             }

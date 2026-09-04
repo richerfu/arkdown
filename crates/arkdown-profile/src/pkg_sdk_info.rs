@@ -185,6 +185,7 @@ mod tests {
                 version_spec: None,
                 package_name: package_name.to_string(),
                 package_root: PathBuf::from(format!("/{package_name}")),
+                installed_alias_path: None,
                 kind: DependencyEdgeKind::Dependency,
                 is_transitive: package_name == "shared-hsp",
             });

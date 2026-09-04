@@ -99,6 +99,13 @@ pub fn compile_plugin_module_sync(file: String, source_map: Option<bool>) -> nap
   plugin_module::PluginModuleNapiCompiler::compile_sync(file, source_map.unwrap_or(false))
 }
 
+/// Compute a plugin module cache identity in Rust so the JavaScript adapter
+/// does not own filesystem or fingerprinting behavior.
+#[napi]
+pub fn plugin_module_cache_identity(file: String) -> napi::Result<String> {
+  plugin_module::PluginModuleNapiCompiler::cache_identity(file)
+}
+
 /// Resolve latest-hvigor compile-plugin order against the native Rolldown
 /// pipeline. JavaScript functions are invoked synchronously on the owning V8
 /// thread; all grouping, built-in inventory, validation, and slot reduction
@@ -746,6 +753,8 @@ pub struct JsPluginDispatchResult {
   pub load: Option<Either<String, JsLoadOutput>>,
   pub transform: Option<Either<String, JsTransformOutput>>,
   pub should_invalid_cache: Option<bool>,
+  #[napi(js_name = "cacheSnapshot", skip_typescript)]
+  pub cache_snapshot: Option<Buffer>,
 }
 
 #[napi(object)]
@@ -777,6 +786,7 @@ pub struct JsPlugin {
   dispatch_fn: PluginDispatchTsfn,
   hook_names: Vec<String>,
   hook_orders: HashMap<String, JsHookOrder>,
+  cache_identity: String,
   usage: HookUsage,
 }
 
@@ -869,6 +879,9 @@ impl JsPlugin {
     let is_hvigor_compile_plugin = obj
       .get::<bool>("__arkdownHvigorCompilePlugin")?
       .unwrap_or(false);
+    let cache_identity = obj
+      .get::<String>("__arkdownPluginCacheIdentity")?
+      .unwrap_or_else(|| name.clone());
     let module_root = obj.get::<String>("__arkdownModuleRoot")?.map(PathBuf::from);
     let target_name = obj.get::<String>("__arkdownTargetName")?;
     let anchor_rank = obj.get::<u32>("__arkdownOrderAnchorRank")?;
@@ -974,6 +987,7 @@ impl JsPlugin {
         dispatch_fn,
         hook_names,
         hook_orders,
+        cache_identity,
         usage,
       }),
       order,
@@ -1257,6 +1271,18 @@ impl HvigorPluginGapHooks for JsPlugin {
     self.has_hook("shouldInvalidCache")
   }
 
+  fn snapshot_hvigor_context_cache(&self) -> HvigorHookFuture<'_, anyhow::Result<Option<Vec<u8>>>> {
+    Box::pin(async move {
+      let request = JsPluginDispatchRequest::new("snapshotContext", None);
+      self
+        .dispatch_fn
+        .await_call(request)
+        .await
+        .map(|result| result.cache_snapshot.map(|buffer| buffer.to_vec()))
+        .map_err(|error| anyhow::anyhow!("snapshot plugin context JS error: {error}"))
+    })
+  }
+
   fn lifecycle_hook_with_context(
     &self,
     hook: HvigorLifecycleHook,
@@ -1290,7 +1316,8 @@ impl HvigorPluginGapHooks for JsPlugin {
   }
 
   fn runtime_cache_identity(&self) -> Option<String> {
-    (!self.hook_names.is_empty()).then(|| self.hook_names.join(","))
+    (!self.hook_names.is_empty())
+      .then(|| format!("{}:{}", self.cache_identity, self.hook_names.join(",")))
   }
 }
 
@@ -1356,11 +1383,17 @@ pub struct HvigorProjectConfig {
 /// source table or perform hook-time filesystem reads.
 #[napi(object, object_from_js = false)]
 pub struct HvigorShareContext {
+  #[napi(js_name = "__arkdownBuildInstanceId", skip_typescript)]
+  pub build_instance_id: String,
   pub project_config: Option<HvigorProjectConfig>,
   #[napi(js_name = "__arkdownProjectConfig", skip_typescript)]
   pub project_config_fields: serde_json::Value,
   #[napi(js_name = "__arkdownNativeShare", skip_typescript)]
   pub native_share: External<HvigorNativeShareContext>,
+  #[napi(js_name = "__arkdownPluginCacheSnapshot", skip_typescript)]
+  pub plugin_cache_snapshot: Option<Buffer>,
+  #[napi(ts_type = "Record<string, string[]>")]
+  pub symlink_map: serde_json::Value,
   #[napi(ts_type = "Map<string, unknown>")]
   pub cache: Option<String>,
   #[napi(ts_type = "Map<string, unknown>")]
@@ -1398,6 +1431,7 @@ impl From<&HvigorCompilePluginShare> for HvigorShareContext {
   fn from(share: &HvigorCompilePluginShare) -> Self {
     let config = &share.project_config;
     Self {
+      build_instance_id: share.build_instance_id.to_string(),
       project_config: Some(HvigorProjectConfig {
         bundle_name: Some(config.bundle_name.clone()),
         build_mode: Some(config.build_mode.clone()),
@@ -1447,6 +1481,33 @@ impl From<&HvigorCompilePluginShare> for HvigorShareContext {
         source_files: Arc::clone(&share.source_files),
         import_resolver_entries: Arc::clone(&share.import_resolver_entries),
       }),
+      plugin_cache_snapshot: share
+        .plugin_cache_snapshot
+        .as_ref()
+        .map(|snapshot| Buffer::from(snapshot.to_vec())),
+      symlink_map: serde_json::Value::Object(
+        share
+          .symlink_map
+          .iter()
+          .map(|(actual, symlinks)| {
+            (
+              arkdown_path::ArtifactPathSerializer::path_to_slash_string(actual)
+                .unwrap_or_else(|_| actual.to_string_lossy().into_owned()),
+              serde_json::Value::Array(
+                symlinks
+                  .iter()
+                  .map(|symlink| {
+                    serde_json::Value::String(
+                      arkdown_path::ArtifactPathSerializer::path_to_slash_string(symlink)
+                        .unwrap_or_else(|_| symlink.to_string_lossy().into_owned()),
+                    )
+                  })
+                  .collect(),
+              ),
+            )
+          })
+          .collect(),
+      ),
       cache: None,
       common_cache: None,
       cache_store_manager: None,

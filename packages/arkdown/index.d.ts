@@ -264,6 +264,7 @@ export interface HvigorProjectConfig {
  */
 export interface HvigorShareContext {
   projectConfig?: HvigorProjectConfig
+  symlinkMap: Record<string, string[]>
   cache?: Map<string, unknown>
   commonCache?: Map<string, unknown>
 cacheStoreManager?: { keys(): IterableIterator<string>; unmount(key: string): void; mount(key: string): { getCache(cacheKey: string): unknown; setCache(cacheKey: string, value: unknown): void } }
@@ -470,6 +471,12 @@ export interface PluginCacheRequest {
   code: string
   id: string
 }
+
+/**
+ * Compute a plugin module cache identity in Rust so the JavaScript adapter
+ * does not own filesystem or fingerprinting behavior.
+ */
+export declare function pluginModuleCacheIdentity(file: string): string
 
 export declare function runtimeHvigorReportSnapshot(ppid: number): any
 

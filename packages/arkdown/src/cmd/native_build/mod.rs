@@ -1782,6 +1782,7 @@ mod tests {
           version_spec: Some("1.0.0".to_string()),
           package_name: alias.to_string(),
           package_root: root,
+          installed_alias_path: None,
           kind: arkdown_session::dependency_graph::snapshot::DependencyEdgeKind::Dependency,
           is_transitive: false,
         },

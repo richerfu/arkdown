@@ -33,6 +33,7 @@ const state = {
   sourceHash: undefined as string | undefined,
   sourceMtimeMs: undefined as number | undefined,
   shareCacheBuildCount: 0,
+  pluginCacheBuildCount: 0,
   importPackageName: undefined as string | undefined,
   buildEndError: undefined as undefined | string,
 };
@@ -55,6 +56,8 @@ export default {
     state.sourceMtimeMs = entry ? this.share.getCachedFileInfo(entry)?.mtimeMs : undefined;
     state.shareCacheBuildCount = (this.share.cache.get("buildCount") ?? 0) + 1;
     this.share.cache.set("buildCount", state.shareCacheBuildCount);
+    state.pluginCacheBuildCount = (this.cache.get("buildCount") ?? 0) + 1;
+    this.cache.set("buildCount", state.pluginCacheBuildCount);
     state.importPackageName = this.share.importResolver(this.share.projectConfig.moduleName)?.packageName;
   },
 
