@@ -320,7 +320,8 @@ impl SystemApiContract {
 pub(super) struct SystemApiSymbol {
     contract: SystemApiContract,
     members: FxHashMap<Box<str>, SystemApiSymbol>,
-    references: Vec<Vec<Box<str>>>,
+    references: Vec<SystemApiTypeProjection>,
+    type_parameters: Vec<SystemApiTypeParameter>,
     call_signatures: Vec<SystemApiCallSignature>,
     awaited: Option<Box<SystemApiSymbol>>,
     type_table: Option<Arc<FxHashMap<Box<str>, SystemApiSymbol>>>,
@@ -331,6 +332,7 @@ impl PartialEq for SystemApiSymbol {
         self.contract == other.contract
             && self.members == other.members
             && self.references == other.references
+            && self.type_parameters == other.type_parameters
             && self.call_signatures == other.call_signatures
             && self.awaited == other.awaited
     }
@@ -343,6 +345,7 @@ impl SystemApiSymbol {
         self.contract.is_empty()
             && self.members.is_empty()
             && self.references.is_empty()
+            && self.type_parameters.is_empty()
             && self.call_signatures.is_empty()
             && self.awaited.is_none()
     }
@@ -356,6 +359,9 @@ impl SystemApiSymbol {
             if !self.references.contains(reference) {
                 self.references.push(reference.clone());
             }
+        }
+        if self.type_parameters.is_empty() {
+            self.type_parameters.clone_from(&other.type_parameters);
         }
         for signature in &other.call_signatures {
             if !self.call_signatures.contains(signature) {
@@ -408,7 +414,7 @@ impl SystemApiSymbol {
     fn resolved_member_with(
         &self,
         name: &str,
-        active_references: &mut FxHashSet<Vec<Box<str>>>,
+        active_references: &mut FxHashSet<SystemApiTypeProjection>,
     ) -> Option<Self> {
         let mut result = self.members.get(name).cloned();
         for reference in &self.references {
@@ -416,12 +422,16 @@ impl SystemApiSymbol {
                 continue;
             }
             let referenced_member = self.type_table.as_ref().and_then(|table| {
-                let root = reference.first()?;
+                let SystemApiTypeProjection::Named { path, arguments } = reference else {
+                    return None;
+                };
+                let root = path.first()?;
                 let mut target = table.get(root)?.clone();
                 target.type_table = Some(Arc::clone(table));
-                for segment in &reference[1..] {
+                for segment in &path[1..] {
                     target = target.resolved_member_with(segment, active_references)?;
                 }
+                target = target.instantiate(arguments);
                 target.resolved_member_with(name, active_references)
             });
             active_references.remove(reference);
@@ -441,9 +451,10 @@ impl SystemApiSymbol {
 
     fn add_type_projection(&mut self, projection: SystemApiTypeProjection) {
         match projection {
-            SystemApiTypeProjection::Named(path) => {
-                if !path.is_empty() && !self.references.contains(&path) {
-                    self.references.push(path);
+            SystemApiTypeProjection::Named { path, arguments } => {
+                let reference = SystemApiTypeProjection::Named { path, arguments };
+                if !self.references.contains(&reference) {
+                    self.references.push(reference);
                 }
             }
             SystemApiTypeProjection::Awaited(inner) => {
@@ -457,6 +468,39 @@ impl SystemApiSymbol {
                     self.add_type_projection(projection);
                 }
             }
+        }
+    }
+
+    fn instantiate(&self, arguments: &[Option<SystemApiTypeProjection>]) -> Self {
+        if self.type_parameters.is_empty() {
+            return self.clone();
+        }
+        let parameters = &self.type_parameters;
+        let arguments = SystemApiTypeParameter::instantiate_arguments(parameters, arguments);
+        let mut instantiated = self.clone();
+        instantiated.substitute_type_parameters(parameters, &arguments, false);
+        instantiated.type_parameters.clear();
+        instantiated
+    }
+
+    fn substitute_type_parameters(
+        &mut self,
+        parameters: &[SystemApiTypeParameter],
+        arguments: &[Option<SystemApiTypeProjection>],
+        protect_own_parameters: bool,
+    ) {
+        let protected = protect_own_parameters.then_some(self.type_parameters.as_slice());
+        for reference in &mut self.references {
+            *reference = reference.substitute_parameters(parameters, arguments, protected);
+        }
+        for signature in &mut self.call_signatures {
+            signature.substitute_outer(parameters, arguments);
+        }
+        for member in self.members.values_mut() {
+            member.substitute_type_parameters(parameters, arguments, true);
+        }
+        if let Some(awaited) = self.awaited.as_deref_mut() {
+            awaited.substitute_type_parameters(parameters, arguments, true);
         }
     }
 
@@ -510,11 +554,7 @@ impl SystemApiCallSignature {
         Self {
             min_arguments,
             max_arguments,
-            type_parameters: type_parameters
-                .into_iter()
-                .flat_map(|parameters| parameters.params.iter())
-                .map(SystemApiTypeParameter::new)
-                .collect(),
+            type_parameters: SystemApiTypeParameter::from_declaration(type_parameters),
             result: return_type
                 .and_then(|annotation| SystemApiTypeProjection::new(&annotation.type_annotation)),
         }
@@ -539,20 +579,20 @@ impl SystemApiCallSignature {
         result
     }
 
-    fn type_argument<'a>(
-        &'a self,
-        name: &str,
-        call: &'a SystemApiCall,
-    ) -> Option<&'a SystemApiTypeProjection> {
-        let (index, parameter) = self
-            .type_parameters
-            .iter()
-            .enumerate()
-            .find(|(_, parameter)| parameter.name.as_ref() == name)?;
-        call.type_arguments
-            .get(index)
-            .and_then(Option::as_ref)
-            .or(parameter.default.as_ref())
+    fn substitute_outer(
+        &mut self,
+        parameters: &[SystemApiTypeParameter],
+        arguments: &[Option<SystemApiTypeProjection>],
+    ) {
+        if let Some(result) = self.result.as_mut() {
+            *result =
+                result.substitute_parameters(parameters, arguments, Some(&self.type_parameters));
+        }
+        for parameter in &mut self.type_parameters {
+            if let Some(default) = parameter.default.as_mut() {
+                *default = default.substitute_parameters(parameters, arguments, None);
+            }
+        }
     }
 }
 
@@ -571,6 +611,35 @@ impl SystemApiTypeParameter {
                 .as_ref()
                 .and_then(SystemApiTypeProjection::new),
         }
+    }
+
+    fn from_declaration(declaration: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<Self> {
+        declaration
+            .into_iter()
+            .flat_map(|parameters| parameters.params.iter())
+            .map(Self::new)
+            .collect()
+    }
+
+    fn instantiate_arguments(
+        parameters: &[Self],
+        explicit: &[Option<SystemApiTypeProjection>],
+    ) -> Vec<Option<SystemApiTypeProjection>> {
+        let mut arguments = Vec::with_capacity(parameters.len());
+        for (index, parameter) in parameters.iter().enumerate() {
+            let argument = explicit
+                .get(index)
+                .and_then(Option::as_ref)
+                .cloned()
+                .or_else(|| {
+                    parameter
+                        .default
+                        .as_ref()
+                        .map(|default| default.substitute_parameters(parameters, &arguments, None))
+                });
+            arguments.push(argument);
+        }
+        arguments
     }
 }
 
@@ -924,6 +993,8 @@ impl<'a> SystemApiDeclarationCollector<'a> {
             Declaration::TSTypeAliasDeclaration(alias) => {
                 let mut symbol =
                     self.symbol_for_spans(alias.id.name.as_str(), [wrapper_span, Some(alias.span)]);
+                symbol.type_parameters =
+                    SystemApiTypeParameter::from_declaration(alias.type_parameters.as_deref());
                 if let Some(projection) = SystemApiTypeProjection::new(&alias.type_annotation) {
                     symbol.add_type_projection(projection);
                 }
@@ -1039,9 +1110,14 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                 .map_or("unnamed", |identifier| identifier.name.as_str()),
             [wrapper_span, Some(class.span)],
         );
+        symbol.type_parameters =
+            SystemApiTypeParameter::from_declaration(class.type_parameters.as_deref());
         if let Some(heritage) = &class.heritage {
-            if let Some(reference) = SystemApiExpressionPath::new(&heritage.expression) {
-                symbol.references.push(reference.path);
+            if let Some(reference) = SystemApiTypeProjection::from_expression_reference(
+                &heritage.expression,
+                heritage.type_arguments.as_deref(),
+            ) {
+                symbol.references.push(reference);
             }
         }
         for element in &class.body.body {
@@ -1093,10 +1169,18 @@ impl<'a> SystemApiDeclarationCollector<'a> {
             interface.id.name.as_str(),
             [wrapper_span, Some(interface.span)],
         );
+        symbol.type_parameters =
+            SystemApiTypeParameter::from_declaration(interface.type_parameters.as_deref());
         for heritage in &interface.extends {
-            symbol
-                .references
-                .push(SystemApiTypeName::new(&heritage.type_name).path());
+            let path = SystemApiTypeName::new(&heritage.type_name).path();
+            if !path.is_empty() {
+                symbol.references.push(SystemApiTypeProjection::Named {
+                    path,
+                    arguments: SystemApiTypeProjection::arguments(
+                        heritage.type_arguments.as_deref(),
+                    ),
+                });
+            }
         }
         for signature in &interface.body.body {
             match signature {
@@ -1372,9 +1456,12 @@ impl<'a> SystemApiSinceWhitelist<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum SystemApiTypeProjection {
-    Named(Vec<Box<str>>),
+    Named {
+        path: Vec<Box<str>>,
+        arguments: Vec<Option<SystemApiTypeProjection>>,
+    },
     Awaited(Box<SystemApiTypeProjection>),
     Composite(Vec<SystemApiTypeProjection>),
 }
@@ -1395,7 +1482,10 @@ impl SystemApiTypeProjection {
                         .and_then(Self::new)?;
                     Some(Self::Awaited(Box::new(inner)))
                 } else {
-                    (!path.is_empty()).then_some(Self::Named(path))
+                    (!path.is_empty()).then(|| Self::Named {
+                        path,
+                        arguments: Self::arguments(reference.type_arguments.as_deref()),
+                    })
                 }
             }
             TSType::TSParenthesizedType(parenthesized) => Self::new(&parenthesized.type_annotation),
@@ -1417,19 +1507,96 @@ impl SystemApiTypeProjection {
     }
 
     fn substitute(&self, signature: &SystemApiCallSignature, call: &SystemApiCall) -> Self {
+        let arguments = SystemApiTypeParameter::instantiate_arguments(
+            &signature.type_parameters,
+            &call.type_arguments,
+        );
+        self.substitute_parameters(&signature.type_parameters, &arguments, None)
+    }
+
+    fn substitute_parameters(
+        &self,
+        parameters: &[SystemApiTypeParameter],
+        arguments: &[Option<SystemApiTypeProjection>],
+        protected: Option<&[SystemApiTypeParameter]>,
+    ) -> Self {
         match self {
-            Self::Named(path) if path.len() == 1 => signature
-                .type_argument(path[0].as_ref(), call)
-                .map_or_else(|| self.clone(), Clone::clone),
-            Self::Named(_) => self.clone(),
-            Self::Awaited(inner) => Self::Awaited(Box::new(inner.substitute(signature, call))),
+            Self::Named {
+                path,
+                arguments: nested,
+            } if path.len() == 1
+                && !protected.is_some_and(|protected| {
+                    protected.iter().any(|parameter| parameter.name == path[0])
+                }) =>
+            {
+                parameters
+                    .iter()
+                    .position(|parameter| parameter.name == path[0])
+                    .and_then(|index| arguments.get(index))
+                    .and_then(Option::as_ref)
+                    .map_or_else(
+                        || Self::Named {
+                            path: path.clone(),
+                            arguments: nested
+                                .iter()
+                                .map(|argument| {
+                                    argument.as_ref().map(|argument| {
+                                        argument
+                                            .substitute_parameters(parameters, arguments, protected)
+                                    })
+                                })
+                                .collect(),
+                        },
+                        Clone::clone,
+                    )
+            }
+            Self::Named {
+                path,
+                arguments: nested,
+            } => Self::Named {
+                path: path.clone(),
+                arguments: nested
+                    .iter()
+                    .map(|argument| {
+                        argument.as_ref().map(|argument| {
+                            argument.substitute_parameters(parameters, arguments, protected)
+                        })
+                    })
+                    .collect(),
+            },
+            Self::Awaited(inner) => Self::Awaited(Box::new(
+                inner.substitute_parameters(parameters, arguments, protected),
+            )),
             Self::Composite(projections) => Self::Composite(
                 projections
                     .iter()
-                    .map(|projection| projection.substitute(signature, call))
+                    .map(|projection| {
+                        projection.substitute_parameters(parameters, arguments, protected)
+                    })
                     .collect(),
             ),
         }
+    }
+
+    fn arguments(
+        arguments: Option<&oxc_ast::ast::TSTypeParameterInstantiation<'_>>,
+    ) -> Vec<Option<Self>> {
+        arguments
+            .into_iter()
+            .flat_map(|arguments| arguments.params.iter())
+            .map(Self::new)
+            .collect()
+    }
+
+    fn from_expression_reference(
+        expression: &Expression<'_>,
+        arguments: Option<&oxc_ast::ast::TSTypeParameterInstantiation<'_>>,
+    ) -> Option<Self> {
+        let path = SystemApiExpressionPath::new(expression)?.path;
+        (!path.is_empty()).then(|| Self::Named {
+            path,
+            arguments: Self::arguments(arguments),
+        })
     }
 }
 
