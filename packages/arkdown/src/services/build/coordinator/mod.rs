@@ -64,7 +64,6 @@ use super::bundle_plan::{
 };
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use super::har_dedup::HarDedupProjectPlan;
-use super::har_importee_cache::HarImporteeCache;
 use super::hot_reload::{
   HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
   ReloadResourceTaskPlan,
@@ -127,7 +126,9 @@ use arkdown::plugins::ets_transform::{
   TransformSourceSnapshot,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
-use arkdown_cache::{BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey};
+use arkdown_cache::{
+  BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey, HarImporteeCache,
+};
 use arkdown_config::build_profile::{
   parse_api_version, BuildOptionProfileInventory, EffectiveModuleBuildOptionResolver,
   EffectiveTargetConfig,
