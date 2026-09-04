@@ -53,8 +53,7 @@ enum Commands {
   BuildInfo(cmd::build_info::BuildInfoArgs),
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
   if let Err(error) = arkdown_napi::RuntimeObservability::install_cli() {
     eprintln!("failed to install arkdown tracing: {error}");
   }
@@ -65,7 +64,11 @@ async fn main() {
 
   let cli = Cli::parse();
   let result: anyhow::Result<()> = match cli.command {
-    Commands::Build(args) => cmd::build::BuildCommand::new(args).execute().await,
+    Commands::Build(args) => tokio::runtime::Builder::new_multi_thread()
+      .enable_all()
+      .build()
+      .map_err(anyhow::Error::from)
+      .and_then(|runtime| runtime.block_on(cmd::build::BuildCommand::new(args).execute())),
     Commands::Clean(args) => cmd::clean::run(args),
     Commands::Check(args) => cmd::check::run(args),
     Commands::DumpConfig(args) => cmd::dump_config::run(args),

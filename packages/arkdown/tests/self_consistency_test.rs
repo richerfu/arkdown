@@ -188,6 +188,7 @@ impl SelfConsistencyOracle {
         mode: "debug".to_string(),
         analyze: Default::default(),
         arkts_version: arkdown_core::ArktsLanguageVersion::default(),
+        ohpm_mode: Default::default(),
         module: None,
         product: None,
         project: Some(project_path.to_path_buf()),

@@ -21,6 +21,17 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
 
   let temp = tempfile::tempdir().expect("temporary semantic-check fixture");
   copy_fixture(&fixture, temp.path()).expect("copy minimal HAP fixture");
+  fs::write(
+    temp.path().join("oh-package.json5"),
+    r#"{
+  "modelVersion": "6.0.0",
+  "description": "Isolated semantic-check fixture.",
+  "dependencies": {},
+  "devDependencies": {}
+}
+"#,
+  )
+  .expect("remove unrelated test-runner dependency from semantic-check fixture");
   let source = temp.path().join("entry/src/main/ets/pages/Index.ets");
   let original = fs::read_to_string(&source).expect("read copied ArkTS source");
   fs::write(
