@@ -4,6 +4,7 @@
 //! owns Rust build planning and orchestration without depending on N-API or
 //! exposing argv/process lifecycle behavior.
 
+pub mod bundle_plan;
 pub mod code_resource;
 pub mod device_test;
 pub mod har_dedup;

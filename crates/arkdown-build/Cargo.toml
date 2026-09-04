@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 arkdown = { workspace = true }
+arkdown-config = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-ets-transform = { workspace = true }
 arkdown-pack = { workspace = true }
@@ -23,6 +24,7 @@ json5 = { workspace = true }
 jsonschema = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
+rolldown_plugin = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
