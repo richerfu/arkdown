@@ -12,12 +12,14 @@ arkdown-abc = { workspace = true }
 arkdown-config = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-ets-transform = { workspace = true }
+arkdown-native = { workspace = true }
 arkdown-pack = { workspace = true }
 arkdown-path = { workspace = true }
 arkdown-profile = { workspace = true }
 arkdown-session = { workspace = true }
 arkdown-sign = { workspace = true }
 arkdown-watcher = { workspace = true }
+dunce = { workspace = true }
 fast-glob = { workspace = true }
 fs-err = { workspace = true }
 globset = { workspace = true }

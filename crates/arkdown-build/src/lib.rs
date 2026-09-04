@@ -5,6 +5,9 @@
 //! exposing argv/process lifecycle behavior.
 
 pub mod bundle_plan;
+pub mod clean;
+#[cfg(test)]
+mod clean_tests;
 pub mod code_resource;
 pub mod device_test;
 pub mod har_dedup;

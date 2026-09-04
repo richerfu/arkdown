@@ -321,6 +321,20 @@ impl DeviceTestExecutionPlan {
     }
 }
 
+const DEVICE_COVERAGE_COMMAND_RUNNER: &str = r#"
+const commandLine = require(process.argv[1]);
+const request = JSON.parse(process.argv[2]);
+const logger = {
+  debug: (...args) => process.env.ARKDOWN_LOG ? console.error(...args) : undefined,
+  info: (...args) => console.error(...args),
+  warn: (...args) => console.error(...args),
+  error: (...args) => console.error(...args),
+};
+commandLine.executeCoverageOhosTest({ ...request, logger })
+  .then(() => process.exit(0))
+  .catch((error) => { console.error(error && error.stack || error); process.exit(1); });
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::DeviceTestExecutionPlan;
@@ -337,17 +351,3 @@ mod tests {
         );
     }
 }
-
-const DEVICE_COVERAGE_COMMAND_RUNNER: &str = r#"
-const commandLine = require(process.argv[1]);
-const request = JSON.parse(process.argv[2]);
-const logger = {
-  debug: (...args) => process.env.ARKDOWN_LOG ? console.error(...args) : undefined,
-  info: (...args) => console.error(...args),
-  warn: (...args) => console.error(...args),
-  error: (...args) => console.error(...args),
-};
-commandLine.executeCoverageOhosTest({ ...request, logger })
-  .then(() => process.exit(0))
-  .catch((error) => { console.error(error && error.stack || error); process.exit(1); });
-"#;
