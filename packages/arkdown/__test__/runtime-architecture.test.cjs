@@ -102,6 +102,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
     'services/build_info.rs',
     'services/clean.rs',
     'services/native_build',
+    'services/package_resolution.rs',
   ]) {
     assert.equal(fs.existsSync(path.join(sourceRoot, removed)), false, `${removed} must stay deleted`)
   }

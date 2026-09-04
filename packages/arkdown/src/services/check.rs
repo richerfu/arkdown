@@ -17,7 +17,9 @@ use super::build::coordinator::TransformSourceSnapshotBuilder;
 use super::ets_checker::{
   SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder, SdkEtsCheckerRunner,
 };
-use super::package_resolution::{LocalPackageSourceRootInventory, ModulePackageResolutionPlanner};
+use arkdown_build::package_resolution::{
+  LocalPackageSourceRootInventory, ModulePackageResolutionPlanner,
+};
 
 #[derive(Debug)]
 pub struct CheckRequest {
