@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use arkdown_session::SdkEs2abcOptionSnapshot;
 
-use crate::cmd::build::bytecode::driver::{Ts2abcOptions, Ts2abcOutput};
-use crate::cmd::build::bytecode::error::Ts2abcError;
+use crate::bytecode::driver::{Ts2abcOptions, Ts2abcOutput};
+use crate::bytecode::error::Ts2abcError;
 
 // ---------------------------------------------------------------------------
 // BytecodeBackend trait
@@ -31,8 +31,8 @@ use crate::cmd::build::bytecode::error::Ts2abcError;
 ///
 /// Corresponds to `load-sdk-functions.js::genAbc` backend dispatch in hvigor.
 pub(crate) trait BytecodeBackend: Send + Sync {
-  /// Compile the given options to ABC bytecode.
-  fn compile(&self, options: &Ts2abcOptions) -> Result<Ts2abcOutput, Ts2abcError>;
+    /// Compile the given options to ABC bytecode.
+    fn compile(&self, options: &Ts2abcOptions) -> Result<Ts2abcOutput, Ts2abcError>;
 }
 
 /// The SDK `es2abc` subprocess backend.
@@ -47,37 +47,37 @@ pub(crate) trait BytecodeBackend: Send + Sync {
 /// is provided.
 #[derive(Debug, Clone)]
 pub(crate) struct SdkEs2abcBackend {
-  es2abc_path: PathBuf,
-  es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
-  input_file_list: Option<PathBuf>,
+    es2abc_path: PathBuf,
+    es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
+    input_file_list: Option<PathBuf>,
 }
 
 impl SdkEs2abcBackend {
-  /// Create a new backend pointing to the given `es2abc` binary.
-  pub(crate) fn new(es2abc_path: PathBuf, es2abc_options: Arc<SdkEs2abcOptionSnapshot>) -> Self {
-    Self {
-      es2abc_path,
-      es2abc_options,
-      input_file_list: None,
+    /// Create a new backend pointing to the given `es2abc` binary.
+    pub(crate) fn new(es2abc_path: PathBuf, es2abc_options: Arc<SdkEs2abcOptionSnapshot>) -> Self {
+        Self {
+            es2abc_path,
+            es2abc_options,
+            input_file_list: None,
+        }
     }
-  }
 
-  /// Set an explicit input file list path (skips per-input filesInfo
-  /// generation).
-  pub(crate) fn with_input_file_list(mut self, input_file_list: Option<PathBuf>) -> Self {
-    self.input_file_list = input_file_list;
-    self
-  }
+    /// Set an explicit input file list path (skips per-input filesInfo
+    /// generation).
+    pub(crate) fn with_input_file_list(mut self, input_file_list: Option<PathBuf>) -> Self {
+        self.input_file_list = input_file_list;
+        self
+    }
 }
 
 impl BytecodeBackend for SdkEs2abcBackend {
-  fn compile(&self, options: &Ts2abcOptions) -> Result<Ts2abcOutput, Ts2abcError> {
-    // Delegate to the driver's implementation.
-    let backend = crate::cmd::build::bytecode::driver::SdkEs2abcBackend::new(
-      self.es2abc_path.clone(),
-      Arc::clone(&self.es2abc_options),
-    )
-    .with_input_file_list(self.input_file_list.clone());
-    crate::cmd::build::bytecode::driver::BytecodeBackend::compile(&backend, options)
-  }
+    fn compile(&self, options: &Ts2abcOptions) -> Result<Ts2abcOutput, Ts2abcError> {
+        // Delegate to the driver's implementation.
+        let backend = crate::bytecode::driver::SdkEs2abcBackend::new(
+            self.es2abc_path.clone(),
+            Arc::clone(&self.es2abc_options),
+        )
+        .with_input_file_list(self.input_file_list.clone());
+        crate::bytecode::driver::BytecodeBackend::compile(&backend, options)
+    }
 }

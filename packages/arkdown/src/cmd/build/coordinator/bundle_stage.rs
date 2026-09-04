@@ -325,12 +325,13 @@ impl BuildCoordinator {
       let unit_test_coverage_cache_ready = !matches!(config.output_target, OutputTarget::Test)
         || !coverage_mode
         || module_layout.test_init_coverage_json().is_file();
+      let aot_output_dir = module_layout.aot_output_dir();
       let aot_cache_ready = AotArtifactWriter::new(
         &module.name,
         loader_json.an_build_mode.as_deref(),
         loader_json.an_build_out_put.as_deref(),
         loader_json.ap_path.as_deref(),
-        &module_layout,
+        &aot_output_dir,
         coverage_mode,
       )
       .cache_ready();

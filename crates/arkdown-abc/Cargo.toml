@@ -1,0 +1,20 @@
+[package]
+name = "arkdown-abc"
+version = "0.1.0"
+edition = "2021"
+description = "Typed ABC bytecode compilation for arkdown builds"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+arkdown-core = { workspace = true }
+arkdown-path = { workspace = true }
+arkdown-session = { workspace = true }
+fs-err = { workspace = true }
+rustc-hash = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

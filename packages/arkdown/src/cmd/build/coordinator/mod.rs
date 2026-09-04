@@ -30,6 +30,10 @@ use indexmap::IndexMap;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use arkdown_abc::aot::AotArtifactWriter;
+use arkdown_abc::bytecode::{
+  BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompiler,
+};
 use arkdown_core::{
   ArkdownConfig, ArktsLanguageVersion, BuildMode, HapManifest, HarArtifactType, ModuleConfig,
   ObfuscationConfig, OhosModuleType, OutputTarget,
@@ -51,13 +55,11 @@ use arkdown_session::{
 };
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
-use super::aot::AotArtifactWriter;
 use super::args::{AbcBackendChoice, BuildRequest, HvigorRuntimeProperties, NativeTaskRoot};
 use super::bundle_plan::{
   make_bundle_plan, BundlePackageOutput, BundlePlanPackageInfo, BundleRuntimePackageInfoBuilder,
   BundleStage, BundleStageInput, BundleStageOutput, HvigorCompileTarget,
 };
-use super::bytecode::{BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompiler};
 use super::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use super::bytecode_stage::{BytecodeStage, BytecodeStageInput};
 use super::code_resource::CodeResourceCopyPlan;

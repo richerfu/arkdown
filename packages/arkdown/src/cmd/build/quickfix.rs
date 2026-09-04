@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use arkdown_abc::bytecode::{Ts2abcReloadMode, Ts2abcReloadPlan};
 use arkdown_core::{HvigorModuleSourceFile, NativeDebugSymbolOption};
 use arkdown_pack::{AppPackageRunner, HqfPackagePlan};
 use arkdown_path::lexical_normalize;
@@ -18,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::args::NativeTaskRoot;
-use super::bytecode::{Ts2abcReloadMode, Ts2abcReloadPlan};
 use super::layout::ModuleBuildLayout;
 
 const INITIAL_PATCH_VERSION: u64 = 3_000_000;

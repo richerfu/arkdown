@@ -12,6 +12,7 @@ members = [
     "crates/arkdown-profile",
     "crates/arkdown-pack",
     "crates/arkdown-cache",
+    "crates/arkdown-abc",
     "crates/arkdown-sign",
     "crates/arkdown-obfuscate",
     "crates/arkdown-watcher",
@@ -26,6 +27,7 @@ members = [
 [workspace.dependencies]
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
+arkdown-abc = { path = "crates/arkdown-abc" }
 arkdown-cache = { path = "crates/arkdown-cache" }
 arkdown-config = { path = "crates/arkdown-config" }
 arkdown-core = { path = "crates/arkdown-core" }

@@ -371,12 +371,13 @@ impl BuildCoordinator {
       bytecode_result?;
 
       if quickfix_task_plan.is_none() && hot_reload_task_plan.is_none() {
+        let aot_output_dir = module_layout.aot_output_dir();
         AotArtifactWriter::new(
           &module.name,
           loader_json.an_build_mode.as_deref(),
           loader_json.an_build_out_put.as_deref(),
           loader_json.ap_path.as_deref(),
-          &module_layout,
+          &aot_output_dir,
           coverage_mode,
         )
         .generate(&bundle_out.bundle_output.modules_abc_path)?;

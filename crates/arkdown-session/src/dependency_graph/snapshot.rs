@@ -437,9 +437,7 @@ impl DependencyGraphSnapshot {
                     Some((matched_root.components().count(), &edge.package_name))
                 })
                 .max_by_key(|(depth, _)| *depth);
-            let Some((_, package_name)) = matched else {
-                return None;
-            };
+            let (_, package_name) = matched?;
             packages.insert(package_name.clone());
         }
         saw_path.then(|| packages.into_iter().collect())

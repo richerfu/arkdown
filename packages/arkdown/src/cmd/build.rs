@@ -1,10 +1,6 @@
-mod aot;
-#[cfg(test)]
-mod aot_tests;
 pub mod app_coordinator;
 pub mod args;
 mod bundle_plan;
-pub(crate) mod bytecode;
 mod bytecode_har_declaration;
 mod bytecode_stage;
 mod code_resource;

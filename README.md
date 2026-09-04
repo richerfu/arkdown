@@ -13,15 +13,18 @@ flowchart LR
     C --> D["Resolve and transform<br/>arkdown-resolver + OXC"]
     D --> E["Bundle<br/>Rolldown + built-in plugins"]
     B --> F["Profile and resources"]
-    E --> G["ABC bytecode"]
+    E --> G["arkdown-abc<br/>ABC bytecode"]
     F --> H["Package and sign"]
     G --> H
     H --> I["HAP / HSP / HAR"]
 ```
 
-The Rust crates under `crates/` are internal implementations of the individual build domains.
-`packages/arkdown` owns the public entry point and performs coarse build orchestration through
-`BuildCoordinator`.
+The Rust crates under `crates/` are internal implementations of the individual build domains;
+`arkdown-abc` owns typed bytecode plans, SDK handoff manifests, and `es2abc` execution.
+`packages/arkdown` owns the public JS/N-API entry point and currently performs coarse build
+orchestration through `BuildCoordinator` while that application layer migrates to `arkdown-build`.
+The npm JavaScript CLI is the only command-line entry: Rust crates must not add binaries, argv
+parsers, or command-line lifecycle APIs.
 
 ## Benchmark
 

@@ -16,6 +16,7 @@ napi-derive = { workspace = true }
 
 # arkdown core crates (workspace = true)
 arkdown = { workspace = true }
+arkdown-abc = { workspace = true }
 arkdown-cache = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-config = { workspace = true }
