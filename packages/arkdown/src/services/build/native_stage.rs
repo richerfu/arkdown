@@ -1,50 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use arkdown_build::native_dependency::{NativeDependencyStageInput, NativeDependencyStagePlan};
 use arkdown_config::build_profile::EffectiveNativeBuildOption;
-use arkdown_core::{ArkdownConfig, ModuleConfig};
-use arkdown_session::ModuleCompileContext;
-
-use arkdown_native::{
-  NativeCmakeLocalDependency, NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo,
-};
+use arkdown_native::{NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo};
 
 use super::coordinator::BuildTaskLifecycle;
-
-/// One local module whose native outputs are required by a dependent module.
-///
-/// Latest hvigor reaches this module through the cross-node edges declared by
-/// `ConfigureCmake.initTaskDepends()` and
-/// `NinjaCA.getModuleDependencies(...DoNativeStrip)`. The ordinary artifact
-/// module set must remain unchanged; this input represents only the native
-/// dependency boundary.
-pub(super) struct NativeDependencyStageInput {
-  pub(super) module: ModuleConfig,
-  pub(super) module_context: ModuleCompileContext,
-  pub(super) config: Arc<ArkdownConfig>,
-  pub(super) target_name: String,
-  pub(super) local_dependencies: Arc<[NativeCmakeLocalDependency]>,
-}
-
-/// Dependency-first native module waves for one build invocation.
-///
-/// Waves are kept explicit even though the current executor runs them
-/// sequentially. CMake projects can share generated dependency packages, so
-/// parallel execution requires a disjoint-output proof before it is enabled.
-#[derive(Default)]
-pub(super) struct NativeDependencyStagePlan {
-  waves: Vec<Vec<NativeDependencyStageInput>>,
-}
-
-impl NativeDependencyStagePlan {
-  pub(super) fn new(waves: Vec<Vec<NativeDependencyStageInput>>) -> Self {
-    Self { waves }
-  }
-
-  pub(super) fn is_empty(&self) -> bool {
-    self.waves.is_empty()
-  }
-}
 
 /// Executes the hvigor local-native dependency boundary before dependent
 /// module stages consume its code model or ProcessLibs output.
@@ -68,7 +29,7 @@ impl<'a> NativeDependencyStageExecutor<'a> {
   }
 
   pub(super) async fn execute(&mut self, plan: &NativeDependencyStagePlan) -> Result<()> {
-    for wave in &plan.waves {
+    for wave in plan.waves() {
       for input in wave {
         self.execute_module(input).await?;
       }

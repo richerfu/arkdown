@@ -46,14 +46,12 @@ use arkdown_profile::{
   InsightIntentProfileInput, InsightIntentProfileProcessor,
 };
 use arkdown_session::dependency_graph::snapshot::{
-  DependencyEdgeKind, DependencyGraphSnapshot, DependencyNodeSnapshot, DependencyNodeType,
+  DependencyEdgeKind, DependencyNodeSnapshot, DependencyNodeType,
 };
 use arkdown_session::{BuildSession, ModuleCompileContext, ProjectSnapshot, SdkToolKind};
 use arkdown_sign::{HarSignBackendRunner, SignBackendRunner};
 
-use super::native_stage::{
-  NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
-};
+use super::native_stage::NativeDependencyStageExecutor;
 use super::static_arkts::{StaticArktsCompileInput, StaticArktsCompiler};
 use super::watch_stage::{WatchStage, WatchStageInput};
 use arkdown::plugins::factory::{
@@ -96,9 +94,7 @@ use arkdown_build::quickfix::{
   QuickFixTaskPlan, QuickFixVersionStore,
 };
 use arkdown_build::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
-use arkdown_build::request::{
-  AbcBackendChoice, BuildRequest, HvigorRuntimeProperties, NativeTaskRoot,
-};
+use arkdown_build::request::{AbcBackendChoice, BuildRequest, NativeTaskRoot};
 use arkdown_build::source_snapshot::TransformSourceSnapshotBuilder;
 
 use crate::progress::Progress;
@@ -124,10 +120,7 @@ use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunne
 use arkdown_cache::{
   BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey, HarImporteeCache,
 };
-use arkdown_config::build_profile::{
-  parse_api_version, BuildOptionProfileInventory, EffectiveModuleBuildOptionResolver,
-  EffectiveTargetConfig,
-};
+use arkdown_config::build_profile::{parse_api_version, EffectiveTargetConfig};
 use arkdown_ets_transform::{
   ArkuiComponentNameCollector, CoverageInstrumenter, HarDeclarationGenerator,
   RolldownEtsTransformPlan,
@@ -145,10 +138,9 @@ use arkdown_pack::{
 };
 use arkdown_profile::{
   BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarDependencyRoot,
-  ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, DependencyCustomTypeInput,
-  FormProfileProcessor, LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput,
-  OhExportsProcessor, PkgContextInfoGenerator, PreloadSystemSoArtifactWriter, PreloadSystemSoPlan,
-  ProfileProcessor,
+  ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, FormProfileProcessor,
+  LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput, OhExportsProcessor,
+  PkgContextInfoGenerator, PreloadSystemSoArtifactWriter, PreloadSystemSoPlan, ProfileProcessor,
 };
 use arkdown_resolver::PackageResolutionPlan;
 use arkdown_resource::{
@@ -159,17 +151,16 @@ use arkdown_resource::{
 mod bundle_stage;
 mod bytecode_stage;
 mod obfuscation;
-mod planning;
 mod plugin_share;
 
-use obfuscation::{
-  ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
-};
-use planning::{
-  copy_tree, BuildTimingProbe, DependencyCustomTypeInputBuilder,
+use arkdown_build::planning::{
+  BuildTimingProbe, DependencyCustomTypeInputBuilder, DirectoryTreeCopier,
   HarDeclarationDependencyPackageInventory, ModuleBuildConfiguration, ModuleTargetSelection,
   NativeCmakeLocalDependencyInventoryBuilder, NativeDependencyStagePlanBuilder,
   TargetBuildExecutionPlan,
+};
+use obfuscation::{
+  ModuleArkguardPlanBuilder, ModuleObfuscationContext, PendingBytecodeObfuscation,
 };
 pub(crate) use plugin_share::{
   HvigorCompilePluginShareBuilder, PluginCacheInvalidationRunner, PluginContextCacheRunner,

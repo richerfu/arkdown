@@ -97,12 +97,12 @@ impl BuildCoordinator {
       // ets assets (compiled ABC) → fastApp/ets
       let ets_assets = module_layout.loader_out_dir().join("ets");
       if ets_assets.is_dir() {
-        copy_tree(&ets_assets, &fast_app.join("ets"))?;
+        DirectoryTreeCopier::new(&ets_assets, &fast_app.join("ets")).copy()?;
       }
       // compiled resources → fastApp/resources
       let resource_dir = module_layout.res_resources_dir();
       if resource_dir.is_dir() {
-        copy_tree(&resource_dir, &fast_app.join("resources"))?;
+        DirectoryTreeCopier::new(&resource_dir, &fast_app.join("resources")).copy()?;
       }
       // resources.index → fastApp/resources.index
       let resources_index = module_layout.res_resources_index();
