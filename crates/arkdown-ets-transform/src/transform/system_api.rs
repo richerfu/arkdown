@@ -524,6 +524,18 @@ impl SystemApiSymbol {
         Some(result)
     }
 
+    fn call_contract(&self, call: &SystemApiCall) -> Option<SystemApiContract> {
+        let mut matches = self
+            .call_signatures
+            .iter()
+            .filter(|signature| signature.accepts(call.argument_count));
+        let mut contract = matches.next()?.contract.clone();
+        for signature in matches {
+            contract.merge(&signature.contract);
+        }
+        Some(contract)
+    }
+
     fn awaited_result(&self) -> Option<Self> {
         let mut result = self.awaited.as_deref()?.clone();
         result.type_table.clone_from(&self.type_table);
@@ -537,6 +549,7 @@ struct SystemApiCallSignature {
     max_arguments: Option<usize>,
     type_parameters: Vec<SystemApiTypeParameter>,
     result: Option<SystemApiTypeProjection>,
+    contract: SystemApiContract,
 }
 
 impl SystemApiCallSignature {
@@ -544,6 +557,7 @@ impl SystemApiCallSignature {
         type_parameters: Option<&TSTypeParameterDeclaration<'_>>,
         params: &FormalParameters<'_>,
         return_type: Option<&TSTypeAnnotation<'_>>,
+        contract: SystemApiContract,
     ) -> Self {
         let min_arguments = params
             .items
@@ -557,6 +571,7 @@ impl SystemApiCallSignature {
             type_parameters: SystemApiTypeParameter::from_declaration(type_parameters),
             result: return_type
                 .and_then(|annotation| SystemApiTypeProjection::new(&annotation.type_annotation)),
+            contract,
         }
     }
 
@@ -1244,17 +1259,23 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         function: &'program oxc_ast::ast::Function<'program>,
         wrapper_span: Option<Span>,
     ) -> SystemApiSymbol {
-        let mut symbol = self.symbol_for_spans(
-            function
-                .id
-                .as_ref()
-                .map_or("unnamed", |identifier| identifier.name.as_str()),
+        let function_name = function
+            .id
+            .as_ref()
+            .map_or("unnamed", |identifier| identifier.name.as_str());
+        let contract = self.contract_for_spans(
+            &self.function(function_name),
             [wrapper_span, Some(function.span)],
         );
+        let mut symbol = SystemApiSymbol {
+            contract: contract.clone(),
+            ..SystemApiSymbol::default()
+        };
         symbol.call_signatures.push(SystemApiCallSignature::new(
             function.type_parameters.as_deref(),
             &function.params,
             function.return_type.as_deref(),
+            contract,
         ));
         symbol
     }
@@ -1295,10 +1316,9 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         let member_function =
             Self::member_function(owner, &name).unwrap_or_else(|| self.function(&name));
         let member = owner.members.entry(name.into_owned().into()).or_default();
-        member
-            .contract
-            .merge(&self.contract_for_spans(&member_function, [Some(span)]));
-        let signature = SystemApiCallSignature::new(type_parameters, params, return_type);
+        let contract = self.contract_for_spans(&member_function, [Some(span)]);
+        member.contract.merge(&contract);
+        let signature = SystemApiCallSignature::new(type_parameters, params, return_type, contract);
         if !member.call_signatures.contains(&signature) {
             member.call_signatures.push(signature);
         }
@@ -1757,9 +1777,25 @@ impl ImportedSystemApiBindings {
         scoping: &Scoping,
     ) -> Option<SystemApiSymbol> {
         match expression {
-            Expression::CallExpression(call) => self.resolve_value(&call.callee, scoping),
+            Expression::CallExpression(call) => {
+                let mut symbol = self.resolve_value(&call.callee, scoping)?;
+                if !symbol.call_signatures.is_empty() {
+                    symbol.contract = symbol.call_contract(&SystemApiCall {
+                        argument_count: call.arguments.len(),
+                        type_arguments: Vec::new(),
+                    })?;
+                }
+                Some(symbol)
+            }
             Expression::NewExpression(constructor) => {
-                self.resolve_value(&constructor.callee, scoping)
+                let mut symbol = self.resolve_value(&constructor.callee, scoping)?;
+                if !symbol.call_signatures.is_empty() {
+                    symbol.contract = symbol.call_contract(&SystemApiCall {
+                        argument_count: constructor.arguments.len(),
+                        type_arguments: Vec::new(),
+                    })?;
+                }
+                Some(symbol)
             }
             _ => self.resolve_value(expression, scoping),
         }

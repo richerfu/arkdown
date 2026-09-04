@@ -888,6 +888,47 @@ fn arkts11_system_api_selects_overloads_and_unwraps_awaited_generic_results() {
 }
 
 #[test]
+fn arkts11_system_api_selects_overload_contracts_by_arity() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "/** @since 13 */\n\
+             export declare function choose(value: string): void;\n\
+             /** @since 10 */\n\
+             export declare function choose(value: string, mode: number): void;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { choose } from '@ohos.demo';\n\
+         choose('future');\n\
+         choose('supported', 1);\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(
+        since,
+        1,
+        "the selected overload owns its JSDoc contract: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
 fn arkts11_system_api_propagates_generic_arguments_through_named_wrappers() {
     let sdk_root = PathBuf::from("/sdk/api");
     let mut files = rustc_hash::FxHashMap::default();
