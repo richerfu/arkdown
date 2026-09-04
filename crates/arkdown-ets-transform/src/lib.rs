@@ -22,6 +22,7 @@
 
 mod api_transform;
 mod checker;
+pub mod declaration_merge;
 pub mod error;
 mod kit_map;
 mod lazy_import;

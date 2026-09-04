@@ -534,6 +534,15 @@ pub struct ArkOptions {
     /// (`buildOption.arkOptions.bundledDependencies` in hvigor).
     #[serde(default)]
     pub bundled_dependencies: bool,
+    /// Merge every declaration reachable from a HAR/HSP public entry into a
+    /// self-contained declaration bundle.
+    ///
+    /// This is `buildOption.arkOptions.bundle.bundledDeclare` in the SDK
+    /// compiler.  It is deliberately separate from `bundledDependencies`:
+    /// the former controls type declaration flattening, while the latter
+    /// controls ByteCode HAR source embedding.
+    #[serde(default)]
+    pub bundled_declare: bool,
     /// HSP dependencies are embedded into the host package only when this
     /// hvigor switch is explicitly enabled.
     #[serde(default)]

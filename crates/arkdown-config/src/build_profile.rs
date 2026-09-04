@@ -676,6 +676,8 @@ pub struct RawArkOptions {
     #[serde(default)]
     pub bundled_dependencies: Option<bool>,
     #[serde(default)]
+    pub bundle: Option<RawArkBundleOptions>,
+    #[serde(default)]
     pub integrated_hsp: Option<bool>,
     #[serde(default)]
     pub widget: Option<RawWidgetArkOptions>,
@@ -701,6 +703,14 @@ pub struct RawArkOptions {
     pub host_pgo: Option<bool>,
     #[serde(rename = "tscConfig", default)]
     pub tsc_config: Option<RawArkTscConfig>,
+}
+
+/// Raw `arkOptions.bundle` declaration-bundling options.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawArkBundleOptions {
+    #[serde(default)]
+    pub bundled_declare: Option<bool>,
 }
 
 /// Raw `arkOptions.widget` values accepted by hvigor 6.24.3.
@@ -803,6 +813,11 @@ impl<'a> BuildOptionDecoder<'a> {
             support_chunks: options.support_chunks.unwrap_or(false),
             byte_code_har: options.byte_code_har,
             bundled_dependencies: options.bundled_dependencies.unwrap_or(false),
+            bundled_declare: options
+                .bundle
+                .as_ref()
+                .and_then(|bundle| bundle.bundled_declare)
+                .unwrap_or(false),
             integrated_hsp: options.integrated_hsp,
             widget: options
                 .widget
@@ -3081,6 +3096,38 @@ mod tests {
         assert!(ark_options.auto_lazy_import.is_none());
         assert!(ark_options.auto_lazy_filter.is_none());
         assert!(ark_options.expand_import_path.is_none());
+    }
+
+    #[test]
+    fn test_parse_bundled_declaration_option() {
+        let json = r#"{
+            app: {
+                products: [{
+                    name: "default",
+                    bundleName: "com.example.app",
+                    compatibleSdkVersion: "5.0.0(12)",
+                    runtimeOS: "HarmonyOS",
+                    buildOption: {
+                        arkOptions: { bundle: { bundledDeclare: true } }
+                    }
+                }],
+            },
+            modules: [{ name: "library", srcPath: "./library" }]
+        }"#;
+        let profile =
+            RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
+        let decoded = BuildOptionDecoder::new(
+            profile.app.products[0].build_option.as_ref(),
+            std::path::Path::new("/project"),
+            std::path::Path::new("build-profile.json5"),
+        )
+        .decode()
+        .unwrap();
+
+        assert!(decoded
+            .ark_options
+            .as_ref()
+            .is_some_and(|options| options.bundled_declare));
     }
 
     #[test]
