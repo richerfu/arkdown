@@ -48,6 +48,9 @@ impl GeneratedViewpuName {
     pub(crate) const UPDATE_DIRTY_ELEMENTS: &'static str = "updateDirtyElements";
     pub(crate) const GET_ENTRY_NAME: &'static str = "getEntryName";
     pub(crate) const FINALIZE_CONSTRUCTION: &'static str = "finalizeConstruction";
+    pub(crate) const INIT_ALLOW_COMPONENT_FREEZE: &'static str = "initAllowComponentFreeze";
+    pub(crate) const SET_REUSABLE_MEMORY_OPTIMIZATION: &'static str =
+        "__setReusableMemOptStrategy__Internal";
     pub(crate) const SET_INITIALLY_PROVIDED_VALUE: &'static str = "setInitiallyProvidedValue";
     pub(crate) const UPDATE_STATE_VARS: &'static str = "updateStateVars";
     pub(crate) const INIT_PARAM: &'static str = "initParam";
@@ -553,6 +556,38 @@ impl<'a> ViewpuAstBuilder<'a> {
     pub(crate) fn super_call_statement(&self, args: &[&str]) -> Statement<'a> {
         let callee = Expression::new_super(SPAN, &self.ast);
         self.call_expression_statement(callee, self.expressions_from_identifiers(args))
+    }
+
+    pub(crate) fn guarded_super_method_call_statement(
+        &self,
+        method: &str,
+        argument: &Expression<'_>,
+    ) -> Statement<'a> {
+        let available = self.super_computed_member_expression(method);
+        let callable = Expression::new_binary_expression(
+            SPAN,
+            Expression::new_unary_expression(
+                SPAN,
+                UnaryOperator::Typeof,
+                self.super_computed_member_expression(method),
+                &self.ast,
+            ),
+            BinaryOperator::StrictEquality,
+            self.string_expression("function"),
+            &self.ast,
+        );
+        let condition = Expression::new_logical_expression(
+            SPAN,
+            available,
+            LogicalOperator::And,
+            callable,
+            &self.ast,
+        );
+        let call = self.call_expression_statement(
+            self.super_computed_member_expression(method),
+            OxcVec::from_value_in(argument.clone_in(self.allocator), &self.ast),
+        );
+        self.if_statement(condition, OxcVec::from_value_in(call, &self.ast))
     }
 
     pub(crate) fn this_assign_statement(
@@ -1106,6 +1141,16 @@ impl<'a> ViewpuAstBuilder<'a> {
         let object = Expression::new_this_expression(SPAN, &self.ast);
         let property = IdentifierName::new(SPAN, self.allocator.alloc_str(property), &self.ast);
         MemberExpression::new_static_member_expression(SPAN, object, property, false, &self.ast)
+    }
+
+    fn super_computed_member_expression(&self, property: &str) -> Expression<'a> {
+        Expression::from(MemberExpression::new_computed_member_expression(
+            SPAN,
+            Expression::new_super(SPAN, &self.ast),
+            self.string_expression(property),
+            false,
+            &self.ast,
+        ))
     }
 
     fn this_member_assignment_target(&self, property: &str) -> oxc_ast::ast::AssignmentTarget<'a> {

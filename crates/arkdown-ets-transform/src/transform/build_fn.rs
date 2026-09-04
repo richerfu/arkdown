@@ -18,7 +18,7 @@ use arkdown_path::HvigorModulePath;
 
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::source_map::offset_to_line_col;
-use crate::transform::component_analysis::ExtendAttributeIndex;
+use crate::transform::component_analysis::{ExtendAttributeIndex, ExtendAttributeKind};
 use crate::transform::component_meta::{
     ArkuiRuntimeComponentKind, ArkuiRuntimeNames, ComponentMetadata,
 };
@@ -762,6 +762,10 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             }
             Expression::ChainExpression(chain) => match &chain.expression {
                 ChainElement::CallExpression(call) => {
+                    if self.push_optional_builder_method_call(statements, call, allocator, context)
+                    {
+                        return Ok(());
+                    }
                     if self.push_wrapped_builder_chain_call(
                         statements, chain, call, allocator, context,
                     ) {
@@ -783,12 +787,16 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         context: &BuildContext,
     ) -> Result<(), BuildLoweringError> {
         let name = ArkuiCallName::component(&component.callee)?;
+        let component_path = ArkuiCallName::component_path(&component.callee)?;
+        let is_namespace_component = component_path != name;
         // SDK process_component_build.js::getComponentType resolves a known
         // custom component before CUSTOM_BUILDER_METHOD. This matters when an
         // imported component and a local @Builder method share a name:
         // unqualified `Name()` is the component, while `this.Name()` is the
         // builder method.
-        if self.plan.builder_methods.contains(&name) && !self.plan.custom_components.contains(&name)
+        if !is_namespace_component
+            && self.plan.builder_methods.contains(&name)
+            && !self.plan.custom_components.contains(&name)
         {
             if !component.children.is_empty() {
                 return Err(BuildLoweringError::UnsupportedChild);
@@ -804,10 +812,10 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             );
             return Ok(());
         }
-        if self.plan.custom_components.contains(&name) {
+        if self.plan.custom_components.contains(&component_path) || is_namespace_component {
             let source_metadata = self.plan.source_metadata();
             let reuse_id = CustomReuseId::from_component_attrs(component, context);
-            let component_info = self.plan.custom_component_update_props.get(&name);
+            let component_info = self.plan.custom_component_update_props.get(&component_path);
             let builder_param = self.custom_component_builder_param(
                 &name,
                 component,
@@ -825,6 +833,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 statements.extend(CustomComponentStatementEmitter::custom(
                     allocator,
                     &name,
+                    &component.callee,
                     &component.arguments,
                     component_info,
                     builder_param,
@@ -837,6 +846,7 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 statements.extend(CustomComponentStatementEmitter::common_wrapped(
                     allocator,
                     &name,
+                    &component.callee,
                     &component.arguments,
                     component_info,
                     builder_param,
@@ -1099,14 +1109,14 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         }
         let lc = LeafComponent::from_call(call, context)?;
         let resolved_attrs = self.expand_leaf_attributes(&lc.chain_attrs, context)?;
-        if self.plan.custom_components.contains(&lc.name) {
+        if self.plan.custom_components.contains(&lc.path) || lc.path != lc.name {
             let source_metadata = self.plan.source_metadata();
             let base_call = LeafComponent::base_call(call);
             let reuse_id = CustomReuseId::from_leaf_attrs(&resolved_attrs, context);
             let is_reusable_reuse_id_only = self
                 .plan
                 .custom_component_update_props
-                .get(&lc.name)
+                .get(&lc.path)
                 .is_some_and(|info| {
                     info.reusable
                         && resolved_attrs
@@ -1117,8 +1127,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                 statements.extend(CustomComponentStatementEmitter::custom(
                     allocator,
                     &lc.name,
+                    &base_call.callee,
                     &base_call.arguments,
-                    self.plan.custom_component_update_props.get(&lc.name),
+                    self.plan.custom_component_update_props.get(&lc.path),
                     None,
                     reuse_id,
                     base_call.span,
@@ -1135,8 +1146,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     statements.extend(CustomComponentStatementEmitter::custom(
                         allocator,
                         &lc.name,
+                        &base_call.callee,
                         &base_call.arguments,
-                        self.plan.custom_component_update_props.get(&lc.name),
+                        self.plan.custom_component_update_props.get(&lc.path),
                         None,
                         reuse_id,
                         base_call.span,
@@ -1147,8 +1159,9 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
                     statements.extend(CustomComponentStatementEmitter::common_wrapped(
                         allocator,
                         &lc.name,
+                        &base_call.callee,
                         &base_call.arguments,
-                        self.plan.custom_component_update_props.get(&lc.name),
+                        self.plan.custom_component_update_props.get(&lc.path),
                         None,
                         reuse_id,
                         base_call.span,
@@ -1895,6 +1908,33 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         false
     }
 
+    fn push_optional_builder_method_call<'b>(
+        &self,
+        statements: &mut OxcVec<'b, Statement<'b>>,
+        call: &CallExpression<'_>,
+        allocator: &'b Allocator,
+        context: &BuildContext,
+    ) -> bool {
+        if !call.optional {
+            return false;
+        }
+        let Some(name) =
+            ArkuiCallName::builder_method_member(&call.callee, &self.plan.builder_methods)
+        else {
+            return false;
+        };
+        statements.push(
+            BuilderMethodCallEmitter::new(
+                BuilderMethodReceiver::This,
+                &name,
+                &call.arguments,
+                context,
+            )
+            .optional_statement(&AstBuilder::new(allocator), allocator),
+        );
+        true
+    }
+
     fn push_wrapped_builder_call<'b>(
         &self,
         statements: &mut OxcVec<'b, Statement<'b>>,
@@ -2289,8 +2329,12 @@ impl BuildContext {
             .is_builder_attribute_method(component_name, method_name)
     }
 
-    fn is_extend_attribute(&self, component_name: &str, attr_name: &str) -> bool {
-        self.extend_attributes.contains(component_name, attr_name)
+    fn extend_attribute_kind(
+        &self,
+        component_name: &str,
+        attr_name: &str,
+    ) -> Option<ExtendAttributeKind> {
+        self.extend_attributes.kind(component_name, attr_name)
     }
 
     fn is_builder_attribute_without_key(&self, attr_name: &str) -> bool {

@@ -6,6 +6,7 @@ use super::*;
 /// Extracted representation of a leaf component call and its attribute chain.
 pub(super) struct LeafComponent<'a> {
     pub(super) name: String,
+    pub(super) path: String,
     pub(super) component_span: Span,
     pub(super) create_arguments: Vec<&'a Argument<'a>>,
     pub(super) chain_attrs: Vec<LeafAttribute<'a>>,
@@ -229,6 +230,7 @@ impl<'a> LeafComponent<'a> {
             Expression::Identifier(_) => {
                 let name = ArkuiCallName::component(&call.callee)?;
                 Ok(Self {
+                    path: name.clone(),
                     name,
                     component_span: call.callee.span(),
                     create_arguments: call.arguments.iter().collect(),
@@ -244,7 +246,13 @@ impl<'a> LeafComponent<'a> {
                             .push(LeafAttribute::from_call(attr_name, call, context));
                         Ok(leaf)
                     }
-                    _ => Err(BuildLoweringError::UnsupportedCallee),
+                    _ => Ok(Self {
+                        name: attr_name,
+                        path: ArkuiCallName::component_path(&call.callee)?,
+                        component_span: call.callee.span(),
+                        create_arguments: call.arguments.iter().collect(),
+                        chain_attrs: vec![],
+                    }),
                 }
             }
             _ => Err(BuildLoweringError::UnsupportedCallee),
@@ -542,6 +550,18 @@ impl ArkuiCallName {
     pub(super) fn component(callee: &Expression<'_>) -> Result<String, BuildLoweringError> {
         match callee {
             Expression::Identifier(identifier) => Ok(identifier.name.to_string()),
+            Expression::StaticMemberExpression(member) => Ok(member.property.name.to_string()),
+            _ => Err(BuildLoweringError::UnsupportedCallee),
+        }
+    }
+
+    pub(super) fn component_path(callee: &Expression<'_>) -> Result<String, BuildLoweringError> {
+        match callee {
+            Expression::Identifier(identifier) => Ok(identifier.name.to_string()),
+            Expression::StaticMemberExpression(member) => {
+                let prefix = Self::component_path(&member.object)?;
+                Ok(format!("{prefix}.{}", member.property.name))
+            }
             _ => Err(BuildLoweringError::UnsupportedCallee),
         }
     }
@@ -2075,19 +2095,26 @@ impl ComponentCallStatementEmitter {
         builder_methods: &FxHashSet<String>,
         context: &BuildContext,
     ) -> Statement<'b> {
-        let arguments = AttributeArgumentEmitter::new(
+        let mut arguments = AttributeArgumentEmitter::new(
             component_name,
             attr_name,
             builder_methods,
             Some(context),
         )
         .argument_refs(arguments, allocator);
-        if context.is_extend_attribute(component_name, attr_name) {
-            return Self::raw_identifier_call(
-                ast,
-                &GeneratedViewpuName::extend_function(component_name, attr_name),
-                arguments,
-            );
+        match context.extend_attribute_kind(component_name, attr_name) {
+            Some(ExtendAttributeKind::Extend) => {
+                return Self::raw_identifier_call(
+                    ast,
+                    &GeneratedViewpuName::extend_function(component_name, attr_name),
+                    arguments,
+                );
+            }
+            Some(ExtendAttributeKind::Animatable) => {
+                Self::append_animatable_runtime_arguments(ast, &mut arguments, context);
+                return Self::raw_identifier_call(ast, attr_name, arguments);
+            }
+            None => {}
         }
         if context
             .runtime_names()
@@ -2110,19 +2137,26 @@ impl ComponentCallStatementEmitter {
         component_span: Span,
         attribute_span: Span,
     ) -> Statement<'b> {
-        let arguments = AttributeArgumentEmitter::new(
+        let mut arguments = AttributeArgumentEmitter::new(
             component_name,
             attr_name,
             builder_methods,
             Some(context),
         )
         .argument_refs(arguments, allocator);
-        if context.is_extend_attribute(component_name, attr_name) {
-            return Self::raw_identifier_call(
-                ast,
-                &GeneratedViewpuName::extend_function(component_name, attr_name),
-                arguments,
-            );
+        match context.extend_attribute_kind(component_name, attr_name) {
+            Some(ExtendAttributeKind::Extend) => {
+                return Self::raw_identifier_call(
+                    ast,
+                    &GeneratedViewpuName::extend_function(component_name, attr_name),
+                    arguments,
+                );
+            }
+            Some(ExtendAttributeKind::Animatable) => {
+                Self::append_animatable_runtime_arguments(ast, &mut arguments, context);
+                return Self::raw_identifier_call(ast, attr_name, arguments);
+            }
+            None => {}
         }
         if context
             .runtime_names()
@@ -2138,6 +2172,27 @@ impl ComponentCallStatementEmitter {
             component_span,
             attribute_span,
         )
+    }
+
+    fn append_animatable_runtime_arguments<'b>(
+        ast: &AstBuilder<'b>,
+        arguments: &mut OxcVec<'b, Argument<'b>>,
+        context: &BuildContext,
+    ) {
+        arguments.extend([
+            Argument::from(Expression::new_identifier(
+                SPAN,
+                ast.allocator().alloc_str(&context.runtime_names().elmt_id),
+                ast,
+            )),
+            Argument::from(Expression::new_identifier(
+                SPAN,
+                ast.allocator()
+                    .alloc_str(&context.runtime_names().is_initial_render),
+                ast,
+            )),
+            Argument::from(Expression::new_this_expression(SPAN, ast)),
+        ]);
     }
 
     pub(super) fn empty<'b>(

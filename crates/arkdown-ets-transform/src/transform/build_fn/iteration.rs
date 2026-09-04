@@ -99,13 +99,15 @@ pub(super) struct IterationArgument;
 
 impl IterationArgument {
     pub(super) fn arrow<'a>(argument: &'a Argument<'a>) -> Option<&'a ArrowFunctionExpression<'a>> {
-        match argument.as_expression()? {
-            Expression::ArrowFunctionExpression(arrow) => Some(arrow),
-            Expression::ParenthesizedExpression(parenthesized) => match &parenthesized.expression {
-                Expression::ArrowFunctionExpression(arrow) => Some(arrow),
-                _ => None,
-            },
-            _ => None,
+        let mut expression = argument.as_expression()?;
+        loop {
+            match expression {
+                Expression::ArrowFunctionExpression(arrow) => return Some(arrow),
+                Expression::ParenthesizedExpression(parenthesized) => {
+                    expression = &parenthesized.expression;
+                }
+                _ => return None,
+            }
         }
     }
 

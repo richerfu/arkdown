@@ -20,14 +20,21 @@ use crate::transform::build_fn::{
 };
 use crate::transform::component_meta::SdkComponentInfo;
 use crate::transform::decorator::ArkuiStateDecorator;
+use crate::transform::legacy_extend::LegacyExtendSource;
 use crate::transform::system_api::{
     ExportedSystemApiSymbols, SystemApiModuleFacts, SystemApiSymbol,
 };
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExtendAttributeKind {
+    Extend,
+    Animatable,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct ExtendAttributeIndex {
-    by_component: FxHashMap<String, FxHashSet<String>>,
+    by_component: FxHashMap<String, FxHashMap<String, ExtendAttributeKind>>,
 }
 
 impl ExtendAttributeIndex {
@@ -49,25 +56,31 @@ impl ExtendAttributeIndex {
         index
     }
 
-    pub(super) fn contains(&self, component: &str, attribute: &str) -> bool {
+    pub(super) fn kind(&self, component: &str, attribute: &str) -> Option<ExtendAttributeKind> {
         self.by_component
             .get(component)
-            .is_some_and(|attributes| attributes.contains(attribute))
+            .and_then(|attributes| attributes.get(attribute))
+            .copied()
     }
 
     fn collect_function(&mut self, function: &Function<'_>, extra_decorators: &[Decorator<'_>]) {
         let Some(name) = function.id.as_ref() else {
             return;
         };
-        let Some(component) = function
+        let Some((component, kind)) = function
             .decorators
             .iter()
             .chain(extra_decorators.iter())
             .find_map(|decorator| {
                 let decorator = ArkuiDecorator::new(decorator);
-                (decorator.name() == ArkuiDecoratorName::EXTEND)
-                    .then(|| decorator.identifier_arg())
-                    .flatten()
+                let kind = match decorator.name() {
+                    ArkuiDecoratorName::EXTEND => ExtendAttributeKind::Extend,
+                    ArkuiDecoratorName::ANIMATABLE_EXTEND => ExtendAttributeKind::Animatable,
+                    _ => return None,
+                };
+                decorator
+                    .identifier_arg()
+                    .map(|component| (component, kind))
             })
         else {
             return;
@@ -75,7 +88,7 @@ impl ExtendAttributeIndex {
         self.by_component
             .entry(component)
             .or_default()
-            .insert(name.name.to_string());
+            .insert(name.name.to_string(), kind);
     }
 }
 
@@ -273,19 +286,45 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
         for specifier in specifiers {
             match specifier {
                 ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                    if !specifier.import_kind.is_type()
-                        && external_component_usages.contains(specifier.local.name.as_str()) =>
+                    if !specifier.import_kind.is_type() =>
                 {
-                    self.names.insert(specifier.local.name.to_string());
+                    self.collect_external_binding(
+                        specifier.local.name.as_str(),
+                        external_component_usages,
+                    );
                 }
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier)
-                    if external_component_usages.contains(specifier.local.name.as_str()) =>
-                {
-                    self.names.insert(specifier.local.name.to_string());
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    self.collect_external_binding(
+                        specifier.local.name.as_str(),
+                        external_component_usages,
+                    );
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    self.collect_external_binding(
+                        specifier.local.name.as_str(),
+                        external_component_usages,
+                    );
                 }
                 _ => {}
             }
         }
+    }
+
+    fn collect_external_binding(
+        &mut self,
+        local: &str,
+        external_component_usages: &FxHashSet<String>,
+    ) {
+        if external_component_usages.contains(local) {
+            self.names.insert(local.to_string());
+        }
+        let prefix = format!("{local}.");
+        self.names.extend(
+            external_component_usages
+                .iter()
+                .filter(|name| name.starts_with(&prefix))
+                .cloned(),
+        );
     }
 
     fn collect_specifier(
@@ -301,6 +340,8 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
                     || target_components.named.contains_key(&imported)
                 {
                     self.names.insert(local);
+                } else if let Some(namespace) = target_components.namespaces.get(&imported) {
+                    self.collect_namespace(&local, namespace);
                 }
             }
             ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
@@ -313,8 +354,16 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
                     self.names.insert(local);
                 }
             }
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                self.collect_namespace(specifier.local.name.as_str(), target_components);
+            }
         }
+    }
+
+    fn collect_namespace(&mut self, local: &str, components: &ExportedComponentNames) {
+        components.visit_paths(local, &mut |path, _| {
+            self.names.insert(path);
+        });
     }
 }
 
@@ -388,19 +437,45 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
         for specifier in specifiers {
             match specifier {
                 ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                    if !specifier.import_kind.is_type()
-                        && external_component_usages.contains(specifier.local.name.as_str()) =>
+                    if !specifier.import_kind.is_type() =>
                 {
-                    self.names.insert(specifier.local.name.to_string());
+                    self.collect_external_binding(
+                        specifier.local.name.as_str(),
+                        external_component_usages,
+                    );
                 }
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier)
-                    if external_component_usages.contains(specifier.local.name.as_str()) =>
-                {
-                    self.names.insert(specifier.local.name.to_string());
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    self.collect_external_binding(
+                        specifier.local.name.as_str(),
+                        external_component_usages,
+                    );
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    self.collect_external_binding(
+                        specifier.local.name.as_str(),
+                        external_component_usages,
+                    );
                 }
                 _ => {}
             }
         }
+    }
+
+    fn collect_external_binding(
+        &mut self,
+        local: &str,
+        external_component_usages: &FxHashSet<String>,
+    ) {
+        if external_component_usages.contains(local) {
+            self.names.insert(local.to_string());
+        }
+        let prefix = format!("{local}.");
+        self.names.extend(
+            external_component_usages
+                .iter()
+                .filter(|name| name.starts_with(&prefix))
+                .cloned(),
+        );
     }
 
     fn collect_sdk_specifiers(
@@ -454,6 +529,8 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
                 } else if let Some(props) = target_components.named.get(&imported) {
                     self.names.insert(local.clone());
                     self.update_props.insert(local, props.clone());
+                } else if let Some(namespace) = target_components.namespaces.get(&imported) {
+                    self.collect_namespace(&local, namespace);
                 }
             }
             ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
@@ -470,8 +547,17 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
                     self.update_props.insert(local, props.clone());
                 }
             }
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                self.collect_namespace(specifier.local.name.as_str(), target_components);
+            }
         }
+    }
+
+    fn collect_namespace(&mut self, local: &str, components: &ExportedComponentNames) {
+        components.visit_paths(local, &mut |path, info| {
+            self.names.insert(path.clone());
+            self.update_props.insert(path, info.clone());
+        });
     }
 }
 
@@ -588,8 +674,8 @@ impl ImportedArkuiComponentUsageCollector {
     }
 
     fn collect_component_expression(&mut self, component: &ArkUIComponentExpression<'_>) {
-        if let Expression::Identifier(identifier) = &component.callee {
-            self.names.insert(identifier.name.to_string());
+        if let Some(path) = Self::component_path(&component.callee) {
+            self.names.insert(path);
         }
         for argument in &component.arguments {
             self.collect_argument(argument);
@@ -606,6 +692,17 @@ impl ImportedArkuiComponentUsageCollector {
                     self.collect_body_statement(statement);
                 }
             }
+        }
+    }
+
+    fn component_path(expression: &Expression<'_>) -> Option<String> {
+        match expression {
+            Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+            Expression::StaticMemberExpression(member) => {
+                let prefix = Self::component_path(&member.object)?;
+                Some(format!("{prefix}.{}", member.property.name))
+            }
+            _ => None,
         }
     }
 
@@ -2108,7 +2205,8 @@ impl ModuleExportFacts {
         let allocator = Allocator::default();
         let source_type =
             CompileArktsSourceType::from_path_with_version(&source.path, arkts_language_version);
-        let parsed = component_metadata.parse_ets(&allocator, &source.source, source_type);
+        let parser_source = LegacyExtendSource::new(&source.source, arkts_language_version);
+        let parsed = component_metadata.parse_ets(&allocator, parser_source.as_str(), source_type);
         if !parsed.diagnostics.is_empty() {
             return Self::default();
         }
@@ -2368,9 +2466,16 @@ impl ModuleExportFacts {
                 }
                 Statement::ExportAllDeclaration(export) => {
                     if let Some(target) = resolver.resolve(export.source.value.as_str()) {
-                        facts.exports.push(ModuleExportFact::AllFrom {
-                            target: target.path,
-                        });
+                        if let Some(exported) = &export.exported {
+                            facts.exports.push(ModuleExportFact::NamespaceFrom {
+                                target: target.path,
+                                exported: ComponentModuleExportName::value(exported),
+                            });
+                        } else {
+                            facts.exports.push(ModuleExportFact::AllFrom {
+                                target: target.path,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -2427,6 +2532,10 @@ enum ModuleExportFact {
     },
     AllFrom {
         target: PathBuf,
+    },
+    NamespaceFrom {
+        target: PathBuf,
+        exported: String,
     },
 }
 
@@ -2666,6 +2775,15 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     entry.entities.named.extend(target_entry.entities.named);
                     entry.system_apis.extend_named(&target_entry.system_apis);
                 }
+                ModuleExportFact::NamespaceFrom { target, exported } => {
+                    let target_entry = self.export_entry(target);
+                    if !target_entry.components.is_empty() {
+                        entry
+                            .components
+                            .namespaces
+                            .insert(exported.clone(), target_entry.components);
+                    }
+                }
             }
         }
 
@@ -2680,18 +2798,35 @@ struct ExportedComponentNames {
     named: FxHashMap<String, CustomComponentInfo>,
     has_default: bool,
     default_info: CustomComponentInfo,
+    namespaces: FxHashMap<String, ExportedComponentNames>,
 }
 
 impl ExportedComponentNames {
     fn is_empty(&self) -> bool {
-        self.named.is_empty() && !self.has_default
+        self.named.is_empty() && !self.has_default && self.namespaces.is_empty()
     }
 
     fn extend(&mut self, other: ExportedComponentNames) {
         self.named.extend(other.named);
+        self.namespaces.extend(other.namespaces);
         if other.has_default {
             self.has_default = true;
             self.default_info = other.default_info;
+        }
+    }
+
+    fn visit_paths(&self, prefix: &str, visitor: &mut impl FnMut(String, &CustomComponentInfo)) {
+        for (name, info) in &self.named {
+            visitor(format!("{prefix}.{name}"), info);
+        }
+        if self.has_default {
+            visitor(
+                format!("{prefix}.{}", ComponentModuleExportName::DEFAULT),
+                &self.default_info,
+            );
+        }
+        for (name, namespace) in &self.namespaces {
+            namespace.visit_paths(&format!("{prefix}.{name}"), visitor);
         }
     }
 }

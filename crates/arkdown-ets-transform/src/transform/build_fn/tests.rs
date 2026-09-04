@@ -55,6 +55,7 @@ fn lower_build_body_with_custom_components(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_build_body_with_component_context(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
@@ -83,6 +84,7 @@ fn lower_build_body_with_component_context(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_build_body_with_component_context_and_module(
     body: Option<&FunctionBody<'_>>,
     source_text: &str,
@@ -295,6 +297,67 @@ struct Foo {
         "got:\n{out}"
     );
     assert!(out.contains("title: () => \"privacy\""), "got:\n{out}");
+}
+
+#[test]
+fn lowers_optional_builder_param_invocation_with_hvigor_bind_chain() {
+    let source = r#"@Component
+struct Foo {
+  @BuilderParam trailing?: () => void
+
+  build() {
+    Column() {
+      this.trailing?.()
+    }
+  }
+}"#;
+    let out = parse_and_lower_with_builder_param_methods(
+        source,
+        &FxHashSet::default(),
+        false,
+        &FxHashSet::from_iter(["trailing".to_string()]),
+    )
+    .unwrap();
+    assert!(
+        out.contains("this.trailing?.bind(this)?.();"),
+        "SDK transferBuilderCall preserves both optional-chain boundaries around bind:\n{out}"
+    );
+}
+
+#[test]
+fn lowers_repeat_callbacks_through_nested_parentheses() {
+    let source = r#"@ComponentV2
+struct Foo {
+  @Local items: string[] = []
+
+  build() {
+    List() {
+      Repeat(this.items)
+        .template('default', ((((item) => {
+          Text(item.item)
+        }))))
+        .each(((item) => {
+          ListItem() {
+            Text(item.item)
+          }
+        }))
+    }
+  }
+}"#;
+    let out = parse_and_lower(source).unwrap();
+    assert!(
+        out.contains("Repeat(this.items, this).template(\"default\", (item) =>"),
+        "Repeat.template must accept arbitrarily parenthesized ArkUI callbacks:\n{out}"
+    );
+    assert!(
+        out.contains(".each((item) =>"),
+        "Repeat.each must accept parenthesized ArkUI callbacks:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Text.create(item.item);").count(),
+        2,
+        "both callbacks must lower their ArkUI bodies:\n{out}"
+    );
 }
 
 #[test]
