@@ -16,6 +16,9 @@ pub mod layout;
 pub mod module_plan;
 pub mod pre_build;
 pub mod preview;
+pub mod quickfix;
+#[cfg(test)]
+mod quickfix_tests;
 pub mod remote_hsp_sign;
 pub mod request;
 pub mod visual_codegen;
