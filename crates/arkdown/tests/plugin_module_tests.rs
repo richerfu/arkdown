@@ -2,6 +2,24 @@ use std::fs;
 
 use arkdown::PluginModuleCompiler;
 
+#[test]
+fn cache_identity_tracks_configured_plugin_source_content() {
+    let fixture = tempfile::tempdir().expect("create fixture");
+    let entry = fixture.path().join("plugin.ts");
+    fs::write(&entry, "export default { name: 'first' }\n").expect("write first plugin");
+    let first = PluginModuleCompiler::new(&entry)
+        .cache_identity()
+        .expect("fingerprint first plugin");
+
+    fs::write(&entry, "export default { name: 'second' }\n").expect("write second plugin");
+    let second = PluginModuleCompiler::new(&entry)
+        .cache_identity()
+        .expect("fingerprint second plugin");
+
+    assert_ne!(first, second);
+    assert!(first.contains("plugin.ts#"));
+}
+
 #[tokio::test]
 async fn compiler_keeps_node_imports_external_and_embeds_oxc_helpers() {
     let fixture = tempfile::tempdir().expect("create fixture");

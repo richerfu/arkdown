@@ -414,9 +414,39 @@ impl DependencyGraphBuilder {
             version_spec: Some(spec.to_string()),
             package_name: self.package_name(alias, package),
             package_root: root.to_path_buf(),
+            installed_alias_path: self.installed_alias_path(issuer_root, alias, root),
             kind: traversal.kind,
             is_transitive: traversal.is_transitive,
         }
+    }
+
+    fn installed_alias_path(
+        &self,
+        issuer_root: &Path,
+        alias: &str,
+        root: &Path,
+    ) -> Option<PathBuf> {
+        let modules_directory = self.package_manager.modules_directory();
+        let mut current = Some(issuer_root);
+        while let Some(issuer) = current {
+            let search_root = issuer
+                .file_name()
+                .filter(|name| {
+                    name.to_string_lossy()
+                        .eq_ignore_ascii_case(modules_directory)
+                })
+                .and_then(|_| issuer.parent())
+                .unwrap_or(issuer);
+            let candidate = search_root.join(modules_directory).join(alias);
+            if std::fs::symlink_metadata(&candidate)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && canonicalize_or_owned(&candidate) == canonicalize_or_owned(root)
+            {
+                return Some(candidate);
+            }
+            current = search_root.parent();
+        }
+        None
     }
 
     fn node_snapshot(
@@ -824,6 +854,46 @@ mod tests {
         );
         let graph_with_install = fixture.build_for("entry");
         assert!(graph_with_install.nodes.contains_key("native-types.so"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captures_installed_symlink_alias_once_in_the_session_graph() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "linked": "file:../packages/linked" }
+            }"#,
+        );
+        fixture.write_package(
+            "packages/linked",
+            r#"{ "name": "linked", "version": "1.0.0" }"#,
+        );
+        let modules = fixture.root().join("entry/oh_modules");
+        fs::create_dir_all(&modules).expect("oh_modules");
+        symlink("../../packages/linked", modules.join("linked")).expect("package symlink");
+
+        let graph = fixture.build_for("entry");
+        let edge = graph
+            .edges
+            .iter()
+            .find(|edge| edge.alias == "linked")
+            .expect("linked dependency edge");
+
+        assert_eq!(
+            edge.installed_alias_path.as_deref(),
+            Some(graph.host_root.join("oh_modules/linked").as_path())
+        );
+        assert_eq!(
+            edge.package_root,
+            canonicalize_or_owned(&fixture.root().join("packages/linked"))
+        );
     }
 
     #[test]

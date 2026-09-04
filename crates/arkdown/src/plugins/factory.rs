@@ -381,6 +381,15 @@ impl PackagePlugin {
         };
         gap_hooks.seed_hvigor_context(share).await
     }
+
+    /// Serialize the shared/plugin cache after a successful build. The bytes
+    /// remain opaque to Rust and are persisted by `arkdown-cache`.
+    pub async fn snapshot_hvigor_context_cache(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let Some(gap_hooks) = &self.gap_hooks else {
+            return Ok(None);
+        };
+        gap_hooks.snapshot_hvigor_context_cache().await
+    }
 }
 
 /// Thin adapter for compile-plugin behavior absent from upstream Rolldown.
@@ -454,6 +463,12 @@ pub trait HvigorPluginGapHooks: Send + Sync {
 
     fn has_should_invalid_cache(&self) -> bool {
         false
+    }
+
+    fn snapshot_hvigor_context_cache(
+        &self,
+    ) -> HvigorHookFuture<'_, anyhow::Result<Option<Vec<u8>>>> {
+        Box::pin(async { Ok(None) })
     }
 
     /// A latest-hvigor lifecycle hook with Rolldown's live plugin context.

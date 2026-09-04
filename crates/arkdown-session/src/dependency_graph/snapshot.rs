@@ -74,6 +74,10 @@ pub struct DependencyEdgeSnapshot {
     pub package_name: String,
     /// Resolved package root directory.
     pub package_root: PathBuf,
+    /// Installed `oh_modules`/`node_modules` alias when the final package
+    /// component is a symbolic link. Captured once while the session graph is
+    /// built for Hvigor's `share.symlinkMap` and module-record aliases.
+    pub installed_alias_path: Option<PathBuf>,
     /// Declared dependency section.
     pub kind: DependencyEdgeKind,
     /// Whether the declaring package is below the module/project dependency

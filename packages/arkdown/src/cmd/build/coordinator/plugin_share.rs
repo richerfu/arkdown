@@ -8,9 +8,11 @@ pub(crate) struct HvigorCompilePluginShareBuilder<'a> {
   pub(crate) module: Option<&'a ModuleConfig>,
   pub(crate) source_store: &'a arkdown_session::SourceStore,
   pub(crate) package_resolution: &'a PackageResolutionPlan,
+  pub(crate) dependency_graph: &'a DependencyGraphSnapshot,
   pub(crate) loader_json: &'a LoaderJson,
   pub(crate) loader_json_path: &'a Path,
   pub(crate) arkts_language_version: ArktsLanguageVersion,
+  pub(crate) plugin_cache_snapshot: Option<Arc<[u8]>>,
 }
 
 impl<'a> HvigorCompilePluginShareBuilder<'a> {
@@ -20,6 +22,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
     module: Option<&'a ModuleConfig>,
     source_store: &'a arkdown_session::SourceStore,
     package_resolution: &'a PackageResolutionPlan,
+    dependency_graph: &'a DependencyGraphSnapshot,
     loader_json: &'a LoaderJson,
     loader_json_path: &'a Path,
     arkts_language_version: ArktsLanguageVersion,
@@ -30,10 +33,17 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
       module,
       source_store,
       package_resolution,
+      dependency_graph,
       loader_json,
       loader_json_path,
       arkts_language_version,
+      plugin_cache_snapshot: None,
     }
+  }
+
+  pub(crate) fn with_plugin_cache_snapshot(mut self, snapshot: Option<Vec<u8>>) -> Self {
+    self.plugin_cache_snapshot = snapshot.map(Arc::from);
+    self
   }
 
   /// Build the module-scoped `this.share` snapshot used by latest-hvigor
@@ -69,6 +79,20 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
           .map(PathBuf::from),
       })
       .collect::<Vec<_>>();
+    let mut symlink_map = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    for edge in &self.dependency_graph.edges {
+      let Some(alias_path) = edge.installed_alias_path.as_ref() else {
+        continue;
+      };
+      symlink_map
+        .entry(edge.package_root.clone())
+        .or_default()
+        .push(alias_path.clone());
+    }
+    for paths in symlink_map.values_mut() {
+      paths.sort();
+      paths.dedup();
+    }
     let mut project_config_fields = serde_json::to_value(self.loader_json)?
       .as_object()
       .cloned()
@@ -165,6 +189,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
         .into(),
     );
     Ok(HvigorCompilePluginShare {
+      build_instance_id: HvigorCompilePluginShare::next_build_instance_id(),
       project_config: HvigorCompilePluginProjectConfig {
         bundle_name: self.config.product.bundle_name.clone(),
         build_mode: self.config.build_mode.as_str().to_string(),
@@ -187,7 +212,38 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
       project_config_fields: Arc::new(project_config_fields),
       source_files: Arc::new(source_files),
       import_resolver_entries: Arc::from(import_resolver_entries),
+      symlink_map: Arc::new(symlink_map),
+      plugin_cache_snapshot: self.plugin_cache_snapshot,
     })
+  }
+}
+
+pub(crate) struct PluginContextCacheRunner<'a> {
+  plugins: &'a [PackagePlugin],
+  store: arkdown_cache::PluginContextCacheStore,
+}
+
+impl<'a> PluginContextCacheRunner<'a> {
+  pub(crate) fn new(plugins: &'a [PackagePlugin], cache_dir: &'a Path) -> Self {
+    Self {
+      plugins,
+      store: arkdown_cache::PluginContextCacheStore::new(cache_dir),
+    }
+  }
+
+  pub(crate) fn load(&self) -> Result<Option<Vec<u8>>> {
+    self.store.load().map_err(Into::into)
+  }
+
+  pub(crate) async fn commit(&self) -> Result<()> {
+    for plugin in self.plugins {
+      let Some(snapshot) = plugin.snapshot_hvigor_context_cache().await? else {
+        continue;
+      };
+      self.store.commit(&snapshot)?;
+      break;
+    }
+    Ok(())
   }
 }
 

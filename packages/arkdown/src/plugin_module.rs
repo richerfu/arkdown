@@ -5,6 +5,17 @@ use arkdown::PluginModuleCompiler;
 pub(crate) struct PluginModuleNapiCompiler;
 
 impl PluginModuleNapiCompiler {
+  pub(crate) fn cache_identity(file: String) -> Result<String> {
+    PluginModuleCompiler::new(file)
+      .cache_identity()
+      .map_err(|error| {
+        Error::new(
+          Status::GenericFailure,
+          format!("ARKDOWN_PLUGIN_MODULE_CACHE_IDENTITY_ERROR: {error}"),
+        )
+      })
+  }
+
   pub(crate) async fn compile(file: String, source_map: bool) -> Result<String> {
     PluginModuleCompiler::new(file)
       .with_source_map(source_map)

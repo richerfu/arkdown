@@ -600,6 +600,7 @@ module.exports.persistRuntimeDetails = nativeBinding.persistRuntimeDetails
 module.exports.persistRuntimeReport = nativeBinding.persistRuntimeReport
 module.exports.planHvigorCompilePlugins = nativeBinding.planHvigorCompilePlugins
 module.exports.planRolldownPackagePlugins = nativeBinding.planRolldownPackagePlugins
+module.exports.pluginModuleCacheIdentity = nativeBinding.pluginModuleCacheIdentity
 module.exports.runtimeHvigorReportSnapshot = nativeBinding.runtimeHvigorReportSnapshot
 module.exports.runtimeObservabilityIsEnabled = nativeBinding.runtimeObservabilityIsEnabled
 module.exports.validateHvigorCompilePlugins = nativeBinding.validateHvigorCompilePlugins

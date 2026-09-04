@@ -39,6 +39,7 @@ pub mod key;
 pub mod manifest;
 pub mod namespace;
 pub mod plugin_cache;
+pub mod plugin_context;
 pub mod store;
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,9 @@ pub use plugin_cache::{
     PluginCacheDecision, PluginInvalidationInput, PluginInvalidationOutput,
     ShouldInvalidCacheBridge,
 };
+
+// plugin_context — opaque V8 plugin state, with Rust-owned persistence
+pub use plugin_context::PluginContextCacheStore;
 
 // event_name — watch-mode event tracking
 pub use event_name::{CacheEventName, ChangedFileEvent, UpdateEventNameHandler};

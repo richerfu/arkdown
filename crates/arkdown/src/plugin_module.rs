@@ -19,6 +19,9 @@ use rolldown_common::{
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 
+use arkdown_cache::CacheKeyMaterial;
+use arkdown_path::ArtifactPathSerializer;
+
 use crate::diagnostics::RolldownBuildDiagnostics;
 
 /// Compiles one plugin module without executing JavaScript.
@@ -43,6 +46,25 @@ impl PluginModuleCompiler {
     pub fn with_source_map(mut self, source_map: bool) -> Self {
         self.source_map = source_map;
         self
+    }
+
+    /// Stable cache identity for the configured plugin module itself. Project
+    /// plugin dependencies are already covered by BuildSession fingerprints;
+    /// this also covers plugin files configured outside the project tree.
+    pub fn cache_identity(&self) -> Result<String, PluginModuleCompileError> {
+        let file = self.absolute_file()?;
+        let source = fs_err::read_to_string(&file).map_err(|source| {
+            PluginModuleCompileError::ReadSource {
+                file: file.clone(),
+                source,
+            }
+        })?;
+        let path = ArtifactPathSerializer::path_to_slash_string(&file)
+            .map_err(|_| PluginModuleCompileError::NonUtf8Path { file: file.clone() })?;
+        Ok(format!(
+            "{path}#{}",
+            CacheKeyMaterial::compute_content_hash(&source)
+        ))
     }
 
     /// Produce one ES2016 CommonJS module for Node's `Module._compile`.
@@ -199,6 +221,12 @@ impl PluginModuleCompiler {
 pub enum PluginModuleCompileError {
     #[error("failed to resolve the current directory for a plugin module: {source}")]
     CurrentDirectory {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read plugin module {}: {source}", file.display())]
+    ReadSource {
+        file: PathBuf,
         #[source]
         source: std::io::Error,
     },

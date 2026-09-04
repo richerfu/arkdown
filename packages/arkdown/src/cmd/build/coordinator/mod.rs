@@ -171,7 +171,9 @@ use planning::{
   ModuleTargetSelection, NativeCmakeLocalDependencyInventoryBuilder,
   NativeDependencyStagePlanBuilder, TargetBuildExecutionPlan,
 };
-pub(crate) use plugin_share::{HvigorCompilePluginShareBuilder, PluginCacheInvalidationRunner};
+pub(crate) use plugin_share::{
+  HvigorCompilePluginShareBuilder, PluginCacheInvalidationRunner, PluginContextCacheRunner,
+};
 pub(crate) use transform::{merge_form_widget_abilities, TransformSourceSnapshotBuilder};
 
 mod entry;
@@ -2719,6 +2721,7 @@ mod har_resource_dependency_selector_tests {
       version_spec: None,
       package_name: name.to_string(),
       package_root: package_root.to_path_buf(),
+      installed_alias_path: None,
       kind,
       is_transitive: false,
     }

@@ -10,8 +10,12 @@
 use oxc_index::{Idx, IndexVec};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static BUILD_INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Module-scoped `this.share.projectConfig` snapshot supplied to JavaScript
 /// compile plugins. Rust owns the build model and passes this typed snapshot
@@ -19,6 +23,10 @@ use std::sync::Arc;
 /// identity while user hooks execute.
 #[derive(Debug, Clone)]
 pub struct HvigorCompilePluginShare {
+    /// Process-unique identity for one module build. Every JavaScript plugin
+    /// receives this same value, allowing the compatibility layer to preserve
+    /// the single shared Rollup object used by hvigor.
+    pub build_instance_id: u64,
     pub project_config: HvigorCompilePluginProjectConfig,
     /// Remaining source-defined `projectConfig` fields that are naturally
     /// represented by loader/config JSON. The Node adapter merges this map
@@ -28,6 +36,17 @@ pub struct HvigorCompilePluginShare {
     pub source_files: Arc<FxHashMap<PathBuf, HvigorCompilePluginSourceFile>>,
     /// Declared package aliases used by Hvigor's synchronous `importResolver`.
     pub import_resolver_entries: Arc<[HvigorCompilePluginImportEntry]>,
+    /// Canonical package root to installed symbolic-link paths, matching the
+    /// custom node-resolve `share.symlinkMap` consumed by ModuleMode.
+    pub symlink_map: Arc<BTreeMap<PathBuf, Vec<PathBuf>>>,
+    /// Opaque V8 structured-clone payload loaded by Rust before hooks start.
+    pub plugin_cache_snapshot: Option<Arc<[u8]>>,
+}
+
+impl HvigorCompilePluginShare {
+    pub fn next_build_instance_id() -> u64 {
+        BUILD_INSTANCE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug, Clone)]
