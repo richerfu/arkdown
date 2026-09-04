@@ -1,6 +1,8 @@
 //! Compile-plugin share snapshot construction and cache invalidation.
 
 use super::*;
+use arkdown::plugins::hvigor_compile::{HvigorWatchChange, HvigorWatchChangeEvent};
+use arkdown_watcher::WatchEventKind;
 
 pub(crate) struct HvigorCompilePluginShareBuilder<'a> {
   pub(crate) config: &'a ArkdownConfig,
@@ -53,6 +55,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
   }
 
   fn project_config(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let watch_mode = self.args.watch || self.args.watch_invalidation.is_some();
     let module_layout = ModuleBuildLayout::for_output_target_product(
       &self.config.output_target,
       &self.module_context.module.root,
@@ -127,7 +130,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
       debug_line: false,
       preview_mode: self.args.preview,
       check_entry: self.args.check_entry,
-      watch_mode: self.args.watch,
+      watch_mode,
       byte_code_har_integrated_optimization: self.args.byte_code_har_integrated_optimization,
       single_file_emit: self.config.build_mode.is_debuggable()
         && self.args.hvigor_properties.single_file_emit
@@ -196,7 +199,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
     );
     project_config.insert(
       "hotReload".into(),
-      (self.args.watch && !self.args.preview).into(),
+      (watch_mode && !(self.args.preview || self.args.preview_transform_mode)).into(),
     );
     let ark_options = self.config.product.build_option.ark_options.as_ref();
     project_config.insert(
@@ -243,6 +246,25 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
         changed_dependencies: Arc::from([]),
       },
     }
+  }
+
+  fn watch_changes(&self) -> Arc<[HvigorWatchChange]> {
+    let Some(batch) = self.args.watch_invalidation.as_ref() else {
+      return Arc::from([]);
+    };
+    batch
+      .raw_events
+      .iter()
+      .map(|event| HvigorWatchChange {
+        path: event.path.clone(),
+        event: match event.kind {
+          WatchEventKind::Created => HvigorWatchChangeEvent::Create,
+          WatchEventKind::Modified => HvigorWatchChangeEvent::Update,
+          WatchEventKind::Deleted => HvigorWatchChangeEvent::Delete,
+        },
+      })
+      .collect::<Vec<_>>()
+      .into()
   }
 
   /// Build the module-scoped `this.share` snapshot used by latest-hvigor
@@ -305,6 +327,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
       import_resolver_entries: Arc::from(import_resolver_entries),
       symlink_map: Arc::new(symlink_map),
       dependency_info: self.dependency_info(),
+      watch_changes: self.watch_changes(),
       plugin_cache_snapshot: self.plugin_cache_snapshot,
     })
   }

@@ -7,6 +7,7 @@ const path = require('node:path')
 const test = require('node:test')
 
 const {
+  ESMODULE_DORMANT_HOOKS,
   PLUGIN_HOOKS,
   PluginAdapter,
   PluginModuleLoader,
@@ -147,6 +148,10 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
     transform: { code: 'let a = 1\n// transformed' },
   })
   assert.deepEqual(dispatch(normalized, 'moduleParsed', { moduleInfo: { id: 'index.ets' } }), {})
+  assert.deepEqual(
+    dispatch(normalized, 'watchChange', { id: '/project/Index.ets', watchEvent: 'update' }),
+    {},
+  )
   assert.deepEqual(dispatch(normalized, 'beforeBuildEnd'), {})
   assert.deepEqual(dispatch(normalized, 'buildEnd', { buildEndContext: { errors: [] } }), {})
   assert.deepEqual(dispatch(normalized, 'afterBuildEnd'), {})
@@ -158,8 +163,24 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
     }),
     { shouldInvalidCache: true },
   )
+  for (const hookName of ESMODULE_DORMANT_HOOKS) {
+    assert.deepEqual(
+      await dispatch(normalized, hookName, {
+        code: 'export {}',
+        chunk: { fileName: 'entry.js' },
+        outputOptions: {},
+        outputHookOptions: {},
+        bundle: {},
+      }),
+      {},
+    )
+  }
   assert.equal(calls.length, PLUGIN_HOOKS.length)
   assert.equal(calls.every((call) => call.share === share), true)
+  assert.deepEqual(calls.find((call) => call.hookName === 'watchChange').args, [
+    '/project/Index.ets',
+    { event: 'update' },
+  ])
 })
 
 test('hook event factories follow ets-loader AnalyzeMode gating', () => {
@@ -504,11 +525,22 @@ test('OXC plugin loader accepts TS, MTS, and CTS entry modules', async (context)
   }
 })
 
-test('output-stage hooks are rejected instead of being silently dropped', () => {
-  assert.throws(
-    () => normalizePluginList({ name: 'chunk-plugin', renderChunk() {} }, fakeBinding()),
-    (error) => error.code === 'ARKDOWN_PLUGIN_HOOK_UNSUPPORTED' && error.hookName === 'renderChunk',
+test('ArkTS 1.1 accepts output-stage hooks while ESMODULE scan keeps them dormant', () => {
+  let called = false
+  const [plugin] = normalizePluginList(
+    {
+      name: 'chunk-plugin',
+      renderChunk() {
+        called = true
+      },
+      generateBundle() {
+        called = true
+      },
+    },
+    fakeBinding(),
   )
+  assert.deepEqual(plugin.__arkdownPluginHooks, ['renderChunk', 'generateBundle'])
+  assert.equal(called, false)
 })
 
 test('non-function hooks are rejected with a typed diagnostic', () => {
