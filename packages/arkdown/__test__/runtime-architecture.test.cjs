@@ -99,6 +99,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
     'hvigor_maintenance.rs',
     'hvigor_sync.rs',
     'runtime_invocation.rs',
+    'services/clean.rs',
     'services/native_build',
   ]) {
     assert.equal(fs.existsSync(path.join(sourceRoot, removed)), false, `${removed} must stay deleted`)
@@ -108,6 +109,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
   assert.equal(fs.existsSync(path.join(nativeDomain, 'Cargo.toml')), true)
   assert.equal(fs.existsSync(path.join(nativeDomain, 'src/lib.rs')), true)
   assert.match(fs.readFileSync(path.join(packageRoot, 'Cargo.toml'), 'utf8'), /arkdown-native\s*=\s*\{\s*workspace\s*=\s*true\s*\}/)
+  assert.equal(fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/clean.rs')), true)
 
   assert.doesNotMatch(napi, /run_runtime_tasks|RuntimeTaskBridgeSeed|RuntimeBuildScriptSession/)
   assert.doesNotMatch(declarations, /runRuntimeTasks|RuntimeHvigor|RuntimeBuildScriptSession/)

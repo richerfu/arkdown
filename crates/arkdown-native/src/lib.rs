@@ -31,9 +31,9 @@ mod zig;
 
 pub use collector::NativeLibCollector;
 pub use types::{
-    DebugSymbolCollector, NativeBuildSanitizers, NativeCleanStage, NativeCmakeLocalDependency,
-    NativeCommandPlan, NativeLibCollectionPolicy, NativeLibPackageInfo, NativeSdkToolchain,
-    ProjectDebugSymbolCollector,
+    DebugSymbolCollector, NativeBuildError, NativeBuildSanitizers, NativeCleanStage,
+    NativeCmakeLocalDependency, NativeCommandPlan, NativeLibCollectionPolicy, NativeLibPackageInfo,
+    NativeSdkToolchain, ProjectDebugSymbolCollector,
 };
 
 #[cfg(test)]

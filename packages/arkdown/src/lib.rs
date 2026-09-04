@@ -88,13 +88,15 @@ pub struct CheckConfig {
 /// All project discovery and path ownership remain in Rust.
 #[napi]
 pub async fn clean(config: CleanConfig) -> napi::Result<()> {
-  let args = services::clean::CleanRequest {
+  let request = arkdown_build::clean::CleanRequest {
     project: config.project.map(PathBuf::from),
   };
-  tokio::task::spawn_blocking(move || services::clean::run(args))
-    .await
-    .map_err(|error| napi::Error::from_reason(format!("Arkdown clean task failed: {error}")))?
-    .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
+  tokio::task::spawn_blocking(move || {
+    arkdown_build::clean::CleanApplication::new(request).execute()
+  })
+  .await
+  .map_err(|error| napi::Error::from_reason(format!("Arkdown clean task failed: {error}")))?
+  .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
 }
 
 /// Run the native ArkTS source checker without entering the build pipeline.
