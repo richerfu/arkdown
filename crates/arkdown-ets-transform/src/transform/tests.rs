@@ -51,6 +51,85 @@ impl TransformHarness {
 }
 
 #[test]
+fn crossplatform_collection_merges_direct_and_sdk_dependency_facts() {
+    let sdk_root = PathBuf::from("/sdk/arkui-x/api");
+    let declaration_path = sdk_root.join("@arkui-x.telephony.d.ts");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        declaration_path,
+        std::sync::Arc::<str>::from(
+            "/** @crossplatform */\n\
+             export declare class CallManager {\n\
+               /** @crossplatform */\n\
+               static dial(): void;\n\
+             }\n\
+             /** @crossplatform */\n\
+             declare namespace telephony {\n\
+               /** @crossplatform */\n\
+               function connect(): void;\n\
+             }\n\
+             export default telephony;\n",
+        ),
+    );
+    let sources = crate::source::TransformSourceSnapshot::new(files)
+        .with_sdk_declaration_roots(vec![sdk_root]);
+    let component_metadata = ComponentMetadata::default();
+    let module_exports = ModuleExportIndex::build(&sources, &[], &component_metadata);
+    let system_api = SystemApiCheckOptions::default()
+        .with_crossplatform(true, false)
+        .with_crossplatform_collection(true)
+        .with_module_prefixes(["ohos", "system", "kit", "arkts", "arkui-x"])
+        .with_crossplatform_dependency(
+            "@arkui-x.telephony",
+            "CallManager#dial",
+            ["ohos.telephony.call"],
+            ["Button"],
+        )
+        .with_crossplatform_dependency(
+            "@arkui-x.telephony",
+            "connect",
+            ["ohos.net.connection"],
+            ["Text"],
+        );
+    let options = TransformOptions {
+        system_api,
+        component_metadata: std::sync::Arc::new(component_metadata),
+        sources,
+        module_exports,
+        ..TransformOptions::default()
+    };
+    let source = make_source(
+        "/project/entry/src/main/ets/pages/Call.ets",
+        "import telephony, { CallManager } from '@arkui-x.telephony';\n\
+         import router from '@ohos.router';\n\
+         ForEach();\n\
+         if (router !== undefined) { CallManager.dial(); telephony.connect(); }\n",
+    );
+
+    let output = TransformHarness::transform_output_with_options(&source, &options)
+        .expect("crossplatform source must transform");
+
+    assert_eq!(
+        output.crossplatform_collection.modules,
+        [
+            "arkui-x.telephony".to_string(),
+            "ohos.router".to_string(),
+            "ohos.telephony.call".to_string(),
+            "ohos.net.connection".to_string(),
+        ]
+    );
+    assert_eq!(
+        output.crossplatform_collection.components,
+        [
+            "ForEach".to_string(),
+            "If".to_string(),
+            "Button".to_string(),
+            "Text".to_string()
+        ]
+    );
+}
+
+#[test]
 fn insight_intent_link_is_consumed_and_emits_static_metadata() {
     let source = make_source(
         "/project/entry/src/main/ets/pages/Link.ets",

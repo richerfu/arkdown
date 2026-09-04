@@ -367,6 +367,7 @@ pub struct RolldownEtsTransformOutput {
     pub is_comment_only_javascript: bool,
     pub is_shared_module: bool,
     pub insight_intent: transform::InsightIntentSourceMetadata,
+    pub crossplatform_collection: transform::CrossplatformSourceCollection,
 }
 
 /// Production ETS transform engine used by the Rolldown plugin adapter.
@@ -386,6 +387,28 @@ impl RolldownEtsTransformer {
     ) -> Result<Option<RolldownEtsTransformOutput>, EtsTransformError> {
         let source_kind = SourceClassifier::classify(id);
         if !source_kind.is_ets_transform_input() {
+            let crossplatform_collection = if source_kind.is_javascript_runtime()
+                && Path::new(id)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    == Some("js")
+                && self.plan.system_api.collects_crossplatform()
+            {
+                let allocator = Allocator::default();
+                let source_type = SourceType::from_path(id)
+                    .unwrap_or_else(|_| SourceType::mjs().with_module(true));
+                let parsed = Parser::new(&allocator, code, source_type).parse();
+                if parsed.diagnostics.is_empty() {
+                    transform::CrossplatformSourceCollection::modules_from_program(
+                        &parsed.program,
+                        self.plan.system_api.module_prefixes(),
+                    )
+                } else {
+                    transform::CrossplatformSourceCollection::default()
+                }
+            } else {
+                transform::CrossplatformSourceCollection::default()
+            };
             let pipeline = HvigorSourcePipeline::new(self, id);
             if pipeline.should_finalize_unclassified_source(code) {
                 let finalization = pipeline.finalize_source(code)?;
@@ -400,8 +423,23 @@ impl RolldownEtsTransformer {
                         is_comment_only_javascript: false,
                         is_shared_module: false,
                         insight_intent: transform::InsightIntentSourceMetadata::default(),
+                        crossplatform_collection,
                     }));
                 }
+            }
+            if !crossplatform_collection.is_empty() {
+                return Ok(Some(RolldownEtsTransformOutput {
+                    code: code.to_string(),
+                    warnings: Vec::new(),
+                    module_source_code: None,
+                    source_map: None,
+                    record_module_source_code: false,
+                    emits_javascript: false,
+                    is_comment_only_javascript: false,
+                    is_shared_module: false,
+                    insight_intent: transform::InsightIntentSourceMetadata::default(),
+                    crossplatform_collection,
+                }));
             }
             return Ok(None);
         }
@@ -436,6 +474,8 @@ impl RolldownEtsTransformer {
         );
 
         if !is_ets && !self.plan.arkts_language_version.is_static() {
+            let crossplatform_collection =
+                self.dynamic_typescript_system_api_collection(code.as_ref(), id)?;
             let finalization = pipeline.finalize_source(code.as_ref())?;
             // SDK genAbc lazy transform runs on every compile input after the
             // regular transform; TS/JS files are covered too.
@@ -469,6 +509,7 @@ impl RolldownEtsTransformer {
                 is_comment_only_javascript,
                 is_shared_module,
                 insight_intent: transform::InsightIntentSourceMetadata::default(),
+                crossplatform_collection,
             }));
         }
 
@@ -500,6 +541,7 @@ impl RolldownEtsTransformer {
                 is_comment_only_javascript: false,
                 is_shared_module,
                 insight_intent: transformed.insight_intent,
+                crossplatform_collection: transformed.crossplatform_collection,
             }));
         }
 
@@ -561,6 +603,7 @@ impl RolldownEtsTransformer {
                 is_comment_only_javascript,
                 is_shared_module,
                 insight_intent: transformed.insight_intent,
+                crossplatform_collection: transformed.crossplatform_collection,
             }));
         }
 
@@ -619,7 +662,63 @@ impl RolldownEtsTransformer {
             is_comment_only_javascript,
             is_shared_module,
             insight_intent: transformed.insight_intent,
+            crossplatform_collection: transformed.crossplatform_collection,
         }))
+    }
+
+    fn dynamic_typescript_system_api_collection(
+        &self,
+        code: &str,
+        id: &str,
+    ) -> Result<transform::CrossplatformSourceCollection, EtsTransformError> {
+        let allocator = Allocator::default();
+        let options = self.plan.transform_options_for(id);
+        let parsed = options.component_metadata.parse_ets(
+            &allocator,
+            code,
+            CompileArktsSourceType::from_id_with_version(id, self.plan.arkts_language_version),
+        );
+        if !parsed.diagnostics.is_empty() {
+            return Err(EtsTransformError::Fatal {
+                file: id.to_string(),
+                message: format!("ArkTS parse failed: {:?}", parsed.diagnostics),
+            });
+        }
+        let mut collection = if options.system_api.collects_crossplatform() {
+            transform::CrossplatformSourceCollection::from_program(
+                &parsed.program,
+                options.system_api.module_prefixes(),
+                &options.component_metadata,
+            )
+        } else {
+            transform::CrossplatformSourceCollection::default()
+        };
+        let validator = transform::system_api::Arkts11SystemApiValidator::new(
+            id,
+            code,
+            options.api_available,
+            &options.system_api,
+            &options.module_exports,
+            &options.sources,
+            &options.module_roots,
+        );
+        if validator.is_required() {
+            let validation = validator.validate(&parsed.program);
+            collection.merge(&validation.crossplatform_dependencies);
+            if matches!(options.checker_mode, transform::CheckerMode::Oxc) {
+                for diagnostic in &validation.diagnostics {
+                    tracing::debug!(file = id, diagnostic = ?diagnostic, "system API diagnostic");
+                }
+                if let Some(error) = validation
+                    .diagnostics
+                    .iter()
+                    .find(|diagnostic| diagnostic.is_error())
+                {
+                    return Err(error.clone());
+                }
+            }
+        }
+        Ok(collection)
     }
 
     fn emit_javascript_if_required(
@@ -1882,6 +1981,62 @@ export { emitter };"#,
             "latest ets-loader prints a rewritten module request as a generated double-quoted literal: {}",
             output.code
         );
+    }
+
+    #[test]
+    fn crossplatform_collection_covers_typescript_and_javascript_inputs() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_system_api_context(
+            SystemApiCheckOptions::default()
+                .with_crossplatform(true, false)
+                .with_crossplatform_collection(true)
+                .with_module_prefixes(["ohos", "system", "kit", "arkts", "arkui-x"]),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+
+        let typescript = transformer
+            .compile_transform(
+                "import call from '@arkui-x.telephony';\nForEach();\nif (call) {}\n",
+                "/tmp/project/entry/src/main/ets/model/Call.ts",
+            )
+            .expect("TypeScript transform")
+            .expect("TypeScript collection output");
+        assert_eq!(
+            typescript.crossplatform_collection.modules,
+            ["arkui-x.telephony".to_string()]
+        );
+        assert_eq!(
+            typescript.crossplatform_collection.components,
+            ["ForEach".to_string(), "If".to_string()]
+        );
+        assert!(typescript.record_module_source_code);
+
+        let javascript = transformer
+            .compile_transform(
+                "import router from '@ohos.router';\n\
+                 import '@ohos.sideEffect';\n\
+                 import colon from '@ohos:colon';\n\
+                 void router; void colon;\n",
+                "/tmp/project/entry/src/main/ets/model/Router.js",
+            )
+            .expect("JavaScript transform")
+            .expect("JavaScript collection output");
+        assert_eq!(
+            javascript.crossplatform_collection.modules,
+            ["ohos.router".to_string()]
+        );
+        assert!(javascript.crossplatform_collection.components.is_empty());
+        assert!(!javascript.record_module_source_code);
     }
 
     #[test]

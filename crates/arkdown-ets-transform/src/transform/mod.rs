@@ -8,6 +8,7 @@ mod component;
 mod component_analysis;
 mod component_collection;
 pub mod component_meta;
+mod crossplatform_collection;
 mod declaration_emit;
 pub(crate) mod decorator;
 mod entry;
@@ -103,6 +104,7 @@ pub(crate) use component_analysis::{
     ClassObservation, CustomComponentSemanticInventory, ImportedClassObservations,
     ImportedInsightIntentEntities, ModuleExportIndex,
 };
+pub use crossplatform_collection::CrossplatformSourceCollection;
 pub use navigation::{NavigationRoute, NavigationRouteMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +315,9 @@ pub struct ArktsTransformOutput {
     /// Per-source InsightIntent facts consumed by the build-end profile
     /// processor. Transform hooks never write profile or cache files.
     pub insight_intent: InsightIntentSourceMetadata,
+    /// ArkUI-X module/component facts collected from the original OXC AST and
+    /// used-system-API declarations.
+    pub crossplatform_collection: CrossplatformSourceCollection,
 }
 
 enum ArktsTransformerOptions<'a> {
@@ -397,10 +402,20 @@ impl<'a> ArktsTransformer<'a> {
             &options.module_roots,
         );
         let needs_system_api_validation = system_api_validator.is_required();
+        let mut crossplatform_collection = if options.system_api.collects_crossplatform() {
+            CrossplatformSourceCollection::from_program(
+                &parsed.program,
+                options.system_api.module_prefixes(),
+                &options.component_metadata,
+            )
+        } else {
+            CrossplatformSourceCollection::default()
+        };
         let syntax_detector = ArktsTransformSyntaxDetector::new();
         if !mock_setup_decorators_lowered
             && !needs_api_available
             && !needs_system_api_validation
+            && !options.system_api.collects_crossplatform()
             && !syntax_detector.program(&parsed.program)
         {
             return Ok(ArktsTransformOutput {
@@ -408,6 +423,7 @@ impl<'a> ArktsTransformer<'a> {
                 source_map: None,
                 rolldown_projection: None,
                 insight_intent: InsightIntentSourceMetadata::default(),
+                crossplatform_collection,
             });
         }
 
@@ -416,10 +432,16 @@ impl<'a> ArktsTransformer<'a> {
         let mut custom_components = custom_component_inventory.names;
         let mut custom_component_update_props = custom_component_inventory.info;
 
+        let system_api_validation =
+            needs_system_api_validation.then(|| system_api_validator.validate(&parsed.program));
+        if let Some(validation) = &system_api_validation {
+            crossplatform_collection.merge(&validation.crossplatform_dependencies);
+        }
+
         if matches!(options.checker_mode, CheckerMode::Oxc) {
-            if needs_system_api_validation {
-                let diagnostics = system_api_validator.diagnostics(&parsed.program);
-                for diagnostic in &diagnostics {
+            if let Some(validation) = &system_api_validation {
+                let diagnostics = &validation.diagnostics;
+                for diagnostic in diagnostics {
                     tracing::debug!(file = %source.id.id, diagnostic = ?diagnostic, "system API diagnostic");
                 }
                 if let Some(error) = diagnostics.iter().find(|diagnostic| diagnostic.is_error()) {
@@ -687,6 +709,7 @@ impl<'a> ArktsTransformer<'a> {
                 source_map: generated.source_map,
                 rolldown_projection: None,
                 insight_intent: insight_intent.metadata,
+                crossplatform_collection,
             })
         } else {
             Ok(ArktsTransformOutput {
@@ -694,6 +717,7 @@ impl<'a> ArktsTransformer<'a> {
                 source_map: None,
                 rolldown_projection: None,
                 insight_intent: insight_intent.metadata,
+                crossplatform_collection,
             })
         }
     }
@@ -726,6 +750,7 @@ impl<'a> ArktsTransformer<'a> {
             source_map: None,
             rolldown_projection: Some(projection),
             insight_intent: InsightIntentSourceMetadata::default(),
+            crossplatform_collection: CrossplatformSourceCollection::default(),
         })
     }
 }

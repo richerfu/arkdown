@@ -8,6 +8,7 @@
 //! production path.
 
 mod bytecode_har_imports;
+mod crossplatform_collection;
 mod import_rewriter;
 mod input_plan;
 mod module_path_map;
@@ -26,6 +27,7 @@ mod module_source_writer_tests;
 #[cfg(test)]
 mod transform_collector_tests;
 
+pub use crossplatform_collection::CrossplatformCollectionWriter;
 pub use types::{
     BundleOutput, HvigorHarImportees, HvigorModuleRequestRewritePlan, InsightIntentModuleSource,
     PreloadSystemSoTask, SourceMapInputFingerprint,
@@ -330,6 +332,7 @@ impl Bundler {
             plan.input.module_name.as_str(),
             plan.use_normalized_ohm_url,
         )?;
+        let crossplatform_collections = module_source_state.take_crossplatform_collections();
         let module_source_write_start = Instant::now();
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump("bundle:before-module-source-write");
@@ -452,6 +455,7 @@ impl Bundler {
             source_maps_path,
             source_map_input_fingerprints,
             insight_intent_sources,
+            crossplatform_collections,
         })
     }
 

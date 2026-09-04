@@ -13,7 +13,9 @@ use std::{borrow::Cow, future::ready, sync::Arc};
 
 #[cfg(feature = "memory-diagnostics")]
 use arkdown_ets_transform::RolldownEtsTransformOutput;
-use arkdown_ets_transform::{InsightIntentSourceMetadata, RolldownEtsTransformer};
+use arkdown_ets_transform::{
+    CrossplatformSourceCollection, InsightIntentSourceMetadata, RolldownEtsTransformer,
+};
 use rolldown_common::LogWithoutPlugin;
 use rolldown_plugin::{
     HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
@@ -47,6 +49,7 @@ pub(crate) struct EtsTransformModuleMetadataEntry {
     pub(crate) is_comment_only_javascript: bool,
     pub(crate) is_shared_module: bool,
     pub(crate) insight_intent: InsightIntentSourceMetadata,
+    pub(crate) crossplatform_collection: CrossplatformSourceCollection,
 }
 
 #[derive(Debug, Default)]
@@ -64,6 +67,7 @@ impl EtsTransformModuleMetadata {
         is_comment_only_javascript: bool,
         is_shared_module: bool,
         insight_intent: InsightIntentSourceMetadata,
+        crossplatform_collection: CrossplatformSourceCollection,
     ) {
         self.entries.insert(
             module_id,
@@ -74,6 +78,7 @@ impl EtsTransformModuleMetadata {
                 is_comment_only_javascript,
                 is_shared_module,
                 insight_intent,
+                crossplatform_collection,
             },
         );
     }
@@ -136,7 +141,7 @@ impl EtsTransformPlugin {
             .map_or(HookTransformOutputMap::Null, |map| {
                 HookTransformOutputMap::Sourcemap(Box::new(map.into_inner()))
             });
-        if output.record_module_source_code {
+        if output.record_module_source_code || !output.crossplatform_collection.is_empty() {
             ctx.meta()
                 .get_or_insert_default::<EtsTransformModuleMetadata>()
                 .record(
@@ -147,6 +152,7 @@ impl EtsTransformPlugin {
                     output.is_comment_only_javascript,
                     output.is_shared_module,
                     output.insight_intent,
+                    output.crossplatform_collection,
                 );
         }
         Ok(Some(HookTransformOutput {

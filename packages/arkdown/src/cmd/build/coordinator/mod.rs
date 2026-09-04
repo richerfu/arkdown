@@ -98,8 +98,9 @@ use arkdown::plugins::hvigor_compile::{
   HvigorCompilePluginSourceFile,
 };
 use arkdown::{
-  BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo, PluginCacheModuleInventory,
-  ShouldInvalidCacheRequest, SourceMapPolicy,
+  BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo,
+  CrossplatformCollectionWriter, PluginCacheModuleInventory, ShouldInvalidCacheRequest,
+  SourceMapPolicy,
 };
 
 use crate::cmd::ets_checker::{

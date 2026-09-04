@@ -688,6 +688,7 @@ impl BuildCoordinator {
         .with_atomic_service(session.project.bundle_type == "atomicService")
         .with_ohos_test_source(module_target_name == "ohosTest")
         .with_crossplatform(args.is_crossplatform, args.ignore_crossplatform_check)
+        .with_crossplatform_collection(args.is_crossplatform && !args.watch)
         .with_strict_api_compatibility(matches!(
           module_build_option.strict_mode.api_compatibility_check,
           Some(arkdown_core::ApiCompatibilityCheckLevel::Error)
@@ -702,6 +703,17 @@ impl BuildCoordinator {
             .filter_map(|permission| permission.get("name").and_then(serde_json::Value::as_str))
             .map(str::to_string),
         );
+      if args.is_crossplatform && !args.watch {
+        system_api = system_api.with_module_prefixes(session.sdk.module_prefixes.iter().cloned());
+        for dependency in session.sdk.crossplatform_dependencies.iter() {
+          system_api = system_api.with_crossplatform_dependency(
+            dependency.api_module.clone(),
+            dependency.function.clone(),
+            dependency.modules.iter().cloned(),
+            dependency.components.iter().cloned(),
+          );
+        }
+      }
       if let Some(capabilities) = module_context
         .module
         .module_json
@@ -879,6 +891,10 @@ impl BuildCoordinator {
         plan: bundle_plan,
       })
       .await?;
+      if args.is_crossplatform && !args.watch {
+        CrossplatformCollectionWriter::new(project_root, cache_dir.as_path())
+          .write(&bundle_out.bundle_output.crossplatform_collections)?;
+      }
       if args.arkts_version == arkdown_core::ArktsLanguageVersion::V1_1 {
         let intent_modules = bundle_out
           .bundle_output

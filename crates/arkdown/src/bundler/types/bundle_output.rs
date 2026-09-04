@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use rustc_hash::FxHashMap;
 
 use arkdown_core::{ChunkGraph, ChunkSourceFile, HvigorModuleSourceFile, HvigorNpmEntry};
-use arkdown_ets_transform::InsightIntentSourceMetadata;
+use arkdown_ets_transform::{CrossplatformSourceCollection, InsightIntentSourceMetadata};
 
 use crate::bundler::*;
 
@@ -52,6 +52,8 @@ pub struct BundleOutput {
     /// InsightIntent facts collected during OXC transforms and attributed to
     /// normalized OHM URLs after Rolldown resolves package ownership.
     pub insight_intent_sources: Vec<InsightIntentModuleSource>,
+    /// ArkUI-X module/component facts keyed by the original source module ID.
+    pub crossplatform_collections: FxHashMap<String, CrossplatformSourceCollection>,
 }
 
 #[derive(Debug, Clone)]

@@ -112,6 +112,12 @@ impl ModuleSpecifier {
         ModuleSpecifierText::new(self.as_str()).sdk_api_filenames()
     }
 
+    /// Return declaration candidates for a dot-form SDK component prefix,
+    /// including prefixes discovered from sibling `sdkConfig.json` files.
+    pub fn sdk_component_api_filenames(&self) -> Vec<String> {
+        ModuleSpecifierText::new(self.as_str()).sdk_component_api_filenames()
+    }
+
     /// Return the primary SDK `kits/` declaration file name for `@kit.*` imports.
     pub fn sdk_kit_filename(&self) -> Option<String> {
         ModuleSpecifierText::new(self.as_str()).sdk_kit_filename()
@@ -224,6 +230,16 @@ impl<'a> ModuleSpecifierText<'a> {
     /// Return SDK `api/` declaration file candidates for `@ohos/<api>` imports.
     pub fn sdk_api_filenames(&self) -> Vec<String> {
         SdkDeclarationSpecifier::new(self.raw).api_filenames()
+    }
+
+    /// Return declaration candidates for `@<sdk-prefix>.<api>` imports.
+    ///
+    /// The prefix inventory is owned by the build session, while this path
+    /// helper only projects the filename shape used by every ETS SDK
+    /// component. Resolution still succeeds only when that declaration was
+    /// inventoried under an SDK declaration root.
+    pub fn sdk_component_api_filenames(&self) -> Vec<String> {
+        SdkDeclarationSpecifier::new(self.raw).component_api_filenames()
     }
 
     /// Return the primary SDK `kits/` declaration file name for `@kit.*` imports.
@@ -464,6 +480,20 @@ impl<'a> SdkDeclarationSpecifier<'a> {
         Vec::new()
     }
 
+    fn component_api_filenames(&self) -> Vec<String> {
+        if !self.raw.starts_with('@')
+            || self.raw.contains('/')
+            || self.raw.contains(':')
+            || self
+                .raw
+                .split_once('.')
+                .is_none_or(|(prefix, api)| prefix.len() <= 1 || api.is_empty())
+        {
+            return Vec::new();
+        }
+        Self::declaration_filenames("", self.raw)
+    }
+
     fn kit_filenames(&self) -> Vec<String> {
         if self.raw.starts_with(Self::KIT_PREFIX) {
             return Self::declaration_filenames("", self.raw);
@@ -666,6 +696,16 @@ mod tests {
                 "@hms.core.map.MapComponent.d.ets".to_string()
             ]
         );
+        assert_eq!(
+            ModuleSpecifier::new("@arkui-x.telephony").sdk_component_api_filenames(),
+            vec![
+                "@arkui-x.telephony.d.ts".to_string(),
+                "@arkui-x.telephony.d.ets".to_string()
+            ]
+        );
+        assert!(ModuleSpecifier::new("@scope/package")
+            .sdk_component_api_filenames()
+            .is_empty());
         assert_eq!(
             ModuleSpecifier::new("@kit.ArkUI").sdk_kit_filename(),
             Some("@kit.ArkUI.d.ts".to_string())

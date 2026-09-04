@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use arkdown_ets_transform::InsightIntentSourceMetadata;
+use arkdown_ets_transform::{CrossplatformSourceCollection, InsightIntentSourceMetadata};
 use rolldown_plugin::{
     HookTransformArgs, HookTransformReturn, HookUsage, Plugin, SharedTransformPluginContext,
 };
@@ -24,6 +24,7 @@ pub(crate) struct HvigorModuleTransformStore {
     pub(crate) javascript_module_ids: Arc<FxDashMap<String, ()>>,
     pub(crate) shared_module_ids: Arc<FxDashMap<String, ()>>,
     pub(crate) insight_intent_sources: Arc<FxDashMap<String, InsightIntentSourceMetadata>>,
+    pub(crate) crossplatform_collections: Arc<FxDashMap<String, CrossplatformSourceCollection>>,
 }
 
 impl HvigorModuleTransformStore {
@@ -35,6 +36,7 @@ impl HvigorModuleTransformStore {
         emits_javascript: bool,
         is_shared_module: bool,
         insight_intent: InsightIntentSourceMetadata,
+        crossplatform_collection: CrossplatformSourceCollection,
     ) {
         if let Some(module_source_code) = module_source_code {
             self.module_source_overrides
@@ -54,7 +56,11 @@ impl HvigorModuleTransformStore {
         // untouched source from a recompiled source whose decorators were
         // removed; dropping empty facts would retain stale cache entries.
         self.insight_intent_sources
-            .insert(module_id, insight_intent);
+            .insert(module_id.clone(), insight_intent);
+        if !crossplatform_collection.is_empty() {
+            self.crossplatform_collections
+                .insert(module_id, crossplatform_collection);
+        }
     }
 
     pub(crate) fn finish(&self) -> HvigorModuleTransformSnapshot {
@@ -85,12 +91,18 @@ impl HvigorModuleTransformStore {
             insight_intent_sources.insert(item.key().clone(), item.value().clone());
         }
         self.insight_intent_sources.clear();
+        let mut crossplatform_collections = FxHashMap::default();
+        for item in self.crossplatform_collections.iter() {
+            crossplatform_collections.insert(item.key().clone(), item.value().clone());
+        }
+        self.crossplatform_collections.clear();
         HvigorModuleTransformSnapshot {
             module_source_overrides,
             source_maps,
             javascript_module_ids,
             shared_module_ids,
             insight_intent_sources,
+            crossplatform_collections,
         }
     }
 }
@@ -101,6 +113,7 @@ pub(crate) struct HvigorModuleTransformSnapshot {
     pub(crate) javascript_module_ids: FxHashSet<String>,
     pub(crate) shared_module_ids: FxHashSet<String>,
     pub(crate) insight_intent_sources: FxHashMap<String, InsightIntentSourceMetadata>,
+    pub(crate) crossplatform_collections: FxHashMap<String, CrossplatformSourceCollection>,
 }
 
 #[derive(Debug)]
@@ -203,6 +216,7 @@ impl Plugin for HvigorModuleTransformCollector {
                     metadata.emits_javascript,
                     metadata.is_shared_module,
                     metadata.insight_intent,
+                    metadata.crossplatform_collection,
                 );
             } else if let Some(source_map) = source_map {
                 store.record(
@@ -212,6 +226,7 @@ impl Plugin for HvigorModuleTransformCollector {
                     true,
                     false,
                     InsightIntentSourceMetadata::default(),
+                    CrossplatformSourceCollection::default(),
                 );
             }
             Ok(None)

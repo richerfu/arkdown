@@ -234,6 +234,22 @@ impl InputFingerprintSet {
             sdk.component_api_version.to_string().as_bytes(),
         );
         builder.add_value("compile_sdk_version", sdk.compile_sdk_version.as_bytes());
+        let module_prefixes =
+            serde_json::to_vec(sdk.module_prefixes.as_ref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "SdkSnapshot.module_prefixes",
+                    source,
+                }
+            })?;
+        builder.add_value("module_prefixes", &module_prefixes);
+        let crossplatform_dependencies =
+            serde_json::to_vec(sdk.crossplatform_dependencies.as_ref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "SdkSnapshot.crossplatform_dependencies",
+                    source,
+                }
+            })?;
+        builder.add_value("crossplatform_dependencies", &crossplatform_dependencies);
 
         for relative in [
             "ets/oh-uni-package.json",

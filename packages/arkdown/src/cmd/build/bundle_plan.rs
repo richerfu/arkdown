@@ -558,6 +558,7 @@ impl BundleStageOutput {
         source_maps_path: None,
         source_map_input_fingerprints: vec![],
         insight_intent_sources: vec![],
+        crossplatform_collections: rustc_hash::FxHashMap::default(),
       },
       state: BundleStageState::CacheHit,
     }
