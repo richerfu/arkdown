@@ -111,9 +111,10 @@ test('native package exposes direct commands and plugin bridges, not a Hvigor ru
 })
 
 test('the npm JavaScript file is the only CLI entrypoint', () => {
+  const workspaceRoot = path.resolve(__dirname, '../../..')
   const packageRoot = path.resolve(__dirname, '..')
   const manifest = fs.readFileSync(path.join(packageRoot, 'Cargo.toml'), 'utf8')
-  const workspaceManifest = fs.readFileSync(path.resolve(packageRoot, '../../Cargo.toml'), 'utf8')
+  const workspaceManifest = fs.readFileSync(path.join(workspaceRoot, 'Cargo.toml'), 'utf8')
   const napi = fs.readFileSync(path.join(packageRoot, 'src/lib.rs'), 'utf8')
   const declarations = fs.readFileSync(path.join(packageRoot, 'index.d.ts'), 'utf8')
   const cli = fs.readFileSync(path.join(packageRoot, 'js/arkdown-cli.js'), 'utf8')
@@ -131,4 +132,25 @@ test('the npm JavaScript file is the only CLI entrypoint', () => {
     /parseArkdown.*CliArgs|installRuntimeObservability|RuntimeProcessMonitor|runtimeHvigorReportSnapshot/,
   )
   assert.match(cli, /class JsCliArgumentParser/)
+
+  const rustPackages = [packageRoot]
+    .concat(
+      fs
+        .readdirSync(path.join(workspaceRoot, 'crates'), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(workspaceRoot, 'crates', entry.name)),
+    )
+    .filter((root) => fs.existsSync(path.join(root, 'Cargo.toml')))
+
+  for (const rustPackage of rustPackages) {
+    const packageManifest = fs.readFileSync(path.join(rustPackage, 'Cargo.toml'), 'utf8')
+    assert.doesNotMatch(packageManifest, /\[\[bin\]\]|^clap\s*=/m, rustPackage)
+    assert.equal(fs.existsSync(path.join(rustPackage, 'src/main.rs')), false, rustPackage)
+    for (const source of fs
+      .readdirSync(path.join(rustPackage, 'src'), { recursive: true })
+      .filter((name) => name.endsWith('.rs'))) {
+      const rust = fs.readFileSync(path.join(rustPackage, 'src', source), 'utf8')
+      assert.doesNotMatch(rust, /std::env::args(?:_os)?\s*\(|clap::/, `${rustPackage}/${source}`)
+    }
+  }
 })

@@ -79,6 +79,7 @@ class JsCliArgumentParser {
     this.oneOf(config, 'arktsVersion', ['1.1', '1.2'])
     this.oneOf(config, 'ohpmMode', ['offline', 'prefer-offline', 'online'])
     this.oneOf(config, 'coverageMode', ['black', 'white', 'full'])
+    this.oneOf(config, 'checker', ['oxc', 'sdk', 'off'])
     if (config.ohosTestCoverage !== undefined) {
       if (!['true', 'false'].includes(config.ohosTestCoverage)) {
         this.invalid('--ohos-test-coverage', config.ohosTestCoverage, 'true or false')
@@ -286,7 +287,8 @@ Options:
   --ignore-crossplatform-check
                       Downgrade cross-platform API errors to warnings.
   --cache-file <path> Override es2abc cache file.
-  --checker <mode>    Checker mode: oxc or off. Defaults to oxc.
+  --checker <mode>    Checker mode: oxc, sdk, or off. Defaults to oxc;
+                      sdk is retained only for parity comparison.
   --hvigor-plugin-file <path>
                       Load a compatible TS/JS compile-plugin module.
   --compile-plugin-path <path>
