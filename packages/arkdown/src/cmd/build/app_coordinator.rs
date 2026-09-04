@@ -30,7 +30,7 @@ use super::args::BuildRequest;
 use super::coordinator::{
   BuildCoordinator, BuildOutput, BuildTaskLifecycle, BuildTaskObserver, NativeTaskCutoffReached,
 };
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 
 pub struct AppBuildCoordinator {
   session: Arc<BuildSession>,

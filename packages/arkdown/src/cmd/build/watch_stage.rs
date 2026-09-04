@@ -29,7 +29,7 @@ use arkdown::plugins::factory::PackagePlugin;
 use super::args::{
   AbcBackendChoice, AnalyzeModeChoice, BuildCommand, BuildRequest, OhpmModeChoice,
 };
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 
 /// Input for the watch stage.
 ///

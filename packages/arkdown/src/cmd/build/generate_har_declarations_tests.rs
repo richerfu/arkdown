@@ -1,5 +1,5 @@
 use super::generate_har_declarations::HarDeclarationGenerator;
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 use arkdown_core::ArktsLanguageVersion;
 
 #[test]

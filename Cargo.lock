@@ -168,6 +168,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkdown-build"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arkdown-core",
+ "arkdown-session",
+ "json5",
+ "jsonschema",
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "arkdown-cache"
 version = "0.1.0"
 dependencies = [
@@ -249,6 +263,7 @@ dependencies = [
  "anyhow",
  "arkdown",
  "arkdown-abc",
+ "arkdown-build",
  "arkdown-cache",
  "arkdown-config",
  "arkdown-core",
@@ -272,7 +287,6 @@ dependencies = [
  "hex",
  "indexmap",
  "json5",
- "jsonschema",
  "junction",
  "mimalloc-safe",
  "napi",

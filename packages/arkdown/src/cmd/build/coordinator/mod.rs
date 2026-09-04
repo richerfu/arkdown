@@ -34,6 +34,7 @@ use arkdown_abc::aot::AotArtifactWriter;
 use arkdown_abc::bytecode::{
   BytecodeAbcInput, RolldownBytecodeBackendChoice, RolldownBytecodeCompiler,
 };
+use arkdown_build::pre_build::PreBuildValidator;
 use arkdown_core::{
   ArkdownConfig, ArktsLanguageVersion, BuildMode, HapManifest, HarArtifactType, ModuleConfig,
   ObfuscationConfig, OhosModuleType, OutputTarget,
@@ -74,15 +75,11 @@ use super::hot_reload::{
 use super::intermediates::{
   IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, SourceMapPackageHandoff,
 };
-use super::layout::{
-  ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
-};
 use super::module_plan::ModuleSelectionPlanner;
 use super::native_stage::{
   NativeDependencyStageExecutor, NativeDependencyStageInput, NativeDependencyStagePlan,
 };
 use super::packing_check::PackingCheck;
-use super::pre_build::PreBuildValidator;
 use super::preload_system_so::{PreloadSystemSoArtifactWriter, PreloadSystemSoPlan};
 use super::quickfix::{
   ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
@@ -103,6 +100,9 @@ use arkdown::{
   BundleCacheBridge, BundleMockDependency, BundleSourceMapPackageInfo,
   CrossplatformCollectionWriter, PluginCacheModuleInventory, ShouldInvalidCacheRequest,
   SourceMapPolicy,
+};
+use arkdown_build::layout::{
+  ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
 };
 
 use crate::cmd::ets_checker::{

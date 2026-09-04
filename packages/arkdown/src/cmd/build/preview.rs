@@ -6,7 +6,7 @@ use arkdown_core::{CompileMode, OhosModuleType};
 use arkdown_path::ArtifactPathSerializer;
 use serde_json::{Map, Value};
 
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 
 /// Owns the filesystem actions performed between `buildPreviewerResource`
 /// and `PreviewArkTS`.

@@ -24,7 +24,7 @@ use arkdown_path::{ArtifactPathSerializer, NormalizedOhmUrl};
 use arkdown_profile::{LoaderJson, PkgContextInfoOpt};
 use arkdown_session::PackageSnapshot;
 
-use super::layout::{ModuleBuildLayout, ModuleSourceCacheLayout, ModuleSourceLayout};
+use arkdown_build::layout::{ModuleBuildLayout, ModuleSourceCacheLayout, ModuleSourceLayout};
 
 // ---------------------------------------------------------------------------
 // BundlePlan construction

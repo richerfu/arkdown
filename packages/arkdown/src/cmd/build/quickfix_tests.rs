@@ -4,11 +4,11 @@ use arkdown_core::HvigorModuleSourceFile;
 use serde_json::json;
 
 use super::args::NativeTaskRoot;
-use super::layout::ModuleBuildLayout;
 use super::quickfix::{
   ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
   QuickFixTaskPlan, QuickFixVersionStore,
 };
+use arkdown_build::layout::ModuleBuildLayout;
 
 fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
   if let Some(parent) = path.parent() {

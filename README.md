@@ -20,9 +20,11 @@ flowchart LR
 ```
 
 The Rust crates under `crates/` are internal implementations of the individual build domains;
-`arkdown-abc` owns typed bytecode plans, SDK handoff manifests, and `es2abc` execution.
-`packages/arkdown` owns the public JS/N-API entry point and currently performs coarse build
-orchestration through `BuildCoordinator` while that application layer migrates to `arkdown-build`.
+`arkdown-abc` owns typed bytecode plans, SDK handoff manifests, and `es2abc` execution, while
+`arkdown-build` owns typed build-application layout and pre-build validation and will receive the
+remaining coordinator.
+`packages/arkdown` owns the public JS/N-API entry point and currently retains the coarse
+`BuildCoordinator` during that migration.
 The npm JavaScript CLI is the only command-line entry: Rust crates must not add binaries, argv
 parsers, or command-line lifecycle APIs.
 

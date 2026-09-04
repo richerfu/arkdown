@@ -31,7 +31,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 
 当前最明显的架构偏差是：
 
-1. `arkdown-napi` 已从约 6.6 万行降至约 4.5 万行 Rust：Hvigor project/task/worker/build-script runtime，以及零调用的 CLI observability/process-monitor/report lifecycle N-API facade 已删除；动态 ABC 的 typed plan、filesInfo/npmEntries/cache manifest 与 `es2abc` 执行已完整迁入 `arkdown-abc`，但构建编排、AOT/quickfix/static ABC 和 package/sign orchestration 仍待迁入对应 application/domain crate，当前还不是薄绑定层。
+1. `arkdown-napi` 已从约 6.6 万行降至约 4.3 万行 Rust：Hvigor project/task/worker/build-script runtime，以及零调用的 CLI observability/process-monitor/report lifecycle N-API facade 已删除；动态 ABC 的 typed plan、filesInfo/npmEntries/cache manifest、`es2abc` 执行和 AOT writer 已完整迁入 `arkdown-abc`，全部 build layout 与 pre-build validator 已迁入无 N-API 依赖的 `arkdown-build`。构建 coordinator、quickfix/static ABC 和 package/sign orchestration 仍待迁入对应 application/domain crate，当前还不是薄绑定层。
 2. `packages/arkdown/js` 当前约 1,419 行：只保留原生入口、CLI trampoline、完整 TS/JS compile-plugin 适配，以及尚待 OXC 语义尾项完成后删除的 checker 对比 bridge。插件适配占其中约 928 行，是原有 TS/JS 插件 ABI 的兼容边界，不应下沉为 Rust CLI 或伪造为内建业务逻辑。
 3. 默认 checker 已改为 OXC；显式 `checker=sdk` 对比后端及其 Node bridge 仍待最后一批语义用例迁移后删除。
 4. ArkTS 1.2 虽然已经按参数正确分流，但 Rust 只解析并投影模块请求，真正的 UI、语法检查、Memo 和 ABC 驱动仍由 Node 加载 SDK 插件执行。
@@ -151,7 +151,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 | 能力域 | 当前状态 | 证据与实际差异 | 重构结论 |
 |---|---|---|---|
-| 项目模型/CLI/任务编排 | Hvigor runtime facade 与 Rust CLI 已删除 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不再包含 binary、Clap、CLI parser/install mode 或 process-monitor/report lifecycle export；`build/check/clean` 以 typed N-API service 暴露，构建 application 仍位于 N-API crate | 抽出 `arkdown-build`；JS CLI 和 programmatic N-API 共用同一原生 `BuildRequest` |
+| 项目模型/CLI/任务编排 | Hvigor runtime facade 与 Rust CLI 已删除，application 迁移已开始 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不再包含 binary、Clap、CLI parser/install mode 或 process-monitor/report lifecycle export；`build/check/clean` 以 typed N-API service 暴露；`arkdown-build` 已接管全部 typed build layout 与 pre-build validator，但 coordinator 仍位于 N-API crate | 继续把 coordinator/stages 迁入 `arkdown-build`；JS CLI 和 programmatic N-API 共用同一原生 `BuildRequest` |
 | 配置和 build script | 旧脚本 runtime 已删除 | `build()` 不发现或执行 `hvigorfile.ts`/`hvigorconfig.ts`；build-script model、config merge、sync/dependency workspace facade 已删除；旧 task/config 参数用 `ARKDOWN_HVIGOR_RUNTIME_UNSUPPORTED` 拒绝 | `arkdown-config` 产出单一结构化配置；TS 只用于插件模块 |
 | OHPM/依赖获取 | 启动链已接入，真实项目语料待扩展 | 生产 `BuildSessionBuilder` 在项目快照前执行 lockfile 驱动的 local/cache/registry acquire；支持 offline/prefer-offline/online、semver range、完整性校验、同包去重并行和原子 cache publish，获取结果直接种入依赖图；仍需以真实 OHPM lockfile/store 变体扩展语料 | 保持 package inventory 只构建一次；补 registry/auth/lockfile 真实工程金标，不再回退为静默扫描 |
 | BuildSession/输入快照 | 主链已冻结，领域重复库存待收敛 | SourceStore 已在 startup 并行冻结源码内容/hash/mtime，package manifest/acquired roots、SDK/profile/build option 同样由 session 提供；profile 仍维护一套 `LocalDependencyGraph`，部分领域仍有二次目录读取 | 只保留 session graph/source store/package index；删除 profile 重复图和剩余 stage I/O |
@@ -162,7 +162,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | System API/syscap/permission | 主干完成，完整 TypeScript 类型查询待补 | 已建立 `SystemApiInventory`，解析 SDK JSDoc、namespace/class/interface/type 引用和 barrel export；生产链路已接入 version/permission/syscap/device、suppressor、直接/局部值类型流，并按参数数量及 literal/primitive/callable/object/named 参数类型选择函数/方法重载及其独立 JSDoc contract。type-only/重命名导入和跨 SDK 文件类型闭包可参与选择，局部别名及连续系统调用结果会固定点收敛；awaited generic wrapper、显式函数/方法类型参数、声明默认参数、命名泛型包装、type alias 和继承会保留并实例化类型实参。ArkUI-X `@crossplatform`/版本范围、11706007 严重级别和 build/check/watch/plugin/cache 参数链路已经对齐；external SDK prefix/apiPath/depsModuleConfig 由 session 一次冻结，直接 import、组件/If 和实际 API 依赖均以 OXC/Rolldown facts 确定性写入 collection 文件 | conditional/indexed type、完整结构兼容和复杂表达式类型必须由 OXC typed semantic API 提供，不能继续扩张 JS checker 或在 Rust 重写 TypeScript 类型系统；以源码诊断顺序做 corpus 金标 |
 | Visual/SuperVisual | Rust 原生主链完成 | `.visual` parser/codegen、组件事件/属性序列化和 OXC 确定性插入均在 Rust 内完成，生产构建不再启动 Node generator | 继续用新源码 Visual/SuperVisual 语料扩展边界回归，并核对大工程生成片段与运行时行为 |
 | ArkTS 1.2 | Rust 行为基本缺失 | OXC 使用 `SourceType::ets_static()` 并生成图投影，但生产编译仍由 Node static driver 加载 UI/syntax/memo 插件；interop 未完整接入，多个 config 字段为空 | 按源码固定阶段在 OXC 实现 interop parsed/checked、UI parsed/checked、UI syntax checked、memo checked+recheck；Rust 直接调用原生后端 |
-| ABC/AOT/中间文件 | 动态 ABC owner 已抽离，其他部分仍散落 | `arkdown-abc` 已拥有 dynamic `es2abc` typed plan、filesInfo/npmEntries/cache manifest、reload 参数和 SDK 命令执行，且不依赖 N-API；sourceMaps、AOT/quickfix 仍位于 N-API crate，static 仍被 JS driver 包住 | 继续把动态/静态/preview/reload 的其余 command plan、sourceMaps、AOT/quickfix 和 bytecode obfuscation 收口到 `arkdown-abc`，统一缓存键 |
+| ABC/AOT/中间文件 | 动态 ABC 与 AOT owner 已抽离，其他部分仍散落 | `arkdown-abc` 已拥有 dynamic `es2abc` typed plan、filesInfo/npmEntries/cache manifest、reload 参数、SDK 命令执行和 AOT writer，且不依赖 N-API；sourceMaps/quickfix 仍位于 N-API crate，static 仍被 JS driver 包住 | 继续把动态/静态/preview/reload 的其余 command plan、sourceMaps、quickfix 和 bytecode obfuscation 收口到 `arkdown-abc`，统一缓存键 |
 | 源码与字节码混淆 | JS 托管 | `arkdown-obfuscate` 把 `arkguard_bridge.cjs` 写入缓存并启动 Node；bytecode 同样走 CJS bridge | 源码混淆使用 OXC minifier/mangler/name cache；字节码走 native panda_guard adapter |
 | Cache/Watch/Reload | 部分 | task 粗缓存可跳模块，但 Rolldown 改动后仍重扫；此前空 `rollup_cache.json` 是假缓存；ArkTS 1.2 reload/widget 明确 unsupported | 实现图级 cache manifest、transform fact cache、ABC file cache 和事件失效；补 static reload/widget，或在最终 scope 中稳定拒绝 |
 | Package/Sign | 基本可用 | HAP/HSP/HAR/APP、profile、签名已有 Rust 实现，但仍在 N-API coordinator 内编排 | domain crate 保留；编排移至 `arkdown-build`；用产物结构/签名校验做金标 |
@@ -297,7 +297,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 只保留 Rolldown bundler 和 built-in adapter。plugin factory 接收 immutable `BundlePlan`；hooks 返回模块事实，构建结束确定性归并。禁止 hook 内重复读文件和 `Arc<Mutex<Vec<_>>>` collector。
 
-### 新增 `arkdown-abc`
+### `arkdown-abc`（已创建）
 
 负责 filesInfo、npmEntries、sourceMaps、动态 es2abc、静态 es2panda/ark_link、AOT、quickfix、bytecode obfuscation 的 typed command plan 和结果解析。
 
@@ -305,7 +305,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 `arkdown-resource`、`arkdown-profile`、`arkdown-cache`、`arkdown-obfuscate`、`arkdown-pack`、`arkdown-sign`、`arkdown-watcher` 各自拥有领域行为，不反向依赖 CLI/N-API。
 
-### 新增 `arkdown-build`
+### `arkdown-build`（已创建，迁移中）
 
 唯一 application service，拥有 `BuildApplication`、`BuildCoordinator`、`StageExecutor`、build waves 和产物提交。它组合 domain crates，但不暴露 N-API 类型。
 
@@ -337,7 +337,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 工作：
 
-- 新建 `arkdown-build`，把 `packages/arkdown/src/cmd/build/coordinator`、prebuild、layout、intermediates、package/sign orchestration 按 owner 迁出。
+- 继续把 `packages/arkdown/src/cmd/build/coordinator`、intermediates、package/sign orchestration 按 owner 迁入已创建的 `arkdown-build`；layout 与 pre-build validator 已完成迁移。
 - 保留唯一 npm JS CLI，删除 Rust binary/Clap/argv parser，并让 JS 将轻量解析后的 typed request 交给 N-API。
 - 定义 `BuildRequest`、`BuildResult`、`PluginDescriptor`、`PluginHookHandle` 和 `BuildDiagnostic`，禁止 application crate 依赖 napi。
 - 用 OXC 提供 TS plugin module transpile；建立最小 `plugin-adapter.js`。

@@ -10,7 +10,7 @@ use super::hot_reload::{
   HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary, HotReloadTaskPlan,
   ReloadResourceTaskPlan,
 };
-use super::layout::ModuleBuildLayout;
+use arkdown_build::layout::ModuleBuildLayout;
 
 fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
   if let Some(parent) = path.parent() {
