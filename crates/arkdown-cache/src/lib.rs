@@ -35,6 +35,7 @@ pub mod artifact;
 pub mod error;
 pub mod event_name;
 pub mod group_invalidation;
+mod har_importee;
 pub mod key;
 pub mod manifest;
 pub mod namespace;
@@ -81,3 +82,6 @@ pub use event_name::{CacheEventName, ChangedFileEvent, UpdateEventNameHandler};
 
 // group_invalidation — deterministic cache-group invalidation
 pub use group_invalidation::{CacheGroupDiff, CacheGroupKey, CacheGroupSnapshot, CacheGroupsStore};
+
+// har_importee — ByteCode HAR importee handoff
+pub use har_importee::{HarImporteeCache, HarImporteeCacheError, HvigorHarImportees};

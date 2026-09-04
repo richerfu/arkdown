@@ -6,9 +6,6 @@ mod device_test;
 mod har_dedup;
 #[cfg(test)]
 mod har_dedup_tests;
-mod har_importee_cache;
-#[cfg(test)]
-mod har_importee_cache_tests;
 mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
