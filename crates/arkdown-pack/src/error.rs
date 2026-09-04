@@ -10,6 +10,14 @@ pub enum PackError {
     RawZip(#[from] rawzip::Error),
     #[error("Missing required input: {0}")]
     MissingInput(String),
+    #[error(
+        "MODULE_SRC_ENTRY_NOT_FOUND: '{source_entry}' is not present under stripped_native_libs/{abi} (referenced by {module_json})"
+    )]
+    ModuleSourceEntryNotFound {
+        source_entry: String,
+        abi: String,
+        module_json: String,
+    },
     #[error("Integrated HSP dependency '{alias}' is missing its pre-built archive: {path}")]
     MissingIntegratedHsp { alias: String, path: String },
     #[error("Malformed pack.info: {0}")]

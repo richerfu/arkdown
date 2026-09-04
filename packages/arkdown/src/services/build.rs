@@ -1,10 +1,6 @@
 pub mod app_coordinator;
 mod bundle_plan;
 mod bytecode_har_declaration;
-mod bytecode_stage;
-mod code_resource;
-#[cfg(test)]
-mod code_resource_tests;
 pub mod coordinator;
 mod coverage_instrument;
 mod device_test;
@@ -21,7 +17,6 @@ mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;
 mod native_stage;
-mod packing_check;
 mod preload_system_so;
 mod preview;
 #[cfg(test)]

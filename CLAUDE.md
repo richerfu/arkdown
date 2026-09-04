@@ -66,9 +66,11 @@ arkdown/
 │   ├── arkdown-resolver/     ← OHOS module/package resolution
 │   ├── arkdown-ets-transform/ ← OXC ArkTS/TS/JS transforms, checker, source maps
 │   ├── arkdown/              ← Rolldown integration + built-in plugin adapters
+│   ├── arkdown-abc/          ← typed ABC plans, manifests, SDK compiler execution, AOT
+│   ├── arkdown-build/        ← typed requests, application plans, layouts, artifact handoffs
 │   ├── arkdown-profile/      ← module/profile/router/startup/share/privacy/PAC processing
 │   ├── arkdown-resource/     ← resource inventory and restool-compatible plans
-│   ├── arkdown-pack/         ← HAP/HSP/HAR/app packaging
+│   ├── arkdown-pack/         ← HAP/HSP/HAR/app packaging and packing validation
 │   ├── arkdown-sign/         ← signing and verification (hapsigner backend)
 │   ├── arkdown-obfuscate/    ← obfuscation rule planning and mapping
 │   ├── arkdown-cache/        ← fingerprint-based cache keys and records
@@ -218,7 +220,7 @@ export OHOS_SDK_HOME=/path/to/sdk/default/openharmony
 | ------------------ | ------------ | ------------------ |
 | `ets-loader` JS plugins | Replaced by OXC transforms | `arkdown-ets-transform` + `arkdown/src/plugins/ets_transform.rs` |
 | Rollup | Replaced by Rolldown | `arkdown` |
-| `es2abc` | SDK backend by default | no Rust ABC crate yet (see `meta/design/abc-pipeline.md`) |
+| `es2abc` | SDK backend by default | `arkdown-abc` typed plan and execution |
 | `restool` | SDK-compatible/native path allowed | `arkdown-resource` planning |
 | `hap-sign-tool.jar` | Superseded | `arkdown-sign` via the published `hapsigner` crate |
 
