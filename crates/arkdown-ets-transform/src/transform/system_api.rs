@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use oxc_ast::{
@@ -49,6 +50,8 @@ pub struct SystemApiCheckOptions {
     form_source: bool,
     atomic_service: bool,
     ohos_test_source: bool,
+    crossplatform: bool,
+    ignore_crossplatform_check: bool,
 }
 
 impl Default for SystemApiCheckOptions {
@@ -65,6 +68,8 @@ impl Default for SystemApiCheckOptions {
             form_source: false,
             atomic_service: false,
             ohos_test_source: false,
+            crossplatform: false,
+            ignore_crossplatform_check: false,
         }
     }
 }
@@ -126,6 +131,12 @@ impl SystemApiCheckOptions {
         self
     }
 
+    pub fn with_crossplatform(mut self, crossplatform: bool, ignore_check: bool) -> Self {
+        self.crossplatform = crossplatform;
+        self.ignore_crossplatform_check = ignore_check;
+        self
+    }
+
     fn severity(&self) -> DiagnosticSeverity {
         if self.strict_api_compatibility {
             DiagnosticSeverity::Error
@@ -147,6 +158,7 @@ pub(super) struct SystemApiContract {
     deprecated: bool,
     since_whitelisted: bool,
     form: Option<Box<str>>,
+    crossplatform: Option<Box<str>>,
     atomic_service: Option<Box<str>>,
     fa_model_only: Option<Box<str>>,
     test_only: Option<Box<str>>,
@@ -162,6 +174,7 @@ impl SystemApiContract {
             && self.system_api.is_none()
             && !self.deprecated
             && self.form.is_none()
+            && self.crossplatform.is_none()
             && self.atomic_service.is_none()
             && self.fa_model_only.is_none()
             && self.test_only.is_none()
@@ -191,6 +204,9 @@ impl SystemApiContract {
         if self.form.is_none() {
             self.form.clone_from(&other.form);
         }
+        if self.crossplatform.is_none() {
+            self.crossplatform.clone_from(&other.crossplatform);
+        }
         if self.atomic_service.is_none() {
             self.atomic_service.clone_from(&other.atomic_service);
         }
@@ -205,14 +221,27 @@ impl SystemApiContract {
 
 /// Export/type tree for an API symbol. References are retained as owned names
 /// until the module export closure has resolved imports and declaration merges.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct SystemApiSymbol {
     contract: SystemApiContract,
     members: FxHashMap<Box<str>, SystemApiSymbol>,
     references: Vec<Vec<Box<str>>>,
     call_signatures: Vec<SystemApiCallSignature>,
     awaited: Option<Box<SystemApiSymbol>>,
+    type_table: Option<Arc<FxHashMap<Box<str>, SystemApiSymbol>>>,
 }
+
+impl PartialEq for SystemApiSymbol {
+    fn eq(&self, other: &Self) -> bool {
+        self.contract == other.contract
+            && self.members == other.members
+            && self.references == other.references
+            && self.call_signatures == other.call_signatures
+            && self.awaited == other.awaited
+    }
+}
+
+impl Eq for SystemApiSymbol {}
 
 impl SystemApiSymbol {
     fn is_empty(&self) -> bool {
@@ -243,6 +272,9 @@ impl SystemApiSymbol {
                 .get_or_insert_with(|| Box::new(SystemApiSymbol::default()))
                 .merge(other_awaited);
         }
+        if self.type_table.is_none() {
+            self.type_table.clone_from(&other.type_table);
+        }
     }
 
     fn merge_type_shape(&mut self, other: &Self) {
@@ -259,6 +291,9 @@ impl SystemApiSymbol {
                 .get_or_insert_with(|| Box::new(SystemApiSymbol::default()))
                 .merge_type_shape(other_awaited);
         }
+        if self.type_table.is_none() {
+            self.type_table.clone_from(&other.type_table);
+        }
     }
 
     fn type_shape(&self) -> Self {
@@ -266,13 +301,47 @@ impl SystemApiSymbol {
             members: self.members.clone(),
             call_signatures: self.call_signatures.clone(),
             awaited: self.awaited.clone(),
+            type_table: self.type_table.clone(),
             ..Self::default()
         }
     }
 
-    fn member(&self, path: &[Box<str>]) -> Option<&Self> {
-        path.iter()
-            .try_fold(self, |symbol, name| symbol.members.get(name.as_ref()))
+    fn resolved_member(&self, name: &str) -> Option<Self> {
+        self.resolved_member_with(name, &mut FxHashSet::default())
+    }
+
+    fn resolved_member_with(
+        &self,
+        name: &str,
+        active_references: &mut FxHashSet<Vec<Box<str>>>,
+    ) -> Option<Self> {
+        let mut result = self.members.get(name).cloned();
+        for reference in &self.references {
+            if !active_references.insert(reference.clone()) {
+                continue;
+            }
+            let referenced_member = self.type_table.as_ref().and_then(|table| {
+                let root = reference.first()?;
+                let mut target = table.get(root)?.clone();
+                target.type_table = Some(Arc::clone(table));
+                for segment in &reference[1..] {
+                    target = target.resolved_member_with(segment, active_references)?;
+                }
+                target.resolved_member_with(name, active_references)
+            });
+            active_references.remove(reference);
+            if let Some(referenced_member) = referenced_member {
+                result
+                    .get_or_insert_with(SystemApiSymbol::default)
+                    .merge(&referenced_member);
+            }
+        }
+        if let Some(result) = result.as_mut() {
+            if result.type_table.is_none() {
+                result.type_table.clone_from(&self.type_table);
+            }
+        }
+        result
     }
 
     fn add_type_projection(&mut self, projection: SystemApiTypeProjection) {
@@ -296,21 +365,30 @@ impl SystemApiSymbol {
         }
     }
 
-    fn call_result(&self, argument_count: usize) -> Option<Cow<'_, Self>> {
+    fn call_result(&self, argument_count: usize) -> Option<Self> {
         let mut matches = self
             .call_signatures
             .iter()
             .filter(|signature| signature.accepts(argument_count));
         let first = matches.next()?;
         let Some(second) = matches.next() else {
-            return Some(Cow::Borrowed(&first.result));
+            let mut result = first.result.clone();
+            result.type_table.clone_from(&self.type_table);
+            return Some(result);
         };
         let mut result = first.result.type_shape();
         result.merge_type_shape(&second.result);
         for signature in matches {
             result.merge_type_shape(&signature.result);
         }
-        Some(Cow::Owned(result))
+        result.type_table.clone_from(&self.type_table);
+        Some(result)
+    }
+
+    fn awaited_result(&self) -> Option<Self> {
+        let mut result = self.awaited.as_deref()?.clone();
+        result.type_table.clone_from(&self.type_table);
+        Some(result)
     }
 }
 
@@ -433,16 +511,9 @@ impl SystemApiModuleFacts {
     }
 
     pub(super) fn resolve_local_references(local: &mut FxHashMap<Box<str>, SystemApiSymbol>) {
-        let rounds = local.len().saturating_add(1).max(1);
-        for _ in 0..rounds {
-            let previous = local.clone();
-            let mut changed = false;
-            for symbol in local.values_mut() {
-                changed |= SystemApiReferenceResolver::new(&previous).resolve(symbol);
-            }
-            if !changed {
-                break;
-            }
+        let type_table = Arc::new(local.clone());
+        for symbol in local.values_mut() {
+            symbol.type_table = Some(Arc::clone(&type_table));
         }
     }
 }
@@ -1003,6 +1074,9 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                         "systemapi" => contract.system_api = Some(value.trim().into()),
                         "deprecated" => contract.deprecated = true,
                         "form" => contract.form = Some(value.trim().into()),
+                        "crossplatform" => {
+                            contract.crossplatform = Some(value.trim().into());
+                        }
                         "atomicservice" => {
                             contract.atomic_service = Some(value.trim().into());
                         }
@@ -1048,45 +1122,6 @@ impl<'a> SystemApiDeclarationCollector<'a> {
             }
         }
         self.facts
-    }
-}
-
-struct SystemApiReferenceResolver<'a> {
-    local: &'a FxHashMap<Box<str>, SystemApiSymbol>,
-}
-
-impl<'a> SystemApiReferenceResolver<'a> {
-    fn new(local: &'a FxHashMap<Box<str>, SystemApiSymbol>) -> Self {
-        Self { local }
-    }
-
-    fn resolve(&self, symbol: &mut SystemApiSymbol) -> bool {
-        let mut changed = false;
-        let references = symbol.references.clone();
-        for reference in references {
-            let Some(root) = reference.first() else {
-                continue;
-            };
-            if let Some(target) = self
-                .local
-                .get(root)
-                .and_then(|target| target.member(&reference[1..]))
-            {
-                let previous = symbol.clone();
-                symbol.merge_type_shape(target);
-                changed |= *symbol != previous;
-            }
-        }
-        for member in symbol.members.values_mut() {
-            changed |= self.resolve(member);
-        }
-        for signature in &mut symbol.call_signatures {
-            changed |= self.resolve(&mut signature.result);
-        }
-        if let Some(awaited) = symbol.awaited.as_mut() {
-            changed |= self.resolve(awaited);
-        }
-        changed
     }
 }
 
@@ -1286,51 +1321,34 @@ impl ImportedSystemApiBindings {
         self.symbols.get(&symbol_id)
     }
 
-    fn resolve_value<'a>(
-        &'a self,
+    fn resolve_value(
+        &self,
         expression: &Expression<'_>,
         scoping: &Scoping,
-    ) -> Option<Cow<'a, SystemApiSymbol>> {
+    ) -> Option<SystemApiSymbol> {
         let path = SystemApiValuePath::new(expression)?;
-        let mut symbol = Cow::Borrowed(self.root_symbol(path.root, scoping)?);
+        let mut symbol = self.root_symbol(path.root, scoping)?.clone();
         for segment in path.segments {
-            symbol = match (segment, symbol) {
-                (SystemApiValueSegment::Member(name), Cow::Borrowed(symbol)) => {
-                    Cow::Borrowed(symbol.members.get(name.as_ref())?)
-                }
-                (SystemApiValueSegment::Member(name), Cow::Owned(symbol)) => {
-                    Cow::Owned(symbol.members.get(name.as_ref())?.clone())
-                }
-                (SystemApiValueSegment::Call(argument_count), Cow::Borrowed(symbol)) => {
+            symbol = match segment {
+                SystemApiValueSegment::Member(name) => symbol.resolved_member(name.as_ref())?,
+                SystemApiValueSegment::Call(argument_count) => {
                     if symbol.call_signatures.is_empty() {
-                        Cow::Borrowed(symbol)
+                        symbol
                     } else {
                         symbol.call_result(argument_count)?
                     }
                 }
-                (SystemApiValueSegment::Call(argument_count), Cow::Owned(symbol)) => {
-                    if symbol.call_signatures.is_empty() {
-                        Cow::Owned(symbol)
-                    } else {
-                        Cow::Owned(symbol.call_result(argument_count)?.into_owned())
-                    }
-                }
-                (SystemApiValueSegment::Await, Cow::Borrowed(symbol)) => {
-                    Cow::Borrowed(symbol.awaited.as_deref()?)
-                }
-                (SystemApiValueSegment::Await, Cow::Owned(symbol)) => {
-                    Cow::Owned(symbol.awaited.as_deref()?.clone())
-                }
+                SystemApiValueSegment::Await => symbol.awaited_result()?,
             };
         }
         Some(symbol)
     }
 
-    fn resolve_api_use<'a>(
-        &'a self,
+    fn resolve_api_use(
+        &self,
         expression: &Expression<'_>,
         scoping: &Scoping,
-    ) -> Option<Cow<'a, SystemApiSymbol>> {
+    ) -> Option<SystemApiSymbol> {
         match expression {
             Expression::CallExpression(call) => self.resolve_value(&call.callee, scoping),
             Expression::NewExpression(constructor) => {
@@ -1402,7 +1420,7 @@ impl<'program> Visit<'program> for SystemApiLocalValueCollector<'_> {
                         .cloned()
                         .unwrap_or_default(),
                     symbol_id,
-                    symbol: symbol.into_owned(),
+                    symbol,
                 });
             }
         }
@@ -1669,6 +1687,26 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
                     span,
                     "Check the official API reference documentation, and switch to the supported interfaces.",
                 );
+            }
+            if self.options.crossplatform
+                && !SystemApiVersionedTag::new(contract.crossplatform.as_deref())
+                    .supports(&self.options.compile_sdk_version)
+            {
+                self.diagnostics.push(EtsTransformError::CodedDiagnostic {
+                    file: self.source_id.to_string(),
+                    code: "11706007".to_string(),
+                    message: format!("'{api_name}' can't support crossplatform application."),
+                    severity: if self.options.ignore_crossplatform_check {
+                        DiagnosticSeverity::Warning
+                    } else {
+                        DiagnosticSeverity::Error
+                    },
+                    span: Some(span),
+                    solutions: vec![
+                        "Check the official API reference documentation, and switch to the supported interfaces."
+                            .to_string(),
+                    ],
+                });
             }
             if self.options.atomic_service
                 && SystemApiVersion::new(&self.options.compile_sdk_version)

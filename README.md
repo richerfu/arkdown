@@ -134,7 +134,8 @@ npx arkdown build --project ./my-app --target hap --mode debug
 `--target` accepts `hap`, `hsp`, or `har`; `--mode` accepts `debug` or `release`. Use `--module`, `--product`,
 or `--build-target-name` to select a more specific build configuration. Run `npx arkdown build --help` for
 the complete option list. Pass `--enable-zig` to compile native C/C++ sources with `zig cc` and `zig c++`;
-the Zig executable must be available on `PATH`.
+the Zig executable must be available on `PATH`. ArkUI-X builds opt in with `--crossplatform`; add
+`--ignore-crossplatform-check` only when `11706007` should be reported as a warning instead of an error.
 
 ### BuildProfile overrides
 

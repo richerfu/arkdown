@@ -2487,6 +2487,8 @@ impl BuildCoordinator {
           byte_code_har_integrated_optimization: args.byte_code_har_integrated_optimization,
           single_file_emit: false,
           rollup_cache_use_source_hash: args.hvigor_properties.rollup_cache_use_source_hash,
+          is_crossplatform: args.is_crossplatform,
+          ignore_crossplatform_check: args.ignore_crossplatform_check,
         })
         .build()?,
       );
@@ -2603,6 +2605,8 @@ impl BuildCoordinator {
               && args.hvigor_properties.single_file_emit
               && !coverage_mode,
             rollup_cache_use_source_hash: args.hvigor_properties.rollup_cache_use_source_hash,
+            is_crossplatform: args.is_crossplatform,
+            ignore_crossplatform_check: args.ignore_crossplatform_check,
           })
           .build()?,
         );

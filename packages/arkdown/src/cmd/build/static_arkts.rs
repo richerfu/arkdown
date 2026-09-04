@@ -28,6 +28,7 @@ pub(super) struct StaticArktsCompileInput<'a> {
   pub output_abc: &'a Path,
   pub preview_mode: bool,
   pub check_entry: bool,
+  pub is_crossplatform: bool,
   pub ui_transform_optimization: bool,
   pub bundle_type: &'a str,
 }
@@ -263,7 +264,7 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
       is_preview: self.input.preview_mode,
       check_entry: self.input.check_entry,
       code_root_path: self.path(&project_path)?,
-      is_crossplatform: false,
+      is_crossplatform: self.input.is_crossplatform,
       bundle_type: self.input.bundle_type.to_string(),
       level: StaticArktsLogLevel::default(),
       is_build_config_modified: false,

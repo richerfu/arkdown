@@ -136,6 +136,8 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
         && self.args.hvigor_properties.single_file_emit
         && !self.coverage_enabled,
       rollup_cache_use_source_hash: self.args.hvigor_properties.rollup_cache_use_source_hash,
+      is_crossplatform: self.args.is_crossplatform,
+      ignore_crossplatform_check: self.args.ignore_crossplatform_check,
     })
     .project_config_value()?;
     let effective = value

@@ -19,6 +19,8 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     '--analyze',
     'trace',
     '--check-entry',
+    '--crossplatform',
+    '--ignore-crossplatform-check',
   ])
 
   assert.deepEqual(config, {
@@ -27,6 +29,8 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     arktsVersion: '1.2',
     analyze: 'trace',
     checkEntry: true,
+    isCrossplatform: true,
+    ignoreCrossplatformCheck: true,
   })
 })
 
@@ -53,12 +57,15 @@ test('package CLI delegates native check and clean commands', async () => {
   }
 
   assert.equal(
-    await new ArkdownPackageCli(['check', '--project', '/tmp/app', '--module', 'entry'], operations).run(),
+    await new ArkdownPackageCli(
+      ['check', '--project', '/tmp/app', '--module', 'entry', '--crossplatform'],
+      operations,
+    ).run(),
     0,
   )
   assert.equal(await new ArkdownPackageCli(['clean', '--project', '/tmp/app'], operations).run(), 0)
   assert.deepEqual(calls, [
-    ['check', { project: '/tmp/app', module: 'entry' }],
+    ['check', { project: '/tmp/app', module: 'entry', isCrossplatform: true }],
     ['clean', { project: '/tmp/app' }],
   ])
 })

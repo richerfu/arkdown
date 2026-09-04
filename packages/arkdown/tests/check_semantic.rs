@@ -45,6 +45,8 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
     module: None,
     project: Some(temp.path().to_path_buf()),
     node_executable: None,
+    is_crossplatform: false,
+    ignore_crossplatform_check: false,
     checker: "sdk".to_string(),
   })
   .expect_err("SDK etsChecker must reject a TypeScript type mismatch");
@@ -70,6 +72,8 @@ fn check_defaults_to_native_oxc_without_a_node_runtime() {
     module: None,
     project: Some(fixture.clone()),
     node_executable: Some(fixture.join("missing-node-runtime/node")),
+    is_crossplatform: false,
+    ignore_crossplatform_check: false,
     checker: "oxc".to_string(),
   })
   .expect("default OXC check must not require Node");
