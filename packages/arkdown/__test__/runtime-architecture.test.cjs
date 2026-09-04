@@ -5,7 +5,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
 
-test('handwritten JavaScript is limited to entry, CLI, checker bridge, and plugin compatibility', () => {
+test('public JavaScript is limited to entry, CLI, and plugin compatibility', () => {
   const packageRoot = path.resolve(__dirname, '..')
   const javascriptRoot = path.join(packageRoot, 'js')
   const sources = Object.fromEntries(
@@ -19,7 +19,6 @@ test('handwritten JavaScript is limited to entry, CLI, checker bridge, and plugi
 
   assert.deepEqual(Object.keys(sources), [
     'arkdown-cli.js',
-    'ets-checker-bridge.cjs',
     'plugin-adapter.js',
     'runtime-entry.js',
   ])
@@ -102,6 +101,8 @@ test('native package exposes typed services and plugin bridges, not a command ru
     'services/build_info.rs',
     'services/build/coordinator/transform.rs',
     'services/clean.rs',
+    'services/ets_checker.rs',
+    'services/ets_checker_tests.rs',
     'services/native_build',
     'services/package_resolution.rs',
   ]) {

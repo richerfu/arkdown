@@ -2459,19 +2459,19 @@ impl BuildCoordinator {
             module.name
           )
         })?;
-      let paths = SdkEtsCheckerPaths::build(
-        module_layout.res_profile_dir(),
-        module_layout.res_ark_module_json(),
-        module_layout.resource_table_txt(),
-        module_layout.res_resources_dir().join("rawfile"),
-        module_layout.source().ets(),
-        module_layout.source().src_main().join("supervisual"),
-        module_layout.loader_json(),
-        PathBuf::from(&loader_json.cache_path),
-        PathBuf::from(&loader_json.ace_module_build),
+      let paths = SdkEtsCheckerPaths::build(SdkEtsCheckerBuildPaths {
+        ace_profile_path: module_layout.res_profile_dir(),
+        ace_module_json_path: module_layout.res_ark_module_json(),
+        app_resource_path: module_layout.resource_table_txt(),
+        raw_file_resource_path: module_layout.res_resources_dir().join("rawfile"),
+        ace_module_root: module_layout.source().ets(),
+        ace_super_visual_path: module_layout.source().src_main().join("supervisual"),
+        ace_build_json_path: module_layout.loader_json(),
+        cache_path: PathBuf::from(&loader_json.cache_path),
+        ace_module_build: PathBuf::from(&loader_json.ace_module_build),
         generated_profile_path,
-        module_layout.generated_resource_table_typescript(),
-      );
+        resource_table_typescript_path: module_layout.generated_resource_table_typescript(),
+      });
       ark_linter_plans.push(
         SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
           config: module_config.as_ref(),
@@ -2574,19 +2574,19 @@ impl BuildCoordinator {
         } else {
           module_layout.source().src_main().join("supervisual")
         };
-        let paths = SdkEtsCheckerPaths::build(
-          module_layout.res_profile_dir(),
-          module_layout.res_ark_module_json(),
-          module_layout.resource_table_txt(),
-          module_layout.res_resources_dir().join("rawfile"),
-          ace_module_root.clone(),
+        let paths = SdkEtsCheckerPaths::build(SdkEtsCheckerBuildPaths {
+          ace_profile_path: module_layout.res_profile_dir(),
+          ace_module_json_path: module_layout.res_ark_module_json(),
+          app_resource_path: module_layout.resource_table_txt(),
+          raw_file_resource_path: module_layout.res_resources_dir().join("rawfile"),
+          ace_module_root: ace_module_root.clone(),
           ace_super_visual_path,
-          module_layout.loader_json(),
-          PathBuf::from(&loader_json.cache_path),
-          PathBuf::from(&loader_json.ace_module_build),
+          ace_build_json_path: module_layout.loader_json(),
+          cache_path: PathBuf::from(&loader_json.cache_path),
+          ace_module_build: PathBuf::from(&loader_json.ace_module_build),
           generated_profile_path,
-          module_layout.generated_resource_table_typescript(),
-        );
+          resource_table_typescript_path: module_layout.generated_resource_table_typescript(),
+        });
         let entries = SdkEtsCheckerEntryCollector::new(loader_json, &ace_module_root).collect();
         checker_plans.push(
           SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {

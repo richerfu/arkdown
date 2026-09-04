@@ -61,8 +61,6 @@ oxc_isolated_declarations = { workspace = true }
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 rustc-hash = { workspace = true }
-rayon = { workspace = true }
-sha2 = { workspace = true }
 dhat = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

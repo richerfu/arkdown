@@ -327,7 +327,6 @@ dependencies = [
  "oxc_resolver",
  "oxc_span",
  "oxc_syntax",
- "rayon",
  "rolldown_common",
  "rolldown_plugin",
  "rolldown_sourcemap",

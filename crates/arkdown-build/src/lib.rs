@@ -25,6 +25,9 @@ pub mod quickfix;
 mod quickfix_tests;
 pub mod remote_hsp_sign;
 pub mod request;
+pub mod sdk_checker;
+#[cfg(test)]
+mod sdk_checker_tests;
 pub mod source_snapshot;
 pub mod unit_test;
 #[cfg(test)]
