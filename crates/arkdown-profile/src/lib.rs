@@ -21,6 +21,7 @@ pub mod oh_exports;
 pub mod pkg_context_info;
 pub mod pkg_sdk_info;
 pub mod plan;
+mod preload_system_so;
 // Per SPEC-048 Phase 2A: `lockfile` and `ohpm_registry` have been deleted
 // from arkdown-profile. Their functionality is now owned by `arkdown-ohpm`.
 //
@@ -97,6 +98,7 @@ pub use plan::{
     LoaderJsonPlan, PackageModuleJsonPlan, PkgContextInfoPlan, ProfileArtifactPaths,
     ProfileProcessContextInput, ProfileProcessPlan,
 };
+pub use preload_system_so::{PreloadSystemSoArtifactWriter, PreloadSystemSoPlan};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, VecDeque};

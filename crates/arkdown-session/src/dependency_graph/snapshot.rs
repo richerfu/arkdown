@@ -29,6 +29,10 @@ pub struct DependencyModuleProfileSnapshot {
     pub bundle_type: Option<String>,
     /// `app.versionCode` when it is embedded in a packaged HSP profile.
     pub version_code: Option<u64>,
+    /// Home ability source entries used as roots for `preloadSystemSo` graph
+    /// traversal. Captured with the dependency profile so later stages do not
+    /// re-read Source HAR `module.json5` files.
+    pub home_ability_src_entries: Vec<String>,
 }
 
 /// Classification of a dependency node.
