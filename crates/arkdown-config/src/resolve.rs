@@ -37,8 +37,9 @@ impl<'a> SigningConfigDecoder<'a> {
         Self { project_root }
     }
 
-    fn decode(&self, material: &RawSigningMaterial) -> SigningConfig {
+    fn decode(&self, name: Option<&str>, material: &RawSigningMaterial) -> SigningConfig {
         SigningConfig {
+            name: name.map(str::to_string),
             cert_path: self.path(&material.cert_path),
             key_alias: material.key_alias.clone(),
             key_password: material.key_password.clone(),
@@ -153,15 +154,15 @@ impl<'a> ArkdownConfigLoader<'a> {
                     .iter()
                     .find(|sc| sc.name == name)
                     .and_then(|sc| sc.material.as_ref())
-                    .map(|material| signing_config_decoder.decode(material))
+                    .map(|material| signing_config_decoder.decode(Some(name), material))
             })
             .or_else(|| {
                 // Backward compat: old format had signing_configs embedded in products.
                 raw_signing_configs_compat
                     .into_iter()
                     .next()
-                    .and_then(|sc| sc.material)
-                    .map(|material| signing_config_decoder.decode(&material))
+                    .and_then(|sc| sc.material.map(|material| (sc.name, material)))
+                    .map(|(name, material)| signing_config_decoder.decode(Some(&name), &material))
             });
 
         let build_option = BuildOptionDecoder::new(
@@ -377,8 +378,9 @@ mod tests {
             store_password: "store-password".to_string(),
         };
 
-        let signing = SigningConfigDecoder::new(&project_root).decode(&material);
+        let signing = SigningConfigDecoder::new(&project_root).decode(Some("default"), &material);
 
+        assert_eq!(signing.name.as_deref(), Some("default"));
         assert_eq!(signing.cert_path, project_root.join("SignFile/debug.cer"));
         assert_eq!(
             signing.profile_path,
@@ -555,6 +557,7 @@ mod tests {
                     .signing_config
                     .as_ref()
                     .expect("signing config present");
+                assert_eq!(sc.name.as_deref(), Some("default"));
                 assert_eq!(sc.key_alias, "testKey");
                 assert_eq!(sc.cert_path.to_str().unwrap(), "/test/cert.cer");
                 // targetSdkVersion used for compile_api_version

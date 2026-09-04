@@ -36,6 +36,7 @@ fn build_profile_adapter_uses_published_sha384_backend_for_in_place_signing() {
     fs_err::write(&profile_path, profile.signed_profile()).expect("write signed profile");
 
     let config = SigningConfig {
+        name: None,
         cert_path: certificate_path,
         key_alias: "1".into(),
         key_password: "test123".into(),
