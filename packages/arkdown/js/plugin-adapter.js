@@ -37,6 +37,14 @@ let esmLoadSequence = 0
 const hvigorShareStateByScope = new Map()
 const hvigorShareByBuildInstance = new Map()
 const HVIGOR_SHARE_STATE = Symbol('arkdown.hvigorShareState')
+const PROJECT_CONFIG_MAP_FIELDS = Object.freeze([
+  'depName2OhExports',
+  'depName2DepInfo',
+  'depName2RootPath',
+  'dependencyAliasMap',
+  'dependentModuleMap',
+  'sdkAliasMap',
+])
 
 function arkdownError(code, message, details = {}) {
   const error = new Error(message)
@@ -300,12 +308,23 @@ function nativeShareMethod(share, binding, handle, localName, nativeName, fallba
   return fallback
 }
 
+function restoreProjectConfigCollections(projectConfig) {
+  for (const key of PROJECT_CONFIG_MAP_FIELDS) {
+    const value = projectConfig[key]
+    if (value && typeof value === 'object' && !(value instanceof Map)) {
+      projectConfig[key] = new Map(Object.entries(value))
+    }
+  }
+  const sourceToModule = projectConfig.mockParams?.source2ModuleIdMap
+  if (sourceToModule && typeof sourceToModule === 'object' && !(sourceToModule instanceof Map)) {
+    projectConfig.mockParams.source2ModuleIdMap = new Map(Object.entries(sourceToModule))
+  }
+}
+
 function hydrateHvigorShare(rawShare, binding) {
   const share = rawShare && typeof rawShare === 'object' ? rawShare : {}
   const projectConfig = share.projectConfig && typeof share.projectConfig === 'object' ? share.projectConfig : {}
-  if (share.__arkdownProjectConfig && typeof share.__arkdownProjectConfig === 'object') {
-    Object.assign(projectConfig, share.__arkdownProjectConfig)
-  }
+  restoreProjectConfigCollections(projectConfig)
   if (typeof projectConfig.watchMode === 'boolean') projectConfig.watchMode = String(projectConfig.watchMode)
   const scope = hvigorShareScope(projectConfig)
   let state = hvigorShareStateByScope.get(scope)
@@ -386,7 +405,10 @@ function hydrateHvigorShare(rawShare, binding) {
     recordErrorFileId(id) {
       if (id) state.errorFileIds.add(String(id))
     },
-    depInfo: { enableIncre: projectConfig.watchMode === 'true', changedDeps: [] },
+    depInfo:
+      share.depInfo && typeof share.depInfo === 'object'
+        ? share.depInfo
+        : { enableIncre: false, changedDeps: [] },
   })
   if (buildInstanceId !== undefined && buildInstanceId !== null) {
     hvigorShareByBuildInstance.set(String(buildInstanceId), share)

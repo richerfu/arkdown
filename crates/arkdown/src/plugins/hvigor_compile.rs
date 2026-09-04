@@ -27,11 +27,10 @@ pub struct HvigorCompilePluginShare {
     /// receives this same value, allowing the compatibility layer to preserve
     /// the single shared Rollup object used by hvigor.
     pub build_instance_id: u64,
-    pub project_config: HvigorCompilePluginProjectConfig,
-    /// Remaining source-defined `projectConfig` fields that are naturally
-    /// represented by loader/config JSON. The Node adapter merges this map
-    /// into the typed core object without owning any build derivation logic.
-    pub project_config_fields: Arc<serde_json::Map<String, serde_json::Value>>,
+    /// Single Rust-owned effective compile configuration. The JavaScript
+    /// compatibility layer receives this object directly and never derives or
+    /// merges build fields.
+    pub project_config: Arc<serde_json::Map<String, serde_json::Value>>,
     /// Immutable source metadata captured by `BuildSession` before hooks run.
     pub source_files: Arc<FxHashMap<PathBuf, HvigorCompilePluginSourceFile>>,
     /// Declared package aliases used by Hvigor's synchronous `importResolver`.
@@ -39,6 +38,9 @@ pub struct HvigorCompilePluginShare {
     /// Canonical package root to installed symbolic-link paths, matching the
     /// custom node-resolve `share.symlinkMap` consumed by ModuleMode.
     pub symlink_map: Arc<BTreeMap<PathBuf, Vec<PathBuf>>>,
+    /// Dependency changes that can safely reuse the checker service. An empty
+    /// or mixed invalidation batch disables incremental dependency reuse.
+    pub dependency_info: HvigorCompilePluginDependencyInfo,
     /// Opaque V8 structured-clone payload loaded by Rust before hooks start.
     pub plugin_cache_snapshot: Option<Arc<[u8]>>,
 }
@@ -64,22 +66,10 @@ pub struct HvigorCompilePluginImportEntry {
     pub entry_path: Option<PathBuf>,
 }
 
-/// Latest-hvigor project configuration fields observed by compile plugins.
-/// Filesystem paths remain `PathBuf` until the N-API display boundary.
 #[derive(Debug, Clone)]
-pub struct HvigorCompilePluginProjectConfig {
-    pub bundle_name: String,
-    pub build_mode: String,
-    pub target: String,
-    pub use_normalized_ohm_url: bool,
-    pub compile_sdk_version: String,
-    pub compatible_sdk_version: String,
-    pub package_manager_type: String,
-    pub is_byte_code_har_optimize: bool,
-    pub module_name: Option<String>,
-    pub module_path: Option<PathBuf>,
-    pub project_top_dir: Option<PathBuf>,
-    pub watch_mode: bool,
+pub struct HvigorCompilePluginDependencyInfo {
+    pub enable_incremental: bool,
+    pub changed_dependencies: Arc<[String]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

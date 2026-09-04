@@ -412,6 +412,39 @@ pub struct BundledHarDependencySnapshot {
 }
 
 impl DependencyGraphSnapshot {
+    /// Resolve a watcher batch to package names only when every changed path
+    /// belongs to a known dependency root or its installed symbolic-link
+    /// alias. The deepest matching root wins for nested dependencies.
+    ///
+    /// `None` means the batch also contains project/configuration changes and
+    /// cannot safely use Hvigor's dependency-only incremental checker path.
+    pub fn changed_package_names_for_paths<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a Path>,
+    ) -> Option<Vec<String>> {
+        let mut packages = std::collections::BTreeSet::new();
+        let mut saw_path = false;
+        for path in paths {
+            saw_path = true;
+            let matched = self
+                .edges
+                .iter()
+                .filter_map(|edge| {
+                    let matched_root = std::iter::once(&edge.package_root)
+                        .chain(edge.installed_alias_path.iter())
+                        .filter(|root| path.starts_with(root))
+                        .max_by_key(|root| root.components().count())?;
+                    Some((matched_root.components().count(), &edge.package_name))
+                })
+                .max_by_key(|(depth, _)| *depth);
+            let Some((_, package_name)) = matched else {
+                return None;
+            };
+            packages.insert(package_name.clone());
+        }
+        saw_path.then(|| packages.into_iter().collect())
+    }
+
     /// Merge every resolved dependency manifest into the host sections and
     /// retain only HSP and ByteCode HAR aliases.
     ///

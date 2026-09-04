@@ -212,12 +212,14 @@ impl BuildCoordinator {
       let share = HvigorCompilePluginShareBuilder::new(
         module_config.as_ref(),
         args,
-        Some(module),
-        &session.source_store,
+        module,
+        session.as_ref(),
+        &module_context,
         module_package_resolution.as_ref(),
-        module_context.deps.as_ref(),
         loader_json,
         &loader_json_path,
+        module_target_name,
+        coverage_mode,
         session.arkts_language_version,
       )
       .with_plugin_cache_snapshot(plugin_context_cache.load()?)

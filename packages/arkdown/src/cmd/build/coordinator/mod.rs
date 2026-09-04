@@ -90,7 +90,7 @@ use arkdown::plugins::factory::{
   HarDedupFactoryMode, PackagePlugin, PluginFactory, PluginFactoryInput,
 };
 use arkdown::plugins::hvigor_compile::{
-  HvigorCompilePluginImportEntry, HvigorCompilePluginProjectConfig, HvigorCompilePluginShare,
+  HvigorCompilePluginDependencyInfo, HvigorCompilePluginImportEntry, HvigorCompilePluginShare,
   HvigorCompilePluginSourceFile,
 };
 use arkdown::{

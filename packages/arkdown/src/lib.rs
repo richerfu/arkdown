@@ -1333,6 +1333,7 @@ impl HvigorPluginGapHooks for JsPlugin {
 #[napi(object)]
 pub struct HvigorProjectConfig {
   pub bundle_name: Option<String>,
+  pub module_type: Option<String>,
   pub build_mode: Option<String>,
   pub build_ark_mode: Option<String>,
   pub compile_mode: Option<String>,
@@ -1340,11 +1341,15 @@ pub struct HvigorProjectConfig {
   pub target_name: Option<String>,
   #[napi(js_name = "useNormalizedOHMUrl")]
   pub use_normalized_ohm_url: Option<bool>,
-  pub compile_sdk_version: Option<String>,
-  pub compatible_sdk_version: Option<String>,
+  pub compile_sdk_version: Option<u32>,
+  pub compatible_sdk_version: Option<u32>,
+  pub compatible_sdk_version_stage: Option<String>,
   pub package_manager_type: Option<String>,
   pub is_byte_code_har_optimize: Option<bool>,
   pub module_name: Option<String>,
+  pub entry_module_name: Option<String>,
+  pub entry_module_version: Option<String>,
+  pub entry_package_name: Option<String>,
   pub module_path: Option<String>,
   pub project_top_dir: Option<String>,
   pub project_root_path: Option<String>,
@@ -1356,14 +1361,29 @@ pub struct HvigorProjectConfig {
   pub ace_module_json_path: Option<String>,
   #[napi(js_name = "runtimeOS")]
   pub runtime_os: Option<String>,
+  pub ets_loader_path: Option<String>,
+  pub ets_loader_version: Option<String>,
   pub watch_mode: Option<String>,
+  pub widget_compile: Option<String>,
   #[napi(js_name = "arkTSVersion")]
   pub ark_ts_version: Option<String>,
   pub is_preview: Option<bool>,
   pub is_ohos_test: Option<bool>,
+  pub is_local_test: Option<bool>,
+  pub is_crossplatform: Option<bool>,
   pub compile_har: Option<bool>,
   pub compile_shared: Option<bool>,
   pub byte_code_har: Option<bool>,
+  pub single_file_emit: Option<bool>,
+  pub need_coverage_insert: Option<bool>,
+  pub need_complete_sources_map: Option<bool>,
+  pub integrated_hsp: Option<bool>,
+  pub mix_compile: Option<bool>,
+  pub ignore_warning: Option<bool>,
+  pub device_types: Option<Vec<String>>,
+  pub resolve_module_paths: Option<Vec<String>>,
+  #[napi(ts_type = "{ requestPermissions: unknown[]; definePermissions: unknown[] }")]
+  pub permission: Option<serde_json::Value>,
   #[napi(ts_type = "Record<string, string>")]
   pub module_path_map: Option<serde_json::Value>,
   #[napi(ts_type = "Record<string, unknown>")]
@@ -1385,15 +1405,16 @@ pub struct HvigorProjectConfig {
 pub struct HvigorShareContext {
   #[napi(js_name = "__arkdownBuildInstanceId", skip_typescript)]
   pub build_instance_id: String,
-  pub project_config: Option<HvigorProjectConfig>,
-  #[napi(js_name = "__arkdownProjectConfig", skip_typescript)]
-  pub project_config_fields: serde_json::Value,
+  #[napi(ts_type = "HvigorProjectConfig & Record<string, unknown>")]
+  pub project_config: serde_json::Value,
   #[napi(js_name = "__arkdownNativeShare", skip_typescript)]
   pub native_share: External<HvigorNativeShareContext>,
   #[napi(js_name = "__arkdownPluginCacheSnapshot", skip_typescript)]
   pub plugin_cache_snapshot: Option<Buffer>,
   #[napi(ts_type = "Record<string, string[]>")]
   pub symlink_map: serde_json::Value,
+  #[napi(ts_type = "{ enableIncre: boolean; changedDeps: string[] }")]
+  pub dep_info: serde_json::Value,
   #[napi(ts_type = "Map<string, unknown>")]
   pub cache: Option<String>,
   #[napi(ts_type = "Map<string, unknown>")]
@@ -1429,54 +1450,9 @@ pub struct HvigorNativeShareContext {
 
 impl From<&HvigorCompilePluginShare> for HvigorShareContext {
   fn from(share: &HvigorCompilePluginShare) -> Self {
-    let config = &share.project_config;
     Self {
       build_instance_id: share.build_instance_id.to_string(),
-      project_config: Some(HvigorProjectConfig {
-        bundle_name: Some(config.bundle_name.clone()),
-        build_mode: Some(config.build_mode.clone()),
-        build_ark_mode: None,
-        compile_mode: None,
-        target: Some(config.target.clone()),
-        target_name: None,
-        use_normalized_ohm_url: Some(config.use_normalized_ohm_url),
-        compile_sdk_version: Some(config.compile_sdk_version.clone()),
-        compatible_sdk_version: Some(config.compatible_sdk_version.clone()),
-        package_manager_type: Some(config.package_manager_type.clone()),
-        is_byte_code_har_optimize: Some(config.is_byte_code_har_optimize),
-        module_name: config.module_name.clone(),
-        module_path: config
-          .module_path
-          .as_ref()
-          .map(|path| path.to_string_lossy().into_owned()),
-        project_top_dir: config
-          .project_top_dir
-          .as_ref()
-          .map(|path| path.to_string_lossy().into_owned()),
-        project_root_path: None,
-        project_path: None,
-        module_root_path: None,
-        cache_path: None,
-        ace_module_build: None,
-        ace_build_json: None,
-        ace_module_json_path: None,
-        runtime_os: None,
-        watch_mode: Some(config.watch_mode.to_string()),
-        ark_ts_version: None,
-        is_preview: None,
-        is_ohos_test: None,
-        compile_har: None,
-        compile_shared: None,
-        byte_code_har: None,
-        module_path_map: None,
-        byte_code_har_info: None,
-        hsp_name_ohm_map: None,
-        har_name_ohm_map: None,
-        other_compile_files: None,
-      }),
-      project_config_fields: serde_json::Value::Object(
-        share.project_config_fields.as_ref().clone(),
-      ),
+      project_config: serde_json::Value::Object(share.project_config.as_ref().clone()),
       native_share: External::new(HvigorNativeShareContext {
         source_files: Arc::clone(&share.source_files),
         import_resolver_entries: Arc::clone(&share.import_resolver_entries),
@@ -1508,6 +1484,10 @@ impl From<&HvigorCompilePluginShare> for HvigorShareContext {
           })
           .collect(),
       ),
+      dep_info: serde_json::json!({
+        "enableIncre": share.dependency_info.enable_incremental,
+        "changedDeps": share.dependency_info.changed_dependencies.as_ref(),
+      }),
       cache: None,
       common_cache: None,
       cache_store_manager: None,

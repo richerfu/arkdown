@@ -53,7 +53,15 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   )
   plugin.name = 'all-hooks'
   const normalized = normalizePlugin(plugin, fakeBinding())
-  const share = { projectConfig: { moduleName: 'entry' } }
+  const share = {
+    projectConfig: {
+      moduleName: 'entry',
+      depName2DepInfo: { library: { pkgRootPath: '/project/library' } },
+      dependencyAliasMap: { alias: 'library' },
+      mockParams: { source2ModuleIdMap: { './mock': '/project/mock.ts' } },
+    },
+    depInfo: { enableIncre: true, changedDeps: ['library'] },
+  }
   await dispatch(normalized, 'seedContext', { share })
   share.setHashValueByFilePath('/tmp/Index.ets', 'source-hash')
 
@@ -61,6 +69,10 @@ test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', asy
   assert.equal(share.getHashByFilePath('/tmp/Index.ets'), 'source-hash')
   assert.equal(share.cache instanceof Map, true)
   assert.equal(share.commonCache instanceof Map, true)
+  assert.equal(share.projectConfig.depName2DepInfo instanceof Map, true)
+  assert.equal(share.projectConfig.dependencyAliasMap instanceof Map, true)
+  assert.equal(share.projectConfig.mockParams.source2ModuleIdMap instanceof Map, true)
+  assert.deepEqual(share.depInfo, { enableIncre: true, changedDeps: ['library'] })
   assert.equal(typeof share.getLogger('fixture').printErrorAndExit, 'function')
   assert.deepEqual(await dispatch(normalized, 'beforeBuild'), {})
   assert.deepEqual((await dispatch(normalized, 'buildStart', { buildStartOptions: { input: 'index.ets' } })), {})
