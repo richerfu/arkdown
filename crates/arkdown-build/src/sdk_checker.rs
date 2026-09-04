@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+use arkdown::plugins::ets_transform::CheckerMode;
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{ArkdownConfig, BuildMode, BuildOption, ModuleConfig, OhosModuleType};
 use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
@@ -32,6 +33,160 @@ use arkdown_resolver::PackageResolutionPlan;
 use arkdown_session::{BuildSession, ModuleCompileContext};
 
 static CHECKER_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Selected ArkTS diagnostic policy.
+///
+/// `oxc` is the native default. `sdk` remains an explicit comparison backend
+/// until the remaining TypeScript semantic corpus is implemented by OXC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArkTsCheckerSelection {
+    Sdk,
+    Oxc,
+    Off,
+}
+
+impl ArkTsCheckerSelection {
+    pub fn parse(value: Option<&str>) -> Result<Self> {
+        match value.unwrap_or("oxc") {
+            "sdk" => Ok(Self::Sdk),
+            "oxc" => Ok(Self::Oxc),
+            "off" => Ok(Self::Off),
+            checker => {
+                anyhow::bail!("unsupported checker '{checker}'; expected 'sdk', 'oxc', or 'off'")
+            }
+        }
+    }
+
+    pub fn oxc_mode(self) -> CheckerMode {
+        match self {
+            Self::Sdk | Self::Oxc => CheckerMode::Oxc,
+            Self::Off => CheckerMode::Off,
+        }
+    }
+
+    pub fn runs_sdk_semantic_checker(self) -> bool {
+        matches!(self, Self::Sdk)
+    }
+}
+
+/// Runs prepared SDK comparison plans before any Rolldown transform hook.
+pub struct SdkSemanticCheckStage {
+    plans: Vec<SdkEtsCheckerPlan>,
+}
+
+#[derive(Debug)]
+struct SdkSemanticCheckFailure {
+    diagnostics: Vec<SdkSemanticCheckError>,
+}
+
+impl SdkSemanticCheckFailure {
+    fn new(diagnostics: Vec<SdkSemanticCheckError>) -> Self {
+        Self { diagnostics }
+    }
+}
+
+impl std::fmt::Display for SdkSemanticCheckFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported {} error(s)",
+            self.diagnostics.len()
+        )?;
+        for diagnostic in &self.diagnostics {
+            write!(
+                formatter,
+                "\n[{}] {}",
+                diagnostic.module_name,
+                diagnostic.message.trim()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SdkSemanticCheckFailure {}
+
+#[derive(Debug)]
+struct SdkSemanticCheckError {
+    module_name: String,
+    message: String,
+}
+
+impl SdkSemanticCheckError {
+    fn new(module_name: String, message: String) -> Self {
+        Self {
+            module_name,
+            message,
+        }
+    }
+}
+
+impl SdkSemanticCheckStage {
+    pub fn new(plans: Vec<SdkEtsCheckerPlan>) -> Self {
+        Self { plans }
+    }
+
+    pub fn run(self) -> Result<()> {
+        let outputs = SdkEtsCheckerBatch::new(self.plans).run()?;
+        let mut errors = Vec::new();
+        for output in outputs {
+            for diagnostic in output.diagnostics {
+                let is_error = diagnostic.level.eq_ignore_ascii_case("error");
+                match diagnostic.level.to_ascii_lowercase().as_str() {
+                    "error" => tracing::error!(
+                        module = %output.module_name,
+                        "ArkTS semantic check: {}",
+                        diagnostic.message
+                    ),
+                    "warn" | "warning" => tracing::warn!(
+                        module = %output.module_name,
+                        "ArkTS semantic check: {}",
+                        diagnostic.message
+                    ),
+                    _ => tracing::debug!(
+                        module = %output.module_name,
+                        level = %diagnostic.level,
+                        "ArkTS semantic check: {}",
+                        diagnostic.message
+                    ),
+                }
+                if is_error {
+                    errors.push(SdkSemanticCheckError::new(
+                        output.module_name.clone(),
+                        diagnostic.message,
+                    ));
+                }
+            }
+        }
+        if !errors.is_empty() {
+            return Err(SdkSemanticCheckFailure::new(errors).into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod semantic_stage_tests {
+    use super::{SdkSemanticCheckError, SdkSemanticCheckFailure};
+
+    #[test]
+    fn failure_keeps_sdk_file_location_and_message_visible() {
+        let failure = SdkSemanticCheckFailure::new(vec![SdkSemanticCheckError::new(
+            "entry".to_string(),
+            "ArkTS:ERROR File: /project/entry/Index.ets:12:7\n Cannot find module '@scope/pkg'.\n"
+                .to_string(),
+        )]);
+
+        assert_eq!(
+            failure.to_string(),
+            concat!(
+                "ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported 1 error(s)\n",
+                "[entry] ArkTS:ERROR File: /project/entry/Index.ets:12:7\n",
+                " Cannot find module '@scope/pkg'."
+            )
+        );
+    }
+}
 
 /// Resolves the single HAR entry accepted by Hvigor's `ArkLinter.findAvailableEntry`.
 ///
