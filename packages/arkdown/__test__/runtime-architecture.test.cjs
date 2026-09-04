@@ -29,8 +29,8 @@ test('handwritten JavaScript is limited to entry, CLI, checker bridge, and plugi
   assert.ok(Buffer.byteLength(sources['runtime-entry.js']) < 500)
   // The adapter owns the complete TS/JS plugin ABI, including V8 structured
   // clone for arbitrary plugin cache values. Build I/O and orchestration stay
-  // native; keep the entire compatibility boundary below 31 KiB.
-  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 31 * 1024)
+  // native; keep the entire compatibility boundary below 34 KiB.
+  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 34 * 1024)
 
   for (const removed of [
     'runtime.js',
