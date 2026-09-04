@@ -8,8 +8,7 @@ use super::*;
 impl BuildCoordinator {
   /// Internal build pipeline implementation.
   ///
-  /// Called by [`BuildCoordinator::execute`], which wraps it to guarantee
-  /// unconditional `cleanUp` hook invocation.
+  /// Called by [`BuildCoordinator::execute`] after target selection.
   pub(crate) async fn execute_impl(self) -> Result<BuildOutput> {
     let start = Instant::now();
 
@@ -17,11 +16,7 @@ impl BuildCoordinator {
     let config = &self.config;
     let session = &self.session;
     let package_plugins = &self.package_plugins;
-    let mut task_lifecycle =
-      BuildTaskLifecycle::new(self.task_observer.clone(), args.native_task_roots.clone());
-    if self.owns_task_cycle {
-      task_lifecycle.begin_cycle().await?;
-    }
+    let mut task_lifecycle = BuildTaskLifecycle::new(args.native_task_roots.clone());
 
     let hot_reload_mode = HotReloadTaskPlan::requested(&args.native_task_roots);
     let watch_mode =
@@ -389,17 +384,6 @@ impl BuildCoordinator {
       let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
       let skip_profile_writes = args.skip_profile;
 
-      if task_lifecycle.is_observed() && task_lifecycle.before(&module.name, None, "clean").await? {
-        NativeCleanStage::new(&project_root, &module.src_path, &native_sdk_toolchain)
-          .with_native_variants(
-            vec![config.product.name.clone()],
-            vec![module_target_name.clone()],
-            config.build_mode.as_str(),
-          )
-          .execute()
-          .map_err(|error| anyhow::anyhow!("clean failed: {error}"))?;
-        task_lifecycle.after(&module.name, None, "clean").await?;
-      }
       let pre_build_validator =
         PreBuildValidator::new(config, session, &module, module_build_option);
       if task_lifecycle
@@ -2867,7 +2851,6 @@ impl BuildCoordinator {
         disable_abc_cache,
         cli_cache_file.clone(),
         package_plugins.clone(),
-        self.task_observer.clone(),
         preview_mode,
         false,
       ))

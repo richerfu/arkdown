@@ -168,9 +168,6 @@ impl BuildCoordinator {
         }
       }
       progress.done();
-      if self.owns_task_cycle {
-        task_lifecycle.finish_cycle().await?;
-      }
       return Ok(Some(BuildOutput {
         artifact_paths: Vec::new(),
       }));
@@ -283,9 +280,6 @@ impl BuildCoordinator {
           .await?;
       }
       progress.done();
-      if self.owns_task_cycle {
-        task_lifecycle.finish_cycle().await?;
-      }
       return Ok(Some(BuildOutput {
         artifact_paths: paths,
       }));
@@ -1784,10 +1778,6 @@ impl BuildCoordinator {
             "build succeeded"
         );
       }
-    }
-
-    if self.owns_task_cycle {
-      task_lifecycle.finish_cycle().await?;
     }
 
     Ok(None)

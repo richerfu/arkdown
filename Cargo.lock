@@ -307,7 +307,6 @@ dependencies = [
  "arkdown-session",
  "arkdown-sign",
  "arkdown-watcher",
- "async-trait",
  "dhat",
  "fast-glob",
  "flate2",

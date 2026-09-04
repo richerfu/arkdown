@@ -80,7 +80,6 @@ pub(super) struct WatchStageInput {
   pub(super) keep_dependency: bool,
   pub(super) hvigor_properties: arkdown_build::request::HvigorRuntimeProperties,
   pub(super) parameter_file_override: Option<PathBuf>,
-  pub(super) task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
   pub(super) hvigor_cache_dir: Option<PathBuf>,
   pub(super) native_task_roots: Vec<arkdown_build::request::NativeTaskRoot>,
   /// When `true`, only `src/main/resources/` directories are watched.
@@ -101,7 +100,6 @@ impl WatchStageInput {
     disable_abc_cache: bool,
     cache_file: Option<PathBuf>,
     package_plugins: Vec<PackagePlugin>,
-    task_observer: Option<Arc<dyn super::coordinator::BuildTaskObserver>>,
     preview_mode: bool,
     hot_reload_mode: bool,
   ) -> Self {
@@ -144,7 +142,6 @@ impl WatchStageInput {
       keep_dependency: args.keep_dependency,
       hvigor_properties: args.hvigor_properties.clone(),
       parameter_file_override: args.parameter_file_override.clone(),
-      task_observer,
       hvigor_cache_dir: args.hvigor_cache_dir.clone(),
       native_task_roots: args.native_task_roots.clone(),
       preview_mode,
@@ -205,7 +202,6 @@ impl WatchStage {
     let keep_dependency = input.keep_dependency;
     let hvigor_properties = input.hvigor_properties;
     let parameter_file_override = input.parameter_file_override;
-    let task_observer = input.task_observer;
     let hvigor_cache_dir = input.hvigor_cache_dir;
     let native_task_roots = input.native_task_roots;
     let hot_reload_mode = input.hot_reload_mode;
@@ -382,13 +378,7 @@ impl WatchStage {
           hvigor_cache_dir: hvigor_cache_dir.clone(),
           native_task_roots: native_task_roots.clone(),
         };
-        let mut command =
-          BuildService::new(rebuild_args).with_package_plugins(package_plugins.clone());
-        if !hot_reload_mode {
-          if let Some(observer) = task_observer.clone() {
-            command = command.with_task_observer(observer);
-          }
-        }
+        let command = BuildService::new(rebuild_args).with_package_plugins(package_plugins.clone());
         if let Err(e) = rt.block_on(command.execute()) {
           tracing::error!(error = %format!("{e:#}"), "watch rebuild failed");
         }

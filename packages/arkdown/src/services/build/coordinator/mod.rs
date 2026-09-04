@@ -104,8 +104,8 @@ use arkdown_build::sdk_checker::{
 };
 use arkdown_build::task_cache::{TaskInputSnapshot, TaskInputs};
 use arkdown_native::{
-  DebugSymbolCollector, NativeCleanStage, NativeCmakeLocalDependency, NativeLibCollectionPolicy,
-  NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
+  DebugSymbolCollector, NativeCmakeLocalDependency, NativeLibCollectionPolicy, NativeLibCollector,
+  NativeLibPackageInfo, NativeSdkToolchain,
 };
 
 use arkdown::plugins::ets_transform::{
@@ -277,235 +277,27 @@ impl ModulePackageArtifact {
   }
 }
 
-/// One observed hvigor task boundary in Arkdown's native build pipeline.
-///
-/// The Node runtime uses these boundaries to execute TypeScript task plugins
-/// on the same side of the owning native action as hvigor 6.24.3. Paths stay
-/// out of the transport: module and target names are resolved by the runtime's
-/// already-initialized node/task containers.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildTaskEvent {
-  pub phase: BuildTaskEventPhase,
-  pub module_name: String,
-  pub target_name: Option<String>,
-  pub task_name: String,
-}
-
-impl BuildTaskEvent {
-  fn new(
-    phase: BuildTaskEventPhase,
-    module_name: &str,
-    target_name: Option<&str>,
-    task_name: &str,
-  ) -> Self {
-    Self {
-      phase,
-      module_name: module_name.to_string(),
-      target_name: target_name.map(str::to_string),
-      task_name: task_name.to_string(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum BuildTaskEventPhase {
-  Before,
-  After,
-  UpToDate,
-}
-
-/// Internal bridge event for OHOS plugin `CommandBuilderModifier` callbacks.
-/// The command contains the executable and base arguments before Hvigor
-/// appends `externalNativeOptions.targets`.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildNativeCommandEvent {
-  phase: BuildNativeCommandEventPhase,
-  pub builder_type: u8,
-  pub module_name: String,
-  pub target_name: String,
-  pub abi: String,
-  pub command: Vec<String>,
-}
-
-impl BuildNativeCommandEvent {
-  const NINJA_BUILDER_TYPE: u8 = 2;
-
-  fn ninja(module_name: &str, target_name: &str, abi: &str, command: Vec<String>) -> Self {
-    Self {
-      phase: BuildNativeCommandEventPhase::ModifyNativeCommand,
-      builder_type: Self::NINJA_BUILDER_TYPE,
-      module_name: module_name.to_string(),
-      target_name: target_name.to_string(),
-      abi: abi.to_string(),
-      command,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-enum BuildNativeCommandEventPhase {
-  ModifyNativeCommand,
-}
-
-/// Marks one complete native pipeline execution inside a normal, multi-target,
-/// or watch build. The Node runtime uses these markers to reset custom-task
-/// execution state and persist successful incremental snapshots per cycle.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildCycleEvent {
-  phase: BuildCycleEventPhase,
-}
-
-impl BuildCycleEvent {
-  fn new(phase: BuildCycleEventPhase) -> Self {
-    Self { phase }
-  }
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-enum BuildCycleEventPhase {
-  BuildCycleStart,
-  BuildCycleEnd,
-}
-
-/// Latest-hvigor `OhosModuleContext.transformAbc` callback input.
-///
-/// `ArkCompile.doBeforeObfuscationAction` invokes this after es2abc produces
-/// the target's main `modules.abc` and before ArkGuard bytecode obfuscation.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildAbcTransformEvent {
-  phase: BuildAbcTransformEventPhase,
-  pub module_name: String,
-  pub target_name: String,
-  pub abc_path: String,
-  pub config: BuildAbcTransformConfig,
-}
-
-impl BuildAbcTransformEvent {
-  fn new(
-    module_name: &str,
-    target_name: &str,
-    abc_path: &Path,
-    is_ark_guard_enabled: bool,
-  ) -> Result<Self> {
-    Ok(Self {
-      phase: BuildAbcTransformEventPhase::TransformAbc,
-      module_name: module_name.to_string(),
-      target_name: target_name.to_string(),
-      abc_path: abc_path
-        .to_str()
-        .ok_or_else(|| {
-          anyhow::anyhow!(
-            "transformAbc requires a UTF-8 ABC path: {}",
-            abc_path.display()
-          )
-        })?
-        .to_string(),
-      config: BuildAbcTransformConfig {
-        is_ark_guard_enabled,
-      },
-    })
-  }
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-enum BuildAbcTransformEventPhase {
-  TransformAbc,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildAbcTransformConfig {
-  pub is_ark_guard_enabled: bool,
-}
-
-/// Same-process bridge for TypeScript task lifecycle behavior.
-///
-/// `before_task` returns whether the native action remains enabled. Latest
-/// hvigor checks `CoreTaskImpl.getEnabled()` before beforeRun/action/afterRun,
-/// so the coordinator must make the decision before touching stage outputs.
-#[async_trait::async_trait]
-pub trait BuildTaskObserver: Send + Sync {
-  async fn build_cycle_started(&self, event: BuildCycleEvent) -> Result<()>;
-  async fn build_cycle_finished(&self, event: BuildCycleEvent) -> Result<()>;
-  async fn before_task(&self, event: BuildTaskEvent) -> Result<bool>;
-  async fn after_task(&self, event: BuildTaskEvent) -> Result<()>;
-  async fn task_up_to_date(&self, event: BuildTaskEvent) -> Result<()>;
-  async fn transform_abc(&self, event: BuildAbcTransformEvent) -> Result<()>;
-  fn has_native_command_modifier(&self, _builder_type: u8) -> bool {
-    false
-  }
-  async fn modify_native_command(&self, event: BuildNativeCommandEvent) -> Result<Vec<String>> {
-    Ok(event.command)
-  }
-}
-
 pub(super) struct BuildTaskLifecycle {
-  observer: Option<Arc<dyn BuildTaskObserver>>,
   remaining_roots: Vec<NativeTaskRoot>,
   cutoff_enabled: bool,
 }
 
 impl BuildTaskLifecycle {
-  pub(super) fn new(
-    observer: Option<Arc<dyn BuildTaskObserver>>,
-    remaining_roots: Vec<NativeTaskRoot>,
-  ) -> Self {
+  pub(super) fn new(remaining_roots: Vec<NativeTaskRoot>) -> Self {
     let cutoff_enabled = !remaining_roots.is_empty();
     Self {
-      observer,
       remaining_roots,
       cutoff_enabled,
     }
   }
 
-  pub(super) async fn begin_cycle(&self) -> Result<()> {
-    let Some(observer) = self.observer.as_ref() else {
-      return Ok(());
-    };
-    observer
-      .build_cycle_started(BuildCycleEvent::new(BuildCycleEventPhase::BuildCycleStart))
-      .await
-  }
-
-  pub(super) async fn finish_cycle(&self) -> Result<()> {
-    let Some(observer) = self.observer.as_ref() else {
-      return Ok(());
-    };
-    observer
-      .build_cycle_finished(BuildCycleEvent::new(BuildCycleEventPhase::BuildCycleEnd))
-      .await
-  }
-
   pub(super) async fn before(
     &mut self,
-    module_name: &str,
-    target_name: Option<&str>,
-    task_name: &str,
+    _module_name: &str,
+    _target_name: Option<&str>,
+    _task_name: &str,
   ) -> Result<bool> {
-    let enabled = if let Some(observer) = self.observer.as_ref() {
-      observer
-        .before_task(BuildTaskEvent::new(
-          BuildTaskEventPhase::Before,
-          module_name,
-          target_name,
-          task_name,
-        ))
-        .await?
-    } else {
-      true
-    };
-    if !enabled {
-      self.complete_root(module_name, target_name, task_name)?;
-    }
-    Ok(enabled)
+    Ok(true)
   }
 
   pub(super) async fn after(
@@ -514,16 +306,6 @@ impl BuildTaskLifecycle {
     target_name: Option<&str>,
     task_name: &str,
   ) -> Result<()> {
-    if let Some(observer) = self.observer.as_ref() {
-      observer
-        .after_task(BuildTaskEvent::new(
-          BuildTaskEventPhase::After,
-          module_name,
-          target_name,
-          task_name,
-        ))
-        .await?;
-    }
     self.complete_root(module_name, target_name, task_name)
   }
 
@@ -533,16 +315,6 @@ impl BuildTaskLifecycle {
     target_name: Option<&str>,
     task_name: &str,
   ) -> Result<()> {
-    if let Some(observer) = self.observer.as_ref() {
-      observer
-        .task_up_to_date(BuildTaskEvent::new(
-          BuildTaskEventPhase::UpToDate,
-          module_name,
-          target_name,
-          task_name,
-        ))
-        .await?;
-    }
     self.complete_root(module_name, target_name, task_name)
   }
 
@@ -571,10 +343,6 @@ impl BuildTaskLifecycle {
     })
   }
 
-  fn is_observed(&self) -> bool {
-    self.observer.is_some()
-  }
-
   fn complete_root(
     &mut self,
     module_name: &str,
@@ -595,57 +363,15 @@ impl BuildTaskLifecycle {
     Ok(())
   }
 
-  async fn transform_abc(
-    &self,
-    module_name: &str,
-    target_name: &str,
-    abc_path: &Path,
-    is_ark_guard_enabled: bool,
-  ) -> Result<()> {
-    let Some(observer) = self.observer.as_ref() else {
-      return Ok(());
-    };
-    observer
-      .transform_abc(BuildAbcTransformEvent::new(
-        module_name,
-        target_name,
-        abc_path,
-        is_ark_guard_enabled,
-      )?)
-      .await
-  }
-
   pub(super) async fn execute_ninja_build(
     &self,
-    module_name: &str,
-    target_name: &str,
+    _module_name: &str,
+    _target_name: &str,
     collector: &NativeLibCollector<'_>,
   ) -> Result<()> {
-    let Some(observer) = self.observer.as_ref().filter(|observer| {
-      observer.has_native_command_modifier(BuildNativeCommandEvent::NINJA_BUILDER_TYPE)
-    }) else {
-      return collector
-        .build_native()
-        .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"));
-    };
-    let commands = collector
-      .native_build_commands()
-      .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"))?;
-    if commands.is_empty() {
-      return Ok(());
-    }
-    for command in commands {
-      let event = BuildNativeCommandEvent::ninja(
-        module_name,
-        target_name,
-        command.abi(),
-        command.modifier_command()?,
-      );
-      let modified = observer.modify_native_command(event).await?;
-      command.with_modifier_command(modified)?.execute()?;
-    }
-    collector.report_native_build_success();
-    Ok(())
+    collector
+      .build_native()
+      .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"))
   }
 }
 
@@ -1879,7 +1605,6 @@ pub struct BuildCoordinator {
   config: Arc<ArkdownConfig>,
   args: BuildRequest,
   package_plugins: Vec<PackagePlugin>,
-  task_observer: Option<Arc<dyn BuildTaskObserver>>,
   owns_task_cycle: bool,
 }
 

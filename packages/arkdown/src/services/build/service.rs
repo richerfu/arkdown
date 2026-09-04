@@ -9,12 +9,9 @@ use anyhow::Result;
 use arkdown::plugins::factory::PackagePlugin;
 use arkdown_build::request::BuildRequest;
 
-use super::coordinator::BuildTaskObserver;
-
 pub struct BuildService {
   request: BuildRequest,
   package_plugins: Vec<PackagePlugin>,
-  task_observer: Option<Arc<dyn BuildTaskObserver>>,
 }
 
 impl BuildService {
@@ -22,17 +19,11 @@ impl BuildService {
     Self {
       request,
       package_plugins: Vec::new(),
-      task_observer: None,
     }
   }
 
   pub fn with_package_plugins(mut self, package_plugins: Vec<PackagePlugin>) -> Self {
     self.package_plugins = package_plugins;
-    self
-  }
-
-  pub fn with_task_observer(mut self, task_observer: Arc<dyn BuildTaskObserver>) -> Self {
-    self.task_observer = Some(task_observer);
     self
   }
 
@@ -42,7 +33,6 @@ impl BuildService {
 
     let request = self.request;
     let package_plugins = self.package_plugins;
-    let task_observer = self.task_observer;
     let project_root = request
       .project
       .clone()
@@ -79,21 +69,14 @@ impl BuildService {
     .map_err(|error| anyhow::anyhow!("build startup worker failed: {error}"))??;
 
     if request.target == "app" {
-      let mut coordinator =
-        super::app_coordinator::AppBuildCoordinator::new(session, config, request)
-          .with_package_plugins(package_plugins);
-      if let Some(task_observer) = task_observer {
-        coordinator = coordinator.with_task_observer(task_observer);
-      }
+      let coordinator = super::app_coordinator::AppBuildCoordinator::new(session, config, request)
+        .with_package_plugins(package_plugins);
       coordinator.execute().await?;
       return Ok(());
     }
 
-    let mut coordinator = super::coordinator::BuildCoordinator::new(session, config, request)
+    let coordinator = super::coordinator::BuildCoordinator::new(session, config, request)
       .with_package_plugins(package_plugins);
-    if let Some(task_observer) = task_observer {
-      coordinator = coordinator.with_task_observer(task_observer);
-    }
     let output = coordinator.execute().await?;
     tracing::debug!(artifacts = output.artifact_paths.len(), "build completed");
     Ok(())

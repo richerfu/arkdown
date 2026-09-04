@@ -525,21 +525,18 @@ async fn partial_hvigor_execution_stops_only_after_every_selected_root() {
   use super::coordinator::{BuildTaskLifecycle, NativeTaskCutoffReached};
   use arkdown_build::request::NativeTaskRoot;
 
-  let mut lifecycle = BuildTaskLifecycle::new(
-    None,
-    vec![
-      NativeTaskRoot {
-        module_name: "entry".to_string(),
-        target_name: Some("default".to_string()),
-        task_name: "CreateBuildProfile".to_string(),
-      },
-      NativeTaskRoot {
-        module_name: "entry".to_string(),
-        target_name: Some("default".to_string()),
-        task_name: "CompileArkTS".to_string(),
-      },
-    ],
-  );
+  let mut lifecycle = BuildTaskLifecycle::new(vec![
+    NativeTaskRoot {
+      module_name: "entry".to_string(),
+      target_name: Some("default".to_string()),
+      task_name: "CreateBuildProfile".to_string(),
+    },
+    NativeTaskRoot {
+      module_name: "entry".to_string(),
+      target_name: Some("default".to_string()),
+      task_name: "CompileArkTS".to_string(),
+    },
+  ]);
 
   lifecycle
     .after("entry", Some("default"), "CreateBuildProfile")
@@ -562,14 +559,11 @@ async fn unqualified_module_hook_root_matches_a_targetless_boundary() {
   use super::coordinator::{BuildTaskLifecycle, NativeTaskCutoffReached};
   use arkdown_build::request::NativeTaskRoot;
 
-  let mut lifecycle = BuildTaskLifecycle::new(
-    None,
-    vec![NativeTaskRoot {
-      module_name: "entry".to_string(),
-      target_name: None,
-      task_name: "GenerateBuildProfile".to_string(),
-    }],
-  );
+  let mut lifecycle = BuildTaskLifecycle::new(vec![NativeTaskRoot {
+    module_name: "entry".to_string(),
+    target_name: None,
+    task_name: "GenerateBuildProfile".to_string(),
+  }]);
 
   lifecycle
     .after("entry", Some("default"), "CreateBuildProfile")
