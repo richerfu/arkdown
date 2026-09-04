@@ -22,6 +22,10 @@ flowchart LR
 
 The Rust crates under `crates/` are internal implementations of the individual build domains;
 `arkdown-abc` owns typed bytecode plans, SDK handoff manifests, and `es2abc` execution, while
+`arkdown-native` owns CMake/Ninja planning, native-library processing, strip/binxo, and debug-symbol
+artifacts. These are direct implementations of source-observed build behavior, not Hvigor
+compatibility layers. Internal Hvigor facades, wrappers, aliases, and parallel legacy paths are
+forbidden; only the public TS/JS plugin ABI may retain compatibility code at the JS/N-API boundary.
 `arkdown-build` owns typed build requests, module selection, build-application layout,
 pre-build validation, intermediate artifact handoffs, and code-resource copying. `arkdown-pack`
 owns archive construction and pre-package validation. The application crate will receive the

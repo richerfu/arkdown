@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use arkdown_config::build_profile::RawBuildProfile;
 use arkdown_session::{SdkSnapshot, SdkToolKind};
 
-use super::native_build::{HvigorModuleCleanStage, NativeSdkToolchain};
+use arkdown_native::{NativeCleanStage, NativeSdkToolchain};
 
 #[derive(Debug)]
 pub struct CleanRequest {
@@ -33,11 +33,11 @@ impl CleanCommandRunner {
     let module_roots = self.module_roots(&project_root)?;
     let native_toolchain = CleanNativeToolchainResolver::new().resolve();
 
-    HvigorModuleCleanStage::for_project(&project_root)
+    NativeCleanStage::for_project(&project_root)
       .execute()
       .map_err(|error| anyhow::anyhow!("project clean failed: {error}"))?;
     for module_root in module_roots {
-      HvigorModuleCleanStage::new(&project_root, &module_root, &native_toolchain)
+      NativeCleanStage::new(&project_root, &module_root, &native_toolchain)
         .execute()
         .map_err(|error| {
           anyhow::anyhow!(

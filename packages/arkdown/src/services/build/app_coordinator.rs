@@ -24,7 +24,7 @@ use arkdown_profile::{
 use arkdown_session::{BuildSession, DuplicateDependencyValidator, SdkToolKind};
 use arkdown_sign::SignBackendRunner;
 
-use crate::services::native_build::ProjectDebugSymbolCollector;
+use arkdown_native::ProjectDebugSymbolCollector;
 
 use super::coordinator::{
   BuildCoordinator, BuildOutput, BuildTaskLifecycle, BuildTaskObserver, NativeTaskCutoffReached,

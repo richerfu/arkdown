@@ -109,14 +109,14 @@ use crate::services::ets_checker::{
   ArkLinterEntryResolver, SdkEtsCheckerBatch, SdkEtsCheckerEntryCollector, SdkEtsCheckerInput,
   SdkEtsCheckerPaths, SdkEtsCheckerPlan, SdkEtsCheckerPlanBuilder,
 };
-use crate::services::native_build::{
-  DebugSymbolCollector, HvigorModuleCleanStage, NativeBuildSanitizers, NativeCmakeLocalDependency,
-  NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
-};
 use crate::services::package_resolution::{
   LocalPackageSourceRootInventory, ModulePackageResolutionPlanner,
 };
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
+use arkdown_native::{
+  DebugSymbolCollector, NativeBuildSanitizers, NativeCleanStage, NativeCmakeLocalDependency,
+  NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo, NativeSdkToolchain,
+};
 
 use arkdown::plugins::ets_transform::{
   CheckerMode, ComponentMetadata, InsightIntentSchemaCatalog, ModuleAnalyzerKind,
