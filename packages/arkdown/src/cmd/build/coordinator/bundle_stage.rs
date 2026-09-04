@@ -68,7 +68,7 @@ struct TransformResourceInventory {
 }
 
 pub(super) struct CoordinatorBundleStageInput<'a> {
-  pub(super) args: &'a BuildArgs,
+  pub(super) args: &'a BuildRequest,
   pub(super) config: &'a Arc<ArkdownConfig>,
   pub(super) session: &'a Arc<BuildSession>,
   pub(super) package_plugins: &'a [PackagePlugin],

@@ -47,4 +47,4 @@ mod unit_test;
 mod visual_codegen;
 mod watch_stage;
 
-pub use args::{BuildArgs, BuildCommand, HvigorRuntimeProperties};
+pub use args::{BuildCommand, BuildRequest, HvigorRuntimeProperties};

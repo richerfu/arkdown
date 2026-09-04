@@ -144,6 +144,27 @@ export interface BuildResult {
   elapsedMs: number
 }
 
+/** Run the native ArkTS source checker without entering the build pipeline. */
+export declare function check(config: CheckConfig): Promise<void>
+
+export interface CheckConfig {
+  project?: string
+  target?: string
+  module?: string
+  nodeExecutable?: string
+  checker?: 'oxc' | 'sdk'
+}
+
+/**
+ * Remove project, module, unit-test, preview, and active native build outputs.
+ * All project discovery and path ownership remain in Rust.
+ */
+export declare function clean(config: CleanConfig): Promise<void>
+
+export interface CleanConfig {
+  project?: string
+}
+
 /**
  * Compile one user-authored TypeScript plugin module through OXC and Rolldown.
  * JavaScript receives only the CommonJS text it must execute in the owning V8
@@ -520,9 +541,6 @@ export interface ObservabilityInstallOptions {
   logLevel: string
   consoleOwner: string
 }
-
-/** Parse Arkdown's direct `build` command arguments in Rust. */
-export declare function parseArkdownBuildCliArgs(args: Array<string>): string
 
 /**
  * Parse JavaScript for plugin glue that is not currently inside a live

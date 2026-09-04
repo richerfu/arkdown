@@ -1,8 +1,8 @@
 //! arkdown Node.js bindings (napi-rs 3.9.x).
 //!
-//! Exposes a `build()` function that accepts Rolldown-compatible JS plugin
-//! objects. Plugin hooks are called via NAPI `ThreadsafeFunction` — same
-//! process, same V8 heap, no subprocess overhead.
+//! Exposes typed build, check, and clean services. `build()` accepts
+//! Rolldown-compatible JS plugin objects; plugin hooks are called via NAPI
+//! `ThreadsafeFunction` in the same process and V8 heap.
 
 #![deny(clippy::all)]
 
@@ -25,7 +25,6 @@
 #[global_allocator]
 static ALLOC: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
-pub mod cli_plan;
 pub mod cmd;
 mod hvigor_plugin_plan;
 mod js_callback;
@@ -74,14 +73,48 @@ use arkdown::plugins::hvigor_compile::{
 };
 use arkdown::PluginCacheModule;
 
-/// Parse Arkdown's direct `build` command arguments in Rust.
+#[napi(object)]
+pub struct CleanConfig {
+  pub project: Option<String>,
+}
+
+#[napi(object)]
+pub struct CheckConfig {
+  pub project: Option<String>,
+  pub target: Option<String>,
+  pub module: Option<String>,
+  pub node_executable: Option<String>,
+  #[napi(ts_type = "'oxc' | 'sdk'")]
+  pub checker: Option<String>,
+}
+
+/// Remove project, module, unit-test, preview, and active native build outputs.
+/// All project discovery and path ownership remain in Rust.
 #[napi]
-pub fn parse_arkdown_build_cli_args(args: Vec<String>) -> napi::Result<String> {
-  cli_plan::PackageCliParser::parse_build_json(&args).map_err(|error| {
-    napi::Error::from_reason(format!(
-      "failed to serialize Arkdown build CLI plan: {error}"
-    ))
-  })
+pub async fn clean(config: CleanConfig) -> napi::Result<()> {
+  let args = cmd::clean::CleanRequest {
+    project: config.project.map(PathBuf::from),
+  };
+  tokio::task::spawn_blocking(move || cmd::clean::run(args))
+    .await
+    .map_err(|error| napi::Error::from_reason(format!("Arkdown clean task failed: {error}")))?
+    .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
+}
+
+/// Run the native ArkTS source checker without entering the build pipeline.
+#[napi]
+pub async fn check(config: CheckConfig) -> napi::Result<()> {
+  let args = cmd::check::CheckRequest {
+    target: config.target.unwrap_or_else(|| "hap".to_string()),
+    module: config.module,
+    project: config.project.map(PathBuf::from),
+    node_executable: config.node_executable.map(PathBuf::from),
+    checker: config.checker.unwrap_or_else(|| "oxc".to_string()),
+  };
+  tokio::task::spawn_blocking(move || cmd::check::run(args))
+    .await
+    .map_err(|error| napi::Error::from_reason(format!("Arkdown check task failed: {error}")))?
+    .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
 }
 
 /// Compile one user-authored TypeScript plugin module through OXC and Rolldown.
@@ -2312,7 +2345,7 @@ async fn run_build(
   js_plugins: Vec<PackagePlugin>,
 ) -> anyhow::Result<Vec<String>> {
   use crate::cmd::build::args::AbcBackendChoice;
-  use crate::cmd::build::BuildArgs;
+  use crate::cmd::build::BuildRequest;
   use arkdown_config::ArkdownConfigLoader;
   use arkdown_core::{BuildMode, OutputTarget};
   use arkdown_session::BuildSessionBuilder;
@@ -2375,7 +2408,7 @@ async fn run_build(
   .await
   .map_err(|error| anyhow::anyhow!("build startup worker failed: {error}"))??;
 
-  let args = BuildArgs {
+  let args = BuildRequest {
     target,
     mode,
     analyze: package_args.analyze,

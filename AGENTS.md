@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`arkdown` is a Rust workspace for building OpenHarmony artifacts (`.hap`, `.hsp`, `.har`) from ArkTS/TypeScript projects. Workspace crates live under `crates/`: shared types in `arkdown-core`, typed paths in `arkdown-path`, OHOS schemas in `arkdown-ohos-schema`, startup snapshots in `arkdown-session`, resolving in `arkdown-resolver`, OXC transforms in `arkdown-ets-transform`, Rolldown bundling and built-in plugin adapters in `arkdown`, packaging/signing/profile/resource/cache/watch support in matching crates, and coarse CLI orchestration in `arkdown-cli`.
+`arkdown` is a Rust workspace for building OpenHarmony artifacts (`.hap`, `.hsp`, `.har`) from ArkTS/TypeScript projects. Workspace crates live under `crates/`: shared types in `arkdown-core`, typed paths in `arkdown-path`, OHOS schemas in `arkdown-ohos-schema`, startup snapshots in `arkdown-session`, resolving in `arkdown-resolver`, OXC transforms in `arkdown-ets-transform`, Rolldown bundling and built-in plugin adapters in `arkdown`, and packaging/signing/profile/resource/cache/watch support in matching crates. The npm package and typed N-API service boundary live under `packages/arkdown`.
 
 Separate `arkdown-plugin-*` crates are not part of the final architecture. Rollup plugin behavior migrates to internal Rolldown adapters under `crates/arkdown/src/plugins/`; non-hook business logic belongs in the owning domain crate. Delete obsolete plugin crates, compatibility wrappers, workspace members, dependency declarations, imports, tests, and docs after their final production caller moves.
 
@@ -39,9 +39,15 @@ mandatory for all contributors and agents, not local preferences:
 - `cargo test -p arkdown -- chunk`: run tests matching a name filter.
 - `cargo clippy -- -D warnings`: run lints as errors.
 - `cargo fmt`: format Rust code.
-- `cargo run -p arkdown-cli -- build --project tests/fixtures/minimal-hap`: run the CLI against the minimal fixture.
+- `node packages/arkdown/js/arkdown-cli.js build --project tests/fixtures/minimal-hap`: run the only supported CLI entry against the minimal fixture.
 
 Use Cargo directly; there is no `justfile`.
+
+## Entrypoint Boundary
+
+The only executable command-line entry is `packages/arkdown/js/arkdown-cli.js`, published through the npm `bin` field. JavaScript owns argv parsing, help/version text, stdout/stderr, exit codes, and TS/JS plugin compatibility. Project discovery, build plans, transforms, caches, SDK commands, artifacts, checking, and cleaning remain Rust-owned behind typed N-API services.
+
+Rust must not expose a command-line interface: do not add Rust `[[bin]]` targets, `main.rs`, Clap dependencies/derives, argv parsers, or N-API functions such as `parse*CliArgs`. The N-API boundary may expose typed service requests such as `build`, `check`, and `clean`; those are not CLI APIs. Entrypoint changes must preserve the architecture deletion test in `packages/arkdown/__test__/runtime-architecture.test.cjs`.
 
 ## Coding Style & Naming Conventions
 

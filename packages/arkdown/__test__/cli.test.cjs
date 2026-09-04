@@ -30,7 +30,7 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
   })
 })
 
-test('package CLI delegates only the native build command', async () => {
+test('package CLI delegates the native build command', async () => {
   const calls = []
   const cli = new ArkdownPackageCli(['build', '--project', '/tmp/app'], async (config) => {
     calls.push(config)
@@ -39,6 +39,28 @@ test('package CLI delegates only the native build command', async () => {
 
   assert.equal(await cli.run(), 0)
   assert.deepEqual(calls, [{ project: '/tmp/app' }])
+})
+
+test('package CLI delegates native check and clean commands', async () => {
+  const calls = []
+  const operations = {
+    async check(config) {
+      calls.push(['check', config])
+    },
+    async clean(config) {
+      calls.push(['clean', config])
+    },
+  }
+
+  assert.equal(
+    await new ArkdownPackageCli(['check', '--project', '/tmp/app', '--module', 'entry'], operations).run(),
+    0,
+  )
+  assert.equal(await new ArkdownPackageCli(['clean', '--project', '/tmp/app'], operations).run(), 0)
+  assert.deepEqual(calls, [
+    ['check', { project: '/tmp/app', module: 'entry' }],
+    ['clean', { project: '/tmp/app' }],
+  ])
 })
 
 test('package CLI rejects removed Hvigor task commands', async () => {

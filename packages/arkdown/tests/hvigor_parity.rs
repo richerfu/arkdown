@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 use zip::ZipArchive;
 
 const ENV_HVIGORW: &str = "ARKDOWN_PARITY_HVIGORW";
-const ENV_ARKDOWN_BIN: &str = "ARKDOWN_PARITY_ARKDOWN_BIN";
+const ENV_ARKDOWN_CLI: &str = "ARKDOWN_PARITY_ARKDOWN_CLI";
 const ENV_REPORT: &str = "ARKDOWN_PARITY_REPORT";
 const ENV_RUN: &str = "ARKDOWN_PARITY_RUN";
 const ENV_STRICT: &str = "ARKDOWN_PARITY_STRICT";
@@ -624,9 +624,11 @@ fn parity_command_args_include_selected_build_mode() {
       "--no-daemon"
     ]
   );
+  let arkdown = arkdown_args(ArtifactType::Hap, ParityBuildMode::Release);
+  assert!(arkdown[0].ends_with("packages/arkdown/js/arkdown-cli.js"));
   assert_eq!(
-    arkdown_args(ArtifactType::Hap, ParityBuildMode::Release),
-    vec!["build", "--target", "hap", "--mode", "release"]
+    &arkdown[1..],
+    ["build", "--target", "hap", "--mode", "release"]
   );
 }
 
@@ -686,8 +688,8 @@ fn parity_for_fixture(
   let hvigor_command = run_command("hvigor", &hvigorw, &hvigor_args, &hvigor_root);
   let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
   let mut arkdown_args = arkdown_args(artifact_type, build_mode);
-  arkdown_args.push("--project");
-  arkdown_args.push(arkdown_project_arg.as_str());
+  arkdown_args.push("--project".to_string());
+  arkdown_args.push(arkdown_project_arg);
   let arkdown_command = run_command("arkdown", &arkdown_bin, &arkdown_args, &arkdown_root);
 
   let hvigor = collect_build("hvigor", &hvigor_root, hvigor_command, artifact_type)?;
@@ -709,7 +711,7 @@ fn parity_for_fixture(
       "strict": env_truthy(ENV_STRICT),
       "env": {
           "ARKDOWN_PARITY_HVIGORW": std::env::var(ENV_HVIGORW).ok(),
-          "ARKDOWN_PARITY_ARKDOWN_BIN": std::env::var(ENV_ARKDOWN_BIN).ok(),
+          "ARKDOWN_PARITY_ARKDOWN_CLI": std::env::var(ENV_ARKDOWN_CLI).ok(),
           "ARKDOWN_PARITY_REPORT": std::env::var(ENV_REPORT).ok(),
           "ARKDOWN_PARITY_KEEP_WORKDIR": std::env::var(ENV_KEEP_WORKDIR).ok(),
       },
@@ -765,8 +767,8 @@ fn incremental_parity_for_fixture(
   let hvigor_args = hvigor_args(artifact_type, build_mode);
   let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
   let mut arkdown_args = arkdown_args(artifact_type, build_mode);
-  arkdown_args.push("--project");
-  arkdown_args.push(arkdown_project_arg.as_str());
+  arkdown_args.push("--project".to_string());
+  arkdown_args.push(arkdown_project_arg);
 
   let cold_hvigor = collect_build(
     "hvigor",
@@ -913,8 +915,8 @@ fn run_component_v2_lifecycle_diagnostic_parity_test() {
   );
   let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
   let mut arkdown_args = arkdown_args(artifact_type, build_mode);
-  arkdown_args.push("--project");
-  arkdown_args.push(arkdown_project_arg.as_str());
+  arkdown_args.push("--project".to_string());
+  arkdown_args.push(arkdown_project_arg);
   let arkdown = run_command("arkdown", &arkdown_program(), &arkdown_args, &arkdown_root);
   let expected = "Methods decorated with '@ComponentAppear' cannot have input parameters.";
   assert!(
@@ -966,21 +968,22 @@ fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<
   args
 }
 
-fn arkdown_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
+fn arkdown_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<String> {
   let mut args = vec![
-    "build",
-    "--target",
-    artifact_type.arkdown_target(),
-    "--mode",
-    build_mode.as_str(),
+    arkdown_cli_path().to_string_lossy().into_owned(),
+    "build".to_string(),
+    "--target".to_string(),
+    artifact_type.arkdown_target().to_string(),
+    "--mode".to_string(),
+    build_mode.as_str().to_string(),
   ];
   if artifact_type == ArtifactType::Test {
-    args.push("--ohos-test-coverage");
-    args.push("false");
+    args.push("--ohos-test-coverage".to_string());
+    args.push("false".to_string());
   }
   if artifact_type == ArtifactType::OhosTest {
-    args.push("--build-target-name");
-    args.push("ohosTest");
+    args.push("--build-target-name".to_string());
+    args.push("ohosTest".to_string());
   }
   args
 }
@@ -1012,7 +1015,17 @@ fn hvigorw_program(project_root: &Path) -> OsString {
 }
 
 fn arkdown_program() -> OsString {
-  std::env::var_os(ENV_ARKDOWN_BIN).unwrap_or_else(|| OsString::from(env!("CARGO_BIN_EXE_arkdown")))
+  std::env::var_os("NODE_HOME")
+    .map(PathBuf::from)
+    .map(|home| home.join(arkdown_path::HostPlatform::CURRENT.executable_name("node")))
+    .map(PathBuf::into_os_string)
+    .unwrap_or_else(|| OsString::from(arkdown_path::HostPlatform::CURRENT.executable_name("node")))
+}
+
+fn arkdown_cli_path() -> PathBuf {
+  std::env::var_os(ENV_ARKDOWN_CLI)
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("js/arkdown-cli.js"))
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -1097,10 +1110,19 @@ struct CommandReport {
   error: Option<String>,
 }
 
-fn run_command(tool: &str, program: &OsStr, args: &[&str], cwd: &Path) -> CommandReport {
+fn run_command<T: AsRef<OsStr>>(
+  tool: &str,
+  program: &OsStr,
+  args: &[T],
+  cwd: &Path,
+) -> CommandReport {
   let start = Instant::now();
   let command = std::iter::once(program.to_string_lossy().into_owned())
-    .chain(args.iter().map(|arg| (*arg).to_string()))
+    .chain(
+      args
+        .iter()
+        .map(|arg| arg.as_ref().to_string_lossy().into_owned()),
+    )
     .collect::<Vec<_>>();
 
   match Command::new(program).args(args).current_dir(cwd).output() {

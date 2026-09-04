@@ -256,7 +256,7 @@ impl BuildCoordinator {
     module: &ModuleConfig,
     module_config: &ArkdownConfig,
     session: &BuildSession,
-    args: &BuildArgs,
+    args: &BuildRequest,
     target_name: &str,
     target: &EffectiveTargetConfig,
     module_layout: &ModuleBuildLayout<'_>,
@@ -491,7 +491,7 @@ impl BuildCoordinator {
   }
 
   /// Construct a new coordinator from a completed build session and CLI args.
-  pub fn new(session: Arc<BuildSession>, config: Arc<ArkdownConfig>, args: BuildArgs) -> Self {
+  pub fn new(session: Arc<BuildSession>, config: Arc<ArkdownConfig>, args: BuildRequest) -> Self {
     Self {
       session,
       config,

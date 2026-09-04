@@ -175,15 +175,15 @@ impl SelfConsistencyOracle {
   /// files produced under `<project_path>/build/`.
   ///
   /// `extra_args` are forwarded to [`arkdown_napi::cmd::build::BuildCommand`]
-  /// via the [`BuildArgs`] struct. The project root is always set to
+  /// via the [`BuildRequest`] struct. The project root is always set to
   /// `project_path`.
   pub fn run_build(project_path: &Path, disable_abc_cache: bool) -> BuildOutput {
     use arkdown_napi::cmd::build::args::AbcBackendChoice;
-    use arkdown_napi::cmd::build::{BuildArgs, BuildCommand};
+    use arkdown_napi::cmd::build::{BuildCommand, BuildRequest};
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(
-      BuildCommand::new(BuildArgs {
+      BuildCommand::new(BuildRequest {
         target: "hap".to_string(),
         mode: "debug".to_string(),
         analyze: Default::default(),

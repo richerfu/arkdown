@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) struct PackageSignStageInput<'a> {
-  pub(super) args: &'a BuildArgs,
+  pub(super) args: &'a BuildRequest,
   pub(super) config: &'a ArkdownConfig,
   pub(super) session: &'a BuildSession,
   pub(super) task_lifecycle: &'a mut BuildTaskLifecycle,

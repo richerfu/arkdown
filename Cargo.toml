@@ -143,8 +143,6 @@ zip = "2"
 rawzip = "0.4.4"
 time = { version = "0.3", features = ["local-offset"] }
 
-# CLI
-clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 dhat = "0.3.3"
