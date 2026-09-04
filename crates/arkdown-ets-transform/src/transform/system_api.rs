@@ -6,9 +6,9 @@ use std::{
 use oxc_ast::{
     ast::{
         Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind, Expression,
-        ImportDeclarationSpecifier, ModuleExportName, Program, PropertyKey, Statement,
-        TSInterfaceDeclaration, TSNamespaceDeclaration, TSNamespaceDeclarationBody, TSSignature,
-        TSType, TSTypeName,
+        FormalParameters, ImportDeclarationSpecifier, ModuleExportName, Program, PropertyKey,
+        Statement, TSInterfaceDeclaration, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
+        TSSignature, TSType, TSTypeAnnotation, TSTypeName,
     },
     AstKind,
 };
@@ -210,11 +210,17 @@ pub(super) struct SystemApiSymbol {
     contract: SystemApiContract,
     members: FxHashMap<Box<str>, SystemApiSymbol>,
     references: Vec<Vec<Box<str>>>,
+    call_signatures: Vec<SystemApiCallSignature>,
+    awaited: Option<Box<SystemApiSymbol>>,
 }
 
 impl SystemApiSymbol {
     fn is_empty(&self) -> bool {
-        self.contract.is_empty() && self.members.is_empty() && self.references.is_empty()
+        self.contract.is_empty()
+            && self.members.is_empty()
+            && self.references.is_empty()
+            && self.call_signatures.is_empty()
+            && self.awaited.is_none()
     }
 
     pub(super) fn merge(&mut self, other: &Self) {
@@ -227,17 +233,39 @@ impl SystemApiSymbol {
                 self.references.push(reference.clone());
             }
         }
+        for signature in &other.call_signatures {
+            if !self.call_signatures.contains(signature) {
+                self.call_signatures.push(signature.clone());
+            }
+        }
+        if let Some(other_awaited) = &other.awaited {
+            self.awaited
+                .get_or_insert_with(|| Box::new(SystemApiSymbol::default()))
+                .merge(other_awaited);
+        }
     }
 
     fn merge_type_shape(&mut self, other: &Self) {
         for (name, symbol) in &other.members {
             self.members.entry(name.clone()).or_default().merge(symbol);
         }
+        for signature in &other.call_signatures {
+            if !self.call_signatures.contains(signature) {
+                self.call_signatures.push(signature.clone());
+            }
+        }
+        if let Some(other_awaited) = &other.awaited {
+            self.awaited
+                .get_or_insert_with(|| Box::new(SystemApiSymbol::default()))
+                .merge_type_shape(other_awaited);
+        }
     }
 
     fn type_shape(&self) -> Self {
         Self {
             members: self.members.clone(),
+            call_signatures: self.call_signatures.clone(),
+            awaited: self.awaited.clone(),
             ..Self::default()
         }
     }
@@ -245,6 +273,80 @@ impl SystemApiSymbol {
     fn member(&self, path: &[Box<str>]) -> Option<&Self> {
         path.iter()
             .try_fold(self, |symbol, name| symbol.members.get(name.as_ref()))
+    }
+
+    fn add_type_projection(&mut self, projection: SystemApiTypeProjection) {
+        match projection {
+            SystemApiTypeProjection::Named(path) => {
+                if !path.is_empty() && !self.references.contains(&path) {
+                    self.references.push(path);
+                }
+            }
+            SystemApiTypeProjection::Awaited(inner) => {
+                let awaited = self
+                    .awaited
+                    .get_or_insert_with(|| Box::new(SystemApiSymbol::default()));
+                awaited.add_type_projection(*inner);
+            }
+            SystemApiTypeProjection::Composite(projections) => {
+                for projection in projections {
+                    self.add_type_projection(projection);
+                }
+            }
+        }
+    }
+
+    fn call_result(&self, argument_count: usize) -> Option<Cow<'_, Self>> {
+        let mut matches = self
+            .call_signatures
+            .iter()
+            .filter(|signature| signature.accepts(argument_count));
+        let first = matches.next()?;
+        let Some(second) = matches.next() else {
+            return Some(Cow::Borrowed(&first.result));
+        };
+        let mut result = first.result.type_shape();
+        result.merge_type_shape(&second.result);
+        for signature in matches {
+            result.merge_type_shape(&signature.result);
+        }
+        Some(Cow::Owned(result))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SystemApiCallSignature {
+    min_arguments: usize,
+    max_arguments: Option<usize>,
+    result: SystemApiSymbol,
+}
+
+impl SystemApiCallSignature {
+    fn new(params: &FormalParameters<'_>, return_type: Option<&TSTypeAnnotation<'_>>) -> Self {
+        let min_arguments = params
+            .items
+            .iter()
+            .filter(|parameter| !parameter.optional && parameter.initializer.is_none())
+            .count();
+        let max_arguments = params.rest.is_none().then_some(params.items.len());
+        let mut result = SystemApiSymbol::default();
+        if let Some(projection) = return_type
+            .and_then(|annotation| SystemApiTypeProjection::new(&annotation.type_annotation))
+        {
+            result.add_type_projection(projection);
+        }
+        Self {
+            min_arguments,
+            max_arguments,
+            result,
+        }
+    }
+
+    fn accepts(&self, argument_count: usize) -> bool {
+        argument_count >= self.min_arguments
+            && self
+                .max_arguments
+                .is_none_or(|maximum| argument_count <= maximum)
     }
 }
 
@@ -602,8 +704,8 @@ impl<'a> SystemApiDeclarationCollector<'a> {
             }
             Declaration::TSTypeAliasDeclaration(alias) => {
                 let mut symbol = self.symbol_for_spans([wrapper_span, Some(alias.span)]);
-                if let Some(reference) = SystemApiTypeReference::new(&alias.type_annotation) {
-                    symbol.references.push(reference.path);
+                if let Some(projection) = SystemApiTypeProjection::new(&alias.type_annotation) {
+                    symbol.add_type_projection(projection);
                 }
                 self.insert_local(alias.id.name.as_str(), symbol);
                 self.record_direct_binding(alias.id.name.as_str(), exported);
@@ -619,10 +721,10 @@ impl<'a> SystemApiDeclarationCollector<'a> {
                         Some(variable.span),
                     ]);
                     if let Some(annotation) = &declaration.type_annotation {
-                        if let Some(reference) =
-                            SystemApiTypeReference::new(&annotation.type_annotation)
+                        if let Some(projection) =
+                            SystemApiTypeProjection::new(&annotation.type_annotation)
                         {
-                            symbol.references.push(reference.path);
+                            symbol.add_type_projection(projection);
                         }
                     }
                     self.insert_local(id.name.as_str(), symbol);
@@ -708,19 +810,32 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         for element in &class.body.body {
             match element {
                 ClassElement::MethodDefinition(method) => {
-                    self.insert_member(&mut symbol, &method.key, method.span, None);
+                    if method.kind == oxc_ast::ast::MethodDefinitionKind::Get {
+                        let projection = method.value.return_type.as_ref().and_then(|annotation| {
+                            SystemApiTypeProjection::new(&annotation.type_annotation)
+                        });
+                        self.insert_member(&mut symbol, &method.key, method.span, projection);
+                    } else {
+                        self.insert_callable_member(
+                            &mut symbol,
+                            &method.key,
+                            method.span,
+                            &method.value.params,
+                            method.value.return_type.as_deref(),
+                        );
+                    }
                 }
                 ClassElement::PropertyDefinition(property) => {
-                    let reference = property.type_annotation.as_ref().and_then(|annotation| {
-                        SystemApiTypeReference::new(&annotation.type_annotation)
+                    let projection = property.type_annotation.as_ref().and_then(|annotation| {
+                        SystemApiTypeProjection::new(&annotation.type_annotation)
                     });
-                    self.insert_member(&mut symbol, &property.key, property.span, reference);
+                    self.insert_member(&mut symbol, &property.key, property.span, projection);
                 }
                 ClassElement::AccessorProperty(property) => {
-                    let reference = property.type_annotation.as_ref().and_then(|annotation| {
-                        SystemApiTypeReference::new(&annotation.type_annotation)
+                    let projection = property.type_annotation.as_ref().and_then(|annotation| {
+                        SystemApiTypeProjection::new(&annotation.type_annotation)
                     });
-                    self.insert_member(&mut symbol, &property.key, property.span, reference);
+                    self.insert_member(&mut symbol, &property.key, property.span, projection);
                 }
                 ClassElement::ETSOverloadDeclaration(overload) => {
                     self.insert_member(&mut symbol, &overload.key, overload.span, None);
@@ -745,22 +860,48 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         for signature in &interface.body.body {
             match signature {
                 TSSignature::TSMethodSignature(method) => {
-                    self.insert_member(&mut symbol, &method.key, method.span, None);
+                    if method.kind == oxc_ast::ast::TSMethodSignatureKind::Get {
+                        let projection = method.return_type.as_ref().and_then(|annotation| {
+                            SystemApiTypeProjection::new(&annotation.type_annotation)
+                        });
+                        self.insert_member(&mut symbol, &method.key, method.span, projection);
+                    } else {
+                        self.insert_callable_member(
+                            &mut symbol,
+                            &method.key,
+                            method.span,
+                            &method.params,
+                            method.return_type.as_deref(),
+                        );
+                    }
                 }
                 TSSignature::TSPropertySignature(property) => {
-                    let reference = property.type_annotation.as_ref().and_then(|annotation| {
-                        SystemApiTypeReference::new(&annotation.type_annotation)
+                    let projection = property.type_annotation.as_ref().and_then(|annotation| {
+                        SystemApiTypeProjection::new(&annotation.type_annotation)
                     });
-                    self.insert_member(&mut symbol, &property.key, property.span, reference);
+                    self.insert_member(&mut symbol, &property.key, property.span, projection);
                 }
                 TSSignature::MethodDefinition(method) => {
-                    self.insert_member(&mut symbol, &method.key, method.span, None);
+                    if method.kind == oxc_ast::ast::MethodDefinitionKind::Get {
+                        let projection = method.value.return_type.as_ref().and_then(|annotation| {
+                            SystemApiTypeProjection::new(&annotation.type_annotation)
+                        });
+                        self.insert_member(&mut symbol, &method.key, method.span, projection);
+                    } else {
+                        self.insert_callable_member(
+                            &mut symbol,
+                            &method.key,
+                            method.span,
+                            &method.value.params,
+                            method.value.return_type.as_deref(),
+                        );
+                    }
                 }
                 TSSignature::PropertyDefinition(property) => {
-                    let reference = property.type_annotation.as_ref().and_then(|annotation| {
-                        SystemApiTypeReference::new(&annotation.type_annotation)
+                    let projection = property.type_annotation.as_ref().and_then(|annotation| {
+                        SystemApiTypeProjection::new(&annotation.type_annotation)
                     });
-                    self.insert_member(&mut symbol, &property.key, property.span, reference);
+                    self.insert_member(&mut symbol, &property.key, property.span, projection);
                 }
                 TSSignature::ETSOverloadDeclaration(overload) => {
                     self.insert_member(&mut symbol, &overload.key, overload.span, None);
@@ -777,11 +918,10 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         wrapper_span: Option<Span>,
     ) -> SystemApiSymbol {
         let mut symbol = self.symbol_for_spans([wrapper_span, Some(function.span)]);
-        if let Some(return_type) = &function.return_type {
-            if let Some(reference) = SystemApiTypeReference::new(&return_type.type_annotation) {
-                symbol.references.push(reference.path);
-            }
-        }
+        symbol.call_signatures.push(SystemApiCallSignature::new(
+            &function.params,
+            function.return_type.as_deref(),
+        ));
         symbol
     }
 
@@ -790,7 +930,7 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         owner: &mut SystemApiSymbol,
         key: &PropertyKey<'program>,
         span: Span,
-        reference: Option<SystemApiTypeReference>,
+        projection: Option<SystemApiTypeProjection>,
     ) {
         let Some(name) = key.static_name() else {
             return;
@@ -799,10 +939,29 @@ impl<'a> SystemApiDeclarationCollector<'a> {
         member
             .contract
             .merge(&self.contract_for_spans([Some(span)]));
-        if let Some(reference) = reference {
-            if !member.references.contains(&reference.path) {
-                member.references.push(reference.path);
-            }
+        if let Some(projection) = projection {
+            member.add_type_projection(projection);
+        }
+    }
+
+    fn insert_callable_member<'program>(
+        &self,
+        owner: &mut SystemApiSymbol,
+        key: &PropertyKey<'program>,
+        span: Span,
+        params: &FormalParameters<'program>,
+        return_type: Option<&TSTypeAnnotation<'program>>,
+    ) {
+        let Some(name) = key.static_name() else {
+            return;
+        };
+        let member = owner.members.entry(name.into_owned().into()).or_default();
+        member
+            .contract
+            .merge(&self.contract_for_spans([Some(span)]));
+        let signature = SystemApiCallSignature::new(params, return_type);
+        if !member.call_signatures.contains(&signature) {
+            member.call_signatures.push(signature);
         }
     }
 
@@ -921,6 +1080,12 @@ impl<'a> SystemApiReferenceResolver<'a> {
         for member in symbol.members.values_mut() {
             changed |= self.resolve(member);
         }
+        for signature in &mut symbol.call_signatures {
+            changed |= self.resolve(&mut signature.result);
+        }
+        if let Some(awaited) = symbol.awaited.as_mut() {
+            changed |= self.resolve(awaited);
+        }
         changed
     }
 }
@@ -950,19 +1115,46 @@ impl<'a> SystemApiSinceWhitelist<'a> {
     }
 }
 
-struct SystemApiTypeReference {
-    path: Vec<Box<str>>,
+enum SystemApiTypeProjection {
+    Named(Vec<Box<str>>),
+    Awaited(Box<SystemApiTypeProjection>),
+    Composite(Vec<SystemApiTypeProjection>),
 }
 
-impl SystemApiTypeReference {
+impl SystemApiTypeProjection {
     fn new(ty: &TSType<'_>) -> Option<Self> {
         match ty {
-            TSType::TSTypeReference(reference) => Some(Self {
-                path: SystemApiTypeName::new(&reference.type_name).path(),
-            }),
+            TSType::TSTypeReference(reference) => {
+                let path = SystemApiTypeName::new(&reference.type_name).path();
+                if path
+                    .last()
+                    .is_some_and(|name| matches!(name.as_ref(), "Promise" | "PromiseLike"))
+                {
+                    let inner = reference
+                        .type_arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.params.first())
+                        .and_then(Self::new)?;
+                    Some(Self::Awaited(Box::new(inner)))
+                } else {
+                    (!path.is_empty()).then_some(Self::Named(path))
+                }
+            }
             TSType::TSParenthesizedType(parenthesized) => Self::new(&parenthesized.type_annotation),
             TSType::TSArrayType(array) => Self::new(&array.element_type),
+            TSType::TSTypeOperatorType(operator) => Self::new(&operator.type_annotation),
+            TSType::TSUnionType(union) => Self::from_many(&union.types),
+            TSType::TSIntersectionType(intersection) => Self::from_many(&intersection.types),
             _ => None,
+        }
+    }
+
+    fn from_many(types: &[TSType<'_>]) -> Option<Self> {
+        let projections = types.iter().filter_map(Self::new).collect::<Vec<_>>();
+        match projections.len() {
+            0 => None,
+            1 => projections.into_iter().next(),
+            _ => Some(Self::Composite(projections)),
         }
     }
 }
@@ -1082,17 +1274,70 @@ impl ImportedSystemApiBindings {
         self.symbols.is_empty()
     }
 
-    fn resolve<'a>(
+    fn root_symbol<'a>(
         &'a self,
         root: &oxc_ast::ast::IdentifierReference<'_>,
-        path: &[Box<str>],
         scoping: &Scoping,
     ) -> Option<&'a SystemApiSymbol> {
         let symbol_id = root
             .reference_id
             .get()
             .and_then(|reference_id| scoping.get_reference(reference_id).symbol_id())?;
-        self.symbols.get(&symbol_id)?.member(path)
+        self.symbols.get(&symbol_id)
+    }
+
+    fn resolve_value<'a>(
+        &'a self,
+        expression: &Expression<'_>,
+        scoping: &Scoping,
+    ) -> Option<Cow<'a, SystemApiSymbol>> {
+        let path = SystemApiValuePath::new(expression)?;
+        let mut symbol = Cow::Borrowed(self.root_symbol(path.root, scoping)?);
+        for segment in path.segments {
+            symbol = match (segment, symbol) {
+                (SystemApiValueSegment::Member(name), Cow::Borrowed(symbol)) => {
+                    Cow::Borrowed(symbol.members.get(name.as_ref())?)
+                }
+                (SystemApiValueSegment::Member(name), Cow::Owned(symbol)) => {
+                    Cow::Owned(symbol.members.get(name.as_ref())?.clone())
+                }
+                (SystemApiValueSegment::Call(argument_count), Cow::Borrowed(symbol)) => {
+                    if symbol.call_signatures.is_empty() {
+                        Cow::Borrowed(symbol)
+                    } else {
+                        symbol.call_result(argument_count)?
+                    }
+                }
+                (SystemApiValueSegment::Call(argument_count), Cow::Owned(symbol)) => {
+                    if symbol.call_signatures.is_empty() {
+                        Cow::Owned(symbol)
+                    } else {
+                        Cow::Owned(symbol.call_result(argument_count)?.into_owned())
+                    }
+                }
+                (SystemApiValueSegment::Await, Cow::Borrowed(symbol)) => {
+                    Cow::Borrowed(symbol.awaited.as_deref()?)
+                }
+                (SystemApiValueSegment::Await, Cow::Owned(symbol)) => {
+                    Cow::Owned(symbol.awaited.as_deref()?.clone())
+                }
+            };
+        }
+        Some(symbol)
+    }
+
+    fn resolve_api_use<'a>(
+        &'a self,
+        expression: &Expression<'_>,
+        scoping: &Scoping,
+    ) -> Option<Cow<'a, SystemApiSymbol>> {
+        match expression {
+            Expression::CallExpression(call) => self.resolve_value(&call.callee, scoping),
+            Expression::NewExpression(constructor) => {
+                self.resolve_value(&constructor.callee, scoping)
+            }
+            _ => self.resolve_value(expression, scoping),
+        }
     }
 
     fn collect_local_value_bindings(&mut self, program: &Program<'_>, scoping: &Scoping) {
@@ -1147,28 +1392,18 @@ impl<'program> Visit<'program> for SystemApiLocalValueCollector<'_> {
             declaration.id.get_binding_identifier(),
             declaration.init.as_ref(),
         ) {
-            if let Some((root, path, _)) = SystemApiUsePath::resolve(initializer) {
-                if let Some(symbol) = self.bindings.resolve(root, &path, self.scoping) {
-                    let symbol = if matches!(
-                        initializer,
-                        Expression::CallExpression(_) | Expression::NewExpression(_)
-                    ) {
-                        symbol.type_shape()
-                    } else {
-                        symbol.clone()
-                    };
-                    let symbol_id = identifier.symbol_id();
-                    self.facts.push(SystemApiLocalValueFact {
-                        previous: self
-                            .bindings
-                            .symbols
-                            .get(&symbol_id)
-                            .cloned()
-                            .unwrap_or_default(),
-                        symbol_id,
-                        symbol,
-                    });
-                }
+            if let Some(symbol) = self.bindings.resolve_value(initializer, self.scoping) {
+                let symbol_id = identifier.symbol_id();
+                self.facts.push(SystemApiLocalValueFact {
+                    previous: self
+                        .bindings
+                        .symbols
+                        .get(&symbol_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    symbol_id,
+                    symbol: symbol.into_owned(),
+                });
             }
         }
         walk::walk_variable_declarator(self, declaration);
@@ -1305,9 +1540,12 @@ impl<'a, 'program> SystemApiUseValidator<'a, 'program> {
         let Some((root, path, span)) = SystemApiUsePath::resolve(expression) else {
             return false;
         };
-        let Some(symbol) = self.bindings.resolve(root, &path, self.scoping) else {
+        let Some(symbol) = self.bindings.resolve_api_use(expression, self.scoping) else {
             return false;
         };
+        if symbol.contract.is_empty() {
+            return false;
+        }
         let api_name = path.last().map_or(root.name.as_str(), |name| name.as_ref());
         self.validate_contract(&symbol.contract, api_name, span);
         true
@@ -1525,6 +1763,73 @@ impl<'program> Visit<'program> for SystemApiUseValidator<'_, 'program> {
     }
 }
 
+struct SystemApiValuePath<'a> {
+    root: &'a oxc_ast::ast::IdentifierReference<'a>,
+    segments: Vec<SystemApiValueSegment>,
+}
+
+enum SystemApiValueSegment {
+    Member(Box<str>),
+    Call(usize),
+    Await,
+}
+
+impl<'a> SystemApiValuePath<'a> {
+    fn new(expression: &'a Expression<'a>) -> Option<Self> {
+        match expression {
+            Expression::Identifier(root) => Some(Self {
+                root,
+                segments: Vec::new(),
+            }),
+            Expression::StaticMemberExpression(member) => {
+                let mut path = Self::new(&member.object)?;
+                path.segments.push(SystemApiValueSegment::Member(
+                    member.property.name.as_str().into(),
+                ));
+                Some(path)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                let Expression::StringLiteral(property) = &member.expression else {
+                    return None;
+                };
+                let mut path = Self::new(&member.object)?;
+                path.segments.push(SystemApiValueSegment::Member(
+                    property.value.as_str().into(),
+                ));
+                Some(path)
+            }
+            Expression::CallExpression(call) => {
+                let mut path = Self::new(&call.callee)?;
+                path.segments
+                    .push(SystemApiValueSegment::Call(call.arguments.len()));
+                Some(path)
+            }
+            Expression::NewExpression(constructor) => {
+                let mut path = Self::new(&constructor.callee)?;
+                path.segments
+                    .push(SystemApiValueSegment::Call(constructor.arguments.len()));
+                Some(path)
+            }
+            Expression::AwaitExpression(await_expression) => {
+                let mut path = Self::new(&await_expression.argument)?;
+                path.segments.push(SystemApiValueSegment::Await);
+                Some(path)
+            }
+            Expression::ParenthesizedExpression(parenthesized) => {
+                Self::new(&parenthesized.expression)
+            }
+            Expression::TSAsExpression(as_expression) => Self::new(&as_expression.expression),
+            Expression::TSSatisfiesExpression(satisfies) => Self::new(&satisfies.expression),
+            Expression::TSNonNullExpression(non_null) => Self::new(&non_null.expression),
+            Expression::TSTypeAssertion(assertion) => Self::new(&assertion.expression),
+            Expression::TSInstantiationExpression(instantiation) => {
+                Self::new(&instantiation.expression)
+            }
+            _ => None,
+        }
+    }
+}
+
 struct SystemApiUsePath;
 
 impl SystemApiUsePath {
@@ -1557,6 +1862,12 @@ impl SystemApiUsePath {
             Expression::TSSatisfiesExpression(satisfies) => Self::resolve(&satisfies.expression),
             Expression::TSNonNullExpression(non_null) => Self::resolve(&non_null.expression),
             Expression::TSTypeAssertion(assertion) => Self::resolve(&assertion.expression),
+            Expression::AwaitExpression(await_expression) => {
+                Self::resolve(&await_expression.argument)
+            }
+            Expression::TSInstantiationExpression(instantiation) => {
+                Self::resolve(&instantiation.expression)
+            }
             Expression::CallExpression(call) => Self::resolve(&call.callee),
             Expression::NewExpression(constructor) => Self::resolve(&constructor.callee),
             _ => None,

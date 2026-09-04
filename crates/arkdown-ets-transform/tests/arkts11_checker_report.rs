@@ -717,3 +717,53 @@ fn arkts11_system_api_resolves_return_and_local_value_type_flow() {
 
     assert_eq!(since, 3);
 }
+
+#[test]
+fn arkts11_system_api_selects_overloads_and_unwraps_awaited_generic_results() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "interface Manager {\n\
+             /** @since 13 */\n\
+             run(): void;\n\
+             }\n\
+             export declare function getManager(): Promise<Manager>;\n\
+             export declare function selectManager(callback: (manager: Manager) => void): void;\n\
+             export declare function selectManager(): Promise<Manager>;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { getManager, selectManager } from '@ohos.demo';\n\
+         async function useManagers(): Promise<void> {\n\
+           const direct = await getManager();\n\
+           direct.run();\n\
+           (await getManager()).run();\n\
+           const selected = await selectManager();\n\
+           selected.run();\n\
+           const callbackResult = selectManager(() => {});\n\
+           callbackResult.run();\n\
+         }\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(
+        since, 3,
+        "zero-argument Promise overloads must expose the awaited Manager shape, while the callback overload returns void: {:?}",
+        report.diagnostics()
+    );
+}

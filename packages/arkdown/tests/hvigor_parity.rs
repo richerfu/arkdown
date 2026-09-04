@@ -580,6 +580,22 @@ fn parity_run_gate_defaults_to_skip_without_hvigor_config() {
   assert!(should_run_parity_with_options(false, false, false, true));
 }
 
+#[test]
+fn parity_rejects_arkdown_compatibility_cli_as_hvigor_reference() {
+  let temp = tempfile::tempdir().expect("create fake hvigor directory");
+  let fake_hvigor = temp.path().join("hvigorw");
+  fs::write(
+    &fake_hvigor,
+    "const { HVIGOR_PARITY_VERSION, parseArkdownBuildCliArgs } = require('arkdown');\n",
+  )
+  .expect("write fake arkdown compatibility CLI");
+
+  let error = validate_hvigorw_program(fake_hvigor.as_os_str())
+    .expect_err("arkdown compatibility CLI must not be accepted as a hvigor reference");
+  assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+  assert!(error.to_string().contains("real DevEco hvigorw executable"));
+}
+
 fn print_report_summary(report: &Value) {
   let report_path = report["report_path"]
     .as_str()
@@ -681,7 +697,7 @@ fn parity_for_fixture(
   copy_clean_fixture(&fixture_abs, &hvigor_root)?;
   copy_clean_fixture(&fixture_abs, &arkdown_root)?;
 
-  let hvigorw = hvigorw_program(&hvigor_root);
+  let hvigorw = hvigorw_program(&hvigor_root)?;
   let arkdown_bin = arkdown_program();
   let hvigor_args = hvigor_args(artifact_type, build_mode);
 
@@ -762,7 +778,7 @@ fn incremental_parity_for_fixture(
   copy_clean_fixture(&fixture_abs, &hvigor_root)?;
   copy_clean_fixture(&fixture_abs, &arkdown_root)?;
 
-  let hvigorw = hvigorw_program(&hvigor_root);
+  let hvigorw = hvigorw_program(&hvigor_root)?;
   let arkdown_bin = arkdown_program();
   let hvigor_args = hvigor_args(artifact_type, build_mode);
   let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
@@ -907,9 +923,10 @@ fn run_component_v2_lifecycle_diagnostic_parity_test() {
 
   let artifact_type = ArtifactType::Hap;
   let build_mode = ParityBuildMode::Debug;
+  let hvigorw = hvigorw_program(&hvigor_root).expect("resolve a real hvigor executable");
   let hvigor = run_command(
     "hvigor",
-    &hvigorw_program(&hvigor_root),
+    &hvigorw,
     &hvigor_args(artifact_type, build_mode),
     &hvigor_root,
   );
@@ -1003,15 +1020,52 @@ fn report_path_for(repo_root: &Path, fixture_name: &str) -> PathBuf {
     .unwrap_or_else(|| repo_root.join(format!("target/parity/{fixture_name}-hvigor-diff.json")))
 }
 
-fn hvigorw_program(project_root: &Path) -> OsString {
-  if let Some(path) = std::env::var_os(ENV_HVIGORW) {
-    return path;
+fn hvigorw_program(project_root: &Path) -> io::Result<OsString> {
+  let candidate = if let Some(path) = std::env::var_os(ENV_HVIGORW) {
+    path
+  } else {
+    let local = project_root.join("hvigorw");
+    if local.exists() {
+      local.into_os_string()
+    } else {
+      OsString::from("hvigorw")
+    }
+  };
+  validate_hvigorw_program(&candidate)?;
+  Ok(candidate)
+}
+
+fn validate_hvigorw_program(candidate: &OsStr) -> io::Result<()> {
+  let candidate_path = Path::new(candidate);
+  let resolved = if candidate_path.components().count() > 1 || candidate_path.is_absolute() {
+    Some(candidate_path.to_path_buf())
+  } else {
+    std::env::var_os("PATH").and_then(|paths| {
+      std::env::split_paths(&paths)
+        .map(|directory| directory.join(candidate_path))
+        .find(|path| path.is_file())
+    })
+  };
+  let Some(resolved) = resolved else {
+    return Ok(());
+  };
+  let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
+  let marker = fs::read_to_string(&canonical).unwrap_or_default();
+  if canonical
+    .to_string_lossy()
+    .contains("/node_modules/@ohos-rs/arkdown/")
+    || marker.contains("HVIGOR_PARITY_VERSION")
+    || marker.contains("parseArkdownBuildCliArgs")
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      format!(
+        "{ENV_HVIGORW} resolved to the arkdown compatibility CLI at {}; point it to the real DevEco hvigorw executable",
+        canonical.display()
+      ),
+    ));
   }
-  let local = project_root.join("hvigorw");
-  if local.exists() {
-    return local.into_os_string();
-  }
-  OsString::from("hvigorw")
+  Ok(())
 }
 
 fn arkdown_program() -> OsString {
