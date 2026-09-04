@@ -2,7 +2,6 @@ pub mod app_coordinator;
 mod bundle_plan;
 mod bytecode_har_declaration;
 pub mod coordinator;
-mod device_test;
 mod hot_reload;
 #[cfg(test)]
 mod hot_reload_tests;

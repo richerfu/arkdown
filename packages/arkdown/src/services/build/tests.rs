@@ -6,21 +6,8 @@ use indexmap::IndexMap;
 use tempfile::TempDir;
 
 use super::coordinator::PackInfoFormResourceResolver;
-use super::device_test::DeviceTestExecutionPlan;
 use arkdown_build::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
 use arkdown_build::layout::ModuleBuildLayout;
-
-#[test]
-fn device_test_hap_name_matches_hvigor_target_output_contract() {
-  assert_eq!(
-    DeviceTestExecutionPlan::test_hap_file_name("entry", None),
-    "entry-ohosTest-signed.hap"
-  );
-  assert_eq!(
-    DeviceTestExecutionPlan::test_hap_file_name("entry", Some("custom-test")),
-    "custom-test.hap"
-  );
-}
 
 #[test]
 fn make_pack_info_form_profiles_follow_form_widget_module_source_set() {

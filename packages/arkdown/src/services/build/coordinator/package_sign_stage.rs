@@ -1708,12 +1708,17 @@ impl BuildCoordinator {
                 .bundle_type
                 .as_deref()
                 .unwrap_or(&session.project.bundle_type);
-              crate::services::build::device_test::DeviceTestExecutionPlan::from_build(
-                crate::services::build::device_test::DeviceTestExecutionInput {
+              arkdown_build::device_test::DeviceTestExecutionPlan::from_build(
+                arkdown_build::device_test::DeviceTestExecutionInput {
                   sdk_config: &module_config.sdk_config,
                   sdk_root: &session.sdk.sdk_root,
                   project_path: &config.project_root,
-                  module,
+                  module_root: &module.src_path,
+                  module_name: &module.name,
+                  ohos_test_module_json: module_context
+                    .module
+                    .ohos_test_module_json_value
+                    .as_deref(),
                   target_artifact_name: module_config.product.artifact_name.as_deref(),
                   product_name: &module_config.product.name,
                   bundle_name: &module_config.product.bundle_name,
