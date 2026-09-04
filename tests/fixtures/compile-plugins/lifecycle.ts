@@ -28,6 +28,8 @@ const state = {
   moduleIds: [] as string[],
   moduleInfoCount: 0,
   parsedType: "",
+  transformModuleType: "",
+  combinedSourceMapVersion: 0,
   projectConfig: undefined as unknown,
   projectConfigShape: undefined as unknown,
   depInfo: undefined as unknown,
@@ -94,8 +96,12 @@ export default {
     return null;
   },
 
-  transform() {
+  transform(this: any, _code: string, _id: string, options: { moduleType?: string }) {
     state.transformCount++;
+    if (!state.transformModuleType) {
+      state.transformModuleType = options?.moduleType ?? "";
+      state.combinedSourceMapVersion = this.getCombinedSourcemap().version;
+    }
     if (process.env.ARKDOWN_PLUGIN_THROW_TRANSFORM === "1") {
       throw new Error("intentional transform failure");
     }

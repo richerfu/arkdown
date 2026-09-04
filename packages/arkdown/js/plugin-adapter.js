@@ -7,7 +7,6 @@ const v8 = require('node:v8')
 
 const nativeBinding = require('../index.js')
 
-// Rolldown runs standard hooks; Rust schedules the source-defined lifecycle hooks.
 const PLUGIN_HOOKS = Object.freeze(
   'beforeBuild buildStart afterBuildStart resolveId load transform moduleParsed resolveDynamicImport beforeBuildEnd buildEnd afterBuildEnd bundleEnd cleanUp shouldInvalidCache'.split(' '),
 )
@@ -502,6 +501,9 @@ function pluginContext(request, share, binding, cache, asyncTracker, pluginName)
     addWatchFile: (id) => context?.addWatchFile(id),
     getModuleIds: () => context?.getModuleIds().values() ?? (moduleInfo?.id ? [moduleInfo.id] : []).values(),
     getModuleInfo: (id) => context?.getModuleInfo(id) ?? (moduleInfo?.id === id ? moduleInfo : null),
+    ...(request.hookName === 'transform' && context
+      ? { getCombinedSourcemap: () => context.getCombinedSourcemap() }
+      : {}),
     parse: (source, options = {}) => parsePluginAst(source, options, context, binding),
     getFileName(referenceId) {
       if (context) return context.getFileName(referenceId)
@@ -547,7 +549,7 @@ function hookArguments(hookName, request, compilePlugin) {
     case 'load':
       return [request.id]
     case 'transform':
-      return [request.code, request.id]
+      return [request.code, request.id, request.transformOptions]
     case 'moduleParsed':
       return [request.moduleInfo]
     case 'beforeBuildEnd':
@@ -578,7 +580,6 @@ function normalizePlugin(plugin, binding, options = {}) {
     const hook = plugin[name]
     return typeof hook === 'function' || (hook && typeof hook === 'object' && typeof hook.handler === 'function')
   })
-  // Drain Hvigor async work at bundleEnd and release failed builds at cleanUp.
   if (compilePlugin && !hookNames.includes('bundleEnd')) hookNames.push('bundleEnd')
   if (compilePlugin && !hookNames.includes('cleanUp')) hookNames.push('cleanUp')
   const hookMeta = hookNames.flatMap((name) => {

@@ -325,6 +325,7 @@ test('plugin context delegates graph operations to Rolldown and retains hvigor c
     getModuleIds: () => ['/project/index.ts'],
     getModuleInfo: (id) => ({ id }),
     getFileName: (id) => `${id}.json`,
+    getCombinedSourcemap: () => ({ version: 3, sources: ['/project/index.ts'], mappings: 'AAAA' }),
     parse: () => ({ ast: { node: { type: 'Program', body: [] }, fixes: [] }, comments: [] }),
     info: (message) => calls.push(['info', message]),
     warn: (message) => calls.push(['warn', message]),
@@ -352,12 +353,13 @@ test('plugin context delegates graph operations to Rolldown and retains hvigor c
           watchMode: this.meta.watchMode,
         }
       },
-      transform(code) {
+      transform(code, id, options) {
         const pluginContext = this
         this.async(() => setImmediate(() => {
           calls.push(['async-complete'])
           pluginContext.signal()
         }))
+        calls.push(['transformContext', id, options, this.getCombinedSourcemap()])
         return code
       },
     },
@@ -367,7 +369,12 @@ test('plugin context delegates graph operations to Rolldown and retains hvigor c
   dispatch(plugin, 'seedContext', { share: { projectConfig: { watchMode: true } } })
 
   await dispatch(plugin, 'buildStart', { context: nativeContext })
-  dispatch(plugin, 'transform', { context: nativeContext, code: 'export {}', id: '/project/index.ts' })
+  dispatch(plugin, 'transform', {
+    context: nativeContext,
+    code: 'export {}',
+    id: '/project/index.ts',
+    transformOptions: { moduleType: 'ts' },
+  })
   await dispatch(plugin, 'bundleEnd', { context: nativeContext })
 
   assert.deepEqual(observed, {
@@ -384,6 +391,12 @@ test('plugin context delegates graph operations to Rolldown and retains hvigor c
     ['emitFile', { type: 'asset', name: 'meta', source: '{}' }],
     ['addWatchFile', '/project/config.json'],
     ['info', 'context ready'],
+    [
+      'transformContext',
+      '/project/index.ts',
+      { moduleType: 'ts' },
+      { version: 3, sources: ['/project/index.ts'], mappings: 'AAAA' },
+    ],
     ['async-complete'],
   ])
 })
