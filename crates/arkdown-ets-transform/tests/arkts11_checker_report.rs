@@ -804,7 +804,7 @@ fn arkts11_system_api_resolves_return_and_local_value_type_flow() {
     files.insert(
         sdk_root.join("@ohos.demo.d.ts"),
         Arc::<str>::from(
-            "interface Manager {\n\
+            "export interface Manager {\n\
              /** @since 13 */\n\
              run(): void;\n\
              }\n\
@@ -883,6 +883,58 @@ fn arkts11_system_api_selects_overloads_and_unwraps_awaited_generic_results() {
     assert_eq!(
         since, 3,
         "zero-argument Promise overloads must expose the awaited Manager shape, while the callback overload returns void: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
+fn arkts11_system_api_applies_explicit_function_and_method_type_arguments() {
+    let sdk_root = PathBuf::from("/sdk/api");
+    let mut files = rustc_hash::FxHashMap::default();
+    files.insert(
+        sdk_root.join("@ohos.demo.d.ts"),
+        Arc::<str>::from(
+            "interface Manager {\n\
+             /** @since 13 */\n\
+             run(): void;\n\
+             }\n\
+             export interface Legacy {}\n\
+             interface Factory {\n\
+               select<T>(): Promise<T>;\n\
+             }\n\
+             export declare const factory: Factory;\n\
+             export declare function select<T>(): Promise<T>;\n\
+             export declare function defaultSelect<T = Manager>(): Promise<T>;\n",
+        ),
+    );
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_project_sources(
+            TransformSourceSnapshot::new(files).with_sdk_declaration_roots(vec![sdk_root]),
+            Vec::new(),
+        )
+        .with_api_available_context("12", "OpenHarmony");
+    let report = checker.check(
+        "/project/Page.ets",
+        "import { factory, select, defaultSelect, Manager, Legacy } from '@ohos.demo';\n\
+         async function useManagers(): Promise<void> {\n\
+           (await select<Manager>()).run();\n\
+           (await factory.select<Manager>()).run();\n\
+           (await defaultSelect()).run();\n\
+           (await select<Legacy>()).run();\n\
+         }\n",
+    );
+    let since = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, EtsTransformError::CodedDiagnostic { code, .. } if code == "11706011")
+        })
+        .count();
+
+    assert_eq!(
+        since,
+        3,
+        "explicit generic arguments must select the instantiated SDK return shape: {:?}",
         report.diagnostics()
     );
 }
