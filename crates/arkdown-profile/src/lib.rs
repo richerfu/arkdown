@@ -25,10 +25,6 @@ mod preload_system_so;
 // Per SPEC-048 Phase 2A: `lockfile` and `ohpm_registry` have been deleted
 // from arkdown-profile. Their functionality is now owned by `arkdown-ohpm`.
 //
-// `dependency_graph` is kept `pub(crate)` during Phase 3 migration; it still
-// provides `LocalDependencyGraph` used by internal profile processors.
-// It will move to `arkdown-session::dependency_graph` in Phase 3.
-pub(crate) mod dependency_graph;
 pub mod form_profile;
 pub mod form_widget;
 pub mod har_abilities;
@@ -125,7 +121,7 @@ pub struct ProfileProcessor {
 }
 
 pub struct ProfileDependencyContext {
-    graph: dependency_graph::LocalDependencyGraph,
+    graph: Arc<arkdown_session::DependencyGraphSnapshot>,
     hsp_dependencies: Vec<arkdown_core::HspDependency>,
     app_version_code: u64,
     dependency_profile_roots: Option<Vec<PathBuf>>,
@@ -133,46 +129,30 @@ pub struct ProfileDependencyContext {
 
 impl ProfileDependencyContext {
     fn build(config: &ArkdownConfig, module_cfg: &ModuleConfig) -> Self {
-        let graph = dependency_graph::LocalDependencyGraph::build(
-            &module_cfg.src_path,
-            &config.project_root,
-        );
         let app_version_code = config.product.version_code.unwrap_or_default();
-        let hsp_dependencies = Self::hsp_dependencies_from_local_graph(&graph, app_version_code);
-        Self {
-            graph,
-            hsp_dependencies,
-            app_version_code,
-            dependency_profile_roots: None,
-        }
+        let graph = Arc::new(
+            arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+                &module_cfg.name,
+                &config.project_root,
+                &module_cfg.src_path,
+            )
+            .build(),
+        );
+        Self::from_session_graph(config, module_cfg, graph, app_version_code)
     }
 
     pub fn from_session_graph(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
-        session_graph: &arkdown_session::DependencyGraphSnapshot,
+        session_graph: Arc<arkdown_session::DependencyGraphSnapshot>,
         app_version_code: u64,
     ) -> Self {
         let dependency_profile_roots = DependencyProfileRootInventory::new(
             &module_cfg.src_path,
             &config.project_root,
-            session_graph,
+            session_graph.as_ref(),
         )
         .collect();
-        let mut graph = dependency_graph::LocalDependencyGraph {
-            nodes: indexmap::IndexMap::new(),
-        };
-        for node in session_graph.nodes.values() {
-            let package_name = node.alias.clone();
-            graph.nodes.insert(
-                package_name.clone(),
-                dependency_graph::DependencyNode {
-                    package_name,
-                    pkg_root: node.package_root.clone().unwrap_or_default(),
-                    node_type: Self::session_node_type(node),
-                },
-            );
-        }
         let hsp_dependencies = session_graph
             .nodes
             .values()
@@ -207,18 +187,16 @@ impl ProfileDependencyContext {
                 }
             })
             .collect();
-        let mut context = Self {
-            graph,
+        Self {
+            graph: session_graph,
             hsp_dependencies,
             app_version_code,
             dependency_profile_roots: Some(dependency_profile_roots),
-        };
-        context.apply_root_runtime_only_packages(config, module_cfg);
-        context
+        }
     }
 
-    pub(crate) fn graph(&self) -> &dependency_graph::LocalDependencyGraph {
-        &self.graph
+    pub(crate) fn graph(&self) -> &arkdown_session::DependencyGraphSnapshot {
+        self.graph.as_ref()
     }
 
     pub(crate) fn dependency_profile_roots(&self) -> Option<&[PathBuf]> {
@@ -227,47 +205,6 @@ impl ProfileDependencyContext {
 
     fn hsp_dependencies(&self) -> &[arkdown_core::HspDependency] {
         &self.hsp_dependencies
-    }
-
-    fn hsp_dependencies_from_local_graph(
-        graph: &dependency_graph::LocalDependencyGraph,
-        app_version_code: u64,
-    ) -> Vec<arkdown_core::HspDependency> {
-        graph
-            .shared_hsps()
-            .into_iter()
-            .filter_map(|node| {
-                let profile_path = [
-                    node.pkg_root.join("src/main/module.json"),
-                    node.pkg_root.join("src/main/module.json5"),
-                ]
-                .into_iter()
-                .find(|path| path.is_file())?;
-                let content = fs_err::read_to_string(profile_path).ok()?;
-                let profile: serde_json::Value = json5::from_str(&content).ok()?;
-                let module_name = profile.pointer("/module/name")?.as_str()?.to_string();
-                let common_app =
-                    profile.pointer("/app/bundleType").and_then(|v| v.as_str()) == Some("shared");
-                Some(arkdown_core::HspDependency {
-                    module_name,
-                    version_code: profile
-                        .pointer("/app/bundleName")
-                        .and_then(|value| value.as_str())
-                        .filter(|bundle_name| !bundle_name.is_empty())
-                        .and_then(|_| profile.pointer("/app/versionCode"))
-                        .and_then(|value| value.as_u64())
-                        .unwrap_or(app_version_code),
-                    bundle_name: common_app
-                        .then(|| {
-                            profile
-                                .pointer("/app/bundleName")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string)
-                        })
-                        .flatten(),
-                })
-            })
-            .collect()
     }
 
     /// Remove dependency records owned by the selected package roots.
@@ -280,115 +217,26 @@ impl ProfileDependencyContext {
             .iter()
             .map(|root| arkdown_path::canonicalize_or_owned(root))
             .collect::<rustc_hash::FxHashSet<_>>();
-        self.graph.nodes.retain(|_, node| {
-            !roots.contains(&arkdown_path::canonicalize_or_owned(&node.pkg_root))
+        if roots.is_empty() {
+            return self;
+        }
+        let graph = Arc::make_mut(&mut self.graph);
+        graph.nodes.retain(|_, node| {
+            node.package_root
+                .as_ref()
+                .is_none_or(|root| !roots.contains(&arkdown_path::canonicalize_or_owned(root)))
         });
+        graph.edges.retain(|edge| {
+            !roots.contains(&arkdown_path::canonicalize_or_owned(&edge.package_root))
+        });
+        graph
+            .roots_by_alias
+            .retain(|_, root| !roots.contains(&arkdown_path::canonicalize_or_owned(root)));
         if let Some(profile_roots) = self.dependency_profile_roots.as_mut() {
             profile_roots
                 .retain(|root| !roots.contains(&arkdown_path::canonicalize_or_owned(root)));
         }
         self
-    }
-
-    fn session_node_type(
-        node: &arkdown_session::dependency_graph::snapshot::DependencyNodeSnapshot,
-    ) -> dependency_graph::DependencyNodeType {
-        if node.is_runtime_only {
-            return dependency_graph::DependencyNodeType::RuntimeOnly;
-        }
-        match node.node_type {
-            arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar => {
-                dependency_graph::DependencyNodeType::SourceHar
-            }
-            arkdown_session::dependency_graph::snapshot::DependencyNodeType::BytecodeHar => {
-                dependency_graph::DependencyNodeType::BytecodeHar
-            }
-            arkdown_session::dependency_graph::snapshot::DependencyNodeType::SharedHsp
-            | arkdown_session::dependency_graph::snapshot::DependencyNodeType::IntegratedHsp => {
-                dependency_graph::DependencyNodeType::SharedHsp
-            }
-            arkdown_session::dependency_graph::snapshot::DependencyNodeType::NativeSo => {
-                dependency_graph::DependencyNodeType::NativeSo
-            }
-            arkdown_session::dependency_graph::snapshot::DependencyNodeType::OhpmSource
-            | arkdown_session::dependency_graph::snapshot::DependencyNodeType::Unknown => {
-                dependency_graph::DependencyNodeType::RemoteOrUnknown
-            }
-        }
-    }
-
-    fn apply_root_runtime_only_packages(
-        &mut self,
-        config: &ArkdownConfig,
-        module_cfg: &ModuleConfig,
-    ) {
-        let mut runtime_only_packages = Self::runtime_only_package_names(&module_cfg.src_path);
-        runtime_only_packages.extend(Self::runtime_only_package_names(&config.project_root));
-        runtime_only_packages.sort();
-        runtime_only_packages.dedup();
-        for package_name in runtime_only_packages {
-            if let Some(node) = self.graph.nodes.get_mut(&package_name) {
-                node.node_type = dependency_graph::DependencyNodeType::RuntimeOnly;
-                continue;
-            }
-            let pkg_root = Self::resolve_runtime_only_root(
-                &module_cfg.src_path,
-                &config.project_root,
-                &package_name,
-            )
-            .unwrap_or_default();
-            self.graph.nodes.insert(
-                package_name.clone(),
-                dependency_graph::DependencyNode {
-                    package_name,
-                    pkg_root,
-                    node_type: dependency_graph::DependencyNodeType::RuntimeOnly,
-                },
-            );
-        }
-    }
-
-    fn runtime_only_package_names(package_root: &Path) -> Vec<String> {
-        let pkg_json = package_root.join("oh-package.json5");
-        let Ok(content) = fs_err::read_to_string(&pkg_json) else {
-            return Vec::new();
-        };
-        #[derive(serde::Deserialize)]
-        struct Pkg {
-            #[serde(default)]
-            metadata: PkgMetaRuntime,
-        }
-        #[derive(Default, serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct PkgMetaRuntime {
-            #[serde(default)]
-            runtime_only: RuntimeOnlySection,
-        }
-        #[derive(Default, serde::Deserialize)]
-        struct RuntimeOnlySection {
-            #[serde(default)]
-            packages: Vec<String>,
-        }
-        json5::from_str::<Pkg>(&content)
-            .map(|pkg| pkg.metadata.runtime_only.packages)
-            .unwrap_or_default()
-    }
-
-    fn resolve_runtime_only_root(
-        module_root: &Path,
-        project_root: &Path,
-        package_name: &str,
-    ) -> Option<PathBuf> {
-        for base in [
-            module_root.join("oh_modules"),
-            project_root.join("oh_modules"),
-        ] {
-            let candidate = base.join(package_name);
-            if candidate.is_dir() {
-                return Some(arkdown_path::canonicalize_or_owned(&candidate));
-            }
-        }
-        None
     }
 }
 

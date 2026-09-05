@@ -319,14 +319,17 @@ impl LoaderJson {
         manifest: &HapManifest,
         target_name: &str,
     ) -> Result<Self, ArkdownError> {
-        // Build the dependency graph ONCE per try_generate() invocation.
-        // Per SPEC-048: the same snapshot feeds all downstream helpers.
+        // Standalone callers still get the same immutable graph type used by
+        // the build session. The production coordinator supplies its already
+        // frozen graph through `try_generate_with_dependency_graph`.
         let dep_graph = {
-            let _timer = LoaderTimingProbe::new(&module_cfg.name, "local_dependency_graph_build");
-            crate::dependency_graph::LocalDependencyGraph::build(
-                &module_cfg.src_path,
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "dependency_graph_snapshot");
+            arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+                &module_cfg.name,
                 &config.project_root,
+                &module_cfg.src_path,
             )
+            .build()
         };
         Self::try_generate_with_dependency_graph(
             config,
@@ -342,7 +345,7 @@ impl LoaderJson {
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
         manifest: &HapManifest,
-        dep_graph: &crate::dependency_graph::LocalDependencyGraph,
+        dep_graph: &arkdown_session::DependencyGraphSnapshot,
         target_name: &str,
         compilation_policy: LoaderCompilationPolicy,
     ) -> Result<Self, ArkdownError> {
@@ -730,11 +733,27 @@ impl LoaderJson {
         }
 
         let bytecode_har_deps = if collects_bytecode_har_inputs {
-            let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_har_graph_scan");
-            ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(
-                &module_cfg.src_path,
-                &config.project_root,
-            )
+            let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_har_session_graph");
+            let typed_roots = dep_graph
+                .bytecode_har_nodes_in_traversal_order()
+                .into_iter()
+                .filter_map(|node| {
+                    node.package_root
+                        .as_ref()
+                        .map(|package_root| ByteCodeHarDependencyRoot {
+                            package_name: node.package_name.clone(),
+                            package_root: package_root.clone(),
+                            is_har_dependency: node
+                                .module_profile
+                                .as_ref()
+                                .and_then(|profile| profile.module_type.as_ref())
+                                .is_some_and(|module_type| {
+                                    matches!(module_type, OhosModuleType::Har)
+                                }),
+                        })
+                })
+                .collect::<Vec<_>>();
+            ByteCodeHarMetadataWriter::scan_from_typed_roots(&typed_roots)
         } else {
             Vec::new()
         };
@@ -1000,14 +1019,16 @@ impl LoaderJson {
             // later by ProcessHarArtifacts.processPackageJson.
             source_roots: Vec::new(),
             bundle_dependencies: {
-                use crate::dependency_graph::DependencyNodeType;
+                use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
                 dep_graph
                     .nodes
                     .values()
                     .filter(|node| {
                         matches!(
                             node.node_type,
-                            DependencyNodeType::SourceHar | DependencyNodeType::SharedHsp
+                            DependencyNodeType::SourceHar
+                                | DependencyNodeType::SharedHsp
+                                | DependencyNodeType::IntegratedHsp
                         )
                     })
                     .map(|node| node.package_name.clone())

@@ -742,7 +742,7 @@ impl BuildCoordinator {
                 arkdown_profile::ProfileDependencyContext::from_session_graph(
                     module_config.as_ref(),
                     module,
-                    module_context.deps.as_ref(),
+                    Arc::clone(&module_context.deps),
                     config
                         .product
                         .version_code

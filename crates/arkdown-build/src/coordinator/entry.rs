@@ -469,9 +469,7 @@ impl BuildCoordinator {
         if self.args.action == crate::request::BuildAction::DeviceTest
             && !matches!(self.config.output_target, OutputTarget::Hap)
         {
-            anyhow::bail!(
-                "ARKDOWN_DEVICE_TEST_TARGET: action=device-test requires target=hap"
-            );
+            anyhow::bail!("ARKDOWN_DEVICE_TEST_TARGET: action=device-test requires target=hap");
         }
         self.execute_targets().await
     }

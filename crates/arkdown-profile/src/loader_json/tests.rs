@@ -381,6 +381,11 @@ fn test_loader_json_collects_bytecode_har_declaration_entry() {
             }"#,
     )
     .expect("write oh-package");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ name: "entry", dependencies: { "bytecode-har": "1.0.0" } }"#,
+    )
+    .expect("write entry package");
 
     let mut config = make_config(true);
     config.project_root = project_root;
@@ -421,6 +426,7 @@ fn test_loader_json_populates_bytecode_har_update_version_info() {
         bytecode_har.join("oh-package.json5"),
         r#"{
               name: "bytecode-har",
+              dependencies: { "dep-a": "1.1.0" },
               metadata: {
                 byteCodeHar: true,
                 dependencyPkgVersion: { "dep-a": "1.0.0" }
@@ -439,6 +445,11 @@ fn test_loader_json_populates_bytecode_har_update_version_info() {
         r#"{ name: "dep-a", version: "1.1.0" }"#,
     )
     .expect("write dep package");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ name: "entry", dependencies: { "bytecode-har": "1.0.0" } }"#,
+    )
+    .expect("write entry package");
 
     let mut config = make_config(true);
     config.project_root = project_root;
@@ -3205,6 +3216,11 @@ fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {
         }"#,
     )
     .expect("write oh-package.json5");
+    std::fs::write(
+        project_root.join("oh-package.json5"),
+        r#"{ name: "app", dependencies: { "@ohos/abc-lib": "1.0.0" } }"#,
+    )
+    .expect("write project package");
 
     // `GenerateLoaderJson.setByteCodeHarInfoAndOtherCompileFiles()` gates the
     // whole ByteCode HAR collection on `useNormalizedOHMUrl` (and HAP/HSP
