@@ -1735,11 +1735,9 @@ impl BuildCoordinator {
 
             // Scan ByteCode HAR dependencies.
             //
-            // Primary path: consume `DependencyGraphSnapshot::bytecode_har_nodes()`
-            // from the session dependency graph.  When the session graph has
-            // `BytecodeHar` nodes with `package_root` set, we read their
-            // `oh-package.json5` directly rather than doing an independent
-            // `oh_modules/` filesystem walk.
+            // Consume ByteCode HAR nodes and their package snapshots directly
+            // from the immutable session graph. The loader stage never
+            // re-opens dependency manifests or walks `oh_modules`.
             //
             // # Upstream correspondence
             //
@@ -1750,42 +1748,19 @@ impl BuildCoordinator {
             })?;
             let mut bc_har_deps = {
                 let _timer = BuildTimingProbe::module(&module.name, "bytecode_har_scan");
-                let typed_roots: Vec<ByteCodeHarDependencyRoot> =
-                    if module_build_option.strict_mode.use_normalized_ohm_url
-                        && !matches!(config.output_target, OutputTarget::Har)
-                    {
-                        module_context
-                            .deps
-                            .bytecode_har_nodes_in_traversal_order()
-                            .into_iter()
-                            .filter_map(|node| {
-                                node.package_root
-                                    .as_ref()
-                                    .map(|root| ByteCodeHarDependencyRoot {
-                                        package_name: node.package_name.clone(),
-                                        package_root: root.clone(),
-                                        is_har_dependency: node
-                                            .module_profile
-                                            .as_ref()
-                                            .and_then(|profile| profile.module_type.as_ref())
-                                            .is_some_and(|module_type| {
-                                                matches!(module_type, OhosModuleType::Har)
-                                            }),
-                                    })
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
+                let bc_har_deps = if module_build_option.strict_mode.use_normalized_ohm_url
+                    && !matches!(config.output_target, OutputTarget::Har)
+                {
+                    ByteCodeHarMetadataWriter::scan_from_dependency_graph(&module_context.deps)
+                } else {
+                    Vec::new()
+                };
 
-                let bc_har_deps = ByteCodeHarMetadataWriter::scan_from_typed_roots(&typed_roots);
-
-                if !typed_roots.is_empty() {
+                if !bc_har_deps.is_empty() {
                     tracing::debug!(
                         module = %module.name,
                         count = bc_har_deps.len(),
-                        "ByteCode HAR scan: used {} typed session-graph roots",
-                        typed_roots.len()
+                        "ByteCode HAR scan: consumed typed session graph"
                     );
                 }
 
@@ -1798,8 +1773,7 @@ impl BuildCoordinator {
 
             loader_json.apply_bytecode_har_scan_entries(
                 &bc_har_deps,
-                &module.src_path,
-                &config.project_root,
+                &module_context.deps,
                 config.output_target.clone(),
             );
 

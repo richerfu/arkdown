@@ -1,7 +1,7 @@
 //! [`BuildSessionBuilder`] — orchestrates all startup reads and constructs
 //! the immutable [`BuildSession`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -164,11 +164,14 @@ impl BuildSessionBuilder {
         // built-in Rolldown adapters borrow this immutable inventory instead
         // of walking or re-reading project/package source trees.
         let source_inventory_roots = self.source_inventory_roots(&project);
-        let source_store = SourceStore::discover(&source_inventory_roots).map_err(|source| {
-            BuildSessionError::Io {
-                path: self.config.project_root.clone(),
-                source,
-            }
+        let dependency_source_inventories = self.dependency_source_inventories(&project);
+        let source_store = SourceStore::discover_with_preinventoried_roots(
+            &source_inventory_roots,
+            &dependency_source_inventories,
+        )
+        .map_err(|source| BuildSessionError::Io {
+            path: self.config.project_root.clone(),
+            source,
         })?;
 
         // Phase 8: Build input fingerprints.
@@ -205,19 +208,33 @@ impl BuildSessionBuilder {
             // overlay is selected later without another directory walk.
             roots.insert(module.root.join("src"));
         }
+        roots.into_iter().collect()
+    }
+
+    fn dependency_source_inventories(
+        &self,
+        project: &ProjectSnapshot,
+    ) -> Vec<(PathBuf, Arc<[PathBuf]>)> {
+        let mut inventories = BTreeMap::new();
         for graph in project.dependency_graphs.values() {
             for node in graph.nodes.values() {
-                if matches!(
+                if !matches!(
                     node.node_type,
                     DependencyNodeType::SourceHar
                         | DependencyNodeType::OhpmSource
                         | DependencyNodeType::IntegratedHsp
                         | DependencyNodeType::NativeSo
                 ) {
-                    roots.extend(node.package_root.iter().cloned());
+                    continue;
                 }
+                let Some(package_root) = node.package_root.as_ref() else {
+                    continue;
+                };
+                inventories
+                    .entry(package_root.clone())
+                    .or_insert_with(|| Arc::clone(&node.compile_inputs.source_inventory_files));
             }
         }
-        roots.into_iter().collect()
+        inventories.into_iter().collect()
     }
 }

@@ -72,8 +72,7 @@ impl LoaderJson {
     pub fn apply_bytecode_har_scan_entries(
         &mut self,
         deps: &[ByteCodeHarScanEntry],
-        module_root: &Path,
-        project_root: &Path,
+        graph: &arkdown_session::DependencyGraphSnapshot,
         output_target: OutputTarget,
     ) {
         let previous_other_compile_files = std::mem::take(&mut self.other_compile_files);
@@ -97,11 +96,8 @@ impl LoaderJson {
             .cloned()
             .map(ByteCodeHarScanEntry::into_loader_entry)
             .collect();
-        self.update_version_info = ByteCodeHarScanEntry::collect_bytecode_har_update_version_info(
-            deps,
-            module_root,
-            project_root,
-        );
+        self.update_version_info =
+            ByteCodeHarScanEntry::collect_bytecode_har_update_version_info_from_graph(deps, graph);
 
         if matches!(
             output_target,
@@ -119,7 +115,7 @@ impl LoaderJson {
         }
 
         let other_compile_paths =
-            LoaderByteCodeHarFields::collect_other_compile_files(deps, module_root, project_root);
+            LoaderByteCodeHarFields::collect_other_compile_files_from_graph(deps, graph);
         self.other_compile_files = other_compile_paths
             .iter()
             .map(|path| to_absolute_path_string(path))
@@ -744,35 +740,15 @@ impl LoaderJson {
 
         let bytecode_har_deps = if collects_bytecode_har_inputs {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_har_session_graph");
-            let typed_roots = dep_graph
-                .bytecode_har_nodes_in_traversal_order()
-                .into_iter()
-                .filter_map(|node| {
-                    node.package_root
-                        .as_ref()
-                        .map(|package_root| ByteCodeHarDependencyRoot {
-                            package_name: node.package_name.clone(),
-                            package_root: package_root.clone(),
-                            is_har_dependency: node
-                                .module_profile
-                                .as_ref()
-                                .and_then(|profile| profile.module_type.as_ref())
-                                .is_some_and(|module_type| {
-                                    matches!(module_type, OhosModuleType::Har)
-                                }),
-                        })
-                })
-                .collect::<Vec<_>>();
-            ByteCodeHarMetadataWriter::scan_from_typed_roots(&typed_roots)
+            ByteCodeHarMetadataWriter::scan_from_dependency_graph(dep_graph)
         } else {
             Vec::new()
         };
         let other_compile_paths = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "bytecode_other_compile_files");
-            LoaderByteCodeHarFields::collect_other_compile_files(
+            LoaderByteCodeHarFields::collect_other_compile_files_from_graph(
                 &bytecode_har_deps,
-                &module_cfg.src_path,
-                &config.project_root,
+                dep_graph,
             )
         };
         let other_compile_files: Vec<String> = other_compile_paths
@@ -867,10 +843,9 @@ impl LoaderJson {
         let update_version_info = if matches!(config.output_target, OutputTarget::Har) {
             IndexMap::new()
         } else {
-            ByteCodeHarScanEntry::collect_bytecode_har_update_version_info(
+            ByteCodeHarScanEntry::collect_bytecode_har_update_version_info_from_graph(
                 &bytecode_har_deps,
-                &module_cfg.src_path,
-                &config.project_root,
+                dep_graph,
             )
         };
 

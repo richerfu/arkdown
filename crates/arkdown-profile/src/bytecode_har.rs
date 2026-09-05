@@ -5,11 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::ProfileModuleLayout;
 use crate::loader_json::ByteCodeHarEntry;
-use arkdown_path::{
-    canonicalize_or_owned, ArtifactPathSerializer, ModuleSpecifierText, OhmUrl, SourceFileName,
-};
+use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer, OhmUrl, SourceFileName};
 #[cfg(test)]
-use arkdown_path::{ArtifactPath, SpecifierKind};
+use arkdown_path::{ArtifactPath, ModuleSpecifierText, SpecifierKind};
 #[cfg(test)]
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
@@ -18,7 +16,7 @@ use rustc_hash::FxHashSet;
 // oh-package.json5 subset for ByteCode HAR detection
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OhPkgMinimal {
     #[serde(default)]
@@ -29,8 +27,10 @@ struct OhPkgMinimal {
     compatible_sdk_version_stage: Option<String>,
     #[serde(default)]
     main: Option<String>,
+    #[cfg(test)]
     #[serde(default, alias = "typings")]
     types: Option<String>,
+    #[cfg(test)]
     #[serde(default)]
     version: Option<String>,
     #[serde(default)]
@@ -40,6 +40,7 @@ struct OhPkgMinimal {
     /// `devDependencies` — excluded from the dependency walk unless the
     /// `ohos.byteCodeHar.integratedOptimization` inject is enabled (hvigor
     /// `getFinalNodes` default filters `DEV_DEPENDENCIES`).
+    #[cfg(test)]
     #[serde(default)]
     dev_dependencies: IndexMap<String, String>,
     #[serde(default)]
@@ -47,8 +48,45 @@ struct OhPkgMinimal {
 }
 
 impl OhPkgMinimal {
+    fn from_snapshot(package: &arkdown_session::package::snapshot::PackageSnapshot) -> Self {
+        let raw = &package.package_json;
+        Self {
+            name: (!raw.name.is_empty()).then(|| raw.name.clone()),
+            compatible_sdk_version: raw
+                .extra
+                .get("compatibleSdkVersion")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+            compatible_sdk_version_stage: raw
+                .extra
+                .get("compatibleSdkVersionStage")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            main: raw.main.clone(),
+            #[cfg(test)]
+            types: raw.types.clone().or_else(|| {
+                raw.extra
+                    .get("typings")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            }),
+            #[cfg(test)]
+            version: (!raw.version.is_empty()).then(|| raw.version.clone()),
+            dependencies: raw.dependencies.clone(),
+            dynamic_dependencies: raw.dynamic_dependencies.clone(),
+            #[cfg(test)]
+            dev_dependencies: raw.dev_dependencies.clone(),
+            metadata: raw
+                .extra
+                .get("metadata")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+        }
+    }
+
     /// `metadata.byteCodeHar` — the SDK marker used by
     /// `DefaultNpmDependency.isByteCodeHarDependency()`.
+    #[cfg(test)]
     fn is_byte_code_har(&self) -> bool {
         self.metadata
             .as_ref()
@@ -57,6 +95,7 @@ impl OhPkgMinimal {
 }
 
 impl OhPkgMinimal {
+    #[cfg(test)]
     fn load(pkg_dir: &Path) -> Option<Self> {
         let pkg_json = ProfileModuleLayout::new(pkg_dir).oh_package_json5();
         if !pkg_json.exists() {
@@ -153,7 +192,7 @@ impl OhPkgMinimal {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OhPkgMetadata {
     #[serde(default)]
@@ -177,7 +216,7 @@ struct OhPkgMetadata {
 }
 
 /// `metadata.runtimeOnly` section of `oh-package.json5`.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct OhPkgRuntimeOnly {
     #[serde(default)]
@@ -192,11 +231,13 @@ struct OhPkgRuntimeOnly {
 /// `TaskService.getHarDependencies()` is classified from
 /// `src/main/module.json[5]#module.type`. A package can therefore contribute
 /// to `byteCodeHarInfo` without contributing to `updateVersionInfo`.
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ByteCodeHarDependencyProfile {
     module: ByteCodeHarDependencyProfileModule,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ByteCodeHarDependencyProfileModule {
     #[serde(rename = "type", default)]
@@ -205,6 +246,7 @@ struct ByteCodeHarDependencyProfileModule {
     distro: Option<ByteCodeHarDependencyProfileDistro>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ByteCodeHarDependencyProfileDistro {
@@ -212,6 +254,7 @@ struct ByteCodeHarDependencyProfileDistro {
     module_type: Option<String>,
 }
 
+#[cfg(test)]
 impl ByteCodeHarDependencyProfile {
     fn is_har_dependency(package_root: &Path) -> bool {
         let layout = ProfileModuleLayout::new(package_root);
@@ -300,18 +343,6 @@ pub struct ByteCodeHarScanEntry {
     pub main_entry: Option<String>,
 }
 
-/// Session-owned root for one dependency carrying ByteCode HAR metadata.
-///
-/// The dependency graph has already read and classified the module profile,
-/// so the build coordinator passes that classification with the package root
-/// rather than making the profile stage read it again.
-#[derive(Debug, Clone)]
-pub struct ByteCodeHarDependencyRoot {
-    pub package_name: String,
-    pub package_root: PathBuf,
-    pub is_har_dependency: bool,
-}
-
 impl ByteCodeHarScanEntry {
     /// Build the OHM URL for this ByteCode HAR package.
     ///
@@ -351,41 +382,6 @@ impl ByteCodeHarScanEntry {
             declaration_entry: self.declaration_entry,
         };
         (self.package_name, entry)
-    }
-
-    // -----------------------------------------------------------------------
-    // Public session-graph-backed scan helper
-    // -----------------------------------------------------------------------
-
-    /// Scan a single ByteCode HAR from a known package root directory.
-    ///
-    /// Used by `ByteCodeHarMetadataWriter::scan_from_typed_roots` to build
-    /// `ByteCodeHarScanEntry` values from `DependencyNodeSnapshot.package_root`
-    /// entries provided by the session dependency graph, instead of doing an
-    /// independent `oh_modules/` filesystem scan.
-    ///
-    /// Reads `oh-package.json5` at `pkg_root`, validates that this is a
-    /// ByteCode HAR (has a pre-compiled `.abc`), and collects its metadata.
-    ///
-    /// Returns nothing when `pkg_root` does not contain a valid ByteCode HAR.
-    pub fn try_collect_from_root(
-        pkg_root: &Path,
-        fallback_pkg_name: &str,
-        is_har_dependency: bool,
-        seen: &mut FxHashSet<String>,
-        out: &mut Vec<Self>,
-    ) {
-        let Some(pkg) = OhPkgMinimal::load(pkg_root) else {
-            return;
-        };
-        Self::try_collect_loaded(
-            pkg_root.to_path_buf(),
-            fallback_pkg_name,
-            pkg,
-            is_har_dependency,
-            seen,
-            out,
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -579,6 +575,7 @@ impl<'a> ByteCodeHarGraphScanner<'a> {
         self.results
     }
 
+    #[cfg(test)]
     fn enqueue_root_dependencies(
         &self,
         root: &Path,
@@ -654,28 +651,38 @@ impl ByteCodeHarMetadataWriter {
         ByteCodeHarGraphScanner::new(module_root, project_root).scan()
     }
 
-    /// Scan ByteCode HAR dependencies from a typed list of package roots.
+    /// Collect ByteCode HAR dependencies from the immutable session graph.
     ///
-    /// This is the DependencyGraphSnapshot-backed path: when the session
-    /// dependency graph has already classified nodes as `BytecodeHar` with
-    /// known package roots, we read their `oh-package.json5` directly instead
-    /// of doing an independent `oh_modules/` filesystem scan.
+    /// Package manifests and module profiles were parsed during session
+    /// startup. This stage only materializes loader fields from those typed
+    /// snapshots and validates the referenced ABC paths.
     ///
     /// # Upstream correspondence
     ///
     /// Corresponds to hvigor's `DependencyManager.getHspOrByteCodeHarDependencies()`
     /// backed by the dependency graph, used by `generate-loader-json.ts` to
     /// locate ByteCode HAR dependencies without re-scanning the filesystem.
-    pub fn scan_from_typed_roots(
-        typed_roots: &[ByteCodeHarDependencyRoot],
+    pub fn scan_from_dependency_graph(
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<ByteCodeHarScanEntry> {
+        use arkdown_core::OhosModuleType;
+
         let mut seen = FxHashSet::default();
         let mut out = Vec::new();
-        for root in typed_roots {
-            ByteCodeHarScanEntry::try_collect_from_root(
-                &root.package_root,
-                &root.package_name,
-                root.is_har_dependency,
+        for node in graph.bytecode_har_nodes_in_traversal_order() {
+            let (Some(package_root), Some(package)) =
+                (node.package_root.as_ref(), node.package.as_ref())
+            else {
+                continue;
+            };
+            ByteCodeHarScanEntry::try_collect_loaded(
+                package_root.clone(),
+                &node.package_name,
+                OhPkgMinimal::from_snapshot(package),
+                node.module_profile
+                    .as_ref()
+                    .and_then(|profile| profile.module_type.as_ref())
+                    .is_some_and(|module_type| matches!(module_type, OhosModuleType::Har)),
                 &mut seen,
                 &mut out,
             );
@@ -692,6 +699,81 @@ impl Default for ByteCodeHarMetadataWriter {
 
 impl ByteCodeHarScanEntry {
     /// Build hvigor's `loader.json#updateVersionInfo` for ByteCode HAR packages.
+    pub fn collect_bytecode_har_update_version_info_from_graph(
+        deps: &[ByteCodeHarScanEntry],
+        graph: &arkdown_session::DependencyGraphSnapshot,
+    ) -> IndexMap<String, serde_json::Value> {
+        let mut info = IndexMap::new();
+
+        for dep in deps.iter().filter(|dep| dep.is_har_dependency) {
+            let Some(node) = graph.nodes.values().find(|node| {
+                node.package_root.as_ref() == Some(&dep.package_root)
+                    || node.package_name == dep.package_name
+            }) else {
+                continue;
+            };
+            let Some(package) = node.package.as_ref() else {
+                continue;
+            };
+            let package = OhPkgMinimal::from_snapshot(package);
+            let mut version_info = serde_json::Map::new();
+            if let Some(metadata) = package
+                .metadata
+                .as_ref()
+                .filter(|metadata| !metadata.dependency_pkg_version.is_empty())
+            {
+                for (name, expected_version) in &metadata.dependency_pkg_version {
+                    let Some(installed_version) =
+                        Self::dependency_version_from_graph(name, &dep.package_root, graph)
+                    else {
+                        continue;
+                    };
+                    if installed_version != *expected_version {
+                        version_info
+                            .insert(name.clone(), serde_json::Value::String(installed_version));
+                    }
+                }
+            } else {
+                for name in package.dependency_names() {
+                    let Some(installed_version) =
+                        Self::dependency_version_from_graph(&name, &dep.package_root, graph)
+                    else {
+                        continue;
+                    };
+                    version_info.insert(name, serde_json::Value::String(installed_version));
+                }
+            }
+            info.insert(
+                dep.package_name.clone(),
+                serde_json::Value::Object(version_info),
+            );
+        }
+
+        info
+    }
+
+    fn dependency_version_from_graph(
+        dependency_name: &str,
+        issuer_root: &Path,
+        graph: &arkdown_session::DependencyGraphSnapshot,
+    ) -> Option<String> {
+        let issuer_root = canonicalize_or_owned(issuer_root);
+        graph
+            .edges
+            .iter()
+            .find(|edge| {
+                canonicalize_or_owned(&edge.issuer_root) == issuer_root
+                    && (edge.alias == dependency_name || edge.package_name == dependency_name)
+            })
+            .and_then(|edge| graph.nodes.get(&edge.package_name))
+            .and_then(|node| node.package.as_ref())
+            .map(|package| package.version.clone())
+            .filter(|version| !version.trim().is_empty())
+    }
+
+    /// Test-only filesystem fixture helper for synthetic layouts that do not
+    /// construct a session dependency graph.
+    #[cfg(test)]
     pub fn collect_bytecode_har_update_version_info(
         deps: &[ByteCodeHarScanEntry],
         module_root: &Path,
@@ -760,6 +842,7 @@ impl ByteCodeHarScanEntry {
         info
     }
 
+    #[cfg(test)]
     fn resolve_dependency_version(
         dep_name: &str,
         issuer_root: &Path,
@@ -799,6 +882,59 @@ impl LoaderByteCodeHarFields {
     }
 
     /// Build hvigor's `loader.json#otherCompileFiles` contribution.
+    pub fn collect_other_compile_files_from_graph(
+        deps: &[ByteCodeHarScanEntry],
+        graph: &arkdown_session::DependencyGraphSnapshot,
+    ) -> Vec<PathBuf> {
+        use arkdown_session::dependency_graph::snapshot::{DependencyEdgeKind, DependencyNodeType};
+
+        let mut files = Vec::new();
+        for dep in deps {
+            let issuer_root = canonicalize_or_owned(&dep.package_root);
+            let dependency_node = graph.nodes.values().find(|node| {
+                node.package_root
+                    .as_ref()
+                    .is_some_and(|root| canonicalize_or_owned(root) == issuer_root)
+            });
+            for edge in graph.edges.iter().filter(|edge| {
+                edge.kind != DependencyEdgeKind::DevDependency
+                    && canonicalize_or_owned(&edge.issuer_root) == issuer_root
+            }) {
+                let Some(node) = graph.nodes.get(&edge.package_name) else {
+                    continue;
+                };
+                if node.node_type == DependencyNodeType::BytecodeHar {
+                    continue;
+                }
+                if let Some(entry) = node.compile_inputs.other_compile_entry_file.as_ref() {
+                    files.push(entry.clone());
+                }
+                if node.node_type == DependencyNodeType::SourceHar {
+                    files.extend(
+                        node.compile_inputs
+                            .other_compile_source_files
+                            .iter()
+                            .cloned(),
+                    );
+                }
+            }
+            for importee in &dep.extra_importees {
+                if let Some(path) = dependency_node.and_then(|node| {
+                    node.compile_inputs
+                        .extra_importee_source_files
+                        .get(importee)
+                }) {
+                    files.push(path.clone());
+                }
+            }
+        }
+        Self::dedupe_pathbufs(&mut files);
+        files
+    }
+
+    /// Test-only filesystem fixture helper for synthetic layouts that do not
+    /// construct a session dependency graph.
+    #[cfg(test)]
     pub fn collect_other_compile_files(
         deps: &[ByteCodeHarScanEntry],
         module_root: &Path,
@@ -834,6 +970,108 @@ impl LoaderByteCodeHarFields {
     ///
     /// HSP dependencies, SO dependencies, and (by default) devDependencies
     /// are dropped from the walk entirely (`getFinalNodes`).
+    pub fn collect_pkg_name2_other_compile_files_from_graph(
+        graph: &arkdown_session::DependencyGraphSnapshot,
+    ) -> IndexMap<String, Vec<PathBuf>> {
+        use arkdown_session::dependency_graph::snapshot::{
+            DependencyEdgeKind, DependencyNodeSnapshot, DependencyNodeType,
+        };
+
+        let nodes_by_root = graph
+            .nodes
+            .values()
+            .filter_map(|node| {
+                node.package_root
+                    .as_ref()
+                    .map(|root| (canonicalize_or_owned(root), node))
+            })
+            .collect::<std::collections::BTreeMap<PathBuf, &DependencyNodeSnapshot>>();
+        let mut walkable_issuers = graph
+            .edges
+            .iter()
+            .filter(|edge| !edge.is_transitive)
+            .map(|edge| canonicalize_or_owned(&edge.issuer_root))
+            .collect::<FxHashSet<_>>();
+        let mut blockers_by_issuer = std::collections::BTreeMap::<PathBuf, String>::new();
+        let mut seen_roots = FxHashSet::default();
+        let mut grouped = IndexMap::<String, Vec<PathBuf>>::new();
+
+        for edge in &graph.edges {
+            let issuer_root = canonicalize_or_owned(&edge.issuer_root);
+            if edge.kind == DependencyEdgeKind::DevDependency
+                || !walkable_issuers.contains(&issuer_root)
+            {
+                continue;
+            }
+            let package_root = canonicalize_or_owned(&edge.package_root);
+            if !seen_roots.insert(package_root.clone()) {
+                continue;
+            }
+            let Some(node) = nodes_by_root.get(&package_root).copied() else {
+                continue;
+            };
+            if matches!(
+                node.node_type,
+                DependencyNodeType::SharedHsp
+                    | DependencyNodeType::IntegratedHsp
+                    | DependencyNodeType::NativeSo
+            ) {
+                continue;
+            }
+            let inherited_blocker = blockers_by_issuer.get(&issuer_root).cloned();
+            match node.node_type {
+                DependencyNodeType::BytecodeHar => {
+                    let blocker = inherited_blocker.unwrap_or_else(|| node.package_name.clone());
+                    let files = grouped.entry(blocker.clone()).or_default();
+                    if let Some(extra_importees) = graph
+                        .widget_extra_importee_source_files
+                        .get(&node.package_name)
+                    {
+                        files.extend(extra_importees.values().cloned());
+                    }
+                    walkable_issuers.insert(package_root.clone());
+                    blockers_by_issuer.insert(package_root, blocker);
+                }
+                DependencyNodeType::SourceHar => {
+                    if let Some(blocker) = inherited_blocker.as_ref() {
+                        let files = grouped.entry(blocker.clone()).or_default();
+                        files.extend(node.compile_inputs.other_compile_entry_file.iter().cloned());
+                        files.extend(
+                            node.compile_inputs
+                                .other_compile_source_files
+                                .iter()
+                                .cloned(),
+                        );
+                    }
+                    walkable_issuers.insert(package_root.clone());
+                    if let Some(blocker) = inherited_blocker {
+                        blockers_by_issuer.insert(package_root, blocker);
+                    }
+                }
+                DependencyNodeType::OhpmSource => {
+                    if let Some(blocker) = inherited_blocker {
+                        grouped
+                            .entry(blocker)
+                            .or_default()
+                            .extend(node.compile_inputs.other_compile_entry_file.iter().cloned());
+                    }
+                }
+                DependencyNodeType::SharedHsp
+                | DependencyNodeType::IntegratedHsp
+                | DependencyNodeType::NativeSo
+                | DependencyNodeType::Unknown => {}
+            }
+        }
+
+        for files in grouped.values_mut() {
+            Self::dedupe_pathbufs(files);
+        }
+        grouped
+    }
+
+    /// Test-only filesystem fixture helper for synthetic layouts that do not
+    /// construct a session dependency graph.
+    #[cfg(test)]
     pub fn collect_pkg_name2_other_compile_files(
         module_root: &Path,
         project_root: &Path,
@@ -946,6 +1184,7 @@ impl LoaderByteCodeHarFields {
         grouped
     }
 
+    #[cfg(test)]
     fn enqueue_root_dependencies(
         root: &Path,
         queue: &mut std::collections::VecDeque<(String, PathBuf, Option<String>)>,
@@ -958,6 +1197,8 @@ impl LoaderByteCodeHarFields {
         }
     }
 
+    #[cfg(test)]
+    #[cfg(test)]
     fn candidate_dep_dirs(
         dep_name: &str,
         issuer_root: &Path,
@@ -984,6 +1225,8 @@ impl LoaderByteCodeHarFields {
     }
 
     /// `getFinalNodes` drops HSP dependencies (`isHspDependency`).
+    #[cfg(test)]
+    #[cfg(test)]
     fn is_hsp_dependency(package_root: &Path) -> bool {
         let layout = ProfileModuleLayout::new(package_root);
         for path in [layout.module_json5(), layout.module_json()] {
@@ -1006,6 +1249,8 @@ impl LoaderByteCodeHarFields {
     }
 
     /// `ValidateRegExp.SO_DEPENDENCY_REG_EXP = /lib(.+)\.so/`.
+    #[cfg(test)]
+    #[cfg(test)]
     fn is_so_dependency(dep_name: &str) -> bool {
         let Some(rest) = dep_name.strip_prefix("lib") else {
             return false;
@@ -1020,6 +1265,8 @@ impl LoaderByteCodeHarFields {
     /// importee list still registers the group: `processExtraImporteesV2`
     /// then materializes the group in the compile-file map (hvigor writes it
     /// as an empty array into `pkgName2OtherCompileFiles`).
+    #[cfg(test)]
+    #[cfg(test)]
     fn collect_extra_importees_v2(
         pkg: &OhPkgMinimal,
         blocker: Option<&str>,
@@ -1045,6 +1292,8 @@ impl LoaderByteCodeHarFields {
 
     /// `addExtraImporteesToOtherCompileFiles`: resolve one importee string
     /// (`@scope/pkg` or `@scope/pkg/path`) into an entry or source file.
+    #[cfg(test)]
+    #[cfg(test)]
     fn collect_extra_importee_paths(
         importee: &str,
         module_root: &Path,
@@ -1189,6 +1438,7 @@ impl LoaderByteCodeHarFields {
         results
     }
 
+    #[cfg(test)]
     fn collect_blocked_dependency_compile_files(
         dep: &ByteCodeHarScanEntry,
         module_root: &Path,
@@ -1229,6 +1479,7 @@ impl LoaderByteCodeHarFields {
         }
     }
 
+    #[cfg(test)]
     fn collect_extra_importee_compile_files(
         dep: &ByteCodeHarScanEntry,
         module_root: &Path,
@@ -1266,6 +1517,7 @@ impl LoaderByteCodeHarFields {
         }
     }
 
+    #[cfg(test)]
     fn resolve_dependency_root(
         dep_name: &str,
         issuer_root: &Path,
@@ -1292,6 +1544,7 @@ impl LoaderByteCodeHarFields {
         None
     }
 
+    #[cfg(test)]
     fn issuer_store_oh_modules_root(issuer_root: &Path) -> Option<PathBuf> {
         let mut current = issuer_root.parent();
         while let Some(path) = current {
@@ -1303,11 +1556,13 @@ impl LoaderByteCodeHarFields {
         None
     }
 
+    #[cfg(test)]
     fn is_source_har_package(pkg_root: &Path) -> bool {
         let layout = ProfileModuleLayout::new(pkg_root);
         layout.module_json5().is_file() || layout.module_json().is_file()
     }
 
+    #[cfg(test)]
     fn resolve_package_entry_path(pkg_root: &Path, pkg: &OhPkgMinimal) -> Option<PathBuf> {
         if let Some(main) = pkg.main.as_deref().filter(|value| !value.is_empty()) {
             let candidate = pkg_root.join(main);
@@ -1330,6 +1585,7 @@ impl LoaderByteCodeHarFields {
         None
     }
 
+    #[cfg(test)]
     fn find_supported_source_file(base: &Path) -> Option<PathBuf> {
         if base.is_file() && Self::is_code_file(base) {
             return Some(base.to_path_buf());
@@ -1343,6 +1599,7 @@ impl LoaderByteCodeHarFields {
         None
     }
 
+    #[cfg(test)]
     fn collect_code_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         let mut directories = std::collections::VecDeque::from([root.to_path_buf()]);
@@ -1364,6 +1621,7 @@ impl LoaderByteCodeHarFields {
         files
     }
 
+    #[cfg(test)]
     fn is_code_file(path: &Path) -> bool {
         if SourceFileName::new(path).is_declaration() {
             return false;
@@ -1380,11 +1638,13 @@ impl LoaderByteCodeHarFields {
     }
 }
 
+#[cfg(test)]
 struct ExtraImporteeSpecifier {
     package_name: String,
     subpath: PathBuf,
 }
 
+#[cfg(test)]
 impl ExtraImporteeSpecifier {
     fn new(importee: &str) -> Option<Self> {
         let candidates = ModuleSpecifierText::new(importee).package_candidates();
@@ -1636,7 +1896,10 @@ mod tests {
             1
         );
         assert!(
-            ByteCodeHarMetadataWriter::scan_from_typed_roots(&[]).is_empty(),
+            ByteCodeHarMetadataWriter::scan_from_dependency_graph(
+                &arkdown_session::DependencyGraphSnapshot::default()
+            )
+            .is_empty(),
             "GenerateLoaderJson must not revive dependencies excluded by the typed hvigor view"
         );
     }
@@ -2660,7 +2923,10 @@ mod tests {
             &bc_har_a.join("oh-package.json5"),
             r#"{
               name: "bc-har-a",
-              metadata: { byteCodeHar: true },
+              metadata: {
+                byteCodeHar: true,
+                extraImportees: ["extra-pkg/src/feature"]
+              },
               dependencies: {
                 "source-har-b": "1.0.0",
                 "npm-pkg-d": "1.0.0"
@@ -2718,8 +2984,21 @@ mod tests {
         );
         write_file(&npm_pkg_d.join("index.js"), "export default 4;");
 
+        let extra_pkg = oh_modules.join("extra-pkg");
+        write_file(
+            &extra_pkg.join("oh-package.json5"),
+            r#"{ name: "extra-pkg" }"#,
+        );
+        write_file(&extra_pkg.join("src/feature.ets"), "export default 5;");
+
+        let graph = arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+            "entry",
+            tmp.path(),
+            tmp.path(),
+        )
+        .build();
         let grouped =
-            LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(tmp.path(), tmp.path());
+            LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files_from_graph(&graph);
 
         let files = grouped
             .get("bc-har-a")
@@ -2751,6 +3030,10 @@ mod tests {
         assert!(
             rel.iter().any(|p| p.ends_with("npm-pkg-d/index.js")),
             "npm package entry below the BC HAR must be collected; got: {rel:?}"
+        );
+        assert!(
+            rel.iter().any(|p| p.ends_with("extra-pkg/src/feature.ets")),
+            "extraImportees must resolve from the host package inventory; got: {rel:?}"
         );
         assert!(
             !rel.iter().any(|p| p.contains("bc-har-a/ets")),

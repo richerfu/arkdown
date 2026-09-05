@@ -418,11 +418,15 @@ impl BuildCoordinator {
                         .map_err(|error| anyhow::anyhow!(error))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let module_context = session.module_context(&module.name).ok_or_else(|| {
+                    anyhow::anyhow!("missing module compile context for {}", module.name)
+                })?;
                 let widget_loader_json = WidgetCompileArktsPass::new(
                     module_config.as_ref(),
                     module,
                     manifest,
                     loader_json,
+                    &module_context.deps,
                 )
                 .compile_context_loader_json(&widget_out.plan)?;
                 // 6.24.3 `GenerateLoaderJson.doTaskAction()` writes the widget loader

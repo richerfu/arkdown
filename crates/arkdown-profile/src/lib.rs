@@ -46,8 +46,8 @@ pub mod validate_permissions;
 pub use arkdown_core::PkgBriefInfo;
 pub use build_profile::{BuildProfileInput, BuildProfileKind, BuildProfileWriter};
 pub use bytecode_har::{
-    ByteCodeHarDependencyRoot, ByteCodeHarMetadataWriter, ByteCodeHarScanEntry,
-    CompatibleSdkVersionValue, DynamicImportLibEntry, HostModuleInfo, LoaderByteCodeHarFields,
+    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CompatibleSdkVersionValue,
+    DynamicImportLibEntry, HostModuleInfo, LoaderByteCodeHarFields,
 };
 pub use custom_types::{
     CustomTypeError, CustomTypeInventory, CustomTypeResolver, DependencyCustomTypeInput,

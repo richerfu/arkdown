@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_core::OhosModuleType;
-use arkdown_path::{canonicalize_or_owned, strip_relative_prefix};
-use indexmap::IndexSet;
+use arkdown_path::{
+    canonicalize_or_owned, strip_relative_prefix, HvigorSourceFileFilter, ModuleSpecifierText,
+    SourceFileName,
+};
+use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
@@ -31,6 +34,7 @@ pub(crate) struct DependencySnapshotInventory {
     packages: FxHashMap<PathBuf, Option<Arc<PackageSnapshot>>>,
     module_profiles: FxHashMap<PathBuf, Option<DependencyModuleProfileSnapshot>>,
     compile_inputs: FxHashMap<PathBuf, Arc<DependencyCompileInputSnapshot>>,
+    source_files: FxHashMap<PathBuf, Arc<[PathBuf]>>,
     resolved_roots: FxHashMap<(PathBuf, PathBuf, String), Option<PathBuf>>,
     acquired_roots: FxHashMap<(PathBuf, String), PathBuf>,
     canonical_roots: FxHashMap<PathBuf, PathBuf>,
@@ -324,6 +328,8 @@ impl DependencySnapshotInventory {
         package_root: &Path,
         package: Option<&PackageSnapshot>,
         module_profile: Option<&DependencyModuleProfileSnapshot>,
+        project_root: &Path,
+        package_manager: DependencyPackageManager,
     ) -> Arc<DependencyCompileInputSnapshot> {
         if let Some(inputs) = self.compile_inputs.get(package_root) {
             return inputs.clone();
@@ -333,6 +339,14 @@ impl DependencySnapshotInventory {
         let mut ability_source_files = IndexSet::new();
         let mut worker_source_files = IndexSet::new();
         let mut insight_intent_source_files = IndexSet::new();
+        let source_inventory_files = self.read_source_inventory_files(package_root);
+        let ets_source_root = layout.ets_source_root();
+        let other_compile_source_files = source_inventory_files
+            .iter()
+            .filter(|path| path.starts_with(&ets_source_root))
+            .filter(|path| Self::is_other_compile_code_file(path))
+            .cloned()
+            .collect::<Vec<_>>();
 
         if let Some(profile) = module_profile {
             for entry in &profile.ability_src_entries {
@@ -382,6 +396,15 @@ impl DependencySnapshotInventory {
             worker_source_files: worker_source_files.into_iter().collect(),
             insight_intent_source_files: insight_intent_source_files.into_iter().collect(),
             dynamic_import_entry_file: Self::dynamic_import_entry_file(package_root, package),
+            other_compile_entry_file: Self::other_compile_entry_file(package_root, package),
+            other_compile_source_files: Arc::from(other_compile_source_files),
+            source_inventory_files,
+            extra_importee_source_files: self.read_extra_importee_source_files(
+                package,
+                package_root,
+                project_root,
+                package_manager,
+            ),
             router_map_profile: module_profile
                 .and_then(|profile| profile.router_map.as_deref())
                 .and_then(|reference| reference.strip_prefix("$profile:"))
@@ -430,6 +453,145 @@ impl DependencySnapshotInventory {
             }
         }
         None
+    }
+
+    fn other_compile_entry_file(
+        package_root: &Path,
+        package: Option<&PackageSnapshot>,
+    ) -> Option<PathBuf> {
+        if let Some(package) = package {
+            if let Some(main) = package
+                .package_json
+                .main
+                .as_deref()
+                .filter(|main| !main.is_empty())
+            {
+                let candidate = package_root.join(main);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            let types = package.package_json.types.as_deref().or_else(|| {
+                package
+                    .package_json
+                    .extra
+                    .get("typings")
+                    .and_then(serde_json::Value::as_str)
+            });
+            if let Some(types) = types.filter(|types| !types.is_empty()) {
+                let candidate = package_root.join(types);
+                if Self::is_other_compile_code_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        for relative in ["src/main/ets/index", "src/main/ets/Index", "index", "Index"] {
+            let base = package_root.join(relative);
+            if Self::is_other_compile_code_file(&base) {
+                return Some(base);
+            }
+            for extension in ["ets", "ts", "js"] {
+                let candidate = base.with_extension(extension);
+                if Self::is_other_compile_code_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    fn read_source_inventory_files(&mut self, package_root: &Path) -> Arc<[PathBuf]> {
+        if let Some(files) = self.source_files.get(package_root) {
+            return Arc::clone(files);
+        }
+        let mut files = Vec::new();
+        if !package_root.is_dir() {
+            let files = Arc::from(files);
+            self.source_files
+                .insert(package_root.to_path_buf(), Arc::clone(&files));
+            return files;
+        }
+        for entry in walkdir::WalkDir::new(package_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.path() == package_root
+                    || !matches!(
+                        entry.path().file_name().and_then(|value| value.to_str()),
+                        Some(".git" | "build" | "out" | "node_modules" | "oh_modules")
+                    )
+            })
+        {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = canonicalize_or_owned(entry.path());
+            if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
+                continue;
+            }
+            let extension = path.extension().and_then(|extension| extension.to_str());
+            if extension.is_some_and(crate::source_store::is_source_inventory_ext) {
+                files.push(path);
+            }
+        }
+        files.sort_unstable();
+        let files = Arc::from(files);
+        self.source_files
+            .insert(package_root.to_path_buf(), Arc::clone(&files));
+        files
+    }
+
+    fn read_extra_importee_source_files(
+        &mut self,
+        package: Option<&PackageSnapshot>,
+        resolution_root: &Path,
+        project_root: &Path,
+        package_manager: DependencyPackageManager,
+    ) -> IndexMap<String, PathBuf> {
+        let importees = package
+            .and_then(|package| package.package_json.extra.get("metadata"))
+            .and_then(|metadata| metadata.get("extraImportees"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str);
+        let mut resolved = IndexMap::new();
+        for importee in importees {
+            let candidates = ModuleSpecifierText::new(importee).package_candidates();
+            let Some(candidate) = candidates.last() else {
+                continue;
+            };
+            let Some(dependency_root) = self.resolve_package_root(
+                resolution_root,
+                project_root,
+                candidate.package_name(),
+                package_manager,
+            ) else {
+                continue;
+            };
+            let dependency_package = self.read_package(&dependency_root, package_manager);
+            let subpath = Path::new(candidate.subpath());
+            let path = if subpath.as_os_str().is_empty() {
+                Self::other_compile_entry_file(&dependency_root, dependency_package.as_deref())
+            } else {
+                let base = canonicalize_or_owned(&dependency_root.join(subpath));
+                let inventory = self.read_source_inventory_files(&dependency_root);
+                std::iter::once(base.clone())
+                    .chain(
+                        ["ets", "ts", "js"]
+                            .into_iter()
+                            .map(|extension| base.with_extension(extension)),
+                    )
+                    .find(|candidate| inventory.iter().any(|path| path == candidate))
+            };
+            if let Some(path) = path {
+                resolved.insert(importee.to_string(), path);
+            }
+        }
+        resolved
     }
 
     fn package_worker_entries(package: &PackageSnapshot) -> Vec<String> {
@@ -524,6 +686,17 @@ impl DependencySnapshotInventory {
 
     fn is_loader_code_file(path: &Path) -> bool {
         path.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(extension.to_ascii_lowercase().as_str(), "ets" | "ts" | "js")
+                })
+    }
+
+    fn is_other_compile_code_file(path: &Path) -> bool {
+        path.is_file()
+            && !SourceFileName::new(path).is_declaration()
             && path
                 .extension()
                 .and_then(|extension| extension.to_str())
@@ -723,6 +896,7 @@ impl DependencyGraphBuilder {
                         continue;
                     }
                     let node = self.node_snapshot(&edge, dep_package.clone(), traversal, inventory);
+                    self.record_widget_extra_importees(graph, &node, inventory);
                     graph.roots_by_alias.insert(alias.clone(), dep_root.clone());
                     graph.nodes.insert(node.package_name.clone(), node);
                     queue.push_back((dep_root, depth + 1));
@@ -798,6 +972,7 @@ impl DependencyGraphBuilder {
                 continue;
             }
             let node = self.node_snapshot(&edge, dep_package, traversal, state.inventory);
+            self.record_widget_extra_importees(state.graph, &node, state.inventory);
             state.graph.roots_by_alias.insert(alias, dep_root.clone());
             state.graph.nodes.insert(node.package_name.clone(), node);
             state.queue.push_back((dep_root, depth + 1));
@@ -885,8 +1060,13 @@ impl DependencyGraphBuilder {
         let root = &edge.package_root;
         let package_name = self.package_name(alias, package.as_deref());
         let module_profile = inventory.read_module_profile(root);
-        let compile_inputs =
-            inventory.read_compile_inputs(root, package.as_deref(), module_profile.as_ref());
+        let compile_inputs = inventory.read_compile_inputs(
+            root,
+            package.as_deref(),
+            module_profile.as_ref(),
+            &self.project_root,
+            self.package_manager,
+        );
         let direct_deps = package
             .as_ref()
             .map(|package| self.direct_dependency_aliases(package))
@@ -908,6 +1088,28 @@ impl DependencyGraphBuilder {
             is_dynamic: traversal.is_dynamic,
             is_transitive: traversal.is_transitive,
             direct_deps,
+        }
+    }
+
+    fn record_widget_extra_importees(
+        &self,
+        graph: &mut DependencyGraphSnapshot,
+        node: &DependencyNodeSnapshot,
+        inventory: &mut DependencySnapshotInventory,
+    ) {
+        let Some(package) = node.package.as_deref() else {
+            return;
+        };
+        let files = inventory.read_extra_importee_source_files(
+            Some(package),
+            &self.host_root,
+            &self.project_root,
+            self.package_manager,
+        );
+        if !files.is_empty() {
+            graph
+                .widget_extra_importee_source_files
+                .insert(node.package_name.clone(), files);
         }
     }
 
@@ -1127,9 +1329,14 @@ mod tests {
               "version": "1.0.0",
               "main": "src/main/ets/index.ets",
               "metadata": {
-                "workers": ["./src/main/ets/workers/PackageWorker.ts"]
+                "workers": ["./src/main/ets/workers/PackageWorker.ts"],
+                "extraImportees": ["extra-pkg/src/feature"]
               }
             }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/extra-pkg",
+            r#"{ "name": "extra-pkg", "version": "1.0.0" }"#,
         );
         fixture.write_dependency_profile(
             "entry/oh_modules/source-har",
@@ -1184,6 +1391,12 @@ mod tests {
             fs::create_dir_all(path.parent().expect("source parent")).expect("source directory");
             fs::write(path, "").expect("dependency source");
         }
+        let extra_importee = fixture
+            .root()
+            .join("entry/oh_modules/extra-pkg/src/feature.ets");
+        fs::create_dir_all(extra_importee.parent().expect("extra importee parent"))
+            .expect("extra importee directory");
+        fs::write(&extra_importee, "").expect("extra importee source");
 
         let graph = fixture.build_for("entry");
         let inputs = &graph.nodes["source-har"].compile_inputs;
@@ -1211,6 +1424,13 @@ mod tests {
         assert_eq!(
             inputs.dynamic_import_entry_file,
             Some(dep_root.join("src/main/ets/index.ets"))
+        );
+        assert!(inputs
+            .source_inventory_files
+            .contains(&dep_root.join("src/main/ets/index.ets")));
+        assert_eq!(
+            inputs.extra_importee_source_files["extra-pkg/src/feature"],
+            canonicalize_or_owned(&extra_importee)
         );
         assert_eq!(
             inputs

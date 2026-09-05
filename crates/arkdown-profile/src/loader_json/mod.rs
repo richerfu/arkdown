@@ -18,8 +18,8 @@ use arkdown_path::{
 };
 
 use crate::bytecode_har::{
-    ByteCodeHarDependencyRoot, ByteCodeHarMetadataWriter, ByteCodeHarScanEntry,
-    CompatibleSdkVersionValue, LoaderByteCodeHarFields,
+    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CompatibleSdkVersionValue,
+    LoaderByteCodeHarFields,
 };
 use crate::form_profile::{FormProfileProcessor, ModuleFormProfileInput};
 
