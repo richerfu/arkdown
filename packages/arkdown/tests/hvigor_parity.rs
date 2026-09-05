@@ -1855,7 +1855,12 @@ fn read_archive_snapshot(
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let normalized = normalize_project_bytes(&bytes, root);
+    let normalized = match String::from_utf8(normalize_project_bytes(&bytes, root)) {
+      Ok(text) => ArtifactNormalization::for_path(Path::new(file.name()))
+        .normalize_text(text)
+        .into_bytes(),
+      Err(error) => error.into_bytes(),
+    };
     entries.insert(
       file.name().to_string(),
       ZipEntrySnapshot {
@@ -1893,7 +1898,12 @@ fn read_har_archive_snapshot(
       entry.read_to_end(&mut bytes)?;
       contents.insert(name.clone(), bytes.clone());
     }
-    let normalized = normalize_project_bytes(&bytes, root);
+    let normalized = match String::from_utf8(normalize_project_bytes(&bytes, root)) {
+      Ok(text) => ArtifactNormalization::for_path(Path::new(&name))
+        .normalize_text(text)
+        .into_bytes(),
+      Err(error) => error.into_bytes(),
+    };
     entries.insert(
       name,
       ZipEntrySnapshot {
@@ -2119,6 +2129,7 @@ enum ArtifactKind {
 enum ArtifactNormalization {
   PreserveOrder,
   UnorderedLineManifest,
+  JsonObjectInsertionOrder,
   ZipContainerTimestamps,
   TarContainerMetadata,
 }
@@ -2142,6 +2153,15 @@ impl ArtifactNormalization {
   fn for_file_name(file_name: &OsStr) -> Self {
     if matches!(file_name.to_str(), Some("filesInfo.txt" | "modules.cache")) {
       Self::UnorderedLineManifest
+    } else if matches!(
+      file_name.to_str(),
+      Some("sourceMaps.map" | "sourceMaps.json")
+    ) {
+      // `generate_sourcemap.ts::SourceMapGenerator.updateSpecifySourceMap`
+      // assigns entries to a plain object as concurrent Rollup transforms
+      // finish. Repeated hvigor builds therefore retain identical maps in a
+      // different top-level insertion order.
+      Self::JsonObjectInsertionOrder
     } else {
       Self::PreserveOrder
     }
@@ -2160,6 +2180,9 @@ impl ArtifactNormalization {
         }
         normalized
       }
+      Self::JsonObjectInsertionOrder => serde_json::from_str::<BTreeMap<String, Value>>(&text)
+        .and_then(|value| serde_json::to_string_pretty(&value))
+        .unwrap_or(text),
       Self::ZipContainerTimestamps | Self::TarContainerMetadata => text,
     }
   }
@@ -2366,6 +2389,25 @@ fn compile_arkts_line_manifests_compare_as_unordered_records() {
       true
     );
   }
+}
+
+#[test]
+fn source_map_manifest_compares_entries_independent_of_transform_completion_order() {
+  // `generate_sourcemap.ts::SourceMapGenerator.updateSpecifySourceMap`
+  // assigns to a plain object from concurrent Rollup transforms. Two real
+  // hvigor OHOS Test builds produce different key orders with identical map
+  // values, so strict parity compares this manifest as a JSON object.
+  let normalization = ArtifactNormalization::for_file_name(OsStr::new("sourceMaps.map"));
+  let first = normalization.normalize_text(
+    r#"{"entry|dep|1.0.0|index.js":{"version":3},"entry|app|1.0.0|Index.ts":{"version":3}}"#
+      .to_string(),
+  );
+  let second = normalization.normalize_text(
+    r#"{"entry|app|1.0.0|Index.ts":{"version":3},"entry|dep|1.0.0|index.js":{"version":3}}"#
+      .to_string(),
+  );
+
+  assert_eq!(first, second);
 }
 
 #[test]

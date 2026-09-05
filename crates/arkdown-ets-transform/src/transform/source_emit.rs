@@ -200,7 +200,7 @@ enum TypeScriptSourceBoundaryKind {
     ImportNamedClause,
     ArrowFunction,
     CallExpression(String),
-    AssignmentOperator(String),
+    AssignmentOperator,
     ExportDefaultFunction,
     ExportDefaultClass,
     FunctionClosure(String),
@@ -209,8 +209,9 @@ enum TypeScriptSourceBoundaryKind {
     TemplateInterpolationClosure,
     ObjectExpressionClosure,
     LineBrokenMember(String),
-    IfConditionClosure,
-    ReturnStatement,
+    ReturnStatement {
+        has_argument: bool,
+    },
     IfStatementClosure,
     TryStatementClosure,
     /// ArkUI component block closure: source components (`Column() { ... }`)
@@ -356,24 +357,21 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     }
 
     fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
-        let left_end = expression.left.span().end as usize;
-        let right_start = expression.right.span().start as usize;
-        if let Some(source) = self.source_text {
-            if let Some(between) = source.get(left_end..right_start) {
-                if between.contains(expression.operator.as_str()) {
-                    let left = expression.left.span();
-                    let left_text = source
-                        .get(left.start as usize..left.end as usize)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string();
-                    self.push(
-                        TypeScriptSourceBoundaryKind::AssignmentOperator(left_text),
-                        Span::new(left_end as u32, right_start as u32),
-                    );
-                }
-            }
-        }
+        let operator_span = if expression.span.is_empty() {
+            expression.span
+        } else {
+            Span::new(expression.left.span().end, expression.right.span().start)
+        };
+        // `process_struct_componentV2.ts::createPropertyAssignNode` inserts
+        // factory-created assignments before source-backed method assignments.
+        // Keep every assignment in printer traversal order so a synthesized
+        // assignment consumes its emitted counterpart without stealing the
+        // next source assignment's boundary. Its empty span is deliberately
+        // retained below: TypeScript emits no operator mapping for that node.
+        self.push(
+            TypeScriptSourceBoundaryKind::AssignmentOperator,
+            operator_span,
+        );
         walk::walk_assignment_expression(self, expression);
     }
 
@@ -394,7 +392,9 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
 
     fn visit_return_statement(&mut self, statement: &ReturnStatement<'a>) {
         self.push(
-            TypeScriptSourceBoundaryKind::ReturnStatement,
+            TypeScriptSourceBoundaryKind::ReturnStatement {
+                has_argument: statement.argument.is_some(),
+            },
             statement.span,
         );
         walk::walk_return_statement(self, statement);
@@ -462,10 +462,6 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     }
 
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
-        self.push(
-            TypeScriptSourceBoundaryKind::IfConditionClosure,
-            Span::new(statement.test.span().end, statement.test.span().end),
-        );
         if let Statement::BlockStatement(block) = &statement.consequent {
             self.push(TypeScriptSourceBoundaryKind::IfStatementClosure, block.span);
         }
@@ -767,7 +763,6 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 .or_default()
                 .push_back(boundary);
         }
-
         let mut entries = Vec::new();
         for original in self.original {
             let generated_boundary = match &original.kind {
@@ -802,13 +797,15 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     );
                     continue;
                 }
-                TypeScriptSourceBoundaryKind::AssignmentOperator(_) => {
-                    entries.push(TypeScriptSourceMapEntry::from_offsets(
-                        self.generated,
-                        generated_boundary.span.start,
-                        self.source,
-                        original.span.start,
-                    ));
+                TypeScriptSourceBoundaryKind::AssignmentOperator => {
+                    if !original.span.is_empty() {
+                        entries.push(TypeScriptSourceMapEntry::from_offsets(
+                            self.generated,
+                            generated_boundary.span.start,
+                            self.source,
+                            original.span.start,
+                        ));
+                    }
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::ExportDefaultFunction => {
@@ -910,17 +907,11 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     ));
                     continue;
                 }
-                TypeScriptSourceBoundaryKind::IfConditionClosure => {
-                    entries.push(TypeScriptSourceMapEntry::from_offsets(
-                        self.generated,
-                        generated_span.start,
-                        self.source,
-                        original.span.start,
-                    ));
-                    continue;
-                }
                 TypeScriptSourceBoundaryKind::IfStatementClosure
                 | TypeScriptSourceBoundaryKind::TryStatementClosure => {
+                    if original.span.is_empty() {
+                        continue;
+                    }
                     if !generated_span.is_empty() {
                         suppressed_generated_positions.insert(
                             crate::source_map::offset_to_line_col(
@@ -935,6 +926,10 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                             original.span.end,
                         ));
                     }
+                    continue;
+                }
+                TypeScriptSourceBoundaryKind::ReturnStatement { has_argument: true } => {
+                    self.map_statement_closure(original, &generated_boundary, &mut entries);
                     continue;
                 }
                 _ => {}
@@ -1156,33 +1151,16 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             ));
             return;
         }
-        let generated_continues = self
-            .generated
-            .get(generated.span.end as usize..)
-            .and_then(|tail| tail.trim_start().chars().next())
-            .is_some_and(|next| {
-                matches!(next, '.' | '?' | '+' | '-' | '*' | '/' | '%' | '&' | '|')
-            });
-        let source_continues = self
-            .source
-            .get(original.span.end as usize..)
-            .and_then(|tail| tail.trim_start().chars().next())
-            .is_some_and(|next| {
-                matches!(next, '.' | '?' | '+' | '-' | '*' | '/' | '%' | '&' | '|')
-            });
-        if generated_continues && source_continues {
-            for (generated_offset, source_offset) in [
-                (generated.span.end - 1, original.span.end - 1),
-                (generated.span.end, original.span.end),
-            ] {
-                entries.push(TypeScriptSourceMapEntry::from_offsets(
-                    self.generated,
-                    generated_offset,
-                    self.source,
-                    source_offset,
-                ));
-            }
-        }
+        // `process_module_files.ts::genContentAndSourceMapInfo` writes the
+        // transformed SourceFile with TypeScript's printer. Its generic
+        // `emitSourceMapsAfterNode` records every source-backed call's end;
+        // `emitIfStatement` does not add a separate mapping for `)`.
+        entries.push(TypeScriptSourceMapEntry::from_offsets(
+            self.generated,
+            generated.span.end,
+            self.source,
+            original.span.end,
+        ));
     }
 
     fn map_statement_closure(
@@ -1194,27 +1172,91 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         if original.span.is_empty() || generated.span.is_empty() {
             return;
         }
-        let source_end_boundary = if self
-            .source
-            .as_bytes()
-            .get(original.span.end.saturating_sub(1) as usize)
-            == Some(&b';')
-        {
-            original.span.end - 1
-        } else {
-            original.span.end
-        };
-        for (generated_offset, source_offset) in [
-            (generated.span.end - 1, source_end_boundary),
-            (generated.span.end, original.span.end),
-        ] {
+        let trailing_argument_end = self.statement_trailing_argument_end_boundary(original.span);
+        let source_end_boundary = trailing_argument_end.unwrap_or_else(|| {
+            if self
+                .source
+                .as_bytes()
+                .get(original.span.end.saturating_sub(1) as usize)
+                == Some(&b';')
+            {
+                original.span.end.saturating_sub(1)
+            } else {
+                original.span.end
+            }
+        });
+        let generated_end_boundary = trailing_argument_end.map_or_else(
+            || generated.span.end.saturating_sub(1),
+            |_| self.statement_generated_end_boundary(generated.span),
+        );
+        entries.push(TypeScriptSourceMapEntry::from_offsets(
+            self.generated,
+            generated_end_boundary,
+            self.source,
+            source_end_boundary,
+        ));
+        if trailing_argument_end.is_some() {
+            // The source and generated statement closures remain mapped in
+            // addition to the last-argument anchor above. TypeScript emits
+            // both tokens when it removes the trailing argument comma.
             entries.push(TypeScriptSourceMapEntry::from_offsets(
                 self.generated,
-                generated_offset,
+                generated.span.end.saturating_sub(1),
                 self.source,
-                source_offset,
+                original.span.end.saturating_sub(1),
             ));
         }
+        entries.push(TypeScriptSourceMapEntry::from_offsets(
+            self.generated,
+            generated.span.end,
+            self.source,
+            original.span.end,
+        ));
+    }
+
+    fn statement_generated_end_boundary(&self, span: Span) -> u32 {
+        let statement = self
+            .generated
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or_default();
+        let without_semicolon = statement.strip_suffix(';').unwrap_or(statement);
+        let trimmed = without_semicolon.trim_end();
+        if trimmed.ends_with(')') {
+            return span.start + trimmed.len().saturating_sub(1).min(u32::MAX as usize) as u32;
+        }
+
+        span.end.saturating_sub(1)
+    }
+
+    /// Return the TypeScript printer's source anchor for the generated closing
+    /// token of an expression statement.
+    ///
+    /// For a multiline call with a trailing comma, TypeScript keeps
+    /// `lastSourcePosition` at the end of the final argument.  The generated
+    /// printer removes that trailing comma, so mapping the generated outer `)`
+    /// to the source statement's outer `)` shifts debugger locations by one
+    /// line.  This is observable in the stock EntryAbility template's
+    /// `hilog.error(..., JSON.stringify(err),)` call.
+    fn statement_trailing_argument_end_boundary(&self, span: Span) -> Option<u32> {
+        let statement = self
+            .source
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or_default();
+        let without_semicolon = statement.strip_suffix(';').unwrap_or(statement);
+        let trimmed = without_semicolon.trim_end();
+        if let Some(arguments) = trimmed.strip_suffix(')') {
+            let before_closing_paren = arguments.trim_end();
+            if let Some(before_trailing_comma) = before_closing_paren.strip_suffix(',') {
+                return Some(
+                    span.start
+                        + before_trailing_comma
+                            .trim_end()
+                            .len()
+                            .min(u32::MAX as usize) as u32,
+                );
+            }
+        }
+        None
     }
 
     fn map_variable_closure(

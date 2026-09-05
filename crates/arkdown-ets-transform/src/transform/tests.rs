@@ -2930,7 +2930,10 @@ struct Page {
         TransformHarness::transform(&make_source("entry/src/main/ets/pages/Page.ets", src))
             .unwrap();
     assert!(result.contains("interface RouteMeta"));
-    assert!(result.contains("import lazy LazyPage, { Helper } from './lazy';"));
+    assert!(
+        result.contains("import lazy LazyPage, { Helper } from './lazy';"),
+        "{result}"
+    );
     assert!(result.contains("class Page extends ViewPU"));
     assert!(!result.contains("@interface"));
     assert!(!result.contains("struct Page"));
@@ -3530,6 +3533,7 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         insight_intent_form_binding: None,
         insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
         entry_source: true,
+        module_source_file_stage: false,
         preview_mode: false,
         check_entry: false,
         partial_update: true,
@@ -3621,6 +3625,7 @@ export struct SecureModePage {
         insight_intent_form_binding: None,
         insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
         entry_source: true,
+        module_source_file_stage: false,
         preview_mode: false,
         check_entry: false,
         partial_update: true,
@@ -3747,6 +3752,7 @@ export struct SecureModePage {
         insight_intent_form_binding: None,
         insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
         entry_source: true,
+        module_source_file_stage: false,
         preview_mode: false,
         check_entry: false,
         partial_update: true,
@@ -4345,8 +4351,191 @@ fn test_minimal_index_component_lowers_arkui_semantics() {
     .expect("source map must be valid JSON");
     assert_eq!(
         source_map["mappings"],
-        "iDAAA;;CAAA;;IAGS,OAAO,GAAE,MAAM;;MADjB,KAAK;IAFZ;;8CAAA;;SAAA;sDAG2B,aAAa;;;KAHxC;;wCAAA;;SAAA;;;;;;;;;;;;IAGE,4CAAgB,MAAM,EAAiB;QAAhC,OAAO;;;QAAP,OAAO,WAAE,MAAM;;;IAEtB;;YACE,GAAG;YAAH,GAAG,CAMD,MAAM,CAAC,MAAM;;;YALb,MAAM;YAAN,MAAM,CAIJ,KAAK,CAAC,MAAM;;;YAHZ,IAAI,QAAC,IAAI,CAAC,OAAO;YAAjB,IAAI,CACD,QAAQ,CAAC,EAAE;YADd,IAAI,CAED,UAAU,CAAC,UAAU,CAAC,IAAI;;QAF7B,IAAI;QADN,MAAM;QADR,GAAG;KAOJ",
-        "latest source compiler TypeScript-printer mappings must remain byte-identical"
+        ";;;;IAGS,OAAO,GAAE,MAAM;;MADjB,KAAK;IAFZ;;;;;sDAG2B,aAAa;;;KAHxC;;;;;;;;;;;;;;;;IAGE,4CAAgB,MAAM,EAAiB;QAAhC,OAAO;;;QAAP,OAAO,WAAE,MAAM;;;IAEtB;;YACE,GAAG;YAAH,GAAG,CAMD,MAAM,CAAC,MAAM;;;YALb,MAAM;YAAN,MAAM,CAIJ,KAAK,CAAC,MAAM;;;YAHZ,IAAI,QAAC,IAAI,CAAC,OAAO;YAAjB,IAAI,CACD,QAAQ,CAAC,EAAE;YADd,IAAI,CAED,UAAU,CAAC,UAAU,CAAC,IAAI;;QAF7B,IAAI;QADN,MAAM;QADR,GAAG;KAOJ",
+        "process_module_files.ts TypeScript printer must not map synthetic ArkUI statements to source byte zero"
+    );
+}
+
+#[test]
+fn component_v2_synthetic_assignments_do_not_consume_source_assignment_mappings() {
+    // `process_struct_componentV2.ts::createPropertyAssignNode` creates the
+    // constructor/reset assignment shells with `ts.factory.create*` while
+    // retaining the source initializer. Those synthetic assignments occupy
+    // printer traversal positions but emit no assignment-operator mapping.
+    let source = include_str!(
+        "../../../../tests/fixtures/component-v2-lifecycle-hap/entry/src/main/ets/pages/Index.ets"
+    );
+    let output = TransformHarness::transform_output_with_options(
+        &make_source("entry/src/main/ets/pages/Index.ets", source),
+        &TransformOptions {
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/entry/src/main/ets")),
+            ..TransformOptions::default()
+        },
+    )
+    .expect("ComponentV2 source must transform");
+    let source_map: serde_json::Value = serde_json::from_str(
+        output
+            .source_map
+            .as_deref()
+            .expect("ComponentV2 transform source map"),
+    )
+    .expect("valid source map");
+
+    assert_eq!(
+        source_map["mappings"],
+        ";;;AAAA,OAAO,CAAC,MAAM,eAAe,EAAE,eAAe,CAAC;AAC/C,OAAO,CAAC,MAAM,kBAAkB,EAAE,eAAe,CAAC;MAI3C,KAAK;IAFZ;;uBAG2B,SAAS;;KALc;;uBAKvB,SAAS;;IAAlC,CAAC,KAAK;IAAC,OAAO,EAAE,MAAM,CAAa;IAEnC,CAAC,eAAe;IAChB,oBAAoB,IAAI,IAAI;QAC1B,IAAI,CAAC,OAAO,GAAG,UAAU,CAAC;IAC5B,CAAC;IAED,CAAC,kBAAkB;IACnB,uBAAuB,IAAI,IAAI;QAC7B,IAAI,CAAC,OAAO,GAAG,aAAa,CAAC;IAC/B,CAAC;IAED;;YACE,MAAM;YAAN,MAAM,CAIL,KAAK,CAAC,MAAM;YAJb,MAAM,CAKL,MAAM,CAAC,MAAM;;;YAJZ,IAAI,QAAC,IAAI,CAAC,OAAO;YAAjB,IAAI,CACD,QAAQ,CAAC,EAAE;;QADd,IAAI;QADN,MAAM;KAMP"
+    );
+}
+
+#[test]
+fn multiline_call_trailing_comma_keeps_typescript_last_source_position() {
+    // `process_module_files.ts::genContentAndSourceMapInfo` delegates to the
+    // TypeScript printer.  Its `lastSourcePosition` for a removed trailing
+    // argument comma remains at the final argument, not the outer call close.
+    let source = include_str!(
+        "../../../../tests/fixtures/minimal-hap/entry/src/main/ets/entryability/EntryAbility.ets"
+    );
+    let plan = crate::RolldownEtsTransformPlan::new(
+        "com.example",
+        "entry",
+        PathBuf::from("/project"),
+        PathBuf::from("/project/entry/src/main/ets"),
+        Vec::new(),
+        17,
+        rustc_hash::FxHashMap::default(),
+        ComponentMetadata::default(),
+        crate::TransformSourceSnapshot::default(),
+    );
+    let output = crate::RolldownEtsTransformer::new(std::sync::Arc::new(plan))
+        .compile_transform(
+            source,
+            "/project/entry/src/main/ets/entryability/EntryAbility.ets",
+        )
+        .expect("kit import transform")
+        .expect("EntryAbility source must transform");
+    let generated = output
+        .module_source_code
+        .as_deref()
+        .expect("CompileArkTS source sidecar");
+    let generated_close_offset = generated
+        .find("JSON.stringify(err));")
+        .map(|offset| offset + "JSON.stringify(err)".len())
+        .unwrap_or_else(|| panic!("generated outer call close:\n{generated}"));
+    let generated_close = crate::source_map::offset_to_line_col(
+        generated,
+        generated_close_offset.min(u32::MAX as usize) as u32,
+    );
+    let source_map = rolldown_sourcemap::OwnedSourceMap::from_json_string(
+        output.source_map.as_deref().expect("TypeScript source map"),
+    )
+    .expect("valid source map");
+    let generated_line_tokens = source_map
+        .get_tokens()
+        .filter(|token| token.get_dst_line() == generated_close.0)
+        .map(|token| {
+            (
+                token.get_dst_col(),
+                token.get_src_line(),
+                token.get_src_col(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let token = source_map
+        .get_tokens()
+        .find(|token| {
+            token.get_dst_line() == generated_close.0 && token.get_dst_col() == generated_close.1
+        })
+        .expect("generated call close mapping");
+
+    assert_eq!((token.get_src_line(), token.get_src_col()), (19, 29));
+    let statement_end = source_map
+        .get_tokens()
+        .find(|token| {
+            token.get_dst_line() == generated_close.0
+                && token.get_dst_col() == generated_close.1 + 1
+        })
+        .unwrap_or_else(|| panic!("generated statement end mapping: {generated_line_tokens:?}"));
+    assert_eq!(
+        (statement_end.get_src_line(), statement_end.get_src_col()),
+        (20, 9)
+    );
+}
+
+#[test]
+fn type_only_default_import_and_return_closure_match_typescript_source_map() {
+    // `transformTypeExportImportAndConstEnumInTypeScript` rebuilds a type-only
+    // default import but retains the original binding's source range. The
+    // TypeScript printer maps that binding and both return-statement closure
+    // positions. This is the exact StartupConfig parity contract.
+    let source = include_str!(
+        "../../../../tests/fixtures/startup-config-hap/entry/src/main/ets/startup/StartupConfig.ets"
+    );
+    let plan = crate::RolldownEtsTransformPlan::new(
+        "com.example",
+        "entry",
+        PathBuf::from("/project"),
+        PathBuf::from("/project/entry/src/main/ets"),
+        Vec::new(),
+        17,
+        rustc_hash::FxHashMap::default(),
+        ComponentMetadata::default(),
+        crate::TransformSourceSnapshot::default(),
+    );
+    let output = crate::RolldownEtsTransformer::new(std::sync::Arc::new(plan))
+        .compile_transform(
+            source,
+            "/project/entry/src/main/ets/startup/StartupConfig.ets",
+        )
+        .expect("StartupConfig transform")
+        .expect("StartupConfig source must transform");
+    let source_map: serde_json::Value =
+        serde_json::from_str(output.source_map.as_deref().expect("TypeScript source map"))
+            .expect("valid source map");
+
+    assert_eq!(
+        source_map["mappings"],
+        "OAAO,kBAAkB;YAClB,aAAa;AAEpB,MAAM,CAAC,OAAO,OAAO,oBAAqB,SAAQ,kBAAkB;IAClE,QAAQ,IAAI,aAAa;QACvB,OAAO,EAAE,SAAS,EAAE,CAAC,EAAE,CAAC;IAC1B,CAAC;CACF"
+    );
+}
+
+#[test]
+fn call_trailing_ranges_match_typescript_printer_source_map() {
+    // `process_module_files.ts::genContentAndSourceMapInfo` uses
+    // `ts.Printer.writeFile`. ohos-typescript 4.9.5-r4 emits the trailing map
+    // for each source-backed CallExpression through
+    // `emitSourceMapsAfterNode`, including a call at the end of an `if`
+    // condition. This golden is the printer output for the same source.
+    let source = "export function check(first: string, second: string): boolean {\n  if (first.includes(\"x\")\n    || second.includes(\"y\")) {\n    return true;\n  }\n  return false;\n}\n";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        oxc_parser::Parser::new(&allocator, source, SourceType::ts().with_module(true)).parse();
+    assert!(parsed.diagnostics.is_empty());
+    let output = HvigorTypescriptPrinter::print_with_source_map(
+        &parsed.program,
+        oxc_codegen::CodegenOptions {
+            source_map_path: Some("/project/entry/src/main/ets/IfCondition.ets".into()),
+            indent_char: oxc_codegen::IndentChar::Space,
+            indent_width: 4,
+            ..oxc_codegen::CodegenOptions::default()
+        },
+        source,
+    );
+    let source_map: serde_json::Value =
+        serde_json::from_str(output.source_map.as_deref().expect("TypeScript source map"))
+            .expect("valid source map");
+
+    let mappings = source_map["mappings"]
+        .as_str()
+        .expect("source map mappings")
+        .split_once(';')
+        .map(|(_, body)| body)
+        .expect("function body mappings");
+    assert_eq!(
+        mappings,
+        "IAC3D,IAAI,KAAK,CAAC,QAAQ,CAAC,GAAG,CAAC;WAClB,MAAM,CAAC,QAAQ,CAAC,GAAG,CAAC,EAAE;QACzB,OAAO,IAAI,CAAC;KACb;IACD,OAAO,KAAK,CAAC;AACf,CAAC",
+        "{}",
+        output.code
     );
 }
 
@@ -5909,6 +6098,7 @@ struct WidgetCard {
             insight_intent_form_binding: None,
             insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
             entry_source: true,
+            module_source_file_stage: false,
             preview_mode: false,
             check_entry: false,
             partial_update: true,
@@ -6063,6 +6253,7 @@ struct ModalPage {
             insight_intent_form_binding: None,
             insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
             entry_source: true,
+            module_source_file_stage: false,
             preview_mode: false,
             check_entry: false,
             partial_update: true,

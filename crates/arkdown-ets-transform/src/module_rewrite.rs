@@ -15,7 +15,7 @@ use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::{GetSpan, SourceType, SPAN};
 use oxc_str::Str;
 use oxc_syntax::reference::ReferenceId;
 use oxc_syntax::symbol::SymbolId;
@@ -317,7 +317,10 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
                     let local_name = specifier.local.name.to_string();
                     let named = NamedImportBinding {
                         imported: ModuleBindingName::from_module_export_name(&specifier.imported),
+                        imported_span: specifier.imported.span(),
                         local: local_name.clone(),
+                        local_span: specifier.local.span,
+                        span: specifier.span,
                     };
                     match self.binding_decision(
                         specifier.import_kind.is_type(),
@@ -346,11 +349,19 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
                         "default",
                     ) {
                         ImportBindingDecision::Value => {
-                            value_bindings.push(ValueImportBinding::Default(local_name));
+                            value_bindings.push(ValueImportBinding::Default {
+                                local: local_name,
+                                local_span: specifier.local.span,
+                                span: specifier.span,
+                            });
                         }
                         ImportBindingDecision::Type => {
                             changed_bindings = true;
-                            type_bindings.push(TypeImportBinding::Default(local_name));
+                            type_bindings.push(TypeImportBinding::Default {
+                                local: local_name,
+                                local_span: specifier.local.span,
+                                span: specifier.span,
+                            });
                         }
                         ImportBindingDecision::Drop => {
                             changed_bindings = true;
@@ -358,9 +369,11 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
                     }
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                    value_bindings.push(ValueImportBinding::Namespace(
-                        specifier.local.name.to_string(),
-                    ));
+                    value_bindings.push(ValueImportBinding::Namespace {
+                        local: specifier.local.name.to_string(),
+                        local_span: specifier.local.span,
+                        span: specifier.span,
+                    });
                 }
             }
         }
@@ -372,7 +385,7 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
         let type_local_names = type_bindings
             .iter()
             .map(|binding| match binding {
-                TypeImportBinding::Default(local) => local.clone(),
+                TypeImportBinding::Default { local, .. } => local.clone(),
                 TypeImportBinding::Named(binding) => binding.local.clone(),
             })
             .collect();

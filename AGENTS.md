@@ -84,6 +84,16 @@ original source, hvigor-generated output/cache, and arkdown-generated
 output/cache. Keep the comparison focused on the failing module or stage, but do
 not skip it.
 
+Generated output and cache comparisons locate a difference; they do not define
+the implementation. Before writing a parity fix, trace the current upstream
+source from its public hook/task through the owning transformation, resolver,
+writer, cache, or SDK handoff and implement that observed algorithm and data
+semantics in the corresponding arkdown owner. Do not infer a new rule from a
+fixture, a VLQ token, or a passing artifact and do not add heuristic branches
+that have no upstream source owner. If the current upstream source does not
+define the behavior, stop implementation and ask the user for direction rather
+than inventing or preserving speculative logic.
+
 Do not invent fallback behavior to make a sample pass. Do not hardcode project
 paths, package layouts, native library declaration directories, cache paths, or
 Example-specific locations. Paths and specifiers must come from manifests,

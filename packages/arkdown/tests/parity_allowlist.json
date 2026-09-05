@@ -1,74 +1,8 @@
 {
   "entries": [
     {
-      "fixture": "minimal-hap",
-      "reason": "sourceMaps.map mappings differ in synthetic-call/lastSourcePosition segments (hvigor TS emit maps finalizeConstruction/component pop closures; arkdown TypeScriptSourceBoundaryMapper does not emit those yet \u2014 tracked in hvigor-remaining-diff-audit.md D-class)",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "minimal-hap-release",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments (same as minimal-hap)",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "component-v2-lifecycle-hap",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "bc-har-dep-hap",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "widget-hap",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "multi-module-hap",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "share-config-hap",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "startup-config-hap",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "bytecode-har",
-      "reason": "compiler cache handoff files (filesInfo.txt module order) are nondeterministic in hvigor (async Rollup resolver timing); abc content is byte-identical",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
       "fixture": "release-obfuscation-hap",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "component-v2-lifecycle-incremental",
-      "reason": "sourceMaps.map synthetic-call/lastSourcePosition mapping segments (incremental variant)",
-      "owner": "arkdown",
-      "expires": "2026-09-30"
-    },
-    {
-      "fixture": "minimal-hap-ohos-test",
-      "reason": "modules.abc debug-info line numbers differ by template formatting (hvigor TS emit vs OXC codegen for the ohosTest templates); res module.json resource ID segments differ (hvigor AppScope segment 0x2000000 vs module segment)",
+      "reason": "ArkGuard merged configuration and reserved-name semantics over-obfuscate file paths, identifiers, and properties, changing ABC, source maps, filesInfo/modules.cache, and entry-nameCache.json",
       "owner": "arkdown",
       "expires": "2026-09-30"
     }
