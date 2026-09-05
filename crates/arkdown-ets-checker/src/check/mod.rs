@@ -308,7 +308,7 @@ impl FileChecker<'_> {
                             let names: Vec<Box<str>> =
                                 params.iter().map(|p| p.name.clone()).collect();
                             let body = Lowerer::with_params(&mut self.view.sink, &resolver, names)
-                                .lower_interface(&iface);
+                                .lower_interface(iface);
                             let index = u32::try_from(self.local_generics.len()).unwrap();
                             self.local_generics.push(LocalGeneric {
                                 name: name.into(),
@@ -325,8 +325,8 @@ impl FileChecker<'_> {
                             });
                             TypeNameEntry::LocalGeneric(index)
                         } else {
-                            let ty = Lowerer::new(&mut self.view.sink, &resolver)
-                                .lower_interface(&iface);
+                            let ty =
+                                Lowerer::new(&mut self.view.sink, &resolver).lower_interface(iface);
                             TypeNameEntry::Inline(self.name_wrap(name, ty))
                         };
                         self.type_names.insert(name.into(), entry);
@@ -1128,11 +1128,11 @@ impl FileChecker<'_> {
             }
             Statement::ExportDeclaration(export) => match &export.declaration {
                 Declaration::VariableDeclaration(var) => {
-                    self.check_variable_declaration(&var);
+                    self.check_variable_declaration(var);
                 }
-                Declaration::FunctionDeclaration(func) => self.check_function(&func),
-                Declaration::ClassDeclaration(class) => self.check_class(&class),
-                Declaration::StructStatement(structure) => self.check_struct(&structure),
+                Declaration::FunctionDeclaration(func) => self.check_function(func),
+                Declaration::ClassDeclaration(class) => self.check_class(class),
+                Declaration::StructStatement(structure) => self.check_struct(structure),
                 Declaration::TSEnumDeclaration(enum_decl) => {
                     self.bind_class_or_enum(enum_decl.id.name.as_str());
                 }

@@ -992,7 +992,7 @@ impl<'a> ArkguardModuleRunner<'a> {
                         end_column.saturating_sub(1),
                     )
                     .filter(|token| token.get_source_id().is_some());
-                if start.is_none() && name == value || end.is_none() && name == value {
+                if (start.is_none() || end.is_none()) && name == value {
                     continue;
                 }
                 let remapped_key = match (start, end) {
@@ -1294,25 +1294,24 @@ impl ArkguardTypeScriptPrinter {
         shape
             .empty_bodies
             .iter()
-            .filter_map(|(span, arrow)| {
-                (Self::text(generated, *span) == "{}").then(|| {
-                    let replacement = if *arrow {
-                        "{ }".to_string()
-                    } else {
-                        let line_start = generated[..span.start as usize]
-                            .rfind('\n')
-                            .map_or(0, |index| index + 1);
-                        let indentation = generated[line_start..span.start as usize]
-                            .chars()
-                            .take_while(|character| character.is_whitespace())
-                            .collect::<String>();
-                        format!("{{\n{indentation}}}")
-                    };
-                    ArkguardPrinterEdit {
-                        span: *span,
-                        replacement,
-                    }
-                })
+            .filter(|(span, _)| Self::text(generated, *span) == "{}")
+            .map(|(span, arrow)| {
+                let replacement = if *arrow {
+                    "{ }".to_string()
+                } else {
+                    let line_start = generated[..span.start as usize]
+                        .rfind('\n')
+                        .map_or(0, |index| index + 1);
+                    let indentation = generated[line_start..span.start as usize]
+                        .chars()
+                        .take_while(|character| character.is_whitespace())
+                        .collect::<String>();
+                    format!("{{\n{indentation}}}")
+                };
+                ArkguardPrinterEdit {
+                    span: *span,
+                    replacement,
+                }
             })
             .collect()
     }
