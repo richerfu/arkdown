@@ -130,11 +130,18 @@ impl PackageAcquisitionInventory {
     }
 }
 
-/// Builds the complete OHPM package inventory for project and module roots.
+/// Builds the complete OHPM package inventory for module dependency roots.
+///
+/// The project-root manifest is captured as metadata, but its dependency list
+/// is not an install request. Hvigor resolves compilation dependencies from
+/// each module and merely uses the project installation tree as a lookup
+/// fallback; its assemble task does not fetch packages declared only by the
+/// root manifest.
 pub(crate) struct PackageAcquisitionPlanner<'a> {
     project_root: &'a Path,
     package_roots: Vec<PathBuf>,
     mode: AcquisitionMode,
+    acquire_remote_dev_dependencies: bool,
 }
 
 impl<'a> PackageAcquisitionPlanner<'a> {
@@ -150,7 +157,17 @@ impl<'a> PackageAcquisitionPlanner<'a> {
             project_root,
             package_roots,
             mode,
+            acquire_remote_dev_dependencies: false,
         }
+    }
+
+    /// Allow a test build to acquire dev-only packages from the global cache
+    /// or registry. Ordinary assemble builds only consume dev dependencies
+    /// already materialized in an issuer's `oh_modules`, matching hvigor's
+    /// separation between its install wrapper and production task graph.
+    pub(crate) fn with_remote_dev_dependencies(mut self, enabled: bool) -> Self {
+        self.acquire_remote_dev_dependencies = enabled;
+        self
     }
 
     pub(crate) fn acquire(self) -> Result<PackageAcquisitionInventory, PackageAcquisitionError> {
@@ -160,6 +177,9 @@ impl<'a> PackageAcquisitionPlanner<'a> {
             .map_err(|error| PackageAcquisitionError::Resolver(Box::new(error)))?;
         let mut inventory = PackageAcquisitionInventory::default();
         let mut pending = VecDeque::new();
+
+        let project_package = PackageSnapshot::from_root(self.project_root)?.map(Arc::new);
+        inventory.insert_package(self.project_root.to_path_buf(), project_package);
 
         for root in &self.package_roots {
             let package = PackageSnapshot::from_root(root)?.map(Arc::new);
@@ -213,7 +233,13 @@ impl<'a> PackageAcquisitionPlanner<'a> {
                 }
             }
 
-            let groups = remote_groups.into_values().collect::<Vec<_>>();
+            let groups = remote_groups
+                .into_values()
+                .filter(|indices| {
+                    self.acquire_remote_dev_dependencies
+                        || indices.iter().any(|index| !wave[*index].is_dev)
+                })
+                .collect::<Vec<_>>();
             let remote_results = groups
                 .par_iter()
                 .map(|indices| {
@@ -236,7 +262,9 @@ impl<'a> PackageAcquisitionPlanner<'a> {
             }
 
             for (task, result) in wave.into_iter().zip(resolved) {
-                let result = result.expect("every acquisition task has a local or remote result");
+                let Some(result) = result else {
+                    continue;
+                };
                 let Some(root) = result.root else {
                     continue;
                 };
@@ -390,5 +418,24 @@ mod tests {
             inventory.package(&nested).expect("nested manifest").name,
             "nested"
         );
+    }
+
+    #[test]
+    fn ordinary_build_does_not_acquire_uninstalled_dev_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        let entry = project.join("entry");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(
+            entry.join("oh-package.json5"),
+            r#"{ name: "entry", devDependencies: { "@ohos/hypium": "1.0.24" } }"#,
+        )
+        .unwrap();
+
+        let inventory = PackageAcquisitionPlanner::new(project, [entry], AcquisitionMode::Offline)
+            .acquire()
+            .expect("ordinary assemble must not require a remote test dependency");
+
+        assert!(inventory.resolved_roots.is_empty());
     }
 }

@@ -106,9 +106,9 @@ impl<'a> UnitTestTemplateWriter<'a> {
     }
 
     /// Write the `ohosTest` template tree into
-    /// `<module>/.test/<product>/intermediates/src/ohosTest/`. API >= 11 uses
+    /// `<module>/build/<product>/intermediates/src/ohosTest/`. API >= 11 uses
     /// the `@kit.*` template variants; older SDKs use the plain templates.
-    pub fn generate_ohos_test(&self, api_version: u32) -> Result<()> {
+    pub fn generate_ohos_test(&self, api_version: u32, is_cross_platform: bool) -> Result<()> {
         let layout = ModuleBuildLayout::for_ohos_test_template(self.module_root, self.product_name);
         let runner_dir = layout.ohos_test_runner_dir();
         let ability_dir = layout.ohos_test_ability_dir();
@@ -126,7 +126,11 @@ impl<'a> UnitTestTemplateWriter<'a> {
         }
         let (runner_src, ability_src) = if api_version >= 11 {
             (
-                OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE,
+                if is_cross_platform {
+                    OPEN_HARMONY_TEST_RUNNER_NO_MOCK_TEMPLATE
+                } else {
+                    OPEN_HARMONY_TEST_RUNNER_MOCK_TEMPLATE
+                },
                 TEST_ABILITY_WITH_KIT_TEMPLATE,
             )
         } else {
@@ -135,16 +139,48 @@ impl<'a> UnitTestTemplateWriter<'a> {
                 TEST_ABILITY_TEMPLATE_OHOS,
             )
         };
-        std::fs::write(runner_dir.join("OpenHarmonyTestRunner.ets"), runner_src)?;
-        std::fs::write(ability_dir.join("TestAbility.ets"), ability_src)?;
-        std::fs::write(pages_dir.join("Index.ets"), OHOS_TEST_INDEX_TEMPLATE)?;
-        std::fs::write(element_dir.join("color.json"), OHOS_TEST_COLOR_TEMPLATE)?;
-        std::fs::write(element_dir.join("string.json"), OHOS_TEST_STRING_TEMPLATE)?;
+        std::fs::write(
+            runner_dir.join("OpenHarmonyTestRunner.ets"),
+            Self::render_ohos_test_template(runner_src),
+        )?;
+        std::fs::write(
+            ability_dir.join("TestAbility.ets"),
+            Self::render_ohos_test_template(ability_src),
+        )?;
+        std::fs::write(
+            pages_dir.join("Index.ets"),
+            Self::render_ohos_test_template(OHOS_TEST_INDEX_TEMPLATE),
+        )?;
+        std::fs::write(
+            element_dir.join("color.json"),
+            Self::render_ohos_test_template(OHOS_TEST_COLOR_TEMPLATE),
+        )?;
+        std::fs::write(
+            element_dir.join("string.json"),
+            Self::render_ohos_test_template(OHOS_TEST_STRING_TEMPLATE),
+        )?;
         std::fs::write(
             profile_dir.join("test_pages.json"),
-            OHOS_TEST_PAGES_TEMPLATE,
+            Self::render_ohos_test_template(OHOS_TEST_PAGES_TEMPLATE),
         )?;
         Ok(())
+    }
+
+    /// The upstream `@ohos/coverage` package stores these as plain template
+    /// files and copies their bytes verbatim. The embedded Rust literals keep
+    /// one source line per escaped template line for reviewability; materialize
+    /// those lines without Rust-source indentation or a trailing newline.
+    fn render_ohos_test_template(template: &str) -> String {
+        let mut rendered = String::with_capacity(template.len());
+        let mut first = true;
+        for line in template.split('\n').skip(1).step_by(2) {
+            if !first {
+                rendered.push('\n');
+            }
+            first = false;
+            rendered.push_str(line.strip_prefix("    ").unwrap_or(line));
+        }
+        rendered
     }
 
     /// Whether the generated `ohosTest` template exists.
@@ -864,6 +900,60 @@ const OPEN_HARMONY_TEST_RUNNER_TEMPLATE: &str = "
       }).catch((err: string) => {\n
         hilog.info(0x0000, tag, '%{public}s', `startAbility error: ${err}`);\n
       })\n
+    }
+  ";
+
+/// `@ohos/coverage/res/template/OpenHarmonyTestRunner_nomock.ets` — API 11+
+/// ArkUI-X projects do not use the platform-only resource-manager mock path.
+const OPEN_HARMONY_TEST_RUNNER_NO_MOCK_TEMPLATE: &str = "
+    import { abilityDelegatorRegistry, TestRunner } from '@kit.TestKit';\n
+    import { Want } from '@kit.AbilityKit';\n
+    import { hilog } from '@kit.PerformanceAnalysisKit';\n
+    \n
+    let abilityDelegator: abilityDelegatorRegistry.AbilityDelegator | undefined = undefined\n
+    let abilityDelegatorArguments: abilityDelegatorRegistry.AbilityDelegatorArgs | undefined = undefined\n
+    \n
+    async function onAbilityCreateCallback() {\n
+      hilog.info(0x0000, 'testTag', '%{public}s', 'onAbilityCreateCallback');\n
+    }\n
+    \n
+    async function addAbilityMonitorCallback(err : Error) {\n
+      hilog.info(0x0000, 'testTag', 'addAbilityMonitorCallback : %{public}s', JSON.stringify(err) ?? '');\n
+    }\n
+    \n
+    export default class OpenHarmonyTestRunner implements TestRunner {\n
+      constructor() {\n
+      }\n
+    \n
+      onPrepare() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'OpenHarmonyTestRunner OnPrepare ');\n
+      }\n
+    \n
+      async onRun() {\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'OpenHarmonyTestRunner onRun run');\n
+        abilityDelegatorArguments = abilityDelegatorRegistry.getArguments()\n
+        abilityDelegator = abilityDelegatorRegistry.getAbilityDelegator()\n
+        const bundleName = abilityDelegatorArguments.bundleName;\n
+        const testAbilityName = 'TestAbility';\n
+        const moduleName = abilityDelegatorArguments.parameters['-m'];\n
+        let lMonitor: abilityDelegatorRegistry.AbilityMonitor = {\n
+          abilityName: testAbilityName,\n
+          onAbilityCreate: onAbilityCreateCallback,\n
+          moduleName: moduleName\n
+        };\n
+        abilityDelegator.addAbilityMonitor(lMonitor, addAbilityMonitorCallback)\n
+        const want: Want = {\n
+          bundleName: bundleName,\n
+          abilityName: testAbilityName,\n
+          moduleName: moduleName\n
+        };\n
+        abilityDelegator = abilityDelegatorRegistry.getAbilityDelegator();\n
+        abilityDelegator.startAbility(want, (err, data) => {\n
+          hilog.info(0x0000, 'testTag', 'startAbility : err : %{public}s', JSON.stringify(err) ?? '');\n
+          hilog.info(0x0000, 'testTag', 'startAbility : data : %{public}s',JSON.stringify(data) ?? '');\n
+        })\n
+        hilog.info(0x0000, 'testTag', '%{public}s', 'OpenHarmonyTestRunner onRun end');\n
+      }\n
     }
   ";
 

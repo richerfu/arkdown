@@ -80,6 +80,9 @@ pub struct BuildSessionBuilder {
     pub parameter_file_override: Option<PathBuf>,
     /// Explicit ArkTS language selected by the arkdown invocation.
     pub arkts_language_version: ArktsLanguageVersion,
+    /// Whether test-only packages may be acquired beyond issuer-local
+    /// `oh_modules` installations.
+    pub acquire_remote_dev_dependencies: bool,
 }
 
 impl BuildSessionBuilder {
@@ -90,6 +93,7 @@ impl BuildSessionBuilder {
             ohpm_mode: crate::package::acquisition::AcquisitionMode::Online,
             parameter_file_override: None,
             arkts_language_version: ArktsLanguageVersion::default(),
+            acquire_remote_dev_dependencies: false,
         }
     }
 
@@ -109,6 +113,12 @@ impl BuildSessionBuilder {
     /// Callers must opt in explicitly; the builder default remains ArkTS 1.1.
     pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
         self.arkts_language_version = version;
+        self
+    }
+
+    /// Enable remote acquisition for test-only dependencies.
+    pub fn with_remote_dev_dependencies(mut self, enabled: bool) -> Self {
+        self.acquire_remote_dev_dependencies = enabled;
         self
     }
 
@@ -132,6 +142,7 @@ impl BuildSessionBuilder {
             &self.config,
             self.parameter_file_override.clone(),
             Some(self.ohpm_mode),
+            self.acquire_remote_dev_dependencies,
         )?;
 
         // Phase 2: Build SDK snapshot.

@@ -100,6 +100,8 @@ pub struct BundleInput {
     pub runtime_packages: BundleRuntimePackageInfo,
     /// ByteCode HAR package aliases from `loader.json#byteCodeHarInfo`.
     pub byte_code_har_packages: Vec<String>,
+    /// Whether the current module itself is compiled as a ByteCode HAR.
+    pub byte_code_har: bool,
     /// Absolute module-source roots whose reachable graph is inspected for
     /// system/native imports when `buildOption.preloadSystemSo` is enabled.
     ///
@@ -250,7 +252,7 @@ impl Default for BundleOutputOptions {
 ///
 /// Corresponds to `rollup-cache-service.js` cache configuration.
 /// The `cache_directory` is the hvigor `build/default/cache/bundle/` directory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BundleCachePolicy {
     /// Cache root directory (e.g., `build/default/cache/bundle/`).
     pub cache_directory: Option<PathBuf>,
@@ -265,17 +267,6 @@ pub struct BundleCachePolicy {
     pub compile_env_key: String,
 }
 
-impl Default for BundleCachePolicy {
-    fn default() -> Self {
-        Self {
-            cache_directory: None,
-            read_cache: false,
-            write_cache: false,
-            compile_env_key: String::new(),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // SourceMapPolicy
 // ---------------------------------------------------------------------------
@@ -286,20 +277,15 @@ impl Default for BundleCachePolicy {
 ///
 /// Corresponds to `getOutputConfig.sourcemap` configuration and
 /// `sourceMaps.map` output path in hvigor release builds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceMapPolicy {
     /// No source maps generated.
+    #[default]
     None,
     /// Inline source maps embedded in each JS chunk.
     Inline,
     /// External source map files (`sourceMaps.map`).
     External,
-}
-
-impl Default for SourceMapPolicy {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +503,7 @@ mod tests {
                 },
                 runtime_packages: BundleRuntimePackageInfo::default(),
                 byte_code_har_packages: Vec::new(),
+                byte_code_har: false,
                 preload_system_so_entries: Vec::new(),
                 mock_config: None,
             },

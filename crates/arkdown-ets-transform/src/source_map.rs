@@ -202,6 +202,18 @@ mod tests {
     }
 
     #[test]
+    fn javascript_identity_map_matches_rolldown_hires_crlf_boundaries() {
+        let source_map = JavaScriptIdentitySourceMapBuilder::new("/*\r\nx", "index.js").build();
+        let value: serde_json::Value = serde_json::from_str(&source_map).expect("source map JSON");
+
+        assert_eq!(value["mappings"], "AAAA,CAAC,CAAC,CAAC;AACH");
+        assert_eq!(value["file"], "index.js");
+        assert_eq!(value["sources"], serde_json::json!(["index.js"]));
+        assert!(value.get("sourceRoot").is_none());
+        assert!(value.get("sourcesContent").is_none());
+    }
+
+    #[test]
     fn standard_export_class_final_brace_maps_only_printer_end_position() {
         let source = "export default class Example {\n    run(): void {\n    }\n}\n";
         let source_map = HvigorStandardSourceMapBuilder::new(source, source, "Example.ets")
@@ -353,6 +365,14 @@ use oxc_span::{GetSpan, SourceType};
 
 /// Build a per-token source map for `source` (identity mapping).
 pub struct TokenSourceMapBuilder<'a> {
+    source: &'a str,
+    id: &'a str,
+}
+
+/// Rolldown's unchanged-JavaScript combined map, which hvigor preserves before
+/// ModuleSourceFile rewrites requests. Its MagicString-compatible high
+/// resolution map owns every UTF-16 column plus the line-end boundary.
+pub struct JavaScriptIdentitySourceMapBuilder<'a> {
     source: &'a str,
     id: &'a str,
 }
@@ -620,6 +640,37 @@ impl<'a> TokenSourceMapBuilder<'a> {
             })
             .collect::<Vec<_>>();
         Some(EtsSourceMapBuilder::new(self.id, 0, &entries).build())
+    }
+}
+
+impl<'a> JavaScriptIdentitySourceMapBuilder<'a> {
+    pub fn new(source: &'a str, id: &'a str) -> Self {
+        Self { source, id }
+    }
+
+    pub fn build(&self) -> String {
+        let source = ArtifactPathSerializer::rel_to_slash(Path::new(self.id));
+        let file = Path::new(self.id)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(self.id);
+        let mut builder = SourceMapBuilder::default();
+        builder.set_file(file);
+        let source_id = builder.set_source_and_content(&source, "");
+        let mut line = 0_u32;
+        let mut column = 0_u32;
+        for code_unit in self.source.encode_utf16() {
+            builder.add_token(line, column, line, column, Some(source_id), None);
+            if code_unit == u16::from(b'\n') {
+                line += 1;
+                column = 0;
+            } else {
+                column += 1;
+            }
+        }
+        let mut source_map = builder.into_sourcemap();
+        source_map.set_source_contents(vec![None]);
+        source_map.to_json_string()
     }
 }
 

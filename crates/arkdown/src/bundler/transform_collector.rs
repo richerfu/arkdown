@@ -7,9 +7,11 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use arkdown_cache::CacheKeyMaterial;
 use arkdown_ets_transform::{CrossplatformSourceCollection, InsightIntentSourceMetadata};
 use rolldown_plugin::{
-    HookTransformArgs, HookTransformReturn, HookUsage, Plugin, SharedTransformPluginContext,
+    HookTransformArgs, HookTransformReturn, HookUsage, Plugin, PluginHookMeta,
+    PluginOrder as RolldownPluginOrder, SharedTransformPluginContext,
 };
 use rolldown_utils::dashmap::FxDashMap;
 
@@ -27,17 +29,27 @@ pub(crate) struct HvigorModuleTransformStore {
     pub(crate) crossplatform_collections: Arc<FxDashMap<String, CrossplatformSourceCollection>>,
 }
 
+pub(crate) struct HvigorModuleTransformRecord {
+    pub(crate) module_id: String,
+    pub(crate) module_source_code: Option<Arc<str>>,
+    pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) emits_javascript: bool,
+    pub(crate) is_shared_module: bool,
+    pub(crate) insight_intent: InsightIntentSourceMetadata,
+    pub(crate) crossplatform_collection: CrossplatformSourceCollection,
+}
+
 impl HvigorModuleTransformStore {
-    pub(crate) fn record(
-        &self,
-        module_id: String,
-        module_source_code: Option<Arc<str>>,
-        source_map: Option<Arc<str>>,
-        emits_javascript: bool,
-        is_shared_module: bool,
-        insight_intent: InsightIntentSourceMetadata,
-        crossplatform_collection: CrossplatformSourceCollection,
-    ) {
+    pub(crate) fn record(&self, record: HvigorModuleTransformRecord) {
+        let HvigorModuleTransformRecord {
+            module_id,
+            module_source_code,
+            source_map,
+            emits_javascript,
+            is_shared_module,
+            insight_intent,
+            crossplatform_collection,
+        } = record;
         if let Some(module_source_code) = module_source_code {
             self.module_source_overrides
                 .insert(module_id.clone(), module_source_code);
@@ -151,9 +163,85 @@ impl HvigorModuleTransformCollector {
         };
         if let Some(mappings) = mappings {
             value["mappings"] = serde_json::Value::String(mappings);
-            return serde_json::to_string(&value).unwrap_or(raw_map);
         }
-        raw_map
+        serde_json::to_string(&value).unwrap_or(raw_map)
+    }
+
+    pub(crate) fn normalize_runtime_javascript_source_map(
+        raw_map: String,
+        has_trailing_newline: bool,
+    ) -> String {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw_map) else {
+            return raw_map;
+        };
+        if has_trailing_newline {
+            if let Some(mappings) = value
+                .get("mappings")
+                .and_then(serde_json::Value::as_str)
+                .filter(|mappings| !mappings.ends_with(';'))
+            {
+                value["mappings"] = serde_json::Value::String(format!("{mappings};"));
+            }
+        }
+        if value.get("sourceRoot").and_then(serde_json::Value::as_str) == Some("") {
+            value
+                .as_object_mut()
+                .expect("source map object")
+                .remove("sourceRoot");
+        }
+        serde_json::to_string(&value).unwrap_or(raw_map)
+    }
+
+    pub(crate) fn select_transform_source_map(
+        code: &str,
+        transform_code_hash: &str,
+        transform_source_map: Option<&str>,
+        combined_source_map: String,
+    ) -> String {
+        let Some(transform_source_map) = transform_source_map else {
+            return combined_source_map;
+        };
+        if CacheKeyMaterial::compute_content_hash(code) != transform_code_hash {
+            return combined_source_map;
+        }
+        if Self::combined_map_is_projection(transform_source_map, &combined_source_map) {
+            transform_source_map.to_string()
+        } else {
+            combined_source_map
+        }
+    }
+
+    fn combined_map_is_projection(transform_source_map: &str, combined_source_map: &str) -> bool {
+        let (Ok(transform), Ok(combined)) = (
+            rolldown_sourcemap::OwnedSourceMap::from_json_string(transform_source_map),
+            rolldown_sourcemap::OwnedSourceMap::from_json_string(combined_source_map),
+        ) else {
+            return false;
+        };
+        let lookup = transform.generate_lookup_table();
+        let mut compared_source_token = false;
+        for combined_token in combined.get_tokens() {
+            let Some(source_id) = combined_token.get_source_id() else {
+                continue;
+            };
+            compared_source_token = true;
+            let Some(transform_token) = transform.lookup_token(
+                &lookup,
+                combined_token.get_dst_line(),
+                combined_token.get_dst_col(),
+            ) else {
+                return false;
+            };
+            if transform_token.get_source_id().is_none()
+                || transform_token.get_src_line() != combined_token.get_src_line()
+                || transform_token.get_src_col() != combined_token.get_src_col()
+                || transform.get_source(transform_token.get_source_id().unwrap_or_default())
+                    != combined.get_source(source_id)
+            {
+                return false;
+            }
+        }
+        compared_source_token
     }
 }
 
@@ -164,6 +252,12 @@ impl Plugin for HvigorModuleTransformCollector {
 
     fn register_hook_usage(&self) -> HookUsage {
         HookUsage::Transform
+    }
+
+    fn transform_meta(&self) -> Option<PluginHookMeta> {
+        Some(PluginHookMeta {
+            order: Some(RolldownPluginOrder::Post),
+        })
     }
 
     fn transform(
@@ -186,12 +280,24 @@ impl Plugin for HvigorModuleTransformCollector {
             // comment contributes to an emitted JavaScript module. Restore
             // that boundary for SDK `Program.emit` output; comment-only input
             // is its one-line `"mappings":";"` sentinel form.
-            let raw_map = ctx.get_combined_sourcemap().to_json_string();
+            let combined_source_map = ctx.get_combined_sourcemap().to_json_string();
+            let raw_map = if !metadata.emits_javascript {
+                Self::select_transform_source_map(
+                    args.code.as_str(),
+                    &metadata.transform_code_hash,
+                    metadata.transform_source_map.as_deref(),
+                    combined_source_map,
+                )
+            } else {
+                combined_source_map
+            };
             let raw_map = if metadata.emits_javascript {
                 Self::restore_hvigor_javascript_mapping_lines(
                     raw_map,
                     metadata.is_comment_only_javascript,
                 )
+            } else if is_runtime_javascript {
+                Self::normalize_runtime_javascript_source_map(raw_map, args.code.ends_with('\n'))
             } else {
                 raw_map
             };
@@ -202,32 +308,35 @@ impl Plugin for HvigorModuleTransformCollector {
             // so retain Rolldown's identity/combined map here instead of
             // silently losing every package JS source from sourceMaps.json.
             Some(Arc::<str>::from(
-                ctx.get_combined_sourcemap().to_json_string(),
+                Self::normalize_runtime_javascript_source_map(
+                    ctx.get_combined_sourcemap().to_json_string(),
+                    args.code.ends_with('\n'),
+                ),
             ))
         } else {
             None
         };
         async move {
             if let Some(metadata) = metadata {
-                store.record(
+                store.record(HvigorModuleTransformRecord {
                     module_id,
-                    metadata.module_source_code,
+                    module_source_code: metadata.module_source_code,
                     source_map,
-                    metadata.emits_javascript,
-                    metadata.is_shared_module,
-                    metadata.insight_intent,
-                    metadata.crossplatform_collection,
-                );
+                    emits_javascript: metadata.emits_javascript,
+                    is_shared_module: metadata.is_shared_module,
+                    insight_intent: metadata.insight_intent,
+                    crossplatform_collection: metadata.crossplatform_collection,
+                });
             } else if let Some(source_map) = source_map {
-                store.record(
+                store.record(HvigorModuleTransformRecord {
                     module_id,
-                    None,
-                    Some(source_map),
-                    true,
-                    false,
-                    InsightIntentSourceMetadata::default(),
-                    CrossplatformSourceCollection::default(),
-                );
+                    module_source_code: None,
+                    source_map: Some(source_map),
+                    emits_javascript: true,
+                    is_shared_module: false,
+                    insight_intent: InsightIntentSourceMetadata::default(),
+                    crossplatform_collection: CrossplatformSourceCollection::default(),
+                });
             }
             Ok(None)
         }

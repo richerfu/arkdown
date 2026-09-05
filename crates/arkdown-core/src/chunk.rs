@@ -217,10 +217,12 @@ mod tests {
     #[test]
     fn test_ark_chunk_entry_fields() {
         let idx = ModuleIdx::from_usize(3);
-        let mut chunk = ArkChunk::default();
-        chunk.name = "EntryAbility".to_string();
-        chunk.is_entry = true;
-        chunk.entry_module = Some(idx);
+        let chunk = ArkChunk {
+            name: "EntryAbility".to_string(),
+            is_entry: true,
+            entry_module: Some(idx),
+            ..ArkChunk::default()
+        };
         assert_eq!(chunk.name, "EntryAbility");
         assert!(chunk.is_entry);
         assert_eq!(chunk.entry_module, Some(idx));
@@ -228,9 +230,11 @@ mod tests {
 
     #[test]
     fn test_ark_chunk_dynamic_entry() {
-        let mut chunk = ArkChunk::default();
-        chunk.is_dynamic_entry = true;
-        chunk.facade_module_id = Some("lazy-page".to_string());
+        let chunk = ArkChunk {
+            is_dynamic_entry: true,
+            facade_module_id: Some("lazy-page".to_string()),
+            ..ArkChunk::default()
+        };
         assert!(chunk.is_dynamic_entry);
         assert_eq!(chunk.facade_module_id.as_deref(), Some("lazy-page"));
     }
@@ -274,9 +278,10 @@ mod tests {
 
     #[test]
     fn test_chunk_graph_with_one_chunk() {
-        let mut chunk = ArkChunk::default();
-        chunk.name = "commons".to_string();
-        chunk.is_entry = false;
+        let chunk = ArkChunk {
+            name: "commons".to_string(),
+            ..ArkChunk::default()
+        };
 
         let mut chunks: IndexVec<ChunkIdx, ArkChunk> = IndexVec::new();
         chunks.push(chunk);

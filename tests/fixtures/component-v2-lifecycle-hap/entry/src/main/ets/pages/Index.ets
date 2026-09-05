@@ -1,4 +1,5 @@
-import { ComponentAppear, ComponentDisappear } from "@kit.ArkUI";
+declare const ComponentAppear: MethodDecorator;
+declare const ComponentDisappear: MethodDecorator;
 
 @Entry
 @ComponentV2

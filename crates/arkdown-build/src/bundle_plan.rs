@@ -217,6 +217,7 @@ impl<'a> BundlePlanBuilder<'a> {
                 source_map_packages: source_map,
                 runtime_packages: runtime,
                 byte_code_har_packages: loader_json.byte_code_har_info.keys().cloned().collect(),
+                byte_code_har: loader_json.byte_code_har.unwrap_or(false),
                 preload_system_so_entries: Vec::new(),
                 mock_config: Some(mock_config),
             },

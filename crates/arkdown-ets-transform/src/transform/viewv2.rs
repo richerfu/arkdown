@@ -16,7 +16,7 @@ use oxc_ast::ast::{
     StructStatement, TSAccessibility, TSIndexSignature, TSType, TSTypeAnnotation,
 };
 use oxc_ast::builder::AstBuilder;
-use oxc_span::SPAN;
+use oxc_span::{Span, SPAN};
 
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, CustomComponentUpdateProps,
@@ -35,7 +35,7 @@ use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
 use crate::transform::local_builder::LocalBuilderRuntimeEmitter;
 use crate::transform::viewpu_emit::{
-    GeneratedViewpuName, ViewpuAstBuilder, ViewpuMemberAstEmitter,
+    GeneratedViewpuName, ViewpuAstBuilder, ViewpuClassDeclaration, ViewpuMemberAstEmitter,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -244,6 +244,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
 
         let mut fields = Vec::new();
         let mut build_body = None;
+        let mut build_method_span = SPAN;
         let mut has_build = false;
         let mut builder_methods = Vec::new();
         let mut source_members = Vec::new();
@@ -293,6 +294,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     if self.is_method_named(method, GeneratedViewpuName::BUILD) =>
                 {
                     has_build = true;
+                    build_method_span = method.span;
                     let plan = BuildBodyPlan::component_v2(
                         method.value.body.as_deref(),
                         self.source_text,
@@ -429,11 +431,17 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
 
         let ast = AstBuilder::new(self.allocator);
         let mut elements = OxcVec::new_in(&ast);
+        let entry_span = self
+            .stmt
+            .decorators
+            .iter()
+            .find(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::ENTRY)
+            .map_or(SPAN, |decorator| decorator.span);
 
         if let Some(reuse_pool) = self.global_reuse_pool {
             elements.push(GlobalReusePoolPropertyEmitter::new(reuse_pool).element(self.allocator));
         }
-        elements.push(self.constructor_element(constructor_method, &fields));
+        elements.push(self.constructor_element(constructor_method, &fields, entry_span));
         elements.push(self.reset_state_vars_on_reuse_element(
             &fields,
             &reuse_resets,
@@ -446,7 +454,11 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     elements.push(self.field_property_element(&fields[index]));
                 }
                 V2SourceMember::InitialRender => {
-                    elements.push(self.initial_render_element(name, build_body.as_ref())?);
+                    elements.push(self.initial_render_element(
+                        name,
+                        build_body.as_ref(),
+                        build_method_span,
+                    )?);
                 }
                 V2SourceMember::Builder(index) => {
                     let (method_name, method, body, kind) = &builder_methods[index];
@@ -481,15 +493,17 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             statements.push(self.reusable_v2_helper_statement());
         }
         statements.push(
-            ViewpuMemberAstEmitter::new(self.allocator)
-                .class_declaration_statement_with_decorators(
-                    self.allocator.alloc_str(name),
-                    GeneratedViewpuName::VIEW_V2_BASE,
+            ViewpuMemberAstEmitter::new(self.allocator).class_declaration_statement(
+                ViewpuClassDeclaration {
+                    name: self.allocator.alloc_str(name),
+                    name_span: self.stmt.id.span,
+                    super_class_name: GeneratedViewpuName::VIEW_V2_BASE,
                     elements,
-                    self.class_decorators(),
-                    self.is_exported,
-                    self.is_default,
-                ),
+                    decorators: self.class_decorators(),
+                    is_exported: self.is_exported,
+                    is_default_export: self.is_default,
+                },
+            ),
         );
         Ok(statements)
     }
@@ -851,6 +865,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         &self,
         constructor_method: Option<&MethodDefinition<'_>>,
         fields: &[V2Field<'_>],
+        entry_span: Span,
     ) -> ClassElement<'b> {
         let builder = ViewpuAstBuilder::new(self.allocator);
         let mut stmts = builder.statements();
@@ -896,12 +911,14 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             builder.formal_parameter(&self.runtime_names.params_lambda),
             builder.formal_parameter(GeneratedViewpuName::EXTRA_INFO),
         ]);
-        ViewpuMemberAstEmitter::new(self.allocator).method_with_params(
+        ViewpuMemberAstEmitter::new(self.allocator).method_with_params_and_source_span(
             GeneratedViewpuName::CONSTRUCTOR,
             params,
             stmts,
             false,
             None,
+            entry_span,
+            SPAN,
         )
     }
 
@@ -1020,6 +1037,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         &self,
         component_name: &str,
         build_body: Option<&BuildBodyPlan<'_>>,
+        build_method_span: Span,
     ) -> Result<ClassElement<'b>, ComponentV2Error> {
         let mut stmts = build_body
             .map(|body| BuildBodyInfo::plan(body.clone()).statements(self.allocator))
@@ -1041,12 +1059,14 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         }
         let builder = ViewpuAstBuilder::new(self.allocator);
         Ok(
-            ViewpuMemberAstEmitter::new(self.allocator).method_with_params(
+            ViewpuMemberAstEmitter::new(self.allocator).method_with_params_and_source_span(
                 GeneratedViewpuName::INITIAL_RENDER,
                 builder.formal_parameters(),
                 stmts,
                 false,
                 None,
+                build_method_span,
+                SPAN,
             ),
         )
     }

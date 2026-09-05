@@ -406,7 +406,7 @@ impl LoaderJson {
             compile_entry.extend(runtime_entry_sources.iter().cloned());
         } else if target_name == "ohosTest" {
             // The `ohosTest` target compiles the generated template tree
-            // (`.test/<product>/intermediates/src/ohosTest/ets/`) — the
+            // (`build/<product>/intermediates/src/ohosTest/ets/`) — the
             // TestAbility srcEntry points there and the test pages live in
             // the template `resources`. Relative `./ets/...` srcEntry values
             // resolve against the module ets root, which does not exist for
@@ -719,6 +719,16 @@ impl LoaderJson {
                 path.file_name() == Some(OsStr::new("ResourceTable.ts"))
                     || path.strip_prefix(&mock_sources_dir).is_ok()
             });
+        } else if target_name == "ohosTest" {
+            // GenerateLoaderJson does not serialize the target's
+            // `src/ohosTest/ets` inventory. Those files remain in the
+            // in-memory `compile_entry` used to seed Rolldown; the SDK target
+            // source roots make them compiler inputs independently of the
+            // loader.json handoff. Component API 23+ still appends the
+            // generated ResourceTable at the task boundary.
+            hvigor_compile_entry.retain(|entry| {
+                Path::new(entry).file_name() == Some(OsStr::new("ResourceTable.ts"))
+            });
         }
         for path in &serialized_compile_entry {
             if let Ok(rel) = path.strip_prefix(&src_main_root) {
@@ -822,14 +832,14 @@ impl LoaderJson {
                     let Some(path) = Self::source_entry_stem_path(&ability_entry.src_entry) else {
                         continue;
                     };
-                    let ohm = Self::bundle_ohm_url(&bundle_name, mod_name, &path);
+                    let ohm = Self::bundle_ohm_url(bundle_name, mod_name, &path);
                     entries.push(ohm);
                 }
                 for ext_ability in &manifest.extension_abilities {
                     let Some(path) = Self::source_entry_stem_path(&ext_ability.src_entry) else {
                         continue;
                     };
-                    let ohm = Self::bundle_ohm_url(&bundle_name, mod_name, &path);
+                    let ohm = Self::bundle_ohm_url(bundle_name, mod_name, &path);
                     entries.push(ohm);
                 }
             }
@@ -917,16 +927,23 @@ impl LoaderJson {
             "UnitTestArkTS"
         } else if matches!(config.output_target, OutputTarget::Preview) {
             "PreviewArkTS"
+        } else if target_name == "ohosTest" {
+            "OhosTestCompileArkTS"
         } else if matches!(config.output_target, OutputTarget::Har) {
             "HarCompileArkTS"
         } else {
             "CompileArkTS"
         };
+        let compile_task_scope = if target_name == "ohosTest" {
+            target_name
+        } else {
+            "default"
+        };
         let compile_arkts_cache = module_layout
             .build_default()
             .join("cache")
-            .join("default")
-            .join(format!("default@{compile_task_name}"))
+            .join(compile_task_scope)
+            .join(format!("{compile_task_scope}@{compile_task_name}"))
             .join(&compile_mode)
             .join(&build_mode_str);
         let cache_path = Self::absolute_dir_path_string(&compile_arkts_cache);

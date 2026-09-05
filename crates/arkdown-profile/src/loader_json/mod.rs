@@ -103,6 +103,11 @@ pub struct LoaderJson {
     /// Incremental update metadata. Empty for the minimal fixture.
     pub update_version_info: IndexMap<String, serde_json::Value>,
     /// Whether HAR compilation uses `packingOptions.customizedOptions.basePackage`.
+    ///
+    /// `compiler/main.js::loadBuildJson` coerces a missing value with `!!`.
+    /// The current GenerateLoaderJson output therefore omits the key for the
+    /// ordinary `false` case and serializes it only for a customized HAR.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub customized_har: bool,
     /// Present only for the HAR currently being emitted as ByteCode HAR.
     ///
@@ -114,10 +119,8 @@ pub struct LoaderJson {
     /// files grouped by the topmost blocking ByteCode HAR package.
     ///
     /// `GenerateLoaderJson.doTaskAction()` writes `pkgName2OtherCompileFiles`
-    /// only on the widget loader JSON (`{...common, pkgName2OtherCompileFiles}`);
-    /// the main `loader.json` never carries the key. The field is therefore
-    /// `None` for the common loader and `Some(_)` (possibly empty) for the
-    /// widget loader when `needSubmitArkTsWidget` is set.
+    /// only for widget transitive-dependency compilation; the common loader
+    /// and an ordinary widget loader omit it.
     #[serde(
         rename = "pkgName2OtherCompileFiles",
         skip_serializing_if = "Option::is_none"
@@ -252,6 +255,10 @@ pub struct LoaderJson {
     /// `oh-exports` declaration.
     #[serde(rename = "oh-exports", default, skip_serializing_if = "Vec::is_empty")]
     pub oh_exports: Vec<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 struct LoaderRouterModuleName<'a> {

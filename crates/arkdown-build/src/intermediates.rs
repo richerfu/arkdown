@@ -652,10 +652,14 @@ impl IntermediateArtifactWriter {
         } else if config.modules.is_empty() {
             module.name.clone()
         } else {
-            config
-                .modules
-                .iter()
-                .map(|module| module.name.as_str())
+            std::iter::once(module.name.as_str())
+                .chain(
+                    config
+                        .modules
+                        .iter()
+                        .filter(|candidate| candidate.name != module.name)
+                        .map(|candidate| candidate.name.as_str()),
+                )
                 .collect::<Vec<_>>()
                 .join(",")
         };
@@ -703,7 +707,12 @@ impl IntermediateArtifactWriter {
             serde_json::Value::String(module_names),
         );
         let resource_tables = self
-            .resource_table_outputs(&module_layout, &module.module_type, &config.output_target)
+            .resource_table_outputs(
+                &module_layout,
+                &module.module_type,
+                &config.output_target,
+                config.sdk_config.sdk_component_api_version,
+            )
             .iter()
             .map(|path| {
                 serde_json::Value::String(IntermediateArtifactWriter::path_string(path.as_path()))
@@ -826,13 +835,16 @@ impl IntermediateArtifactWriter {
         module_layout: &ModuleBuildLayout<'_>,
         module_type: &OhosModuleType,
         output_target: &OutputTarget,
+        sdk_component_api_version: u32,
     ) -> Vec<PathBuf> {
         let mut outputs = vec![module_layout.generated_resource_table_header()];
-        // Latest hvigor ProcessResource asks restool for the TypeScript resource
-        // table for every non-HAR, non-preview module. The installed SDK version
-        // only gates whether GenerateLoaderJson compiles that generated file.
+        // The current GenerateLoaderJson/ProcessResource contract introduces
+        // ResourceTable.ts with component API 23. Older component SDKs ask
+        // restool only for the C header and must not leave a generated TS file
+        // or source-map entry behind.
         if !matches!(module_type, OhosModuleType::Har)
             && !matches!(output_target, OutputTarget::Preview)
+            && sdk_component_api_version >= 23
         {
             outputs.push(module_layout.generated_resource_table_typescript());
         }

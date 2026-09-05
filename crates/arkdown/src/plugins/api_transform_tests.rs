@@ -1,6 +1,6 @@
 use rolldown_sourcemap::{collapse_sourcemaps, OwnedSourceMap};
 
-use super::api_transform::RollupHiresCompatibilityMap;
+use super::api_transform::RollupHiresSourceMap;
 
 #[test]
 fn rollup_hires_map_matches_latest_ide_module_info_chain() {
@@ -16,7 +16,7 @@ export const __BUNDLE_NAME__ = __getCurrentBundleName__();\r\n\
     )
     .expect("latest TypeScript emit map")
     .into_inner();
-    let api_map = RollupHiresCompatibilityMap::new(code, "ModuleInfo.ts", Some(&raw_map)).build();
+    let api_map = RollupHiresSourceMap::new(code, "ModuleInfo.ts", Some(&raw_map)).build();
     let combined = collapse_sourcemaps(&[&raw_map, &api_map]);
 
     let value: serde_json::Value =
@@ -32,7 +32,7 @@ AACjE,CAAA,CAAA,CAAA,CAAA,CAAA,CAAM,CAAC,CAAM,CAAA,CAAA,CAAA,CAAA,CAAA,CAAA,CAAA
 #[test]
 fn rollup_hires_map_is_utf16_identity_without_a_prior_map() {
     let code = "a😀b\r\nc";
-    let map = RollupHiresCompatibilityMap::new(code, "unicode.ts", None).build();
+    let map = RollupHiresSourceMap::new(code, "unicode.ts", None).build();
     let tokens = map
         .get_tokens()
         .map(|token| {

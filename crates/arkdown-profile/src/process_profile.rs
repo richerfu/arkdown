@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn test_process_profile_processor_new_and_default() {
         let _p1 = ProcessProfileProcessor::new();
-        let _p2 = ProcessProfileProcessor::default();
+        let _p2 = ProcessProfileProcessor;
     }
 
     #[test]

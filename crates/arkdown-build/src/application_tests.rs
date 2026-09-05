@@ -394,6 +394,7 @@ fn resource_table_outputs_match_latest_process_resource_contract() {
         &module_layout,
         &arkdown_core::OhosModuleType::Entry,
         &arkdown_core::OutputTarget::Hap,
+        23,
     );
     assert_eq!(
         hap.iter()
@@ -406,14 +407,30 @@ fn resource_table_outputs_match_latest_process_resource_contract() {
         &module_layout,
         &arkdown_core::OhosModuleType::Har,
         &arkdown_core::OutputTarget::Har,
+        23,
     );
     assert_eq!(har.len(), 1);
     let preview = writer.resource_table_outputs(
         &module_layout,
         &arkdown_core::OhosModuleType::Entry,
         &arkdown_core::OutputTarget::Preview,
+        23,
     );
     assert_eq!(preview.len(), 1);
+
+    let legacy_component_sdk = writer.resource_table_outputs(
+        &module_layout,
+        &arkdown_core::OhosModuleType::Entry,
+        &arkdown_core::OutputTarget::Hap,
+        22,
+    );
+    assert_eq!(
+        legacy_component_sdk
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect::<Vec<_>>(),
+        ["ResourceTable.h"]
+    );
 }
 
 #[test]

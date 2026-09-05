@@ -119,10 +119,7 @@ impl<'a> HvigorJsonParser<'a> {
                 |diagnostic| {
                     (
                         diagnostic.to_string(),
-                        diagnostic
-                            .labels
-                            .first()
-                            .map_or(0, |label| label.offset() as u32),
+                        diagnostic.labels.first().map_or(0, |label| label.offset()),
                     )
                 },
             );

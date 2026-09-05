@@ -53,7 +53,7 @@ impl BuildCoordinator {
             if resources_index.is_file() {
                 std::fs::copy(&resources_index, fast_app.join("resources.index"))?;
             }
-            // package context / sdk info (conditional on normalized OHM url)
+            // Package context metadata is emitted only for normalized OHM URLs.
             let use_normalized = module_config
                 .product
                 .build_option
@@ -62,10 +62,6 @@ impl BuildCoordinator {
             let pkg_context = module_layout.pkg_context_info_json();
             if use_normalized && pkg_context.is_file() {
                 std::fs::copy(&pkg_context, fast_app.join("pkgContextInfo.json"))?;
-            }
-            let pkg_sdk_info = module_layout.pkg_sdk_info_json();
-            if !use_normalized && pkg_sdk_info.is_file() {
-                std::fs::copy(&pkg_sdk_info, fast_app.join("pkgSdkInfo.json"))?;
             }
             // module.json with the owning bundle name. Normal packaging extracts
             // this intermediate from the archive, while FastPackage runs before an

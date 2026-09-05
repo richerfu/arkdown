@@ -735,7 +735,6 @@ fn test_loader_json_hvigor_keys() {
         "routerMap",
         "hspResourcesMap",
         "updateVersionInfo",
-        "customizedHar",
         "anBuildOutPut",
         "anBuildMode",
     ]
@@ -787,7 +786,6 @@ fn test_loader_json_serializes_minimal_hvigor_shape() {
   "routerMap": [],
   "hspResourcesMap": {},
   "updateVersionInfo": {},
-  "customizedHar": false,
   "anBuildOutPut": "/project/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
   "anBuildMode": "type"
 }"#
@@ -1512,7 +1510,6 @@ fn test_loader_json_golden_hvigor_key_set() {
         "routerMap",
         "hspResourcesMap",
         "updateVersionInfo",
-        "customizedHar",
         "anBuildOutPut",
         "anBuildMode",
     ]
@@ -1988,7 +1985,7 @@ fn test_loader_json_serialized_compile_entry_is_separate_from_internal_entries()
             .len(),
         0
     );
-    assert_eq!(value["customizedHar"], false);
+    assert!(value.get("customizedHar").is_none());
 }
 
 #[test]
@@ -3418,6 +3415,15 @@ fn test_loader_json_routes_ohos_test_sources_only_to_ohos_test_target() {
     .expect("write test runner");
     fs::write(test_ets.join("index.ets"), "export * from './TestRunner'")
         .expect("write test index");
+    let generated_test_ability = module_root
+        .join("build/default/intermediates/src/ohosTest/ets/testability/TestAbility.ets");
+    fs::create_dir_all(generated_test_ability.parent().unwrap())
+        .expect("create generated ohosTest template root");
+    fs::write(
+        &generated_test_ability,
+        "export default class TestAbility {}",
+    )
+    .expect("write generated TestAbility");
     // A .d.ts file should NOT be included
     fs::write(test_ets.join("TestTypes.d.ts"), "export type T = {}").expect("write types");
 
@@ -3447,12 +3453,29 @@ fn test_loader_json_routes_ohos_test_sources_only_to_ohos_test_target() {
     let ohos_test_loader =
         LoaderJson::try_generate(&ohos_test_config, &module_cfg, &make_manifest(), "ohosTest")
             .expect("generate ohosTest loader");
+    assert!(ohos_test_loader.hvigor_compile_entry.is_empty());
     assert!(ohos_test_loader
-        .hvigor_compile_entry
+        .compile_entry
         .contains(&to_absolute_path_string(&test_ets.join("TestRunner.ets"))));
+    assert!(ohos_test_loader
+        .compile_entry
+        .contains(&to_absolute_path_string(&generated_test_ability)));
     assert!(!ohos_test_loader
         .hvigor_compile_entry
         .contains(&to_absolute_path_string(&test_ets.join("TestTypes.d.ts"))));
+    assert_eq!(
+        ohos_test_loader.cache_path,
+        LoaderJson::absolute_dir_path_string(
+            &module_root
+                .join("build/default/cache/ohosTest/ohosTest@OhosTestCompileArkTS/esmodule/debug")
+        )
+    );
+    assert_eq!(
+        ohos_test_loader.ace_module_build,
+        LoaderJson::absolute_dir_path_string(
+            &module_root.join("build/default/intermediates/loader_out/ohosTest/ets")
+        )
+    );
 
     // Debug mode should NOT include ohosTest sources
     let debug_config = make_config(false);
@@ -3503,9 +3526,8 @@ fn ohos_test_loader_disables_chunks_like_ohos_test_ark_compile() {
     assert!(!ohos_test_loader.support_chunks);
 }
 
-/// 6.24.3 `pkgName2OtherCompileFiles` is a widget-loader-only field: the
-/// common `loader.json` never carries it, the widget loader always does
-/// (`Some(empty)` object when `widget.transitiveDeps` is off).
+/// Latest `pkgName2OtherCompileFiles` is a transitive widget-loader field; an
+/// ordinary widget build and the common loader both omit it.
 #[test]
 fn test_loader_json_pkg_name2_other_compile_files_widget_only() {
     let tmp = tempfile::tempdir().expect("create temp dir");
@@ -3528,14 +3550,12 @@ fn test_loader_json_pkg_name2_other_compile_files_widget_only() {
         "the common loader.json must not carry pkgName2OtherCompileFiles"
     );
 
-    // Widget loader with transitiveDeps off: field present and empty.
-    let mut widget_loader = loader.clone();
-    widget_loader.pkg_name2_other_compile_files = Some(IndexMap::new());
+    // Widget loader with transitiveDeps off: field remains absent.
+    let widget_loader = loader.clone();
     let value = serde_json::to_value(&widget_loader).expect("serialize widget loader");
-    assert_eq!(
-        value.get("pkgName2OtherCompileFiles"),
-        Some(&serde_json::json!({})),
-        "widget loader without transitiveDeps carries an empty object"
+    assert!(
+        value.get("pkgName2OtherCompileFiles").is_none(),
+        "widget loader without transitiveDeps omits the field"
     );
 
     // Widget loader with grouped blocked files.

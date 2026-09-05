@@ -589,7 +589,9 @@ mod tests {
         let bridge = BundleCacheBridge::from_plan("env_v1", Some(tmp.path().to_path_buf()), vec![]);
 
         let snap = CacheGroupSnapshot::from_value(CacheGroupKey::HarNameOhmMap, "har-v1");
-        bridge.commit_group_snapshots(&[snap.clone()]).unwrap();
+        bridge
+            .commit_group_snapshots(std::slice::from_ref(&snap))
+            .unwrap();
 
         // Reload and verify
         let store = CacheGroupsStore::load(tmp.path());

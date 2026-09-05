@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arkdown_path::{AbsPath, ModuleSpecifierText};
 use oxc_allocator::Allocator;
+use oxc_ast_visit::VisitMut;
 use oxc_codegen::{CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
@@ -16,7 +17,8 @@ use crate::api_transform::event_emitter::EventEmitterImportRewriter;
 use crate::error::EtsTransformError;
 use crate::lazy_import::LazyImportRolldownAdapter;
 use crate::module_rewrite::{
-    ModuleAnalyzerKind, TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
+    ModuleAnalyzerKind, ModuleSourceFilePrinter, ModuleSourceFileSpanEraser,
+    TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
 };
 use crate::resource_transform::{
     ResourceReference, ResourceReferenceIndex, ResourceReferenceRewriter, ResourceTransformContext,
@@ -387,6 +389,9 @@ impl RolldownEtsTransformer {
     ) -> Result<Option<RolldownEtsTransformOutput>, EtsTransformError> {
         let source_kind = SourceClassifier::classify(id);
         if !source_kind.is_ets_transform_input() {
+            let javascript_source_map = source_kind
+                .is_javascript_runtime()
+                .then(|| source_map::JavaScriptIdentitySourceMapBuilder::new(code, id).build());
             let crossplatform_collection = if source_kind.is_javascript_runtime()
                 && Path::new(id)
                     .extension()
@@ -417,7 +422,7 @@ impl RolldownEtsTransformer {
                         code: finalization.code.into_owned(),
                         warnings: finalization.warnings,
                         module_source_code: None,
-                        source_map: None,
+                        source_map: javascript_source_map,
                         record_module_source_code: false,
                         emits_javascript: false,
                         is_comment_only_javascript: false,
@@ -432,7 +437,21 @@ impl RolldownEtsTransformer {
                     code: code.to_string(),
                     warnings: Vec::new(),
                     module_source_code: None,
-                    source_map: None,
+                    source_map: javascript_source_map,
+                    record_module_source_code: false,
+                    emits_javascript: false,
+                    is_comment_only_javascript: false,
+                    is_shared_module: false,
+                    insight_intent: transform::InsightIntentSourceMetadata::default(),
+                    crossplatform_collection,
+                }));
+            }
+            if let Some(source_map) = javascript_source_map {
+                return Ok(Some(RolldownEtsTransformOutput {
+                    code: code.to_string(),
+                    warnings: Vec::new(),
+                    module_source_code: None,
+                    source_map: Some(source_map),
                     record_module_source_code: false,
                     emits_javascript: false,
                     is_comment_only_javascript: false,
@@ -577,24 +596,55 @@ impl RolldownEtsTransformer {
             // even when no ArkUI syntax was lowered. Its TypeScript output uses
             // four-space indentation before ModuleMode writes the CompileArkTS
             // cache source consumed by es2abc.
-            let formatted_source = pipeline.format_source(final_source);
+            // For a resolvable module request, ModuleSourceFile creates a fresh
+            // declaration around the retained import/export clause before the
+            // TypeScript printer emits both text and mappings. Preserve that
+            // source-node boundary while the original spans are still
+            // available; reparsing later in the cache writer loses them.
+            let module_source_print = (!emits_javascript && finalization_source_map.is_none())
+                .then(|| {
+                    ModuleSourceFilePrinter::new(
+                        id,
+                        final_source,
+                        CompileArktsSourceType::from_id_with_version(
+                            id,
+                            self.plan.arkts_language_version,
+                        ),
+                    )
+                    .print()
+                })
+                .flatten();
+            let (formatted_source, module_source_map) = match module_source_print {
+                Some(printed) => (printed.code, printed.source_map),
+                None => (pipeline.format_source(final_source), None),
+            };
             let emitted =
                 self.emit_javascript_if_required(formatted_source.as_str(), id, directive_flags)?;
+            let TypeScriptJavascriptEmitOutput {
+                code: emitted_code,
+                source_map: emitted_map,
+            } = emitted;
             let source_map = if is_comment_only_javascript {
                 Some(source_map::TypeScriptCommentOnlySourceMap::new(id).build())
             } else {
-                emitted.source_map.or_else(|| {
-                    source_map::HvigorStandardSourceMapBuilder::new(
-                        &emitted.code,
+                let source_map_before_emit = finalization_source_map.or(module_source_map);
+                match (source_map_before_emit, emitted_map) {
+                    (Some(transform_map), Some(emit_map)) => {
+                        Some(self.collapse_source_maps(id, &transform_map, &emit_map)?)
+                    }
+                    (Some(transform_map), None) => Some(transform_map),
+                    (None, Some(emit_map)) => Some(emit_map),
+                    (None, None) => source_map::HvigorStandardSourceMapBuilder::new(
+                        &emitted_code,
                         original_source,
                         id,
                     )
                     .build()
-                    .or_else(|| source_map::TokenSourceMapBuilder::new(&emitted.code, id).build())
-                })
+                    .or_else(|| source_map::TokenSourceMapBuilder::new(&emitted_code, id).build()),
+                }
             };
             return Ok(Some(RolldownEtsTransformOutput {
-                code: emitted.code,
+                code: emitted_code,
                 warnings,
                 module_source_code: None,
                 source_map,
@@ -1472,7 +1522,7 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         // The SDK transformer resolves local enum member values through the
         // TypeScript emit resolver before it writes ModuleSourceFile. Enable
         // OXC's matching enum evaluation so the Rust pass can make the same
-        // substitution without a JavaScript-side compatibility layer.
+        // substitution entirely inside the owning OXC transform.
         let semantic_ret = SemanticBuilder::new()
             .with_enum_eval(true)
             .build(&parsed.program);
@@ -1594,6 +1644,16 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         .with_context(self.pipeline.transformer.plan.resource_context.clone())
         .rewrite_program(&allocator, &mut parsed.program)?;
         changed |= resource_rewrite.changed;
+
+        // ModuleSourceFile rebuilds every declaration whose request will be
+        // resolved to an OHM URL. The declaration shell and request literal
+        // are factory-created nodes; only the retained import/export clause
+        // owns source mappings. Apply that ownership before the printer even
+        // when an earlier finalization pass (for example Kit expansion) has
+        // already made this stage non-identity.
+        let mut module_source_spans = ModuleSourceFileSpanEraser::default();
+        module_source_spans.visit_program(&mut parsed.program);
+        changed |= module_source_spans.changed;
 
         if !changed {
             return Ok(HvigorSourceFinalization::unchanged_with_warnings(
@@ -1955,12 +2015,10 @@ const allMapApis = [MapComponent, map, mapCommon, navi];"#,
             TransformSourceSnapshot::default(),
         );
         let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let source = r#"import emitter from '@system.emitter';
+export { emitter };"#;
         let output = transformer
-            .transform(
-                r#"import emitter from '@system.emitter';
-export { emitter };"#,
-                "entry/src/main/ets/pages/emitter.js",
-            )
+            .transform(source, "entry/src/main/ets/pages/emitter.js")
             .unwrap()
             .expect("unclassified JS legacy emitter import must be finalized");
 
@@ -1981,6 +2039,15 @@ export { emitter };"#,
             "latest ets-loader prints a rewritten module request as a generated double-quoted literal: {}",
             output.code
         );
+        let source_map = rolldown_sourcemap::OwnedSourceMap::from_json_string(
+            output
+                .source_map
+                .as_deref()
+                .expect("JavaScript combined map"),
+        )
+        .expect("decode JavaScript combined map");
+        let expected_tokens = source.encode_utf16().count();
+        assert_eq!(source_map.get_tokens().count(), expected_tokens);
     }
 
     #[test]
@@ -2159,7 +2226,9 @@ export default class ChannelManager {
             .expect("default import/export barrel must produce transform output");
 
         assert!(
-            output.code.contains("import LX from './src/main/ets/LX';"),
+            output
+                .code
+                .contains("import LX from \"./src/main/ets/LX\";"),
             "hvigor keeps the default import binding:\n{}",
             output.code
         );
@@ -2246,8 +2315,8 @@ export default class ChannelManager {
         assert!(!output.code.contains("import lazy"), "{}", output.code);
         assert_eq!(
             output.module_source_code.as_deref(),
-            Some("import lazy nativePlayer from 'libaemonplayer.so';\nnativePlayer.create();\n"),
-            "CompileArkTS must retain the original lazy-import semantics"
+            Some("import lazy nativePlayer from \"libaemonplayer.so\";\nnativePlayer.create();\n"),
+            "CompileArkTS must retain lazy-import semantics through the source printer"
         );
     }
 
@@ -2490,7 +2559,7 @@ export const uid = Constant.Key.MapUidKey;"#,
     }
 
     #[test]
-    fn compile_transform_preserves_unrewritten_string_quotes_after_module_rewrite() {
+    fn compile_transform_prints_fresh_module_declarations_after_module_rewrite() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
             "entry",
@@ -2511,13 +2580,14 @@ export const uid = Constant.Key.MapUidKey;"#,
             .unwrap()
             .expect("ETS source must produce ModuleMode source");
 
-        // ets-loader's module-specifier rewrite creates a fresh literal for
-        // the rewritten request, but TypeScript preserves the raw spelling of
-        // the unrelated relative type import that remains in the same file.
+        // ModuleSourceFile rebuilds every import/export declaration around its
+        // retained clause. TypeScript therefore prints fresh request literals
+        // with double quotes, including declarations whose request text did
+        // not change.
         assert!(
             output
                 .code
-                .contains("import type { Local } from './Local';"),
+                .contains("import type { Local } from \"./Local\";"),
             "{output:?}"
         );
         assert!(
@@ -2529,7 +2599,7 @@ export const uid = Constant.Key.MapUidKey;"#,
     }
 
     #[test]
-    fn compile_transform_preserves_raw_quote_when_type_import_split_rebuilds_declaration() {
+    fn compile_transform_prints_fresh_quote_when_type_import_split_rebuilds_declaration() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
             "entry",
@@ -2550,13 +2620,13 @@ export const uid = Constant.Key.MapUidKey;"#,
             .unwrap()
             .expect("ETS source must produce ModuleMode source");
 
-        // `TypeOnlyNamedImportSplitter` creates a replacement import AST
-        // node. Its source literal has a synthetic span but retains the raw
-        // text, matching TypeScript's printer used by latest ets-loader.
+        // `TypeOnlyNamedImportSplitter` creates a replacement import AST node;
+        // ModuleSourceFile then owns the declaration shell and TypeScript
+        // prints the fresh source literal with double quotes.
         assert!(
             output
                 .code
-                .contains("import type { Local } from './Local';"),
+                .contains("import type { Local } from \"./Local\";"),
             "{output:?}"
         );
         assert_eq!(

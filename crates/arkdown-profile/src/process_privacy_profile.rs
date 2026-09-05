@@ -1183,7 +1183,7 @@ mod tests {
     #[test]
     fn test_privacy_profile_processor_new_and_default() {
         let _p1 = PrivacyProfileProcessor::new();
-        let _p2 = PrivacyProfileProcessor::default();
+        let _p2 = PrivacyProfileProcessor;
     }
 
     #[test]

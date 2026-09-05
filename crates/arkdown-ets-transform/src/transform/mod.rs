@@ -1411,9 +1411,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                                 .map(FieldExpression::from_expression);
                             regular_fields.push(RegularField {
                                 name: name.into_owned(),
-                                type_annotation_ast: property.type_annotation.as_deref(),
+                                source: property,
                                 initializer,
-                                optional: property.optional,
                             });
                         } else {
                             regular_members.push(RegularMember::Property(property));

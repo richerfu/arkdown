@@ -425,10 +425,10 @@ impl<'a> StartupConfigInput<'a> {
                 .to_string();
 
             if let Some((profile_name, module_name)) =
-                Self::read_app_startup_from_pkg(&pkg_dir, &pkg_name)
+                Self::read_app_startup_from_pkg(pkg_dir, &pkg_name)
             {
                 // Locate the startup profile JSON.
-                let profile_path = Self::find_startup_profile_in_pkg(&pkg_dir, &profile_name);
+                let profile_path = Self::find_startup_profile_in_pkg(pkg_dir, &profile_name);
                 if let Some(path) = profile_path {
                     if let Some(profile) = Self::read_startup_profile(&path) {
                         Self::merge_tasks_from_profile(&profile, &module_name, &path, merged);
@@ -445,7 +445,7 @@ impl<'a> StartupConfigInput<'a> {
         found_any: &mut bool,
     ) {
         for pkg_dir in dependency_roots {
-            if !Self::is_bytecode_har_package(&pkg_dir) {
+            if !Self::is_bytecode_har_package(pkg_dir) {
                 continue;
             }
             let preload_json = ProfileModuleLayout::new(pkg_dir).meta_inf_preload_json();
@@ -1208,7 +1208,7 @@ mod tests {
     #[test]
     fn test_startup_config_processor_new_and_default() {
         let _p1 = StartupConfigProcessor::new();
-        let _p2 = StartupConfigProcessor::default();
+        let _p2 = StartupConfigProcessor;
     }
 
     #[test]

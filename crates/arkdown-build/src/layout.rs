@@ -80,7 +80,7 @@ impl<'a> ModuleSourceLayout<'a> {
     /// Hvigor `ohos-test-util.ts::isTemplatesAfterSourceCodeMigration`.
     ///
     /// New-style `ohosTest` source sets omit the runner implementation and let
-    /// `GenerateOhosTestTemplate` materialize it below `.test/<product>`. When
+    /// `GenerateOhosTestTemplate` materialize it below `build/<product>`. When
     /// abilities are declared, hvigor only inspects the first ability's
     /// `srcEntry`; otherwise it falls back to the two legacy runner files.
     pub fn ohos_test_templates_after_migration(&self, module_json: &serde_json::Value) -> bool {
@@ -163,7 +163,7 @@ impl<'a> ModuleBuildLayout<'a> {
     /// Layout used by hvigor `GenerateOhosTestTemplate` while compiling the
     /// normal `build/<product>/.../ohosTest` target.
     pub fn for_ohos_test_template(module_root: &'a Path, product_name: &'a str) -> Self {
-        Self::for_test_product(module_root, product_name)
+        Self::for_product(module_root, product_name)
     }
 
     pub fn for_preview_product(
@@ -431,10 +431,6 @@ impl<'a> ModuleBuildLayout<'a> {
         self.default_intermediate_file("loader", "pkgContextInfo.json")
     }
 
-    pub fn pkg_sdk_info_json(&self) -> PathBuf {
-        self.default_intermediate_file("loader", "pkgSdkInfo.json")
-    }
-
     pub fn router_map_loader(&self) -> PathBuf {
         self.default_intermediate_file("router_map", "loader-router-map.json")
     }
@@ -696,7 +692,7 @@ impl<'a> ModuleBuildLayout<'a> {
     }
 
     pub fn output_mapping_source_maps(&self) -> PathBuf {
-        self.outputs_default()
+        self.target_output_dir()
             .join("mapping")
             .join("sourceMaps.map")
     }

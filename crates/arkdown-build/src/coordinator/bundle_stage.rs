@@ -470,7 +470,7 @@ impl BuildCoordinator {
             bundle_plan.check_entry = args.check_entry;
             if ohos_test_templates_after_migration {
                 // The ohosTest module's ets root is the generated template tree
-                // (`.test/<product>/intermediates/src/ohosTest/ets`); entry page
+                // (`build/<product>/intermediates/src/ohosTest/ets`); entry page
                 // paths resolve against it (`testability/pages/Index`).
                 let template_ets = ohos_test_template_layout.ohos_test_ets_root();
                 if template_ets.is_dir() {

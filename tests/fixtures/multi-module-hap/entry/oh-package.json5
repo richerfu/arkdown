@@ -6,5 +6,5 @@
   "main": "",
   "author": "",
   "license": "",
-  "dependencies": { "library": "file:../../library" }
+  "dependencies": { "library": "file:../library" }
 }

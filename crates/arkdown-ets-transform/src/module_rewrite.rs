@@ -11,11 +11,11 @@ use oxc_ast::ast::{
     Program, Statement, StringLiteral, TSImportEqualsDeclaration, TSModuleReference, TSTypeName,
 };
 use oxc_ast::builder::AstBuilder;
-use oxc_ast_visit::{walk, Visit};
+use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
-use oxc_span::SPAN;
+use oxc_span::{SourceType, SPAN};
 use oxc_str::Str;
 use oxc_syntax::reference::ReferenceId;
 use oxc_syntax::symbol::SymbolId;
@@ -28,13 +28,138 @@ use crate::module_emit::{
 use crate::source::{
     CompileArktsSourceType, SourceClassifier, TransformSourceFile, TransformSourceSnapshot,
 };
-use crate::transform::source_emit::CodegenSourceText;
+use crate::transform::source_emit::{
+    CodegenSourceText, HvigorTypescriptPrintOutput, HvigorTypescriptPrinter,
+};
 use crate::ModuleExportNameText;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModuleAnalyzerKind {
     #[default]
     Oxc,
+}
+
+/// Prints a plain ETS/TS source using the source-node ownership of hvigor's
+/// `ModuleSourceFile::processTransformedTsModuleRequest` +
+/// `writeFileSyncByNode` path.
+///
+/// The SDK creates a fresh import/export declaration when a resolvable module
+/// request is replaced with an OHM URL. The retained clause keeps its source
+/// spans, while the declaration shell and request literal are generated. This
+/// is observably different from an identity map even before the final URL text
+/// is known to Rolldown.
+pub(super) struct ModuleSourceFilePrinter<'a> {
+    id: &'a str,
+    source: &'a str,
+    source_type: SourceType,
+}
+
+impl<'a> ModuleSourceFilePrinter<'a> {
+    pub(super) fn new(id: &'a str, source: &'a str, source_type: SourceType) -> Self {
+        Self {
+            id,
+            source,
+            source_type,
+        }
+    }
+
+    pub(super) fn print(&self) -> Option<HvigorTypescriptPrintOutput> {
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, self.source, self.source_type).parse();
+        if parsed.panicked || !parsed.diagnostics.is_empty() {
+            return None;
+        }
+        let mut span_eraser = ModuleSourceFileSpanEraser::default();
+        span_eraser.visit_program(&mut parsed.program);
+        if !span_eraser.changed {
+            return None;
+        }
+        Some(HvigorTypescriptPrinter::print_with_source_map(
+            &parsed.program,
+            CodegenOptions {
+                source_map_path: Some(self.id.into()),
+                indent_char: IndentChar::Space,
+                indent_width: 4,
+                ..CodegenOptions::default()
+            },
+            self.source,
+        ))
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ModuleSourceFileSpanEraser {
+    pub(super) changed: bool,
+}
+
+impl ModuleSourceFileSpanEraser {
+    fn request_is_rewritten(source: &StringLiteral<'_>) -> bool {
+        let request = ModuleSpecifierText::new(source.value.as_str());
+        request.is_relative()
+            || !(source.value.starts_with('@')
+                && source
+                    .value
+                    .as_bytes()
+                    .get(1..)
+                    .is_some_and(|tail| tail.contains(&b':')))
+    }
+
+    fn erase_request(source: &mut StringLiteral<'_>) {
+        source.span = SPAN;
+        source.raw = None;
+    }
+}
+
+impl<'a> VisitMut<'a> for ModuleSourceFileSpanEraser {
+    fn visit_import_declaration(&mut self, declaration: &mut ImportDeclaration<'a>) {
+        if declaration.source.span.is_empty() || Self::request_is_rewritten(&declaration.source) {
+            declaration.span = SPAN;
+            Self::erase_request(&mut declaration.source);
+            self.changed = true;
+        }
+        walk_mut::walk_import_declaration(self, declaration);
+    }
+
+    fn visit_lazy_import_declaration(
+        &mut self,
+        declaration: &mut oxc_ast::ast::LazyImportDeclaration<'a>,
+    ) {
+        if declaration.source.span.is_empty() || Self::request_is_rewritten(&declaration.source) {
+            declaration.span = SPAN;
+            Self::erase_request(&mut declaration.source);
+            self.changed = true;
+        }
+        walk_mut::walk_lazy_import_declaration(self, declaration);
+    }
+
+    fn visit_export_from_declaration(&mut self, declaration: &mut ExportFromDeclaration<'a>) {
+        if declaration.source.span.is_empty() || Self::request_is_rewritten(&declaration.source) {
+            declaration.span = SPAN;
+            Self::erase_request(&mut declaration.source);
+            self.changed = true;
+        }
+        walk_mut::walk_export_from_declaration(self, declaration);
+    }
+
+    fn visit_export_all_declaration(&mut self, declaration: &mut ExportAllDeclaration<'a>) {
+        if declaration.source.span.is_empty() || Self::request_is_rewritten(&declaration.source) {
+            declaration.span = SPAN;
+            Self::erase_request(&mut declaration.source);
+            self.changed = true;
+        }
+        walk_mut::walk_export_all_declaration(self, declaration);
+    }
+
+    fn visit_import_expression(&mut self, expression: &mut oxc_ast::ast::ImportExpression<'a>) {
+        if let oxc_ast::ast::Expression::StringLiteral(source) = &mut expression.source {
+            if Self::request_is_rewritten(source) {
+                expression.span = SPAN;
+                Self::erase_request(source);
+                self.changed = true;
+            }
+        }
+        walk_mut::walk_import_expression(self, expression);
+    }
 }
 
 impl ModuleAnalyzerKind {
@@ -672,25 +797,35 @@ where
                 if self.should_skip_type_only(import.import_kind.is_type(), &import.source) {
                     return;
                 }
-                self.rewrite_literal(&mut import.source);
+                if self.rewrite_literal(&mut import.source) {
+                    import.span = SPAN;
+                }
             }
-            Statement::LazyImportDeclaration(import) => {
-                self.rewrite_literal(&mut import.source);
-            }
+            Statement::LazyImportDeclaration(import) => self.rewrite_lazy_import(import),
             Statement::ExportFromDeclaration(export) => {
                 let is_type_only = export.export_kind.is_type();
                 if self.should_skip_type_only(is_type_only, &export.source) {
                     return;
                 }
-                self.rewrite_literal(&mut export.source);
+                if self.rewrite_literal(&mut export.source) {
+                    export.span = SPAN;
+                }
             }
             Statement::ExportAllDeclaration(export) => {
                 if self.should_skip_type_only(export.export_kind.is_type(), &export.source) {
                     return;
                 }
-                self.rewrite_literal(&mut export.source);
+                if self.rewrite_literal(&mut export.source) {
+                    export.span = SPAN;
+                }
             }
             _ => {}
+        }
+    }
+
+    fn rewrite_lazy_import(&mut self, import: &mut oxc_ast::ast::LazyImportDeclaration<'a>) {
+        if self.rewrite_literal(&mut import.source) {
+            import.span = SPAN;
         }
     }
 
@@ -707,13 +842,13 @@ where
         }
     }
 
-    fn rewrite_literal(&mut self, literal: &mut StringLiteral<'a>) {
+    fn rewrite_literal(&mut self, literal: &mut StringLiteral<'a>) -> bool {
         let specifier = literal.value.as_str();
         let Some(replacement) = (self.rewrite)(specifier) else {
-            return;
+            return false;
         };
         if replacement == specifier {
-            return;
+            return false;
         }
         literal.value = Str::from_str_in(&replacement, &self.ast);
         literal.raw = None;
@@ -725,6 +860,7 @@ where
         // request is a generated node, so it must not retain that provenance.
         literal.span = SPAN;
         self.changed = true;
+        true
     }
 }
 
@@ -1655,6 +1791,26 @@ mod tests {
 
     use crate::typescript_emit::TypeScriptJavascriptEmitter;
     use oxc_semantic::SemanticBuilder;
+
+    #[test]
+    fn module_source_file_printer_maps_retained_export_clause_like_hvigor() {
+        let source = concat!(
+            "export { greet } from './src/main/ets/lib/greeting';\n",
+            "export const LIB_VERSION = '1.0.0';\n",
+        );
+        let output =
+            ModuleSourceFilePrinter::new("/project/library/Index.ets", source, SourceType::ets())
+                .print()
+                .expect("resolvable module request");
+        let source_map: serde_json::Value =
+            serde_json::from_str(output.source_map.as_deref().expect("TypeScript source map"))
+                .expect("source map JSON");
+
+        assert_eq!(
+            source_map["mappings"],
+            "OAAO,EAAE,KAAK,EAAE;AAChB,MAAM,CAAC,MAAM,WAAW,GAAG,OAAO,CAAC"
+        );
+    }
 
     fn codegen_source(program: &Program<'_>) -> String {
         CodegenSourceText::new(

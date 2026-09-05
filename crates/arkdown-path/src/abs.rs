@@ -138,6 +138,18 @@ impl AbsPath {
     }
 }
 
+/// Canonicalize an existing filesystem path and otherwise preserve the
+/// caller's path spelling for an output that has not been created yet.
+///
+/// Build plans use this at boundaries that legitimately accept both existing
+/// inputs and future outputs. Callers that know which kind they have should
+/// prefer [`AbsPath::canonicalize`] or [`AbsPath::from_absolute`].
+pub fn canonicalize_or_owned(path: &Path) -> PathBuf {
+    AbsPath::canonicalize(path)
+        .map(AbsPath::into_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 impl Deref for AbsPath {
     type Target = Path;
 

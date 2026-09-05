@@ -4,6 +4,36 @@ use super::*;
 use crate::plan::{BundleMockConfig, BundleRuntimePackageContext, BundleRuntimePackageInfo};
 use rustc_hash::FxHashMap;
 
+macro_rules! module_source_writer {
+    (
+        $bundle_name:expr,
+        $module_name:expr,
+        $project_root:expr,
+        $module_path_map:expr,
+        $runtime_packages:expr,
+        $byte_code_har_packages:expr,
+        $use_normalized_ohm_url:expr,
+        $module_graph_facts:expr,
+        $module_source_ids:expr,
+        $state:expr,
+        $output_dir:expr $(,)?
+    ) => {
+        HvigorModuleSourceWriter::new(HvigorModuleSourceWriterInput {
+            bundle_name: $bundle_name,
+            module_name: $module_name,
+            project_root: $project_root,
+            module_path_map: $module_path_map,
+            runtime_packages: $runtime_packages,
+            byte_code_har_packages: $byte_code_har_packages,
+            use_normalized_ohm_url: $use_normalized_ohm_url,
+            module_graph_facts: $module_graph_facts,
+            module_source_ids: $module_source_ids,
+            state: $state,
+            output_dir: $output_dir,
+        })
+    };
+}
+
 fn runtime_packages(contexts: &[(&str, &str, &str, &str, &str, bool)]) -> BundleRuntimePackageInfo {
     let mut packages = FxHashMap::default();
     for (key, package_name, bundle_name, module_name, version, is_so) in contexts {
@@ -115,7 +145,7 @@ fn module_source_writer_rewrites_unresolved_native_so_static_import() {
     );
     let runtime_packages = BundleRuntimePackageInfo { packages };
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -159,7 +189,7 @@ fn module_source_writer_rewrites_unresolved_native_so_static_import() {
     );
     record_resolved_import(&mut next_state, &entry_id, "liblx.so", "liblx.so");
 
-    let next_files = HvigorModuleSourceWriter::new(
+    let next_files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -193,6 +223,71 @@ fn module_source_writer_rewrites_unresolved_native_so_static_import() {
         std::fs::read_to_string(&next_entry_file.path).unwrap(),
         output
     );
+}
+
+#[test]
+fn current_bytecode_har_files_info_uses_ohpm_package_identity() {
+    // CompileArkTS bytecode-HAR evidence: filesInfo.txt column five is the
+    // current OHPM package name, which also becomes es2abc pkgName metadata;
+    // it is not the logical build module name.
+    let project = tempfile::tempdir().expect("project");
+    let module_root = project.path().join("library");
+    let source = module_root.join("src/main/ets/Index.ets");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source directory");
+    std::fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ "name": "bytecode-har", "version": "1.0.0" }"#,
+    )
+    .expect("package manifest");
+    std::fs::write(&source, "export const value = 1;").expect("source");
+
+    let source_id = arkdown_path::canonicalize_or_owned(&source)
+        .to_string_lossy()
+        .into_owned();
+    let module_root = arkdown_path::canonicalize_or_owned(&module_root);
+    let module_path_map = HvigorModulePathMap::new(
+        "entry",
+        &module_root,
+        &[("entry".to_string(), module_root.clone())],
+    );
+    let mut state = HvigorModuleSourceState::default();
+    state.sources.insert(
+        source_id.clone(),
+        HvigorCollectedModuleSource {
+            code: "export const value = 1;".to_string().into(),
+        },
+    );
+    let facts = ModuleGraphFacts {
+        full_module_ids: vec![source_id.clone()],
+        full_module_is_commonjs: FxHashMap::default(),
+    };
+    let runtime_packages = runtime_packages(&[
+        ("entry", "bytecode-har", "", "entry", "1.0.0", false),
+        ("bytecode-har", "bytecode-har", "", "entry", "1.0.0", false),
+    ]);
+
+    let files = module_source_writer!(
+        "com.example",
+        "entry",
+        project.path(),
+        &module_path_map,
+        &runtime_packages,
+        &[],
+        true,
+        &facts,
+        facts.full_module_ids.clone(),
+        state,
+        project.path().join("cache"),
+    )
+    .with_current_byte_code_har(true)
+    .write()
+    .expect("write bytecode HAR module sources");
+
+    let source_file = files
+        .iter()
+        .find(|file| file.module_id == source_id)
+        .expect("bytecode HAR source record");
+    assert_eq!(source_file.package_name.as_deref(), Some("bytecode-har"));
 }
 
 #[test]
@@ -258,7 +353,7 @@ export type Use = Want | MapBridge | IMtBluetoothAccess;
     let runtime_packages = BundleRuntimePackageInfo { packages };
     let byte_code_har_packages = vec!["@example/privacy".to_string()];
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hexample",
         "example",
         project_root,
@@ -354,7 +449,7 @@ fn module_source_writer_records_bytecode_har_import_records_for_compile_context(
     let runtime_packages = BundleRuntimePackageInfo { packages };
     let byte_code_har_packages = vec!["@tencent/qq-open-sdk".to_string()];
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -462,7 +557,7 @@ fn module_source_writer_rewrites_case_mismatched_bare_package_entry_request() {
     );
     let runtime_packages = BundleRuntimePackageInfo { packages };
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -547,7 +642,7 @@ fn module_source_writer_rewrites_source_har_imports_with_pkg_context_module_name
         ("audioplayer", "audioplayer", "", "", "1.0.0", false),
     ]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -691,7 +786,7 @@ fn module_source_writer_rewrites_static_re_exports_from_rolldown_graph() {
         .expect("mrn package context")
         .entry_path = "Index.ets".to_string();
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -805,7 +900,7 @@ fn module_source_writer_rewrites_relative_package_imports_from_resolved_module_i
         .expect("mtlauncher package context")
         .entry_path = "Index.ets".to_string();
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -937,7 +1032,7 @@ export { ASYNC_OR_SYNC_MODE, INNER_SCOPE, KEY_SCOPE };"#
         .expect("mtlauncher package context")
         .entry_path = "Index.ets".to_string();
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1057,7 +1152,7 @@ fn module_source_writer_preserves_arkts_syntax_when_rewriting_requests() {
     let runtime_packages =
         runtime_packages(&[("@example/lx", "@example/lx", "", "", "4.119.1", false)]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1172,7 +1267,7 @@ fn module_source_writer_rewrites_lowercase_index_request_to_pascal_index_record(
     let runtime_packages =
         runtime_packages(&[("@mrn/mrn", "@mrn/mrn", "", "", "12.59.403", false)]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1273,7 +1368,7 @@ fn module_source_writer_rewrites_mixed_case_request_to_uppercase_record() {
     let runtime_packages =
         runtime_packages(&[("@example/lx", "@example/lx", "", "", "4.119.1", false)]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1380,7 +1475,7 @@ fn module_source_writer_rewrites_case_mismatched_relative_file_request() {
         false,
     )]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1482,7 +1577,7 @@ fn module_source_writer_preserves_standard_source_root_index_record() {
     let runtime_packages =
         runtime_packages(&[("@msi/msi", "@msi/msi", "", "", "12.59.400", false)]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1630,7 +1725,7 @@ fn module_source_writer_preserves_package_source_index_subpath_record() {
         ),
     ]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1733,7 +1828,7 @@ fn module_source_writer_uses_local_dependency_module_name_for_cache_path() {
         },
     );
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1850,7 +1945,7 @@ fn module_source_writer_uses_actual_package_file_path_for_package_root_record() 
     );
     let runtime_packages = BundleRuntimePackageInfo { packages };
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -1966,7 +2061,7 @@ fn module_source_writer_rewrites_bare_package_imports_from_rolldown_graph() {
     );
     let runtime_packages = BundleRuntimePackageInfo { packages };
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -2081,7 +2176,7 @@ fn module_source_writer_uses_actual_entry_file_when_pkg_context_entry_path_is_em
     );
     let runtime_packages = BundleRuntimePackageInfo { packages };
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -2206,7 +2301,7 @@ fn module_source_writer_matches_index_source_for_empty_main_package_root_record(
     );
     let runtime_packages = BundleRuntimePackageInfo { packages };
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -2246,17 +2341,17 @@ fn module_source_writer_matches_index_source_for_empty_main_package_root_record(
 }
 
 #[test]
-fn module_source_output_path_uses_transform_language_metadata() {
+fn module_source_output_path_uses_cache_module_and_transform_language_metadata() {
     let ownership = HvigorChunkSource::source_module(
         "entry".to_string(),
-        "entry".to_string(),
+        "entry_test".to_string(),
         String::new(),
         "ets/Zip.ts".to_string(),
+        "src/main/ets/Zip.ts".to_string(),
     );
     let output = HvigorModuleSourceOutputPath::new(
         Path::new("/workspace/cache"),
         &ownership,
-        "entry",
         "ets/Zip.ts",
         "/workspace/entry/src/main/ets/Zip.ts",
         true,
@@ -2266,7 +2361,7 @@ fn module_source_output_path_uses_transform_language_metadata() {
 
     assert_eq!(
         output,
-        Path::new("/workspace/cache/entry/src/main/ets/Zip.js")
+        Path::new("/workspace/cache/entry_test/src/main/ets/Zip.js")
     );
     assert_eq!(
         ownership.file_info_source_file("entry", "1.0.0", false, true),
@@ -2278,6 +2373,7 @@ fn module_source_output_path_uses_transform_language_metadata() {
         "entry".to_string(),
         String::new(),
         "ets/vendor/pako.esm.mjs".to_string(),
+        "src/main/ets/vendor/pako.esm.mjs".to_string(),
     );
     assert_eq!(
         mjs_ownership.file_info_source_file("entry", "1.0.0", false, false),
@@ -2289,6 +2385,7 @@ fn module_source_output_path_uses_transform_language_metadata() {
         "entry".to_string(),
         String::new(),
         "ets/vendor/index.cjs".to_string(),
+        "src/main/ets/vendor/index.cjs".to_string(),
     );
     assert_eq!(
         cjs_ownership.file_info_source_file("entry", "1.0.0", false, false),
@@ -2323,7 +2420,6 @@ fn package_source_output_uses_the_owning_dependency_project_like_hvigor() {
     let output = HvigorModuleSourceOutputPath::new(
         &cache,
         &ownership,
-        "@example/cipstorage",
         "index.ts",
         module_id.to_str().unwrap(),
         false,
@@ -2474,7 +2570,7 @@ fn module_source_writer_generates_hvigor_mock_config_and_origin_import() {
             main_file_path: dependency_main,
         }],
     };
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example",
         "entry",
         project_root,
@@ -2705,7 +2801,7 @@ fn module_source_writer_rewrites_ohpm_imports_to_package_records() {
         ("@ohos/hypium", "@ohos/hypium", "", "", "1.0.11", false),
     ]);
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,

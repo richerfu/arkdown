@@ -199,7 +199,6 @@ fn minimal_pack_input(
         source_maps_path: None,
         aot_mode: None,
         pkg_context_info_path: None,
-        pkg_sdk_info_path: None,
         integrated_hsps: vec![],
         privacy_profile_path: None,
         syscap_path: None,
@@ -245,7 +244,10 @@ fn test_hap_output_is_readable_by_zip_crate() {
     let file = fs::File::open(&out).expect("open HAP");
     // zip::ZipArchive will error if the file is not a well-formed ZIP
     let archive = zip::ZipArchive::new(file).expect("HAP must be a valid ZIP archive");
-    assert!(archive.len() > 0, "HAP ZIP must contain at least one entry");
+    assert!(
+        !archive.is_empty(),
+        "HAP ZIP must contain at least one entry"
+    );
 }
 
 #[test]
@@ -443,7 +445,7 @@ fn test_hap_contains_module_json() {
     let archive = zip::ZipArchive::new(file).expect("valid ZIP");
     let names: Vec<_> = archive.file_names().collect();
     assert!(
-        names.iter().any(|n| *n == "module.json"),
+        names.contains(&"module.json"),
         "HAP must contain 'module.json'; entries: {:?}",
         names
     );
@@ -463,7 +465,7 @@ fn test_hap_contains_pack_info() {
     let archive = zip::ZipArchive::new(file).expect("valid ZIP");
     let names: Vec<_> = archive.file_names().collect();
     assert!(
-        names.iter().any(|n| *n == "pack.info"),
+        names.contains(&"pack.info"),
         "HAP must contain 'pack.info'; entries: {:?}",
         names
     );
@@ -619,14 +621,12 @@ fn test_hap_preserves_native_lib_abi_directory() {
     let archive = zip::ZipArchive::new(file).expect("valid ZIP");
     let names: Vec<_> = archive.file_names().collect();
     assert!(
-        names
-            .iter()
-            .any(|name| *name == "libs/arm64-v8a/libsame.so"),
+        names.contains(&"libs/arm64-v8a/libsame.so"),
         "missing arm64-v8a native lib; entries: {:?}",
         names
     );
     assert!(
-        names.iter().any(|name| *name == "libs/x86_64/libsame.so"),
+        names.contains(&"libs/x86_64/libsame.so"),
         "missing x86_64 native lib; entries: {:?}",
         names
     );
@@ -780,7 +780,7 @@ fn test_hap_omits_pkg_context_info_when_not_provided() {
     let archive = zip::ZipArchive::new(file).expect("valid ZIP");
     let names: Vec<_> = archive.file_names().collect();
     assert!(
-        !names.iter().any(|n| *n == "pkgContextInfo.json"),
+        !names.contains(&"pkgContextInfo.json"),
         "HAP must not package 'pkgContextInfo.json'; entries: {:?}",
         names
     );
@@ -825,41 +825,6 @@ fn test_hap_packages_pkg_context_info_when_provided_like_hvigor() {
 }
 
 #[test]
-fn test_hap_packages_pkg_sdk_info_when_provided_like_hvigor() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (abc, res, modj) = write_minimal_inputs(tmp.path());
-    let out = tmp.path().join("pkg_sdk.hap");
-    let pkg_sdk_info = tmp.path().join("pkgSdkInfo.json");
-    let expected = r#"{"library":{"version":"1.2.3","type":"har","isDirectDep":true},"entry":{"version":"1.0.0","type":"entry","isDirectDep":false}}"#;
-    fs::write(&pkg_sdk_info, expected).expect("write pkgSdkInfo.json");
-
-    let mut input = minimal_pack_input(abc, res, modj, out.clone());
-    input.pkg_sdk_info_path = Some(pkg_sdk_info);
-
-    Packager::new(make_config())
-        .pack_hap(input)
-        .expect("pack_hap must succeed");
-
-    let file = fs::File::open(&out).expect("open HAP");
-    let mut archive = zip::ZipArchive::new(file).expect("valid ZIP");
-    let mut entry = archive
-        .by_name("pkgSdkInfo.json")
-        .expect("pkgSdkInfo.json must be packaged");
-    let mut content = String::new();
-    entry.read_to_string(&mut content).unwrap();
-    assert_eq!(
-        content, expected,
-        "pkgSdkInfo.json must remain byte-identical"
-    );
-    drop(entry);
-    assert_eq!(
-        archive.file_names().last(),
-        Some("pkgSdkInfo.json"),
-        "SDK app_packing_tool writes pkgSdkInfo.json after pack.info"
-    );
-}
-
-#[test]
 fn test_hap_contains_abc_at_ets_path_for_api12() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());
@@ -874,7 +839,7 @@ fn test_hap_contains_abc_at_ets_path_for_api12() {
     let archive = zip::ZipArchive::new(file).expect("valid ZIP");
     let names: Vec<_> = archive.file_names().collect();
     assert!(
-        names.iter().any(|n| *n == "ets/modules.abc"),
+        names.contains(&"ets/modules.abc"),
         "API 12 HAP must store the ABC at 'ets/modules.abc'; entries: {:?}",
         names
     );
@@ -917,6 +882,54 @@ fn test_hap_packages_source_maps_after_modules_abc_like_hvigor_ets_path() {
     let mut content = String::new();
     entry.read_to_string(&mut content).unwrap();
     assert_eq!(content, r#"{"version":3,"sources":[],"mappings":""}"#);
+}
+
+#[test]
+fn test_hap_packages_loader_assets_before_main_abc_like_hvigor() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loader_ets = tmp.path().join("loader_out/default/ets");
+    fs::create_dir_all(loader_ets.join("widget")).unwrap();
+    let abc = loader_ets.join("modules.abc");
+    let res = tmp.path().join("resources.index");
+    let modj = tmp.path().join("module.json");
+    let source_maps = loader_ets.join("sourceMaps.map");
+    let out = tmp.path().join("widget.hsp");
+    fs::write(&abc, b"PAND\0\0\0\0").unwrap();
+    fs::write(&res, b"resources").unwrap();
+    fs::write(&modj, r#"{"module":{"name":"widget","type":"shared"}}"#).unwrap();
+    fs::write(loader_ets.join("widget/component_collection.json"), b"{}").unwrap();
+    fs::write(loader_ets.join("widgets.abc"), b"PAND").unwrap();
+    fs::write(&source_maps, br#"{"version":3}"#).unwrap();
+
+    let mut input = minimal_pack_input(abc, res, modj, out.clone());
+    input.source_maps_path = Some(source_maps);
+    Packager::new(make_config())
+        .pack_hsp(input)
+        .expect("pack_hsp must succeed");
+
+    let file = fs::File::open(out).expect("open HSP");
+    let archive = zip::ZipArchive::new(file).expect("valid ZIP");
+    let names = archive.file_names().collect::<Vec<_>>();
+    let collection = names
+        .iter()
+        .position(|name| *name == "ets/widget/component_collection.json")
+        .unwrap();
+    let widgets = names
+        .iter()
+        .position(|name| *name == "ets/widgets.abc")
+        .unwrap();
+    let abc = names
+        .iter()
+        .position(|name| *name == "ets/modules.abc")
+        .unwrap();
+    let source_maps = names
+        .iter()
+        .position(|name| *name == "ets/sourceMaps.map")
+        .unwrap();
+    assert!(
+        collection < widgets && widgets < abc && abc < source_maps,
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -1104,7 +1117,6 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
-            pkg_sdk_info_path: None,
             integrated_hsps: vec![],
             privacy_profile_path: None,
             syscap_path: None,
@@ -1173,7 +1185,6 @@ fn test_missing_abc_returns_missing_input_error() {
         source_maps_path: None,
         aot_mode: None,
         pkg_context_info_path: None,
-        pkg_sdk_info_path: None,
         integrated_hsps: vec![],
         privacy_profile_path: None,
         syscap_path: None,
@@ -1210,7 +1221,6 @@ fn test_missing_module_json_returns_missing_input_error() {
         source_maps_path: None,
         aot_mode: None,
         pkg_context_info_path: None,
-        pkg_sdk_info_path: None,
         integrated_hsps: vec![],
         privacy_profile_path: None,
         syscap_path: None,
@@ -1254,7 +1264,6 @@ fn test_hsp_output_is_valid_zip() {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
-            pkg_sdk_info_path: None,
             integrated_hsps: vec![],
             privacy_profile_path: None,
             syscap_path: None,
@@ -1295,7 +1304,6 @@ fn test_hsp_pack_info_keeps_app_bundle_type_and_uses_shared_module_type() {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
-            pkg_sdk_info_path: None,
             integrated_hsps: vec![],
             privacy_profile_path: None,
             syscap_path: None,
@@ -1722,7 +1730,6 @@ fn test_pack_hap_embeds_integrated_hsp() {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
-            pkg_sdk_info_path: None,
             integrated_hsps: vec![integrated_entry],
             privacy_profile_path: None,
             syscap_path: None,
@@ -1737,17 +1744,14 @@ fn test_pack_hap_embeds_integrated_hsp() {
     let names: Vec<_> = archive.file_names().collect();
 
     assert!(
-        names.iter().any(|n| *n == "libs/remote@1.0.0/remote.hsp"),
+        names.contains(&"libs/remote@1.0.0/remote.hsp"),
         "HAP must contain embedded HSP at libs/<hsp_dir_name>/<hsp_file_name>; entries: {:?}",
         names
     );
     // Standard HAP entries must still be present.
+    assert!(names.contains(&"module.json"), "module.json missing");
     assert!(
-        names.iter().any(|n| *n == "module.json"),
-        "module.json missing"
-    );
-    assert!(
-        names.iter().any(|n| *n == "ets/modules.abc"),
+        names.contains(&"ets/modules.abc"),
         "ets/modules.abc missing"
     );
 }
@@ -1947,7 +1951,7 @@ fn test_original_har_does_not_invent_types_field() {
     )
     .expect("read oh-package.json5");
 
-    let pkg: serde_json::Value = serde_json::from_str(&content).expect("parse oh-package.json5");
+    let pkg: serde_json::Value = serde_json::from_str(content).expect("parse oh-package.json5");
     assert_eq!(
         pkg.get("types").and_then(|v| v.as_str()),
         None,

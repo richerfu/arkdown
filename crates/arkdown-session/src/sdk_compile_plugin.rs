@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 /// Resolved path to the ETS loader plugin directory.
 ///
 /// The ETS loader transforms ArkTS/ETS source files before bundling. In
-/// arkdown, this is replaced by `arkdown-plugin-ets-transform` (SPEC-004a),
-/// but the SDK path is still needed for compatibility checks.
+/// arkdown, this behavior is owned by the OXC transform inside `arkdown`;
+/// the SDK path remains an input to source checks and SDK-backed tools.
 ///
 /// Upstream: `DefaultSdk.getEtsLoader`.
 #[derive(Debug, Clone)]

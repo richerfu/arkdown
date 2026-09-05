@@ -446,21 +446,6 @@ impl Packager {
         } else {
             None
         };
-        let pkg_sdk = if let Some(pkg_sdk_info_path) = &input.pkg_sdk_info_path {
-            if !pkg_sdk_info_path.exists() {
-                return Err(PackError::MissingInput(format!(
-                    "pkgSdkInfo.json ({})",
-                    pkg_sdk_info_path.display()
-                )));
-            }
-            // Latest SDK app_packing_tool stores pkgSdkInfo.json byte-for-byte.
-            // Unlike module.json/pkgContextInfo.json, it does not run this
-            // metadata through fastjson's object-key normalization.
-            Some(std::fs::read(pkg_sdk_info_path)?)
-        } else {
-            None
-        };
-
         if let Some(syscap_path) = &input.syscap_path {
             if !syscap_path.is_file() {
                 return Err(PackError::MissingInput(format!(
@@ -497,6 +482,13 @@ impl Packager {
             }
         }
 
+        // Additional ETS-side assets copied by CompileArkTS/loader, such as
+        // widget/component_collection.json and widgets.abc, precede the main
+        // ABC in SDK app_packing_tool output order.
+        if let Some(ets_dir) = input.abc_path.parent() {
+            Self::add_loader_out_ets_assets(&mut writer, ets_dir, &input.output_path)?;
+        }
+
         // modules.abc — stored at ets/modules.abc for API >= 9, else modules.abc
         if input.abc_path.exists() {
             let abc_dest = if self.config.sdk_config.compile_api_version >= 9 {
@@ -517,12 +509,6 @@ impl Packager {
                 )));
             }
             zip_writer::add_file_stored(&mut writer, "ets/sourceMaps.map", source_maps_path)?;
-        }
-
-        // Additional ETS-side assets copied by CompileArkTS/loader, such as
-        // `src/main/ets/common/**/*.json`, are packaged under `ets/`.
-        if let Some(ets_dir) = input.abc_path.parent() {
-            Self::add_loader_out_ets_assets(&mut writer, ets_dir, &input.output_path)?;
         }
 
         // Native .so libraries — placed under libs/<abi>/, with compression
@@ -629,10 +615,6 @@ impl Packager {
         if let Some(pkg_context) = pkg_context {
             zip_writer::add_bytes_stored(&mut writer, "pkgContextInfo.json", &pkg_context)?;
         }
-        if let Some(pkg_sdk) = pkg_sdk {
-            zip_writer::add_bytes_stored(&mut writer, "pkgSdkInfo.json", &pkg_sdk)?;
-        }
-
         writer.finish()?;
         Ok(input.output_path)
     }

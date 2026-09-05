@@ -137,7 +137,6 @@ mod tests {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
-            pkg_sdk_info_path: None,
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -191,7 +190,6 @@ mod tests {
                 source_maps_path: None,
                 aot_mode: None,
                 pkg_context_info_path: None,
-                pkg_sdk_info_path: None,
                 integrated_hsps: vec![],
                 privacy_profile_path: None,
                 syscap_path: None,
@@ -240,7 +238,6 @@ mod tests {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
-            pkg_sdk_info_path: None,
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -342,7 +339,6 @@ mod tests {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
-            pkg_sdk_info_path: None,
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -386,7 +382,6 @@ mod tests {
                 source_maps_path: None,
                 aot_mode: None,
                 pkg_context_info_path: None,
-                pkg_sdk_info_path: None,
                 privacy_profile_path: None,
                 syscap_path: None,
                 device_types: vec![],
@@ -442,7 +437,6 @@ mod tests {
                 source_maps_path: None,
                 aot_mode: None,
                 pkg_context_info_path: None,
-                pkg_sdk_info_path: None,
                 privacy_profile_path: Some(privacy),
                 syscap_path: None,
                 integrated_hsps: vec![],

@@ -101,6 +101,7 @@ impl ProjectSnapshot {
             config,
             parameter_file_override,
             None,
+            false,
         )
     }
 
@@ -108,6 +109,7 @@ impl ProjectSnapshot {
         config: &ArkdownConfig,
         parameter_file_override: Option<PathBuf>,
         acquisition_mode: Option<AcquisitionMode>,
+        acquire_remote_dev_dependencies: bool,
     ) -> Result<Self, ProjectSnapshotError> {
         let root = &config.project_root;
         let app_json_path = ProjectPathLayout::new(root).app_scope_app_json5();
@@ -181,10 +183,10 @@ impl ProjectSnapshot {
                 .map(|mode| {
                     PackageAcquisitionPlanner::new(
                         root,
-                        std::iter::once(root.clone())
-                            .chain(config.modules.iter().map(|module| module.src_path.clone())),
+                        config.modules.iter().map(|module| module.src_path.clone()),
                         mode,
                     )
+                    .with_remote_dev_dependencies(acquire_remote_dev_dependencies)
                     .acquire()
                 })
                 .transpose()?

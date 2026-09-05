@@ -30,7 +30,7 @@ impl<'a> CrossplatformCollectionWriter<'a> {
         let mut modules = BTreeMap::<String, Vec<String>>::new();
         let mut components = BTreeMap::<String, Vec<String>>::new();
         let mut entries = sources.iter().collect::<Vec<_>>();
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        entries.sort_by_key(|(source, _)| *source);
         for (source, collection) in entries {
             let key = self.source_key(source);
             if !collection.modules.is_empty() {

@@ -349,12 +349,12 @@ fn component_v2_lifecycle_incremental_hvigor_parity_report() {
   );
 }
 
-/// Lifecycle diagnostics are semantic contracts too: latest hvigor rejects a
-/// `@ComponentAppear` method with input parameters before any package output
-/// exists. Keep arkdown's SDK checker tied to that real diagnostic boundary.
+/// ComponentV2 decorator diagnostics are semantic contracts too: hvigor
+/// rejects `@Require` combined with `@Local` before package output exists.
+/// Keep arkdown tied to the same source-owned diagnostic boundary.
 #[test]
-fn component_v2_lifecycle_parameter_diagnostic_matches_hvigor() {
-  run_component_v2_lifecycle_diagnostic_parity_test();
+fn component_v2_require_diagnostic_matches_hvigor() {
+  run_component_v2_require_diagnostic_parity_test();
 }
 
 fn run_parity_report_test(
@@ -696,6 +696,8 @@ fn parity_for_fixture(
   let arkdown_root = temp.path().join(format!("arkdown/{fixture_name}"));
   copy_clean_fixture(&fixture_abs, &hvigor_root)?;
   copy_clean_fixture(&fixture_abs, &arkdown_root)?;
+  materialize_local_file_dependencies(&hvigor_root)?;
+  materialize_local_file_dependencies(&arkdown_root)?;
 
   let hvigorw = hvigorw_program(&hvigor_root)?;
   let arkdown_bin = arkdown_program();
@@ -777,6 +779,8 @@ fn incremental_parity_for_fixture(
   let arkdown_root = temp_root.join(format!("arkdown/{fixture_name}"));
   copy_clean_fixture(&fixture_abs, &hvigor_root)?;
   copy_clean_fixture(&fixture_abs, &arkdown_root)?;
+  materialize_local_file_dependencies(&hvigor_root)?;
+  materialize_local_file_dependencies(&arkdown_root)?;
 
   let hvigorw = hvigorw_program(&hvigor_root)?;
   let arkdown_bin = arkdown_program();
@@ -890,13 +894,13 @@ fn incremental_parity_for_fixture(
   Ok(report)
 }
 
-fn run_component_v2_lifecycle_diagnostic_parity_test() {
+fn run_component_v2_require_diagnostic_parity_test() {
   let fixture = "tests/fixtures/component-v2-lifecycle-hap";
   let repo_root = repo_root();
   let fixture_abs = repo_root.join(fixture);
   if !should_run_parity(&fixture_abs) {
     tracing::error!(
-      "skipping ComponentV2 lifecycle diagnostic parity; set {ENV_HVIGORW}, {ENV_RUN}=1, or {ENV_STRICT}=1"
+      "skipping ComponentV2 @Require diagnostic parity; set {ENV_HVIGORW}, {ENV_RUN}=1, or {ENV_STRICT}=1"
     );
     return;
   }
@@ -909,10 +913,14 @@ fn run_component_v2_lifecycle_diagnostic_parity_test() {
   let arkdown_root = temp.path().join("arkdown/component-v2-lifecycle-hap");
   copy_clean_fixture(&fixture_abs, &hvigor_root).expect("copy hvigor diagnostic fixture");
   copy_clean_fixture(&fixture_abs, &arkdown_root).expect("copy arkdown diagnostic fixture");
+  materialize_local_file_dependencies(&hvigor_root)
+    .expect("materialize hvigor diagnostic fixture dependencies");
+  materialize_local_file_dependencies(&arkdown_root)
+    .expect("materialize arkdown diagnostic fixture dependencies");
   let mutation = ParitySourceMutation::new(
     "entry/src/main/ets/pages/Index.ets",
-    "whenComponentAppears(): void",
-    "whenComponentAppears(value: number): void",
+    "@Local message: string = \"initial\";",
+    "@Require\n  @Local message: string = \"initial\";",
   );
   mutation
     .apply(&hvigor_root)
@@ -935,25 +943,25 @@ fn run_component_v2_lifecycle_diagnostic_parity_test() {
   arkdown_args.push("--project".to_string());
   arkdown_args.push(arkdown_project_arg);
   let arkdown = run_command("arkdown", &arkdown_program(), &arkdown_args, &arkdown_root);
-  let expected = "Methods decorated with '@ComponentAppear' cannot have input parameters.";
+  let expected = "In a struct decorated with '@ComponentV2', '@Require' can only be used with '@Param' and '@BuilderParam'.";
   assert!(
     !hvigor.success,
-    "latest hvigor accepted invalid ComponentV2 lifecycle method:\n{}",
+    "latest hvigor accepted invalid ComponentV2 @Require property:\n{}",
     hvigor.output_text()
   );
   assert!(
     hvigor.output_text().contains(expected),
-    "latest hvigor did not emit the lifecycle boundary diagnostic {expected:?}:\n{}",
+    "latest hvigor did not emit the ComponentV2 @Require diagnostic {expected:?}:\n{}",
     hvigor.output_text()
   );
   assert!(
     !arkdown.success,
-    "arkdown accepted a ComponentV2 lifecycle method that hvigor rejects:\n{}",
+    "arkdown accepted a ComponentV2 @Require property that hvigor rejects:\n{}",
     arkdown.output_text()
   );
   assert!(
     arkdown.output_text().contains(expected),
-    "arkdown did not preserve hvigor's lifecycle boundary diagnostic {expected:?}:\n{}",
+    "arkdown did not preserve hvigor's ComponentV2 @Require diagnostic {expected:?}:\n{}",
     arkdown.output_text()
   );
 }
@@ -1119,6 +1127,86 @@ fn copy_clean_fixture(src: &Path, dst: &Path) -> io::Result<()> {
     }
   }
   Ok(())
+}
+
+fn materialize_local_file_dependencies(root: &Path) -> io::Result<()> {
+  let manifests = WalkDir::new(root)
+    .follow_links(false)
+    .into_iter()
+    .filter_map(Result::ok)
+    .filter(|entry| entry.file_type().is_file() && entry.file_name() == "oh-package.json5")
+    .map(|entry| entry.into_path())
+    .collect::<Vec<_>>();
+  let canonical_root = fs::canonicalize(root)?;
+
+  for manifest_path in manifests {
+    let manifest_text = fs::read_to_string(&manifest_path)?;
+    let manifest: Value = json5::from_str(&manifest_text).map_err(|error| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+          "invalid fixture manifest {}: {error}",
+          manifest_path.display()
+        ),
+      )
+    })?;
+    let module_root = manifest_path.parent().expect("manifest has parent");
+    for group in ["dependencies", "devDependencies", "dynamicDependencies"] {
+      let Some(dependencies) = manifest.get(group).and_then(Value::as_object) else {
+        continue;
+      };
+      for (package_name, specifier) in dependencies {
+        let Some(relative) = specifier
+          .as_str()
+          .and_then(|value| value.strip_prefix("file:"))
+        else {
+          continue;
+        };
+        let source = fs::canonicalize(module_root.join(relative))?;
+        if !source.starts_with(&canonical_root) || !source.is_dir() {
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+              "fixture local dependency {package_name} resolves outside {}",
+              root.display()
+            ),
+          ));
+        }
+        let package_path = Path::new(package_name);
+        if package_path.is_absolute()
+          || package_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid fixture package name: {package_name}"),
+          ));
+        }
+        let destination = module_root.join("oh_modules").join(package_path);
+        if destination.exists() {
+          continue;
+        }
+        fs::create_dir_all(
+          destination
+            .parent()
+            .expect("dependency destination has parent"),
+        )?;
+        materialize_local_dependency(&source, &destination)?;
+      }
+    }
+  }
+  Ok(())
+}
+
+#[cfg(unix)]
+fn materialize_local_dependency(source: &Path, destination: &Path) -> io::Result<()> {
+  std::os::unix::fs::symlink(source, destination)
+}
+
+#[cfg(windows)]
+fn materialize_local_dependency(source: &Path, destination: &Path) -> io::Result<()> {
+  copy_clean_fixture(source, destination)
 }
 
 fn should_copy_fixture_entry(root: &Path, path: &Path) -> bool {

@@ -17,7 +17,6 @@
 pub mod abs;
 pub mod artifact;
 pub mod classify;
-pub mod compat;
 pub mod host;
 pub mod hvigor;
 pub mod native_library;
@@ -28,10 +27,9 @@ pub mod serializer;
 pub mod source_file;
 pub mod specifier;
 
-pub use abs::AbsPath;
+pub use abs::{canonicalize_or_owned, AbsPath};
 pub use artifact::ArtifactPath;
 pub use classify::PathKind;
-pub use compat::{canonicalize_or_owned, to_slash};
 pub use host::HostPlatform;
 pub use hvigor::HvigorModulePath;
 pub use native_library::HvigorNativeLibraryPattern;

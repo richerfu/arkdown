@@ -40,7 +40,6 @@ pub mod duplicate_dependency;
 pub mod fingerprint;
 pub mod mode_inventory;
 pub mod module;
-pub mod native_inventory;
 pub mod package;
 pub mod paths;
 pub mod plan_input;
@@ -146,11 +145,6 @@ pub use sdk_schemas::{SdkSchemaKind, SdkSchemaPath, SdkSchemaResolver};
 pub use sdk_compile_plugin::{
     ComponentMetadata, EtsLoaderPath, JsLoaderPath, SdkArkTsFeatureGate, SdkCompilePluginSnapshot,
     SdkSupportExtensionSet,
-};
-
-// native_inventory
-pub use native_inventory::{
-    NativeAbi, NativeBuildInventory, NativeBuildTarget, NativeDebugSymbolPolicy, NativeLibCandidate,
 };
 
 // mode_inventory

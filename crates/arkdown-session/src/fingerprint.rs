@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use arkdown_config::ArkdownCustomConfig;
 use arkdown_core::{ArkdownConfig, ArktsLanguageVersion};
-use arkdown_path::{lexical_normalize, to_slash};
+use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
@@ -227,7 +227,10 @@ impl InputFingerprintSet {
 
     fn compute_sdk_hash(sdk: &SdkSnapshot) -> Result<Fingerprint, FingerprintError> {
         let mut builder = FingerprintBuilder::new("sdk", &sdk.sdk_root);
-        builder.add_value("sdk_root", to_slash(&sdk.sdk_root).as_bytes());
+        builder.add_value(
+            "sdk_root",
+            ArtifactPathSerializer::rel_to_slash(&sdk.sdk_root).as_bytes(),
+        );
         builder.add_value("api_version", sdk.api_version.to_string().as_bytes());
         builder.add_value(
             "component_api_version",
@@ -699,8 +702,8 @@ impl FingerprintBuilder {
 
     fn path_key(&self, path: &Path) -> String {
         path.strip_prefix(&self.base)
-            .map(to_slash)
-            .unwrap_or_else(|_| to_slash(path))
+            .map(ArtifactPathSerializer::rel_to_slash)
+            .unwrap_or_else(|_| ArtifactPathSerializer::rel_to_slash(path))
     }
 
     /// Finish the builder.

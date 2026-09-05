@@ -24,11 +24,11 @@ static BUILD_INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 pub struct HvigorCompilePluginShare {
     /// Process-unique identity for one module build. Every JavaScript plugin
-    /// receives this same value, allowing the compatibility layer to preserve
+    /// receives this same value, allowing the public JS plugin adapter to preserve
     /// the single shared Rollup object used by hvigor.
     pub build_instance_id: u64,
     /// Single Rust-owned effective compile configuration. The JavaScript
-    /// compatibility layer receives this object directly and never derives or
+    /// public JS plugin adapter receives this object directly and never derives or
     /// merges build fields.
     pub project_config: Arc<serde_json::Map<String, serde_json::Value>>,
     /// Immutable source metadata captured by `BuildSession` before hooks run.

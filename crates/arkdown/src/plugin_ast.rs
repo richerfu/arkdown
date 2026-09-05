@@ -223,10 +223,7 @@ impl<'a> PluginAstParser<'a> {
             let (message, byte_offset) = parsed.diagnostics.first().map_or_else(
                 || ("OXC parser stopped unexpectedly".to_string(), 0),
                 |diagnostic| {
-                    let offset = diagnostic
-                        .labels
-                        .first()
-                        .map_or(0, |label| label.offset() as u32);
+                    let offset = diagnostic.labels.first().map_or(0, |label| label.offset());
                     (diagnostic.to_string(), offset)
                 },
             );

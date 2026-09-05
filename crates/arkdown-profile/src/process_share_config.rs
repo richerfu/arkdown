@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn test_share_config_processor_new_and_default() {
         let _p1 = ShareConfigProcessor::new();
-        let _p2 = ShareConfigProcessor::default();
+        let _p2 = ShareConfigProcessor;
     }
 
     #[test]
