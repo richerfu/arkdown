@@ -1,22 +1,19 @@
 //! Cache key types.
 //!
-//! This module defines the types used to identify and validate cache entries.
-//! Production cache keys are driven by [`CacheKeyMaterial`] which combines
-//! content fingerprints from `InputFingerprintSet` with per-stage config
-//! hashes.
+//! Production cache keys use [`CacheFingerprint`] for deterministic content
+//! identity and [`CompileEnv`] for compiler-wide invalidation.
 //!
 //! # Upstream correspondence
 //!
 //! | Type | hvigor equivalent |
 //! |------|-------------------|
 //! | `CompileEnv` | `arkts-pack.js::getCompileEnv` output |
-//! | `BundleCacheKey` | bundle-level cache entry in `rollup-cache-service.js` |
-//! | `CacheKey` | per-module cache key from `invalid-cache-plugin.js` |
-//! | `CacheKeyMaterial` | fingerprint input fed into the above |
+//! | `CacheFingerprint` | deterministic content identity for owned cache records |
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Hvigor ArkTS msgpack compile cache file name.
 ///
@@ -43,89 +40,40 @@ pub fn compiler_cache_path(cache_path: impl AsRef<Path>) -> String {
 
 /// FNV-1a 64-bit hash of a byte slice.
 ///
-/// Used internally for computing stable short hashes for cache keys.
-/// This is NOT exported as a public API — callers must use
-/// [`CacheKeyMaterial::compute_content_hash`] instead.
+/// Used internally for computing stable short hashes for cache keys. This is
+/// not exported; callers use [`CacheFingerprint::content_hash`] instead.
 pub(crate) fn fnv1a_hash_bytes(bytes: &[u8]) -> u64 {
     arkdown_core::fnv1a64(bytes)
 }
 
-/// FNV-1a 64-bit hash of a string slice.
-///
-/// Internal implementation detail — use [`CacheKeyMaterial::compute_content_hash`]
-/// for public API.
-pub(crate) fn fnv1a_hash(s: &str) -> u64 {
-    fnv1a_hash_bytes(s.as_bytes())
-}
-
 // ---------------------------------------------------------------------------
-// CacheKeyMaterial
+// CacheFingerprint
 // ---------------------------------------------------------------------------
 
-/// Material used to construct a [`CacheKey`] or [`BundleCacheKey`].
-///
-/// `CacheKeyMaterial` is the typed input to key construction.  Callers build
-/// up material from source fingerprints, config hashes, and dependency graph
-/// hashes, then call [`CacheKeyMaterial::build`] to produce the final key.
-///
-/// # Upstream correspondence
-///
-/// Corresponds to the per-module cache key inputs collected by
-/// `invalid-cache-plugin.js` and passed to `shouldInvalidCache`.
-#[derive(Debug, Clone, Default)]
-pub struct CacheKeyMaterial {
-    /// Content bytes of the source file (or pre-computed FNV-1a hex hash).
-    pub content_hash: Option<String>,
-    /// Hash of the build configuration (SDK version, mode, etc.).
-    pub config_hash: u64,
-    /// Hash of the resolved import graph for this module.
-    pub dependency_hash: u64,
-}
+/// Deterministic fingerprints for content-addressed cache records.
+pub struct CacheFingerprint;
 
-impl CacheKeyMaterial {
-    /// Compute a deterministic FNV-1a content hash from `content`.
+impl CacheFingerprint {
+    /// Compute a deterministic SHA-256 content hash from `content`.
     ///
-    /// The result is a 16-character lowercase hex string suitable for use as
-    /// a [`CacheKey::content_hash`].
-    ///
-    /// # Upstream correspondence
-    ///
-    /// Replaces `arkdown_cache::compute_content_hash` (SPEC-048: free function
-    /// → associated method).
-    pub fn compute_content_hash(content: &str) -> String {
-        format!("{:016x}", fnv1a_hash(content))
+    /// The result is a 64-character lowercase hex string suitable for use as
+    /// a content-addressed cache identifier.
+    pub fn content_hash(content: &str) -> String {
+        Self::content_hash_bytes(content.as_bytes())
     }
 
-    /// Compute a deterministic FNV-1a content hash from raw bytes.
-    pub fn compute_content_hash_bytes(bytes: &[u8]) -> String {
-        format!("{:016x}", fnv1a_hash_bytes(bytes))
+    /// Compute a deterministic SHA-256 content hash from raw bytes.
+    pub fn content_hash_bytes(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
     }
 
-    /// Compute the raw FNV-1a u64 hash of a string.
+    /// Compute a fast FNV-1a fingerprint for an already versioned cache field.
     ///
-    /// Use this when you need the raw integer value rather than a hex string
-    /// (e.g., for comparing against stored numeric hashes or embedding in
-    /// filenames that use decimal representation).
+    /// Use this only when the serialized cache schema already carries the
+    /// collision boundary; content-addressed artifacts use SHA-256 above.
     ///
-    /// # Note
-    ///
-    /// Prefer [`CacheKeyMaterial::compute_content_hash`] for cache keys, as
-    /// it produces a stable hex string.  This method is for callers that need
-    /// numeric hash compatibility (e.g., router-map cache, coverage var names).
-    pub fn hash_u64(s: &str) -> u64 {
-        fnv1a_hash(s)
-    }
-
-    /// Build a [`CacheKey`] from the accumulated material.
-    pub fn build(self) -> CacheKey {
-        let content_hash = self
-            .content_hash
-            .unwrap_or_else(|| "0000000000000000".to_string());
-        CacheKey {
-            content_hash,
-            config_hash: self.config_hash,
-            dependency_hash: self.dependency_hash,
-        }
+    pub fn fast_hash_bytes(bytes: &[u8]) -> u64 {
+        fnv1a_hash_bytes(bytes)
     }
 }
 
@@ -205,160 +153,27 @@ impl CompileEnv {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CacheKey
-// ---------------------------------------------------------------------------
-
-/// Key that uniquely identifies a valid cache entry for a module.
-///
-/// A cache entry is valid if and only if all three hash components match the
-/// values computed from the current build inputs.
-///
-/// # Upstream correspondence
-///
-/// Corresponds to the per-module fingerprint check in
-/// `invalid-cache-plugin.js::shouldInvalidCache`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CacheKey {
-    /// FNV-1a hex digest of the source file content.
-    pub content_hash: String,
-    /// Fingerprint derived from build config: SDK version, build mode,
-    /// `useNormalizedOHMUrl`, obfuscation settings, etc.
-    pub config_hash: u64,
-    /// Hash of all direct import specifiers' resolved IDs (dependency graph).
-    pub dependency_hash: u64,
-}
-
-impl CacheKey {
-    /// Compute a stable string hash of the key for use as a filesystem-safe
-    /// cache identifier.
-    ///
-    /// The result is a 16-character hex string.
-    pub fn stable_hash(&self) -> String {
-        let combined = format!(
-            "{}:{}:{}",
-            self.content_hash, self.config_hash, self.dependency_hash
-        );
-        CacheKeyMaterial::compute_content_hash(&combined)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BundleCacheKey
-// ---------------------------------------------------------------------------
-
-/// Extended cache key that includes the compile-environment discriminator.
-///
-/// A [`BundleCacheKey`] is valid only when both the per-module [`CacheKey`]
-/// fields AND the `compile_env` string match the stored values.
-///
-/// # Upstream correspondence
-///
-/// Corresponds to the bundle-level cache key in `rollup-cache-service.js`
-/// that gates the entire bundle output.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BundleCacheKey {
-    pub inner: CacheKey,
-    pub compile_env: String,
-}
-
-impl BundleCacheKey {
-    /// Build a bundle cache key from a set of fingerprints and a compile env.
-    ///
-    /// # Upstream correspondence
-    ///
-    /// Corresponds to constructing the bundle-level cache key in
-    /// `arkts-pack.js::generateConfig` and `rollup-cache-service.js`.
-    pub fn from_fingerprints(
-        content_hash: impl Into<String>,
-        config_hash: u64,
-        dependency_hash: u64,
-        compile_env: impl Into<String>,
-    ) -> Self {
-        Self {
-            inner: CacheKey {
-                content_hash: content_hash.into(),
-                config_hash,
-                dependency_hash,
-            },
-            compile_env: compile_env.into(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// StageCacheKey
-// ---------------------------------------------------------------------------
-
-/// Cache key scoped to a specific build stage (e.g., profile, resource, ABC).
-///
-/// `StageCacheKey` adds a `stage_name` discriminant to the inner [`CacheKey`]
-/// so that cache entries from different stages do not collide even if they
-/// share the same module input fingerprint.
-///
-/// # Upstream correspondence
-///
-/// Corresponds to task-level cache keys in hvigor's task cache service.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StageCacheKey {
-    /// The stage name (e.g., `"profile"`, `"resource"`, `"abc"`).
-    pub stage_name: String,
-    /// The underlying module-level key.
-    pub inner: CacheKey,
-}
-
-impl StageCacheKey {
-    /// Create a stage-scoped cache key.
-    pub fn new(stage_name: impl Into<String>, inner: CacheKey) -> Self {
-        Self {
-            stage_name: stage_name.into(),
-            inner,
-        }
-    }
-
-    /// Compute a stable filesystem-safe identifier for this key.
-    pub fn stable_hash(&self) -> String {
-        let combined = format!("{}:{}", self.stage_name, self.inner.stable_hash());
-        CacheKeyMaterial::compute_content_hash(&combined)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn compute_content_hash_is_16_hex_chars() {
-        let h = CacheKeyMaterial::compute_content_hash("test");
-        assert_eq!(h.len(), 16);
+    fn content_hash_is_sha256_hex() {
+        let h = CacheFingerprint::content_hash("test");
+        assert_eq!(h.len(), 64);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn compute_content_hash_deterministic() {
+    fn content_hash_deterministic() {
         assert_eq!(
-            CacheKeyMaterial::compute_content_hash("hello"),
-            CacheKeyMaterial::compute_content_hash("hello")
+            CacheFingerprint::content_hash("hello"),
+            CacheFingerprint::content_hash("hello")
         );
         assert_ne!(
-            CacheKeyMaterial::compute_content_hash("hello"),
-            CacheKeyMaterial::compute_content_hash("world")
+            CacheFingerprint::content_hash("hello"),
+            CacheFingerprint::content_hash("world")
         );
-    }
-
-    #[test]
-    fn cache_key_stable_hash_differs_for_different_keys() {
-        let k1 = CacheKey {
-            content_hash: "a".to_string(),
-            config_hash: 0,
-            dependency_hash: 0,
-        };
-        let k2 = CacheKey {
-            content_hash: "b".to_string(),
-            config_hash: 0,
-            dependency_hash: 0,
-        };
-        assert_ne!(k1.stable_hash(), k2.stable_hash());
     }
 
     #[test]
@@ -376,23 +191,5 @@ mod tests {
             env.to_key_string(),
             "6.0.0.47#12#OpenHarmony#/sdk/ets-loader#false#Entry#/tmp/cache/compiler.cache"
         );
-    }
-
-    #[test]
-    fn material_build_uses_default_hash_when_unset() {
-        let material = CacheKeyMaterial {
-            content_hash: None,
-            config_hash: 0,
-            dependency_hash: 0,
-        };
-        let key = material.build();
-        assert_eq!(key.content_hash, "0000000000000000");
-    }
-
-    #[test]
-    fn bundle_cache_key_from_fingerprints() {
-        let k = BundleCacheKey::from_fingerprints("abc", 1, 2, "env_str");
-        assert_eq!(k.inner.content_hash, "abc");
-        assert_eq!(k.compile_env, "env_str");
     }
 }

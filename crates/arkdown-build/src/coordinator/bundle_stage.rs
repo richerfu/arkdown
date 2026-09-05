@@ -470,6 +470,17 @@ impl BuildCoordinator {
             .build();
             bundle_plan.preview_mode |= args.preview || args.preview_transform_mode;
             bundle_plan.check_entry = args.check_entry;
+            bundle_plan.cache = arkdown::BundleCachePolicy {
+                cache_directory: Some(
+                    module_layout
+                        .default_cache_dir("bundle")
+                        .join("oxc-transform"),
+                ),
+                read_cache: !disable_abc_cache,
+                write_cache: !disable_abc_cache,
+                compile_env_key: bundle_compile_env.clone(),
+                transform_environment_key: task_inputs.transform_cache_environment_key(),
+            };
             if ohos_test_templates_after_migration {
                 // The ohosTest module's ets root is the generated template tree
                 // (`build/<product>/intermediates/src/ohosTest/ets`); entry page
@@ -1074,60 +1085,6 @@ impl BuildCoordinator {
                 .save(cache_dir.as_path())?;
             } else {
                 PluginCacheModuleInventory::clear(cache_dir.as_path())?;
-            }
-
-            // Write bundle-level cache manifest.
-            {
-                let bundle_cache_dir = module_layout.default_cache_dir("bundle");
-                let bundle_cache = BuildCache::new(bundle_cache_dir);
-                let bundle_config_hash = {
-                    let page_entries = serde_json::to_string(&loader_json.page_entry_sources)
-                        .context("serialize page entry sources for bundle cache")?;
-                    let key_str = format!(
-            "{}#{}#{:?}#{}#arkts={}#preview={}#checkEntry={}#crossplatform={}#ignoreCrossplatformCheck={}#uiTransformOptimization={}#pageEntries={}#preloadSystemSo={}",
-            config.sdk_config.compile_sdk_version,
-            config.build_mode.as_str(),
-            config.output_target,
-            module_analyzer.as_str(),
-            self.session.arkts_language_version,
-            args.preview
-              || args.preview_transform_mode
-              || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
-            args.check_entry,
-            args.is_crossplatform,
-            args.ignore_crossplatform_check,
-            args.ui_transform_optimization,
-            page_entries,
-            module_build_option.preload_system_so
-          );
-                    arkdown_cache::CacheKeyMaterial::hash_u64(&key_str)
-                };
-                let bundle_dep_hash = {
-                    let mut h: u64 = 0xcbf29ce484222325;
-                    let mut entries: Vec<_> = loader_json.har_name_ohm_map.iter().collect();
-                    entries.sort_by_key(|(k, _)| k.as_str());
-                    for (k, v) in &entries {
-                        for b in k.bytes().chain(b"|".iter().copied()).chain(v.bytes()) {
-                            h ^= b as u64;
-                            h = h.wrapping_mul(0x100000001b3);
-                        }
-                    }
-                    h
-                };
-                let bundle_key = BundleCacheKey {
-                    inner: CacheKey {
-                        content_hash: task_input_snapshot.source_hash.clone(),
-                        config_hash: bundle_config_hash,
-                        dependency_hash: bundle_dep_hash,
-                    },
-                    compile_env: bundle_compile_env,
-                };
-                if let Err(e) = bundle_cache.write_bundle_manifest(&bundle_key) {
-                    tracing::debug!(
-                        error = %e,
-                        "failed to write bundle cache manifest (non-fatal)"
-                    );
-                }
             }
 
             // Persist cache-group hashes so the next build can diff against them.

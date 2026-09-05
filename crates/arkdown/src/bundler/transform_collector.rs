@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use arkdown_cache::CacheKeyMaterial;
+use arkdown_cache::CacheFingerprint;
 use arkdown_ets_transform::{CrossplatformSourceCollection, InsightIntentSourceMetadata};
 use rolldown_plugin::{
     HookTransformArgs, HookTransformReturn, HookUsage, Plugin, PluginHookMeta,
@@ -254,7 +254,7 @@ impl HvigorModuleTransformCollector {
         let Some(transform_source_map) = transform_source_map else {
             return combined_source_map;
         };
-        if CacheKeyMaterial::compute_content_hash(code) != transform_code_hash {
+        if CacheFingerprint::content_hash(code) != transform_code_hash {
             return combined_source_map;
         }
         if Self::combined_map_is_projection(transform_source_map, &combined_source_map) {

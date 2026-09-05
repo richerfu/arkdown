@@ -20,7 +20,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::key::fnv1a_hash;
+use crate::key::fnv1a_hash_bytes;
 
 // ---------------------------------------------------------------------------
 // CacheGroupKey
@@ -100,7 +100,7 @@ impl CacheGroupSnapshot {
     pub fn from_value(key: CacheGroupKey, serialized: &str) -> Self {
         Self {
             key,
-            hash: fnv1a_hash(serialized),
+            hash: fnv1a_hash_bytes(serialized.as_bytes()),
         }
     }
 

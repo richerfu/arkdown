@@ -6,6 +6,7 @@ use arkdown_ets_transform::ModuleAnalyzerKind;
 use arkdown_path::{ArtifactPathSerializer, SourceFileName};
 use arkdown_profile::LoaderJson;
 use arkdown_session::BuildSession;
+use sha2::{Digest, Sha256};
 
 /// Session-derived, content-addressed inputs for one module compile task.
 ///
@@ -260,6 +261,40 @@ impl TaskInputs {
         Self::hash_file_contents_into(&mut h, paths.iter().map(PathBuf::as_path));
         self.obfuscation_hash = h;
         self
+    }
+
+    /// Stable environment key for per-module OXC transform artifacts.
+    /// Source content is deliberately excluded: the transform cache owns a
+    /// separate hash per source and invalidates only its reverse dependency
+    /// closure. Every non-source input observable by the transform remains in
+    /// this key.
+    pub(crate) fn transform_cache_environment_key(&self) -> String {
+        let mut hash = Sha256::new();
+        for value in [
+            self.sdk_version.as_str(),
+            self.compile_env.as_str(),
+            self.module_analyzer.as_str(),
+            self.resource_hash.as_str(),
+            self.dependency_content_hash.as_str(),
+            self.config_hash.as_str(),
+            self.profile_hash.as_str(),
+            self.sdk_hash.as_str(),
+            self.arkts_language_version.as_str(),
+        ] {
+            hash.update(value.as_bytes());
+            hash.update([0]);
+        }
+        for value in [
+            self.schema_version as u64,
+            self.obfuscation_hash,
+            self.plugin_hash,
+            self.custom_types_hash,
+            self.dependency_hash,
+        ] {
+            hash.update(value.to_le_bytes());
+            hash.update([0]);
+        }
+        format!("{:x}", hash.finalize())
     }
 
     /// Return `true` if the persisted inputs in `cache_dir` match `self`.
@@ -545,14 +580,12 @@ mod tests {
 
     fn make_snapshot(source: &str) -> TaskInputSnapshot {
         TaskInputSnapshot {
-            source_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash(source),
-            resource_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("resources"),
-            dependency_content_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash(
-                "dependencies",
-            ),
-            config_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("config"),
-            profile_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("profiles"),
-            sdk_hash: arkdown_cache::CacheKeyMaterial::compute_content_hash("sdk"),
+            source_hash: arkdown_cache::CacheFingerprint::content_hash(source),
+            resource_hash: arkdown_cache::CacheFingerprint::content_hash("resources"),
+            dependency_content_hash: arkdown_cache::CacheFingerprint::content_hash("dependencies"),
+            config_hash: arkdown_cache::CacheFingerprint::content_hash("config"),
+            profile_hash: arkdown_cache::CacheFingerprint::content_hash("profiles"),
+            sdk_hash: arkdown_cache::CacheFingerprint::content_hash("sdk"),
         }
     }
 
@@ -672,6 +705,29 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn transform_cache_environment_is_granular_for_sources_and_strict_for_side_inputs() {
+        let config = make_config();
+        let loader = make_loader(vec!["./ets/A.ets".to_string()], "/tmp/cache");
+        let base = TaskInputs::compute(&config, &loader, &make_snapshot("const value = 1;"));
+
+        let changed_source =
+            TaskInputs::compute(&config, &loader, &make_snapshot("const value = 2;"));
+        assert_eq!(
+            base.transform_cache_environment_key(),
+            changed_source.transform_cache_environment_key(),
+            "module source content is invalidated by the graph manifest, not globally"
+        );
+
+        let mut changed_resource = changed_source;
+        changed_resource.resource_hash = "resource-v2".to_string();
+        assert_ne!(
+            base.transform_cache_environment_key(),
+            changed_resource.transform_cache_environment_key(),
+            "resource lowering inputs must invalidate every transform artifact"
+        );
     }
 
     #[test]

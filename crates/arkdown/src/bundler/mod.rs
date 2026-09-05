@@ -55,7 +55,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use arkdown_cache::CacheKeyMaterial;
+use arkdown_cache::CacheFingerprint;
 use arkdown_core::{ArkdownError, HvigorModuleSourceFile};
 use arkdown_ets_transform::RolldownEtsTransformPlan;
 use arkdown_path::{lexical_normalize, AbsPath, ArtifactPathSerializer};
@@ -159,6 +159,9 @@ impl Bundler {
         let bundle_start = Instant::now();
         plan.validate()?;
         let input_plan = RolldownInputPlan::from_bundle_plan(plan);
+        if let Some(plugin) = self.ets_transform_plugin.as_ref() {
+            plugin.begin_build();
+        }
 
         // ── 2. Pass plugins directly to rolldown ─────────────────────────────
         let transform_store = self
@@ -568,6 +571,17 @@ impl Bundler {
             "bundler completed"
         );
 
+        if let Some(plugin) = self.ets_transform_plugin.as_ref() {
+            let mut active_module_ids = module_source_files
+                .iter()
+                .map(|source| source.module_id.clone())
+                .chain(module_imports.keys().cloned())
+                .collect::<Vec<_>>();
+            active_module_ids.sort();
+            active_module_ids.dedup();
+            plugin.commit_cache(&module_imports, active_module_ids);
+        }
+
         Ok(BundleOutput {
             chunk_graph,
             output_dir,
@@ -767,7 +781,7 @@ impl Bundler {
                 let source = ets_transform_plan.sources.source_text(&source_path)?;
                 Some(SourceMapInputFingerprint {
                     key: entry.key.clone(),
-                    content_hash: CacheKeyMaterial::compute_content_hash(source.as_ref()),
+                    content_hash: CacheFingerprint::content_hash(source.as_ref()),
                 })
             })
             .collect::<Vec<_>>();

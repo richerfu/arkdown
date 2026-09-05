@@ -2,6 +2,7 @@ use oxc_ast::ast::{ImportDeclarationSpecifier, Program, Statement, TSModuleRefer
 use oxc_ast::AstKind;
 use oxc_ast_visit::Visit;
 use rustc_hash::FxHashSet;
+use serde::{Deserialize, Serialize};
 
 use crate::kit_map::resolve_kit_import;
 
@@ -9,7 +10,7 @@ use super::component_meta::ComponentMetadata;
 
 /// Per-source data written by the ArkUI-X `apiTransform` lifecycle to
 /// `module_collection.json` and `component_collection.json`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossplatformSourceCollection {
     pub modules: Vec<String>,
     pub components: Vec<String>,

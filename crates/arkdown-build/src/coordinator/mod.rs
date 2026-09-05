@@ -110,9 +110,7 @@ use arkdown::plugins::ets_transform::{
     SystemApiCheckOptions, SystemResourceReferenceLoader,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
-use arkdown_cache::{
-    BuildCache, BundleCacheKey, CacheGroupKey, CacheGroupSnapshot, CacheKey, HarImporteeCache,
-};
+use arkdown_cache::{CacheGroupKey, CacheGroupSnapshot, HarImporteeCache};
 use arkdown_config::build_profile::{parse_api_version, EffectiveTargetConfig};
 use arkdown_ets_transform::{
     ArkuiComponentNameCollector, CoverageInstrumenter, HarDeclarationGenerator,
@@ -1550,7 +1548,7 @@ fn build_cache_group_snapshots(
     let file_hash = |path: &PathBuf, key: CacheGroupKey| -> CacheGroupSnapshot {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let h = arkdown_cache::CacheKeyMaterial::hash_u64(&String::from_utf8_lossy(&bytes));
+                let h = arkdown_cache::CacheFingerprint::fast_hash_bytes(&bytes);
                 CacheGroupSnapshot::from_u64(key, h)
             }
             Err(_) => CacheGroupSnapshot::from_value(key, ""),
