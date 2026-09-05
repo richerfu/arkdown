@@ -53,6 +53,9 @@ pub struct HvigorModuleSourceFile {
     pub path: PathBuf,
     /// ABC record name generated from hvigor module ownership.
     pub record_name: String,
+    /// Whether `record_name` came from explicit module metadata (`meta.ohmurl`).
+    /// Explicit records are not derived again after filename obfuscation.
+    pub record_name_is_explicit: bool,
     /// Original source-file attribution written to `filesInfo.txt` column 4.
     pub source_file: String,
     /// Package name written to `filesInfo.txt` column 5.
@@ -68,6 +71,9 @@ pub struct HvigorModuleSourceFile {
     pub origin_source_lang: String,
     /// ABC record names for static imports/re-exports resolved from this module.
     pub imported_record_names: Vec<String>,
+    /// Files owned by installed `oh_modules` packages keep their physical and
+    /// logical filenames when ArkGuard filename obfuscation is enabled.
+    pub is_package_module: bool,
 }
 
 /// One `npmEntries.txt` mapping consumed by SDK `es2abc`.

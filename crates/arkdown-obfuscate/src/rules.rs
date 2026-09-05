@@ -23,7 +23,10 @@
 
 use std::path::Path;
 
+use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
 use rustc_hash::FxHashSet;
+
+use crate::ObfuscationError;
 
 /// Parsed, merged set of obfuscation directives.
 #[derive(Debug, Clone, Default)]
@@ -58,18 +61,20 @@ pub struct ObfuscationRules {
     pub print_name_cache: Option<String>,
     pub print_kept_names_path: Option<String>,
     pub apply_name_cache: Option<String>,
-    pub remove_no_side_effects_calls: Vec<String>,
     pub keep_property_names: FxHashSet<String>,
     pub keep_global_names: FxHashSet<String>,
     pub keep_file_names: FxHashSet<String>,
     pub keep_comments: FxHashSet<String>,
     pub keep_source_paths: FxHashSet<String>,
+    pub exclude_source_paths: FxHashSet<String>,
+    pub keep_dts_paths: FxHashSet<String>,
 }
 
 /// Current `-keep-*` section being accumulated.
 enum Section {
     None,
     KeepSource,
+    KeepDts,
     KeepProperty,
     KeepGlobal,
     KeepFile,
@@ -77,7 +82,6 @@ enum Section {
     PrintNameCache,
     PrintKeptNames,
     ApplyNameCache,
-    RemoveNoSideEffectsCalls,
     ExtraOptions,
 }
 
@@ -99,7 +103,6 @@ impl ObfuscationRules {
     const REMOVE_COMMENTS: &'static str = "-remove-comments";
     const COMPACT: &'static str = "-compact";
     const REMOVE_LOG: &'static str = "-remove-log";
-    const REMOVE_NOSIDEEFFECTS_CALLS: &'static str = "-remove-nosideeffects-calls";
     const PRINT_NAMECACHE: &'static str = "-print-namecache";
     const PRINT_KEPT_NAMES: &'static str = "-print-kept-names";
     const APPLY_NAMECACHE: &'static str = "-apply-namecache";
@@ -196,7 +199,7 @@ impl ObfuscationRules {
                     section = Section::KeepSource;
                 }
                 Self::KEEP_DTS => {
-                    section = Section::None;
+                    section = Section::KeepDts;
                 }
                 Self::KEEP_PROPERTY_NAME => {
                     section = Section::KeepProperty;
@@ -220,15 +223,15 @@ impl ObfuscationRules {
                 Self::APPLY_NAMECACHE => {
                     section = Section::ApplyNameCache;
                 }
-                Self::REMOVE_NOSIDEEFFECTS_CALLS => {
-                    section = Section::RemoveNoSideEffectsCalls;
-                }
                 Self::EXTRA_OPTIONS => {
                     section = Section::ExtraOptions;
                 }
                 name => match section {
                     Section::KeepSource => {
                         rules.keep_source_paths.insert(name.to_string());
+                    }
+                    Section::KeepDts => {
+                        rules.keep_dts_paths.insert(name.to_string());
                     }
                     Section::KeepProperty => {
                         rules.keep_property_names.insert(name.to_string());
@@ -254,9 +257,6 @@ impl ObfuscationRules {
                         rules.apply_name_cache = Some(name.to_string());
                         section = Section::None;
                     }
-                    Section::RemoveNoSideEffectsCalls => {
-                        rules.remove_no_side_effects_calls.push(name.to_string());
-                    }
                     Section::ExtraOptions => match name {
                         Self::STRIP_LANGUAGE_DEFAULT => {
                             rules.strip_language_default = true;
@@ -279,9 +279,11 @@ impl ObfuscationRules {
     }
 
     /// Parse a rule file from disk.
-    pub fn from_file(path: &Path) -> std::io::Result<Self> {
+    pub fn from_file(path: &Path) -> Result<Self, ObfuscationError> {
         let content = std::fs::read_to_string(path)?;
-        Ok(Self::parse(&content))
+        let mut rules = Self::parse(&content);
+        rules.resolve_paths(path)?;
+        Ok(rules)
     }
 
     /// Merge two rule sets (logical OR for flags, union for keep-name sets).
@@ -323,11 +325,6 @@ impl ObfuscationRules {
             print_name_cache: other.print_name_cache.or(self.print_name_cache),
             print_kept_names_path: other.print_kept_names_path.or(self.print_kept_names_path),
             apply_name_cache: other.apply_name_cache.or(self.apply_name_cache),
-            remove_no_side_effects_calls: self
-                .remove_no_side_effects_calls
-                .into_iter()
-                .chain(other.remove_no_side_effects_calls)
-                .collect(),
             keep_property_names: self
                 .keep_property_names
                 .into_iter()
@@ -353,6 +350,16 @@ impl ObfuscationRules {
                 .into_iter()
                 .chain(other.keep_source_paths)
                 .collect(),
+            exclude_source_paths: self
+                .exclude_source_paths
+                .into_iter()
+                .chain(other.exclude_source_paths)
+                .collect(),
+            keep_dts_paths: self
+                .keep_dts_paths
+                .into_iter()
+                .chain(other.keep_dts_paths)
+                .collect(),
         }
     }
 
@@ -366,6 +373,8 @@ impl ObfuscationRules {
         self.keep_file_names.extend(other.keep_file_names);
         self.keep_comments.extend(other.keep_comments);
         self.keep_source_paths.extend(other.keep_source_paths);
+        self.exclude_source_paths.extend(other.exclude_source_paths);
+        self.keep_dts_paths.extend(other.keep_dts_paths);
         self
     }
 
@@ -428,6 +437,76 @@ impl ObfuscationRules {
             }
         }
         output
+    }
+
+    /// Resolve path-valued directives while the owning rule file is still
+    /// known. SDK `ConfigResolver.resolveKeepConfig` anchors `-keep` entries to
+    /// the rule file, canonicalizes existing concrete includes, and keeps
+    /// wildcard/exclusion entries for module-inventory matching.
+    fn resolve_paths(&mut self, config_path: &Path) -> Result<(), ObfuscationError> {
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let configured_paths = std::mem::take(&mut self.keep_source_paths);
+        for configured in configured_paths {
+            let (exclude, value) = configured
+                .strip_prefix('!')
+                .map_or((false, configured.as_str()), |value| (true, value));
+            let unresolved = Path::new(value);
+            let anchored = if unresolved.is_absolute() {
+                unresolved.to_path_buf()
+            } else {
+                config_dir.join(unresolved)
+            };
+            let resolved = lexical_normalize(&anchored);
+            let contains_wildcards = value.contains(['*', '?']);
+            if !exclude && !contains_wildcards && !resolved.exists() {
+                // ArkGuard reports a warning and ignores a missing concrete
+                // include. Missing wildcard matches and exclusions are valid.
+                continue;
+            }
+            let resolved = if !contains_wildcards && resolved.exists() {
+                std::fs::canonicalize(&resolved)?
+            } else {
+                resolved
+            };
+            let serialized = ArtifactPathSerializer::path_to_slash_string(&resolved)?;
+            if exclude {
+                self.exclude_source_paths.insert(serialized);
+            } else {
+                self.keep_source_paths.insert(serialized);
+            }
+        }
+
+        let dts_paths = std::mem::take(&mut self.keep_dts_paths);
+        for configured in dts_paths {
+            let path = Path::new(&configured);
+            let anchored = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                config_dir.join(path)
+            };
+            let resolved = lexical_normalize(&anchored);
+            self.keep_dts_paths
+                .insert(ArtifactPathSerializer::path_to_slash_string(&resolved)?);
+        }
+
+        for configured in [
+            &mut self.print_name_cache,
+            &mut self.print_kept_names_path,
+            &mut self.apply_name_cache,
+        ] {
+            let Some(value) = configured.as_deref() else {
+                continue;
+            };
+            let path = Path::new(value);
+            let anchored = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                config_dir.join(path)
+            };
+            let resolved = lexical_normalize(&anchored);
+            *configured = Some(ArtifactPathSerializer::path_to_slash_string(&resolved)?);
+        }
+        Ok(())
     }
 }
 

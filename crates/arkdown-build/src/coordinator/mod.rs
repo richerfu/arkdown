@@ -1007,6 +1007,8 @@ mod compile_context_info_tests {
                 is_shared_module: false,
                 origin_source_lang: "ts".to_string(),
                 imported_record_names: vec![],
+                record_name_is_explicit: true,
+                is_package_module: false,
             },
             HvigorModuleSourceFile {
                 module_id: index.to_string_lossy().into_owned(),
@@ -1018,6 +1020,8 @@ mod compile_context_info_tests {
                 is_shared_module: false,
                 origin_source_lang: "ets".to_string(),
                 imported_record_names: vec![],
+                record_name_is_explicit: true,
+                is_package_module: false,
             },
         ];
         let pkg_context_info = BTreeMap::new();
@@ -1070,6 +1074,8 @@ mod compile_context_info_tests {
                 is_shared_module: false,
                 origin_source_lang: "ets".to_string(),
                 imported_record_names: vec!["&mtlauncher/Index&12.59.403".to_string()],
+                record_name_is_explicit: true,
+                is_package_module: false,
             },
             HvigorModuleSourceFile {
                 module_id: package_entry.to_string_lossy().into_owned(),
@@ -1084,6 +1090,8 @@ mod compile_context_info_tests {
                     "&mtlauncher/BuildProfile&12.59.403".to_string(),
                     "&@meituan/log/Index&0.0.18".to_string(),
                 ],
+                record_name_is_explicit: false,
+                is_package_module: true,
             },
             HvigorModuleSourceFile {
                 module_id: package_build_profile.to_string_lossy().into_owned(),
@@ -1097,6 +1105,8 @@ mod compile_context_info_tests {
                 is_shared_module: false,
                 origin_source_lang: "ets".to_string(),
                 imported_record_names: vec![],
+                record_name_is_explicit: false,
+                is_package_module: true,
             },
             HvigorModuleSourceFile {
                 module_id: log_entry.to_string_lossy().into_owned(),
@@ -1108,6 +1118,8 @@ mod compile_context_info_tests {
                 is_shared_module: false,
                 origin_source_lang: "ets".to_string(),
                 imported_record_names: vec![],
+                record_name_is_explicit: false,
+                is_package_module: true,
             },
         ];
         let mut pkg_context_info = BTreeMap::new();
@@ -1158,16 +1170,19 @@ mod compile_context_info_tests {
                 source_file:
                     "meituan|@mrn/mrn|12.59.403|src/main/ets/mapi/apis/getfeedcommentlist_bin.ts"
                         .to_string(),
+                record_name_is_explicit: false,
                 package_name: Some("@mrn/mrn".to_string()),
                 is_commonjs: false,
                 is_shared_module: false,
                 origin_source_lang: "ets".to_string(),
                 imported_record_names: vec![],
+                is_package_module: true,
             },
             HvigorModuleSourceFile {
                 module_id: index_entry.to_string_lossy().into_owned(),
                 path: temp.path().join("cache/oh_modules/@mrn/mrn/Index.ts"),
                 record_name: "&@mrn/mrn/Index&12.59.403".to_string(),
+                record_name_is_explicit: false,
                 source_file: "meituan|@mrn/mrn|12.59.403|Index.ts".to_string(),
                 package_name: Some("@mrn/mrn".to_string()),
                 is_commonjs: false,
@@ -1176,6 +1191,7 @@ mod compile_context_info_tests {
                 imported_record_names: vec![
                     "&@mrn/mrn/src/main/ets/config/MRNConfigCenter&12.59.403".to_string(),
                 ],
+                is_package_module: true,
             },
             HvigorModuleSourceFile {
                 module_id: build_profile_entry.to_string_lossy().into_owned(),
@@ -1183,12 +1199,14 @@ mod compile_context_info_tests {
                     .path()
                     .join("cache/oh_modules/@mrn/mrn/BuildProfile.ts"),
                 record_name: "&@mrn/mrn/BuildProfile&12.59.403".to_string(),
+                record_name_is_explicit: false,
                 source_file: "meituan|@mrn/mrn|12.59.403|BuildProfile.ts".to_string(),
                 package_name: Some("@mrn/mrn".to_string()),
                 is_commonjs: false,
                 is_shared_module: false,
                 origin_source_lang: "ets".to_string(),
                 imported_record_names: vec![],
+                is_package_module: true,
             },
             HvigorModuleSourceFile {
                 module_id: config_entry.to_string_lossy().into_owned(),
@@ -1196,6 +1214,7 @@ mod compile_context_info_tests {
                     .path()
                     .join("cache/oh_modules/@mrn/mrn/src/main/ets/config/MRNConfigCenter.ts"),
                 record_name: "&@mrn/mrn/src/main/ets/config/MRNConfigCenter&12.59.403".to_string(),
+                record_name_is_explicit: false,
                 source_file: "meituan|@mrn/mrn|12.59.403|src/main/ets/config/MRNConfigCenter.ts"
                     .to_string(),
                 package_name: Some("@mrn/mrn".to_string()),
@@ -1203,6 +1222,7 @@ mod compile_context_info_tests {
                 is_shared_module: false,
                 origin_source_lang: "ets".to_string(),
                 imported_record_names: vec![],
+                is_package_module: true,
             },
         ];
         let mut pkg_context_info = BTreeMap::new();
@@ -1248,12 +1268,14 @@ mod compile_context_info_tests {
           .path()
           .join("cache/meituan/src/main/ets/form/FormAbility.ts"),
         record_name: "&meituan/src/main/ets/form/FormAbility&".to_string(),
+        record_name_is_explicit: true,
         source_file: "meituan|meituan|1.0.0|src/main/ets/form/FormAbility.ts".to_string(),
         package_name: Some("meituan".to_string()),
         is_commonjs: false,
         is_shared_module: false,
         origin_source_lang: "ets".to_string(),
         imported_record_names: vec!["&@meituan/card_subscribe/&1.0.32".to_string()],
+        is_package_module: false,
       },
       HvigorModuleSourceFile {
         module_id: subscribe_entry.to_string_lossy().into_owned(),
@@ -1261,6 +1283,7 @@ mod compile_context_info_tests {
           .path()
           .join("cache/oh_modules/@meituan/card_subscribe/index.ts"),
         record_name: "&@meituan/card_subscribe/&1.0.32".to_string(),
+        record_name_is_explicit: false,
         source_file: "meituan|@meituan/card_subscribe|1.0.32|index.ts".to_string(),
         package_name: Some("@meituan/card_subscribe".to_string()),
         is_commonjs: false,
@@ -1269,6 +1292,7 @@ mod compile_context_info_tests {
         imported_record_names: vec![
           "&@meituan/card_subscribe/src/main/ets/subscribeForm/PTSubscribeForm&1.0.32".to_string(),
         ],
+        is_package_module: true,
       },
       HvigorModuleSourceFile {
         module_id: subscribe_form.to_string_lossy().into_owned(),
@@ -1277,6 +1301,7 @@ mod compile_context_info_tests {
         ),
         record_name: "&@meituan/card_subscribe/src/main/ets/subscribeForm/PTSubscribeForm&1.0.32"
           .to_string(),
+        record_name_is_explicit: false,
         source_file:
           "meituan|@meituan/card_subscribe|1.0.32|src/main/ets/subscribeForm/PTSubscribeForm.ts"
             .to_string(),
@@ -1285,6 +1310,7 @@ mod compile_context_info_tests {
         is_shared_module: false,
         origin_source_lang: "ets".to_string(),
         imported_record_names: vec![],
+        is_package_module: true,
       },
     ];
         let pkg_context_info = BTreeMap::new();
@@ -1319,12 +1345,14 @@ mod compile_context_info_tests {
                 .path()
                 .join("cache/oh_modules/dljson/src/main/ets/internal/DlJson.ts"),
             record_name: "&dljson/src/main/ets/internal/DlJson&0.0.5".to_string(),
+            record_name_is_explicit: false,
             source_file: "meituan|dljson|0.0.5|src/main/ets/internal/DlJson.ts".to_string(),
             package_name: Some("dljson".to_string()),
             is_commonjs: false,
             is_shared_module: false,
             origin_source_lang: "ts".to_string(),
             imported_record_names: vec![],
+            is_package_module: true,
         }];
         let pkg_context_info = BTreeMap::new();
         let writer = CompileContextInfoWriter::new(

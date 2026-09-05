@@ -57,6 +57,7 @@ pub(crate) struct HvigorModuleSourceRecordIndex {
 pub(crate) struct HvigorModuleSourceRecord {
     pub(crate) ownership: HvigorChunkSource,
     pub(crate) record_name: String,
+    pub(crate) record_name_is_explicit: bool,
 }
 
 pub(crate) struct HvigorModuleSourceWriteJob {
@@ -541,6 +542,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             module_id: module_id.to_string(),
             path: job.path.clone(),
             record_name: module_record.record_name.clone(),
+            record_name_is_explicit: module_record.record_name_is_explicit,
             source_file: ownership.file_info_source_file(
                 entry_package_name,
                 entry_package_version,
@@ -557,6 +559,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             is_shared_module: self.state.shared_module_ids.contains(module_id),
             origin_source_lang,
             imported_record_names,
+            is_package_module: matches!(ownership.kind, HvigorChunkSourceKind::Package(_)),
         }))
     }
 
@@ -640,9 +643,8 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             if ownership.module_name.is_empty() {
                 continue;
             }
-            let record_name = if let Some(record_name) =
-                self.module_path_map.module_meta_info_ohm_url(module_id)
-            {
+            let explicit_record_name = self.module_path_map.module_meta_info_ohm_url(module_id);
+            let record_name = if let Some(record_name) = explicit_record_name {
                 record_name.to_string()
             } else if self.use_normalized_ohm_url {
                 ownership.normalized_record_name(self.runtime_packages)?
@@ -665,6 +667,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                 HvigorModuleSourceRecord {
                     ownership,
                     record_name,
+                    record_name_is_explicit: explicit_record_name.is_some(),
                 },
             );
         }

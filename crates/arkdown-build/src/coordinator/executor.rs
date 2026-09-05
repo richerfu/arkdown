@@ -2093,7 +2093,7 @@ impl BuildCoordinator {
             ),
         ) in loader_jsons
             .iter()
-            .zip(bundle_outs.iter())
+            .zip(bundle_outs.iter_mut())
             .zip(module_obfuscation_contexts.iter())
             .enumerate()
         {
@@ -2130,7 +2130,6 @@ impl BuildCoordinator {
                     module,
                     loader_json,
                     bundle_out,
-                    args.resolved_node_executable(),
                 );
                 let (arkguard, module_input) = arkguard_plan.build()?;
                 let obfuscator = Obfuscator::new(ObfuscationOptions {
@@ -2151,9 +2150,16 @@ impl BuildCoordinator {
                             ));
                     }
                     ObfuscationMode::Source => {
-                        obfuscator
+                        let output = obfuscator
                             .obfuscate_module(module_input)
                             .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
+                        output
+                            .apply_to_module_sources(
+                                &mut bundle_out.bundle_output.module_source_files,
+                            )
+                            .map_err(|e| {
+                                anyhow::anyhow!("Obfuscation output handoff failed: {}", e)
+                            })?;
                     }
                     ObfuscationMode::Disabled => {}
                 }

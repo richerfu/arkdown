@@ -433,12 +433,14 @@ mod tests {
             module_id: module_id.to_string(),
             path,
             record_name: "entry/ets/pages/Index".to_string(),
+            record_name_is_explicit: false,
             source_file: "entry/src/main/ets/pages/Index.ets".to_string(),
             package_name: Some("entry".to_string()),
             is_commonjs: false,
             is_shared_module: false,
             origin_source_lang: "ets".to_string(),
             imported_record_names: Vec::new(),
+            is_package_module: false,
         }
     }
 

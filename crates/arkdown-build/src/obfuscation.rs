@@ -1,20 +1,20 @@
 //! Hvigor-aligned module obfuscation planning for the build application.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{
-    ArkdownConfig, BuildMode, HarArtifactType, ModuleConfig, ObfuscationConfig, OhosModuleType,
-    OutputTarget,
+    ArkdownConfig, BuildMode, HarArtifactType, ModuleConfig, ObfuscationConfig, OutputTarget,
 };
 use arkdown_obfuscate::{
     ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
-    BytecodeObfuscationSource, ConsumerObfuscationFileWriter, ObfuscationModuleFile,
-    ObfuscationModuleInput, Obfuscator,
+    ConsumerObfuscationFileWriter, ObfuscationModuleFile, ObfuscationModuleInput,
+    ObfuscationSource, Obfuscator,
 };
-use arkdown_path::canonicalize_or_owned;
+use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
 use arkdown_profile::LoaderJson;
 use arkdown_session::dependency_graph::snapshot::{DependencyGraphSnapshot, DependencyNodeType};
 use arkdown_session::{BuildSession, ModuleCompileContext};
@@ -37,7 +37,6 @@ pub struct ModuleArkguardPlanBuilder<'a> {
     module: &'a ModuleConfig,
     loader_json: &'a LoaderJson,
     bundle_out: &'a BundleStageOutput,
-    node_executable: PathBuf,
 }
 
 impl<'a> ModuleArkguardPlanBuilder<'a> {
@@ -47,7 +46,6 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
         module: &'a ModuleConfig,
         loader_json: &'a LoaderJson,
         bundle_out: &'a BundleStageOutput,
-        node_executable: PathBuf,
     ) -> Self {
         Self {
             config,
@@ -55,7 +53,6 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             module,
             loader_json,
             bundle_out,
-            node_executable,
         }
     }
 
@@ -71,7 +68,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                     self.module.name
                 )
             })?;
-        let source_maps: serde_json::Map<String, serde_json::Value> =
+        let mut source_maps: serde_json::Map<String, serde_json::Value> =
             serde_json::from_slice(&std::fs::read(&source_maps_path)?)?;
         let insight_intent_keep = self
             .bundle_out
@@ -80,16 +77,14 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             .iter()
             .map(|source| (source.module_id.as_str(), &source.metadata))
             .collect::<FxHashMap<_, _>>();
-        let files = self
+        let mut files = self
             .bundle_out
             .bundle_output
             .module_source_files
             .iter()
             .map(|source| {
-                let previous_source_map = source_maps
-                    .get(&source.source_file)
-                    .cloned()
-                    .ok_or_else(|| {
+                let previous_source_map =
+                    source_maps.remove(&source.source_file).ok_or_else(|| {
                         anyhow::anyhow!(
                             "sourceMaps.map has no entry '{}' for ArkGuard input {}",
                             source.source_file,
@@ -122,8 +117,13 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                     build_path: source.path.clone(),
                     original_path,
                     relative_path,
+                    record_name: (!source.record_name_is_explicit)
+                        .then(|| source.record_name.clone()),
+                    rename_file: !source.is_package_module,
+                    source_name_cache_key: None,
                     source_map_key: source.source_file.clone(),
                     previous_source_map: Some(previous_source_map),
+                    source: Arc::from(fs_err::read_to_string(&source.path)?),
                     insight_intent_global_names: insight_intent
                         .map(|metadata| metadata.obfuscation_global_names.clone())
                         .unwrap_or_default(),
@@ -133,12 +133,75 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        files.extend(self.declaration_files()?);
         if files.is_empty() {
             anyhow::bail!(
                 "ArkGuard source obfuscation has no CompileArkTS module sources for '{}'",
                 self.module.name
             );
         }
+        let source_module_paths = self
+            .bundle_out
+            .bundle_output
+            .module_source_files
+            .iter()
+            .map(|source| PathBuf::from(&source.module_id))
+            .collect::<FxHashSet<_>>();
+        let module_dependencies = self
+            .bundle_out
+            .bundle_output
+            .module_imports
+            .iter()
+            .filter_map(|(importer, imports)| {
+                let importer = PathBuf::from(importer);
+                if !source_module_paths.contains(&importer) {
+                    return None;
+                }
+                let mut imports = imports
+                    .iter()
+                    .map(PathBuf::from)
+                    .filter(|path| source_module_paths.contains(path))
+                    .collect::<Vec<_>>();
+                imports.sort();
+                imports.dedup();
+                Some((importer, imports))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut inventory_sources = Vec::with_capacity(files.len().saturating_mul(2));
+        for file in &files {
+            let original_source = if file.relative_path.ends_with(".d.ts")
+                || file.relative_path.ends_with(".d.ets")
+            {
+                Arc::clone(&file.source)
+            } else {
+                self.session.source_store.read_text(&file.original_path)?
+            };
+            inventory_sources.push(ObfuscationSource {
+                path: file.original_path.clone(),
+                source: original_source,
+                sdk_declaration: false,
+            });
+            inventory_sources.push(ObfuscationSource {
+                path: file.build_path.clone(),
+                source: Arc::clone(&file.source),
+                sdk_declaration: false,
+            });
+        }
+        for root in self.session.sdk.global_module_paths.iter() {
+            inventory_sources.extend(
+                self.session
+                    .source_store
+                    .text_sources_under(root)
+                    .into_iter()
+                    .map(|(path, source)| ObfuscationSource {
+                        path: path.to_path_buf(),
+                        source,
+                        sdk_declaration: true,
+                    }),
+            );
+        }
+        inventory_sources.sort_by(|left, right| left.path.cmp(&right.path));
+        inventory_sources.dedup_by(|left, right| left.path == right.path);
         let module_context = self
             .session
             .module_context(&self.module.name)
@@ -154,14 +217,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 self.module.name
             )
         })?;
-        let module_path_map = self
-            .loader_json
-            .module_path_map
-            .iter()
-            .map(|(name, path)| (name.clone(), PathBuf::from(path)))
-            .collect();
         let adapter = ArkguardAdapterOptions {
-            node_executable: self.node_executable.clone(),
             panda_guard_path: self.config.sdk_config.es2abc_path.with_file_name(
                 if cfg!(target_os = "windows") {
                     "panda_guard.exe"
@@ -175,42 +231,32 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 .ets_loader_path
                 .join("node_modules")
                 .join("arkguard"),
-            sdk_api_paths: self.session.sdk.global_module_paths.to_vec(),
             module_root: self.module.src_path.clone(),
             project_root: self.config.project_root.clone(),
             project_path: ModuleBuildLayout::new(&self.module.src_path).source().ets(),
             cache_path: PathBuf::from(&self.loader_json.cache_path),
             ace_module_build: PathBuf::from(&self.loader_json.ace_module_build),
-            ace_module_json_path: ModuleBuildLayout::for_product(
-                &self.module.src_path,
-                &self.config.product.name,
-            )
-            .res_ark_module_json(),
             compile_sdk_version: self.config.sdk_config.compile_sdk_version.clone(),
             compatible_sdk_version: parse_api_version(&self.config.product.compatible_sdk_version)
                 .unwrap_or(self.config.sdk_config.compile_api_version),
             compatible_sdk_version_stage: self.config.product.compatible_sdk_version_stage.clone(),
             entry_package_info: format!("{}|{}", package.name, package.version),
-            package_dir: if self.loader_json.package_manager_type == "ohpm" {
-                "oh_modules".to_string()
-            } else {
-                "node_modules".to_string()
-            },
-            module_path_map,
-            entry_array: self.arkguard_entry_array(),
             resource_table_path: self.generated_resource_table_path(),
-            local_packages: Vec::new(),
-            compile_har: matches!(self.module.module_type, OhosModuleType::Har),
-            compile_shared: matches!(self.module.module_type, OhosModuleType::Shared),
             use_normalized: self.loader_json.use_normalized_ohm_url,
-            use_ts_har: false,
             byte_code_har_info: serde_json::to_value(&self.loader_json.byte_code_har_info)?,
         };
         Ok((
             adapter,
             ObfuscationModuleInput {
                 files,
+                inventory_sources,
+                module_dependencies,
+                preserved_source_maps: source_maps.into_iter().collect(),
                 source_maps_path: Some(source_maps_path),
+                source_map_mirror_paths: vec![
+                    PathBuf::from(&self.loader_json.cache_path).join("sourceMaps.json"),
+                    PathBuf::from(&self.loader_json.cache_path).join("sourceMaps.map"),
+                ],
             },
         ))
     }
@@ -247,37 +293,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             .collect::<Vec<_>>();
         record_name_white_list.sort();
         record_name_white_list.dedup();
-        let mut reserved_name_sources = Vec::with_capacity(module.files.len().saturating_mul(2));
-        for file in &module.files {
-            reserved_name_sources.push(BytecodeObfuscationSource {
-                path: file.original_path.clone(),
-                source: self.session.source_store.read_text(&file.original_path)?,
-                sdk_declaration: false,
-            });
-            // Latest `collectSourcesWhiteList` scans both project source and
-            // the post-ArkUI CompileArkTS source. Generated backing fields and
-            // decorator-derived members only exist in the latter snapshot.
-            reserved_name_sources.push(BytecodeObfuscationSource {
-                path: file.build_path.clone(),
-                source: Arc::from(fs_err::read_to_string(&file.build_path)?),
-                sdk_declaration: false,
-            });
-        }
-        for root in self.session.sdk.global_module_paths.iter() {
-            reserved_name_sources.extend(
-                self.session
-                    .source_store
-                    .text_sources_under(root)
-                    .into_iter()
-                    .map(|(path, source)| BytecodeObfuscationSource {
-                        path: path.to_path_buf(),
-                        source,
-                        sdk_declaration: true,
-                    }),
-            );
-        }
-        reserved_name_sources.sort_by(|left, right| left.path.cmp(&right.path));
-        reserved_name_sources.dedup_by(|left, right| left.path == right.path);
+        let reserved_name_sources = module.inventory_sources.clone();
         Ok(BytecodeObfuscationInput {
             module,
             modules_abc_path: self.bundle_out.bundle_output.modules_abc_path.clone(),
@@ -285,14 +301,6 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             record_name_white_list,
             reserved_name_sources,
         })
-    }
-
-    fn arkguard_entry_array(&self) -> Vec<String> {
-        let mut entries = self.loader_json.runtime_entry_sources.clone();
-        entries.extend(self.loader_json.hvigor_compile_entry.iter().cloned());
-        let mut seen = FxHashSet::default();
-        entries.retain(|entry| seen.insert(entry.clone()));
-        entries
     }
 
     fn generated_resource_table_path(&self) -> Option<PathBuf> {
@@ -311,6 +319,65 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                                     .any(|part| part.as_os_str() == "generated")
                         })
             })
+    }
+
+    fn declaration_files(&self) -> Result<Vec<ObfuscationModuleFile>> {
+        let declarations_root = ModuleBuildLayout::new(&self.module.src_path).declarations_dir();
+        if !declarations_root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut entries = walkdir::WalkDir::new(&declarations_root)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        entries.retain(|entry| {
+            entry.file_type().is_file()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".d.ts") || name.ends_with(".d.ets"))
+        });
+        entries.sort_by(|left, right| left.path().cmp(right.path()));
+        entries
+            .into_iter()
+            .map(|entry| {
+                let build_path = entry.into_path();
+                let relative = build_path.strip_prefix(&declarations_root)?;
+                let relative_path = ArtifactPathSerializer::rel_to_slash(relative);
+                let source_relative = relative_path
+                    .strip_suffix(".d.ets")
+                    .map(|path| format!("{path}.ets"))
+                    .or_else(|| {
+                        relative_path
+                            .strip_suffix(".d.ts")
+                            .map(|path| format!("{path}.ts"))
+                    })
+                    .unwrap_or_else(|| relative_path.clone());
+                let source_path = self.config.project_root.join(&source_relative);
+                let declaration_path = self.config.project_root.join(relative);
+                let original_path = if source_path.is_file() {
+                    source_path
+                } else if declaration_path.is_file() {
+                    declaration_path
+                } else {
+                    build_path.clone()
+                };
+                Ok(ObfuscationModuleFile {
+                    source: Arc::from(fs_err::read_to_string(&build_path)?),
+                    build_path,
+                    original_path,
+                    relative_path: relative_path.clone(),
+                    record_name: None,
+                    rename_file: true,
+                    source_name_cache_key: Some(source_relative),
+                    source_map_key: relative_path,
+                    previous_source_map: None,
+                    insight_intent_global_names: Vec::new(),
+                    insight_intent_property_names: Vec::new(),
+                })
+            })
+            .collect()
     }
 }
 
