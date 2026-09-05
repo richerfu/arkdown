@@ -82,7 +82,7 @@ impl ModuleJsonWriter {
         config: &ArkdownConfig,
         output_path: &Path,
         resource_ids: Option<&FxHashMap<String, u32>>,
-        dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
+        dependency_graph: &arkdown_session::DependencyGraphSnapshot,
         dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<(), ArkdownError> {
         let value = Self::build_with_optional_dependency_graph(
@@ -101,7 +101,7 @@ impl ModuleJsonWriter {
         manifest: &HapManifest,
         config: &ArkdownConfig,
         resource_ids: Option<&FxHashMap<String, u32>>,
-        dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
+        dependency_graph: &arkdown_session::DependencyGraphSnapshot,
         dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<serde_json::Value, ArkdownError> {
         Self::build_with_optional_dependency_graph(
@@ -119,7 +119,7 @@ impl ModuleJsonWriter {
         manifest: &HapManifest,
         config: &ArkdownConfig,
         resource_ids: Option<&FxHashMap<String, u32>>,
-        dependency_graph: &crate::dependency_graph::LocalDependencyGraph,
+        dependency_graph: &arkdown_session::DependencyGraphSnapshot,
         dependency_profile_roots: Option<&[PathBuf]>,
         raw_module_json: Option<&serde_json::Value>,
         target_abilities: &[RawTargetAbility],
@@ -139,7 +139,7 @@ impl ModuleJsonWriter {
         manifest: &HapManifest,
         config: &ArkdownConfig,
         resource_ids: Option<&FxHashMap<String, u32>>,
-        dependency_graph: Option<&crate::dependency_graph::LocalDependencyGraph>,
+        dependency_graph: Option<&arkdown_session::DependencyGraphSnapshot>,
         dependency_profile_roots: Option<&[PathBuf]>,
         raw_module_json: Option<&serde_json::Value>,
         target_abilities: Option<&[RawTargetAbility]>,
@@ -987,7 +987,7 @@ impl ModuleJsonWriter {
         manifest: &HapManifest,
         config: &ArkdownConfig,
         raw_module5: Option<&serde_json::Value>,
-        dependency_graph: Option<&crate::dependency_graph::LocalDependencyGraph>,
+        dependency_graph: Option<&arkdown_session::DependencyGraphSnapshot>,
         dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<DependencyProfileMerge, ArkdownError> {
         if matches!(manifest.module_type, OhosModuleType::Har) {
@@ -1015,29 +1015,34 @@ impl ModuleJsonWriter {
         // Matches hvigor's checkHarApiStatus() / checkHarDeviceTypes() behavior
         // which validates the entire dependency graph, not just the merging subset.
         {
-            use crate::dependency_graph::DependencyNodeType;
+            use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
             let owned_graph;
             let graph = if let Some(graph) = dependency_graph {
                 graph
             } else {
-                owned_graph = crate::dependency_graph::LocalDependencyGraph::build(
-                    &module_cfg.src_path,
-                    &config.project_root,
-                );
+                owned_graph =
+                    arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+                        &module_cfg.name,
+                        &config.project_root,
+                        &module_cfg.src_path,
+                    )
+                    .build();
                 &owned_graph
             };
             for node in graph.nodes.values() {
                 if !matches!(
                     node.node_type,
-                    DependencyNodeType::SourceHar | DependencyNodeType::SharedHsp
+                    DependencyNodeType::SourceHar
+                        | DependencyNodeType::SharedHsp
+                        | DependencyNodeType::IntegratedHsp
                 ) {
                     continue;
                 }
-                if node.pkg_root.as_os_str().is_empty() {
+                let Some(package_root) = node.package_root.as_ref() else {
                     continue;
-                }
+                };
                 // Read module profile for this node and validate API/device.
-                let profile_path = ProfileModuleLayout::new(&node.pkg_root).module_json5();
+                let profile_path = ProfileModuleLayout::new(package_root).module_json5();
                 if !profile_path.is_file() {
                     continue;
                 }

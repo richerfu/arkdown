@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::dependency_graph::issuer_store_oh_modules_root;
 use crate::layout::ProfileModuleLayout;
 use crate::loader_json::ByteCodeHarEntry;
 use arkdown_path::{
-    canonicalize_or_owned, ArtifactPath, ArtifactPathSerializer, ModuleSpecifierText, OhmUrl,
-    SourceFileName, SpecifierKind,
+    canonicalize_or_owned, ArtifactPathSerializer, ModuleSpecifierText, OhmUrl, SourceFileName,
 };
+#[cfg(test)]
+use arkdown_path::{ArtifactPath, SpecifierKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 // ---------------------------------------------------------------------------
@@ -390,6 +390,7 @@ impl ByteCodeHarScanEntry {
     // Private scan helpers
     // -----------------------------------------------------------------------
 
+    #[cfg(test)]
     fn scan_oh_modules_dir(oh_modules: &Path, seen: &mut FxHashSet<String>, out: &mut Vec<Self>) {
         for entry in Self::read_dir_sorted(oh_modules) {
             let pkg_dir = entry.path();
@@ -427,6 +428,7 @@ impl ByteCodeHarScanEntry {
         }
     }
 
+    #[cfg(test)]
     fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -436,6 +438,7 @@ impl ByteCodeHarScanEntry {
         entries
     }
 
+    #[cfg(test)]
     fn try_collect(
         pkg_dir: PathBuf,
         pkg_name: &str,
@@ -510,6 +513,7 @@ impl ByteCodeHarScanEntry {
     }
 }
 
+#[cfg(test)]
 struct ByteCodeHarGraphScanner<'a> {
     module_root: &'a Path,
     project_root: &'a Path,
@@ -518,6 +522,7 @@ struct ByteCodeHarGraphScanner<'a> {
     results: Vec<ByteCodeHarScanEntry>,
 }
 
+#[cfg(test)]
 impl<'a> ByteCodeHarGraphScanner<'a> {
     fn new(module_root: &'a Path, project_root: &'a Path) -> Self {
         Self {
@@ -626,10 +631,8 @@ impl<'a> ByteCodeHarGraphScanner<'a> {
 
 /// Writes and collects ByteCode HAR metadata used by loader/package stages.
 ///
-/// The current implementation delegates dependency discovery to the existing
-/// graph scanner. SPEC-048 moves that graph snapshot into `arkdown-session`;
-/// until that migration lands, this owner type keeps the public API shape off
-/// free functions without changing scanner behavior.
+/// Production dependency discovery is supplied by `arkdown-session`; this
+/// owner only reads ByteCode HAR metadata from typed package roots.
 pub struct ByteCodeHarMetadataWriter;
 
 impl ByteCodeHarMetadataWriter {
@@ -638,9 +641,11 @@ impl ByteCodeHarMetadataWriter {
         Self
     }
 
-    /// Scan ByteCode HAR dependencies using the current profile dependency
-    /// graph scanner.
-    pub fn scan_bytecode_har_deps_from_graph(
+    /// Test-fixture scanner retained outside production code so metadata tests
+    /// can exercise synthetic directory layouts without constructing a full
+    /// project session.
+    #[cfg(test)]
+    pub(crate) fn scan_bytecode_har_deps_from_graph(
         module_root: &Path,
         project_root: &Path,
     ) -> Vec<ByteCodeHarScanEntry> {
@@ -959,7 +964,7 @@ impl LoaderByteCodeHarFields {
     ) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         let mut candidates = vec![issuer_root.join("oh_modules").join(dep_name)];
-        if let Some(store_root) = issuer_store_oh_modules_root(issuer_root) {
+        if let Some(store_root) = Self::issuer_store_oh_modules_root(issuer_root) {
             candidates.push(store_root.join("oh_modules").join(dep_name));
         }
         candidates.extend([
@@ -1195,7 +1200,7 @@ impl LoaderByteCodeHarFields {
         project_root: &Path,
     ) -> Option<PathBuf> {
         let mut roots = Vec::new();
-        if let Some(root) = issuer_store_oh_modules_root(issuer_root) {
+        if let Some(root) = Self::issuer_store_oh_modules_root(issuer_root) {
             roots.push(root);
         }
         roots.extend([
@@ -1210,6 +1215,17 @@ impl LoaderByteCodeHarFields {
             if candidate.is_dir() && seen.insert(ByteCodeHarScanEntry::path_key(&candidate)) {
                 return Some(candidate);
             }
+        }
+        None
+    }
+
+    fn issuer_store_oh_modules_root(issuer_root: &Path) -> Option<PathBuf> {
+        let mut current = issuer_root.parent();
+        while let Some(path) = current {
+            if path.file_name().is_some_and(|name| name == "oh_modules") {
+                return Some(path.to_path_buf());
+            }
+            current = path.parent();
         }
         None
     }

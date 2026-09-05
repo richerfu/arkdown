@@ -19,7 +19,7 @@ impl LoaderJson {
         config: &ArkdownConfig,
         host_module: &ModuleConfig,
         router_map_ref: Option<&str>,
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
         pkg_contexts: Option<&std::collections::BTreeMap<String, PkgContextInfoOpt>>,
     ) -> Vec<serde_json::Value> {
         let mut router_maps = Vec::new();
@@ -56,7 +56,7 @@ impl LoaderJson {
     pub(super) fn dependency_router_map_modules(
         config: &ArkdownConfig,
         host_module: &ModuleConfig,
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<RouterMapModule> {
         let mut modules = Vec::new();
         let mut seen_roots = FxHashSet::default();
@@ -74,15 +74,18 @@ impl LoaderJson {
             });
         }
 
-        for node in graph.source_hars() {
-            if node.pkg_root.as_os_str().is_empty() {
+        for node in graph.nodes.values().filter(|node| {
+            node.node_type
+                == arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar
+        }) {
+            let Some(package_root) = node.package_root.as_ref() else {
                 continue;
-            }
-            let root = to_absolute_path_string(&node.pkg_root);
+            };
+            let root = to_absolute_path_string(package_root);
             if !seen_roots.insert(root) {
                 continue;
             }
-            let module_name = Self::read_dependency_module_json(&node.pkg_root)
+            let module_name = Self::read_dependency_module_json(package_root)
                 .and_then(|module_json| module_json.module.name)
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| {
@@ -94,7 +97,7 @@ impl LoaderJson {
             modules.push(RouterMapModule {
                 module_name,
                 package_name: node.package_name.clone(),
-                src_path: node.pkg_root.clone(),
+                src_path: package_root.clone(),
             });
         }
 
@@ -248,7 +251,7 @@ impl LoaderJson {
     pub(super) fn collect_dependency_router_map_source_files(
         config: &ArkdownConfig,
         host_module: &ModuleConfig,
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
         pkg_contexts: Option<&std::collections::BTreeMap<String, PkgContextInfoOpt>>,
     ) -> Vec<PathBuf> {
         let mut files = Vec::new();
@@ -275,7 +278,7 @@ impl LoaderJson {
     }
 
     pub(super) fn collect_dependency_ability_source_files(
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<PathBuf> {
         Self::collect_dependency_source_har_roots(graph)
             .into_iter()
@@ -284,7 +287,7 @@ impl LoaderJson {
     }
 
     pub(super) fn collect_dependency_worker_files(
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<PathBuf> {
         let mut files = Vec::new();
         let mut seen = FxHashSet::default();
@@ -373,7 +376,7 @@ impl LoaderJson {
     }
 
     pub(super) fn collect_dependency_insight_intent_src_entries(
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<PathBuf> {
         Self::collect_dependency_source_har_roots(graph)
             .into_iter()
@@ -384,13 +387,16 @@ impl LoaderJson {
     }
 
     pub(super) fn collect_dependency_source_har_roots(
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<PathBuf> {
         graph
-            .source_hars()
-            .into_iter()
-            .filter(|node| !node.pkg_root.as_os_str().is_empty())
-            .map(|node| node.pkg_root.clone())
+            .nodes
+            .values()
+            .filter(|node| {
+                node.node_type
+                    == arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar
+            })
+            .filter_map(|node| node.package_root.clone())
             .collect()
     }
 
@@ -752,24 +758,30 @@ impl LoaderJson {
     /// Walk declared `oh_modules` dependencies, find installed HSP packages,
     /// and collect their `ResourceTable.txt` paths.
     ///
-    /// Uses `LocalDependencyGraph` for BFS-consistent node ordering and
-    /// correct type classification (only SharedHsp nodes contribute).
+    /// Uses the build-session dependency classification; only external or
+    /// integrated shared HSP nodes contribute.
     /// Matches hvigor's `getHspResourcesMap()` for HSP dependencies.
     pub(super) fn collect_hsp_resources_map(
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> FxHashMap<String, String> {
         let mut map = FxHashMap::default();
 
-        for node in graph.shared_hsps() {
-            if node.pkg_root.as_os_str().is_empty() {
-                continue; // RemoteOrUnknown with empty path
-            }
+        for node in graph.nodes.values().filter(|node| {
+            matches!(
+                node.node_type,
+                arkdown_session::dependency_graph::snapshot::DependencyNodeType::SharedHsp
+                    | arkdown_session::dependency_graph::snapshot::DependencyNodeType::IntegratedHsp
+            )
+        }) {
+            let Some(package_root) = node.package_root.as_ref() else {
+                continue;
+            };
             // Check for ResourceTable.txt in priority order:
             // 1. Build output intermediates (hvigor target intermediates layout)
             // 2. Dep root (remote HSP / pre-packaged layout)
             let resource_table = [
-                ProfileModuleLayout::new(&node.pkg_root).resource_table_txt(),
-                node.pkg_root.join("ResourceTable.txt"),
+                ProfileModuleLayout::new(package_root).resource_table_txt(),
+                package_root.join("ResourceTable.txt"),
             ]
             .into_iter()
             .find(|p| p.is_file());
@@ -825,10 +837,10 @@ impl LoaderJson {
     pub(super) fn collect_hsp_har_ohm_maps(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
         module_is_bytecode_har: bool,
     ) -> (IndexMap<String, String>, IndexMap<String, String>) {
-        use crate::dependency_graph::DependencyNodeType;
+        use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
         let bundle_name = &config.product.bundle_name;
         let use_normalized = config
             .product
@@ -843,32 +855,34 @@ impl LoaderJson {
             .flatten();
 
         for node in graph.nodes.values() {
-            let is_hsp = node.node_type == DependencyNodeType::SharedHsp;
-            let is_har_map_dependency = match node.node_type {
-                // A bundled ByteCode HAR compiles source HARs into its ABC and
-                // maps the remaining ByteCode HAR / OTHER barriers. The
-                // coordinator replaces this coarse local-graph selection with
-                // the exact session-tree view before serialization.
-                DependencyNodeType::SourceHar => !config
-                    .product
-                    .build_option
-                    .ark_options
-                    .as_ref()
-                    .is_some_and(|options| options.bundled_dependencies),
-                DependencyNodeType::BytecodeHar
-                | DependencyNodeType::NativeSo
-                | DependencyNodeType::RuntimeOnly
-                | DependencyNodeType::RemoteOrUnknown => true,
-                DependencyNodeType::SharedHsp => false,
+            let is_hsp = matches!(
+                node.node_type,
+                DependencyNodeType::SharedHsp | DependencyNodeType::IntegratedHsp
+            );
+            let is_har_map_dependency = node.is_runtime_only
+                || match node.node_type {
+                    // A bundled ByteCode HAR compiles source HARs into its ABC and
+                    // maps the remaining ByteCode HAR / OTHER barriers. The
+                    // coordinator replaces this coarse local-graph selection with
+                    // the exact session-tree view before serialization.
+                    DependencyNodeType::SourceHar => !config
+                        .product
+                        .build_option
+                        .ark_options
+                        .as_ref()
+                        .is_some_and(|options| options.bundled_dependencies),
+                    DependencyNodeType::BytecodeHar
+                    | DependencyNodeType::NativeSo
+                    | DependencyNodeType::OhpmSource
+                    | DependencyNodeType::Unknown => true,
+                    DependencyNodeType::SharedHsp | DependencyNodeType::IntegratedHsp => false,
+                };
+            if !(is_hsp || module_is_bytecode_har && use_normalized && is_har_map_dependency) {
+                continue;
+            }
+            let Some(pkg_dir) = node.package_root.as_ref() else {
+                continue;
             };
-            if !is_hsp && !(module_is_bytecode_har && use_normalized && is_har_map_dependency) {
-                continue;
-            }
-            if node.pkg_root.as_os_str().is_empty() {
-                continue;
-            }
-
-            let pkg_dir = &node.pkg_root;
             let Some(parsed) = Self::read_dependency_module_json(pkg_dir) else {
                 continue;
             };
@@ -912,9 +926,9 @@ impl LoaderJson {
     pub(super) fn dependency_pkg_contexts(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Option<std::collections::BTreeMap<String, PkgContextInfoOpt>> {
-        use crate::dependency_graph::DependencyNodeType;
+        use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
         let current_pkg = Self::read_dependency_package_json(&module_cfg.src_path);
         let current = PkgContextCurrentInput {
             package_name: current_pkg
@@ -935,26 +949,32 @@ impl LoaderJson {
         };
         let mut dependencies = Vec::new();
         for node in graph.nodes.values() {
-            let kind = match node.node_type {
-                DependencyNodeType::SourceHar | DependencyNodeType::BytecodeHar => {
-                    PkgContextDependencyKind::Har
-                }
-                DependencyNodeType::SharedHsp => PkgContextDependencyKind::Hsp,
-                DependencyNodeType::NativeSo => PkgContextDependencyKind::So,
-                DependencyNodeType::RuntimeOnly | DependencyNodeType::RemoteOrUnknown => {
-                    PkgContextDependencyKind::Other
+            let kind = if node.is_runtime_only {
+                PkgContextDependencyKind::Other
+            } else {
+                match node.node_type {
+                    DependencyNodeType::SourceHar | DependencyNodeType::BytecodeHar => {
+                        PkgContextDependencyKind::Har
+                    }
+                    DependencyNodeType::SharedHsp | DependencyNodeType::IntegratedHsp => {
+                        PkgContextDependencyKind::Hsp
+                    }
+                    DependencyNodeType::NativeSo => PkgContextDependencyKind::So,
+                    DependencyNodeType::OhpmSource | DependencyNodeType::Unknown => {
+                        PkgContextDependencyKind::Other
+                    }
                 }
             };
-            if node.pkg_root.as_os_str().is_empty() {
+            let Some(package_root) = node.package_root.as_ref() else {
                 continue;
-            }
-            let package = Self::read_dependency_package_json(&node.pkg_root);
-            let module = Self::read_dependency_module_json(&node.pkg_root);
+            };
+            let package = Self::read_dependency_package_json(package_root);
+            let module = Self::read_dependency_module_json(package_root);
             dependencies.push(PkgContextDependencyInput {
-                alias: node.package_name.clone(),
+                alias: node.alias.clone(),
                 package_name: node.package_name.clone(),
                 version_spec: package.as_ref().map(|pkg| pkg.version.clone()),
-                package_root: Some(node.pkg_root.clone()),
+                package_root: Some(package_root.clone()),
                 node_entry: package
                     .as_ref()
                     .and_then(|pkg| pkg.main.clone())
@@ -1065,7 +1085,7 @@ impl LoaderJson {
     pub(super) fn build_pkg_brief_info(
         config: &ArkdownConfig,
         module_cfg: &ModuleConfig,
-        graph: &crate::dependency_graph::LocalDependencyGraph,
+        graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> FxHashMap<String, PkgBriefInfo> {
         let mut map = FxHashMap::default();
         let module_root = to_absolute_path_string(&module_cfg.src_path);
@@ -1128,7 +1148,7 @@ impl LoaderJson {
         // Add source-type dependency packages from the shared dependency graph.
         // BytecodeHar and NativeSo are excluded (no ETS sources to compile).
         {
-            use crate::dependency_graph::DependencyNodeType;
+            use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
             for node in graph.nodes.values() {
                 if matches!(
                     node.node_type,
@@ -1136,10 +1156,10 @@ impl LoaderJson {
                 ) {
                     continue; // pre-compiled or native-only: no ETS sources
                 }
-                if node.pkg_root.as_os_str().is_empty() {
-                    continue; // remote package not installed locally
-                }
-                let ets_dir = ProfileModuleLayout::new(&node.pkg_root).ets_source_root();
+                let Some(package_root) = node.package_root.as_ref() else {
+                    continue;
+                };
+                let ets_dir = ProfileModuleLayout::new(package_root).ets_source_root();
                 if !ets_dir.is_dir() {
                     continue; // no source tree → skip
                 }
@@ -1147,7 +1167,7 @@ impl LoaderJson {
                 if map.contains_key(pkg_name.as_str()) {
                     continue; // prefer workspace module entry
                 }
-                let pkg_root_str = to_absolute_path_string(&node.pkg_root);
+                let pkg_root_str = to_absolute_path_string(package_root);
                 let pkg_ets_src = to_absolute_path_string(&ets_dir);
                 map.insert(
                     pkg_name.clone(),

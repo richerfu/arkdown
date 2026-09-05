@@ -39,6 +39,7 @@ struct DependencyTraversalState {
     kind: DependencyEdgeKind,
     is_transitive: bool,
     is_dynamic: bool,
+    is_runtime_only: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -372,6 +373,12 @@ impl DependencyGraphBuilder {
     ) {
         let mut queue = VecDeque::new();
         let mut seen_roots = std::collections::BTreeSet::new();
+        let mut root_runtime_only_aliases = std::collections::BTreeSet::new();
+        for root in [&self.host_root, &self.project_root] {
+            if let Some(package) = inventory.read_package(root, self.package_manager) {
+                root_runtime_only_aliases.extend(Self::runtime_only_aliases(&package));
+            }
+        }
         queue.push_back((self.host_root.clone(), 0usize));
         if self.project_root != self.host_root {
             queue.push_back((self.project_root.clone(), 0usize));
@@ -380,6 +387,14 @@ impl DependencyGraphBuilder {
         while let Some((package_root, depth)) = queue.pop_front() {
             let Some(package) = inventory.read_package(&package_root, self.package_manager) else {
                 continue;
+            };
+            let runtime_only_aliases = if depth == 0 {
+                root_runtime_only_aliases
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
             };
             for (dependencies, edge_kind, is_dynamic) in [
                 (
@@ -412,17 +427,23 @@ impl DependencyGraphBuilder {
                         kind: edge_kind,
                         is_transitive: depth > 0,
                         is_dynamic,
+                        is_runtime_only: runtime_only_aliases.contains(alias),
                     };
                     let canonical_issuer_root = inventory.canonical_root(&package_root);
                     let edge = self.edge_snapshot(
                         &canonical_issuer_root,
                         alias,
-                        spec,
+                        Some(spec),
                         &dep_root,
                         dep_package.as_deref(),
                         traversal,
                     );
                     if !seen_roots.insert(dep_root.clone()) {
+                        if traversal.is_runtime_only {
+                            if let Some(node) = graph.nodes.get_mut(&edge.package_name) {
+                                node.is_runtime_only = true;
+                            }
+                        }
                         graph.edges.push(edge);
                         continue;
                     }
@@ -433,14 +454,80 @@ impl DependencyGraphBuilder {
                     graph.edges.push(edge);
                 }
             }
+
+            if depth == 0 {
+                let declared_aliases = package
+                    .package_json
+                    .dependencies
+                    .keys()
+                    .chain(package.package_json.dynamic_dependencies.keys())
+                    .chain(package.package_json.dev_dependencies.keys())
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                for alias in runtime_only_aliases {
+                    if declared_aliases.contains(&alias) {
+                        continue;
+                    }
+                    let Some(dep_root) = inventory.resolve_package_root(
+                        &package_root,
+                        &self.project_root,
+                        &alias,
+                        self.package_manager,
+                    ) else {
+                        continue;
+                    };
+                    let dep_package = inventory.read_package(&dep_root, self.package_manager);
+                    let traversal = DependencyTraversalState {
+                        kind: DependencyEdgeKind::Dependency,
+                        is_transitive: false,
+                        is_dynamic: false,
+                        is_runtime_only: true,
+                    };
+                    let canonical_issuer_root = inventory.canonical_root(&package_root);
+                    let edge = self.edge_snapshot(
+                        &canonical_issuer_root,
+                        &alias,
+                        None,
+                        &dep_root,
+                        dep_package.as_deref(),
+                        traversal,
+                    );
+                    if !seen_roots.insert(dep_root.clone()) {
+                        if let Some(node) = graph.nodes.get_mut(&edge.package_name) {
+                            node.is_runtime_only = true;
+                        }
+                        continue;
+                    }
+                    let node = self.node_snapshot(&edge, dep_package, traversal, inventory);
+                    graph.roots_by_alias.insert(alias, dep_root.clone());
+                    graph.nodes.insert(node.package_name.clone(), node);
+                    queue.push_back((dep_root, depth + 1));
+                    graph.edges.push(edge);
+                }
+            }
         }
+    }
+
+    fn runtime_only_aliases(package: &PackageSnapshot) -> Vec<String> {
+        package
+            .package_json
+            .extra
+            .get("metadata")
+            .and_then(|metadata| metadata.get("runtimeOnly"))
+            .and_then(|runtime_only| runtime_only.get("packages"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
     }
 
     fn edge_snapshot(
         &self,
         issuer_root: &Path,
         alias: &str,
-        spec: &str,
+        spec: Option<&str>,
         root: &Path,
         package: Option<&PackageSnapshot>,
         traversal: DependencyTraversalState,
@@ -452,7 +539,7 @@ impl DependencyGraphBuilder {
             // drive/case spellings being misclassified as project globals.
             issuer_root: issuer_root.to_path_buf(),
             alias: alias.to_string(),
-            version_spec: Some(spec.to_string()),
+            version_spec: spec.map(str::to_string),
             package_name: self.package_name(alias, package),
             package_root: root.to_path_buf(),
             installed_alias_path: self.installed_alias_path(issuer_root, alias, root),
@@ -498,7 +585,6 @@ impl DependencyGraphBuilder {
         inventory: &mut DependencySnapshotInventory,
     ) -> DependencyNodeSnapshot {
         let alias = edge.alias.as_str();
-        let spec = edge.version_spec.as_deref().unwrap_or_default();
         let root = &edge.package_root;
         let package_name = self.package_name(alias, package.as_deref());
         let module_profile = inventory.read_module_profile(root);
@@ -509,7 +595,7 @@ impl DependencyGraphBuilder {
         DependencyNodeSnapshot {
             alias: alias.to_string(),
             package_name,
-            version_spec: Some(spec.to_string()),
+            version_spec: edge.version_spec.clone(),
             package_root: Some(root.to_path_buf()),
             node_type: self.classify_package(
                 package.as_deref(),
@@ -518,7 +604,7 @@ impl DependencyGraphBuilder {
             ),
             package,
             module_profile,
-            is_runtime_only: false,
+            is_runtime_only: traversal.is_runtime_only,
             is_dynamic: traversal.is_dynamic,
             is_transitive: traversal.is_transitive,
             direct_deps,
@@ -670,6 +756,79 @@ mod tests {
         assert_eq!(node.alias, "@ohos/hypium");
         assert_eq!(node.version_spec.as_deref(), Some("1.0.11"));
         assert!(graph.roots_by_alias.contains_key("@ohos/hypium"));
+    }
+
+    #[test]
+    fn freezes_root_runtime_only_packages_into_the_session_graph() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package(
+            "",
+            r#"{
+              "name": "app",
+              "version": "1.0.0",
+              "metadata": { "runtimeOnly": { "packages": ["runtime-har"] } }
+            }"#,
+        );
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "runtime-har": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/runtime-har",
+            r#"{ "name": "runtime-har", "version": "1.0.0", "metadata": { "byteCodeHar": true } }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        let node = graph.nodes.get("runtime-har").expect("runtime-only node");
+
+        assert!(node.is_runtime_only);
+        assert_eq!(node.node_type, DependencyNodeType::BytecodeHar);
+    }
+
+    #[test]
+    fn runtime_only_package_does_not_require_a_duplicate_dependency_entry() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "metadata": { "runtimeOnly": { "packages": ["runtime-har"] } }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/runtime-har",
+            r#"{
+              "name": "runtime-har",
+              "version": "1.0.0",
+              "metadata": { "byteCodeHar": true },
+              "dependencies": { "nested": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/runtime-har/oh_modules/nested",
+            r#"{ "name": "nested", "version": "1.0.0" }"#,
+        );
+
+        let graph = fixture.build_for("entry");
+        let node = graph.nodes.get("runtime-har").expect("runtime-only node");
+
+        assert!(node.is_runtime_only);
+        assert_eq!(node.version_spec, None);
+        assert!(graph.nodes["nested"].is_transitive);
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.alias == "runtime-har")
+                .count(),
+            1
+        );
     }
 
     #[test]

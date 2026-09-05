@@ -465,7 +465,7 @@ mod tests {
 
         assert_eq!(
             snapshot.external_api_paths.as_ref(),
-            &[external_ets.clone()]
+            std::slice::from_ref(&external_ets)
         );
         assert!(snapshot
             .global_module_paths
