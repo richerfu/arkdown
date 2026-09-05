@@ -618,12 +618,17 @@ impl HvigorSourceDescriptor {
                     package_name: None,
                     package_version: None,
                     key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
-                    // `generate_sourcemap.js::SourceMapGenerator` retains
-                    // `sourceRoot: ""` for every ETS/TS source, including
-                    // generated ohosTest templates below
-                    // `build/<product>/intermediates/src`. Only an original
-                    // runtime JavaScript input omits it.
-                    include_source_root: !is_original_javascript,
+                    // `process_module_files.ts::genContentAndSourceMapInfo`
+                    // supplies `sourceRoot: ""` for ETS/TS printer maps. A
+                    // generated profile compile entry instead leaves
+                    // `rollup-plugin-ets-typescript.ts::printSourceFile` as a
+                    // string transform, so Rollup's composed map has no
+                    // `sourceRoot`. ByteCode HAR `ModuleInfo.ts` exposes this
+                    // distinction. Generated ohosTest templates live below
+                    // `intermediates/src`, take the printer path, and retain
+                    // the field.
+                    include_source_root: !is_original_javascript
+                        && !Self::is_generated_profile_source(&components),
                 });
             }
         }
@@ -761,6 +766,12 @@ impl HvigorSourceDescriptor {
             .windows(2)
             .position(|window| window[0] == "src" && window[1] == "main")
             .and_then(|index| Self::join_components(components.get(index + 2..)?))
+    }
+
+    fn is_generated_profile_source(components: &[String]) -> bool {
+        components
+            .windows(2)
+            .any(|window| window[0] == "generated" && window[1] == "profile")
     }
 
     fn join_components(components: &[String]) -> Option<String> {
@@ -1265,6 +1276,59 @@ mod tests {
 
         assert_eq!(value[key]["sources"][0], "entry/src/main/ets/Index.ets");
         assert_eq!(value[key]["entry-package-info"], "bytecode-har|1.0.0");
+
+        let _ = fs_err::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn generated_profile_source_map_omits_source_root_like_typescript_string_transform() {
+        // `rollup-plugin-ets-typescript.ts::printSourceFile` returns generated
+        // profile TS as a string. Unlike `process_module_files.ts`, that path
+        // does not create a TypeScript printer map with `sourceRoot: ""`.
+        let output_dir = temp_output_dir("generated-profile-source-map");
+        let source_map = serde_json::json!({
+            "version": 3,
+            "file": "ModuleInfo.ts",
+            "sources": ["/project/entry/build/default/generated/profile/default/ModuleInfo.ts"],
+            "names": [],
+            "mappings": "AAAA"
+        })
+        .to_string();
+        let chunk_graph = graph(vec![ArkChunk {
+            name: "ModuleInfo".to_string(),
+            code: "export const moduleName = 'entry';\n".to_string(),
+            source_map: Some(source_map),
+            ..ArkChunk::default()
+        }]);
+        let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/entry"),
+            module_name: "bytecode-har".to_string(),
+            package_name: "bytecode-har".to_string(),
+            version: "1.0.0".to_string(),
+            chunk_source_files: FxHashMap::default(),
+            package_versions: FxHashMap::default(),
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::from_iter([PathBuf::from(
+                "/project/entry/build/default/generated/profile/default/ModuleInfo.ts",
+            )]),
+        };
+
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, Some(&opts))
+            .expect("write generated profile source map");
+        let value: serde_json::Value = serde_json::from_str(
+            &fs_err::read_to_string(written.source_maps_path.expect("sourceMaps.map"))
+                .expect("read sourceMaps.map"),
+        )
+        .expect("parse sourceMaps.map");
+        let key =
+            "bytecode-har|bytecode-har|1.0.0|build/default/generated/profile/default/ModuleInfo.js";
+
+        assert!(value[key].get("sourceRoot").is_none(), "{value}");
+        assert_eq!(
+            value[key]["sources"][0],
+            "entry/build/default/generated/profile/default/ModuleInfo.ts"
+        );
 
         let _ = fs_err::remove_dir_all(output_dir);
     }

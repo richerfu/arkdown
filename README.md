@@ -101,21 +101,19 @@ configurations may differ.
 ## Parity testing against a real hvigor
 
 The fixture matrix under `tests/fixtures/` is compared artifact-by-artifact against
-the DevEco-bundled hvigor. The bundled `hvigorw` cannot install `@ohos/hvigor`
-from any public npm registry (the IDE provisions the packages itself), so
-`hvigor/tools/arkdown-hvigorw` provisions the per-project workspace from the
-DevEco installation and runs the engine directly:
+a real DevEco-bundled `hvigorw`. Point the harness at that executable directly:
 
 ```sh
-ARKDOWN_PARITY_HVIGORW="$PWD/hvigor/tools/arkdown-hvigorw" \
-ARKDOWN_PARITY_RUN=1 \
-cargo test -p arkdown-napi --test hvigor_parity
+ARKDOWN_PARITY_HVIGORW=/path/to/command-line-tools/bin/hvigorw \
+ARKDOWN_PARITY_STRICT=1 \
+ARKDOWN_PARITY_ALLOWLIST=/tmp/arkdown-parity-no-allowlist.json \
+cargo test -p arkdown-napi --test hvigor_parity -- --test-threads=1
 ```
 
-Requires DevEco Studio at `/Applications/DevEco-Studio.app` (override with
-`DEVECO_APP`). Verified against hvigor 6.24.3: all 25 parity tests pass with
-zero diffs across HAP/HSP/source-HAR/ByteCode-HAR fixtures in debug and
-release modes, including cold/unchanged/changed incremental builds.
+The checked-in allowlist tracks known deterministic differences and is not a
+zero-diff completion signal. The current audit, exact remaining gaps, and strict
+release gate are recorded in
+[`meta/tasks/TASK-HVIGOR-PARITY-GAP-CLOSURE.md`](meta/tasks/TASK-HVIGOR-PARITY-GAP-CLOSURE.md).
 
 ## Usage
 

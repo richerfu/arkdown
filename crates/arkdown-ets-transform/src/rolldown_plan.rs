@@ -9,7 +9,6 @@ use oxc_codegen::{CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
-use rolldown_sourcemap::SourceMapBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::api_transform;
@@ -317,6 +316,7 @@ impl RolldownEtsTransformPlan {
             pkg_name: self.pkg_name.clone(),
             expand_import_path: self.expand_import_path.clone(),
             hsp_har_package_names: self.hsp_har_package_names.clone(),
+            module_source_file_stage: true,
             disable_mock_setup_decorator: self.disable_mock_setup_decorator,
         }
     }
@@ -575,7 +575,8 @@ impl RolldownEtsTransformer {
         // imports into `import lazy` in genAbc. The expander now runs inside
         // the transform pipeline (before codegen) so the source map covers
         // the expanded imports.
-        let finalization = pipeline.finalize_source_with_source_map(&transformed.code)?;
+        let finalization =
+            pipeline.finalize_transformed_source_with_source_map(&transformed.code)?;
         let HvigorSourceFinalization {
             code: finalized_code,
             source_map: finalization_source_map,
@@ -696,12 +697,6 @@ impl RolldownEtsTransformer {
                 .or_else(|| source_map::TokenSourceMapBuilder::new(&emitted.code, id).build()),
             }
         };
-        let source_map = source_map
-            .map(|source_map| {
-                ComponentV2SourceMapProjector::new(id, original_source, &emitted.code)
-                    .project(source_map)
-            })
-            .transpose()?;
         Ok(Some(RolldownEtsTransformOutput {
             code: emitted.code,
             warnings,
@@ -898,11 +893,11 @@ impl<'a> HvigorSourcePipeline<'a> {
         HvigorFinalizeSourcePass::new(self).run(source)
     }
 
-    fn finalize_source_with_source_map<'s>(
+    fn finalize_transformed_source_with_source_map<'s>(
         &self,
         source: &'s str,
     ) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
-        HvigorFinalizeSourcePass::new(self).run_with_source_map(source)
+        HvigorFinalizeSourcePass::new(self).run_transformed(source)
     }
 
     fn format_source(&self, source: &str) -> String {
@@ -994,485 +989,6 @@ struct HvigorSourceFinalization<'s> {
     warnings: Vec<EtsTransformError>,
 }
 
-/// Applies the source-map ownership that the latest ets-loader's TypeScript
-/// printer gives to `@ComponentV2` source nodes.
-///
-/// `process_struct_componentV2.js` constructs the ViewV2 class with fresh
-/// TypeScript factory nodes. The TypeScript printer therefore maps only the
-/// retained ArkTS boundaries, rather than each punctuation token in generated
-/// `.create()`/`.pop()` calls. OXC's generic map attaches a few of those
-/// synthetic child tokens to their parent span. Project the final map back to
-/// the observed SDK boundary contract after all Rust lowering/finalization
-/// passes have completed.
-struct ComponentV2SourceMapProjector<'a> {
-    id: &'a str,
-    source: &'a str,
-    generated: &'a str,
-}
-
-impl<'a> ComponentV2SourceMapProjector<'a> {
-    fn new(id: &'a str, source: &'a str, generated: &'a str) -> Self {
-        Self {
-            id,
-            source,
-            generated,
-        }
-    }
-
-    fn project(&self, source_map: String) -> Result<String, EtsTransformError> {
-        if !self.source.contains("@ComponentV2") || !self.generated.contains("extends ViewV2") {
-            return Ok(source_map);
-        }
-
-        let source_map_value: serde_json::Value =
-            serde_json::from_str(&source_map).map_err(|error| EtsTransformError::Fatal {
-                file: self.id.to_string(),
-                message: format!("failed to decode ComponentV2 source map JSON: {error}"),
-            })?;
-        let decoded =
-            rolldown_sourcemap::OwnedSourceMap::from_json_string(&source_map).map_err(|error| {
-                EtsTransformError::Fatal {
-                    file: self.id.to_string(),
-                    message: format!("failed to decode ComponentV2 source map: {error}"),
-                }
-            })?;
-        let Some(source_id) = decoded.get_sources().next().map(|_| 0) else {
-            return Ok(source_map);
-        };
-        let Some(locations) = ComponentV2SourceMapLocations::from_source(self.source) else {
-            return Ok(source_map);
-        };
-
-        let mut tokens = decoded
-            .get_tokens()
-            .filter_map(|token| {
-                let token = ComponentV2SourceMapToken {
-                    dst_line: token.get_dst_line(),
-                    dst_col: token.get_dst_col(),
-                    src_line: token.get_src_line(),
-                    src_col: token.get_src_col(),
-                    source_id: token.get_source_id(),
-                    name_id: token.get_name_id(),
-                };
-                self.retain_token(&token).then_some(token)
-            })
-            .collect::<Vec<_>>();
-        self.append_import_tokens(&mut tokens, source_id, &locations);
-        self.append_structural_tokens(&mut tokens, source_id, &locations);
-        self.append_source_statement_end_tokens(&mut tokens);
-        tokens.sort_by_key(ComponentV2SourceMapToken::sort_key);
-        tokens.dedup_by_key(|token| (token.dst_line, token.dst_col));
-
-        let mut builder = SourceMapBuilder::default();
-        if let Some(file) = decoded.get_file() {
-            builder.set_file(file);
-        }
-        for name in decoded.get_names() {
-            builder.add_name(name);
-        }
-        for source in decoded.get_sources() {
-            builder.set_source_and_content(source, "");
-        }
-        for token in tokens {
-            builder.add_token(
-                token.dst_line,
-                token.dst_col,
-                token.src_line,
-                token.src_col,
-                token.source_id,
-                token.name_id,
-            );
-        }
-        let projected_value: serde_json::Value =
-            serde_json::from_str(&builder.into_sourcemap().to_json_string()).map_err(|error| {
-                EtsTransformError::Fatal {
-                    file: self.id.to_string(),
-                    message: format!("failed to encode ComponentV2 source map: {error}"),
-                }
-            })?;
-        let Some(mappings) = projected_value.get("mappings").cloned() else {
-            return Ok(source_map);
-        };
-        let mut source_map_value = source_map_value;
-        source_map_value["mappings"] = mappings;
-        serde_json::to_string(&source_map_value).map_err(|error| EtsTransformError::Fatal {
-            file: self.id.to_string(),
-            message: format!("failed to serialize ComponentV2 source map: {error}"),
-        })
-    }
-
-    fn retain_token(&self, token: &ComponentV2SourceMapToken) -> bool {
-        let Some(line) = self.generated_line(token.dst_line) else {
-            return true;
-        };
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("import ")
-            || trimmed.starts_with("class ") && trimmed.contains(" extends ViewV2")
-            || trimmed.starts_with("constructor(")
-            || trimmed.starts_with("initialRender(")
-        {
-            return false;
-        }
-        if trimmed == "}"
-            && self
-                .generated_line(token.dst_line.saturating_add(1))
-                .is_some_and(|next| {
-                    let next = next.trim_start();
-                    next.starts_with("public resetStateVarsOnReuse")
-                        || next.starts_with("rerender(")
-                })
-        {
-            return false;
-        }
-        let column = token.dst_col as usize;
-        if line.as_bytes().get(column).copied() == Some(b'{') {
-            return false;
-        }
-        !self.is_synthetic_component_call_token(line, column)
-            && !self.is_synthetic_component_pop_token(line, column)
-    }
-
-    fn is_synthetic_component_call_token(&self, line: &str, column: usize) -> bool {
-        let indent = self.indent_width(line);
-        let content = &line[indent..];
-        let Some(member_start) = content.find(".create(") else {
-            return false;
-        };
-        let component_end = indent + member_start;
-        let arguments_start = component_end + ".create(".len();
-        if column <= component_end {
-            return false;
-        }
-        let after_arguments = line.get(arguments_start..).unwrap_or_default();
-        if after_arguments.starts_with(");") {
-            return true;
-        }
-        column < arguments_start
-    }
-
-    fn is_synthetic_component_pop_token(&self, line: &str, column: usize) -> bool {
-        let indent = self.indent_width(line);
-        let content = &line[indent..];
-        let Some(member_start) = content.find(".pop(") else {
-            return false;
-        };
-        column > indent + member_start
-    }
-
-    fn append_import_tokens(
-        &self,
-        tokens: &mut Vec<ComponentV2SourceMapToken>,
-        source_id: u32,
-        locations: &ComponentV2SourceMapLocations,
-    ) {
-        for (line_index, line) in self.generated.lines().enumerate() {
-            let Some((binding, binding_column)) = self.generated_named_import(line) else {
-                continue;
-            };
-            let Some((source_line, source_column)) = locations.import_binding(&binding) else {
-                continue;
-            };
-            let binding_end = binding_column + binding.len() as u32;
-            let source_end = source_column + binding.len() as u32;
-            tokens.extend([
-                ComponentV2SourceMapToken::new(
-                    line_index as u32,
-                    binding_column.saturating_sub(2),
-                    source_line,
-                    source_column,
-                    source_id,
-                ),
-                ComponentV2SourceMapToken::new(
-                    line_index as u32,
-                    binding_column,
-                    source_line,
-                    source_column,
-                    source_id,
-                ),
-                ComponentV2SourceMapToken::new(
-                    line_index as u32,
-                    binding_end,
-                    source_line,
-                    source_end,
-                    source_id,
-                ),
-                ComponentV2SourceMapToken::new(
-                    line_index as u32,
-                    binding_end.saturating_add(2),
-                    source_line,
-                    source_end,
-                    source_id,
-                ),
-            ]);
-        }
-    }
-
-    fn append_structural_tokens(
-        &self,
-        tokens: &mut Vec<ComponentV2SourceMapToken>,
-        source_id: u32,
-        locations: &ComponentV2SourceMapLocations,
-    ) {
-        for (line_index, line) in self.generated.lines().enumerate() {
-            let line_index = line_index as u32;
-            let indent = self.indent_width(line) as u32;
-            let trimmed = line.trim_start();
-            if trimmed == format!("class {} extends ViewV2 {{", locations.component_name) {
-                let class_column = "class ".len() as u32;
-                tokens.extend([
-                    ComponentV2SourceMapToken::new(
-                        line_index,
-                        class_column,
-                        locations.struct_name_line,
-                        locations.struct_name_column,
-                        source_id,
-                    ),
-                    ComponentV2SourceMapToken::new(
-                        line_index,
-                        class_column + locations.component_name.len() as u32,
-                        locations.struct_name_line,
-                        locations.struct_name_column + locations.component_name.len() as u32,
-                        source_id,
-                    ),
-                ]);
-            }
-            if trimmed.starts_with("constructor(") {
-                tokens.push(ComponentV2SourceMapToken::new(
-                    line_index,
-                    indent,
-                    locations.entry_line,
-                    locations.entry_column,
-                    source_id,
-                ));
-            }
-            if trimmed == "}"
-                && self
-                    .generated_line(line_index.saturating_add(1))
-                    .is_some_and(|next| {
-                        next.trim_start()
-                            .starts_with("public resetStateVarsOnReuse")
-                    })
-            {
-                tokens.push(ComponentV2SourceMapToken::new(
-                    line_index,
-                    indent.saturating_add(1),
-                    locations.import_line,
-                    locations.import_end_column,
-                    source_id,
-                ));
-            }
-            if trimmed.starts_with("initialRender(") {
-                tokens.push(ComponentV2SourceMapToken::new(
-                    line_index,
-                    indent,
-                    locations.build_line,
-                    locations.build_column,
-                    source_id,
-                ));
-            }
-            if trimmed == "}"
-                && self
-                    .generated_line(line_index.saturating_add(1))
-                    .is_some_and(|next| next.trim_start().starts_with("rerender("))
-            {
-                tokens.push(ComponentV2SourceMapToken::new(
-                    line_index,
-                    indent.saturating_add(1),
-                    locations.build_end_line,
-                    locations.build_end_column,
-                    source_id,
-                ));
-            }
-        }
-    }
-
-    fn append_source_statement_end_tokens(&self, tokens: &mut Vec<ComponentV2SourceMapToken>) {
-        for (line_index, line) in self.generated.lines().enumerate() {
-            let line_index = line_index as u32;
-            if !line.trim_start().starts_with("this.") || !line.trim_end().ends_with(';') {
-                continue;
-            }
-            let Some(last) = tokens
-                .iter()
-                .filter(|token| token.dst_line == line_index)
-                .max_by_key(|token| token.dst_col)
-                .copied()
-            else {
-                continue;
-            };
-            if !self
-                .source_line(last.src_line)
-                .is_some_and(|source| source.trim_start().starts_with("this."))
-            {
-                continue;
-            }
-            tokens.push(ComponentV2SourceMapToken {
-                dst_line: line_index,
-                dst_col: line.len() as u32,
-                src_line: last.src_line,
-                src_col: last.src_col.saturating_add(1),
-                source_id: last.source_id,
-                name_id: last.name_id,
-            });
-        }
-    }
-
-    fn generated_named_import(&self, line: &str) -> Option<(String, u32)> {
-        let binding_start = line.find("import { ")? + "import { ".len();
-        let rest = line.get(binding_start..)?;
-        let binding_end = rest.find(" } from ")?;
-        let binding = rest.get(..binding_end)?.trim();
-        (!binding.is_empty() && !binding.contains(',') && !binding.contains(" as "))
-            .then(|| (binding.to_string(), binding_start as u32))
-    }
-
-    fn generated_line(&self, line_index: u32) -> Option<&str> {
-        self.generated.lines().nth(line_index as usize)
-    }
-
-    fn source_line(&self, line_index: u32) -> Option<&str> {
-        self.source.lines().nth(line_index as usize)
-    }
-
-    fn indent_width(&self, line: &str) -> usize {
-        line.len() - line.trim_start().len()
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ComponentV2SourceMapToken {
-    dst_line: u32,
-    dst_col: u32,
-    src_line: u32,
-    src_col: u32,
-    source_id: Option<u32>,
-    name_id: Option<u32>,
-}
-
-impl ComponentV2SourceMapToken {
-    fn new(dst_line: u32, dst_col: u32, src_line: u32, src_col: u32, source_id: u32) -> Self {
-        Self {
-            dst_line,
-            dst_col,
-            src_line,
-            src_col,
-            source_id: Some(source_id),
-            name_id: None,
-        }
-    }
-
-    fn sort_key(&self) -> (u32, u32, u32, u32) {
-        (self.dst_line, self.dst_col, self.src_line, self.src_col)
-    }
-}
-
-struct ComponentV2SourceMapLocations {
-    component_name: String,
-    import_line: u32,
-    import_end_column: u32,
-    import_bindings: FxHashMap<String, (u32, u32)>,
-    entry_line: u32,
-    entry_column: u32,
-    struct_name_line: u32,
-    struct_name_column: u32,
-    build_line: u32,
-    build_column: u32,
-    build_end_line: u32,
-    build_end_column: u32,
-}
-
-impl ComponentV2SourceMapLocations {
-    fn from_source(source: &str) -> Option<Self> {
-        let lines = source.lines().collect::<Vec<_>>();
-        let (import_line, import_source) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.trim_start().starts_with("import "))?;
-        let (entry_line, entry_source) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.trim_start().starts_with("@Entry"))?;
-        let (struct_name_line, struct_source) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.trim_start().starts_with("struct "))?;
-        let struct_offset = struct_source.find("struct ")? + "struct ".len();
-        let component_name = struct_source
-            .get(struct_offset..)?
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .next()?
-            .to_string();
-        if component_name.is_empty() {
-            return None;
-        }
-        let (build_line, build_source) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.trim_start().starts_with("build("))?;
-        let build_column = build_source.find("build(")? as u32;
-        let (build_end_line, build_end_column) = Self::build_end(&lines, build_line, build_source)?;
-        let mut import_bindings = FxHashMap::default();
-        let search_start = import_source.find('{').unwrap_or_default();
-        for binding in import_source[search_start..]
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .filter(|binding| !binding.is_empty())
-        {
-            if binding == "import" || binding == "from" || binding == "kit" || binding == "ArkUI" {
-                continue;
-            }
-            if let Some(column) = import_source.find(binding) {
-                import_bindings.insert(binding.to_string(), (import_line as u32, column as u32));
-            }
-        }
-        Some(Self {
-            component_name,
-            import_line: import_line as u32,
-            import_end_column: import_source.len() as u32,
-            import_bindings,
-            entry_line: entry_line as u32,
-            entry_column: entry_source.find('@').unwrap_or_default() as u32,
-            struct_name_line: struct_name_line as u32,
-            struct_name_column: struct_offset as u32,
-            build_line: build_line as u32,
-            build_column,
-            build_end_line,
-            build_end_column,
-        })
-    }
-
-    fn import_binding(&self, binding: &str) -> Option<(u32, u32)> {
-        self.import_bindings.get(binding).copied()
-    }
-
-    fn build_end(lines: &[&str], build_line: usize, build_source: &str) -> Option<(u32, u32)> {
-        let mut depth = 0u32;
-        let mut entered = false;
-        for (line_index, line) in lines.iter().enumerate().skip(build_line) {
-            let start = if line_index == build_line {
-                build_source.find("build(").unwrap_or_default()
-            } else {
-                0
-            };
-            for (column, byte) in line.bytes().enumerate().skip(start) {
-                match byte {
-                    b'{' => {
-                        entered = true;
-                        depth = depth.saturating_add(1);
-                    }
-                    b'}' if entered => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            return Some((line_index as u32, column as u32 + 1));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        None
-    }
-}
-
 impl<'s> HvigorSourceFinalization<'s> {
     fn unchanged(source: &'s str) -> Self {
         Self {
@@ -1505,12 +1021,20 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
     }
 
     fn run<'s>(&self, source: &'s str) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
-        self.run_with_source_map(source)
+        self.run_with_source_map(source, ModuleSourceAstOwnership::Pending)
+    }
+
+    fn run_transformed<'s>(
+        &self,
+        source: &'s str,
+    ) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
+        self.run_with_source_map(source, ModuleSourceAstOwnership::Applied)
     }
 
     fn run_with_source_map<'s>(
         &self,
         source: &'s str,
+        module_source_ownership: ModuleSourceAstOwnership,
     ) -> Result<HvigorSourceFinalization<'s>, EtsTransformError> {
         let allocator = Allocator::default();
         let source_type = self.source_type();
@@ -1645,6 +1169,8 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         .rewrite_program(&allocator, &mut parsed.program)?;
         changed |= resource_rewrite.changed;
 
+        let changed_before_module_source = changed;
+
         // ModuleSourceFile rebuilds every declaration whose request will be
         // resolved to an OHM URL. The declaration shell and request literal
         // are factory-created nodes; only the retained import/export clause
@@ -1654,6 +1180,21 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         let mut module_source_spans = ModuleSourceFileSpanEraser::default();
         module_source_spans.visit_program(&mut parsed.program);
         changed |= module_source_spans.changed;
+
+        // `etsTransform` hands ModuleSourceFile the transformed SourceFile,
+        // not printed text. ArktsTransformer has therefore already applied
+        // the declaration ownership above on that same AST. If reparsing was
+        // needed only to run this ownership pass again, retain the first
+        // printer result and its source map. This preserves TypeScript's
+        // synthesized-node identity instead of composing a second printer map.
+        if module_source_ownership == ModuleSourceAstOwnership::Applied
+            && !changed_before_module_source
+        {
+            return Ok(HvigorSourceFinalization::unchanged_with_warnings(
+                source,
+                resource_rewrite.warnings,
+            ));
+        }
 
         if !changed {
             return Ok(HvigorSourceFinalization::unchanged_with_warnings(
@@ -1684,6 +1225,12 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
             self.pipeline.transformer.plan.arkts_language_version,
         )
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModuleSourceAstOwnership {
+    Pending,
+    Applied,
 }
 
 fn hvigor_stage_codegen(program: &oxc_ast::ast::Program<'_>) -> String {
@@ -2595,6 +2142,90 @@ export const uid = Constant.Key.MapUidKey;"#,
                 .code
                 .contains("import emitter from \"@ohos.events.emitter\";"),
             "{output:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_import_and_arkui_lowering_keep_module_source_ast_for_single_print() {
+        // Source chain:
+        // rollup-plugin-ets-typescript.ts::transformNodes keeps the transformed
+        // SourceFile through processUISyntax -> expandAllImportPaths ->
+        // processKitImport; process_module_files.ts then prints the SourceFile
+        // only after ModuleSourceFile::processTransformedTsModuleRequest.
+        // The retained import clauses map to their original bindings, while
+        // factory-created declaration shells and ArkUI runtime nodes stay
+        // synthesized. This is the observed multi-module fixture mapping.
+        let fixture_root = arkdown_path::lexical_normalize(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/multi-module-hap"),
+        );
+        let library_root = fixture_root.join("library");
+        let page_path = fixture_root.join("entry/src/main/ets/pages/Index.ets");
+        let mut source_map = FxHashMap::default();
+        source_map.insert(
+            library_root.join("Index.ets"),
+            Arc::<str>::from(include_str!(
+                "../../../tests/fixtures/multi-module-hap/library/Index.ets"
+            )),
+        );
+        source_map.insert(
+            library_root.join("src/main/ets/lib/greeting.ets"),
+            Arc::<str>::from(include_str!(
+                "../../../tests/fixtures/multi-module-hap/library/src/main/ets/lib/greeting.ets"
+            )),
+        );
+        let source = include_str!(
+            "../../../tests/fixtures/multi-module-hap/entry/src/main/ets/pages/Index.ets"
+        );
+        source_map.insert(page_path.clone(), Arc::<str>::from(source));
+        let sources = TransformSourceSnapshot::new(source_map).with_package_roots(
+            FxHashMap::from_iter([("library".to_string(), library_root.clone())]),
+        );
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example.multimodule",
+            "entry",
+            fixture_root.clone(),
+            fixture_root.join("entry/src/main/ets"),
+            vec![("library".to_string(), library_root)],
+            17,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            sources,
+        )
+        .with_expand_import_path(Some(arkdown_core::ExpandImportPath {
+            enable: true,
+            exclude: Vec::new(),
+        }))
+        .with_checker_mode(CheckerMode::Off);
+        let output = RolldownEtsTransformer::new(Arc::new(plan))
+            .compile_transform(source, page_path.to_str().expect("UTF-8 fixture path"))
+            .expect("multi-module transform")
+            .expect("multi-module output");
+        let source_map: serde_json::Value = serde_json::from_str(
+            output
+                .source_map
+                .as_deref()
+                .expect("multi-module TypeScript source map"),
+        )
+        .expect("source map JSON");
+
+        assert!(
+            output
+                .code
+                .contains("import { greet } from \"library/src/main/ets/lib/greeting\";"),
+            "{}",
+            output.code
+        );
+        assert!(
+            output
+                .code
+                .contains("import { LIB_VERSION } from \"library/Index\";"),
+            "{}",
+            output.code
+        );
+        assert_eq!(
+            source_map["mappings"],
+            ";;;;IAKS,OAAO,GAAE,MAAM;;SALf,KAAK;SAAE,WAAW;MAIpB,KAAK;IAFZ;;;;;sDAG2B,aAAa;;;KALK;;;;;;;;;;;;;;;;IAK3C,4CAAgB,MAAM,EAAiB;QAAhC,OAAO;;;QAAP,OAAO,WAAE,MAAM;;;IAEtB;;YACE,GAAG;YAAH,GAAG,CAMD,MAAM,CAAC,MAAM;;;YALb,MAAM;YAAN,MAAM,CAIJ,KAAK,CAAC,MAAM;;;YAHZ,IAAI,QAAC,IAAI,CAAC,OAAO,GAAG,KAAK,CAAC,SAAS,CAAC,GAAG,WAAW;YAAlD,IAAI,CACD,QAAQ,CAAC,EAAE;YADd,IAAI,CAED,UAAU,CAAC,UAAU,CAAC,IAAI;;QAF7B,IAAI;QADN,MAAM;QADR,GAAG;KAOJ"
         );
     }
 

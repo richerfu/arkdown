@@ -4,25 +4,40 @@ use oxc_ast::ast::{
     ModuleExportName, Statement, StringLiteral,
 };
 use oxc_ast::builder::AstBuilder;
-use oxc_span::SPAN;
+use oxc_span::{Span, SPAN};
 use oxc_str::{Ident, Str};
 
 #[derive(Debug)]
 pub(super) struct NamedImportBinding {
     pub(super) imported: ModuleBindingName,
+    pub(super) imported_span: Span,
     pub(super) local: String,
+    pub(super) local_span: Span,
+    pub(super) span: Span,
 }
 
 #[derive(Debug)]
 pub(super) enum ValueImportBinding {
-    Default(String),
-    Namespace(String),
+    Default {
+        local: String,
+        local_span: Span,
+        span: Span,
+    },
+    Namespace {
+        local: String,
+        local_span: Span,
+        span: Span,
+    },
     Named(NamedImportBinding),
 }
 
 #[derive(Debug)]
 pub(super) enum TypeImportBinding {
-    Default(String),
+    Default {
+        local: String,
+        local_span: Span,
+        span: Span,
+    },
     Named(NamedImportBinding),
 }
 
@@ -77,14 +92,18 @@ impl ImportSplitEmitter {
     fn type_import_statements<'a>(&self, ast: &AstBuilder<'a>) -> ArenaVec<'a, Statement<'a>> {
         let mut statements = ArenaVec::new_in(ast);
         let default_binding = self.type_bindings.iter().find_map(|binding| match binding {
-            TypeImportBinding::Default(local) => Some(local.as_str()),
+            TypeImportBinding::Default {
+                local,
+                local_span,
+                span,
+            } => Some((local.as_str(), *local_span, *span)),
             TypeImportBinding::Named(_) => None,
         });
-        if let Some(local) = default_binding {
+        if let Some((local, local_span, span)) = default_binding {
             let specifiers = ArenaVec::from_value_in(
                 ImportDeclarationSpecifier::new_import_default_specifier(
-                    SPAN,
-                    BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
+                    span,
+                    BindingIdentifier::new(local_span, Ident::from_str_in(local, ast), ast),
                     ast,
                 ),
                 ast,
@@ -104,15 +123,21 @@ impl ImportSplitEmitter {
             .type_bindings
             .iter()
             .filter_map(|binding| match binding {
-                TypeImportBinding::Default(_) => None,
+                TypeImportBinding::Default { .. } => None,
                 TypeImportBinding::Named(binding) => Some(binding),
             });
         let specifiers = ArenaVec::from_iter_in(
             named_bindings.map(|binding| {
                 ImportDeclarationSpecifier::new_import_specifier(
-                    SPAN,
-                    binding.imported.to_ast(ast),
-                    BindingIdentifier::new(SPAN, Ident::from_str_in(&binding.local, ast), ast),
+                    binding.span,
+                    binding
+                        .imported
+                        .to_ast_with_span(ast, binding.imported_span),
+                    BindingIdentifier::new(
+                        binding.local_span,
+                        Ident::from_str_in(&binding.local, ast),
+                        ast,
+                    ),
                     ImportOrExportKind::Value,
                     ast,
                 )
@@ -142,19 +167,23 @@ impl ImportSplitEmitter {
         let specifiers = if import_kind.is_type() {
             ArenaVec::from_iter_in(
                 self.type_bindings.iter().map(|binding| match binding {
-                    TypeImportBinding::Default(local) => {
-                        ImportDeclarationSpecifier::new_import_default_specifier(
-                            SPAN,
-                            BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
-                            ast,
-                        )
-                    }
+                    TypeImportBinding::Default {
+                        local,
+                        local_span,
+                        span,
+                    } => ImportDeclarationSpecifier::new_import_default_specifier(
+                        *span,
+                        BindingIdentifier::new(*local_span, Ident::from_str_in(local, ast), ast),
+                        ast,
+                    ),
                     TypeImportBinding::Named(binding) => {
                         ImportDeclarationSpecifier::new_import_specifier(
-                            SPAN,
-                            binding.imported.to_ast(ast),
+                            binding.span,
+                            binding
+                                .imported
+                                .to_ast_with_span(ast, binding.imported_span),
                             BindingIdentifier::new(
-                                SPAN,
+                                binding.local_span,
                                 Ident::from_str_in(&binding.local, ast),
                                 ast,
                             ),
@@ -168,26 +197,32 @@ impl ImportSplitEmitter {
         } else {
             ArenaVec::from_iter_in(
                 self.value_bindings.iter().map(|binding| match binding {
-                    ValueImportBinding::Default(local) => {
-                        ImportDeclarationSpecifier::new_import_default_specifier(
-                            SPAN,
-                            BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
-                            ast,
-                        )
-                    }
-                    ValueImportBinding::Namespace(local) => {
-                        ImportDeclarationSpecifier::new_import_namespace_specifier(
-                            SPAN,
-                            BindingIdentifier::new(SPAN, Ident::from_str_in(local, ast), ast),
-                            ast,
-                        )
-                    }
+                    ValueImportBinding::Default {
+                        local,
+                        local_span,
+                        span,
+                    } => ImportDeclarationSpecifier::new_import_default_specifier(
+                        *span,
+                        BindingIdentifier::new(*local_span, Ident::from_str_in(local, ast), ast),
+                        ast,
+                    ),
+                    ValueImportBinding::Namespace {
+                        local,
+                        local_span,
+                        span,
+                    } => ImportDeclarationSpecifier::new_import_namespace_specifier(
+                        *span,
+                        BindingIdentifier::new(*local_span, Ident::from_str_in(local, ast), ast),
+                        ast,
+                    ),
                     ValueImportBinding::Named(binding) => {
                         ImportDeclarationSpecifier::new_import_specifier(
-                            SPAN,
-                            binding.imported.to_ast(ast),
+                            binding.span,
+                            binding
+                                .imported
+                                .to_ast_with_span(ast, binding.imported_span),
                             BindingIdentifier::new(
-                                SPAN,
+                                binding.local_span,
                                 Ident::from_str_in(&binding.local, ast),
                                 ast,
                             ),
@@ -357,11 +392,20 @@ impl ModuleBindingName {
     }
 
     fn to_ast<'a>(&self, ast: &AstBuilder<'a>) -> ModuleExportName<'a> {
+        self.to_ast_with_span(ast, SPAN)
+    }
+
+    fn to_ast_with_span<'a>(&self, ast: &AstBuilder<'a>, span: Span) -> ModuleExportName<'a> {
         match self {
             Self::Identifier(name) => {
-                ModuleExportName::new_identifier_name(SPAN, Ident::from_str_in(name, ast), ast)
+                ModuleExportName::new_identifier_name(span, Ident::from_str_in(name, ast), ast)
             }
-            Self::StringLiteral(literal) => ModuleExportName::StringLiteral(literal.to_ast(ast)),
+            Self::StringLiteral(literal) => ModuleExportName::StringLiteral(StringLiteral::new(
+                span,
+                Str::from_str_in(&literal.value, ast),
+                literal.raw.as_ref().map(|raw| Str::from_str_in(raw, ast)),
+                ast,
+            )),
         }
     }
 }

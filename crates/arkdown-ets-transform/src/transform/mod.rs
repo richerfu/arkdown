@@ -177,6 +177,10 @@ pub struct TransformOptions {
     /// (`a2[i]` guard); local `file:` dependencies are not in the maps and
     /// do expand.
     pub hsp_har_package_names: FxHashSet<String>,
+    /// The transformed AST is owned by the ESMODULE `ModuleSourceFile` stage.
+    /// That stage rebuilds resolved module-request declaration shells before
+    /// the single TypeScript printer pass; standalone transform callers do not.
+    pub(crate) module_source_file_stage: bool,
     /// SDK `process_mock.disableMockDecorator`: `mockParams` is present for
     /// every Ark compile, so only Preview builds retain `@MockSetup`.
     pub disable_mock_setup_decorator: bool,
@@ -210,6 +214,7 @@ impl Default for TransformOptions {
             pkg_name: None,
             expand_import_path: None,
             hsp_har_package_names: FxHashSet::default(),
+            module_source_file_stage: false,
             disable_mock_setup_decorator: false,
         }
     }
@@ -691,6 +696,22 @@ impl<'a> ArktsTransformer<'a> {
                 &source.id.id,
                 options,
             );
+
+            // Source pipeline ownership follows the current ets-loader AST
+            // chain exactly: processUISyntax -> expandAllImportPaths ->
+            // processKitImport -> ModuleSourceFile. ModuleSourceFile receives
+            // the transformed SourceFile itself, then rebuilds resolvable
+            // import/export declarations before the only TypeScript printer
+            // pass (`module_source_file.ts::processTransformedTsModuleRequest`).
+            // Mark those declaration shells synthetic while their retained
+            // clauses still carry the original source spans. Printing and
+            // reparsing first would lose TypeScript's `pos === -1` ownership
+            // and cannot be repaired from generated VLQ tokens.
+            if options.module_source_file_stage {
+                let mut module_source_spans =
+                    crate::module_rewrite::ModuleSourceFileSpanEraser::default();
+                module_source_spans.visit_program(&mut parsed.program);
+            }
 
             let generated = HvigorTypescriptPrinter::print_with_source_map(
                 &parsed.program,

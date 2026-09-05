@@ -4,6 +4,11 @@
 更新时间：2026-09-05
 适用范围：Stage 模型、ESMODULE、ArkTS 1.1 默认编译、显式 ArkTS 1.2 编译，以及 HAP/HSP/HAR/APP 的现代构建链路
 
+当前差异、清零顺序和完成记录统一维护在
+[`TASK-HVIGOR-PARITY-GAP-CLOSURE.md`](TASK-HVIGOR-PARITY-GAP-CLOSURE.md)。
+本文件描述目标架构和总体迁移阶段；两者冲突时，以差异清零清单中经过最新源码/产物
+复验的状态为准。
+
 ## 1. 结论
 
 ### 1.1 2026-09-05 ArkTS 1.1 实施进度
@@ -23,7 +28,8 @@
 - `ModuleSourceFile` 的 TypeScript emit 已按 OXC AST boundary 生成精确 source map，import/export、函数/类、对象、模板、调用、控制流和跨行 member 均参与映射；Rolldown 负责合并 OXC、内建 `apiTransform` 与用户 TS/JS 插件的 map chain，最终 post collector 只在源码 hash 未变化且 combined map 仍是投影时恢复原始 transform map。该边界同时修复了入口合成对象零 span 的下溢崩溃。
 - ByteCode HAR 的 `filesInfo.txt` 第五列和 ABC `pkgName` 已使用当前 OHPM package identity，不再错误使用逻辑 module name；`modules.cache`、HSP debug/release、ohosTest 独立 cache/task 目录、模板与资源 module cluster 已进入严格产物对比。
 - 已删除 `arkdown-path::compat` 迁移门面以及无生产价值的 `PkgSdkInfoGenerator`、重复 session native inventory；保留的路径、profile/native 行为分别归属 typed path、profile 和 native domain owner。JS 兼容代码仅存在于公开 TS/JS 插件 ABI 边界。
-- 2026-09-05 使用 DevEco Studio 6.1.1.280 自带的真实 `hvigorw` 和同版本 SDK，在 `ARKDOWN_PARITY_STRICT=1` 下串行执行完整 parity harness：30/30 通过，覆盖 HAP/HSP/HAR、debug/release、源码/字节码 HAR、混淆、测试包、widget、多模块、share/startup、ComponentV2、增量构建及诊断。该结果证明当前 fixture 范围内的 ArkTS 1.1 产物行为一致，不代表源码 ArkGuard 的大工程 corpus、跨进程完整 Rolldown 图恢复和所有 SDK 边界语料已经完成。
+- 2026-09-05 使用 DevEco Studio 6.1.1.280 自带的真实 `hvigorw` 和同版本 SDK，在 `ARKDOWN_PARITY_STRICT=1` 下串行执行完整 parity harness：30/30 通过，覆盖 HAP/HSP/HAR、debug/release、源码/字节码 HAR、混淆、测试包、widget、多模块、share/startup、ComponentV2、增量构建及诊断。该结果包含 `parity_allowlist.json` 接受的 12 个已知差异场景，只能证明现有 fixture 在“已知差异受控”条件下通过，不能表述为字节级零差异；清零规则见差异清单 P0-1。
+- 2026-09-05 空 allowlist 完整复验为 30/31。已删除 11 个旧 allowlist 场景；HAP/HSP/HAR、Test/OHOS Test、debug/release、source/ByteCode HAR、widget、多模块、share/startup、ComponentV2 冷构建与增量构建均严格零差异。当前只保留 release ArkGuard 1 个真实差异，具体产物范围与源码追链状态以 `TASK-HVIGOR-PARITY-GAP-CLOSURE.md` 为准。
 - Rolldown 官方 incremental API 已进入 JS CLI watch 主链：初始构建以 `IncrementalFullBuild + ScanMode::Full` 建立长生命周期图，热更新以 `IncrementalBuild + ScanMode::Partial(changedFiles)` 只重扫变化模块；未变化模块的 transform/source-map/InsightIntent/ArkUI-X facts 保留在 Rust-owned snapshot 中，删除模块会从快照移除，watch 退出或 cold invalidation 会执行 `closeBundle`。这是一轮 JS CLI/watch 生命周期内的内存图缓存，不冒充跨进程磁盘 cache。
 - 跨进程 OXC transform cache 已进入生产 bundle 主链：Rust 在 hook 前一次加载版本化 manifest 和 allocator-independent artifact，命中时完整恢复 code、source map、warning span/solution、CompileArkTS source、shared/InsightIntent/ArkUI-X facts；精确 hook-input hash 防止前置 TS/JS 插件改写后误命中，BuildSession source/Visual hash 与上一轮解析图共同计算反向依赖失效闭包。只有 Rolldown 成功扫描并完成产物归并后才以 artifact-first、manifest-last 的 temp + fsync + rename 提交，损坏单 artifact 降级为 miss，提交中断可从 previous manifest 恢复。Rolldown 当前 Rust API 未提供 allocator-independent AST/graph 反序列化入口，因此新进程仍需执行 Rolldown resolve/parse/scan；文档和代码不得把 graph facts 称为完整 Rolldown graph cache。
 - source/bytecode ArkGuard 均已原生化：源码模式由 OXC AST/semantic/codegen 实现模块级 identifier/property/file mangler、console 移除、source-map 合并、name cache、增量删除清理、`-keep`/`-keep-dts`/通配符/源码 Keep 标记和声明注释规则；`-keep` 的导出白名单使用 Rolldown 已解析模块图计算传递依赖，ResourceTable 作为隐式 keep，keep 文件仍按原实现执行 compact、注释/日志处理和文件名改写。文件名混淆输出以一个 Rust typed handoff 同步提交 CompileArkTS 物理路径、派生 recordName、importedRecordNames、sourceFile/source-map key 和全部 sourceMaps cache/package 镜像；显式 `meta.ohmurl` 保持原值，`oh_modules` 物理与逻辑文件名不改写。字节码模式由 Rust 生成 PandaGuard `config.json`、从 BuildSession/OXC 快照构建 reserved-name inventory、先处理声明文件，再直接执行 SDK `panda_guard` 并回写 ABC/source-map/name-cache 产物。`arkguard_bridge.cjs`、`bytecode_arkguard_bridge.cjs`、单文件/目录 obfuscation facade 和 ets-loader bytecode driver 均已删除；源码变换不调用 `bin/secharmony`，只有 PandaGuard 保持原生二进制工具边界。
