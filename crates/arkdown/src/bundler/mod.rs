@@ -56,14 +56,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arkdown_cache::CacheKeyMaterial;
-use arkdown_core::{ArkdownConfig, ArkdownError, HvigorModuleSourceFile};
+use arkdown_core::{ArkdownError, HvigorModuleSourceFile};
 use arkdown_ets_transform::RolldownEtsTransformPlan;
-use arkdown_path::{lexical_normalize, AbsPath};
-use rolldown::{BundlerOptions, OutputFormat};
+use arkdown_path::{lexical_normalize, AbsPath, ArtifactPathSerializer};
+use rolldown::{
+    BundlerOptions, ModuleSourceScanImport, ModuleSourceScanModule, ModuleSourceScanOutput,
+    ModuleSourceScanSpan, OutputFormat,
+};
 use rolldown_common::{
-    BundlerTransformOptions, ChunkingContext, CodeSplittingMode, ManualCodeSplittingOptions,
-    MatchGroup, MatchGroupName, MatchGroupTest, ModuleType as RdModuleType, SanitizeFilename,
-    TreeshakeOptions, TypeScriptOptions,
+    BundleMode, BundlerTransformOptions, ChunkingContext, CodeSplittingMode, ExperimentalOptions,
+    ManualCodeSplittingOptions, MatchGroup, MatchGroupName, MatchGroupTest, ModuleTable,
+    ModuleType as RdModuleType, SanitizeFilename, ScanMode, TreeshakeOptions, TypeScriptOptions,
 };
 use rolldown_plugin::__inner::SharedPluginable;
 
@@ -72,6 +75,7 @@ use crate::diagnostics::RolldownBuildDiagnostics;
 use crate::manual_chunks::{ChunkName, ManualChunkPolicy};
 use crate::output;
 use crate::plan::{BundlePlan, SourceMapPolicy};
+use crate::plugins::ets_transform::EtsTransformPlugin;
 
 type DynamicChunkNameFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>;
@@ -81,18 +85,26 @@ type DynamicChunkName = Arc<dyn Fn(&str, &ChunkingContext) -> DynamicChunkNameFu
 ///
 /// Orchestrates the full pipeline via rolldown with OHOS-specific plugins.
 pub struct Bundler {
-    pub config: Arc<ArkdownConfig>,
     pub plugins: Vec<SharedPluginable>,
     ets_transform_plan: Option<Arc<RolldownEtsTransformPlan>>,
+    ets_transform_plugin: Option<Arc<EtsTransformPlugin>>,
+    graph_session: Option<RolldownGraphSession>,
+}
+
+struct RolldownGraphSession {
+    bundler: rolldown::Bundler,
+    transform_store: HvigorModuleTransformStore,
+    transform_snapshot: HvigorModuleTransformSnapshot,
 }
 
 impl Bundler {
     /// Create a new `Bundler` with the given configuration and plugin list.
-    pub fn new(config: ArkdownConfig, plugins: Vec<SharedPluginable>) -> Self {
+    pub fn new(plugins: Vec<SharedPluginable>) -> Self {
         Bundler {
-            config: Arc::new(config),
             plugins,
             ets_transform_plan: None,
+            ets_transform_plugin: None,
+            graph_session: None,
         }
     }
 
@@ -101,17 +113,59 @@ impl Bundler {
         self
     }
 
+    pub fn with_ets_transform_plugin(mut self, plugin: Arc<EtsTransformPlugin>) -> Self {
+        self.ets_transform_plugin = Some(plugin);
+        self
+    }
+
+    pub fn update_ets_transform_plan(&mut self, plan: Arc<RolldownEtsTransformPlan>) {
+        self.ets_transform_plan = Some(plan);
+    }
+
+    /// Close a retained Rolldown graph and run its `closeBundle` hooks.
+    pub async fn close(&mut self) -> Result<(), ArkdownError> {
+        let Some(mut session) = self.graph_session.take() else {
+            return Ok(());
+        };
+        session.bundler.close().await.map_err(|error| {
+            ArkdownError::Bundler(RolldownBuildDiagnostics::new(error).into_message())
+        })
+    }
+
     /// Run the full bundle pipeline and return the chunk outputs.
     ///
     /// The output remains ESM so the Rust ABC backend compiles the same
     /// CompileArkTS-stage module shape that hvigor sends to es2abc.
-    pub async fn bundle(&self, plan: &BundlePlan) -> Result<BundleOutput, ArkdownError> {
+    pub async fn bundle(&mut self, plan: &BundlePlan) -> Result<BundleOutput, ArkdownError> {
+        self.bundle_with_graph_cache(plan, None).await
+    }
+
+    /// Incrementally rescan the changed module ids while retaining Rolldown's
+    /// parsed graph/AST snapshot in this typed build-session owner.
+    pub async fn bundle_incremental(
+        &mut self,
+        plan: &BundlePlan,
+        changed_files: &[PathBuf],
+    ) -> Result<BundleOutput, ArkdownError> {
+        self.bundle_with_graph_cache(plan, Some(changed_files))
+            .await
+    }
+
+    async fn bundle_with_graph_cache(
+        &mut self,
+        plan: &BundlePlan,
+        changed_files: Option<&[PathBuf]>,
+    ) -> Result<BundleOutput, ArkdownError> {
         let bundle_start = Instant::now();
         plan.validate()?;
         let input_plan = RolldownInputPlan::from_bundle_plan(plan);
 
         // ── 2. Pass plugins directly to rolldown ─────────────────────────────
-        let transform_store = HvigorModuleTransformStore::default();
+        let transform_store = self
+            .graph_session
+            .as_ref()
+            .map(|session| session.transform_store.clone())
+            .unwrap_or_default();
         let mut rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
         let source_collector =
             Arc::new(HvigorModuleTransformCollector::new(transform_store.clone()))
@@ -184,6 +238,10 @@ impl Bundler {
             // sanitizeFileName: false — hvigor disables file-name sanitization
             // so OHM URL path segments are preserved verbatim.
             sanitize_filename: Some(SanitizeFilename::Boolean(false)),
+            experimental: changed_files.map(|_| ExperimentalOptions {
+                incremental_build: Some(true),
+                ..ExperimentalOptions::default()
+            }),
             ..Default::default()
         };
         let entry_module_ids = input_plan.entry_module_ids()?;
@@ -201,16 +259,89 @@ impl Bundler {
 
         // ── 4. Scan the hvigor module-source graph ──────────────────────────
         let scan_start = Instant::now();
-        let mut rd_bundler = rolldown::Bundler::with_plugins(options, rd_plugins)
-            .map_err(|e| ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message()))?;
-        let module_source_scan = rd_bundler
-            .scan_module_sources()
-            .await
-            .map_err(|e| ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message()))?;
-        rd_bundler
-            .close()
-            .await
-            .map_err(|e| ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message()))?;
+        let (module_source_scan, transform_snapshot) = if let Some(changed_files) = changed_files {
+            let had_graph = self.graph_session.is_some();
+            if !had_graph {
+                let bundler =
+                    rolldown::Bundler::with_plugins(options, rd_plugins).map_err(|e| {
+                        ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message())
+                    })?;
+                self.graph_session = Some(RolldownGraphSession {
+                    bundler,
+                    transform_store: transform_store.clone(),
+                    transform_snapshot: HvigorModuleTransformSnapshot::default(),
+                });
+            }
+            if let (Some(plugin), Some(plan)) = (
+                self.ets_transform_plugin.as_ref(),
+                self.ets_transform_plan.as_ref(),
+            ) {
+                plugin.update_plan(Arc::clone(plan));
+            }
+            let session = self
+                .graph_session
+                .as_mut()
+                .expect("graph session initialized above");
+            let scan_mode = if had_graph {
+                ScanMode::Partial(
+                    changed_files
+                        .iter()
+                        .map(|path| {
+                            ArtifactPathSerializer::path_to_slash_string(path)
+                                .map(Into::into)
+                                .map_err(|error| {
+                                    ArkdownError::Bundler(format!(
+                                        "incremental module id cannot be serialized: {error}"
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            } else {
+                ScanMode::Full
+            };
+            let bundle_mode = if had_graph {
+                BundleMode::IncrementalBuild
+            } else {
+                BundleMode::IncrementalFullBuild
+            };
+            let module_source_scan = session
+                .bundler
+                .with_cached_bundle_experimental(bundle_mode, async |bundle| {
+                    let mut output = bundle.scan_modules(scan_mode).await?;
+                    let warnings = std::mem::take(&mut output.warnings);
+                    Ok(Self::module_source_scan_output(
+                        &output.module_table,
+                        warnings,
+                    ))
+                })
+                .await
+                .map_err(|e| {
+                    ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message())
+                })?;
+            let update = session.transform_store.finish();
+            let active_module_ids = module_source_scan
+                .modules
+                .iter()
+                .map(|module| module.id.to_string())
+                .collect();
+            session
+                .transform_snapshot
+                .merge_incremental(update, &active_module_ids);
+            (module_source_scan, session.transform_snapshot.clone())
+        } else {
+            let mut rd_bundler =
+                rolldown::Bundler::with_plugins(options, rd_plugins).map_err(|e| {
+                    ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message())
+                })?;
+            let module_source_scan = rd_bundler.scan_module_sources().await.map_err(|e| {
+                ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message())
+            })?;
+            rd_bundler.close().await.map_err(|e| {
+                ArkdownError::Bundler(RolldownBuildDiagnostics::new(e).into_message())
+            })?;
+            (module_source_scan, transform_store.finish())
+        };
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump("bundle:after-scan");
         tracing::info!(
@@ -242,10 +373,8 @@ impl Bundler {
 
         // ── 5. Materialize the hvigor CompileArkTS module-source handoff ─────
         let module_source_start = Instant::now();
-        let mut module_source_state = HvigorModuleSourceState::from_rolldown_scan(
-            module_source_scan,
-            transform_store.finish(),
-        );
+        let mut module_source_state =
+            HvigorModuleSourceState::from_rolldown_scan(module_source_scan, transform_snapshot);
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump_with(
             "bundle:module-source-state",
@@ -457,6 +586,48 @@ impl Bundler {
             insight_intent_sources,
             crossplatform_collections,
         })
+    }
+
+    fn module_source_scan_output(
+        module_table: &ModuleTable,
+        warnings: Vec<rolldown_error::BuildDiagnostic>,
+    ) -> ModuleSourceScanOutput {
+        let module_id_by_idx = module_table
+            .modules
+            .iter()
+            .map(|module| module.id().as_arc_str().clone())
+            .collect::<oxc_index::IndexVec<rolldown_common::ModuleIdx, arcstr::ArcStr>>();
+        let modules = module_table
+            .modules
+            .iter()
+            .filter_map(|module| {
+                let module = module.as_normal()?;
+                let imports = module
+                    .ecma_view
+                    .import_records
+                    .iter()
+                    .map(|record| ModuleSourceScanImport {
+                        module_request: record.module_request.to_string(),
+                        resolved_id: record
+                            .resolved_module
+                            .and_then(|idx| module_id_by_idx.get(idx).cloned()),
+                        kind: record.kind,
+                        importer_span: ModuleSourceScanSpan {
+                            start: record.importer_span.start,
+                            end: record.importer_span.end,
+                        },
+                    })
+                    .collect();
+                Some(ModuleSourceScanModule {
+                    id: module.id.as_arc_str().clone(),
+                    source: module.ecma_view.source.clone(),
+                    module_type: module.module_type.clone(),
+                    exports_kind: module.ecma_view.exports_kind,
+                    imports,
+                })
+            })
+            .collect();
+        ModuleSourceScanOutput { modules, warnings }
     }
 
     fn canonical_project_root(path: &std::path::Path) -> PathBuf {

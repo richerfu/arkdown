@@ -1,6 +1,7 @@
 //! Hvigor-aligned module obfuscation planning for the build application.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use arkdown_config::build_profile::parse_api_version;
@@ -10,7 +11,8 @@ use arkdown_core::{
 };
 use arkdown_obfuscate::{
     ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
-    ConsumerObfuscationFileWriter, ObfuscationModuleFile, ObfuscationModuleInput, Obfuscator,
+    BytecodeObfuscationSource, ConsumerObfuscationFileWriter, ObfuscationModuleFile,
+    ObfuscationModuleInput, Obfuscator,
 };
 use arkdown_path::canonicalize_or_owned;
 use arkdown_profile::LoaderJson;
@@ -160,7 +162,13 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             .collect();
         let adapter = ArkguardAdapterOptions {
             node_executable: self.node_executable.clone(),
-            ets_loader_path: self.config.sdk_config.ets_loader_path.clone(),
+            panda_guard_path: self.config.sdk_config.es2abc_path.with_file_name(
+                if cfg!(target_os = "windows") {
+                    "panda_guard.exe"
+                } else {
+                    "panda_guard"
+                },
+            ),
             arkguard_package: self
                 .config
                 .sdk_config
@@ -207,7 +215,10 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
         ))
     }
 
-    pub fn bytecode_input(&self, module: ObfuscationModuleInput) -> BytecodeObfuscationInput {
+    pub fn bytecode_input(
+        &self,
+        module: ObfuscationModuleInput,
+    ) -> Result<BytecodeObfuscationInput> {
         let module_records = self
             .bundle_out
             .bundle_output
@@ -236,12 +247,44 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             .collect::<Vec<_>>();
         record_name_white_list.sort();
         record_name_white_list.dedup();
-        BytecodeObfuscationInput {
+        let mut reserved_name_sources = Vec::with_capacity(module.files.len().saturating_mul(2));
+        for file in &module.files {
+            reserved_name_sources.push(BytecodeObfuscationSource {
+                path: file.original_path.clone(),
+                source: self.session.source_store.read_text(&file.original_path)?,
+                sdk_declaration: false,
+            });
+            // Latest `collectSourcesWhiteList` scans both project source and
+            // the post-ArkUI CompileArkTS source. Generated backing fields and
+            // decorator-derived members only exist in the latter snapshot.
+            reserved_name_sources.push(BytecodeObfuscationSource {
+                path: file.build_path.clone(),
+                source: Arc::from(fs_err::read_to_string(&file.build_path)?),
+                sdk_declaration: false,
+            });
+        }
+        for root in self.session.sdk.global_module_paths.iter() {
+            reserved_name_sources.extend(
+                self.session
+                    .source_store
+                    .text_sources_under(root)
+                    .into_iter()
+                    .map(|(path, source)| BytecodeObfuscationSource {
+                        path: path.to_path_buf(),
+                        source,
+                        sdk_declaration: true,
+                    }),
+            );
+        }
+        reserved_name_sources.sort_by(|left, right| left.path.cmp(&right.path));
+        reserved_name_sources.dedup_by(|left, right| left.path == right.path);
+        Ok(BytecodeObfuscationInput {
             module,
             modules_abc_path: self.bundle_out.bundle_output.modules_abc_path.clone(),
             module_records,
             record_name_white_list,
-        }
+            reserved_name_sources,
+        })
     }
 
     fn arkguard_entry_array(&self) -> Vec<String> {

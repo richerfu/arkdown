@@ -32,12 +32,14 @@ use crate::request::{
 };
 
 use super::BuildService;
+use crate::bundle_plan::BundleRuntime;
 
 /// Input for the watch stage.
 ///
 /// Individual fields keep the long-lived watcher independent from transient
 /// N-API request values and avoid retaining unrelated build state.
 pub(super) struct WatchStageInput {
+    pub(super) bundle_runtime: BundleRuntime,
     pub(super) config: Arc<ArkdownConfig>,
     pub(super) session: Arc<BuildSession>,
     /// Build target string (e.g. "hap", "hsp", "har").
@@ -92,6 +94,7 @@ pub(super) struct WatchStageInput {
 }
 
 pub(super) struct WatchStageBuildInput<'a> {
+    pub(super) bundle_runtime: BundleRuntime,
     pub(super) config: Arc<ArkdownConfig>,
     pub(super) session: Arc<BuildSession>,
     pub(super) args: &'a BuildRequest,
@@ -108,6 +111,7 @@ pub(super) struct WatchStageBuildInput<'a> {
 impl WatchStageInput {
     pub(super) fn from_build(input: WatchStageBuildInput<'_>) -> Self {
         let WatchStageBuildInput {
+            bundle_runtime,
             config,
             session,
             args,
@@ -121,6 +125,7 @@ impl WatchStageInput {
             hot_reload_mode,
         } = input;
         Self {
+            bundle_runtime,
             config,
             session,
             target: args.target.clone(),
@@ -178,6 +183,7 @@ impl WatchStage {
     /// This call blocks until the user sends `Ctrl+C` or the watcher
     /// encounters a fatal error.
     pub(super) async fn run(input: WatchStageInput) -> Result<()> {
+        let mut bundle_runtime = input.bundle_runtime;
         let config_for_watch = input.config.clone();
         let arkts_version = input.session.arkts_language_version;
         let session = input.session;
@@ -245,7 +251,7 @@ impl WatchStage {
         let rt = tokio::runtime::Handle::current();
 
         tokio::task::spawn_blocking(move || {
-            watcher.watch(move |events| {
+            let watch_result = watcher.watch(|events| {
                 let invalidation = WatchInvalidationBatch::from_watch_events_with_custom_inputs(
                     events,
                     &fingerprint_baseline,
@@ -400,11 +406,18 @@ impl WatchStage {
                 };
                 let command =
                     BuildService::new(rebuild_args).with_package_plugins(package_plugins.clone());
-                if let Err(e) = rt.block_on(command.execute()) {
+                if let Err(e) =
+                    rt.block_on(command.execute_with_bundle_runtime(&mut bundle_runtime))
+                {
                     tracing::error!(error = %format!("{e:#}"), "watch rebuild failed");
                 }
                 Ok(())
-            })
+            });
+            let close_result = rt
+                .block_on(bundle_runtime.close())
+                .map_err(|error| arkdown_watcher::WatchError::Build(error.to_string()));
+            watch_result?;
+            close_result
         })
         .await
         .map_err(|error| anyhow::anyhow!("watch stage task failed: {error}"))?

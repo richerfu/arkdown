@@ -9,6 +9,7 @@ arkdown-core = { workspace = true }
 arkdown-path = { workspace = true }
 arkdown-ets-transform = { workspace = true }
 arkdown-resolver = { workspace = true }
+arc-swap = { workspace = true }
 indexmap = { workspace = true }
 json5 = { workspace = true }
 oxc_allocator = { workspace = true }

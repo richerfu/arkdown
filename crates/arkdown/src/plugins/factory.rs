@@ -839,6 +839,7 @@ pub struct PluginFactory<'a> {
 pub struct PluginFactoryOutput {
     pub plugins: Vec<SharedPluginable>,
     pub ets_transform_plan: Arc<RolldownEtsTransformPlan>,
+    pub ets_transform_plugin: Arc<EtsTransformPlugin>,
 }
 
 impl<'a> PluginFactory<'a> {
@@ -1037,9 +1038,10 @@ impl<'a> PluginFactory<'a> {
         .with_hsp_har_package_names(self.input.hsp_har_package_names.clone())
         .with_disable_mock_setup_decorator(!self.plan.preview_mode);
         let ets_transform_plan = Arc::new(ets_transform_plan);
-        let ets_transform_plugin: SharedPluginable = Arc::new(EtsTransformPlugin::from_plan(
-            Arc::clone(&ets_transform_plan),
-        ));
+        let ets_transform_plugin = Arc::new(EtsTransformPlugin::from_plan(Arc::clone(
+            &ets_transform_plan,
+        )));
+        let ets_transform_plugin_entry: SharedPluginable = ets_transform_plugin.clone();
 
         // ── 8. ApiTransformPlugin (hvigor SDK: apiTransform) ───────────────
         //
@@ -1084,7 +1086,10 @@ impl<'a> PluginFactory<'a> {
         }
 
         native_plugins.extend([
-            PluginFactoryEntry::native(ets_transform_plugin, HvigorNativePluginSlot::EtsTransform),
+            PluginFactoryEntry::native(
+                ets_transform_plugin_entry,
+                HvigorNativePluginSlot::EtsTransform,
+            ),
             PluginFactoryEntry::native(api_transform_plugin, HvigorNativePluginSlot::ApiTransform),
         ]);
 
@@ -1221,6 +1226,7 @@ impl<'a> PluginFactory<'a> {
         Ok(PluginFactoryOutput {
             plugins,
             ets_transform_plan,
+            ets_transform_plugin,
         })
     }
 }

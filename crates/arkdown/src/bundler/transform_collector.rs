@@ -119,6 +119,7 @@ impl HvigorModuleTransformStore {
     }
 }
 
+#[derive(Clone, Default)]
 pub(crate) struct HvigorModuleTransformSnapshot {
     pub(crate) module_source_overrides: FxHashMap<String, Arc<str>>,
     pub(crate) source_maps: FxHashMap<String, Arc<str>>,
@@ -126,6 +127,58 @@ pub(crate) struct HvigorModuleTransformSnapshot {
     pub(crate) shared_module_ids: FxHashSet<String>,
     pub(crate) insight_intent_sources: FxHashMap<String, InsightIntentSourceMetadata>,
     pub(crate) crossplatform_collections: FxHashMap<String, CrossplatformSourceCollection>,
+}
+
+impl HvigorModuleTransformSnapshot {
+    /// Merge the modules transformed by one incremental scan and discard
+    /// records no longer present in Rolldown's normalized graph snapshot.
+    pub(crate) fn merge_incremental(
+        &mut self,
+        mut update: Self,
+        active_module_ids: &FxHashSet<String>,
+    ) {
+        let mut updated_module_ids = FxHashSet::default();
+        updated_module_ids.extend(update.module_source_overrides.keys().cloned());
+        updated_module_ids.extend(update.source_maps.keys().cloned());
+        updated_module_ids.extend(update.javascript_module_ids.iter().cloned());
+        updated_module_ids.extend(update.shared_module_ids.iter().cloned());
+        updated_module_ids.extend(update.insight_intent_sources.keys().cloned());
+        updated_module_ids.extend(update.crossplatform_collections.keys().cloned());
+
+        for module_id in &updated_module_ids {
+            self.module_source_overrides.remove(module_id);
+            self.source_maps.remove(module_id);
+            self.javascript_module_ids.remove(module_id);
+            self.shared_module_ids.remove(module_id);
+            self.insight_intent_sources.remove(module_id);
+            self.crossplatform_collections.remove(module_id);
+        }
+
+        self.module_source_overrides
+            .extend(update.module_source_overrides.drain());
+        self.source_maps.extend(update.source_maps.drain());
+        self.javascript_module_ids
+            .extend(update.javascript_module_ids.drain());
+        self.shared_module_ids
+            .extend(update.shared_module_ids.drain());
+        self.insight_intent_sources
+            .extend(update.insight_intent_sources.drain());
+        self.crossplatform_collections
+            .extend(update.crossplatform_collections.drain());
+
+        self.module_source_overrides
+            .retain(|module_id, _| active_module_ids.contains(module_id));
+        self.source_maps
+            .retain(|module_id, _| active_module_ids.contains(module_id));
+        self.javascript_module_ids
+            .retain(|module_id| active_module_ids.contains(module_id));
+        self.shared_module_ids
+            .retain(|module_id| active_module_ids.contains(module_id));
+        self.insight_intent_sources
+            .retain(|module_id, _| active_module_ids.contains(module_id));
+        self.crossplatform_collections
+            .retain(|module_id, _| active_module_ids.contains(module_id));
+    }
 }
 
 #[derive(Debug)]
