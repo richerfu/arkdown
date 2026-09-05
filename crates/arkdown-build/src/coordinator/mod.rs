@@ -129,10 +129,10 @@ use arkdown_pack::{
     Packager,
 };
 use arkdown_profile::{
-    BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarDependencyRoot,
-    ByteCodeHarMetadataWriter, ByteCodeHarScanEntry, CustomTypeResolver, FormProfileProcessor,
-    LoaderByteCodeHarFields, LoaderJson, ModuleFormProfileInput, OhExportsProcessor,
-    PkgContextInfoGenerator, PreloadSystemSoArtifactWriter, PreloadSystemSoPlan, ProfileProcessor,
+    BuildProfileInput, BuildProfileKind, BuildProfileWriter, ByteCodeHarMetadataWriter,
+    ByteCodeHarScanEntry, CustomTypeResolver, FormProfileProcessor, LoaderByteCodeHarFields,
+    LoaderJson, ModuleFormProfileInput, OhExportsProcessor, PkgContextInfoGenerator,
+    PreloadSystemSoArtifactWriter, PreloadSystemSoPlan, ProfileProcessor,
 };
 use arkdown_resolver::PackageResolutionPlan;
 use arkdown_resource::{
@@ -301,6 +301,7 @@ struct WidgetCompileArktsPass<'a> {
     module: &'a ModuleConfig,
     manifest: &'a HapManifest,
     loader_json: &'a LoaderJson,
+    dependencies: &'a arkdown_session::DependencyGraphSnapshot,
 }
 
 impl<'a> WidgetCompileArktsPass<'a> {
@@ -309,12 +310,14 @@ impl<'a> WidgetCompileArktsPass<'a> {
         module: &'a ModuleConfig,
         manifest: &'a HapManifest,
         loader_json: &'a LoaderJson,
+        dependencies: &'a arkdown_session::DependencyGraphSnapshot,
     ) -> Self {
         Self {
             config,
             module,
             manifest,
             loader_json,
+            dependencies,
         }
     }
 
@@ -406,9 +409,8 @@ impl<'a> WidgetCompileArktsPass<'a> {
             .and_then(|options| options.widget.as_ref())
             .is_some_and(|widget| widget.transitive_deps);
         loader_json.pkg_name2_other_compile_files = Some(if transitive_deps {
-            LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files(
-                &self.module.src_path,
-                &self.config.project_root,
+            LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files_from_graph(
+                self.dependencies,
             )
             .into_iter()
             .map(|(package_name, files)| {

@@ -571,7 +571,7 @@ fn test_loader_json_refreshes_bytecode_har_other_compile_files_from_late_scan() 
     fs::create_dir_all(&module_root).expect("create module root");
     fs::write(
         module_root.join("oh-package.json5"),
-        r#"{ dependencies: {} }"#,
+        r#"{ dependencies: { "bytecode-har": "1.0.0" } }"#,
     )
     .expect("write module package");
     fs::create_dir_all(bytecode_har.join("ets")).expect("create bytecode har");
@@ -627,9 +627,14 @@ fn test_loader_json_refreshes_bytecode_har_other_compile_files_from_late_scan() 
         .compile_entry
         .retain(|entry| !entry.contains("source-har"));
 
-    let deps =
-        ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(&module_root, &project_root);
-    loader.apply_bytecode_har_scan_entries(&deps, &module_root, &project_root, OutputTarget::Hap);
+    let graph = arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+        "entry",
+        &project_root,
+        &module_root,
+    )
+    .build();
+    let deps = ByteCodeHarMetadataWriter::scan_from_dependency_graph(&graph);
+    loader.apply_bytecode_har_scan_entries(&deps, &graph, OutputTarget::Hap);
 
     assert!(loader.byte_code_har_info.contains_key("bytecode-har"));
     assert_eq!(

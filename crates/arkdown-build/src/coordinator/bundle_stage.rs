@@ -217,8 +217,13 @@ impl BuildCoordinator {
                 widget_bundle_outs.push(None);
                 continue;
             }
-            let widget_pass =
-                WidgetCompileArktsPass::new(module_config.as_ref(), module, manifest, loader_json);
+            let widget_pass = WidgetCompileArktsPass::new(
+                module_config.as_ref(),
+                module,
+                manifest,
+                loader_json,
+                &module_context.deps,
+            );
             let widget_compile_plan = widget_pass.plan()?;
             let task_plugin_hash =
                 module_package_plugins

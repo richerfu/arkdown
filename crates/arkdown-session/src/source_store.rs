@@ -268,10 +268,23 @@ impl SourceStore {
     /// Corresponds to `compileEntry`/`otherCompileFiles` inventory in
     /// `GenerateLoaderJson` and `arkts-pack.js::init_config`.
     pub fn discover(source_roots: &[PathBuf]) -> Result<Self, std::io::Error> {
+        Self::discover_with_preinventoried_roots(source_roots, &[])
+    }
+
+    /// Discover module roots while reusing dependency path inventories frozen
+    /// by [`crate::DependencyGraphSnapshot`].
+    ///
+    /// Each tuple contains the dependency package root and its complete source
+    /// file list. The package root remains part of `covers()`/alias handling,
+    /// but is not walked a second time.
+    pub(crate) fn discover_with_preinventoried_roots(
+        source_roots: &[PathBuf],
+        preinventoried_roots: &[(PathBuf, Arc<[PathBuf]>)],
+    ) -> Result<Self, std::io::Error> {
         let mut paths = BTreeSet::new();
         let mut visuals = VisualSourceInventory::default();
 
-        let mut requested_roots = source_roots
+        let mut walk_roots = source_roots
             .iter()
             .map(|root| lexical_normalize(root))
             .collect::<std::collections::BTreeSet<_>>();
@@ -280,11 +293,17 @@ impl SourceStore {
                 if let Some(src_main) = root.parent() {
                     let visual_root = src_main.join("supervisual");
                     if visual_root.is_dir() {
-                        requested_roots.insert(lexical_normalize(&visual_root));
+                        walk_roots.insert(lexical_normalize(&visual_root));
                     }
                 }
             }
         }
+        let mut requested_roots = walk_roots.clone();
+        requested_roots.extend(
+            preinventoried_roots
+                .iter()
+                .map(|(root, _)| lexical_normalize(root)),
+        );
         let mut root_aliases = requested_roots
             .into_iter()
             .map(|root| {
@@ -305,7 +324,28 @@ impl SourceStore {
             .map(|(_, canonical)| canonical.clone())
             .collect::<BTreeSet<_>>();
 
-        for root in &inventory_roots {
+        for (_, inventory) in preinventoried_roots {
+            for path in inventory.iter() {
+                let path = canonicalize_or_owned(path);
+                if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
+                    continue;
+                }
+                let extension = path.extension().and_then(|extension| extension.to_str());
+                if !extension.is_some_and(is_source_inventory_ext) {
+                    continue;
+                }
+                if extension == Some("visual") {
+                    visuals.insert(&path);
+                }
+                paths.insert(path);
+            }
+        }
+
+        let walk_roots = walk_roots
+            .into_iter()
+            .map(|root| canonicalize_or_owned(&root))
+            .collect::<BTreeSet<_>>();
+        for root in &walk_roots {
             if !root.exists() {
                 continue;
             }
@@ -605,5 +645,26 @@ mod tests {
             frozen_hash,
             format!("{:016x}", arkdown_core::fnv1a64(b"export const value = 1;"))
         );
+    }
+
+    #[test]
+    fn preinventoried_dependency_root_is_not_walked_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let dependency_root = temp.path().join("dependency");
+        std::fs::create_dir_all(&dependency_root).unwrap();
+        let captured = dependency_root.join("captured.ets");
+        let excluded = dependency_root.join("excluded.ets");
+        std::fs::write(&captured, "export const captured = true;").unwrap();
+        std::fs::write(&excluded, "export const excluded = true;").unwrap();
+
+        let store = SourceStore::discover_with_preinventoried_roots(
+            &[],
+            &[(dependency_root.clone(), Arc::from([captured.clone()]))],
+        )
+        .unwrap();
+
+        assert!(store.covers(&dependency_root));
+        assert!(store.source_by_path(&captured).is_some());
+        assert!(store.source_by_path(&excluded).is_none());
     }
 }

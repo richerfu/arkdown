@@ -58,6 +58,19 @@ pub struct DependencyCompileInputSnapshot {
     /// Existing package entry selected by `main`, `types`, or the conventional
     /// ArkTS/TypeScript/JavaScript candidates used for dynamic imports.
     pub dynamic_import_entry_file: Option<PathBuf>,
+    /// Package entry selected with ByteCode HAR `otherCompileFiles` rules.
+    /// This differs from the dynamic-import entry for declaration-only
+    /// `types` fields and the uppercase `Index` fallback.
+    pub other_compile_entry_file: Option<PathBuf>,
+    /// Non-declaration ArkTS/TypeScript/JavaScript files below
+    /// `src/main/ets`, in deterministic path order.
+    pub other_compile_source_files: Arc<[PathBuf]>,
+    /// Complete source-store path inventory for this dependency root. The
+    /// session source store reuses it instead of walking the package again.
+    pub source_inventory_files: Arc<[PathBuf]>,
+    /// ByteCode HAR `metadata.extraImportees` resolved to concrete source
+    /// files at session startup. Keys preserve the original importee strings.
+    pub extra_importee_source_files: IndexMap<String, PathBuf>,
     /// Parsed router-map profile referenced by the dependency module. `None`
     /// is authoritative and means the reference was absent, unreadable, or
     /// invalid at session startup.
@@ -175,6 +188,9 @@ pub struct DependencyGraphSnapshot {
     pub edges: Vec<DependencyEdgeSnapshot>,
     /// Package roots by alias.
     pub roots_by_alias: BTreeMap<String, PathBuf>,
+    /// ByteCode HAR extra importees resolved from the host module root for
+    /// widget `pkgName2OtherCompileFiles` generation.
+    pub widget_extra_importee_source_files: BTreeMap<String, IndexMap<String, PathBuf>>,
 }
 
 #[derive(Debug, Clone, Default)]
