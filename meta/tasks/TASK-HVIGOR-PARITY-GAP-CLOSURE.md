@@ -198,6 +198,8 @@ source-map chain、watchChange、cache invalidation 和 close；所有公开 hoo
 | P1-7 | coordinator 大量 `anyhow/bail`，诊断结构不统一 | domain crate 返回 typed error；application 统一转换为 code/stage/module/path/span/severity/suggestion 并稳定排序 |
 | P1-8 | 已完成：OHPM 使用完整 Rust install pipeline | `arkdown-build::OhpmInstallStage` 在首次 `BuildSession` 快照前直接调用 `ohpm-core::install`，沿用其 lock graph、store、materialization、auth/proxy/mirror、workspace、override、parameterFile、生命周期 hook 与原子安装语义；watch 重建不重复安装。旧 `arkdown-ohpm` acquire 实现和自创 offline/prefer-offline/online 构建参数已删除 |
 
+OHPM 发布门禁：`ohpm-rs` 已提交 `gix 0.87` 升级和 lockfile debug stderr 清理；在包含这两项修复的新版本发布前，arkdown 仍固定使用 `ohpm-core 0.2.0`，并仅在 Cargo source 层补回其被 crates.io 撤回的 `bisync`。发布新版本后必须更新版本并删除 `[patch.crates-io] bisync`；不得把这个依赖分发问题扩张为 arkdown 内部的 OHPM wrapper 或兼容实现。
+
 性能实现必须同时证明 `RAYON_NUM_THREADS=1` 与 `8` 产物字节一致，不能用并发换取非确定
 输出。资源二进制不得进入长生命周期 BuildSession；OXC allocator AST 不得跨任务或持久化。
 
