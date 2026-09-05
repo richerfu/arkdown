@@ -16,6 +16,7 @@ if (!tracePath) {
 
 const state = {
   events: [] as string[],
+  contextKeys: [] as string[],
   buildStartArgumentCount: -1,
   beforeBuildEndArgumentCount: -1,
   buildEndArgumentCount: -1,
@@ -28,8 +29,6 @@ const state = {
   moduleIds: [] as string[],
   moduleInfoCount: 0,
   parsedType: "",
-  transformModuleType: "",
-  combinedSourceMapVersion: 0,
   projectConfig: undefined as unknown,
   projectConfigShape: undefined as unknown,
   depInfo: undefined as unknown,
@@ -38,7 +37,6 @@ const state = {
   sourceHash: undefined as string | undefined,
   sourceMtimeMs: undefined as number | undefined,
   shareCacheBuildCount: 0,
-  pluginCacheBuildCount: 0,
   importPackageName: undefined as string | undefined,
   buildEndError: undefined as undefined | string,
 };
@@ -46,13 +44,10 @@ const state = {
 export default {
   name: "arkdown-latest-hvigor-lifecycle-fixture",
 
-  beforeBuild() {
-    state.events.push("beforeBuild");
-  },
-
   buildStart(this: any) {
     state.events.push("buildStart");
     state.buildStartArgumentCount = arguments.length;
+    state.contextKeys = Object.keys(this).sort();
     state.projectConfig = this.share?.projectConfig;
     state.projectConfigShape = {
       depName2DepInfoIsMap: this.share.projectConfig.depName2DepInfo instanceof Map,
@@ -77,13 +72,7 @@ export default {
     state.sourceMtimeMs = entry ? this.share.getCachedFileInfo(entry)?.mtimeMs : undefined;
     state.shareCacheBuildCount = (this.share.cache.get("buildCount") ?? 0) + 1;
     this.share.cache.set("buildCount", state.shareCacheBuildCount);
-    state.pluginCacheBuildCount = (this.cache.get("buildCount") ?? 0) + 1;
-    this.cache.set("buildCount", state.pluginCacheBuildCount);
     state.importPackageName = this.share.importResolver(this.share.projectConfig.moduleName)?.packageName;
-  },
-
-  afterBuildStart() {
-    state.events.push("afterBuildStart");
   },
 
   resolveId() {
@@ -96,12 +85,8 @@ export default {
     return null;
   },
 
-  transform(this: any, _code: string, _id: string, options: { moduleType?: string }) {
+  transform(_code: string, _id: string) {
     state.transformCount++;
-    if (!state.transformModuleType) {
-      state.transformModuleType = options?.moduleType ?? "";
-      state.combinedSourceMapVersion = this.getCombinedSourcemap().version;
-    }
     if (process.env.ARKDOWN_PLUGIN_THROW_TRANSFORM === "1") {
       throw new Error("intentional transform failure");
     }
@@ -125,35 +110,20 @@ export default {
     state.moduleParsedCount++;
   },
 
-  beforeBuildEnd: {
-    order: "pre",
-    handler(this: any) {
-      state.events.push("beforeBuildEnd");
-      state.beforeBuildEndArgumentCount = arguments.length;
-      state.moduleIds = Array.from(this.getModuleIds());
-      state.moduleInfoCount = state.moduleIds.filter(
-        (id) => this.getModuleInfo(id) !== null,
-      ).length;
-      state.parsedType = this.parse("export const parsed = true").type;
-    },
+  beforeBuildEnd(this: any) {
+    state.events.push("beforeBuildEnd");
+    state.beforeBuildEndArgumentCount = arguments.length;
+    state.moduleIds = Array.from(this.getModuleIds());
+    state.moduleInfoCount = state.moduleIds.filter(
+      (id) => this.getModuleInfo(id) !== null,
+    ).length;
+    state.parsedType = this.parse("export const parsed = true").type;
   },
 
   buildEnd(this: any, error?: Error) {
     state.events.push("buildEnd");
     state.buildEndArgumentCount = arguments.length;
     state.buildEndError = error?.message;
-  },
-
-  afterBuildEnd() {
-    state.events.push("afterBuildEnd");
-  },
-
-  bundleEnd() {
-    state.events.push("bundleEnd");
-  },
-
-  cleanUp() {
-    state.events.push("cleanUp");
     fs.writeFileSync(tracePath, JSON.stringify(state, null, 2));
   },
 };

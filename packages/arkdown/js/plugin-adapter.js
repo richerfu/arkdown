@@ -16,7 +16,13 @@ const PLUGIN_HOOKS = Object.freeze(
     .concat(ESMODULE_DORMANT_HOOKS),
 )
 
-const COMPILE_PLUGIN_HOOKS = Object.freeze(PLUGIN_HOOKS.filter((name) => name !== 'resolveDynamicImport'))
+// @ohos/hvigor-arkts-compose/dist/src/hvigor-plugins/types.d.ts and
+// arkts-pack.js::doWrapper expose exactly these hooks to compilePluginFile,
+// hvigorPluginFile, and compilePluginPath modules. Arkdown's explicit plugin
+// argument has a wider Rolldown surface and is deliberately kept separate.
+const COMPILE_PLUGIN_HOOKS = Object.freeze(
+  'buildStart resolveId load transform shouldInvalidCache moduleParsed beforeBuildEnd buildEnd'.split(' '),
+)
 const RESULT_FIELDS = Object.freeze({
   resolveId: 'resolveId',
   resolveDynamicImport: 'resolveId',
@@ -86,26 +92,33 @@ function requireDefaultExport(value, file) {
 
 const asArray = (value) => (value === undefined || value === null ? [] : Array.isArray(value) ? value : [value])
 
-function validateHookSurface(plugin, hookNames, pluginFile) {
-  for (const hookName of UNSUPPORTED_ROLLUP_HOOKS) {
-    if (plugin[hookName] === undefined || plugin[hookName] === null) continue
-    throw arkdownError(
-      'ARKDOWN_PLUGIN_HOOK_UNSUPPORTED',
-      `Plugin "${String(plugin.name || '<anonymous>')}" uses unsupported hook "${hookName}"`,
-      { hookName, pluginFile },
-    )
+function validateHookSurface(plugin, hookNames, pluginFile, compilePlugin = false) {
+  if (!compilePlugin) {
+    for (const hookName of UNSUPPORTED_ROLLUP_HOOKS) {
+      if (plugin[hookName] === undefined || plugin[hookName] === null) continue
+      throw arkdownError(
+        'ARKDOWN_PLUGIN_HOOK_UNSUPPORTED',
+        `Plugin "${String(plugin.name || '<anonymous>')}" uses unsupported hook "${hookName}"`,
+        { hookName, pluginFile },
+      )
+    }
   }
   for (const hookName of hookNames) {
     const hook = plugin[hookName]
     if (hook === undefined || hook === null) continue
-    if (typeof hook !== 'function' && !(typeof hook === 'object' && typeof hook.handler === 'function')) {
+    if (
+      typeof hook !== 'function' &&
+      !(compilePlugin === false && typeof hook === 'object' && typeof hook.handler === 'function')
+    ) {
       throw arkdownError(
         'ARKDOWN_PLUGIN_HOOK_INVALID',
-        `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" must be a function or an object with a handler function`,
+        compilePlugin
+          ? `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" must be a function`
+          : `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" must be a function or an object with a handler function`,
         { hookName, pluginFile },
       )
     }
-    if (typeof hook === 'object' && hook.order !== undefined && hook.order !== 'pre' && hook.order !== 'post') {
+    if (!compilePlugin && typeof hook === 'object' && hook.order !== undefined && hook.order !== 'pre' && hook.order !== 'post') {
       throw arkdownError(
         'ARKDOWN_PLUGIN_HOOK_ORDER_INVALID',
         `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" order must be "pre" or "post"`,
@@ -287,7 +300,7 @@ function restoreHvigorCacheState(state, snapshot) {
     })
     return
   }
-  for (const key of ['cache', 'commonCache', 'cacheStores', 'pluginCaches']) {
+  for (const key of ['cache', 'commonCache', 'cacheStores', 'pluginCaches', 'moduleInfos']) {
     if (restored?.[key] instanceof Map) state[key] = restored[key]
   }
 }
@@ -295,7 +308,13 @@ function restoreHvigorCacheState(state, snapshot) {
 function snapshotHvigorCacheState(share) {
   const state = share?.[HVIGOR_SHARE_STATE]
   if (!state) return undefined
-  const snapshot = v8.serialize({ cache: state.cache, commonCache: state.commonCache, cacheStores: state.cacheStores, pluginCaches: state.pluginCaches })
+  const snapshot = v8.serialize({
+    cache: state.cache,
+    commonCache: state.commonCache,
+    cacheStores: state.cacheStores,
+    pluginCaches: state.pluginCaches,
+    moduleInfos: state.moduleInfos,
+  })
   const buildInstanceId = share.__arkdownBuildInstanceId
   if (buildInstanceId !== undefined && buildInstanceId !== null) {
     hvigorShareByBuildInstance.delete(String(buildInstanceId))
@@ -380,6 +399,9 @@ function hydrateHvigorShare(rawShare, binding) {
       hashOverrides: new Map(),
       arkProjectConfig: {},
       pluginCaches: new Map(),
+      moduleInfos: new Map(),
+      pendingModuleInfos: new Map(),
+      pendingBuildInstanceId: undefined,
       hookEventSequence: 0,
       snapshotLoaded: false,
     }
@@ -387,6 +409,10 @@ function hydrateHvigorShare(rawShare, binding) {
   }
   restoreHvigorCacheState(state, share.__arkdownPluginCacheSnapshot)
   const buildInstanceId = share.__arkdownBuildInstanceId
+  if (state.pendingBuildInstanceId !== buildInstanceId) {
+    state.pendingBuildInstanceId = buildInstanceId
+    state.pendingModuleInfos = new Map()
+  }
   if (buildInstanceId !== undefined && buildInstanceId !== null) {
     const existing = hvigorShareByBuildInstance.get(String(buildInstanceId))
     if (existing) return existing
@@ -505,9 +531,10 @@ function moduleInfoWithOptions(share, info) {
   }
 }
 
-function pluginContext(request, share, binding, cache, asyncTracker, pluginName) {
+function pluginContext(request, share, binding, cache, asyncTracker, pluginName, compilePlugin) {
   const context = request.context
   const moduleInfo = moduleInfoWithOptions(share, request.moduleInfo)
+  const state = share?.[HVIGOR_SHARE_STATE]
   const unavailable = (operation) => {
     throw arkdownError('PLUGIN_CONTEXT_UNAVAILABLE', `${operation} requires a live Rolldown plugin context`)
   }
@@ -516,6 +543,24 @@ function pluginContext(request, share, binding, cache, asyncTracker, pluginName)
     if (context) context[level](message)
     else if (level === 'warn') process.emitWarning(message, { code: 'PLUGIN_WARNING', type: 'ArkdownWarning' })
     else process[level === 'debug' ? 'stderr' : 'stdout'].write(`${message}\n`)
+  }
+  const getModuleIds = () =>
+    context?.getModuleIds().values() ??
+    state?.moduleInfos.keys() ??
+    (moduleInfo?.id ? [moduleInfo.id] : []).values()
+  const getModuleInfo = (id) =>
+    moduleInfoWithOptions(
+      share,
+      context?.getModuleInfo(id) ?? state?.moduleInfos.get(id) ?? (moduleInfo?.id === id ? moduleInfo : null),
+    )
+  const parse = (source, options = {}) => parsePluginAst(source, options, context, binding)
+  const getFileName = (referenceId) => {
+    if (context) return context.getFileName(referenceId)
+    throw arkdownError('FILE_NAME_NOT_FOUND', `Unable to get file name for unknown reference ID "${referenceId}"`)
+  }
+  if (compilePlugin) {
+    // arkts-pack.js::getCompilePluginContext forwards only these five members.
+    return { getFileName, getModuleIds, getModuleInfo, parse, share }
   }
   return {
     share,
@@ -539,16 +584,13 @@ function pluginContext(request, share, binding, cache, asyncTracker, pluginName)
     },
     emitFile: (file) => (context ? context.emitFile(file) : unavailable('emitFile')),
     addWatchFile: (id) => context?.addWatchFile(id),
-    getModuleIds: () => context?.getModuleIds().values() ?? (moduleInfo?.id ? [moduleInfo.id] : []).values(),
-    getModuleInfo: (id) => moduleInfoWithOptions(share, context?.getModuleInfo(id) ?? (moduleInfo?.id === id ? moduleInfo : null)),
+    getModuleIds,
+    getModuleInfo,
     ...(request.hookName === 'transform' && context
       ? { getCombinedSourcemap: () => context.getCombinedSourcemap() }
       : {}),
-    parse: (source, options = {}) => parsePluginAst(source, options, context, binding),
-    getFileName(referenceId) {
-      if (context) return context.getFileName(referenceId)
-      throw arkdownError('FILE_NAME_NOT_FOUND', `Unable to get file name for unknown reference ID "${referenceId}"`)
-    },
+    parse,
+    getFileName,
     info: (value) => log('info', value),
     warn: (value) => log('warn', value),
     debug(value) {
@@ -589,7 +631,7 @@ function hookArguments(hookName, request, compilePlugin) {
     case 'load':
       return [request.id]
     case 'transform':
-      return [request.code, request.id, request.transformOptions]
+      return compilePlugin ? [request.code, request.id] : [request.code, request.id, request.transformOptions]
     case 'moduleParsed':
       return [request.moduleInfo]
     case 'watchChange':
@@ -638,15 +680,13 @@ function normalizePlugin(plugin, binding, options = {}) {
   const compilePlugin = options.compilePlugin === true
   const pluginFile = options.pluginFile
   const allowedHooks = compilePlugin ? COMPILE_PLUGIN_HOOKS : PLUGIN_HOOKS
-  validateHookSurface(plugin, allowedHooks, pluginFile)
+  validateHookSurface(plugin, allowedHooks, pluginFile, compilePlugin)
 
   const normalized = compilePlugin ? { name: plugin.name } : { ...plugin }
   const hookNames = allowedHooks.filter((name) => {
     const hook = plugin[name]
     return typeof hook === 'function' || (hook && typeof hook === 'object' && typeof hook.handler === 'function')
   })
-  if (compilePlugin && !hookNames.includes('bundleEnd')) hookNames.push('bundleEnd')
-  if (compilePlugin && !hookNames.includes('cleanUp')) hookNames.push('cleanUp')
   const hookMeta = hookNames.flatMap((name) => {
     const hook = plugin[name]
     return typeof hook === 'object' && hook.order ? [{ name, order: hook.order }] : []
@@ -671,16 +711,57 @@ function normalizePlugin(plugin, binding, options = {}) {
       const cacheSnapshot = snapshotHvigorCacheState(share)
       return cacheSnapshot ? { cacheSnapshot } : {}
     }
-    if (request.moduleInfo) request.moduleInfo = moduleInfoWithOptions(share, request.moduleInfo)
+    if (request.moduleInfo) {
+      request.moduleInfo = moduleInfoWithOptions(share, request.moduleInfo)
+      const state = share?.[HVIGOR_SHARE_STATE]
+      if (state && request.moduleInfo.id) {
+        state.pendingModuleInfos.set(request.moduleInfo.id, request.moduleInfo)
+      }
+    }
     const hookName = request.hookName
-    const context = pluginContext(request, share, binding, cache, asyncTracker, plugin.name || '<anonymous>')
+    const context = pluginContext(
+      request,
+      share,
+      binding,
+      cache,
+      asyncTracker,
+      plugin.name || '<anonymous>',
+      compilePlugin,
+    )
     const handler = plugin[hookName] && hookHandler(plugin[hookName])
     const invoke = () => handler?.apply(context, hookArguments(hookName, request, compilePlugin))
-    const result = hookName === 'bundleEnd' ? asyncTracker.block().then(invoke) : invoke()
+    let result
+    try {
+      result = hookName === 'bundleEnd' ? asyncTracker.block().then(invoke) : invoke()
+    } catch (error) {
+      if (compilePlugin && pluginFile && error && typeof error === 'object') {
+        error.message = `${String(error.message || error)} ${pluginFile}`
+      }
+      throw error
+    }
+    // arkts-pack.js wrappers intentionally do not return buildStart,
+    // moduleParsed, or buildEnd results from Hvigor compile plugins.
+    if (compilePlugin && ['buildStart', 'moduleParsed', 'buildEnd'].includes(hookName)) result = undefined
     const field = RESULT_FIELDS[hookName]
     if (!field) {
       const finish = () => {
+        if (compilePlugin && hookName === 'buildEnd') {
+          const state = share?.[HVIGOR_SHARE_STATE]
+          if ((request.buildEndContext?.errors?.length ?? 0) === 0 && state) {
+            state.moduleInfos = state.pendingModuleInfos
+          }
+        }
         if (hookName === 'cleanUp') {
+          const buildInstanceId = share.__arkdownBuildInstanceId
+          if (buildInstanceId !== undefined && buildInstanceId !== null) {
+            hvigorShareByBuildInstance.delete(String(buildInstanceId))
+          }
+        }
+        if (
+          compilePlugin &&
+          hookName === 'buildEnd' &&
+          (request.buildEndContext?.errors?.length ?? 0) > 0
+        ) {
           const buildInstanceId = share.__arkdownBuildInstanceId
           if (buildInstanceId !== undefined && buildInstanceId !== null) {
             hvigorShareByBuildInstance.delete(String(buildInstanceId))
@@ -692,6 +773,9 @@ function normalizePlugin(plugin, binding, options = {}) {
     }
     const wrap = (value) => {
       if (value === undefined || value === null) return {}
+      if (compilePlugin && hookName === 'shouldInvalidCache' && typeof value !== 'boolean') {
+        return { shouldInvalidCache: false }
+      }
       const id = (hookName === 'resolveId' || hookName === 'resolveDynamicImport') && typeof value === 'object'
         ? value.id
         : request.id
@@ -759,7 +843,6 @@ function normalizePluginList(value, binding = nativeBinding) {
 class PluginModuleLoader {
   constructor(binding = nativeBinding) {
     this.binding = binding
-    this.loaded = new Set()
     this.installTypeScriptExtensions()
   }
 
@@ -795,8 +878,6 @@ class PluginModuleLoader {
 
   async load(candidate, baseDir) {
     const file = this.resolve(candidate, baseDir)
-    if (this.loaded.has(file)) return null
-    this.loaded.add(file)
     const extension = path.extname(file).toLowerCase()
     if (TYPESCRIPT_EXTENSIONS.has(extension)) {
       let output
@@ -916,6 +997,7 @@ function createBuild(nativeBuild = nativeBinding.build, binding = nativeBinding)
 }
 
 module.exports = {
+  COMPILE_PLUGIN_HOOKS,
   ESMODULE_DORMANT_HOOKS,
   PLUGIN_HOOKS,
   PluginAdapter,
