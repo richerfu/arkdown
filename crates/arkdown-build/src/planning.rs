@@ -21,7 +21,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::layout::ModuleSourceLayout;
 use crate::native_dependency::{NativeDependencyStageInput, NativeDependencyStagePlan};
-use crate::request::{BuildRequest, HvigorRuntimeProperties};
+use crate::request::{BuildAction, BuildRequest, HvigorRuntimeProperties};
 
 pub struct TargetBuildExecutionPlan {
     pub target_names: Vec<String>,
@@ -80,12 +80,7 @@ impl TargetBuildExecutionPlan {
     }
 
     pub fn is_device_test(args: &BuildRequest) -> bool {
-        args.native_task_roots.iter().any(|root| {
-            matches!(
-                root.task_name.as_str(),
-                "onDeviceTest" | "GenerateDeviceCoverage"
-            )
-        })
+        args.action == BuildAction::DeviceTest
     }
 
     pub fn aligned_target_for_action(

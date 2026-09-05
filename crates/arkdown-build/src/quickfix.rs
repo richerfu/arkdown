@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::layout::ModuleBuildLayout;
-use crate::request::NativeTaskRoot;
+use crate::request::BuildAction;
 
 const INITIAL_PATCH_VERSION: u64 = 3_000_000;
 
@@ -70,49 +70,50 @@ pub struct QuickFixTaskPlan {
 }
 
 impl QuickFixTaskPlan {
-    pub fn for_module(roots: &[NativeTaskRoot], module_name: &str) -> Option<Self> {
-        roots
-            .iter()
-            .filter(|root| root.module_name == module_name)
-            .filter_map(|root| {
-                let boundary = match root.task_name.as_str() {
-                    "ColdReloadArkTS" => QuickFixTaskBoundary::ColdReload,
-                    "PrepareQuickfix" => QuickFixTaskBoundary::Prepare,
-                    "PackageHqf" => QuickFixTaskBoundary::Package,
-                    "SignHqf" => QuickFixTaskBoundary::Sign,
-                    "assembleDevHqf" => QuickFixTaskBoundary::Assemble,
-                    _ => return None,
-                };
-                Some(Self { boundary })
-            })
-            .max_by_key(|plan| plan.rank())
+    pub fn for_action(action: BuildAction) -> Option<Self> {
+        let boundary = match action {
+            BuildAction::ColdReload => QuickFixTaskBoundary::ColdReload,
+            BuildAction::PrepareQuickfix => QuickFixTaskBoundary::Prepare,
+            BuildAction::PackageQuickfix => QuickFixTaskBoundary::Package,
+            BuildAction::SignQuickfix => QuickFixTaskBoundary::Sign,
+            BuildAction::AssembleQuickfix => QuickFixTaskBoundary::Assemble,
+            _ => return None,
+        };
+        Some(Self { boundary })
     }
 
     pub fn boundary(self) -> QuickFixTaskBoundary {
         self.boundary
     }
 
-    pub fn patch_artifacts_requested(roots: &[NativeTaskRoot]) -> bool {
-        roots.iter().any(|root| {
-            matches!(
-                root.task_name.as_str(),
-                "PrepareQuickfix" | "PackageHqf" | "SignHqf" | "assembleDevHqf"
-            )
-        })
+    pub fn patch_artifacts_requested(action: BuildAction) -> bool {
+        matches!(
+            action,
+            BuildAction::PrepareQuickfix
+                | BuildAction::PackageQuickfix
+                | BuildAction::SignQuickfix
+                | BuildAction::AssembleQuickfix
+        )
     }
 
     pub fn needs_patch_artifacts(self) -> bool {
         !matches!(self.boundary, QuickFixTaskBoundary::ColdReload)
     }
 
-    fn rank(self) -> u8 {
-        match self.boundary {
-            QuickFixTaskBoundary::ColdReload => 0,
-            QuickFixTaskBoundary::Prepare => 1,
-            QuickFixTaskBoundary::Package => 2,
-            QuickFixTaskBoundary::Sign => 3,
-            QuickFixTaskBoundary::Assemble => 4,
-        }
+    pub fn packages(self) -> bool {
+        matches!(
+            self.boundary,
+            QuickFixTaskBoundary::Package
+                | QuickFixTaskBoundary::Sign
+                | QuickFixTaskBoundary::Assemble
+        )
+    }
+
+    pub fn signs(self) -> bool {
+        matches!(
+            self.boundary,
+            QuickFixTaskBoundary::Sign | QuickFixTaskBoundary::Assemble
+        )
     }
 }
 

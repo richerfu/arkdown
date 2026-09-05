@@ -19,6 +19,7 @@
 - Ark VM 版本探测已按新 ets2bundle `ts2abc.js` 的实际转发语义改为 Rust 直接调用原生 `es2abc --target-bc-version`；API 8 固定值由 Rust 返回，配置加载不再为该探测启动 Node。
 - HarmonyOS 外部 ETS SDK 组件已按 `ets/sdkConfig.json` 在 `BuildSession` 启动时一次冻结：同一份 `globalModulePaths`/`externalApiPaths` 快照同时供 OXC component metadata、standalone/build checker、syscap、系统资源和 ArkGuard 消费；外部 `sysResource.js` 不再依赖进程环境变量，也不再由各阶段重复扫描 SDK 目录。
 - 真实产物 parity harness 已禁止把 PATH 中的 `@ohos-rs/arkdown` 兼容命令误认成 hvigor；必须解析到 DevEco 的真实 `hvigorw`，否则测试直接失败，避免 arkdown 对 arkdown 的伪阳性。
+- JS CLI/N-API 已公开强类型 `BuildAction`：`assemble`、HotReload compile/build、ColdReload、QuickFix prepare/package/sign/assemble 和 `device-test`。默认仍为 `assemble`；`--arkts-version` 未指定时仍为 ArkTS 1.1。Rust 已删除任意字符串 `NativeTaskRoot`、`BuildTaskLifecycle` 空门面和截止异常，Reload/QuickFix/DeviceTest 由各领域 plan 直接决定阶段与终止边界，watch 重建沿用同一个 typed action。
 - 2026-09-04 使用 DevEco Studio 6.1.1.280 自带的真实 `hvigorw` 和同版本 SDK，在 `ARKDOWN_PARITY_STRICT=1` 下串行执行完整 parity harness：30/30 通过，覆盖 HAP/HSP/HAR、debug/release、源码/字节码 HAR、混淆、测试包、widget、多模块、share/startup、ComponentV2、增量构建及诊断。该结果证明当前 fixture 范围内的 ArkTS 1.1 产物行为一致，不代表下表尚未原生化的 ArkGuard、真实图缓存和大工程语料已经完成。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
@@ -153,7 +154,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 | 能力域 | 当前状态 | 证据与实际差异 | 重构结论 |
 |---|---|---|---|
-| 项目模型/CLI/任务编排 | 原生 application owner 已形成 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不包含 binary、Clap、CLI parser/install mode、`cmd`/`BuildCommand` facade 或 process-monitor/report lifecycle export；`build/check/clean` 以 typed N-API service 暴露；`arkdown-build` 已接管 `BuildRequest`、module/target selection、build layout、pre-build、coordinator、watch 和 package/sign orchestration | 保持 JS CLI 与 programmatic N-API 共用同一原生 `BuildRequest`；后续能力直接进入对应 Rust owner，不得恢复 service facade |
+| 项目模型/CLI/任务编排 | 原生 application owner 已形成 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不包含 binary、Clap、CLI parser/install mode、`cmd`/`BuildCommand` facade 或 process-monitor/report lifecycle export；`build/check/clean` 以 typed N-API service 暴露。完整 assemble、Reload、QuickFix、DeviceTest 以 `BuildAction` 进入同一 `BuildRequest`，Rust 内已无任意 Hvigor task 名称执行入口或空生命周期门面；`arkdown-build` 直接拥有 module/target selection、build layout、pre-build、coordinator、watch 和 package/sign orchestration | 保持 JS CLI 与 programmatic N-API 共用同一原生 `BuildRequest`；新增公开构建目标时扩展 typed action 和所属领域 plan，不得恢复 task-name/service facade |
 | 配置和 build script | 旧脚本 runtime 已删除 | `build()` 不发现或执行 `hvigorfile.ts`/`hvigorconfig.ts`；build-script model、config merge、sync/dependency workspace facade 已删除；旧 task/config 参数用 `ARKDOWN_HVIGOR_RUNTIME_UNSUPPORTED` 拒绝 | `arkdown-config` 产出单一结构化配置；TS 只用于插件模块 |
 | OHPM/依赖获取 | 启动链已接入，真实项目语料待扩展 | 生产 `BuildSessionBuilder` 在项目快照前执行 lockfile 驱动的 local/cache/registry acquire；支持 offline/prefer-offline/online、semver range、完整性校验、同包去重并行和原子 cache publish，获取结果直接种入依赖图；仍需以真实 OHPM lockfile/store 变体扩展语料 | 保持 package inventory 只构建一次；补 registry/auth/lockfile 真实工程金标，不再回退为静默扫描 |
 | BuildSession/输入快照 | 主链已冻结，领域重复库存待收敛 | SourceStore 已在 startup 并行冻结源码内容/hash/mtime，package manifest/acquired roots、SDK/profile/build option 同样由 session 提供；profile 仍维护一套 `LocalDependencyGraph`，部分领域仍有二次目录读取 | 只保留 session graph/source store/package index；删除 profile 重复图和剩余 stage I/O |
@@ -314,6 +315,8 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 ### JS CLI
 
 不新增 Rust `arkdown-cli` crate。npm `arkdown-cli.js` 是唯一可执行入口，负责 argv/help/stdout/stderr/exit code 和进程生命周期，并调用 `arkdown-napi` 的 typed service。Rust workspace 不得依赖 Clap，或暴露 argv parser、CLI install mode、process monitor、runtime-report lifecycle。
+
+`arkdown build --action <action>` 是 assemble 之外构建目标的唯一命令入口。JS 只校验 action 枚举并传给 N-API；Reload、QuickFix、DeviceTest 的依赖闭包、阶段执行与终止条件必须由 `arkdown-build` 中对应 Rust owner 直接实现。禁止重新引入 Hvigor task 字符串、task-root 数组、生命周期 marker 或依靠特殊异常截断流水线。
 
 ### `arkdown-napi`
 

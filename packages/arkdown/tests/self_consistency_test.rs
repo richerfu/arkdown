@@ -184,6 +184,7 @@ impl SelfConsistencyOracle {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(
       BuildService::new(BuildRequest {
+        action: Default::default(),
         target: "hap".to_string(),
         mode: "debug".to_string(),
         analyze: Default::default(),
@@ -233,7 +234,6 @@ impl SelfConsistencyOracle {
         build_version: None,
         node_executable: None,
         hvigor_cache_dir: None,
-        native_task_roots: Vec::new(),
         hvigor_properties: Default::default(),
       })
       .execute(),

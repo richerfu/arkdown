@@ -5,24 +5,19 @@ use anyhow::Result;
 use arkdown_config::build_profile::EffectiveNativeBuildOption;
 use arkdown_native::{NativeLibCollectionPolicy, NativeLibCollector, NativeLibPackageInfo};
 
-use super::coordinator::BuildTaskLifecycle;
-
 /// Executes the hvigor local-native dependency boundary before dependent
 /// module stages consume its code model or ProcessLibs output.
 pub(super) struct NativeDependencyStageExecutor<'a> {
-    lifecycle: &'a mut BuildTaskLifecycle,
     base_policy: &'a NativeLibCollectionPolicy,
     release_cmake_build_type: Option<&'a str>,
 }
 
 impl<'a> NativeDependencyStageExecutor<'a> {
     pub(super) fn new(
-        lifecycle: &'a mut BuildTaskLifecycle,
         base_policy: &'a NativeLibCollectionPolicy,
         release_cmake_build_type: Option<&'a str>,
     ) -> Self {
         Self {
-            lifecycle,
             base_policy,
             release_cmake_build_type,
         }
@@ -67,90 +62,30 @@ impl<'a> NativeDependencyStageExecutor<'a> {
         .with_output_variant(&input.config.product.name, &input.target_name)
         .with_policy(policy);
         let module_name = input.module.name.as_str();
-        let target_name = input.target_name.as_str();
 
-        if self
-            .lifecycle
-            .before(module_name, Some(target_name), "ConfigureCmake")
-            .await?
-        {
-            collector.configure_cmake_dependencies().map_err(|error| {
-                anyhow::anyhow!("ConfigureCmake failed for dependency '{module_name}': {error}")
-            })?;
-            self.lifecycle
-                .after(module_name, Some(target_name), "ConfigureCmake")
-                .await?;
-        }
-        if self
-            .lifecycle
-            .before(module_name, Some(target_name), "BuildNativeWithCmake")
-            .await?
-        {
-            collector.configure_native().map_err(|error| {
-                anyhow::anyhow!(
-                    "BuildNativeWithCmake failed for dependency '{module_name}': {error}"
-                )
-            })?;
-            self.lifecycle
-                .after(module_name, Some(target_name), "BuildNativeWithCmake")
-                .await?;
-        }
-        if self
-            .lifecycle
-            .before(module_name, Some(target_name), "BuildNativeWithNinja")
-            .await?
-        {
-            self.lifecycle
-                .execute_ninja_build(module_name, target_name, &collector)
-                .await?;
-            self.lifecycle
-                .after(module_name, Some(target_name), "BuildNativeWithNinja")
-                .await?;
-        }
+        collector.configure_cmake_dependencies().map_err(|error| {
+            anyhow::anyhow!("ConfigureCmake failed for dependency '{module_name}': {error}")
+        })?;
+        collector.configure_native().map_err(|error| {
+            anyhow::anyhow!("BuildNativeWithCmake failed for dependency '{module_name}': {error}")
+        })?;
+        collector
+            .build_native()
+            .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"))?;
 
-        let processed = if self
-            .lifecycle
-            .before(module_name, Some(target_name), "ProcessLibs")
-            .await?
-        {
-            let outputs = collector.process_libs().map_err(|error| {
-                anyhow::anyhow!("ProcessLibs failed for dependency '{module_name}': {error}")
-            })?;
-            self.lifecycle
-                .after(module_name, Some(target_name), "ProcessLibs")
-                .await?;
-            outputs
-        } else {
-            Vec::new()
-        };
-        let processed = if collector.is_binxo_enabled()
-            && self
-                .lifecycle
-                .before(module_name, Some(target_name), "DoNativeBinxo")
-                .await?
-        {
-            let outputs = collector.binxo_libs(&processed).map_err(|error| {
+        let processed = collector.process_libs().map_err(|error| {
+            anyhow::anyhow!("ProcessLibs failed for dependency '{module_name}': {error}")
+        })?;
+        let processed = if collector.is_binxo_enabled() {
+            collector.binxo_libs(&processed).map_err(|error| {
                 anyhow::anyhow!("DoNativeBinxo failed for dependency '{module_name}': {error}")
-            })?;
-            self.lifecycle
-                .after(module_name, Some(target_name), "DoNativeBinxo")
-                .await?;
-            outputs
+            })?
         } else {
             processed
         };
-        if self
-            .lifecycle
-            .before(module_name, Some(target_name), "DoNativeStrip")
-            .await?
-        {
-            collector.strip_libs(&processed).map_err(|error| {
-                anyhow::anyhow!("DoNativeStrip failed for dependency '{module_name}': {error}")
-            })?;
-            self.lifecycle
-                .after(module_name, Some(target_name), "DoNativeStrip")
-                .await?;
-        }
+        collector.strip_libs(&processed).map_err(|error| {
+            anyhow::anyhow!("DoNativeStrip failed for dependency '{module_name}': {error}")
+        })?;
         Ok(())
     }
 }

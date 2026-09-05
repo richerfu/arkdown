@@ -3,58 +3,6 @@
 use super::*;
 
 impl BuildCoordinator {
-    pub(crate) fn arkts_compile_task_name(
-        output_target: &OutputTarget,
-        module_type: &OhosModuleType,
-        target_name: &str,
-    ) -> &'static str {
-        if matches!(output_target, OutputTarget::Test) {
-            "UnitTestArkTS"
-        } else if matches!(output_target, OutputTarget::Preview) {
-            "PreviewArkTS"
-        } else if target_name == "ohosTest" {
-            "OhosTestCompileArkTS"
-        } else if matches!(module_type, OhosModuleType::Har) {
-            "HarCompileArkTS"
-        } else {
-            "CompileArkTS"
-        }
-    }
-
-    /// Select the concrete compiler task requested through Hvigor's public task
-    /// graph. `BuildArkTS`/`BuildJS` and `CompileJS` remain registered by the
-    /// 6.24.3 plugin even though current Stage projects normally reach
-    /// `CompileArkTS`. A direct invocation must therefore publish the selected
-    /// task's lifecycle boundary instead of silently running `CompileArkTS` and
-    /// leaving the requested root unfinished.
-    pub(crate) fn selected_arkts_compile_task_name(
-        roots: &[NativeTaskRoot],
-        module_name: &str,
-        target_name: &str,
-        output_target: &OutputTarget,
-        module_type: &OhosModuleType,
-    ) -> &'static str {
-        roots
-            .iter()
-            .find_map(|root| {
-                (root.module_name == module_name
-                    && root.target_name.as_deref() == Some(target_name))
-                .then_some(match root.task_name.as_str() {
-                    "BuildArkTS" => Some("BuildArkTS"),
-                    "BuildJS" => Some("BuildJS"),
-                    "CompileArkTS" => Some("CompileArkTS"),
-                    "CompileJS" => Some("CompileJS"),
-                    "HarBuildArkTS" => Some("HarBuildArkTS"),
-                    "HarCompileArkTS" => Some("HarCompileArkTS"),
-                    _ => None,
-                })
-                .flatten()
-            })
-            .unwrap_or_else(|| {
-                Self::arkts_compile_task_name(output_target, module_type, target_name)
-            })
-    }
-
     /// hvigor `FastPackageHap` (`packOptions.fastBuildApp`): copy the compiled
     /// intermediates into `intermediates/fastApp/<target>/` — `ets/` assets,
     /// compiled resources + `resources.index`, package context, module.json and
@@ -518,16 +466,14 @@ impl BuildCoordinator {
     /// Execute the full build pipeline and return the produced artifacts.
     ///
     pub async fn execute(self) -> Result<BuildOutput> {
-        let owns_task_cycle = self.owns_task_cycle;
-        match self.execute_targets().await {
-            Ok(output) => Ok(output),
-            Err(error) if owns_task_cycle && error.is::<NativeTaskCutoffReached>() => {
-                Ok(BuildOutput {
-                    artifact_paths: Vec::new(),
-                })
-            }
-            Err(error) => Err(error),
+        if self.args.action == crate::request::BuildAction::DeviceTest
+            && !matches!(self.config.output_target, OutputTarget::Hap)
+        {
+            anyhow::bail!(
+                "ARKDOWN_DEVICE_TEST_TARGET: action=device-test requires target=hap"
+            );
         }
+        self.execute_targets().await
     }
 
     async fn execute_targets(self) -> Result<BuildOutput> {

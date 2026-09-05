@@ -10,7 +10,7 @@ use super::hot_reload::{
     HotReloadTaskPlan, ReloadResourceTaskPlan,
 };
 use super::layout::ModuleBuildLayout;
-use super::request::NativeTaskRoot;
+use super::request::BuildAction;
 
 fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
     if let Some(parent) = path.parent() {
@@ -35,21 +35,12 @@ fn source(module_id: &Path, emitted: &Path, source_file: &str) -> HvigorModuleSo
 
 #[test]
 fn hot_reload_task_plan_preserves_targetless_build_boundary_and_resource_hook() {
-    let roots = vec![NativeTaskRoot {
-        module_name: "entry".to_string(),
-        target_name: None,
-        task_name: "HotReloadBuild".to_string(),
-    }];
-
-    let plan = HotReloadTaskPlan::for_module(&roots, "entry").expect("hot reload plan");
+    let action = BuildAction::HotReloadBuild;
+    let plan = HotReloadTaskPlan::for_action(action).expect("hot reload plan");
     assert_eq!(plan.boundary(), HotReloadTaskBoundary::Build);
-    assert!(HotReloadTaskPlan::requested(&roots));
-    assert!(ReloadResourceTaskPlan::requested_for_module(
-        &roots, "entry"
-    ));
-    assert!(!ReloadResourceTaskPlan::requested_for_module(
-        &roots, "feature"
-    ));
+    assert!(action.is_hot_reload());
+    assert!(ReloadResourceTaskPlan::requested(action));
+    assert!(!ReloadResourceTaskPlan::requested(BuildAction::Assemble));
 }
 
 #[test]

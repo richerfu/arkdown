@@ -16,6 +16,8 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     './compile-b.mjs',
     '--arkts-version',
     '1.2',
+    '--action',
+    'device-test',
     '--analyze',
     'trace',
     '--check-entry',
@@ -27,11 +29,23 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     project: '/tmp/app',
     compilePluginPath: ['./compile-a.ts', './compile-b.mjs'],
     arktsVersion: '1.2',
+    action: 'device-test',
     analyze: 'trace',
     checkEntry: true,
     isCrossplatform: true,
     ignoreCrossplatformCheck: true,
   })
+})
+
+test('package CLI validates typed reload and QuickFix actions', () => {
+  const cli = new ArkdownPackageCli([], async () => ({ artifacts: [] }))
+
+  assert.equal(cli.parseBuildArgs(['--action', 'hot-reload-build']).action, 'hot-reload-build')
+  assert.equal(cli.parseBuildArgs(['--action', 'assemble-quickfix']).action, 'assemble-quickfix')
+  assert.throws(
+    () => cli.parseBuildArgs(['--action', 'CompileArkTS']),
+    (error) => error.code === 'INVALID_ARKDOWN_CLI_OPTION',
+  )
 })
 
 test('package CLI validates the native checker contract before N-API dispatch', () => {

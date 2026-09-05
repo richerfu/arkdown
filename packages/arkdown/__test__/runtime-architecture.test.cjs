@@ -168,6 +168,7 @@ test('the npm JavaScript file is the only CLI entrypoint', () => {
   assert.doesNotMatch(workspaceManifest, /^clap\s*=/m)
   assert.doesNotMatch(napi, /parse_arkdown_.*cli_args|clap::/)
   assert.doesNotMatch(napi, /pub mod cmd|\bBuildCommand\b/)
+  assert.doesNotMatch(napi, /NativeTaskRoot|native_task_roots|BuildTaskLifecycle/)
   assert.doesNotMatch(observability, /install_cli|ObservabilityMode::Cli|FormatStyle::Cli/)
   assert.doesNotMatch(
     declarations,
@@ -194,6 +195,11 @@ test('the npm JavaScript file is the only CLI entrypoint', () => {
       const rust = fs.readFileSync(path.join(rustPackage, 'src', source), 'utf8')
       assert.doesNotMatch(rust, /std::env::args(?:_os)?\s*\(|clap::/, `${rustPackage}/${source}`)
       assert.doesNotMatch(rust, /\bBuildCommand\b/, `${rustPackage}/${source}`)
+      assert.doesNotMatch(
+        rust,
+        /NativeTaskRoot|native_task_roots|BuildTaskLifecycle/,
+        `${rustPackage}/${source}`,
+      )
     }
   }
 })

@@ -6,7 +6,6 @@ pub(super) struct PackageSignStageInput<'a> {
     pub(super) args: &'a BuildRequest,
     pub(super) config: &'a ArkdownConfig,
     pub(super) session: &'a BuildSession,
-    pub(super) task_lifecycle: &'a mut BuildTaskLifecycle,
     pub(super) quickfix_version_store: &'a Option<QuickFixVersionStore>,
     pub(super) quickfix_patch_version: Option<u64>,
     pub(super) quickfix_version_advanced: &'a mut bool,
@@ -33,7 +32,6 @@ impl BuildCoordinator {
             args,
             config,
             session,
-            task_lifecycle,
             quickfix_version_store,
             quickfix_patch_version,
             quickfix_version_advanced,
@@ -64,7 +62,7 @@ impl BuildCoordinator {
                 _manifest,
                 _loader_json,
                 _resource_refs,
-                module_target_name,
+                _module_target_name,
                 module_config,
             ) in loader_jsons.iter()
             {
@@ -72,100 +70,30 @@ impl BuildCoordinator {
                     &module.src_path,
                     &module_config.product.name,
                 );
-                if task_lifecycle.has_root(
-                    &module.name,
-                    Some(module_target_name),
-                    "UnitTestCopyMockConfigJson",
-                ) && task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(module_target_name),
-                        "UnitTestCopyMockConfigJson",
+                artifacts.copy_mock_config_json()?;
+                artifacts.replace_source_map_in_coverage_mode(coverage)?;
+                let module_context = session.module_context(&module.name).ok_or_else(|| {
+                    anyhow::anyhow!("missing module compile context for {}", module.name)
+                })?;
+                crate::unit_test::UnitTestExecutionPlan::from_build(
+                    crate::unit_test::UnitTestExecutionInput {
+                        sdk_config: &config.sdk_config,
+                        runtime_os: &config.product.runtime_os,
+                        module_path: &module.src_path,
+                        project_path: &config.project_root,
+                        module_type: &module.module_type,
+                        dependencies: module_context.deps.as_ref(),
+                        coverage,
+                        node_executable: args.resolved_node_executable(),
+                    },
+                )
+                .and_then(|plan| plan.execute())
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "GenerateUnitTestResult failed for module '{}': {error}",
+                        module.name
                     )
-                    .await?
-                {
-                    artifacts.copy_mock_config_json()?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(module_target_name),
-                            "UnitTestCopyMockConfigJson",
-                        )
-                        .await?;
-                }
-                if task_lifecycle.has_root(
-                    &module.name,
-                    Some(module_target_name),
-                    "ReplaceSourceMapInCoverageMode",
-                ) && task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(module_target_name),
-                        "ReplaceSourceMapInCoverageMode",
-                    )
-                    .await?
-                {
-                    artifacts.replace_source_map_in_coverage_mode(coverage)?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(module_target_name),
-                            "ReplaceSourceMapInCoverageMode",
-                        )
-                        .await?;
-                }
-
-                let generate_result = args.native_task_roots.is_empty()
-                    || task_lifecycle.has_root(&module.name, None, "test")
-                    || task_lifecycle.has_root(
-                        &module.name,
-                        Some(module_target_name),
-                        "GenerateUnitTestResult",
-                    );
-                if generate_result
-                    && task_lifecycle
-                        .before(
-                            &module.name,
-                            Some(module_target_name),
-                            "GenerateUnitTestResult",
-                        )
-                        .await?
-                {
-                    let module_context = session.module_context(&module.name).ok_or_else(|| {
-                        anyhow::anyhow!("missing module compile context for {}", module.name)
-                    })?;
-                    crate::unit_test::UnitTestExecutionPlan::from_build(
-                        crate::unit_test::UnitTestExecutionInput {
-                            sdk_config: &config.sdk_config,
-                            runtime_os: &config.product.runtime_os,
-                            module_path: &module.src_path,
-                            project_path: &config.project_root,
-                            module_type: &module.module_type,
-                            dependencies: module_context.deps.as_ref(),
-                            coverage,
-                            node_executable: args.resolved_node_executable(),
-                        },
-                    )
-                    .and_then(|plan| plan.execute())
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "GenerateUnitTestResult failed for module '{}': {error}",
-                            module.name
-                        )
-                    })?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(module_target_name),
-                            "GenerateUnitTestResult",
-                        )
-                        .await?;
-                }
-                if args.native_task_roots.is_empty()
-                    || task_lifecycle.has_root(&module.name, None, "test")
-                {
-                    task_lifecycle.marker(&module.name, None, "test").await?;
-                }
+                })?;
             }
             progress.done();
             return Ok(Some(BuildOutput {
@@ -176,67 +104,33 @@ impl BuildCoordinator {
         // packaging and copy the compiled intermediates into
         // `intermediates/fastApp/<target>/` for IDE fast deployment.
         if args.fast_build_app {
-            let mut enabled_fast_packages = Vec::with_capacity(loader_jsons.len());
-            let mut fast_task_names = Vec::with_capacity(loader_jsons.len());
-            for (module, _, _, _, module_target_name, _) in loader_jsons {
-                let fast_task_name = if matches!(module.module_type, OhosModuleType::Shared) {
-                    "FastPackageHsp"
-                } else {
-                    "FastPackageHap"
-                };
-                enabled_fast_packages.push(
-                    task_lifecycle
-                        .before(&module.name, Some(module_target_name), fast_task_name)
-                        .await?,
-                );
-                fast_task_names.push(fast_task_name);
-            }
+            let enabled_fast_packages = vec![true; loader_jsons.len()];
             let paths = Self::run_fast_package(
                 loader_jsons,
                 &enabled_fast_packages,
                 module_pack_info_plans,
             )?;
             for (
-                (
-                    (module, manifest, loader_json, _, module_target_name, module_config),
-                    (package_out,),
-                ),
-                (enabled, fast_task_name),
-            ) in loader_jsons
-                .iter()
-                .zip(bundle_package_outs.iter())
-                .zip(enabled_fast_packages.iter().zip(fast_task_names))
+                (module, manifest, loader_json, _, module_target_name, module_config),
+                (package_out,),
+            ) in loader_jsons.iter().zip(bundle_package_outs.iter())
             {
-                if *enabled {
-                    task_lifecycle
-                        .after(&module.name, Some(module_target_name), fast_task_name)
-                        .await?;
-                }
-
                 let module_layout = ModuleBuildLayout::for_output_target_product(
                     &module_config.output_target,
                     &module.src_path,
                     &module_config.product.name,
                     module_target_name,
                 );
-                if task_lifecycle
-                    .before(&module.name, Some(module_target_name), "PackingCheck")
-                    .await?
-                {
-                    PackingCheck::new(
-                        module_config,
-                        module,
-                        manifest,
-                        PathBuf::from(&loader_json.ace_module_build),
-                        module_layout.stripped_native_libs_dir(),
-                        module_layout.res_default_dir(),
-                    )
-                    .validate()
-                    .map_err(|error| anyhow::anyhow!("packing-check failed: {error}"))?;
-                    task_lifecycle
-                        .after(&module.name, Some(module_target_name), "PackingCheck")
-                        .await?;
-                }
+                PackingCheck::new(
+                    module_config,
+                    module,
+                    manifest,
+                    PathBuf::from(&loader_json.ace_module_build),
+                    module_layout.stripped_native_libs_dir(),
+                    module_layout.res_default_dir(),
+                )
+                .validate()
+                .map_err(|error| anyhow::anyhow!("packing-check failed: {error}"))?;
 
                 let source_map_output = args
                     .hvigor_properties
@@ -246,41 +140,24 @@ impl BuildCoordinator {
                     package_out.source_maps_path.as_deref(),
                     &source_map_output,
                 )?;
-                if task_lifecycle
-                    .before(&module.name, Some(module_target_name), "CollectDebugSymbol")
-                    .await?
-                {
-                    let source_map_primary = package_out
-                        .source_maps_path
-                        .clone()
-                        .unwrap_or_else(|| module_layout.loader_out_source_maps());
-                    DebugSymbolCollector::new(
-                        module.src_path.clone(),
-                        module.name.clone(),
-                        config.build_mode.clone(),
-                        source_map_primary,
-                        None,
-                        PathBuf::from(&loader_json.cache_path)
-                            .join("obfuscation")
-                            .join("nameCache.json"),
-                    )
-                    .with_collection_override(args.collect_debug_symbol)
-                    .with_output_variant(&config.product.name, module_target_name)
-                    .collect()
-                    .map_err(|error| anyhow::anyhow!("CollectDebugSymbol failed: {error}"))?;
-                    task_lifecycle
-                        .after(&module.name, Some(module_target_name), "CollectDebugSymbol")
-                        .await?;
-                }
-
-                let assemble_task_name = if matches!(module.module_type, OhosModuleType::Shared) {
-                    "assembleHsp"
-                } else {
-                    "assembleHap"
-                };
-                task_lifecycle
-                    .marker(&module.name, None, assemble_task_name)
-                    .await?;
+                let source_map_primary = package_out
+                    .source_maps_path
+                    .clone()
+                    .unwrap_or_else(|| module_layout.loader_out_source_maps());
+                DebugSymbolCollector::new(
+                    module.src_path.clone(),
+                    module.name.clone(),
+                    config.build_mode.clone(),
+                    source_map_primary,
+                    None,
+                    PathBuf::from(&loader_json.cache_path)
+                        .join("obfuscation")
+                        .join("nameCache.json"),
+                )
+                .with_collection_override(args.collect_debug_symbol)
+                .with_output_variant(&config.product.name, module_target_name)
+                .collect()
+                .map_err(|error| anyhow::anyhow!("CollectDebugSymbol failed: {error}"))?;
             }
             progress.done();
             return Ok(Some(BuildOutput {
@@ -325,8 +202,7 @@ impl BuildCoordinator {
                 &config.product.name,
                 module_target_name,
             );
-            let quickfix_task_plan =
-                QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name);
+            let quickfix_task_plan = QuickFixTaskPlan::for_action(args.action);
             let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
             let resources_index = module_layout.res_resources_index();
             let modules_abc = package_out.modules_abc_path.clone();
@@ -393,40 +269,29 @@ impl BuildCoordinator {
                     .tool_path(SdkToolKind::SyscapTool)
                     .map(|tool| tool.path)
                     .unwrap_or_else(|| session.sdk.sdk_root.join("toolchains/syscap_tool"));
-                let syscap_enabled = task_lifecycle
-                    .before(&module.name, Some(artifact_target_label), "SyscapTransform")
-                    .await?;
-                let syscap_path = if syscap_enabled {
-                    let device_capabilities = session
-                        .sdk
-                        .system_capabilities
-                        .select(&manifest.device_types)
-                        .map(|selection| {
-                            selection
-                                .intersection
-                                .into_iter()
-                                .map(|capability| capability.to_string())
-                                .collect()
-                        });
-                    let syscap_path = SyscapTransform::new(SyscapTransformInput {
-                        runtime_os: &config.product.runtime_os,
-                        module_name: &module.name,
-                        compile_api_version: config.sdk_config.compile_api_version,
-                        tool_path: &syscap_tool,
-                        output_dir: module_layout.syscap_dir(),
-                        is_har: matches!(module_config.output_target, OutputTarget::Har),
-                        device_capabilities,
-                        custom_syscap: module_context.module.syscap_value.as_deref(),
-                    })
-                    .run()
-                    .map_err(|error| anyhow::anyhow!("SyscapTransform failed: {error}"))?;
-                    task_lifecycle
-                        .after(&module.name, Some(artifact_target_label), "SyscapTransform")
-                        .await?;
-                    syscap_path
-                } else {
-                    None
-                };
+                let device_capabilities = session
+                    .sdk
+                    .system_capabilities
+                    .select(&manifest.device_types)
+                    .map(|selection| {
+                        selection
+                            .intersection
+                            .into_iter()
+                            .map(|capability| capability.to_string())
+                            .collect()
+                    });
+                let syscap_path = SyscapTransform::new(SyscapTransformInput {
+                    runtime_os: &config.product.runtime_os,
+                    module_name: &module.name,
+                    compile_api_version: config.sdk_config.compile_api_version,
+                    tool_path: &syscap_tool,
+                    output_dir: module_layout.syscap_dir(),
+                    is_har: matches!(module_config.output_target, OutputTarget::Har),
+                    device_capabilities,
+                    custom_syscap: module_context.module.syscap_value.as_deref(),
+                })
+                .run()
+                .map_err(|error| anyhow::anyhow!("SyscapTransform failed: {error}"))?;
 
                 let bundle_version_code = session.project.version_code;
                 let bundle_version_name = session.project.version_name.clone();
@@ -456,39 +321,20 @@ impl BuildCoordinator {
                     })
                     .collect();
                 let integrated_hsp_start = Instant::now();
-                let process_integrated_hsp = task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(artifact_target_label),
-                        "ProcessIntegratedHsp",
+                BuildPolicy::new(config).validate_integrated_hsp_api(
+                    integrated_hsp_enabled && !integrated_hsp_candidates.is_empty(),
+                )?;
+                let integrated_hsps = IntegratedHspCollector::new(&integrated_hsp_candidates)
+                    .with_enabled(integrated_hsp_enabled)
+                    .collect_normalized(
+                        &config.product.bundle_name,
+                        bundle_version_code,
+                        bundle_build_version.as_deref(),
+                        &module_layout.integrated_hsp_dir(),
                     )
-                    .await?;
-                let integrated_hsps = if process_integrated_hsp {
-                    BuildPolicy::new(config).validate_integrated_hsp_api(
-                        integrated_hsp_enabled && !integrated_hsp_candidates.is_empty(),
-                    )?;
-                    let integrated_hsps = IntegratedHspCollector::new(&integrated_hsp_candidates)
-                        .with_enabled(integrated_hsp_enabled)
-                        .collect_normalized(
-                            &config.product.bundle_name,
-                            bundle_version_code,
-                            bundle_build_version.as_deref(),
-                            &module_layout.integrated_hsp_dir(),
-                        )
-                        .map_err(|error| {
-                            anyhow::anyhow!("K5: failed to normalize integrated HSPs: {error}")
-                        })?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "ProcessIntegratedHsp",
-                        )
-                        .await?;
-                    integrated_hsps
-                } else {
-                    Vec::new()
-                };
+                    .map_err(|error| {
+                        anyhow::anyhow!("K5: failed to normalize integrated HSPs: {error}")
+                    })?;
                 tracing::info!(
                   module = %module.name,
                   elapsed_ms = integrated_hsp_start.elapsed().as_millis(),
@@ -540,104 +386,36 @@ impl BuildCoordinator {
                     native_collector
                         .excluding_dependency_roots(module_har_dedup_plan.duplicate_package_roots())
                 };
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(artifact_target_label),
-                        "BuildNativeWithCmake",
-                    )
-                    .await?
-                {
-                    native_collector
-                        .configure_native()
-                        .map_err(|error| anyhow::anyhow!("BuildNativeWithCmake failed: {error}"))?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "BuildNativeWithCmake",
-                        )
-                        .await?;
-                }
+                native_collector
+                    .configure_native()
+                    .map_err(|error| anyhow::anyhow!("BuildNativeWithCmake failed: {error}"))?;
                 // hvigor 6.24.3 CompileNativeHook is a targetless module hook whose
                 // only action is the dependency edge to target@BuildNativeWithCmake.
-                task_lifecycle
-                    .marker(&module.name, None, "compileNative")
-                    .await?;
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(artifact_target_label),
-                        "BuildNativeWithNinja",
-                    )
-                    .await?
-                {
-                    task_lifecycle
-                        .execute_ninja_build(&module.name, artifact_target_label, &native_collector)
-                        .await?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "BuildNativeWithNinja",
-                        )
-                        .await?;
-                }
+                native_collector
+                    .build_native()
+                    .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"))?;
                 let native_lib_start = Instant::now();
-                let process_libs = task_lifecycle
-                    .before(&module.name, Some(artifact_target_label), "ProcessLibs")
-                    .await?;
-                let processed_native_libs = if process_libs {
-                    let processed = native_collector
-                        .process_libs()
-                        .map_err(|error| anyhow::anyhow!("ProcessLibs failed: {error}"))?;
-                    task_lifecycle
-                        .after(&module.name, Some(artifact_target_label), "ProcessLibs")
-                        .await?;
-                    processed
-                } else {
-                    Vec::new()
-                };
+                let processed_native_libs = native_collector
+                    .process_libs()
+                    .map_err(|error| anyhow::anyhow!("ProcessLibs failed: {error}"))?;
                 // NativeTaskInitializer makes DoNativeStrip depend on DoNativeBinxo
                 // whenever its BinXO-only predicate is enabled. Direct invocation of
                 // DoNativeBinxo reaches the same action even when the predicate is
                 // disabled, where BinxoValidationService reports the missing HWASan
                 // combination.
-                let run_binxo = native_collector.is_binxo_enabled()
-                    || task_lifecycle.has_root(
-                        &module.name,
-                        Some(artifact_target_label),
-                        "DoNativeBinxo",
-                    );
-                let binxo_libs = if run_binxo
-                    && task_lifecycle
-                        .before(&module.name, Some(artifact_target_label), "DoNativeBinxo")
-                        .await?
-                {
+                let run_binxo = native_collector.is_binxo_enabled();
+                let binxo_libs = if run_binxo {
                     let outputs = native_collector
                         .binxo_libs(&processed_native_libs)
                         .map_err(|error| anyhow::anyhow!("DoNativeBinxo failed: {error}"))?;
-                    task_lifecycle
-                        .after(&module.name, Some(artifact_target_label), "DoNativeBinxo")
-                        .await?;
+
                     outputs
                 } else {
                     processed_native_libs
                 };
-                let native_libs = if task_lifecycle
-                    .before(&module.name, Some(artifact_target_label), "DoNativeStrip")
-                    .await?
-                {
-                    let stripped = native_collector
-                        .strip_libs(&binxo_libs)
-                        .map_err(|error| anyhow::anyhow!("DoNativeStrip failed: {error}"))?;
-                    task_lifecycle
-                        .after(&module.name, Some(artifact_target_label), "DoNativeStrip")
-                        .await?;
-                    stripped
-                } else {
-                    Vec::new()
-                };
+                let native_libs = native_collector
+                    .strip_libs(&binxo_libs)
+                    .map_err(|error| anyhow::anyhow!("DoNativeStrip failed: {error}"))?;
                 if let Some(quickfix_task_plan) = quickfix_task_plan {
                     if !quickfix_task_plan.needs_patch_artifacts() {
                         anyhow::bail!(
@@ -662,46 +440,31 @@ impl BuildCoordinator {
                         patch_version,
                     });
 
-                    if task_lifecycle
-                        .before(&module.name, Some(artifact_target_label), "PrepareQuickfix")
-                        .await?
-                    {
-                        quickfix
-                            .prepare(loader_json.patch_config.as_ref())
-                            .map_err(|error| anyhow::anyhow!("PrepareQuickfix failed: {error}"))?;
-                        task_lifecycle
-                            .after(&module.name, Some(artifact_target_label), "PrepareQuickfix")
-                            .await?;
-                    }
+                    quickfix
+                        .prepare(loader_json.patch_config.as_ref())
+                        .map_err(|error| anyhow::anyhow!("PrepareQuickfix failed: {error}"))?;
 
+                    if !quickfix_task_plan.packages() {
+                        continue;
+                    }
                     let package_tool = session
-            .sdk
-            .tool_path(SdkToolKind::PackageTool)
-            .map(|tool| tool.path)
-            .context(
-              "ARKDOWN_QUICKFIX_PACKAGE_TOOL: PackageHqf requires the SDK app_packing_tool",
-            )?;
+                        .sdk
+                        .tool_path(SdkToolKind::PackageTool)
+                        .map(|tool| tool.path)
+                        .context(
+                            "ARKDOWN_QUICKFIX_PACKAGE_TOOL: PackageHqf requires the SDK app_packing_tool",
+                        )?;
                     let package_runner = AppPackageRunner::new(package_tool);
-                    let unsigned_hqf = if task_lifecycle
-                        .before(&module.name, Some(artifact_target_label), "PackageHqf")
-                        .await?
-                    {
+                    let unsigned_hqf = {
                         let output = quickfix
                             .package(&package_runner)
                             .map_err(|error| anyhow::anyhow!("PackageHqf failed: {error}"))?;
-                        task_lifecycle
-                            .after(&module.name, Some(artifact_target_label), "PackageHqf")
-                            .await?;
+
                         output
-                    } else {
-                        quickfix.unsigned_hqf()
                     };
 
                     let mut final_hqf = unsigned_hqf.clone();
-                    if task_lifecycle
-                        .before(&module.name, Some(artifact_target_label), "SignHqf")
-                        .await?
-                    {
+                    if quickfix_task_plan.signs() {
                         if let Some(signing_config) = &config.product.signing_config {
                             let signed_hqf = quickfix.signed_hqf();
                             if signed_hqf.is_file() {
@@ -715,50 +478,32 @@ impl BuildCoordinator {
                             })?;
                             final_hqf = signed_hqf;
                         }
-                        task_lifecycle
-                            .after(&module.name, Some(artifact_target_label), "SignHqf")
-                            .await?;
                     }
 
                     if quickfix_task_plan.boundary() == QuickFixTaskBoundary::Assemble
-                        && task_lifecycle
-                            .before(&module.name, None, "assembleDevHqf")
-                            .await?
+                        && !*quickfix_version_advanced
                     {
-                        if !*quickfix_version_advanced {
-                            quickfix_version_store
+                        quickfix_version_store
                 .as_ref()
                 .context(
                   "ARKDOWN_QUICKFIX_VERSION_STORE: assembleDevHqf requires the Hvigor cache",
                 )?
                 .advance_after_assemble(patch_version)?;
-                            *quickfix_version_advanced = true;
-                        }
-                        task_lifecycle
-                            .after(&module.name, None, "assembleDevHqf")
-                            .await?;
+                        *quickfix_version_advanced = true;
                     }
                     if final_hqf.is_file() {
                         output_paths.push(final_hqf);
                     }
                     continue;
                 }
-                if task_lifecycle
-                    .before(&module.name, Some(artifact_target_label), "CacheNativeLibs")
-                    .await?
-                {
-                    native_collector
-                        .cache_libs()
-                        .map_err(|error| anyhow::anyhow!("CacheNativeLibs failed: {error}"))?;
-                    native_collector
-                        .validate_libs(&native_libs)
-                        .map_err(|error| {
-                            anyhow::anyhow!("CacheNativeLibs validation failed: {error}")
-                        })?;
-                    task_lifecycle
-                        .after(&module.name, Some(artifact_target_label), "CacheNativeLibs")
-                        .await?;
-                }
+                native_collector
+                    .cache_libs()
+                    .map_err(|error| anyhow::anyhow!("CacheNativeLibs failed: {error}"))?;
+                native_collector
+                    .validate_libs(&native_libs)
+                    .map_err(|error| {
+                        anyhow::anyhow!("CacheNativeLibs validation failed: {error}")
+                    })?;
                 tracing::info!(
                   module = %module.name,
                   elapsed_ms = native_lib_start.elapsed().as_millis(),
@@ -767,28 +512,13 @@ impl BuildCoordinator {
                 );
                 let interface_native_libs = native_libs.clone();
 
-                if artifact_target_label == "ohosTest"
-                    && task_lifecycle
-                        .before(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "OhosTestCopyMockConfigJson",
-                        )
-                        .await?
-                {
+                if artifact_target_label == "ohosTest" {
                     crate::unit_test::UnitTestArtifactWriter::for_ohos_test(
                         &module.src_path,
                         &module_config.product.name,
                         artifact_target_label,
                     )
                     .copy_mock_config_json()?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "OhosTestCopyMockConfigJson",
-                        )
-                        .await?;
                 }
 
                 let res_module_json = module_layout.res_module_json();
@@ -799,43 +529,17 @@ impl BuildCoordinator {
                 .is_some();
                 let module_json = if matches!(module_config.output_target, OutputTarget::Har) {
                     res_module_json.clone()
-                } else if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(artifact_target_label),
-                        "GeneratePkgModuleJson",
-                    )
-                    .await?
-                {
-                    let generated = PackageModuleJsonOptions::new(&res_module_json)
-                        .write_for_pack(
-                            &package_module_json,
-                            (module_build_option.deduplicate_har
-                                && matches!(module.module_type, OhosModuleType::Shared))
-                            .then_some(!module_har_dedup_plan.is_empty()),
-                            preload_system_so_effective,
-                        )?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "GeneratePkgModuleJson",
-                        )
-                        .await?;
-                    generated
                 } else {
-                    package_module_json
+                    PackageModuleJsonOptions::new(&res_module_json).write_for_pack(
+                        &package_module_json,
+                        (module_build_option.deduplicate_har
+                            && matches!(module.module_type, OhosModuleType::Shared))
+                        .then_some(!module_har_dedup_plan.is_empty()),
+                        preload_system_so_effective,
+                    )?
                 };
 
-                if matches!(module_config.output_target, OutputTarget::Hap)
-                    && task_lifecycle
-                        .before(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "ProcessCompiledResources",
-                        )
-                        .await?
-                {
+                if matches!(module_config.output_target, OutputTarget::Hap) {
                     PreloadSystemSoArtifactWriter::new(
                         &module_layout.preload_system_so_json(),
                         &module_layout.res_profile_dir(),
@@ -844,747 +548,597 @@ impl BuildCoordinator {
                         &package_out.preload_system_so_tasks,
                     )
                     .process_compiled_resources()?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "ProcessCompiledResources",
-                        )
-                        .await?;
                 }
 
-                let package_task_name = match &module_config.output_target {
-                    OutputTarget::Har => "PackageHar",
-                    OutputTarget::Hsp => "PackageHsp",
-                    _ => "PackageHap",
-                };
-                let mut package_task_started = false;
-                let package_enabled = if matches!(module_config.output_target, OutputTarget::Har) {
-                    // HAR exposes ProcessPackageJson/ProcessOHPackageJson and
-                    // ProcessHarArtifacts as independently executable task boundaries.
-                    // PackageHar itself starts only after those dependencies complete.
-                    true
-                } else {
-                    let enabled = task_lifecycle
-                        .before(&module.name, Some(artifact_target_label), package_task_name)
-                        .await?;
-                    package_task_started = enabled;
-                    enabled
-                };
-                let out = if package_enabled {
-                    let out = match &module_config.output_target {
-                        OutputTarget::Har => {
-                            let source_dir = module_context
-                                .module
-                                .source_roots
-                                .first()
-                                .cloned()
-                                .unwrap_or_else(|| module_layout.source().ets());
-                            let package_manifest = module_context
-                                .module
-                                .package_path
-                                .clone()
-                                .unwrap_or_else(|| module_layout.oh_package_json5());
-                            let is_ohpm_project =
-                                package_manifest.file_name().is_some_and(|name| {
-                                    name == std::ffi::OsStr::new("oh-package.json5")
-                                });
-                            if !source_dir.is_dir() {
-                                anyhow::bail!(
-                                    "HAR source directory does not exist for module '{}': {}",
-                                    module.name,
-                                    source_dir.display()
-                                );
-                            }
-                            let artifact_type = module_build_option.har_artifact_type;
-                            let declarations_dir = module_layout.declarations_dir();
-                            if !matches!(artifact_type, HarArtifactType::Original) {
-                                let generated_module_info =
-                                    module_layout.generated_module_info(module_target_name);
-                                let declaration_packages =
-                                    HarDeclarationDependencyPackageInventory::new(
-                                        &module_context.deps,
-                                    )
+                let out = match &module_config.output_target {
+                    OutputTarget::Har => {
+                        let source_dir = module_context
+                            .module
+                            .source_roots
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| module_layout.source().ets());
+                        let package_manifest = module_context
+                            .module
+                            .package_path
+                            .clone()
+                            .unwrap_or_else(|| module_layout.oh_package_json5());
+                        let is_ohpm_project = package_manifest
+                            .file_name()
+                            .is_some_and(|name| name == std::ffi::OsStr::new("oh-package.json5"));
+                        if !source_dir.is_dir() {
+                            anyhow::bail!(
+                                "HAR source directory does not exist for module '{}': {}",
+                                module.name,
+                                source_dir.display()
+                            );
+                        }
+                        let artifact_type = module_build_option.har_artifact_type;
+                        let declarations_dir = module_layout.declarations_dir();
+                        if !matches!(artifact_type, HarArtifactType::Original) {
+                            let generated_module_info =
+                                module_layout.generated_module_info(module_target_name);
+                            let declaration_packages =
+                                HarDeclarationDependencyPackageInventory::new(&module_context.deps)
                                     .collect();
-                                let declaration_generator =
-                                    HarDeclarationGenerator::new(
-                                        &module.src_path,
-                                        &source_dir,
-                                        declarations_dir.clone(),
-                                        &module.name,
-                                    )
-                                    .with_arkts_language_version(
-                                        self.session.arkts_language_version,
-                                    )
-                                    .with_dependency_declaration_packages(declaration_packages)
-                                    .with_package_bundled_declarations(
-                                        module_build_option
-                                            .ark_options
-                                            .as_ref()
-                                            .is_some_and(|options| options.bundled_declare),
-                                        module_context.module.package.as_deref().and_then(
-                                            |package| package.package_json.main.as_deref(),
-                                        ),
-                                        module_context.module.package.as_deref().and_then(
-                                            |package| package.package_json.oh_exports.as_deref(),
-                                        ),
-                                    );
-                                let declaration_generator =
-                                    if matches!(artifact_type, HarArtifactType::Bytecode) {
-                                        declaration_generator
-                                            .with_generated_source(&generated_module_info)
-                                    } else {
-                                        declaration_generator
-                                    };
-                                declaration_generator.generate().map_err(|error| {
-                                    anyhow::anyhow!("generate HAR declarations failed: {error}")
-                                })?;
-                            }
-
-                            let declaration_entries =
+                            let declaration_generator = HarDeclarationGenerator::new(
+                                &module.src_path,
+                                &source_dir,
+                                declarations_dir.clone(),
+                                &module.name,
+                            )
+                            .with_arkts_language_version(self.session.arkts_language_version)
+                            .with_dependency_declaration_packages(declaration_packages)
+                            .with_package_bundled_declarations(
+                                module_build_option
+                                    .ark_options
+                                    .as_ref()
+                                    .is_some_and(|options| options.bundled_declare),
+                                module_context
+                                    .module
+                                    .package
+                                    .as_deref()
+                                    .and_then(|package| package.package_json.main.as_deref()),
+                                module_context
+                                    .module
+                                    .package
+                                    .as_deref()
+                                    .and_then(|package| package.package_json.oh_exports.as_deref()),
+                            );
+                            let declaration_generator =
                                 if matches!(artifact_type, HarArtifactType::Bytecode) {
-                                    if !loader_json.use_normalized_ohm_url {
-                                        anyhow::bail!(
+                                    declaration_generator
+                                        .with_generated_source(&generated_module_info)
+                                } else {
+                                    declaration_generator
+                                };
+                            declaration_generator.generate().map_err(|error| {
+                                anyhow::anyhow!("generate HAR declarations failed: {error}")
+                            })?;
+                        }
+
+                        let declaration_entries =
+                            if matches!(artifact_type, HarArtifactType::Bytecode) {
+                                if !loader_json.use_normalized_ohm_url {
+                                    anyhow::bail!(
                     "ByteCode HAR '{}' requires strictMode.useNormalizedOHMUrl=true",
                     module.name
                   );
-                                    }
-                                    let pkg_context_input = PkgContextInfoInputBuilder::new(
-                                        config,
-                                        session,
-                                        module,
-                                        &module_context,
-                                    )
-                                    .with_local_native_dependencies(
-                                        local_native_dependencies
-                                            .get(&module.name)
-                                            .cloned()
-                                            .unwrap_or_else(|| Arc::from([])),
-                                    )
-                                    .build()?;
-                                    let pkg_context_info = PkgContextInfoGenerator::new()
-                                        .generate(&pkg_context_input)
-                                        .map_err(|error| {
-                                            anyhow::anyhow!(
-                                                "GeneratePkgContextInfo failed: {error}"
-                                            )
-                                        })?;
-                                    ByteCodeHarDeclarationCollector::new(
-                                        config,
-                                        module,
-                                        manifest,
-                                        &pkg_context_input,
-                                        &pkg_context_info,
-                                    )
-                                    .collect()?
-                                    .ohm_urls
-                                } else {
-                                    Vec::new()
-                                };
-                            let bundled_dependencies = module_build_option
-                                .ark_options
-                                .as_ref()
-                                .is_some_and(|options| options.bundled_dependencies);
-                            let har_importees =
-                                HarImporteeCache::new(&loader_json.cache_path).read()?;
-                            let runtime_only_packages = module_build_option
-                                .ark_options
-                                .as_ref()
-                                .and_then(|options| options.runtime_only.as_ref())
-                                .map(|runtime_only| runtime_only.packages.as_slice())
-                                .unwrap_or_default();
-                            let importee_metadata = module_context.deps.har_importee_metadata(
-                                &har_importees.non_entry,
-                                &har_importees.compiled,
-                                &har_importees.direct,
-                                bundled_dependencies,
-                                args.byte_code_har_integrated_optimization,
-                                runtime_only_packages,
-                            );
-                            let compiled_package_names = importee_metadata
-                                .compiled_package_names
-                                .iter()
-                                .cloned()
-                                .collect::<BTreeSet<_>>();
-                            let affects_compilation_dependency_keys = importee_metadata
-                                .affects_compilation_dependency_keys
-                                .iter()
-                                .cloned()
-                                .collect::<BTreeSet<_>>();
-                            let dependency_pkg_version =
-                                module_context.deps.bytecode_har_dependency_versions(
-                                    bundled_dependencies,
-                                    args.byte_code_har_integrated_optimization,
-                                    &compiled_package_names,
-                                    &affects_compilation_dependency_keys,
-                                )?;
-                            let package_parameters = module_context
-                                .module
-                                .package
-                                .as_deref()
-                                .map(|package| {
-                                    module_context
-                                        .deps
-                                        .dependency_parameters
-                                        .resolve_package_parameters(&package.package_json)
-                                })
-                                .transpose()?
-                                .map(|resolved| HarPackageParameterInput {
-                                    version: (!resolved.version.is_empty())
-                                        .then_some(resolved.version),
-                                    dependencies: resolved.dependencies,
-                                    dev_dependencies: resolved.dev_dependencies,
-                                    dynamic_dependencies: resolved.dynamic_dependencies,
-                                })
-                                .unwrap_or_default();
-                            let bundled_dependency_rewrite =
-                                if matches!(artifact_type, HarArtifactType::Bytecode)
-                                    && bundled_dependencies
-                                    && !args.keep_dependency
-                                {
-                                    module_context
-                                        .module
-                                        .package
-                                        .as_deref()
-                                        .map(|package| {
-                                            module_context.deps.bundled_har_retained_dependencies(
-                                                &package.package_json,
-                                            )
-                                        })
-                                        .transpose()?
-                                        .map(|retained| HarBundledDependencyInput {
-                                            dependencies: retained.dependencies,
-                                            dynamic_dependencies: retained.dynamic_dependencies,
-                                        })
-                                } else {
-                                    None
-                                };
-                            // `har-target-util.js::isNeedExclude`: `resOptions.excludeHarRes`
-                            // drops remote HAR resources (local `file:` dependencies and
-                            // HAR-host modules are never excluded).
-                            let exclude_har_res = module_build_option
-                                .res_options
-                                .as_ref()
-                                .map(|options| options.exclude_har_res.as_slice())
-                                .unwrap_or_default();
-                            let bundled_resource_snapshots = if bundled_dependencies {
-                                module_context
-                                    .deps
-                                    .bundled_har_resources()
-                                    .into_iter()
-                                    .filter(|resource| {
-                                        let is_local = module_context
-                                            .deps
-                                            .nodes
-                                            .get(&resource.package_name)
-                                            .and_then(|node| node.version_spec.as_deref())
-                                            .is_some_and(|spec| spec.starts_with("file:"));
-                                        !exclude_har_res.contains(&resource.package_name)
-                                            || is_local
-                                    })
-                                    .collect::<Vec<_>>()
+                                }
+                                let pkg_context_input = PkgContextInfoInputBuilder::new(
+                                    config,
+                                    session,
+                                    module,
+                                    &module_context,
+                                )
+                                .with_local_native_dependencies(
+                                    local_native_dependencies
+                                        .get(&module.name)
+                                        .cloned()
+                                        .unwrap_or_else(|| Arc::from([])),
+                                )
+                                .build()?;
+                                let pkg_context_info = PkgContextInfoGenerator::new()
+                                    .generate(&pkg_context_input)
+                                    .map_err(|error| {
+                                        anyhow::anyhow!("GeneratePkgContextInfo failed: {error}")
+                                    })?;
+                                ByteCodeHarDeclarationCollector::new(
+                                    config,
+                                    module,
+                                    manifest,
+                                    &pkg_context_input,
+                                    &pkg_context_info,
+                                )
+                                .collect()?
+                                .ohm_urls
                             } else {
                                 Vec::new()
                             };
-                            let bundled_resources = bundled_resource_snapshots
-                                .iter()
-                                .map(|resource| BundledHarResourceInput {
-                                    source_dir: resource.source_dir.clone(),
-                                    archive_directory: resource.archive_directory.clone(),
+                        let bundled_dependencies = module_build_option
+                            .ark_options
+                            .as_ref()
+                            .is_some_and(|options| options.bundled_dependencies);
+                        let har_importees =
+                            HarImporteeCache::new(&loader_json.cache_path).read()?;
+                        let runtime_only_packages = module_build_option
+                            .ark_options
+                            .as_ref()
+                            .and_then(|options| options.runtime_only.as_ref())
+                            .map(|runtime_only| runtime_only.packages.as_slice())
+                            .unwrap_or_default();
+                        let importee_metadata = module_context.deps.har_importee_metadata(
+                            &har_importees.non_entry,
+                            &har_importees.compiled,
+                            &har_importees.direct,
+                            bundled_dependencies,
+                            args.byte_code_har_integrated_optimization,
+                            runtime_only_packages,
+                        );
+                        let compiled_package_names = importee_metadata
+                            .compiled_package_names
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        let affects_compilation_dependency_keys = importee_metadata
+                            .affects_compilation_dependency_keys
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        let dependency_pkg_version =
+                            module_context.deps.bytecode_har_dependency_versions(
+                                bundled_dependencies,
+                                args.byte_code_har_integrated_optimization,
+                                &compiled_package_names,
+                                &affects_compilation_dependency_keys,
+                            )?;
+                        let package_parameters = module_context
+                            .module
+                            .package
+                            .as_deref()
+                            .map(|package| {
+                                module_context
+                                    .deps
+                                    .dependency_parameters
+                                    .resolve_package_parameters(&package.package_json)
+                            })
+                            .transpose()?
+                            .map(|resolved| HarPackageParameterInput {
+                                version: (!resolved.version.is_empty()).then_some(resolved.version),
+                                dependencies: resolved.dependencies,
+                                dev_dependencies: resolved.dev_dependencies,
+                                dynamic_dependencies: resolved.dynamic_dependencies,
+                            })
+                            .unwrap_or_default();
+                        let bundled_dependency_rewrite =
+                            if matches!(artifact_type, HarArtifactType::Bytecode)
+                                && bundled_dependencies
+                                && !args.keep_dependency
+                            {
+                                module_context
+                                    .module
+                                    .package
+                                    .as_deref()
+                                    .map(|package| {
+                                        module_context.deps.bundled_har_retained_dependencies(
+                                            &package.package_json,
+                                        )
+                                    })
+                                    .transpose()?
+                                    .map(|retained| HarBundledDependencyInput {
+                                        dependencies: retained.dependencies,
+                                        dynamic_dependencies: retained.dynamic_dependencies,
+                                    })
+                            } else {
+                                None
+                            };
+                        // `har-target-util.js::isNeedExclude`: `resOptions.excludeHarRes`
+                        // drops remote HAR resources (local `file:` dependencies and
+                        // HAR-host modules are never excluded).
+                        let exclude_har_res = module_build_option
+                            .res_options
+                            .as_ref()
+                            .map(|options| options.exclude_har_res.as_slice())
+                            .unwrap_or_default();
+                        let bundled_resource_snapshots = if bundled_dependencies {
+                            module_context
+                                .deps
+                                .bundled_har_resources()
+                                .into_iter()
+                                .filter(|resource| {
+                                    let is_local = module_context
+                                        .deps
+                                        .nodes
+                                        .get(&resource.package_name)
+                                        .and_then(|node| node.version_spec.as_deref())
+                                        .is_some_and(|spec| spec.starts_with("file:"));
+                                    !exclude_har_res.contains(&resource.package_name) || is_local
                                 })
-                                .collect::<Vec<_>>();
-                            let mut bundled_resource_directories = Vec::new();
-                            if bundled_dependencies {
-                                let effective_target = ModuleTargetSelection::resolve_build(
-                                    config,
-                                    session.build_options.as_ref(),
-                                    module,
-                                    Some(artifact_target_label),
-                                    &args.hvigor_properties,
-                                )
-                                .target;
-                                if effective_target.resource_directories.is_empty() {
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+                        let bundled_resources = bundled_resource_snapshots
+                            .iter()
+                            .map(|resource| BundledHarResourceInput {
+                                source_dir: resource.source_dir.clone(),
+                                archive_directory: resource.archive_directory.clone(),
+                            })
+                            .collect::<Vec<_>>();
+                        let mut bundled_resource_directories = Vec::new();
+                        if bundled_dependencies {
+                            let effective_target = ModuleTargetSelection::resolve_build(
+                                config,
+                                session.build_options.as_ref(),
+                                module,
+                                Some(artifact_target_label),
+                                &args.hvigor_properties,
+                            )
+                            .target;
+                            if effective_target.resource_directories.is_empty() {
+                                bundled_resource_directories.push(
+                                    arkdown_path::ArtifactPath::from_slash("src/main/resources"),
+                                );
+                            } else {
+                                for directory in &effective_target.resource_directories {
                                     bundled_resource_directories.push(
-                                        arkdown_path::ArtifactPath::from_slash(
-                                            "src/main/resources",
-                                        ),
-                                    );
-                                } else {
-                                    for directory in &effective_target.resource_directories {
-                                        bundled_resource_directories.push(
-                                            ArtifactPathSerializer::path_to_slash(directory)
-                                                .map_err(|error| {
-                                                    anyhow::anyhow!(
+                                        ArtifactPathSerializer::path_to_slash(directory).map_err(
+                                            |error| {
+                                                anyhow::anyhow!(
                           "invalid HAR target resource directory '{}': {error}",
                           directory.display()
                         )
-                                                })?,
-                                        );
-                                    }
+                                            },
+                                        )?,
+                                    );
                                 }
-                                bundled_resource_directories.extend(
-                                    bundled_resource_snapshots
-                                        .iter()
-                                        .map(|resource| resource.metadata_directory.clone()),
-                                );
                             }
-                            let resource_table = module_layout.resource_table_txt();
-                            let processed_module_json = module_layout.process_profile_module_json();
-                            let source_maps = package_out.source_maps_path.clone().or_else(|| {
-                                let candidate = module_layout.loader_out_source_maps();
-                                candidate.is_file().then_some(candidate)
-                            });
-                            let consumer_rules_path = module_layout.obfuscation_export_rule_path();
-                            let ignore_resource_patterns = config
-                                .product
-                                .build_option
+                            bundled_resource_directories.extend(
+                                bundled_resource_snapshots
+                                    .iter()
+                                    .map(|resource| resource.metadata_directory.clone()),
+                            );
+                        }
+                        let resource_table = module_layout.resource_table_txt();
+                        let processed_module_json = module_layout.process_profile_module_json();
+                        let source_maps = package_out.source_maps_path.clone().or_else(|| {
+                            let candidate = module_layout.loader_out_source_maps();
+                            candidate.is_file().then_some(candidate)
+                        });
+                        let consumer_rules_path = module_layout.obfuscation_export_rule_path();
+                        let ignore_resource_patterns = config
+                            .product
+                            .build_option
+                            .res_options
+                            .as_ref()
+                            .map(|options| options.ignore_resource_pattern.clone())
+                            .unwrap_or_default();
+                        let preload_system_so_json = PreloadSystemSoArtifactWriter::effective_path(
+                            &module_layout.preload_system_so_json(),
+                        )?;
+
+                        let har_pack_input = HarPackInput {
+                            module_name: module.name.clone(),
+                            source_dir: source_dir.clone(),
+                            resources_dir: module_layout.source().resources(),
+                            resource_str_dir: {
+                                let dir = module_layout.res_resource_str_dir();
+                                dir.exists().then_some(dir)
+                            },
+                            oh_package_json: package_manifest.clone(),
+                            output_path: primary_output.clone(),
+                            declarations_dir: declarations_dir.exists().then_some(declarations_dir),
+                            consumer_rules_path: consumer_rules_path
+                                .exists()
+                                .then_some(consumer_rules_path),
+                        };
+                        let har_variant = HarVariantInput {
+                            artifact_type,
+                            module_root: module.src_path.clone(),
+                            compiled_output_dir: module_layout.loader_out_dir(),
+                            processed_module_json: Some(processed_module_json),
+                            resource_table_path: resource_table.exists().then_some(resource_table),
+                            native_libs,
+                            native_header_dirs,
+                            preload_system_so_json,
+                            source_maps_path: source_maps,
+                            build_profile_path: Some(module_layout.build_profile_for_module(
+                                &module.module_type,
+                                artifact_target_label,
+                            )),
+                            declaration_entries,
+                            package_parameters,
+                            worker_entries: module_build_option
+                                .source_option
+                                .as_ref()
+                                .map(|options| options.workers.clone())
+                                .unwrap_or_default(),
+                            runtime_only: module_build_option
+                                .ark_options
+                                .as_ref()
+                                .and_then(|options| options.runtime_only.clone()),
+                            resource_directories: module_build_option
                                 .res_options
                                 .as_ref()
-                                .map(|options| options.ignore_resource_pattern.clone())
-                                .unwrap_or_default();
-                            let preload_system_so_json =
-                                PreloadSystemSoArtifactWriter::effective_path(
-                                    &module_layout.preload_system_so_json(),
-                                )?;
-
-                            let har_pack_input = HarPackInput {
-                                module_name: module.name.clone(),
-                                source_dir: source_dir.clone(),
-                                resources_dir: module_layout.source().resources(),
-                                resource_str_dir: {
-                                    let dir = module_layout.res_resource_str_dir();
-                                    dir.exists().then_some(dir)
-                                },
-                                oh_package_json: package_manifest.clone(),
-                                output_path: primary_output.clone(),
-                                declarations_dir: declarations_dir
-                                    .exists()
-                                    .then_some(declarations_dir),
-                                consumer_rules_path: consumer_rules_path
-                                    .exists()
-                                    .then_some(consumer_rules_path),
-                            };
-                            let har_variant = HarVariantInput {
-                                artifact_type,
-                                module_root: module.src_path.clone(),
-                                compiled_output_dir: module_layout.loader_out_dir(),
-                                processed_module_json: Some(processed_module_json),
-                                resource_table_path: resource_table
-                                    .exists()
-                                    .then_some(resource_table),
-                                native_libs,
-                                native_header_dirs,
-                                preload_system_so_json,
-                                source_maps_path: source_maps,
-                                build_profile_path: Some(module_layout.build_profile_for_module(
-                                    &module.module_type,
-                                    artifact_target_label,
-                                )),
-                                declaration_entries,
-                                package_parameters,
-                                worker_entries: module_build_option
-                                    .source_option
-                                    .as_ref()
-                                    .map(|options| options.workers.clone())
-                                    .unwrap_or_default(),
-                                runtime_only: module_build_option
-                                    .ark_options
-                                    .as_ref()
-                                    .and_then(|options| options.runtime_only.clone()),
-                                resource_directories: module_build_option
-                                    .res_options
-                                    .as_ref()
-                                    .map(|options| options.resource_directories.clone())
-                                    .unwrap_or_default(),
-                                bundled_dependency_rewrite,
-                                dependency_pkg_version,
-                                bundled_dependencies,
-                                bundled_resources,
-                                bundled_resource_directories,
-                                compiled_package_names: importee_metadata.compiled_package_names,
-                                extra_importees: importee_metadata.extra_importees,
-                                global_dependencies: importee_metadata.global_dependencies,
-                                ignore_resource_patterns,
-                                debug: config.build_mode.is_debuggable(),
-                                target_name: artifact_target_label.clone(),
-                                package_cache_dir: Some(
-                                    module_layout.package_har_cache_dir(artifact_target_label),
-                                ),
-                            };
-                            let process_package_task = if is_ohpm_project {
-                                "ProcessOHPackageJson"
-                            } else {
-                                "ProcessPackageJson"
-                            };
-                            let generated_package_manifest = if is_ohpm_project {
-                                module_layout.generated_pm_oh_package(artifact_target_label)
-                            } else {
-                                module_layout.generated_pm_package_json(artifact_target_label)
-                            };
-                            if task_lifecycle
-                                .before(
-                                    &module.name,
-                                    Some(artifact_target_label),
-                                    process_package_task,
-                                )
-                                .await?
-                            {
-                                packager
-                                    .process_har_package_json(
-                                        &har_pack_input,
-                                        &har_variant,
-                                        &generated_package_manifest,
-                                    )
-                                    .map_err(|error| {
-                                        anyhow::anyhow!("{process_package_task} failed: {error}")
-                                    })?;
-                                task_lifecycle
-                                    .after(
-                                        &module.name,
-                                        Some(artifact_target_label),
-                                        process_package_task,
-                                    )
-                                    .await?;
-                            }
-                            let package_cache_dir =
-                                module_layout.package_har_cache_dir(artifact_target_label);
-                            if task_lifecycle
-                                .before(
-                                    &module.name,
-                                    Some(artifact_target_label),
-                                    "ProcessHarArtifacts",
-                                )
-                                .await?
-                            {
-                                packager
-                                    .process_har_artifacts(
-                                        &har_pack_input,
-                                        &har_variant,
-                                        &package_cache_dir,
-                                    )
-                                    .map_err(|error| {
-                                        anyhow::anyhow!("ProcessHarArtifacts failed: {error}")
-                                    })?;
-                                task_lifecycle
-                                    .after(
-                                        &module.name,
-                                        Some(artifact_target_label),
-                                        "ProcessHarArtifacts",
-                                    )
-                                    .await?;
-                            }
-                            if task_lifecycle
-                                .before(&module.name, Some(artifact_target_label), "PackageHar")
-                                .await?
-                            {
-                                package_task_started = true;
-                                let npm_executable =
-                                    (!is_ohpm_project).then(|| args.resolved_npm_executable());
-                                let packed = packager
-                                    .pack_har_artifacts(
-                                        &har_pack_input,
-                                        &package_cache_dir,
-                                        npm_executable.as_deref(),
-                                    )
-                                    .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
-                                vec![packed]
-                            } else {
-                                Vec::new()
-                            }
-                        }
-                        _ => {
-                            if module_json.exists() && modules_abc.exists() {
-                                if !resources_index.exists() {
-                                    if let Some(parent) = resources_index.parent() {
-                                        std::fs::create_dir_all(parent)?;
-                                    }
-                                    std::fs::write(&resources_index, [])?;
+                                .map(|options| options.resource_directories.clone())
+                                .unwrap_or_default(),
+                            bundled_dependency_rewrite,
+                            dependency_pkg_version,
+                            bundled_dependencies,
+                            bundled_resources,
+                            bundled_resource_directories,
+                            compiled_package_names: importee_metadata.compiled_package_names,
+                            extra_importees: importee_metadata.extra_importees,
+                            global_dependencies: importee_metadata.global_dependencies,
+                            ignore_resource_patterns,
+                            debug: config.build_mode.is_debuggable(),
+                            target_name: artifact_target_label.clone(),
+                            package_cache_dir: Some(
+                                module_layout.package_har_cache_dir(artifact_target_label),
+                            ),
+                        };
+                        let process_package_task = if is_ohpm_project {
+                            "ProcessOHPackageJson"
+                        } else {
+                            "ProcessPackageJson"
+                        };
+                        let generated_package_manifest = if is_ohpm_project {
+                            module_layout.generated_pm_oh_package(artifact_target_label)
+                        } else {
+                            module_layout.generated_pm_package_json(artifact_target_label)
+                        };
+                        packager
+                            .process_har_package_json(
+                                &har_pack_input,
+                                &har_variant,
+                                &generated_package_manifest,
+                            )
+                            .map_err(|error| {
+                                anyhow::anyhow!("{process_package_task} failed: {error}")
+                            })?;
+                        let package_cache_dir =
+                            module_layout.package_har_cache_dir(artifact_target_label);
+                        packager
+                            .process_har_artifacts(
+                                &har_pack_input,
+                                &har_variant,
+                                &package_cache_dir,
+                            )
+                            .map_err(|error| {
+                                anyhow::anyhow!("ProcessHarArtifacts failed: {error}")
+                            })?;
+                        let npm_executable =
+                            (!is_ohpm_project).then(|| args.resolved_npm_executable());
+                        let packed = packager
+                            .pack_har_artifacts(
+                                &har_pack_input,
+                                &package_cache_dir,
+                                npm_executable.as_deref(),
+                            )
+                            .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
+                        vec![packed]
+                    }
+                    _ => {
+                        if module_json.exists() && modules_abc.exists() {
+                            if !resources_index.exists() {
+                                if let Some(parent) = resources_index.parent() {
+                                    std::fs::create_dir_all(parent)?;
                                 }
-                                {
-                                    let raw_source_maps_path = package_out
-                                        .source_maps_path
-                                        .clone()
-                                        .filter(|path| path.is_file())
-                                        .or_else(|| {
-                                            let candidate = module_layout.loader_out_source_maps();
-                                            candidate.is_file().then_some(candidate)
-                                        });
-                                    let source_maps_path =
-                                        if matches!(config.build_mode, BuildMode::Release) {
-                                            None
-                                        } else {
-                                            raw_source_maps_path.clone()
-                                        };
-                                    let delivery_with_install = module_context
-                                        .module
-                                        .module_json
-                                        .as_ref()
-                                        .and_then(|module_json| {
-                                            module_json.module.delivery_with_install
-                                        })
-                                        .unwrap_or(true);
-                                    let compress_native_libs =
-                                        PackageModuleJsonOptions::new(&module_json)
-                                            .compress_native_libs()?;
-                                    let pkg_sdk_info_path = (!loader_json.use_normalized_ohm_url)
-                                        .then(|| module_layout.pkg_sdk_info_json())
-                                        .filter(|path| path.is_file());
-                                    let pack_hap_start = Instant::now();
-                                    #[cfg(feature = "memory-diagnostics")]
-                                    arkdown::memory_diagnostics::dump_with(
-                                        "build:before-pack-hap",
-                                        format_args!(
-                                            "module={} native_libs={} source_maps={}",
-                                            module.name,
-                                            native_libs.len(),
-                                            source_maps_path.is_some()
+                                std::fs::write(&resources_index, [])?;
+                            }
+                            {
+                                let raw_source_maps_path = package_out
+                                    .source_maps_path
+                                    .clone()
+                                    .filter(|path| path.is_file())
+                                    .or_else(|| {
+                                        let candidate = module_layout.loader_out_source_maps();
+                                        candidate.is_file().then_some(candidate)
+                                    });
+                                let source_maps_path =
+                                    if matches!(config.build_mode, BuildMode::Release) {
+                                        None
+                                    } else {
+                                        raw_source_maps_path.clone()
+                                    };
+                                let delivery_with_install = module_context
+                                    .module
+                                    .module_json
+                                    .as_ref()
+                                    .and_then(|module_json| {
+                                        module_json.module.delivery_with_install
+                                    })
+                                    .unwrap_or(true);
+                                let compress_native_libs =
+                                    PackageModuleJsonOptions::new(&module_json)
+                                        .compress_native_libs()?;
+                                let pkg_sdk_info_path = (!loader_json.use_normalized_ohm_url)
+                                    .then(|| module_layout.pkg_sdk_info_json())
+                                    .filter(|path| path.is_file());
+                                let pack_hap_start = Instant::now();
+                                #[cfg(feature = "memory-diagnostics")]
+                                arkdown::memory_diagnostics::dump_with(
+                                    "build:before-pack-hap",
+                                    format_args!(
+                                        "module={} native_libs={} source_maps={}",
+                                        module.name,
+                                        native_libs.len(),
+                                        source_maps_path.is_some()
+                                    ),
+                                );
+                                let mut packed_outputs =
+                                    Vec::with_capacity(package_artifacts.len());
+                                for artifact in &package_artifacts {
+                                    let pack_input = PackInput {
+                                        module_name: module.name.clone(),
+                                        target_name: artifact_target_label.clone(),
+                                        abc_path: modules_abc.clone(),
+                                        resources_index: resources_index.clone(),
+                                        module_json: module_json.clone(),
+                                        pack_info_module_json: Some(
+                                            module_layout.merge_profile_module_json(),
                                         ),
-                                    );
-                                    let mut packed_outputs =
-                                        Vec::with_capacity(package_artifacts.len());
-                                    for artifact in &package_artifacts {
-                                        let pack_input = PackInput {
-                                            module_name: module.name.clone(),
-                                            target_name: artifact_target_label.clone(),
-                                            abc_path: modules_abc.clone(),
-                                            resources_index: resources_index.clone(),
-                                            module_json: module_json.clone(),
-                                            pack_info_module_json: Some(
-                                                module_layout.merge_profile_module_json(),
-                                            ),
-                                            pack_info_path: Some(artifact.pack_info_path.clone()),
-                                            native_libs: native_libs.clone(),
-                                            compress_native_libs,
-                                            output_path: artifact.package_path.clone(),
-                                            resources_src_dir: Some(
-                                                module_layout.res_resources_dir(),
-                                            ),
-                                            bundle_version_code,
-                                            bundle_version_name: bundle_version_name.clone(),
-                                            bundle_build_version: bundle_build_version.clone(),
-                                            bundle_type: bundle_type.clone(),
-                                            source_maps_path: source_maps_path.clone(),
-                                            aot_mode: loader_json.an_build_mode.clone(),
-                                            pkg_context_info_path: loader_json
-                                                .use_normalized_ohm_url
-                                                .then(|| module_layout.pkg_context_info_json()),
-                                            pkg_sdk_info_path: pkg_sdk_info_path.clone(),
-                                            integrated_hsps: integrated_hsps.clone(),
-                                            device_types: manifest.device_types.clone(),
-                                            installation_free: bundle_type == "atomicService",
-                                            delivery_with_install,
-                                            privacy_profile_path: privacy_profile_path.clone(),
-                                            syscap_path: syscap_path.clone(),
-                                        };
-                                        let packed = if matches!(
-                                            module_config.output_target,
-                                            OutputTarget::Hsp
-                                        ) {
+                                        pack_info_path: Some(artifact.pack_info_path.clone()),
+                                        native_libs: native_libs.clone(),
+                                        compress_native_libs,
+                                        output_path: artifact.package_path.clone(),
+                                        resources_src_dir: Some(module_layout.res_resources_dir()),
+                                        bundle_version_code,
+                                        bundle_version_name: bundle_version_name.clone(),
+                                        bundle_build_version: bundle_build_version.clone(),
+                                        bundle_type: bundle_type.clone(),
+                                        source_maps_path: source_maps_path.clone(),
+                                        aot_mode: loader_json.an_build_mode.clone(),
+                                        pkg_context_info_path: loader_json
+                                            .use_normalized_ohm_url
+                                            .then(|| module_layout.pkg_context_info_json()),
+                                        pkg_sdk_info_path: pkg_sdk_info_path.clone(),
+                                        integrated_hsps: integrated_hsps.clone(),
+                                        device_types: manifest.device_types.clone(),
+                                        installation_free: bundle_type == "atomicService",
+                                        delivery_with_install,
+                                        privacy_profile_path: privacy_profile_path.clone(),
+                                        syscap_path: syscap_path.clone(),
+                                    };
+                                    let packed =
+                                        if matches!(module_config.output_target, OutputTarget::Hsp)
+                                        {
                                             packager.pack_hsp(pack_input)
                                         } else {
                                             packager.pack_hap(pack_input)
                                         }
                                         .map_err(|e| anyhow::anyhow!("Pack failed: {}", e))?;
-                                        tracing::info!(
-                                          module = %module.name,
-                                          output = %packed.display(),
-                                          "hap packed"
-                                        );
-                                        packed_outputs.push(packed);
-                                    }
-
-                                    if matches!(module_config.output_target, OutputTarget::Hsp) {
-                                        let prepare_shared_har = task_lifecycle
-                                            .before(
-                                                &module.name,
-                                                Some(artifact_target_label),
-                                                "PrepareSharedHarResource",
-                                            )
-                                            .await?;
-                                        let mut interface_dependencies = BTreeMap::new();
-                                        let mut interface_dynamic_dependencies = BTreeMap::new();
-                                        for dependency in module_context.deps.nodes.values().filter(
-                                            |dependency| {
-                                                !dependency.is_transitive
-                                                    && matches!(
-                                                        dependency.node_type,
-                                                        DependencyNodeType::SharedHsp
-                                                            | DependencyNodeType::IntegratedHsp
-                                                    )
-                                            },
-                                        ) {
-                                            let version =
-                                                dependency.version_spec.clone().or_else(|| {
-                                                    dependency
-                                                        .package
-                                                        .as_ref()
-                                                        .map(|package| package.version.clone())
-                                                });
-                                            if let Some(version) = version {
-                                                let target = if dependency.is_dynamic {
-                                                    &mut interface_dynamic_dependencies
-                                                } else {
-                                                    &mut interface_dependencies
-                                                };
-                                                target.insert(dependency.alias.clone(), version);
-                                            }
-                                        }
-                                        let resource_table_path =
-                                            module_layout.resource_table_txt();
-                                        let resource_str_dir = module_layout.res_resource_str_dir();
-                                        let obfuscation_rules_path =
-                                            module_layout.obfuscation_export_rule_path();
-                                        let interface_input = HspInterfaceHarInput {
-                                            module_name: module.name.clone(),
-                                            module_root: module.src_path.clone(),
-                                            target_name: artifact_target_label.clone(),
-                                            // Hvigor PrepareSharedHarRes always reads the module's
-                                            // OHPM manifest and writes `oh-package.json5`; it does
-                                            // not switch this interface-HAR boundary to package.json.
-                                            oh_package_json: module_layout.oh_package_json5(),
-                                            processed_module_json: module_layout
-                                                .process_profile_module_json(),
-                                            declarations_dir: module_layout.declarations_dir(),
-                                            resource_table_path: resource_table_path
-                                                .is_file()
-                                                .then_some(resource_table_path),
-                                            resource_str_dir: resource_str_dir
-                                                .is_dir()
-                                                .then_some(resource_str_dir),
-                                            privacy_profile_path: privacy_profile_path.clone(),
-                                            obfuscation_rules_path: obfuscation_rules_path
-                                                .is_file()
-                                                .then_some(obfuscation_rules_path),
-                                            native_libs: interface_native_libs,
-                                            native_header_dirs,
-                                            exclude_so_from_interface_har,
-                                            output_path: output_dir
-                                                .join(format!("{}.har", module.name)),
-                                            compatible_sdk_version: parse_api_version(
-                                                &config.product.compatible_sdk_version,
-                                            )
-                                            .unwrap_or(config.sdk_config.compile_api_version),
-                                            compatible_sdk_type: config.product.runtime_os.clone(),
-                                            use_normalized_ohm_url: config
-                                                .product
-                                                .build_option
-                                                .strict_mode
-                                                .use_normalized_ohm_url,
-                                            integrated_hsp: config
-                                                .product
-                                                .build_option
-                                                .ark_options
-                                                .as_ref()
-                                                .and_then(|options| options.integrated_hsp),
-                                            source_roots: interface_source_roots,
-                                            dependencies: interface_dependencies,
-                                            dynamic_dependencies: interface_dynamic_dependencies,
-                                            debug: config.build_mode.is_debuggable(),
-                                            obfuscated: module_obfuscation
-                                                .is_enabled(&config.build_mode),
-                                        };
-                                        if prepare_shared_har {
-                                            task_lifecycle
-                                                .after(
-                                                    &module.name,
-                                                    Some(artifact_target_label),
-                                                    "PrepareSharedHarResource",
-                                                )
-                                                .await?;
-                                        }
-                                        if task_lifecycle
-                                            .before(
-                                                &module.name,
-                                                Some(artifact_target_label),
-                                                "PackageSharedHar",
-                                            )
-                                            .await?
-                                        {
-                                            packager
-                                                .pack_hsp_interface_har(interface_input)
-                                                .map_err(|e| {
-                                                    anyhow::anyhow!(
-                                                        "PackageSharedHar failed: {}",
-                                                        e
-                                                    )
-                                                })?;
-                                            task_lifecycle
-                                                .after(
-                                                    &module.name,
-                                                    Some(artifact_target_label),
-                                                    "PackageSharedHar",
-                                                )
-                                                .await?;
-                                        }
-                                    }
                                     tracing::info!(
                                       module = %module.name,
-                                      elapsed_ms = pack_hap_start.elapsed().as_millis(),
-                                      artifact_count = packed_outputs.len(),
-                                      "hap packaging completed"
+                                      output = %packed.display(),
+                                      "hap packed"
                                     );
-                                    #[cfg(feature = "memory-diagnostics")]
-                                    arkdown::memory_diagnostics::dump_with(
-                                        "build:after-pack-hap",
-                                        format_args!(
-                                            "module={} artifacts={}",
-                                            module.name,
-                                            packed_outputs.len()
-                                        ),
-                                    );
-                                    packed_outputs
+                                    packed_outputs.push(packed);
                                 }
-                            } else {
-                                Vec::new()
+
+                                if matches!(module_config.output_target, OutputTarget::Hsp) {
+                                    let mut interface_dependencies = BTreeMap::new();
+                                    let mut interface_dynamic_dependencies = BTreeMap::new();
+                                    for dependency in
+                                        module_context.deps.nodes.values().filter(|dependency| {
+                                            !dependency.is_transitive
+                                                && matches!(
+                                                    dependency.node_type,
+                                                    DependencyNodeType::SharedHsp
+                                                        | DependencyNodeType::IntegratedHsp
+                                                )
+                                        })
+                                    {
+                                        let version =
+                                            dependency.version_spec.clone().or_else(|| {
+                                                dependency
+                                                    .package
+                                                    .as_ref()
+                                                    .map(|package| package.version.clone())
+                                            });
+                                        if let Some(version) = version {
+                                            let target = if dependency.is_dynamic {
+                                                &mut interface_dynamic_dependencies
+                                            } else {
+                                                &mut interface_dependencies
+                                            };
+                                            target.insert(dependency.alias.clone(), version);
+                                        }
+                                    }
+                                    let resource_table_path = module_layout.resource_table_txt();
+                                    let resource_str_dir = module_layout.res_resource_str_dir();
+                                    let obfuscation_rules_path =
+                                        module_layout.obfuscation_export_rule_path();
+                                    let interface_input = HspInterfaceHarInput {
+                                        module_name: module.name.clone(),
+                                        module_root: module.src_path.clone(),
+                                        target_name: artifact_target_label.clone(),
+                                        // Hvigor PrepareSharedHarRes always reads the module's
+                                        // OHPM manifest and writes `oh-package.json5`; it does
+                                        // not switch this interface-HAR boundary to package.json.
+                                        oh_package_json: module_layout.oh_package_json5(),
+                                        processed_module_json: module_layout
+                                            .process_profile_module_json(),
+                                        declarations_dir: module_layout.declarations_dir(),
+                                        resource_table_path: resource_table_path
+                                            .is_file()
+                                            .then_some(resource_table_path),
+                                        resource_str_dir: resource_str_dir
+                                            .is_dir()
+                                            .then_some(resource_str_dir),
+                                        privacy_profile_path: privacy_profile_path.clone(),
+                                        obfuscation_rules_path: obfuscation_rules_path
+                                            .is_file()
+                                            .then_some(obfuscation_rules_path),
+                                        native_libs: interface_native_libs,
+                                        native_header_dirs,
+                                        exclude_so_from_interface_har,
+                                        output_path: output_dir
+                                            .join(format!("{}.har", module.name)),
+                                        compatible_sdk_version: parse_api_version(
+                                            &config.product.compatible_sdk_version,
+                                        )
+                                        .unwrap_or(config.sdk_config.compile_api_version),
+                                        compatible_sdk_type: config.product.runtime_os.clone(),
+                                        use_normalized_ohm_url: config
+                                            .product
+                                            .build_option
+                                            .strict_mode
+                                            .use_normalized_ohm_url,
+                                        integrated_hsp: config
+                                            .product
+                                            .build_option
+                                            .ark_options
+                                            .as_ref()
+                                            .and_then(|options| options.integrated_hsp),
+                                        source_roots: interface_source_roots,
+                                        dependencies: interface_dependencies,
+                                        dynamic_dependencies: interface_dynamic_dependencies,
+                                        debug: config.build_mode.is_debuggable(),
+                                        obfuscated: module_obfuscation
+                                            .is_enabled(&config.build_mode),
+                                    };
+                                    packager.pack_hsp_interface_har(interface_input).map_err(
+                                        |e| anyhow::anyhow!("PackageSharedHar failed: {}", e),
+                                    )?;
+                                }
+                                tracing::info!(
+                                  module = %module.name,
+                                  elapsed_ms = pack_hap_start.elapsed().as_millis(),
+                                  artifact_count = packed_outputs.len(),
+                                  "hap packaging completed"
+                                );
+                                #[cfg(feature = "memory-diagnostics")]
+                                arkdown::memory_diagnostics::dump_with(
+                                    "build:after-pack-hap",
+                                    format_args!(
+                                        "module={} artifacts={}",
+                                        module.name,
+                                        packed_outputs.len()
+                                    ),
+                                );
+                                packed_outputs
                             }
+                        } else {
+                            Vec::new()
                         }
-                    };
-                    if package_task_started {
-                        task_lifecycle
-                            .after(&module.name, Some(artifact_target_label), package_task_name)
-                            .await?;
                     }
-                    out
-                } else {
-                    Vec::new()
                 };
 
                 if !out.is_empty() {
-                    let packing_check_task =
-                        if matches!(module_config.output_target, OutputTarget::Har) {
-                            "PackingCheckHar"
-                        } else {
-                            "PackingCheck"
-                        };
-                    if task_lifecycle
-                        .before(
-                            &module.name,
-                            Some(artifact_target_label),
-                            packing_check_task,
-                        )
-                        .await?
-                    {
-                        // hvigor `packing-check.js`: `.so` extension-ability srcEntry
-                        // existence per ABI + stray-source-file packaging warning.
-                        let packing_check = PackingCheck::new(
-                            config,
-                            module,
-                            manifest,
-                            PathBuf::from(&loader_json.ace_module_build),
-                            module_layout.stripped_native_libs_dir(),
-                            module_layout.res_default_dir(),
-                        );
-                        packing_check
-                            .validate()
-                            .map_err(|error| anyhow::anyhow!("packing-check failed: {error}"))?;
-                        task_lifecycle
-                            .after(
-                                &module.name,
-                                Some(artifact_target_label),
-                                packing_check_task,
-                            )
-                            .await?;
-                    }
+                    // hvigor `packing-check.js`: `.so` extension-ability srcEntry
+                    // existence per ABI + stray-source-file packaging warning.
+                    let packing_check = PackingCheck::new(
+                        config,
+                        module,
+                        manifest,
+                        PathBuf::from(&loader_json.ace_module_build),
+                        module_layout.stripped_native_libs_dir(),
+                        module_layout.res_default_dir(),
+                    );
+                    packing_check
+                        .validate()
+                        .map_err(|error| anyhow::anyhow!("packing-check failed: {error}"))?;
                     let package_sign_har =
                         if matches!(module_config.output_target, OutputTarget::Har) {
                             PackageSignHarPlan::resolve(args, config, loader_json, session)
@@ -1597,19 +1151,10 @@ impl BuildCoordinator {
                         } else {
                             args.enable_sign_task && config.product.signing_config.is_some()
                         };
-                    let sign_task_name = match &module_config.output_target {
-                        OutputTarget::Har => "PackageSignHar",
-                        OutputTarget::Hsp => "SignHsp",
-                        _ => "SignHap",
-                    };
-                    let sign_enabled = task_lifecycle
-                        .before(&module.name, Some(artifact_target_label), sign_task_name)
-                        .await?;
                     // Hvigor SignHap/SignHsp/SignApp remove stale signed outputs even
                     // when `enableSignTask=false`, while keeping the task in the graph.
-                    if sign_enabled
-                        && (!matches!(module_config.output_target, OutputTarget::Har)
-                            || is_package_signed)
+                    if !matches!(module_config.output_target, OutputTarget::Har)
+                        || is_package_signed
                     {
                         for artifact in &package_artifacts {
                             if artifact.signed_path.is_file() {
@@ -1617,7 +1162,7 @@ impl BuildCoordinator {
                             }
                         }
                     }
-                    let final_paths = if sign_enabled && is_package_signed {
+                    let final_paths = if is_package_signed {
                         let sign_start = Instant::now();
                         #[cfg(feature = "memory-diagnostics")]
                         arkdown::memory_diagnostics::dump_with(
@@ -1690,11 +1235,6 @@ impl BuildCoordinator {
                         }
                         out.clone()
                     };
-                    if sign_enabled {
-                        task_lifecycle
-                            .after(&module.name, Some(artifact_target_label), sign_task_name)
-                            .await?;
-                    }
                     if !matches!(module_config.output_target, OutputTarget::Har) {
                         let package_metadata_start = Instant::now();
                         let package_module_json = module_layout.package_module_json();
@@ -1726,40 +1266,24 @@ impl BuildCoordinator {
                         package_out.source_maps_path.as_deref(),
                         &source_map_output,
                     )?;
-                    if task_lifecycle
-                        .before(
-                            &module.name,
-                            Some(artifact_target_label),
-                            "CollectDebugSymbol",
-                        )
-                        .await?
-                    {
-                        let source_map_primary = package_out
-                            .source_maps_path
-                            .clone()
-                            .unwrap_or_else(|| module_layout.loader_out_source_maps());
-                        DebugSymbolCollector::new(
-                            module.src_path.clone(),
-                            module.name.clone(),
-                            config.build_mode.clone(),
-                            source_map_primary,
-                            None,
-                            PathBuf::from(&loader_json.cache_path)
-                                .join("obfuscation")
-                                .join("nameCache.json"),
-                        )
-                        .with_collection_override(args.collect_debug_symbol)
-                        .with_output_variant(&config.product.name, artifact_target_label)
-                        .collect()
-                        .map_err(|error| anyhow::anyhow!("CollectDebugSymbol failed: {error}"))?;
-                        task_lifecycle
-                            .after(
-                                &module.name,
-                                Some(artifact_target_label),
-                                "CollectDebugSymbol",
-                            )
-                            .await?;
-                    }
+                    let source_map_primary = package_out
+                        .source_maps_path
+                        .clone()
+                        .unwrap_or_else(|| module_layout.loader_out_source_maps());
+                    DebugSymbolCollector::new(
+                        module.src_path.clone(),
+                        module.name.clone(),
+                        config.build_mode.clone(),
+                        source_map_primary,
+                        None,
+                        PathBuf::from(&loader_json.cache_path)
+                            .join("obfuscation")
+                            .join("nameCache.json"),
+                    )
+                    .with_collection_override(args.collect_debug_symbol)
+                    .with_output_variant(&config.product.name, artifact_target_label)
+                    .collect()
+                    .map_err(|error| anyhow::anyhow!("CollectDebugSymbol failed: {error}"))?;
                     if matches!(module_config.output_target, OutputTarget::Hsp) {
                         let shared_tgz_output = output_dir.join(output_name.shared_tgz());
                         if module_build_option.generate_shared_tgz.is_some()
@@ -1767,36 +1291,20 @@ impl BuildCoordinator {
                         {
                             std::fs::remove_file(&shared_tgz_output)?;
                         }
-                        if task_lifecycle
-                            .before(
-                                &module.name,
-                                Some(artifact_target_label),
-                                "PackageSharedTgz",
-                            )
-                            .await?
-                        {
-                            let should_generate_shared_tgz = module_build_option
-                                .generate_shared_tgz
-                                .unwrap_or(matches!(config.build_mode, BuildMode::Release));
-                            if should_generate_shared_tgz {
-                                packager
-                                    .pack_hsp_tgz(HspTgzInput {
-                                        hsp_path: out[0].clone(),
-                                        interface_har_path: output_dir
-                                            .join(format!("{}.har", module.name)),
-                                        output_path: shared_tgz_output,
-                                    })
-                                    .map_err(|error| {
-                                        anyhow::anyhow!("PackageSharedTgz failed: {error}")
-                                    })?;
-                            }
-                            task_lifecycle
-                                .after(
-                                    &module.name,
-                                    Some(artifact_target_label),
-                                    "PackageSharedTgz",
-                                )
-                                .await?;
+                        let should_generate_shared_tgz = module_build_option
+                            .generate_shared_tgz
+                            .unwrap_or(matches!(config.build_mode, BuildMode::Release));
+                        if should_generate_shared_tgz {
+                            packager
+                                .pack_hsp_tgz(HspTgzInput {
+                                    hsp_path: out[0].clone(),
+                                    interface_har_path: output_dir
+                                        .join(format!("{}.har", module.name)),
+                                    output_path: shared_tgz_output,
+                                })
+                                .map_err(|error| {
+                                    anyhow::anyhow!("PackageSharedTgz failed: {error}")
+                                })?;
                         }
                     }
                     output_paths.extend(final_paths.iter().cloned());
@@ -1811,84 +1319,45 @@ impl BuildCoordinator {
                                 artifact_target_label
                             )
                         })?;
-                        task_lifecycle
-                            .marker(
-                                &module.name,
-                                Some(artifact_target_label),
-                                "BeforeGenerateDeviceCoverage",
-                            )
-                            .await?;
-                        if task_lifecycle
-                            .before(
-                                &module.name,
-                                Some(artifact_target_label),
-                                "GenerateDeviceCoverage",
-                            )
-                            .await?
-                        {
-                            let bundle_type = module_config
-                                .product
-                                .app_options
-                                .bundle_type
-                                .as_deref()
-                                .unwrap_or(&session.project.bundle_type);
-                            crate::device_test::DeviceTestExecutionPlan::from_build(
-                                crate::device_test::DeviceTestExecutionInput {
-                                    sdk_config: &module_config.sdk_config,
-                                    sdk_root: &session.sdk.sdk_root,
-                                    project_path: &config.project_root,
-                                    module_root: &module.src_path,
-                                    module_name: &module.name,
-                                    ohos_test_module_json: module_context
-                                        .module
-                                        .ohos_test_module_json_value
-                                        .as_deref(),
-                                    target_artifact_name: module_config
-                                        .product
-                                        .artifact_name
-                                        .as_deref(),
-                                    product_name: &module_config.product.name,
-                                    bundle_name: &module_config.product.bundle_name,
-                                    bundle_type,
-                                    target_package_path,
-                                    dependencies: module_context.deps.as_ref(),
-                                    coverage: args.ohos_test_coverage.unwrap_or(true),
-                                    scope: args.scope.as_deref().unwrap_or(""),
-                                    node_executable: args.resolved_node_executable(),
-                                },
-                            )
-                            .and_then(|plan| plan.execute())
-                            .map_err(|error| {
-                                anyhow::anyhow!(
-                                    "GenerateDeviceCoverage failed for module '{}': {error}",
-                                    module.name
-                                )
-                            })?;
-                            task_lifecycle
-                                .after(
-                                    &module.name,
-                                    Some(artifact_target_label),
-                                    "GenerateDeviceCoverage",
-                                )
-                                .await?;
-                        }
-                        task_lifecycle
-                            .marker(&module.name, None, "onDeviceTest")
-                            .await?;
-                    }
 
-                    let assemble_task_name = match &module_config.output_target {
-                        OutputTarget::Har => "assembleHar",
-                        OutputTarget::Hsp => "assembleHsp",
-                        _ => "assembleHap",
-                    };
-                    if task_lifecycle
-                        .before(&module.name, None, assemble_task_name)
-                        .await?
-                    {
-                        task_lifecycle
-                            .after(&module.name, None, assemble_task_name)
-                            .await?;
+                        let bundle_type = module_config
+                            .product
+                            .app_options
+                            .bundle_type
+                            .as_deref()
+                            .unwrap_or(&session.project.bundle_type);
+                        crate::device_test::DeviceTestExecutionPlan::from_build(
+                            crate::device_test::DeviceTestExecutionInput {
+                                sdk_config: &module_config.sdk_config,
+                                sdk_root: &session.sdk.sdk_root,
+                                project_path: &config.project_root,
+                                module_root: &module.src_path,
+                                module_name: &module.name,
+                                ohos_test_module_json: module_context
+                                    .module
+                                    .ohos_test_module_json_value
+                                    .as_deref(),
+                                target_artifact_name: module_config
+                                    .product
+                                    .artifact_name
+                                    .as_deref(),
+                                product_name: &module_config.product.name,
+                                bundle_name: &module_config.product.bundle_name,
+                                bundle_type,
+                                target_package_path,
+                                dependencies: module_context.deps.as_ref(),
+                                coverage: args.ohos_test_coverage.unwrap_or(true),
+                                scope: args.scope.as_deref().unwrap_or(""),
+                                node_executable: args.resolved_node_executable(),
+                            },
+                        )
+                        .and_then(|plan| plan.execute())
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "GenerateDeviceCoverage failed for module '{}': {error}",
+                                module.name
+                            )
+                        })?;
                     }
                 }
             }

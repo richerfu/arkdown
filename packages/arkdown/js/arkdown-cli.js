@@ -6,6 +6,7 @@ const BUILD_VALUE_OPTIONS = new Map([
   ['--project', 'project'],
   ['--target', 'target'],
   ['--mode', 'mode'],
+  ['--action', 'action'],
   ['--analyze', 'analyze'],
   ['--module', 'module'],
   ['-m', 'module'],
@@ -76,6 +77,17 @@ class JsCliArgumentParser {
       this.unknown(option)
     }
     this.oneOf(config, 'analyze', ['normal', 'default', 'verbose', 'false', 'trace'])
+    this.oneOf(config, 'action', [
+      'assemble',
+      'hot-reload-compile',
+      'hot-reload-build',
+      'cold-reload',
+      'prepare-quickfix',
+      'package-quickfix',
+      'sign-quickfix',
+      'assemble-quickfix',
+      'device-test',
+    ])
     this.oneOf(config, 'arktsVersion', ['1.1', '1.2'])
     this.oneOf(config, 'ohpmMode', ['offline', 'prefer-offline', 'online'])
     this.oneOf(config, 'coverageMode', ['black', 'white', 'full'])
@@ -263,6 +275,8 @@ Options:
   --project <dir>     Project root. Defaults to current directory.
   --target <kind>     Output artifact: hap, hsp, har, app, or test. Defaults to hap.
   --mode <mode>       Build mode: debug or release. Defaults to debug.
+  --action <action>   Build action. Defaults to assemble. Reload, QuickFix,
+                      and device-test actions select their complete Rust flow.
   --analyze <mode>    Hook metrics: normal, verbose, false, or trace.
   --module, -m <name> Scope build to one module.
   --product <name>    Product name from build-profile.json5.

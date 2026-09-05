@@ -128,21 +128,61 @@ impl From<OhpmModeChoice> for arkdown_session::package::acquisition::Acquisition
     }
 }
 
-/// One selected native hvigor command root.
+/// Public build goal selected by the JavaScript entry.
 ///
-/// The Node task graph serializes only explicit partial-task roots here. The
-/// coordinator completes their dependency closure and stops after every root
-/// boundary has completed, matching hvigor's selected DAG execution.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeTaskRoot {
-    pub module_name: String,
-    pub target_name: Option<String>,
-    pub task_name: String,
+/// These are product actions rather than Hvigor task names. Rust owns each
+/// action's dependency closure and terminal stage directly; the JavaScript
+/// layer only selects the goal and carries plugin objects across N-API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuildAction {
+    #[default]
+    Assemble,
+    HotReloadCompile,
+    HotReloadBuild,
+    ColdReload,
+    PrepareQuickfix,
+    PackageQuickfix,
+    SignQuickfix,
+    AssembleQuickfix,
+    DeviceTest,
+}
+
+impl BuildAction {
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "assemble" => Some(Self::Assemble),
+            "hot-reload-compile" => Some(Self::HotReloadCompile),
+            "hot-reload-build" => Some(Self::HotReloadBuild),
+            "cold-reload" => Some(Self::ColdReload),
+            "prepare-quickfix" => Some(Self::PrepareQuickfix),
+            "package-quickfix" => Some(Self::PackageQuickfix),
+            "sign-quickfix" => Some(Self::SignQuickfix),
+            "assemble-quickfix" => Some(Self::AssembleQuickfix),
+            "device-test" => Some(Self::DeviceTest),
+            _ => None,
+        }
+    }
+
+    pub fn is_hot_reload(self) -> bool {
+        matches!(self, Self::HotReloadCompile | Self::HotReloadBuild)
+    }
+
+    pub fn is_quickfix(self) -> bool {
+        matches!(
+            self,
+            Self::ColdReload
+                | Self::PrepareQuickfix
+                | Self::PackageQuickfix
+                | Self::SignQuickfix
+                | Self::AssembleQuickfix
+        )
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct BuildRequest {
+    /// Product action selected at the JavaScript CLI/API boundary.
+    pub action: BuildAction,
     /// Build target: hap, hsp, har, app, preview, test
     ///
     /// `test` mirrors hvigor's `hvigorw test` task: local unit-test build root
@@ -338,9 +378,6 @@ pub struct BuildRequest {
     /// Project-scoped Hvigor cache directory resolved by `PathUtil` in the JS
     /// runtime. Direct package builds derive `<project>/.hvigor` at the use site.
     pub hvigor_cache_dir: Option<PathBuf>,
-
-    /// Explicit partial hvigor roots selected by the Node task graph.
-    pub native_task_roots: Vec<NativeTaskRoot>,
 }
 
 impl BuildRequest {

@@ -66,8 +66,8 @@ use crate::compile_context::{
 };
 use crate::har_dedup::HarDedupProjectPlan;
 use crate::hot_reload::{
-    HotReloadCompileInput, HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary,
-    HotReloadTaskPlan, ReloadResourceTaskPlan,
+    HotReloadCompileInput, HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskPlan,
+    ReloadResourceTaskPlan,
 };
 use crate::intermediates::{
     IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, ResourceConfigInput,
@@ -82,7 +82,7 @@ use crate::quickfix::{
     QuickFixTaskPlan, QuickFixVersionStore,
 };
 use crate::remote_hsp_sign::{RemoteHspSignScope, RemoteHspSigner};
-use crate::request::{AbcBackendChoice, BuildRequest, NativeTaskRoot};
+use crate::request::{AbcBackendChoice, BuildRequest};
 use crate::source_snapshot::TransformSourceSnapshotBuilder;
 use crate::static_arkts::{StaticArktsCompileInput, StaticArktsCompiler};
 use arkdown::plugins::factory::{
@@ -96,9 +96,8 @@ use arkdown::{
 use crate::package_resolution::{LocalPackageSourceRootInventory, ModulePackageResolutionPlanner};
 use crate::progress::Progress;
 use crate::sdk_checker::{
-    ArkLinterEntryResolver, ArkTsCheckerSelection, SdkEtsCheckerBuildPaths,
-    SdkEtsCheckerEntryCollector, SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder,
-    SdkSemanticCheckStage,
+    ArkTsCheckerSelection, SdkEtsCheckerBuildPaths, SdkEtsCheckerEntryCollector,
+    SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder, SdkSemanticCheckStage,
 };
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 use arkdown_native::{
@@ -283,108 +282,6 @@ impl ModulePackageArtifact {
             .collect()
     }
 }
-
-pub(super) struct BuildTaskLifecycle {
-    remaining_roots: Vec<NativeTaskRoot>,
-    cutoff_enabled: bool,
-}
-
-impl BuildTaskLifecycle {
-    pub(super) fn new(remaining_roots: Vec<NativeTaskRoot>) -> Self {
-        let cutoff_enabled = !remaining_roots.is_empty();
-        Self {
-            remaining_roots,
-            cutoff_enabled,
-        }
-    }
-
-    pub(super) async fn before(
-        &mut self,
-        _module_name: &str,
-        _target_name: Option<&str>,
-        _task_name: &str,
-    ) -> Result<bool> {
-        Ok(true)
-    }
-
-    pub(super) async fn after(
-        &mut self,
-        module_name: &str,
-        target_name: Option<&str>,
-        task_name: &str,
-    ) -> Result<()> {
-        self.complete_root(module_name, target_name, task_name)
-    }
-
-    async fn up_to_date(
-        &mut self,
-        module_name: &str,
-        target_name: Option<&str>,
-        task_name: &str,
-    ) -> Result<()> {
-        self.complete_root(module_name, target_name, task_name)
-    }
-
-    pub(super) async fn marker(
-        &mut self,
-        module_name: &str,
-        target_name: Option<&str>,
-        task_name: &str,
-    ) -> Result<()> {
-        if self.before(module_name, target_name, task_name).await? {
-            self.after(module_name, target_name, task_name).await?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn has_root(
-        &self,
-        module_name: &str,
-        target_name: Option<&str>,
-        task_name: &str,
-    ) -> bool {
-        self.remaining_roots.iter().any(|root| {
-            root.module_name == module_name
-                && root.target_name.as_deref() == target_name
-                && root.task_name == task_name
-        })
-    }
-
-    fn complete_root(
-        &mut self,
-        module_name: &str,
-        target_name: Option<&str>,
-        task_name: &str,
-    ) -> Result<()> {
-        if !self.cutoff_enabled {
-            return Ok(());
-        }
-        self.remaining_roots.retain(|root| {
-            root.module_name != module_name
-                || root.target_name.as_deref() != target_name
-                || root.task_name != task_name
-        });
-        if self.remaining_roots.is_empty() {
-            return Err(NativeTaskCutoffReached.into());
-        }
-        Ok(())
-    }
-
-    pub(super) async fn execute_ninja_build(
-        &self,
-        _module_name: &str,
-        _target_name: &str,
-        collector: &NativeLibCollector<'_>,
-    ) -> Result<()> {
-        collector
-            .build_native()
-            .map_err(|error| anyhow::anyhow!("BuildNativeWithNinja failed: {error}"))
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("selected native hvigor task roots completed")]
-pub(super) struct NativeTaskCutoffReached;
 
 struct WidgetCompileArktsPlan {
     entries: Vec<String>,
@@ -1774,12 +1671,8 @@ mod target_build_execution_plan_tests {
             )
             .expect("empty startup build-profile inventory");
         let args = BuildRequest {
+            action: crate::request::BuildAction::DeviceTest,
             build_target_name: Some("phone".to_string()),
-            native_task_roots: vec![super::NativeTaskRoot {
-                module_name: "entry".to_string(),
-                target_name: None,
-                task_name: "onDeviceTest".to_string(),
-            }],
             ..BuildRequest::default()
         };
         let dependency_target = ModuleTargetSelection::resolve_dependency(

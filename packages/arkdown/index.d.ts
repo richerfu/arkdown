@@ -113,6 +113,8 @@ export interface BuildConfig {
   project?: string
   target?: string
   mode?: string
+  /** Product action. Omitted performs a complete assemble. */
+  action?: 'assemble' | 'hot-reload-compile' | 'hot-reload-build' | 'cold-reload' | 'prepare-quickfix' | 'package-quickfix' | 'sign-quickfix' | 'assemble-quickfix' | 'device-test'
   /**
    * Hvigor-compatible performance analysis mode. Hook event factories are
    * active only for verbose and trace.

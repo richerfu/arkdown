@@ -7,7 +7,6 @@ pub(super) struct CoordinatorBytecodeStageInput<'a> {
     pub(super) config: &'a Arc<ArkdownConfig>,
     pub(super) session: &'a Arc<BuildSession>,
     pub(super) package_plugins: &'a [PackagePlugin],
-    pub(super) task_lifecycle: &'a mut BuildTaskLifecycle,
     pub(super) hot_reload_mode: bool,
     pub(super) coverage_mode: bool,
     pub(super) disable_abc_cache: bool,
@@ -23,7 +22,6 @@ pub(super) struct CoordinatorBytecodeStageInput<'a> {
     pub(super) all_bc_har_deps: &'a [Vec<ByteCodeHarScanEntry>],
     pub(super) bundle_outs: &'a mut Vec<(BundleStageOutput,)>,
     pub(super) widget_bundle_outs: &'a [Option<WidgetCompileArktsOutput>],
-    pub(super) compile_task_active: &'a [bool],
     pub(super) module_obfuscation_contexts: &'a [ModuleObfuscationContext],
     pub(super) pending_bytecode_obfuscations: &'a mut [Option<PendingBytecodeObfuscation>],
 }
@@ -43,7 +41,6 @@ impl BuildCoordinator {
             config,
             session,
             package_plugins,
-            task_lifecycle,
             hot_reload_mode,
             coverage_mode,
             disable_abc_cache,
@@ -59,7 +56,6 @@ impl BuildCoordinator {
             all_bc_har_deps,
             bundle_outs,
             widget_bundle_outs,
-            compile_task_active,
             module_obfuscation_contexts,
             pending_bytecode_obfuscations,
         } = input;
@@ -88,23 +84,8 @@ impl BuildCoordinator {
             .zip(all_bc_har_deps.iter())
             .enumerate()
         {
-            let quickfix_task_plan =
-                QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name);
-            let hot_reload_task_plan =
-                HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name);
-            let compile_task_name = if hot_reload_task_plan.is_some() {
-                "HotReloadArkTS"
-            } else if quickfix_task_plan.is_some() {
-                "ColdReloadArkTS"
-            } else {
-                Self::selected_arkts_compile_task_name(
-                    &args.native_task_roots,
-                    &module.name,
-                    module_target_name,
-                    &config.output_target,
-                    &module.module_type,
-                )
-            };
+            let quickfix_task_plan = QuickFixTaskPlan::for_action(args.action);
+            let hot_reload_task_plan = HotReloadTaskPlan::for_action(args.action);
             let module_layout = ModuleBuildLayout::for_output_target_product(
                 &config.output_target,
                 &module.src_path,
@@ -417,14 +398,6 @@ impl BuildCoordinator {
             }
 
             if quickfix_task_plan.is_some() {
-                if compile_task_active[bundle_index] {
-                    task_lifecycle
-                        .after(&module.name, Some(module_target_name), compile_task_name)
-                        .await?;
-                }
-                task_lifecycle
-                    .up_to_date(&module.name, Some(module_target_name), "BuildJS")
-                    .await?;
                 continue;
             }
 
@@ -665,29 +638,20 @@ impl BuildCoordinator {
                     artifacts.write_hsp_build_config()?;
                 }
             }
-
-            if compile_task_active[bundle_index] {
-                task_lifecycle
-                    .after(&module.name, Some(module_target_name), compile_task_name)
-                    .await?;
-            }
-            if matches!(config.output_target, OutputTarget::Test)
-                && task_lifecycle.has_root(&module.name, None, "UnitTestBuild")
-            {
-                task_lifecycle
-                    .marker(&module.name, None, "UnitTestBuild")
-                    .await?;
-            }
-            if matches!(config.output_target, OutputTarget::Preview) {
-                task_lifecycle
-                    .marker(&module.name, None, "PreviewBuild")
-                    .await?;
-            }
-            task_lifecycle
-                .up_to_date(&module.name, Some(module_target_name), "BuildJS")
-                .await?;
         }
         progress.done();
+
+        if matches!(
+            QuickFixTaskPlan::for_action(args.action).map(QuickFixTaskPlan::boundary),
+            Some(QuickFixTaskBoundary::ColdReload)
+        ) {
+            return Ok(CoordinatorBytecodeStageOutput {
+                early_output: Some(BuildOutput {
+                    artifact_paths: Vec::new(),
+                }),
+                bundle_package_outs: Vec::new(),
+            });
+        }
 
         if hot_reload_mode {
             if args.watch_invalidation.is_some() {
@@ -717,34 +681,6 @@ impl BuildCoordinator {
             }))
             .await?;
 
-            for (
-                bundle_index,
-                (
-                    module,
-                    _manifest,
-                    _loader_json,
-                    _resource_refs,
-                    module_target_name,
-                    _module_config,
-                ),
-            ) in loader_jsons.iter().enumerate()
-            {
-                let Some(plan) =
-                    HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name)
-                else {
-                    continue;
-                };
-                if compile_task_active[bundle_index] {
-                    task_lifecycle
-                        .after(&module.name, Some(module_target_name), "HotReloadArkTS")
-                        .await?;
-                }
-                if plan.boundary() == HotReloadTaskBoundary::Build {
-                    task_lifecycle
-                        .marker(&module.name, None, "HotReloadBuild")
-                        .await?;
-                }
-            }
             return Ok(CoordinatorBytecodeStageOutput {
                 early_output: Some(BuildOutput {
                     artifact_paths: Vec::new(),
