@@ -174,7 +174,7 @@ impl BuildSessionBuilder {
         // Phase 7: Capture source contents once. Transform snapshots and
         // built-in Rolldown adapters borrow this immutable inventory instead
         // of walking or re-reading project/package source trees.
-        let source_inventory_roots = self.source_inventory_roots(&project);
+        let source_inventory_roots = self.source_inventory_roots(&project, &sdk);
         let dependency_source_inventories = self.dependency_source_inventories(&project);
         let source_store = SourceStore::discover_with_preinventoried_roots(
             &source_inventory_roots,
@@ -212,12 +212,19 @@ impl BuildSessionBuilder {
         })
     }
 
-    fn source_inventory_roots(&self, project: &ProjectSnapshot) -> Vec<PathBuf> {
+    fn source_inventory_roots(&self, project: &ProjectSnapshot, sdk: &SdkSnapshot) -> Vec<PathBuf> {
         let mut roots = BTreeSet::new();
         for module in project.modules.values() {
             // Capture every source set below `src/` once. The active target
             // overlay is selected later without another directory walk.
             roots.insert(module.root.join("src"));
+        }
+        // `ConfigResolver.collectSystemApiWhitelist` performs this inventory
+        // only for an obfuscated release build. Capture the same inputs once
+        // at session startup so the ArkGuard stage never walks or re-reads the
+        // selected SDK.
+        if self.config.build_mode.is_release() {
+            roots.extend(sdk.arkguard_source_roots());
         }
         roots.into_iter().collect()
     }

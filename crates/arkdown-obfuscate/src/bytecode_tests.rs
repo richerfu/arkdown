@@ -104,6 +104,9 @@ impl NativeBytecodeFixture {
             resource_table_path: Some(module_root.join("build/generated/r/ResourceTable.ts")),
             use_normalized: true,
             byte_code_har_info: serde_json::json!({"remote-har": {}}),
+            reserved_file_paths: Vec::new(),
+            arkui_reserved_property_names: Vec::new(),
+            arkui_optimized_reserved_property_names: Vec::new(),
         };
         let options = ObfuscationOptions {
             enable_obfuscation: true,

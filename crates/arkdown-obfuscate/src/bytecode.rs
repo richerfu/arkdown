@@ -8,8 +8,8 @@ use oxc_ast::ast::{
     AccessorProperty, BindingIdentifier, Class, ClassElement, Decorator, ExportDeclaration,
     ExportDefaultDeclaration, ExportNamedDeclaration, ExportSpecifier, Expression, Function,
     IdentifierName, IdentifierReference, MethodDefinition, ModuleExportName, PropertyDefinition,
-    PropertyKey, StringLiteral, StructStatement, TSEnumDeclaration, TSInterfaceDeclaration,
-    TSSignature, VariableDeclaration,
+    PropertyKey, StringLiteral, StructStatement, TSEnumDeclaration, TSIndexSignatureName,
+    TSInterfaceDeclaration, TSSignature, VariableDeclaration,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -525,19 +525,18 @@ impl<'a> ReservedNameSourceScanner<'a> {
     }
 
     fn scan(&self) -> Result<BTreeSet<String>, ObfuscationError> {
+        if self.is_pre_define() {
+            if self.rules.strip_system_api_args {
+                return Ok(BTreeSet::new());
+            }
+            return Ok(Self::collect_pre_define_strings(&self.source.source));
+        }
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, &self.source.source, self.source_type()).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Err(ObfuscationError::ParseError {
-                file: self.source.path.display().to_string(),
-                message: parsed
-                    .diagnostics
-                    .into_iter()
-                    .map(|diagnostic| diagnostic.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            });
-        }
+        // `ApiExtractor.parseFile` uses TypeScript's recovery parser and does
+        // not reject declaration diagnostics while building ArkGuard
+        // whitelists. OXC likewise returns a usable recovery AST here; source
+        // compilation owns diagnostics separately.
         let is_declaration = self
             .source
             .path
@@ -556,6 +555,23 @@ impl<'a> ReservedNameSourceScanner<'a> {
                 .extend(AtKeepNameCollector::collect(&parsed.program));
         }
         Ok(collector.names)
+    }
+
+    fn is_pre_define(&self) -> bool {
+        self.source.sdk_declaration
+            && self.source.path.file_name().and_then(|name| name.to_str()) == Some("pre_define.js")
+    }
+
+    /// Mirrors `ApiExtractor.extractStringsFromFile`'s
+    /// `/"([^"]*)"/g` collection without treating the loader implementation's
+    /// identifiers as SDK API names.
+    fn collect_pre_define_strings(source: &str) -> BTreeSet<String> {
+        static DOUBLE_QUOTED: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r#""([^"]*)""#).expect("valid regex"));
+        DOUBLE_QUOTED
+            .captures_iter(source)
+            .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_string()))
+            .collect()
     }
 
     fn supports_at_keep(&self) -> bool {
@@ -879,6 +895,13 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
         if self.collect_all_names || self.decorator_depth > 0 {
             self.names.insert(literal.value.to_string());
         }
+    }
+
+    fn visit_ts_index_signature_name(&mut self, parameter: &TSIndexSignatureName<'a>) {
+        if self.collect_all_names {
+            self.names.insert(parameter.name.to_string());
+        }
+        walk::walk_ts_index_signature_name(self, parameter);
     }
 
     fn visit_export_declaration(&mut self, declaration: &ExportDeclaration<'a>) {

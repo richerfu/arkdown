@@ -76,6 +76,7 @@ rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451
 rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
 rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
 rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
+string_wizard = "=1.2.4"
 
 # NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
 napi = { version = "3.9.1", features = [

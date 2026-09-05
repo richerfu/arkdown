@@ -85,6 +85,29 @@ pub struct SdkSnapshot {
 }
 
 impl SdkSnapshot {
+    /// Source roots and files consumed by ArkGuard's system-API whitelist pass.
+    ///
+    /// Upstream correspondence:
+    /// `ConfigResolver.collectSystemApiWhitelist` scans every `sdkApis` entry,
+    /// the sibling `component` directory, and the ETS loader's
+    /// `lib/pre_define.js` plus `obfuscateWhiteList.json5`. Returning the
+    /// paths from the SDK snapshot lets [`crate::SourceStore`] capture their
+    /// contents once during session startup.
+    pub fn arkguard_source_roots(&self) -> Vec<PathBuf> {
+        let mut roots = std::collections::BTreeSet::new();
+        for api_root in self.global_module_paths.iter() {
+            roots.insert(api_root.clone());
+            let Some(ets_root) = api_root.parent() else {
+                continue;
+            };
+            roots.insert(ets_root.join("component"));
+            let ets_loader = ets_root.join("build-tools").join("ets-loader");
+            roots.insert(ets_loader.join("lib").join("pre_define.js"));
+            roots.insert(ets_loader.join("obfuscateWhiteList.json5"));
+        }
+        roots.into_iter().collect()
+    }
+
     /// Build from the normalized SDK config produced during config loading.
     ///
     /// `arkdown-config` performs SDK discovery and normalizes tool paths once.
