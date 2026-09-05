@@ -11,6 +11,7 @@ thiserror     = { workspace = true }
 walkdir       = { workspace = true }
 rustc-hash    = { workspace = true }
 rayon         = { workspace = true }
+regex         = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 oxc_allocator = { workspace = true }
@@ -24,6 +25,7 @@ oxc_sourcemap = { workspace = true }
 oxc_str       = { workspace = true }
 oxc_syntax    = { workspace = true }
 rolldown_sourcemap = { workspace = true }
+string_wizard = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

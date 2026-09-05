@@ -55,6 +55,9 @@ impl NativeArkguardFixture {
             ),
             use_normalized: true,
             byte_code_har_info: serde_json::json!({}),
+            reserved_file_paths: Vec::new(),
+            arkui_reserved_property_names: Vec::new(),
+            arkui_optimized_reserved_property_names: Vec::new(),
         }
     }
 

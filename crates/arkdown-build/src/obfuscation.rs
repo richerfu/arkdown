@@ -1,6 +1,6 @@
 //! Hvigor-aligned module obfuscation planning for the build application.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -187,12 +187,13 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 sdk_declaration: false,
             });
         }
-        for root in self.session.sdk.global_module_paths.iter() {
+        for root in self.session.sdk.arkguard_source_roots() {
             inventory_sources.extend(
                 self.session
                     .source_store
-                    .text_sources_under(root)
+                    .text_sources_under(&root)
                     .into_iter()
+                    .filter(|(path, _)| Self::is_arkguard_source(path))
                     .map(|(path, source)| ObfuscationSource {
                         path: path.to_path_buf(),
                         source,
@@ -217,6 +218,8 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 self.module.name
             )
         })?;
+        let (arkui_reserved_property_names, arkui_optimized_reserved_property_names) =
+            self.arkui_reserved_property_names()?;
         let adapter = ArkguardAdapterOptions {
             panda_guard_path: self.config.sdk_config.es2abc_path.with_file_name(
                 if cfg!(target_os = "windows") {
@@ -244,6 +247,9 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             resource_table_path: self.generated_resource_table_path(),
             use_normalized: self.loader_json.use_normalized_ohm_url,
             byte_code_har_info: serde_json::to_value(&self.loader_json.byte_code_har_info)?,
+            reserved_file_paths: self.reserved_file_paths(&module_context),
+            arkui_reserved_property_names,
+            arkui_optimized_reserved_property_names,
         };
         Ok((
             adapter,
@@ -259,6 +265,101 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 ],
             },
         ))
+    }
+
+    fn is_arkguard_source(path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        name.ends_with(".d.ts")
+            || name.ends_with(".d.ets")
+            || name.ends_with(".ts")
+            || name.ends_with(".ets")
+            || name.ends_with(".js")
+    }
+
+    /// Reconstruct the exact path families consumed by
+    /// `ConfigResolver.collectResevedFileNameInIDEConfig` from immutable
+    /// loader, module, and package snapshots.
+    fn reserved_file_paths(&self, module_context: &ModuleCompileContext) -> Vec<String> {
+        let mut paths = BTreeSet::new();
+        paths.extend(self.loader_json.compile_entry.iter().cloned());
+        paths.extend(self.loader_json.form_entry_sources.iter().cloned());
+        paths.extend(self.loader_json.runtime_entry_sources.iter().cloned());
+        paths.extend(self.loader_json.page_entry_sources.iter().cloned());
+        paths.extend(self.loader_json.workers.iter().cloned());
+        if let Some(path) = self.generated_resource_table_path() {
+            paths.insert(path.to_string_lossy().into_owned());
+        }
+        if !self.loader_json.module_path_map.is_empty() {
+            for (name, path) in &self.loader_json.module_path_map {
+                paths.insert(name.clone());
+                paths.insert(path.clone());
+            }
+        }
+        if let Some(package) = module_context.module.package.as_ref() {
+            paths.extend(package.package_json.main.iter().cloned());
+            paths.extend(package.package_json.types.iter().cloned());
+        }
+        if let Some(src_entry) = module_context
+            .module
+            .module_json_value
+            .as_deref()
+            .and_then(|value| value.pointer("/module/srcEntry"))
+            .and_then(serde_json::Value::as_str)
+        {
+            paths.insert(src_entry.to_string());
+        }
+        paths.insert(self.loader_json.module_root_path.clone());
+        paths.insert(self.loader_json.cache_path.clone());
+        if matches!(
+            self.module.module_type,
+            arkdown_core::OhosModuleType::Shared
+        ) || self.loader_json.byte_code_har == Some(true)
+        {
+            paths.insert(self.loader_json.ace_module_build.clone());
+            paths.insert("etsFortgz".to_string());
+        }
+        paths.into_iter().collect()
+    }
+
+    /// Load the two ArkUI property groups from the startup source snapshot.
+    /// `ConfigResolver.collectUIApiWhitelist` always uses the base group and
+    /// adds the optimized group only for `strip-system-api-args`.
+    fn arkui_reserved_property_names(&self) -> Result<(Vec<String>, Vec<String>)> {
+        let mut reserved = BTreeSet::new();
+        let mut optimized = BTreeSet::new();
+        for path in self.session.sdk.arkguard_source_roots() {
+            if path.file_name().and_then(|name| name.to_str()) != Some("obfuscateWhiteList.json5") {
+                continue;
+            }
+            let Some(source) = self.session.source_store.source_by_path(&path) else {
+                continue;
+            };
+            let Some(arkdown_session::SourceContent::Text(content)) = source.cached_content()
+            else {
+                continue;
+            };
+            let value: serde_json::Value = json5::from_str(content)?;
+            Self::extend_string_array(&mut reserved, &value, "ReservedPropertyNames");
+            Self::extend_string_array(&mut optimized, &value, "OptimizedReservedPropertyNames");
+        }
+        Ok((
+            reserved.into_iter().collect(),
+            optimized.into_iter().collect(),
+        ))
+    }
+
+    fn extend_string_array(output: &mut BTreeSet<String>, value: &serde_json::Value, field: &str) {
+        if let Some(values) = value.get(field).and_then(serde_json::Value::as_array) {
+            output.extend(
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
     }
 
     pub fn bytecode_input(
