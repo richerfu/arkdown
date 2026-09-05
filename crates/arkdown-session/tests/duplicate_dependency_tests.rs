@@ -119,6 +119,7 @@ fn graph(host_module: &str, remote_har: &Path) -> DependencyGraphSnapshot {
         package_root: Some(remote_har.to_path_buf()),
         package: None,
         module_profile: None,
+        compile_inputs: Default::default(),
         node_type: DependencyNodeType::SourceHar,
         is_runtime_only: false,
         is_dynamic: false,

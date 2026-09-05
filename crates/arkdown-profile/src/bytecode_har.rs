@@ -10,7 +10,9 @@ use arkdown_path::{
 };
 #[cfg(test)]
 use arkdown_path::{ArtifactPath, SpecifierKind};
-use rustc_hash::{FxHashMap, FxHashSet};
+#[cfg(test)]
+use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
 // ---------------------------------------------------------------------------
 // oh-package.json5 subset for ByteCode HAR detection
@@ -1076,6 +1078,77 @@ impl LoaderByteCodeHarFields {
     }
 
     /// Build hvigor's `loader.json#dynamicImportLibInfo` entries.
+    pub fn collect_dynamic_import_lib_info_from_graph(
+        module_name: &str,
+        dynamic_dep_names: &[String],
+        graph: &arkdown_session::DependencyGraphSnapshot,
+    ) -> Vec<(String, DynamicImportLibEntry)> {
+        use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
+
+        let mut results = Vec::new();
+        for dep_name in dynamic_dep_names {
+            let Some(edge) = graph
+                .edges
+                .iter()
+                .find(|edge| edge.alias == *dep_name || edge.package_name == *dep_name)
+            else {
+                continue;
+            };
+            let Some(node) = graph.nodes.get(&edge.package_name) else {
+                continue;
+            };
+            let Some(package_root) = node.package_root.as_ref() else {
+                continue;
+            };
+            let package_name = node
+                .package
+                .as_ref()
+                .map(|package| package.name.as_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&node.package_name);
+            let resolved_module_name = if matches!(
+                node.node_type,
+                DependencyNodeType::SharedHsp | DependencyNodeType::IntegratedHsp
+            ) {
+                node.module_profile
+                    .as_ref()
+                    .and_then(|profile| profile.module_name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| package_name.to_string())
+            } else {
+                package_name.to_string()
+            };
+            let entry_file_path = node
+                .compile_inputs
+                .dynamic_import_entry_file
+                .as_ref()
+                .map(|path| ByteCodeHarPathText::new(path).string())
+                .unwrap_or_default();
+            let is_local_dependency = edge
+                .version_spec
+                .as_deref()
+                .is_some_and(|spec| PackageDependencySpec::new(spec).is_file_dependency());
+
+            results.push((
+                dep_name.clone(),
+                DynamicImportLibEntry {
+                    entry_file_path,
+                    module_name: resolved_module_name,
+                    is_local_dependency,
+                    pkg_path: ByteCodeHarPathText::new(package_root).string(),
+                    host_modules_info: vec![HostModuleInfo {
+                        host_dependency_name: dep_name.clone(),
+                        host_module_name: module_name.to_string(),
+                    }],
+                },
+            ));
+        }
+        results
+    }
+
+    /// Test-only filesystem fixture helper for synthetic layouts that do not
+    /// construct a session dependency graph.
+    #[cfg(test)]
     pub fn collect_dynamic_import_lib_info(
         module_name: &str,
         dynamic_dep_names: &[String],
@@ -1365,6 +1438,7 @@ pub struct HostModuleInfo {
     pub host_module_name: String,
 }
 
+#[cfg(test)]
 impl DynamicImportLibEntry {
     // -----------------------------------------------------------------------
     // Private resolution helpers

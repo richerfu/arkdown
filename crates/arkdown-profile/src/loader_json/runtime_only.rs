@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownConfig, ModuleConfig};
 use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
-use indexmap::IndexMap;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use super::to_absolute_path_string;
 use crate::layout::ProfileModuleLayout;
@@ -12,25 +11,34 @@ use crate::layout::ProfileModuleLayout;
 pub(super) struct RuntimeOnlyCollector<'a> {
     config: &'a ArkdownConfig,
     module_cfg: &'a ModuleConfig,
-    declared_dependency_roots: Vec<PathBuf>,
-    local_dependency_names: FxHashSet<String>,
+    graph: &'a arkdown_session::DependencyGraphSnapshot,
 }
 
 impl<'a> RuntimeOnlyCollector<'a> {
-    pub(super) fn new(config: &'a ArkdownConfig, module_cfg: &'a ModuleConfig) -> Self {
-        let mut collector = Self {
+    pub(super) fn new(
+        config: &'a ArkdownConfig,
+        module_cfg: &'a ModuleConfig,
+        graph: &'a arkdown_session::DependencyGraphSnapshot,
+    ) -> Self {
+        Self {
             config,
             module_cfg,
-            declared_dependency_roots: Vec::new(),
-            local_dependency_names: FxHashSet::default(),
-        };
-        collector.declared_dependency_roots = collector.discover_declared_dependency_roots();
-        collector.local_dependency_names = collector.collect_local_dependency_names();
-        collector
+            graph,
+        }
     }
 
     pub(super) fn collect_dynamic_import_dep_names(&self) -> Vec<String> {
-        let mut names = self.read_dynamic_dep_names(&self.module_cfg.src_path);
+        let mut names = self
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind
+                    == arkdown_session::dependency_graph::snapshot::DependencyEdgeKind::DynamicDependency
+                    && edge.issuer_root == self.graph.host_root
+            })
+            .map(|edge| edge.alias.clone())
+            .collect::<Vec<_>>();
         names.extend(
             self.read_module_runtime_only(&self.module_cfg.src_path)
                 .packages,
@@ -45,7 +53,13 @@ impl<'a> RuntimeOnlyCollector<'a> {
         {
             names.extend(runtime_only.packages.iter().cloned());
         }
-        names.extend(self.read_dependency_runtime_only_package_names());
+        names.extend(self.graph.edges.iter().filter_map(|edge| {
+            self.graph
+                .nodes
+                .get(&edge.package_name)
+                .filter(|node| node.is_runtime_only)
+                .map(|_| edge.alias.clone())
+        }));
         let mut seen = FxHashSet::default();
         names.retain(|name| seen.insert(name.clone()));
         names
@@ -79,12 +93,22 @@ impl<'a> RuntimeOnlyCollector<'a> {
             self.collect_source_config_entry(&self.module_cfg.src_path, source, &mut files);
         }
 
-        // D3: also collect sources from dependency metadata.runtimeOnly.sources.
-        // Matches hvigor's processIndirectDependency() over the dependency graph.
-        for pkg_dir in &self.declared_dependency_roots {
-            let rt = self.read_pkg_runtime_only(pkg_dir);
-            for source in &rt.sources {
-                self.collect_source_config_entry(pkg_dir, source, &mut files);
+        // D3: dependency runtime-only metadata follows the immutable graph's
+        // declared BFS order. Package manifests were parsed at session startup.
+        let mut seen_roots = FxHashSet::default();
+        for edge in &self.graph.edges {
+            if edge.kind
+                != arkdown_session::dependency_graph::snapshot::DependencyEdgeKind::Dependency
+                || edge.version_spec.is_none()
+                || !seen_roots.insert(edge.package_root.clone())
+            {
+                continue;
+            }
+            let Some(node) = self.graph.nodes.get(&edge.package_name) else {
+                continue;
+            };
+            for source in Self::dependency_runtime_only_sources(node) {
+                self.collect_source_config_entry(&edge.package_root, &source, &mut files);
             }
         }
 
@@ -107,28 +131,29 @@ impl<'a> RuntimeOnlyCollector<'a> {
                 .unwrap_or_default(),
         );
 
-        // D3: also include runtimeOnly.packages from dependency metadata
-        // (matches hvigor's processIndirectDependency() over the dependency graph).
-        for pkg_dir in &self.declared_dependency_roots {
-            packages.extend(self.read_pkg_runtime_only_packages(pkg_dir));
-        }
+        packages.extend(self.graph.edges.iter().filter_map(|edge| {
+            self.graph
+                .nodes
+                .get(&edge.package_name)
+                .filter(|node| node.is_runtime_only)
+                .map(|_| edge.alias.clone())
+        }));
 
         let mut files = Vec::new();
         let mut visited: FxHashSet<String> = FxHashSet::default();
-        // BFS over runtimeOnly package list (handles transitive packages).
-        let mut queue: VecDeque<String> = packages.into_iter().collect();
-        while let Some(package) = queue.pop_front() {
+        for package in packages {
             if !visited.insert(package.clone()) {
                 continue;
             }
-            let Some(pkg_dir) = self.resolve_oh_module_dir(&package) else {
+            let Some(node) = self.dependency_node(&package) else {
                 continue;
             };
-            if !self.should_exclude_remote_har(&package, &pkg_dir) {
-                files.extend(self.collect_package_source_files_from(&pkg_dir));
+            let Some(package_root) = node.package_root.as_ref() else {
+                continue;
+            };
+            if !self.should_exclude_remote_har(&package, node) {
+                files.extend(self.collect_package_source_files_from(package_root));
             }
-            // Collect transitive runtimeOnly.packages from this dep.
-            queue.extend(self.read_pkg_runtime_only_packages(&pkg_dir));
         }
         self.dedupe_paths(&mut files);
         files
@@ -137,27 +162,6 @@ impl<'a> RuntimeOnlyCollector<'a> {
     pub(super) fn dedupe_paths(&self, files: &mut Vec<PathBuf>) {
         let mut seen = FxHashSet::default();
         files.retain(|path| seen.insert(to_absolute_path_string(path)));
-    }
-
-    /// Read `dynamicDependencies` package names from `oh-package.json5`.
-    ///
-    /// Returns an empty vec if the file is absent or unparseable.
-    fn read_dynamic_dep_names(&self, module_root: &Path) -> Vec<String> {
-        let path = module_root.join("oh-package.json5");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return vec![];
-        };
-
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct PkgDynDeps {
-            #[serde(default)]
-            dynamic_dependencies: FxHashMap<String, String>,
-        }
-
-        json5::from_str::<PkgDynDeps>(&content)
-            .map(|p| p.dynamic_dependencies.into_keys().collect())
-            .unwrap_or_default()
     }
 
     fn read_module_runtime_only(&self, module_root: &Path) -> RuntimeOnlyLists {
@@ -204,133 +208,6 @@ impl<'a> RuntimeOnlyCollector<'a> {
             .unwrap_or_default()
     }
 
-    fn read_dependency_runtime_only_package_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        for pkg_dir in &self.declared_dependency_roots {
-            names.extend(self.read_pkg_runtime_only_packages(pkg_dir));
-        }
-        names
-    }
-
-    fn read_package_dep_names(&self, module_root: &Path) -> Vec<String> {
-        let path = module_root.join("oh-package.json5");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return vec![];
-        };
-
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct PkgDeps {
-            #[serde(default)]
-            dependencies: IndexMap<String, String>,
-        }
-
-        json5::from_str::<PkgDeps>(&content)
-            .map(|p| p.dependencies.into_keys().collect())
-            .unwrap_or_default()
-    }
-
-    fn read_pkg_runtime_only(&self, pkg_dir: &Path) -> PkgRuntimeOnly {
-        let path = pkg_dir.join("oh-package.json5");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return PkgRuntimeOnly {
-                packages: vec![],
-                sources: vec![],
-            };
-        };
-
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct PkgJson {
-            #[serde(default)]
-            metadata: PkgMetadata,
-        }
-
-        #[derive(Default, serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct PkgMetadata {
-            #[serde(default)]
-            runtime_only: PkgRuntimeOnlyConfig,
-        }
-
-        #[derive(Default, serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct PkgRuntimeOnlyConfig {
-            #[serde(default)]
-            packages: Vec<String>,
-            #[serde(default)]
-            sources: Vec<String>,
-        }
-
-        json5::from_str::<PkgJson>(&content)
-            .map(|p| PkgRuntimeOnly {
-                packages: p.metadata.runtime_only.packages,
-                sources: p.metadata.runtime_only.sources,
-            })
-            .unwrap_or(PkgRuntimeOnly {
-                packages: vec![],
-                sources: vec![],
-            })
-    }
-
-    fn read_pkg_runtime_only_packages(&self, pkg_dir: &Path) -> Vec<String> {
-        self.read_pkg_runtime_only(pkg_dir).packages
-    }
-
-    fn resolve_oh_module_dir(&self, dep_name: &str) -> Option<PathBuf> {
-        for base in &[
-            self.module_cfg.src_path.join("oh_modules"),
-            self.config.project_root.join("oh_modules"),
-        ] {
-            let candidate = base.join(dep_name);
-            if candidate.exists() && candidate.is_dir() {
-                return Some(candidate);
-            }
-        }
-        None
-    }
-
-    fn discover_declared_dependency_roots(&self) -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        let mut visited: FxHashSet<String> = FxHashSet::default();
-        let mut queue: VecDeque<PathBuf> = VecDeque::new();
-        queue.push_back(self.module_cfg.src_path.to_path_buf());
-        if self.config.project_root != self.module_cfg.src_path {
-            queue.push_back(self.config.project_root.to_path_buf());
-        }
-
-        while let Some(pkg_root) = queue.pop_front() {
-            for dep_name in self.read_package_dep_names(&pkg_root) {
-                let Some(dep_root) = self.resolve_declared_dep_dir(&dep_name, &pkg_root) else {
-                    continue;
-                };
-
-                if !visited.insert(to_absolute_path_string(&dep_root)) {
-                    continue;
-                }
-
-                roots.push(dep_root.clone());
-                queue.push_back(dep_root);
-            }
-        }
-
-        roots
-    }
-
-    fn resolve_declared_dep_dir(&self, dep_name: &str, issuer_root: &Path) -> Option<PathBuf> {
-        for base in [
-            issuer_root.join("oh_modules"),
-            self.module_cfg.src_path.join("oh_modules"),
-            self.config.project_root.join("oh_modules"),
-        ] {
-            let candidate = base.join(dep_name);
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-        }
-        None
-    }
-
     fn collect_package_source_files_from(&self, pkg_dir: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         for stem in ["Index", "index"] {
@@ -349,12 +226,45 @@ impl<'a> RuntimeOnlyCollector<'a> {
         files
     }
 
+    fn dependency_node(
+        &self,
+        package_name_or_alias: &str,
+    ) -> Option<&arkdown_session::dependency_graph::snapshot::DependencyNodeSnapshot> {
+        self.graph
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.alias == package_name_or_alias || edge.package_name == package_name_or_alias
+            })
+            .and_then(|edge| self.graph.nodes.get(&edge.package_name))
+    }
+
+    fn dependency_runtime_only_sources(
+        node: &arkdown_session::dependency_graph::snapshot::DependencyNodeSnapshot,
+    ) -> Vec<String> {
+        node.package
+            .as_ref()
+            .and_then(|package| package.package_json.extra.get("metadata"))
+            .and_then(|metadata| metadata.get("runtimeOnly"))
+            .and_then(|runtime_only| runtime_only.get("sources"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Mirrors
     /// `exclude-remote-dynamic-import.ts#isNeedToExcludeHar`: an
     /// `excludePackages` entry suppresses source collection only for remote
     /// source HARs. Local project modules and non-HAR packages remain compile
     /// inputs.
-    fn should_exclude_remote_har(&self, package_name: &str, package_root: &Path) -> bool {
+    fn should_exclude_remote_har(
+        &self,
+        package_name: &str,
+        node: &arkdown_session::dependency_graph::snapshot::DependencyNodeSnapshot,
+    ) -> bool {
         let excluded = self
             .config
             .product
@@ -369,33 +279,19 @@ impl<'a> RuntimeOnlyCollector<'a> {
                     .any(|excluded| excluded == package_name)
             });
         excluded
-            && self.is_source_har(package_root)
-            && !self.is_local_dependency(package_name, package_root)
+            && node.node_type
+                == arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar
+            && !self.is_local_dependency(package_name, node)
     }
 
-    fn is_source_har(&self, package_root: &Path) -> bool {
-        for file in ["src/main/module.json5", "src/main/module.json"] {
-            let path = package_root.join(file);
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            #[derive(serde::Deserialize)]
-            struct Profile {
-                module: Module,
-            }
-            #[derive(serde::Deserialize)]
-            struct Module {
-                #[serde(rename = "type", default)]
-                type_: String,
-            }
-            if let Ok(profile) = json5::from_str::<Profile>(&content) {
-                return profile.module.type_ == "har";
-            }
-        }
-        false
-    }
-
-    fn is_local_dependency(&self, package_name: &str, package_root: &Path) -> bool {
+    fn is_local_dependency(
+        &self,
+        package_name: &str,
+        node: &arkdown_session::dependency_graph::snapshot::DependencyNodeSnapshot,
+    ) -> bool {
+        let Some(package_root) = node.package_root.as_ref() else {
+            return false;
+        };
         let canonical_root = canonicalize_or_owned(package_root);
         if self
             .config
@@ -405,44 +301,13 @@ impl<'a> RuntimeOnlyCollector<'a> {
         {
             return true;
         }
-        self.local_dependency_names.contains(package_name)
-    }
-
-    fn collect_local_dependency_names(&self) -> FxHashSet<String> {
-        let mut roots = vec![
-            self.module_cfg.src_path.clone(),
-            self.config.project_root.clone(),
-        ];
-        roots.extend(self.declared_dependency_roots.iter().cloned());
-        roots
-            .iter()
-            .flat_map(|root| self.local_dependency_specs(root))
-            .filter_map(|(name, specifier)| specifier.starts_with("file:").then_some(name))
-            .collect()
-    }
-
-    fn local_dependency_specs(&self, root: &Path) -> Vec<(String, String)> {
-        let Ok(content) = std::fs::read_to_string(root.join("oh-package.json5")) else {
-            return Vec::new();
-        };
-        #[derive(serde::Deserialize)]
-        struct Manifest {
-            #[serde(default)]
-            dependencies: IndexMap<String, String>,
-            #[serde(default, rename = "devDependencies")]
-            dev_dependencies: IndexMap<String, String>,
-            #[serde(default, rename = "dynamicDependencies")]
-            dynamic_dependencies: IndexMap<String, String>,
-        }
-        let Ok(manifest) = json5::from_str::<Manifest>(&content) else {
-            return Vec::new();
-        };
-        manifest
-            .dependencies
-            .into_iter()
-            .chain(manifest.dev_dependencies)
-            .chain(manifest.dynamic_dependencies)
-            .collect()
+        self.graph.edges.iter().any(|edge| {
+            (edge.alias == package_name || edge.package_root == *package_root)
+                && edge
+                    .version_spec
+                    .as_deref()
+                    .is_some_and(|specifier| specifier.starts_with("file:"))
+        })
     }
 
     fn collect_dynamic_import_source_files(&self, root: &Path) -> Vec<PathBuf> {
@@ -498,12 +363,6 @@ impl<'a> RuntimeOnlyCollector<'a> {
 
 #[derive(Default)]
 struct RuntimeOnlyLists {
-    packages: Vec<String>,
-    sources: Vec<String>,
-}
-
-/// Combined runtimeOnly config from a package's `oh-package.json5#metadata.runtimeOnly`.
-struct PkgRuntimeOnly {
     packages: Vec<String>,
     sources: Vec<String>,
 }

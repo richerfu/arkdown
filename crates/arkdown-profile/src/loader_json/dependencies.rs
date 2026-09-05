@@ -27,6 +27,8 @@ impl LoaderJson {
             module_name: host_module.name.clone(),
             package_name: Self::dependency_package_name(&host_module.src_path),
             src_path: host_module.src_path.clone(),
+            router_map_ref: router_map_ref.map(str::to_string),
+            profile_source: RouterMapProfileSource::Disk,
         };
         router_maps.extend(Self::read_loader_router_map(
             &config.product.bundle_name,
@@ -37,15 +39,14 @@ impl LoaderJson {
         ));
 
         for router_module in Self::dependency_router_map_modules(config, host_module, graph) {
-            let Some(router_map_ref) = Self::read_module_router_map_ref(&router_module.src_path)
-            else {
+            let Some(router_map_ref) = router_module.router_map_ref.as_deref() else {
                 continue;
             };
             router_maps.extend(Self::read_loader_router_map(
                 &config.product.bundle_name,
                 &host_module.name,
                 &router_module,
-                Some(&router_map_ref),
+                Some(router_map_ref),
                 pkg_contexts.and_then(|contexts| contexts.get(&router_module.package_name)),
             ));
         }
@@ -71,6 +72,8 @@ impl LoaderJson {
                 module_name: module_cfg.name.clone(),
                 package_name: Self::dependency_package_name(&module_cfg.src_path),
                 src_path: module_cfg.src_path.clone(),
+                router_map_ref: Self::read_module_router_map_ref(&module_cfg.src_path),
+                profile_source: RouterMapProfileSource::Disk,
             });
         }
 
@@ -85,8 +88,10 @@ impl LoaderJson {
             if !seen_roots.insert(root) {
                 continue;
             }
-            let module_name = Self::read_dependency_module_json(package_root)
-                .and_then(|module_json| module_json.module.name)
+            let module_name = node
+                .module_profile
+                .as_ref()
+                .and_then(|profile| profile.module_name.clone())
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| {
                     ModuleSpecifierText::new(&node.package_name)
@@ -98,6 +103,13 @@ impl LoaderJson {
                 module_name,
                 package_name: node.package_name.clone(),
                 src_path: package_root.clone(),
+                router_map_ref: node
+                    .module_profile
+                    .as_ref()
+                    .and_then(|profile| profile.router_map.clone()),
+                profile_source: RouterMapProfileSource::Session(
+                    node.compile_inputs.router_map_profile.clone(),
+                ),
             });
         }
 
@@ -168,12 +180,19 @@ impl LoaderJson {
         };
 
         let module_layout = ProfileModuleLayout::new(&module_cfg.src_path);
-        let path = module_layout.profile_json(profile_name);
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return vec![];
-        };
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) else {
-            return vec![];
+        let mut value = match &module_cfg.profile_source {
+            RouterMapProfileSource::Disk => {
+                let path = module_layout.profile_json(profile_name);
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    return vec![];
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                    return vec![];
+                };
+                value
+            }
+            RouterMapProfileSource::Session(Some(value)) => value.as_ref().clone(),
+            RouterMapProfileSource::Session(None) => return vec![],
         };
 
         let Some(entries) = value
@@ -256,15 +275,14 @@ impl LoaderJson {
     ) -> Vec<PathBuf> {
         let mut files = Vec::new();
         for router_module in Self::dependency_router_map_modules(config, host_module, graph) {
-            let Some(router_map_ref) = Self::read_module_router_map_ref(&router_module.src_path)
-            else {
+            let Some(router_map_ref) = router_module.router_map_ref.as_deref() else {
                 continue;
             };
             let router_map = Self::read_loader_router_map(
                 &config.product.bundle_name,
                 &host_module.name,
                 &router_module,
-                Some(&router_map_ref),
+                Some(router_map_ref),
                 pkg_contexts.and_then(|contexts| contexts.get(&router_module.package_name)),
             );
             files.extend(router_map.iter().filter_map(|entry| {
@@ -280,9 +298,14 @@ impl LoaderJson {
     pub(super) fn collect_dependency_ability_source_files(
         graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<PathBuf> {
-        Self::collect_dependency_source_har_roots(graph)
-            .into_iter()
-            .flat_map(|dep_root| Self::collect_dependency_module_ability_source_files(&dep_root))
+        graph
+            .nodes
+            .values()
+            .filter(|node| {
+                node.node_type
+                    == arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar
+            })
+            .flat_map(|node| node.compile_inputs.ability_source_files.iter().cloned())
             .collect()
     }
 
@@ -291,102 +314,20 @@ impl LoaderJson {
     ) -> Vec<PathBuf> {
         let mut files = Vec::new();
         let mut seen = FxHashSet::default();
-        for dep_root in Self::collect_dependency_source_har_roots(graph) {
-            for worker in Self::collect_dependency_worker_entries(&dep_root) {
-                let path = dep_root.join(arkdown_path::strip_relative_prefix(&worker));
-                if Self::is_existing_loader_code_file(&path)
-                    && seen.insert(to_absolute_path_string(&path))
-                {
-                    files.push(path);
+        for node in graph.nodes.values().filter(|node| {
+            node.node_type
+                == arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar
+        }) {
+            for path in &node.compile_inputs.worker_source_files {
+                if seen.insert(to_absolute_path_string(path)) {
+                    files.push(path.clone());
                 }
             }
         }
         files
     }
 
-    pub(super) fn collect_dependency_worker_entries(dep_root: &Path) -> Vec<String> {
-        let mut workers = Vec::new();
-        if let Some(module_json) = Self::read_dependency_module_json(dep_root) {
-            workers.extend(
-                module_json
-                    .module
-                    .extension_abilities
-                    .iter()
-                    .filter_map(|ability| {
-                        (ability.extension_type.as_deref() == Some("workScheduler"))
-                            .then(|| ability.src_entry.clone())
-                            .flatten()
-                    }),
-            );
-        }
-        workers.extend(Self::read_dependency_package_workers(dep_root));
-        workers.extend(Self::read_dependency_build_profile_workers(dep_root));
-
-        let mut seen = FxHashSet::default();
-        workers.retain(|worker| seen.insert(worker.clone()));
-        workers
-    }
-
-    pub(super) fn read_dependency_package_workers(dep_root: &Path) -> Vec<String> {
-        let path = dep_root.join("oh-package.json5");
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return vec![];
-        };
-        #[derive(Deserialize)]
-        struct PackageWorkers {
-            #[serde(default)]
-            metadata: PackageWorkerMetadata,
-        }
-        #[derive(Default, Deserialize)]
-        struct PackageWorkerMetadata {
-            #[serde(default)]
-            workers: Vec<String>,
-        }
-        json5::from_str::<PackageWorkers>(&content)
-            .map(|package| package.metadata.workers)
-            .unwrap_or_default()
-    }
-
-    pub(super) fn read_dependency_build_profile_workers(dep_root: &Path) -> Vec<String> {
-        let path = dep_root.join("build-profile.json5");
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return vec![];
-        };
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct BuildProfileWorkers {
-            #[serde(default)]
-            build_option: BuildProfileOption,
-        }
-        #[derive(Default, Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct BuildProfileOption {
-            #[serde(default)]
-            source_option: BuildProfileSourceOption,
-        }
-        #[derive(Default, Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct BuildProfileSourceOption {
-            #[serde(default)]
-            workers: Vec<String>,
-        }
-        json5::from_str::<BuildProfileWorkers>(&content)
-            .map(|profile| profile.build_option.source_option.workers)
-            .unwrap_or_default()
-    }
-
     pub(super) fn collect_dependency_insight_intent_src_entries(
-        graph: &arkdown_session::DependencyGraphSnapshot,
-    ) -> Vec<PathBuf> {
-        Self::collect_dependency_source_har_roots(graph)
-            .into_iter()
-            .flat_map(|dep_root| {
-                Self::collect_dependency_module_insight_intent_src_entries(&dep_root)
-            })
-            .collect()
-    }
-
-    pub(super) fn collect_dependency_source_har_roots(
         graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Vec<PathBuf> {
         graph
@@ -396,97 +337,18 @@ impl LoaderJson {
                 node.node_type
                     == arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar
             })
-            .filter_map(|node| node.package_root.clone())
-            .collect()
-    }
-
-    pub(super) fn collect_dependency_module_ability_source_files(dep_root: &Path) -> Vec<PathBuf> {
-        let Some(module_json) = Self::read_dependency_module_json(dep_root) else {
-            return vec![];
-        };
-
-        let src_main = ProfileModuleLayout::new(dep_root).src_main();
-        module_json
-            .module
-            .abilities
-            .iter()
-            .chain(module_json.module.extension_abilities.iter())
-            .filter_map(|ability| ability.src_entry.as_deref())
-            .map(|src_entry| src_main.join(arkdown_path::strip_relative_prefix(src_entry)))
-            .filter(|path| Self::is_existing_loader_code_file(path))
-            .collect()
-    }
-
-    pub(super) fn collect_dependency_module_insight_intent_src_entries(
-        dep_root: &Path,
-    ) -> Vec<PathBuf> {
-        let mut entries = Vec::new();
-        for resource_dir in Self::dependency_resource_dirs(dep_root) {
-            let profile_path = resource_dir
-                .join("base")
-                .join("profile")
-                .join("insight_intent.json");
-            let Ok(content) = std::fs::read_to_string(profile_path) else {
-                continue;
-            };
-
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct InsightIntentProfile {
-                #[serde(default)]
-                insight_intents_src_entry: Vec<InsightIntentEntry>,
-            }
-
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct InsightIntentEntry {
-                src_entry: Option<String>,
-            }
-
-            let Ok(profile) = json5::from_str::<InsightIntentProfile>(&content) else {
-                continue;
-            };
-            let src_main = ProfileModuleLayout::new(dep_root).src_main();
-            entries.extend(
-                profile
-                    .insight_intents_src_entry
+            .flat_map(|node| {
+                node.compile_inputs
+                    .insight_intent_source_files
                     .iter()
-                    .filter_map(|entry| entry.src_entry.as_deref())
-                    .map(|src_entry| src_main.join(arkdown_path::strip_relative_prefix(src_entry)))
-                    .filter(|path| Self::is_existing_loader_code_file(path)),
-            );
-        }
-        entries
-    }
-
-    pub(super) fn dependency_resource_dirs(dep_root: &Path) -> Vec<PathBuf> {
-        let directories = Self::read_dependency_package_json(dep_root)
-            .and_then(|pkg| pkg.metadata)
-            .and_then(|metadata| metadata.resource)
-            .map(|resource| resource.directories)
-            .unwrap_or_default();
-
-        if directories.is_empty() {
-            return vec![ProfileModuleLayout::new(dep_root).resources_root()];
-        }
-
-        directories
-            .into_iter()
-            .map(|directory| dep_root.join(arkdown_path::strip_relative_prefix(&directory)))
+                    .cloned()
+            })
             .collect()
     }
 
     pub(super) fn read_dependency_package_json(pkg_root: &Path) -> Option<DependencyPackageJson> {
         let content = std::fs::read_to_string(pkg_root.join("oh-package.json5")).ok()?;
         json5::from_str::<DependencyPackageJson>(&content).ok()
-    }
-
-    pub(super) fn read_dependency_module_json(pkg_root: &Path) -> Option<DependencyModuleJson> {
-        let layout = ProfileModuleLayout::new(pkg_root);
-        [layout.module_json5(), layout.module_json()]
-            .into_iter()
-            .find_map(|path| std::fs::read_to_string(path).ok())
-            .and_then(|content| json5::from_str::<DependencyModuleJson>(&content).ok())
     }
 
     pub(super) fn loader_build_config_path(
@@ -883,11 +745,16 @@ impl LoaderJson {
             let Some(pkg_dir) = node.package_root.as_ref() else {
                 continue;
             };
-            let Some(parsed) = Self::read_dependency_module_json(pkg_dir) else {
+            let Some(module_profile) = node.module_profile.as_ref() else {
                 continue;
             };
             let dep_name = &node.package_name;
-            let entry_rel = Self::dep_entry_rel_path(pkg_dir);
+            let entry_rel = Self::dep_entry_rel_path(
+                pkg_dir,
+                node.package
+                    .as_ref()
+                    .and_then(|package| package.package_json.main.as_deref()),
+            );
             let ohm_url = if use_normalized {
                 let Some(context) = pkg_contexts
                     .as_ref()
@@ -900,9 +767,9 @@ impl LoaderJson {
                 if is_har_map_dependency {
                     continue;
                 }
-                let module_name = parsed
-                    .module
-                    .name
+                let module_name = module_profile
+                    .module_name
+                    .clone()
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| {
                         ModuleSpecifierText::new(dep_name)
@@ -968,27 +835,40 @@ impl LoaderJson {
             let Some(package_root) = node.package_root.as_ref() else {
                 continue;
             };
-            let package = Self::read_dependency_package_json(package_root);
-            let module = Self::read_dependency_module_json(package_root);
             dependencies.push(PkgContextDependencyInput {
                 alias: node.alias.clone(),
                 package_name: node.package_name.clone(),
-                version_spec: package.as_ref().map(|pkg| pkg.version.clone()),
+                version_spec: node.package.as_ref().map(|package| package.version.clone()),
                 package_root: Some(package_root.clone()),
-                node_entry: package
+                node_entry: node
+                    .package
                     .as_ref()
-                    .and_then(|pkg| pkg.main.clone())
+                    .and_then(|package| package.package_json.main.clone())
                     .or_else(|| Some("index.js".to_string())),
-                main: package
-                    .as_ref()
-                    .and_then(|pkg| pkg.main.clone().or_else(|| pkg.types.clone())),
+                main: node.package.as_ref().and_then(|package| {
+                    package
+                        .package_json
+                        .main
+                        .clone()
+                        .or_else(|| package.package_json.types.clone())
+                }),
                 kind,
-                module_name: module
+                module_name: node
+                    .module_profile
                     .as_ref()
-                    .and_then(|module| module.module.name.clone()),
-                bundle_name: None,
-                bundle_type: None,
-                oh_export_files: None,
+                    .and_then(|profile| profile.module_name.clone()),
+                bundle_name: node
+                    .module_profile
+                    .as_ref()
+                    .and_then(|profile| profile.bundle_name.clone()),
+                bundle_type: node
+                    .module_profile
+                    .as_ref()
+                    .and_then(|profile| profile.bundle_type.clone()),
+                oh_export_files: node
+                    .package
+                    .as_ref()
+                    .and_then(|package| package.oh_export_files.clone()),
             });
         }
         let input = PkgContextInfoInput {
@@ -1049,20 +929,9 @@ impl LoaderJson {
     /// Return the entry file path relative to `pkg_dir` with extension stripped.
     ///
     /// Reads `oh-package.json5#main`; falls back to conventional candidates.
-    pub(super) fn dep_entry_rel_path(pkg_dir: &Path) -> String {
-        #[derive(Deserialize)]
-        struct PkgEntry {
-            #[serde(default)]
-            main: Option<String>,
-        }
-        let main_file: Option<String> = std::fs::read_to_string(pkg_dir.join("oh-package.json5"))
-            .ok()
-            .and_then(|s| json5::from_str::<PkgEntry>(&s).ok())
-            .and_then(|p| p.main)
-            .filter(|m| !m.is_empty());
-
-        if let Some(main) = main_file {
-            if let Some(rel) = Self::source_entry_stem_path(&main) {
+    pub(super) fn dep_entry_rel_path(pkg_dir: &Path, main_file: Option<&str>) -> String {
+        if let Some(main) = main_file.filter(|main| !main.is_empty()) {
+            if let Some(rel) = Self::source_entry_stem_path(main) {
                 return ArtifactPathSerializer::rel_to_slash(&rel);
             }
         }

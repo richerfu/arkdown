@@ -1,6 +1,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use indexmap::IndexMap;
@@ -52,7 +53,7 @@ mod runtime_only;
 use runtime_only::RuntimeOnlyCollector;
 
 mod aot;
-pub(crate) use aot::{AotLoaderFields, DependencyModuleJson, DependencyPackageJson};
+pub(crate) use aot::{AotLoaderFields, DependencyPackageJson};
 mod dependencies;
 mod generate;
 
@@ -262,6 +263,13 @@ struct RouterMapModule {
     module_name: String,
     package_name: String,
     src_path: PathBuf,
+    router_map_ref: Option<String>,
+    profile_source: RouterMapProfileSource,
+}
+
+enum RouterMapProfileSource {
+    Disk,
+    Session(Option<Arc<serde_json::Value>>),
 }
 
 #[derive(Deserialize)]

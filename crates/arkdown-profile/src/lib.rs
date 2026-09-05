@@ -136,6 +136,16 @@ impl ProfileDependencyContext {
                 &config.project_root,
                 &module_cfg.src_path,
             )
+            .with_runtime_only_aliases(
+                config
+                    .product
+                    .build_option
+                    .ark_options
+                    .as_ref()
+                    .and_then(|options| options.runtime_only.as_ref())
+                    .into_iter()
+                    .flat_map(|runtime_only| runtime_only.packages.iter().cloned()),
+            )
             .build(),
         );
         Self::from_session_graph(config, module_cfg, graph, app_version_code)

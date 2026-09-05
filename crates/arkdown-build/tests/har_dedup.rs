@@ -216,6 +216,7 @@ fn node(
         package_root: Some(root.to_path_buf()),
         package: None,
         module_profile: None,
+        compile_inputs: Default::default(),
         node_type,
         is_runtime_only: false,
         is_dynamic: false,

@@ -5,14 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_core::OhosModuleType;
-use arkdown_path::canonicalize_or_owned;
+use arkdown_path::{canonicalize_or_owned, strip_relative_prefix};
+use indexmap::IndexSet;
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
 use crate::dependency_graph::snapshot::{
-    DependencyEdgeKind, DependencyEdgeSnapshot, DependencyGraphSnapshot,
-    DependencyModuleProfileSnapshot, DependencyNodeSnapshot, DependencyNodeType,
-    DependencyParameterSnapshot,
+    DependencyCompileInputSnapshot, DependencyEdgeKind, DependencyEdgeSnapshot,
+    DependencyGraphSnapshot, DependencyModuleProfileSnapshot, DependencyNodeSnapshot,
+    DependencyNodeType, DependencyParameterSnapshot,
 };
 use crate::package::acquisition::PackageAcquisitionInventory;
 use crate::package::snapshot::PackageSnapshot;
@@ -29,6 +30,7 @@ use crate::paths::ModulePathLayout;
 pub(crate) struct DependencySnapshotInventory {
     packages: FxHashMap<PathBuf, Option<Arc<PackageSnapshot>>>,
     module_profiles: FxHashMap<PathBuf, Option<DependencyModuleProfileSnapshot>>,
+    compile_inputs: FxHashMap<PathBuf, Arc<DependencyCompileInputSnapshot>>,
     resolved_roots: FxHashMap<(PathBuf, PathBuf, String), Option<PathBuf>>,
     acquired_roots: FxHashMap<(PathBuf, String), PathBuf>,
     canonical_roots: FxHashMap<PathBuf, PathBuf>,
@@ -40,6 +42,13 @@ struct DependencyTraversalState {
     is_transitive: bool,
     is_dynamic: bool,
     is_runtime_only: bool,
+}
+
+struct DependencyCollectionState<'a> {
+    queue: &'a mut VecDeque<(PathBuf, usize)>,
+    seen_roots: &'a mut std::collections::BTreeSet<PathBuf>,
+    graph: &'a mut DependencyGraphSnapshot,
+    inventory: &'a mut DependencySnapshotInventory,
 }
 
 #[derive(Clone, Copy)]
@@ -189,6 +198,7 @@ impl DependencySnapshotInventory {
         }
 
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct DependencyProfileModule {
             #[serde(default)]
             name: Option<String>,
@@ -198,6 +208,10 @@ impl DependencySnapshotInventory {
             distro: Option<DependencyProfileDistro>,
             #[serde(default)]
             abilities: Vec<DependencyProfileAbility>,
+            #[serde(default)]
+            extension_abilities: Vec<DependencyProfileAbility>,
+            #[serde(default, rename = "routerMap")]
+            router_map: Option<String>,
         }
 
         #[derive(Deserialize)]
@@ -207,6 +221,8 @@ impl DependencySnapshotInventory {
             src_entry: String,
             #[serde(default)]
             skills: Vec<DependencyProfileSkill>,
+            #[serde(rename = "type", alias = "extensionType", default)]
+            extension_type: Option<String>,
         }
 
         #[derive(Deserialize)]
@@ -243,6 +259,24 @@ impl DependencySnapshotInventory {
             .next()
             .map(|profile| {
                 let app = profile.app;
+                let ability_src_entries = profile
+                    .module
+                    .abilities
+                    .iter()
+                    .chain(profile.module.extension_abilities.iter())
+                    .filter(|ability| !ability.src_entry.is_empty())
+                    .map(|ability| ability.src_entry.clone())
+                    .collect();
+                let work_scheduler_src_entries = profile
+                    .module
+                    .extension_abilities
+                    .iter()
+                    .filter(|ability| {
+                        ability.extension_type.as_deref() == Some("workScheduler")
+                            && !ability.src_entry.is_empty()
+                    })
+                    .map(|ability| ability.src_entry.clone())
+                    .collect();
                 let home_ability_src_entries = profile
                     .module
                     .abilities
@@ -275,11 +309,227 @@ impl DependencySnapshotInventory {
                     bundle_type: app.as_ref().and_then(|app| app.bundle_type.clone()),
                     version_code: app.and_then(|app| app.version_code),
                     home_ability_src_entries,
+                    ability_src_entries,
+                    work_scheduler_src_entries,
+                    router_map: profile.module.router_map,
                 }
             });
         self.module_profiles
             .insert(package_root.to_path_buf(), profile.clone());
         profile
+    }
+
+    fn read_compile_inputs(
+        &mut self,
+        package_root: &Path,
+        package: Option<&PackageSnapshot>,
+        module_profile: Option<&DependencyModuleProfileSnapshot>,
+    ) -> Arc<DependencyCompileInputSnapshot> {
+        if let Some(inputs) = self.compile_inputs.get(package_root) {
+            return inputs.clone();
+        }
+
+        let layout = ModulePathLayout::new(package_root);
+        let mut ability_source_files = IndexSet::new();
+        let mut worker_source_files = IndexSet::new();
+        let mut insight_intent_source_files = IndexSet::new();
+
+        if let Some(profile) = module_profile {
+            for entry in &profile.ability_src_entries {
+                let path = layout.src_main().join(strip_relative_prefix(entry));
+                if Self::is_loader_code_file(&path) {
+                    ability_source_files.insert(path);
+                }
+            }
+            for entry in &profile.work_scheduler_src_entries {
+                let path = package_root.join(strip_relative_prefix(entry));
+                if Self::is_loader_code_file(&path) {
+                    worker_source_files.insert(path);
+                }
+            }
+        }
+
+        if let Some(package) = package {
+            for entry in Self::package_worker_entries(package) {
+                let path = package_root.join(strip_relative_prefix(&entry));
+                if Self::is_loader_code_file(&path) {
+                    worker_source_files.insert(path);
+                }
+            }
+        }
+        for entry in Self::build_profile_worker_entries(package_root) {
+            let path = package_root.join(strip_relative_prefix(&entry));
+            if Self::is_loader_code_file(&path) {
+                worker_source_files.insert(path);
+            }
+        }
+
+        for resource_dir in Self::resource_directories(package_root, package) {
+            let profile_path = resource_dir
+                .join("base")
+                .join("profile")
+                .join("insight_intent.json");
+            for entry in Self::insight_intent_entries(&profile_path) {
+                let path = layout.src_main().join(strip_relative_prefix(&entry));
+                if Self::is_loader_code_file(&path) {
+                    insight_intent_source_files.insert(path);
+                }
+            }
+        }
+
+        let inputs = Arc::new(DependencyCompileInputSnapshot {
+            ability_source_files: ability_source_files.into_iter().collect(),
+            worker_source_files: worker_source_files.into_iter().collect(),
+            insight_intent_source_files: insight_intent_source_files.into_iter().collect(),
+            dynamic_import_entry_file: Self::dynamic_import_entry_file(package_root, package),
+            router_map_profile: module_profile
+                .and_then(|profile| profile.router_map.as_deref())
+                .and_then(|reference| reference.strip_prefix("$profile:"))
+                .and_then(|profile_name| {
+                    std::fs::read_to_string(
+                        layout.profile_root().join(format!("{profile_name}.json")),
+                    )
+                    .ok()
+                })
+                .and_then(|content| serde_json::from_str(&content).ok())
+                .map(Arc::new),
+        });
+        self.compile_inputs
+            .insert(package_root.to_path_buf(), inputs.clone());
+        inputs
+    }
+
+    fn dynamic_import_entry_file(
+        package_root: &Path,
+        package: Option<&PackageSnapshot>,
+    ) -> Option<PathBuf> {
+        if let Some(package) = package {
+            for entry in [
+                package.package_json.main.as_deref(),
+                package.package_json.types.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|entry| !entry.is_empty())
+            {
+                let candidate = package_root.join(entry);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        let ets_root = ModulePathLayout::new(package_root).ets_source_root();
+        for candidate_name in ["index.ets", "index.ts", "index.js"] {
+            for candidate in [
+                ets_root.join(candidate_name),
+                package_root.join(candidate_name),
+            ] {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    fn package_worker_entries(package: &PackageSnapshot) -> Vec<String> {
+        package
+            .package_json
+            .extra
+            .get("metadata")
+            .and_then(|metadata| metadata.get("workers"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn build_profile_worker_entries(package_root: &Path) -> Vec<String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BuildProfileWorkers {
+            #[serde(default)]
+            build_option: BuildProfileOption,
+        }
+
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BuildProfileOption {
+            #[serde(default)]
+            source_option: BuildProfileSourceOption,
+        }
+
+        #[derive(Default, Deserialize)]
+        struct BuildProfileSourceOption {
+            #[serde(default)]
+            workers: Vec<String>,
+        }
+
+        std::fs::read_to_string(package_root.join("build-profile.json5"))
+            .ok()
+            .and_then(|content| json5::from_str::<BuildProfileWorkers>(&content).ok())
+            .map(|profile| profile.build_option.source_option.workers)
+            .unwrap_or_default()
+    }
+
+    fn resource_directories(
+        package_root: &Path,
+        package: Option<&PackageSnapshot>,
+    ) -> Vec<PathBuf> {
+        let directories = package
+            .and_then(|package| package.package_json.extra.get("metadata"))
+            .and_then(|metadata| metadata.get("resource"))
+            .and_then(|resource| resource.get("directories"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(|directory| package_root.join(strip_relative_prefix(directory)))
+            .collect::<Vec<_>>();
+        if directories.is_empty() {
+            vec![ModulePathLayout::new(package_root).resources_root()]
+        } else {
+            directories
+        }
+    }
+
+    fn insight_intent_entries(profile_path: &Path) -> Vec<String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct InsightIntentProfile {
+            #[serde(default)]
+            insight_intents_src_entry: Vec<InsightIntentEntry>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct InsightIntentEntry {
+            src_entry: Option<String>,
+        }
+
+        std::fs::read_to_string(profile_path)
+            .ok()
+            .and_then(|content| json5::from_str::<InsightIntentProfile>(&content).ok())
+            .map(|profile| {
+                profile
+                    .insight_intents_src_entry
+                    .into_iter()
+                    .filter_map(|entry| entry.src_entry)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn is_loader_code_file(path: &Path) -> bool {
+        path.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(extension.to_ascii_lowercase().as_str(), "ets" | "ts" | "js")
+                })
     }
 }
 
@@ -291,6 +541,7 @@ pub struct DependencyGraphBuilder {
     parameter_file_override: Option<PathBuf>,
     dependency_parameters: Option<DependencyParameterSnapshot>,
     package_manager: DependencyPackageManager,
+    configured_runtime_only_aliases: Vec<String>,
 }
 
 impl DependencyGraphBuilder {
@@ -306,6 +557,7 @@ impl DependencyGraphBuilder {
             parameter_file_override: None,
             dependency_parameters: None,
             package_manager: DependencyPackageManager::Ohpm,
+            configured_runtime_only_aliases: Vec::new(),
         }
     }
 
@@ -329,6 +581,14 @@ impl DependencyGraphBuilder {
         dependency_parameters: DependencyParameterSnapshot,
     ) -> Self {
         self.dependency_parameters = Some(dependency_parameters);
+        self
+    }
+
+    /// Add runtime-only package aliases selected by the normalized build
+    /// option. They participate in the same immutable dependency graph as
+    /// manifest-declared runtime-only packages.
+    pub fn with_runtime_only_aliases(mut self, aliases: impl IntoIterator<Item = String>) -> Self {
+        self.configured_runtime_only_aliases.extend(aliases);
         self
     }
 
@@ -374,6 +634,7 @@ impl DependencyGraphBuilder {
         let mut queue = VecDeque::new();
         let mut seen_roots = std::collections::BTreeSet::new();
         let mut root_runtime_only_aliases = std::collections::BTreeSet::new();
+        root_runtime_only_aliases.extend(self.configured_runtime_only_aliases.iter().cloned());
         for root in [&self.host_root, &self.project_root] {
             if let Some(package) = inventory.read_package(root, self.package_manager) {
                 root_runtime_only_aliases.extend(Self::runtime_only_aliases(&package));
@@ -385,16 +646,30 @@ impl DependencyGraphBuilder {
         }
 
         while let Some((package_root, depth)) = queue.pop_front() {
-            let Some(package) = inventory.read_package(&package_root, self.package_manager) else {
+            let package = inventory.read_package(&package_root, self.package_manager);
+            let mut runtime_only_aliases = package
+                .as_deref()
+                .map(Self::runtime_only_aliases)
+                .unwrap_or_default();
+            if depth == 0 {
+                runtime_only_aliases.extend(root_runtime_only_aliases.iter().cloned());
+                runtime_only_aliases.sort();
+                runtime_only_aliases.dedup();
+            }
+            let Some(package) = package else {
+                self.collect_runtime_only_dependencies(
+                    &package_root,
+                    depth,
+                    runtime_only_aliases,
+                    &std::collections::BTreeSet::new(),
+                    &mut DependencyCollectionState {
+                        queue: &mut queue,
+                        seen_roots: &mut seen_roots,
+                        graph,
+                        inventory,
+                    },
+                );
                 continue;
-            };
-            let runtime_only_aliases = if depth == 0 {
-                root_runtime_only_aliases
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
             };
             for (dependencies, edge_kind, is_dynamic) in [
                 (
@@ -455,56 +730,78 @@ impl DependencyGraphBuilder {
                 }
             }
 
-            if depth == 0 {
-                let declared_aliases = package
-                    .package_json
-                    .dependencies
-                    .keys()
-                    .chain(package.package_json.dynamic_dependencies.keys())
-                    .chain(package.package_json.dev_dependencies.keys())
-                    .cloned()
-                    .collect::<std::collections::BTreeSet<_>>();
-                for alias in runtime_only_aliases {
-                    if declared_aliases.contains(&alias) {
-                        continue;
-                    }
-                    let Some(dep_root) = inventory.resolve_package_root(
-                        &package_root,
-                        &self.project_root,
-                        &alias,
-                        self.package_manager,
-                    ) else {
-                        continue;
-                    };
-                    let dep_package = inventory.read_package(&dep_root, self.package_manager);
-                    let traversal = DependencyTraversalState {
-                        kind: DependencyEdgeKind::Dependency,
-                        is_transitive: false,
-                        is_dynamic: false,
-                        is_runtime_only: true,
-                    };
-                    let canonical_issuer_root = inventory.canonical_root(&package_root);
-                    let edge = self.edge_snapshot(
-                        &canonical_issuer_root,
-                        &alias,
-                        None,
-                        &dep_root,
-                        dep_package.as_deref(),
-                        traversal,
-                    );
-                    if !seen_roots.insert(dep_root.clone()) {
-                        if let Some(node) = graph.nodes.get_mut(&edge.package_name) {
-                            node.is_runtime_only = true;
-                        }
-                        continue;
-                    }
-                    let node = self.node_snapshot(&edge, dep_package, traversal, inventory);
-                    graph.roots_by_alias.insert(alias, dep_root.clone());
-                    graph.nodes.insert(node.package_name.clone(), node);
-                    queue.push_back((dep_root, depth + 1));
-                    graph.edges.push(edge);
-                }
+            let declared_aliases = package
+                .package_json
+                .dependencies
+                .keys()
+                .chain(package.package_json.dynamic_dependencies.keys())
+                .chain(package.package_json.dev_dependencies.keys())
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            self.collect_runtime_only_dependencies(
+                &package_root,
+                depth,
+                runtime_only_aliases,
+                &declared_aliases,
+                &mut DependencyCollectionState {
+                    queue: &mut queue,
+                    seen_roots: &mut seen_roots,
+                    graph,
+                    inventory,
+                },
+            );
+        }
+    }
+
+    fn collect_runtime_only_dependencies(
+        &self,
+        package_root: &Path,
+        depth: usize,
+        aliases: Vec<String>,
+        declared_aliases: &std::collections::BTreeSet<String>,
+        state: &mut DependencyCollectionState<'_>,
+    ) {
+        for alias in aliases {
+            if declared_aliases.contains(&alias) {
+                continue;
             }
+            let Some(dep_root) = state.inventory.resolve_package_root(
+                package_root,
+                &self.project_root,
+                &alias,
+                self.package_manager,
+            ) else {
+                continue;
+            };
+            let dep_package = state
+                .inventory
+                .read_package(&dep_root, self.package_manager);
+            let traversal = DependencyTraversalState {
+                kind: DependencyEdgeKind::Dependency,
+                is_transitive: depth > 0,
+                is_dynamic: false,
+                is_runtime_only: true,
+            };
+            let canonical_issuer_root = state.inventory.canonical_root(package_root);
+            let edge = self.edge_snapshot(
+                &canonical_issuer_root,
+                &alias,
+                None,
+                &dep_root,
+                dep_package.as_deref(),
+                traversal,
+            );
+            if !state.seen_roots.insert(dep_root.clone()) {
+                if let Some(node) = state.graph.nodes.get_mut(&edge.package_name) {
+                    node.is_runtime_only = true;
+                }
+                continue;
+            }
+            let node = self.node_snapshot(&edge, dep_package, traversal, state.inventory);
+            state.graph.roots_by_alias.insert(alias, dep_root.clone());
+            state.graph.nodes.insert(node.package_name.clone(), node);
+            state.queue.push_back((dep_root, depth + 1));
+            state.graph.edges.push(edge);
         }
     }
 
@@ -588,6 +885,8 @@ impl DependencyGraphBuilder {
         let root = &edge.package_root;
         let package_name = self.package_name(alias, package.as_deref());
         let module_profile = inventory.read_module_profile(root);
+        let compile_inputs =
+            inventory.read_compile_inputs(root, package.as_deref(), module_profile.as_ref());
         let direct_deps = package
             .as_ref()
             .map(|package| self.direct_dependency_aliases(package))
@@ -604,6 +903,7 @@ impl DependencyGraphBuilder {
             ),
             package,
             module_profile,
+            compile_inputs,
             is_runtime_only: traversal.is_runtime_only,
             is_dynamic: traversal.is_dynamic,
             is_transitive: traversal.is_transitive,
@@ -787,6 +1087,139 @@ mod tests {
 
         assert!(node.is_runtime_only);
         assert_eq!(node.node_type, DependencyNodeType::BytecodeHar);
+    }
+
+    #[test]
+    fn configured_runtime_only_package_is_frozen_without_host_manifest() {
+        let fixture = DependencyGraphFixture::new();
+        fs::create_dir_all(fixture.root().join("entry")).expect("host module");
+        fixture.write_package(
+            "oh_modules/runtime-package",
+            r#"{ "name": "runtime-package", "version": "1.0.0" }"#,
+        );
+
+        let graph =
+            DependencyGraphBuilder::new("entry", fixture.root(), fixture.root().join("entry"))
+                .with_runtime_only_aliases(["runtime-package".to_string()])
+                .build();
+
+        assert!(graph.nodes["runtime-package"].is_runtime_only);
+        assert_eq!(graph.edges[0].alias, "runtime-package");
+        assert_eq!(graph.edges[0].version_spec, None);
+    }
+
+    #[test]
+    fn freezes_dependency_loader_compile_inputs_at_session_startup() {
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{ "name": "app", "version": "1.0.0" }"#);
+        fixture.write_package(
+            "entry",
+            r#"{
+              "name": "entry",
+              "version": "1.0.0",
+              "dependencies": { "source-har": "1.0.0" }
+            }"#,
+        );
+        fixture.write_package(
+            "entry/oh_modules/source-har",
+            r#"{
+              "name": "source-har",
+              "version": "1.0.0",
+              "main": "src/main/ets/index.ets",
+              "metadata": {
+                "workers": ["./src/main/ets/workers/PackageWorker.ts"]
+              }
+            }"#,
+        );
+        fixture.write_dependency_profile(
+            "entry/oh_modules/source-har",
+            "module.json5",
+            r#"{
+              module: {
+                name: "source-har",
+                type: "har",
+                routerMap: "$profile:router_map",
+                abilities: [{ srcEntry: "ets/abilities/MainAbility.ets" }],
+                extensionAbilities: [
+                  { type: "workScheduler", srcEntry: "./src/main/ets/workers/SchedulerWorker.ets" },
+                  { type: "service", srcEntry: "ets/extensions/ServiceExtension.ets" }
+                ]
+              }
+            }"#,
+        );
+        let dep_root = fixture.root().join("entry/oh_modules/source-har");
+        fs::write(
+            dep_root.join("build-profile.json5"),
+            r#"{
+              buildOption: {
+                sourceOption: { workers: ["./src/main/ets/workers/ProfileWorker.js"] }
+              }
+            }"#,
+        )
+        .expect("dependency build profile");
+        let insight_profile = dep_root.join("src/main/resources/base/profile");
+        fs::create_dir_all(&insight_profile).expect("insight profile directory");
+        fs::write(
+            insight_profile.join("insight_intent.json"),
+            r#"{
+              insightIntentsSrcEntry: [{ srcEntry: "ets/insight/IntentEntry.ts" }]
+            }"#,
+        )
+        .expect("insight profile");
+        fs::write(
+            insight_profile.join("router_map.json"),
+            r#"{ "routerMap": [{ "name": "detail", "pageSourceFile": "ets/pages/Detail.ets" }] }"#,
+        )
+        .expect("router map profile");
+        for relative in [
+            "src/main/ets/abilities/MainAbility.ets",
+            "src/main/ets/extensions/ServiceExtension.ets",
+            "src/main/ets/workers/SchedulerWorker.ets",
+            "src/main/ets/workers/PackageWorker.ts",
+            "src/main/ets/workers/ProfileWorker.js",
+            "src/main/ets/insight/IntentEntry.ts",
+            "src/main/ets/index.ets",
+        ] {
+            let path = dep_root.join(relative);
+            fs::create_dir_all(path.parent().expect("source parent")).expect("source directory");
+            fs::write(path, "").expect("dependency source");
+        }
+
+        let graph = fixture.build_for("entry");
+        let inputs = &graph.nodes["source-har"].compile_inputs;
+        let dep_root = canonicalize_or_owned(&dep_root);
+
+        assert_eq!(
+            inputs.ability_source_files,
+            vec![
+                dep_root.join("src/main/ets/abilities/MainAbility.ets"),
+                dep_root.join("src/main/ets/extensions/ServiceExtension.ets"),
+            ]
+        );
+        assert_eq!(
+            inputs.worker_source_files,
+            vec![
+                dep_root.join("src/main/ets/workers/SchedulerWorker.ets"),
+                dep_root.join("src/main/ets/workers/PackageWorker.ts"),
+                dep_root.join("src/main/ets/workers/ProfileWorker.js"),
+            ]
+        );
+        assert_eq!(
+            inputs.insight_intent_source_files,
+            vec![dep_root.join("src/main/ets/insight/IntentEntry.ts")]
+        );
+        assert_eq!(
+            inputs.dynamic_import_entry_file,
+            Some(dep_root.join("src/main/ets/index.ets"))
+        );
+        assert_eq!(
+            inputs
+                .router_map_profile
+                .as_deref()
+                .and_then(|profile| profile.pointer("/routerMap/0/name"))
+                .and_then(serde_json::Value::as_str),
+            Some("detail")
+        );
     }
 
     #[test]

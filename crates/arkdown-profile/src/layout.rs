@@ -201,10 +201,6 @@ impl<'a> ProfileModuleLayout<'a> {
         self.profile_json("insight_intent")
     }
 
-    pub(crate) fn resources_root(&self) -> PathBuf {
-        self.src_main().join("resources")
-    }
-
     pub(crate) fn source_from_module_src(&self, src_path: &Path) -> PathBuf {
         self.src_main().join(src_path)
     }

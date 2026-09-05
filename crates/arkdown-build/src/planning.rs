@@ -835,6 +835,7 @@ mod har_declaration_dependency_package_inventory_tests {
                 package_root: Some(package_root.clone()),
                 package: None,
                 module_profile: None,
+                compile_inputs: Default::default(),
                 node_type: DependencyNodeType::SourceHar,
                 is_runtime_only: false,
                 is_dynamic: false,
