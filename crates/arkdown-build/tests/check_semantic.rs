@@ -1,25 +1,14 @@
-//! Regression coverage for the native check application and its explicit SDK
-//! comparison backend.
-//!
-//! Hvigor's ArkLint worker delegates this work to
-//! `ets-loader/lib/ets_checker.js::etsStandaloneChecker`. The fixture is
-//! copied before mutation so the checked-in source remains a valid build.
+//! Regression coverage for the native OXC check application.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use arkdown_build::check::{CheckApplication, CheckRequest};
-use arkdown_core::{BuildMode, OutputTarget};
 use walkdir::WalkDir;
 
 #[test]
-fn check_reports_sdk_typescript_semantic_diagnostics() {
+fn check_reports_native_typescript_semantic_diagnostics() {
     let fixture = repo_root().join("tests/fixtures/minimal-hap");
-    if !sdk_ets_checker_available(&fixture) {
-        eprintln!("skipping SDK semantic check regression: ets-loader is unavailable");
-        return;
-    }
-
     let temp = tempfile::tempdir().expect("temporary semantic-check fixture");
     copy_fixture(&fixture, temp.path()).expect("copy minimal HAP fixture");
     fs::write(
@@ -45,13 +34,11 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
         target: "hap".to_string(),
         module: None,
         project: Some(temp.path().to_path_buf()),
-        node_executable: None,
         is_crossplatform: false,
         ignore_crossplatform_check: false,
-        checker: "sdk".to_string(),
     })
     .execute()
-    .expect_err("SDK etsChecker must reject a TypeScript type mismatch");
+    .expect_err("native OXC checker must reject a TypeScript type mismatch");
     let diagnostics = format!("{error:#}");
 
     assert!(
@@ -59,10 +46,8 @@ fn check_reports_sdk_typescript_semantic_diagnostics() {
         "check must report its semantic-check failure boundary; output:\n{diagnostics}"
     );
     assert!(
-        diagnostics.contains("not assignable to type 'number'")
-            || diagnostics.contains("not assignable to type \"number\"")
-            || diagnostics.contains("Type 'string'"),
-        "failure must originate from the SDK TypeScript checker; output:\n{diagnostics}"
+        diagnostics.contains("not assignable to type 'number'"),
+        "failure must originate from the native semantic checker; output:\n{diagnostics}"
     );
 }
 
@@ -73,31 +58,11 @@ fn check_defaults_to_native_oxc_without_a_node_runtime() {
         target: "hap".to_string(),
         module: None,
         project: Some(fixture.clone()),
-        node_executable: Some(fixture.join("missing-node-runtime/node")),
         is_crossplatform: false,
         ignore_crossplatform_check: false,
-        checker: "oxc".to_string(),
     })
     .execute()
     .expect("default OXC check must not require Node");
-}
-
-fn sdk_ets_checker_available(project_root: &Path) -> bool {
-    arkdown_config::load_config(
-        project_root,
-        BuildMode::Debug,
-        OutputTarget::Hap,
-        None,
-        None,
-    )
-    .map(|config| {
-        config
-            .sdk_config
-            .ets_loader_path
-            .join("compile_plugin.js")
-            .is_file()
-    })
-    .unwrap_or(false)
 }
 
 fn repo_root() -> PathBuf {

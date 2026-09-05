@@ -1,0 +1,25 @@
+[package]
+name = "arkdown-ets-checker"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "OXC-native project semantic checker for ArkTS and TypeScript"
+
+[dependencies]
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_diagnostics = { workspace = true }
+oxc_isolated_declarations = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_resolver = { workspace = true }
+oxc_span = { workspace = true }
+json-strip-comments = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

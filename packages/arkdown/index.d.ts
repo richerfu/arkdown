@@ -146,7 +146,6 @@ export interface BuildConfig {
   enableZig?: boolean
   disableAbcCache?: boolean
   cacheFile?: string
-  checker?: string
   /** Enable the source compiler's ArkUI-X cross-platform API contract. */
   isCrossplatform?: boolean
   /** Match `ignoreCrossplatformCheck`: emit 11706007 as a warning instead of an error. */
@@ -168,10 +167,8 @@ export interface CheckConfig {
   project?: string
   target?: string
   module?: string
-  nodeExecutable?: string
   isCrossplatform?: boolean
   ignoreCrossplatformCheck?: boolean
-  checker?: 'oxc' | 'sdk'
 }
 
 /**

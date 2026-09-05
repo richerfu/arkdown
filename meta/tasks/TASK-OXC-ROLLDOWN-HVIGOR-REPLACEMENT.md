@@ -14,13 +14,20 @@
 ### 1.1 2026-09-05 ArkTS 1.1 实施进度
 
 - 已建立可执行的 `arkts11.json` 源码契约清单，当前 129 个最小行为直接通过公开 OXC transform/check 入口验证，不再以旧反编译代码或旧 spec 为预期；独立 checker 回归还覆盖 SDK JSDoc/export inventory、`@since`/`@Available` 使用点、permission/syscap、Stage/Form/Atomic/Test 标签和 warning suppressor。UI checker 已覆盖 Extend/LocalBuilder/Env/CustomEnv、SDK `Type` 身份、BuilderParam、ObjectLink、Monitor 根状态、Button label、组件 parent/child grammar、V1/V2 参数传递、双向绑定、Reusable/Repeat、Computed 和属性装饰器冲突。
-- 已删除旧 OXC checker 中约千行没有新源码错误码/函数证据的猜测式规则，改为结构化、多诊断、稳定顺序的 `EtsCheckReport`；`arkdown check --checker oxc` 可在不启动 Node checker 的情况下运行该路径。
+- 已删除旧 OXC checker 中约千行没有新源码错误码/函数证据的猜测式规则。ArkTS 1.1
+  build/check 现在固定使用嵌入式 OXC project checker 和结构化 ArkTS source checker；
+  `checker` 选择项及 SDK Node checker 已删除。
 - 已对齐首批高频规则：struct/class/function decorator target、build/Styles、成员初始化、Watch、Observed V1/V2、生命周期、全局复用池、SDK 组件/容器命名与根节点约束、`apiAvailable`。
 - 已补动态 ArkTS 的 `worker.Worker('*.ts') -> '*.js'` 和 `ESObject -> any` 全程序 OXC 变换，并把 Builder factory/global reuse pool 错误改为源码错误码。
 - 已把 `@Observed/@ObservedV2` 类事实并入并行构建的 `ModuleExportIndex`，named/default/namespace import 与 barrel re-export 的继承和 V1 property 类型检查不再退化为单文件名称判断；standalone check 也复用一次性 source snapshot。
 - 已从 SDK `components/*.json` 一次性加载 atomic/single/specific-child/style/systemApi grammar，补齐 10905219–10905223、10905228、10905348、10905363、10905365、10905367、10905372，并通过无 cache 的真实 ArkTS 1.1 OXC/Rolldown HAP 构建。
 - 已按 `processResourceData` 建立原生资源查询库存：当前模块 rawfile、HSP `ResourceTable.txt`/rawfile 在 bundle 启动边界读取并跨模块复用，Rolldown hook 只读 `Arc` 快照；普通资源的 format/source/type/name、unsupported type、rawfile 错误码和模板/HSP warning 降级行为已接入生产变换。
-- 默认 build/check checker 已切换为 `oxc`，不再启动 SDK Node checker；`sdk` 仅作为显式对比后端暂留。system API 已以 SDK declaration JSDoc、OXC `SymbolId` 和 import/export 闭包接入生产 build/check，并从 `SdkSnapshot` 消费一次读取的 device capability inventory；函数和方法现在保留调用签名，先按必选/可选/rest 参数数量筛选，再按源码可见的 literal/primitive/callable/object/named 类型选择同参数数量重载，调用点从选中的签名而不是预合并成员读取 JSDoc contract。局部注解、别名、函数、SDK 调用结果和 type-only/重命名导入使用 `SymbolId` 固定点推导，跨文件 SDK 类型表在 export 闭包收敛后重新绑定；返回类型沿 `Promise`/`PromiseLike`、union/intersection 和 `await` 传播。显式函数/方法类型参数和声明默认类型参数可实例化直接返回类型及上述异步/组合投影；`Result<T>` 一类命名泛型包装、泛型 type alias、泛型继承和声明默认参数也会保留类型实参直至成员解析。命名类型使用共享只读类型表并在实际成员访问时解析，递归 SDK 类型不再按声明数量重复展开。ArkUI-X `@crossplatform` 的缺失标签和 `[since x - y]` 版本范围已按新源码产生 `11706007`，`ignoreCrossplatformCheck` 只把该诊断从 error 降为 warning；两个开关均从唯一 JS CLI/N-API 入口传播到 build、check、watch、插件 `projectConfig`、静态驱动和缓存键。`SdkSnapshot` 还会一次解析外部 `sdkConfig.json` 的 prefix/apiPath 与 ArkUI-X `depsModuleConfig`，OXC 在 ETS/TS/JS 中收集直接系统模块、TS/ETS 组件/If 和实际 API 使用触发的依赖，Rolldown 按源文件归并后由 Rust 写出 `module_collection.json`/`component_collection.json`；watch 与 standalone check 不产生这组构建事实。当前 OXC fork 的 `oxc_type_checker` 仍是空骨架，conditional/indexed type、完整结构兼容和复杂表达式推导没有可调用的 typed query，因此 checker bridge 只能在这些源码语义进入 OXC 并通过 corpus 后删除。
+- ArkTS 1.1 build/check 已接入嵌入式 OXC eager project checker：Rust 直接传递 compile roots、
+  OHPM package aliases/module paths、SDK `globalModulePaths` declaration aliases，并遵循上游
+  `skipLibCheck`；SDK checker bridge、planner、runner、配置字段和 Node 参数已经删除。
+  system API 仍以 SDK declaration JSDoc、OXC `SymbolId` 和 import/export 闭包接入生产
+  build/check，并从 `SdkSnapshot` 消费一次读取的 device capability inventory。新增深层类型
+  corpus 必须继续补入 OXC type owner，不得恢复 SDK checker fallback。
 - Ark VM 版本探测已按新 ets2bundle `ts2abc.js` 的实际转发语义改为 Rust 直接调用原生 `es2abc --target-bc-version`；API 8 固定值由 Rust 返回，配置加载不再为该探测启动 Node。
 - HarmonyOS 外部 ETS SDK 组件已按 `ets/sdkConfig.json` 在 `BuildSession` 启动时一次冻结：同一份 `globalModulePaths`/`externalApiPaths` 快照同时供 OXC component metadata、standalone/build checker、syscap、系统资源和 ArkGuard 消费；外部 `sysResource.js` 不再依赖进程环境变量，也不再由各阶段重复扫描 SDK 目录。
 - 真实产物 parity harness 已禁止把 PATH 中的 `@ohos-rs/arkdown` 兼容命令误认成 hvigor；必须解析到 DevEco 的真实 `hvigorw`，否则测试直接失败，避免 arkdown 对 arkdown 的伪阳性。
@@ -45,8 +52,9 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 当前最明显的架构偏差是：
 
 1. `arkdown-napi` 已从约 6.6 万行降至约 4,004 行 Rust：Hvigor project/task/worker/build-script runtime、零调用的 task observer/event 桥，以及 CLI observability/process-monitor/report lifecycle N-API facade 已删除；动态 ABC 的 typed plan、filesInfo/npmEntries/cache manifest、`es2abc` 执行和 AOT writer 已完整迁入 `arkdown-abc`；typed `BuildRequest`、module/target/native execution planning、全部 build layout、pre-build validator、intermediate artifact writer、code-resource、preview、hot reload、quickfix、remote HSP signing、device test、unit-test、compile task cache、SDK checker planning、static ArkTS backend planning、obfuscation planning、plugin share/cache planning、主 coordinator、watch 与 package/sign orchestration 已迁入无 N-API 依赖的 `arkdown-build`；CMake/Ninja、native library、strip/binxo 和 debug-symbol 行为已迁入 `arkdown-native`；packing check 已迁入 `arkdown-pack`。N-API 现只保留 typed service 值转换、异步 handoff、diagnostic serialization 和 TS/JS 插件函数句柄。
-2. `packages/arkdown/js` 当前约 1,419 行：只保留原生入口、CLI trampoline、完整 TS/JS compile-plugin 适配，以及尚待 OXC 语义尾项完成后删除的 checker 对比 bridge。插件适配占其中约 928 行，是原有 TS/JS 插件 ABI 的兼容边界，不应下沉为 Rust CLI 或伪造为内建业务逻辑。
-3. 默认 checker 已改为 OXC；显式 `checker=sdk` 对比后端及其 Node bridge 仍待最后一批语义用例迁移后删除。
+2. `packages/arkdown/js` 只保留原生入口、CLI trampoline 和 TS/JS compile-plugin 适配；
+   插件适配是原有 TS/JS 插件 ABI 的公开边界，不应下沉为 Rust CLI 或伪造为内建业务逻辑。
+3. ArkTS 1.1 build/check 固定使用 OXC；SDK checker 和 Node bridge 已删除。
 4. ArkTS 1.2 虽然已经按参数正确分流，但 Rust 只解析并投影模块请求，真正的 UI、语法检查、Memo 和 ABC 驱动仍由 Node 加载 SDK 插件执行。
 5. Visual 已完成 Rust 原生 parser/codegen 与确定性插入；源码 ArkGuard 已由 OXC 原生实现，字节码混淆由 Rust 直接驱动 PandaGuard，混淆主链不再含业务 JS 或 Node bridge。
 6. 旧的空 `rollup_cache.json`、只写不读的 `bundle.json`、无生产调用的 `RollupCacheStore`/通用 artifact/namespace/plugin cache facade 均已删除；watch 使用 Rolldown 官方 retained graph API，跨进程构建使用 Rust-owned OXC transform artifact + resolved-import fact manifest。完整 Rolldown graph 反序列化受上游 API 限制，精细 ABC cache 仍待补齐。
@@ -461,7 +469,8 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 工作：
 
 - 执行第 8 节删除表，移除所有零调用 wrapper、旧 N-API export、CLI flag、环境变量、测试和文档；除 TS/JS 插件 ABI 边界外不得保留任何兼容层。
-- ArkGuard JS 与 Visual JS 已删除；继续删除 Yuku、SDK checker、static JS driver 和 hvigor task/runtime/config script 解释器。
+- ArkGuard JS、Visual JS 与 SDK checker JS 已删除；继续删除 Yuku、static JS driver 和
+  hvigor task/runtime/config script 解释器。
 - 清理所有 crate 内 direct path/version/git dependency，统一 root workspace dependencies。
 - 更新 README/API 文档，只公布真实支持能力和 typed rejections。
 

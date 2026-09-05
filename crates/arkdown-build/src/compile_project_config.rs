@@ -1,30 +1,21 @@
-//! SDK-backed ArkTS semantic checking.
+//! Source-owned `projectConfig` construction for ArkTS compilation and plugins.
 //!
-//! The installed ets-loader owns TypeScript semantic diagnostics and the
-//! ArkTS linter.  Rust owns the stage plan, process lifecycle, path
-//! serialization, and deterministic diagnostic aggregation; the adjacent CJS
-//! file loads `compile_plugin.js` and invokes the SDK-owned checker entry for
-//! the requested Hvigor phase.
+//! Rust owns the immutable configuration snapshot exposed to ArkTS compilation
+//! and to user-authored compile plugins. No checker or JavaScript process is
+//! started from this module.
 //!
 //! Upstream evidence:
-//! - `hvigor-arkts-compose/load-sdk-functions.js::loadSdkFunctions`
-//! - `ets-loader/rollup-plugin-ets-checker.js::etsChecker.buildStart`
-//! - `hvigor-arkts-compose/load-sdk-functions.js::runEtsStandaloneChecker`
-//! - `ets-loader/lib/ets_checker.js::etsStandaloneChecker`
 //! - `hvigor-ohos-plugin/tasks/worker/util.js::generateLoaderEnv`
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
-use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use arkdown::plugins::ets_transform::CheckerMode;
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{ArkdownConfig, BuildMode, BuildOption, ModuleConfig, OhosModuleType};
 use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
@@ -32,224 +23,11 @@ use arkdown_profile::LoaderJson;
 use arkdown_resolver::PackageResolutionPlan;
 use arkdown_session::{BuildSession, ModuleCompileContext};
 
-static CHECKER_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static PROJECT_CONFIG_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Selected ArkTS diagnostic policy.
-///
-/// `oxc` is the native default. `sdk` remains an explicit comparison backend
-/// until the remaining TypeScript semantic corpus is implemented by OXC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArkTsCheckerSelection {
-    Sdk,
-    Oxc,
-    Off,
-}
-
-impl ArkTsCheckerSelection {
-    pub fn parse(value: Option<&str>) -> Result<Self> {
-        match value.unwrap_or("oxc") {
-            "sdk" => Ok(Self::Sdk),
-            "oxc" => Ok(Self::Oxc),
-            "off" => Ok(Self::Off),
-            checker => {
-                anyhow::bail!("unsupported checker '{checker}'; expected 'sdk', 'oxc', or 'off'")
-            }
-        }
-    }
-
-    pub fn oxc_mode(self) -> CheckerMode {
-        match self {
-            Self::Sdk | Self::Oxc => CheckerMode::Oxc,
-            Self::Off => CheckerMode::Off,
-        }
-    }
-
-    pub fn runs_sdk_semantic_checker(self) -> bool {
-        matches!(self, Self::Sdk)
-    }
-}
-
-/// Runs prepared SDK comparison plans before any Rolldown transform hook.
-pub struct SdkSemanticCheckStage {
-    plans: Vec<SdkEtsCheckerPlan>,
-}
-
-#[derive(Debug)]
-struct SdkSemanticCheckFailure {
-    diagnostics: Vec<SdkSemanticCheckError>,
-}
-
-impl SdkSemanticCheckFailure {
-    fn new(diagnostics: Vec<SdkSemanticCheckError>) -> Self {
-        Self { diagnostics }
-    }
-}
-
-impl std::fmt::Display for SdkSemanticCheckFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported {} error(s)",
-            self.diagnostics.len()
-        )?;
-        for diagnostic in &self.diagnostics {
-            write!(
-                formatter,
-                "\n[{}] {}",
-                diagnostic.module_name,
-                diagnostic.message.trim()
-            )?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for SdkSemanticCheckFailure {}
-
-#[derive(Debug)]
-struct SdkSemanticCheckError {
-    module_name: String,
-    message: String,
-}
-
-impl SdkSemanticCheckError {
-    fn new(module_name: String, message: String) -> Self {
-        Self {
-            module_name,
-            message,
-        }
-    }
-}
-
-impl SdkSemanticCheckStage {
-    pub fn new(plans: Vec<SdkEtsCheckerPlan>) -> Self {
-        Self { plans }
-    }
-
-    pub fn run(self) -> Result<()> {
-        let outputs = SdkEtsCheckerBatch::new(self.plans).run()?;
-        let mut errors = Vec::new();
-        for output in outputs {
-            for diagnostic in output.diagnostics {
-                let is_error = diagnostic.level.eq_ignore_ascii_case("error");
-                match diagnostic.level.to_ascii_lowercase().as_str() {
-                    "error" => tracing::error!(
-                        module = %output.module_name,
-                        "ArkTS semantic check: {}",
-                        diagnostic.message
-                    ),
-                    "warn" | "warning" => tracing::warn!(
-                        module = %output.module_name,
-                        "ArkTS semantic check: {}",
-                        diagnostic.message
-                    ),
-                    _ => tracing::debug!(
-                        module = %output.module_name,
-                        level = %diagnostic.level,
-                        "ArkTS semantic check: {}",
-                        diagnostic.message
-                    ),
-                }
-                if is_error {
-                    errors.push(SdkSemanticCheckError::new(
-                        output.module_name.clone(),
-                        diagnostic.message,
-                    ));
-                }
-            }
-        }
-        if !errors.is_empty() {
-            return Err(SdkSemanticCheckFailure::new(errors).into());
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod semantic_stage_tests {
-    use super::{SdkSemanticCheckError, SdkSemanticCheckFailure};
-
-    #[test]
-    fn failure_keeps_sdk_file_location_and_message_visible() {
-        let failure = SdkSemanticCheckFailure::new(vec![SdkSemanticCheckError::new(
-            "entry".to_string(),
-            "ArkTS:ERROR File: /project/entry/Index.ets:12:7\n Cannot find module '@scope/pkg'.\n"
-                .to_string(),
-        )]);
-
-        assert_eq!(
-            failure.to_string(),
-            concat!(
-                "ARKDOWN_ETS_SEMANTIC_CHECK_FAILED: SDK etsChecker reported 1 error(s)\n",
-                "[entry] ArkTS:ERROR File: /project/entry/Index.ets:12:7\n",
-                " Cannot find module '@scope/pkg'."
-            )
-        );
-    }
-}
-
-/// Resolves the single HAR entry accepted by Hvigor's `ArkLinter.findAvailableEntry`.
-///
-/// The linter reads `oh-package.json5#main`; when it is absent it probes
-/// `index.ets`, `index.ts`, then `index.js` at the module root. Keeping this
-/// lookup in the SDK-checker owner prevents the runtime task bridge from
-/// inventing a second entry-resolution policy.
-pub struct ArkLinterEntryResolver<'a> {
-    module_root: &'a Path,
-}
-
-impl<'a> ArkLinterEntryResolver<'a> {
-    pub fn new(module_root: &'a Path) -> Self {
-        Self { module_root }
-    }
-
-    pub fn resolve(&self) -> Result<PathBuf> {
-        let package_path = self.module_root.join("oh-package.json5");
-        let source = std::fs::read_to_string(&package_path).with_context(|| {
-            format!("read ArkLinter package manifest {}", package_path.display())
-        })?;
-        let package: Value = json5::from_str(&source).with_context(|| {
-            format!(
-                "parse ArkLinter package manifest {}",
-                package_path.display()
-            )
-        })?;
-        if let Some(main) = package
-            .get("main")
-            .and_then(Value::as_str)
-            .filter(|main| !main.is_empty())
-        {
-            let entry = lexical_normalize(&self.module_root.join(main));
-            if entry.is_file() {
-                return Ok(entry);
-            }
-            anyhow::bail!(
-                "ARKDOWN_ARK_LINTER_INVALID_MAIN: invalid main file '{}' defined in {}",
-                main,
-                package_path.display()
-            );
-        }
-
-        for file_name in ["index.ets", "index.ts", "index.js"] {
-            let entry = self.module_root.join(file_name);
-            if entry.is_file() {
-                return Ok(entry);
-            }
-        }
-        anyhow::bail!(
-            "ARKDOWN_ARK_LINTER_MAIN_NOT_FOUND: no available main file is defined in {}",
-            package_path.display()
-        )
-    }
-}
-
-/// All filesystem paths supplied to the SDK checker for one module.
-///
-/// Build callers pass the same generated paths used by CompileArkTS.  The
-/// standalone `check` command uses an isolated temporary workspace for files
-/// the SDK writes, while retaining the original module manifest/source roots.
+/// Filesystem paths represented in the compile-plugin `projectConfig`.
 #[derive(Debug, Clone)]
-pub struct SdkEtsCheckerPaths {
+pub struct CompileProjectPaths {
     pub ace_profile_path: PathBuf,
     pub ace_module_json_path: PathBuf,
     pub app_resource_path: PathBuf,
@@ -264,9 +42,9 @@ pub struct SdkEtsCheckerPaths {
     workspace: PathBuf,
 }
 
-/// Generated build artifacts supplied to the SDK semantic checker adapter.
+/// Generated build artifacts represented in the compile configuration.
 #[derive(Debug, Clone)]
-pub struct SdkEtsCheckerBuildPaths {
+pub struct CompileProjectBuildPaths {
     pub ace_profile_path: PathBuf,
     pub ace_module_json_path: PathBuf,
     pub app_resource_path: PathBuf,
@@ -280,34 +58,10 @@ pub struct SdkEtsCheckerBuildPaths {
     pub resource_table_typescript_path: PathBuf,
 }
 
-impl SdkEtsCheckerPaths {
-    /// Construct an isolated no-build-output workspace for `arkdown check`.
-    pub fn standalone(module_root: &Path, module_json_path: PathBuf) -> Self {
-        let workspace = Self::next_workspace(&std::env::temp_dir());
-        let source_main = module_root.join("src").join("main");
-        Self {
-            ace_profile_path: workspace.join("resources").join("base").join("profile"),
-            ace_module_json_path: module_json_path,
-            app_resource_path: workspace.join("ResourceTable.txt"),
-            raw_file_resource_path: workspace.join("resources").join("rawfile"),
-            ace_module_root: source_main.join("ets"),
-            ace_super_visual_path: source_main.join("supervisual"),
-            ace_build_json_path: workspace.join("loader.json"),
-            cache_path: workspace.join("cache"),
-            ace_module_build: workspace.join("loader_out").join("ets"),
-            generated_profile_path: workspace.join("generated").join("profile").join("default"),
-            resource_table_typescript_path: workspace.join("generated").join("ResourceTable.ts"),
-            workspace,
-        }
-    }
-
-    /// Construct a transport workspace below the existing CompileArkTS cache.
-    ///
-    /// It is intentionally distinct from `cache_path`: the SDK owns cache files
-    /// at that path, while Arkdown owns and removes only the uniquely named
-    /// bridge/request/response directory.
-    pub fn build(input: SdkEtsCheckerBuildPaths) -> Self {
-        let SdkEtsCheckerBuildPaths {
+impl CompileProjectPaths {
+    /// Construct paths for one CompileArkTS target.
+    pub fn build(input: CompileProjectBuildPaths) -> Self {
+        let CompileProjectBuildPaths {
             ace_profile_path,
             ace_module_json_path,
             app_resource_path,
@@ -338,17 +92,16 @@ impl SdkEtsCheckerPaths {
     }
 
     fn next_workspace(parent: &Path) -> PathBuf {
-        let sequence = CHECKER_WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = PROJECT_CONFIG_WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         parent.join(format!(
-            "arkdown-sdk-ets-checker-{}-{sequence}",
+            "arkdown-compile-project-{}-{sequence}",
             std::process::id()
         ))
     }
 }
 
-/// Typed inputs collected by the Rust build/check planners before invoking the
-/// SDK.  No filesystem or configuration reads occur in the Node bridge.
-pub struct SdkEtsCheckerInput<'a> {
+/// Typed inputs collected before exposing the compile configuration.
+pub struct CompileProjectConfigInput<'a> {
     pub config: &'a ArkdownConfig,
     pub session: &'a BuildSession,
     pub module: &'a ModuleConfig,
@@ -357,8 +110,7 @@ pub struct SdkEtsCheckerInput<'a> {
     pub module_build_option: &'a BuildOption,
     pub loader_json: Option<&'a LoaderJson>,
     pub target_name: &'a str,
-    pub node_executable: PathBuf,
-    pub paths: SdkEtsCheckerPaths,
+    pub paths: CompileProjectPaths,
     pub entries: Vec<PathBuf>,
     pub coverage_enabled: bool,
     pub coverage_path_filter: Option<&'a str>,
@@ -374,11 +126,11 @@ pub struct SdkEtsCheckerInput<'a> {
     pub ignore_crossplatform_check: bool,
 }
 
-struct SdkEtsCheckerModuleLayout<'a> {
+struct CompileProjectModuleLayout<'a> {
     root: &'a Path,
 }
 
-impl<'a> SdkEtsCheckerModuleLayout<'a> {
+impl<'a> CompileProjectModuleLayout<'a> {
     fn new(root: &'a Path) -> Self {
         Self { root }
     }
@@ -408,12 +160,12 @@ impl<'a> SdkEtsCheckerModuleLayout<'a> {
 /// roots. `LoaderJson::compile_entry` is intentionally retained in its
 /// src/main-relative form for Arkdown's bundler, so this owner resolves it
 /// once for the SDK service.
-pub struct SdkEtsCheckerEntryCollector<'a> {
+pub struct CompileProjectEntryCollector<'a> {
     loader_json: &'a LoaderJson,
     source_root: PathBuf,
 }
 
-impl<'a> SdkEtsCheckerEntryCollector<'a> {
+impl<'a> CompileProjectEntryCollector<'a> {
     pub fn new(loader_json: &'a LoaderJson, ace_module_root: &Path) -> Self {
         Self {
             loader_json,
@@ -449,70 +201,29 @@ impl<'a> SdkEtsCheckerEntryCollector<'a> {
     }
 }
 
-/// Rust-owned plan builder for an installed SDK semantic-check invocation.
-pub struct SdkEtsCheckerPlanBuilder<'a> {
-    input: SdkEtsCheckerInput<'a>,
+/// Rust-owned builder for the compile-plugin `projectConfig` snapshot.
+pub struct CompileProjectConfigBuilder<'a> {
+    input: CompileProjectConfigInput<'a>,
 }
 
-impl<'a> SdkEtsCheckerPlanBuilder<'a> {
-    pub fn new(input: SdkEtsCheckerInput<'a>) -> Self {
+impl<'a> CompileProjectConfigBuilder<'a> {
+    pub fn new(input: CompileProjectConfigInput<'a>) -> Self {
         Self { input }
     }
 
-    pub fn build(self) -> Result<SdkEtsCheckerPlan> {
-        let ets_loader_path = self.path(&self.input.config.sdk_config.ets_loader_path)?;
-        let entries = self.entries()?;
-        let project_config = self.project_config()?;
-        let loader_env = self.loader_env()?;
-        let working_directory = self.input.config.project_root.clone();
-
-        let request = SdkEtsCheckerRequest {
-            ets_loader_path,
-            working_directory: self.path(&working_directory)?,
-            entries,
-            project_config,
-            loader_env,
-            phase: if self.input.loader_json.is_some() {
-                SdkEtsCheckerPhase::Compile
-            } else {
-                SdkEtsCheckerPhase::Standalone
-            },
-        };
-        Ok(SdkEtsCheckerPlan {
-            module_name: self.input.module.name.clone(),
-            node_executable: self.input.node_executable,
-            workspace: self.input.paths.workspace.clone(),
-            checker_cache_path: self.input.paths.cache_path.clone(),
-            checker_output_path: self.input.paths.ace_module_build.clone(),
-            request,
-        })
-    }
-
     /// Return the exact Rust-owned ArkTS compile configuration used by both the
-    /// optional SDK checker comparison backend and JavaScript/TypeScript compile
-    /// plugins. Keeping a single serialized snapshot prevents the plugin bridge
-    /// from reconstructing a smaller, divergent configuration.
+    /// JavaScript/TypeScript compile plugins. Keeping a single serialized
+    /// snapshot prevents the plugin boundary from reconstructing a smaller,
+    /// divergent configuration.
     pub fn project_config_value(&self) -> Result<Value> {
         serde_json::to_value(self.project_config()?).map_err(Into::into)
     }
 
-    fn entries(&self) -> Result<BTreeMap<String, String>> {
-        let mut entries = BTreeMap::new();
-        let mut seen = BTreeSet::new();
-        for (index, path) in self.input.entries.iter().enumerate() {
-            let path = self.path(path)?;
-            if seen.insert(path.clone()) {
-                entries.insert(format!("entry_{index:05}"), path);
-            }
-        }
-        Ok(entries)
-    }
-
     /// `ArkCompile.initDefaultArkCompileConfig().mockParams`, sourced from the
     /// immutable session dependency graph instead of re-running OHPM lookup in
-    /// the checker process.
+    /// later build stages.
     fn mock_params(&self) -> Result<Value> {
-        let module_layout = SdkEtsCheckerModuleLayout::new(&self.input.module_context.module.root);
+        let module_layout = CompileProjectModuleLayout::new(&self.input.module_context.module.root);
         let mock_config_path = module_layout.mock_config_json5();
         let mut mock_config_key_to_module_info = Map::new();
         let mut source_to_module_id = Map::new();
@@ -625,7 +336,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
         }))
     }
 
-    fn project_config(&self) -> Result<SdkEtsCheckerProjectConfig> {
+    fn project_config(&self) -> Result<CompileProjectConfig> {
         let module_package = self
             .input
             .module_context
@@ -1016,7 +727,7 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
         extras.insert("useTsHar".to_string(), Value::Bool(false));
         extras.insert("entryObj".to_string(), self.entry_obj()?);
 
-        Ok(SdkEtsCheckerProjectConfig {
+        Ok(CompileProjectConfig {
             module_type,
             perf: 0,
             target_name: format!(".{0}", self.input.target_name),
@@ -1108,71 +819,6 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
             device_types: self.device_types(),
             extras,
         })
-    }
-
-    fn loader_env(&self) -> Result<SdkEtsCheckerLoaderEnvironment> {
-        let external_api_paths = self.external_api_paths()?;
-        let external_api_paths_environment =
-            std::env::join_paths(external_api_paths.iter().map(std::path::Path::new))
-                .map_err(|error| {
-                    anyhow::anyhow!(
-            "ARKDOWN_ETS_CHECKER_EXTERNAL_API_PATHS: cannot encode SDK component paths: {error}"
-          )
-                })?
-                .into_string()
-                .map_err(|value| {
-                    anyhow::anyhow!(
-            "ARKDOWN_ETS_CHECKER_EXTERNAL_API_PATHS: SDK component path is not UTF-8: {}",
-            value.to_string_lossy()
-          )
-                })?;
-        Ok(SdkEtsCheckerLoaderEnvironment {
-            runtime_os: self.input.config.product.runtime_os.clone(),
-            sdk_info: self.sdk_info()?,
-            watch_mode: self.input.watch_mode.to_string(),
-            is_preview: self.input.preview_mode.then(|| "true".to_string()),
-            check_entry: self.input.check_entry.then(|| "true".to_string()),
-            ace_manifest_path: None,
-            app_resource: self.path(&self.input.paths.app_resource_path)?,
-            raw_file_resource: self.path(&self.input.paths.raw_file_resource_path)?,
-            ace_module_build: self.path(&self.input.paths.ace_module_build)?,
-            ace_module_root: self.path(&self.input.paths.ace_module_root)?,
-            cache_path: self.path(&self.input.paths.cache_path)?,
-            ace_profile_path: self.path(&self.input.paths.ace_profile_path)?,
-            ace_module_json_path: self.path(&self.input.paths.ace_module_json_path)?,
-            ace_super_visual_path: self.path(&self.input.paths.ace_super_visual_path)?,
-            ace_build_json: self.path(&self.input.paths.ace_build_json_path)?,
-            compile_tool: "rollup".to_string(),
-            ability_type: String::new(),
-            ace_compile_mode: self.compile_mode(),
-            external_api_paths: external_api_paths_environment,
-            enable_debug_line: self.input.debug_line,
-            is_fa_mode: None,
-            is_first_build: "true".to_string(),
-            widget_compile: "false".to_string(),
-        })
-    }
-
-    fn sdk_info(&self) -> Result<String> {
-        let component_metadata = self
-            .input
-            .session
-            .sdk
-            .compile_plugin()
-            .component_metadata()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ARKDOWN_ETS_CHECKER_SDK_METADATA: cannot read ETS component metadata from {}",
-                    self.input.config.sdk_config.ets_loader_path.display()
-                )
-            })?;
-        Ok(format!(
-            "{}:{}:{}:{}",
-            !arkdown_core::is_harmony_os(&self.input.config.product.runtime_os),
-            self.input.config.sdk_config.compile_api_version,
-            component_metadata.version,
-            component_metadata.release_type
-        ))
     }
 
     fn compile_mode(&self) -> String {
@@ -1570,193 +1216,9 @@ impl<'a> SdkEtsCheckerPlanBuilder<'a> {
     }
 }
 
-#[derive(Debug)]
-pub struct SdkEtsCheckerPlan {
-    module_name: String,
-    node_executable: PathBuf,
-    workspace: PathBuf,
-    checker_cache_path: PathBuf,
-    checker_output_path: PathBuf,
-    request: SdkEtsCheckerRequest,
-}
-
-#[derive(Debug)]
-pub struct SdkEtsCheckerBatch {
-    plans: Vec<SdkEtsCheckerPlan>,
-}
-
-impl SdkEtsCheckerBatch {
-    pub fn new(plans: Vec<SdkEtsCheckerPlan>) -> Self {
-        Self { plans }
-    }
-
-    /// SDK checker processes have isolated Node globals and module-specific
-    /// caches, so module plans can run in parallel. `par_iter()` over a `Vec`
-    /// retains input order when collected, which keeps diagnostics deterministic.
-    pub fn run(&self) -> Result<Vec<SdkEtsCheckerOutput>> {
-        self.plans
-            .par_iter()
-            .map(|plan| SdkEtsCheckerRunner::new(plan).run())
-            .collect()
-    }
-}
-
-pub struct SdkEtsCheckerRunner<'a> {
-    plan: &'a SdkEtsCheckerPlan,
-}
-
-impl<'a> SdkEtsCheckerRunner<'a> {
-    pub fn new(plan: &'a SdkEtsCheckerPlan) -> Self {
-        Self { plan }
-    }
-
-    pub fn run(&self) -> Result<SdkEtsCheckerOutput> {
-        let result = self.run_inner();
-        self.cleanup_workspace();
-        result
-    }
-
-    fn run_inner(&self) -> Result<SdkEtsCheckerOutput> {
-        std::fs::create_dir_all(&self.plan.workspace).with_context(|| {
-            format!(
-                "ARKDOWN_ETS_CHECKER_WORKSPACE: create {}",
-                self.plan.workspace.display()
-            )
-        })?;
-        std::fs::create_dir_all(&self.plan.checker_cache_path).with_context(|| {
-            format!(
-                "ARKDOWN_ETS_CHECKER_CACHE: create {}",
-                self.plan.checker_cache_path.display()
-            )
-        })?;
-        std::fs::create_dir_all(&self.plan.checker_output_path).with_context(|| {
-            format!(
-                "ARKDOWN_ETS_CHECKER_OUTPUT: create {}",
-                self.plan.checker_output_path.display()
-            )
-        })?;
-        let bridge_path = self.plan.workspace.join("ets-checker-bridge.cjs");
-        let request_path = self.plan.workspace.join("request.json");
-        let response_path = self.plan.workspace.join("response.json");
-        std::fs::write(
-            &bridge_path,
-            include_str!("../assets/sdk-ets-checker-bridge.cjs"),
-        )
-        .with_context(|| {
-            format!(
-                "ARKDOWN_ETS_CHECKER_BRIDGE_WRITE: write {}",
-                bridge_path.display()
-            )
-        })?;
-        std::fs::write(&request_path, serde_json::to_vec(&self.plan.request)?).with_context(
-            || {
-                format!(
-                    "ARKDOWN_ETS_CHECKER_REQUEST_WRITE: write {}",
-                    request_path.display()
-                )
-            },
-        )?;
-        let output = Command::new(&self.plan.node_executable)
-            .arg(&bridge_path)
-            .arg(&request_path)
-            .arg(&response_path)
-            .current_dir(PathBuf::from(&self.plan.request.working_directory))
-            .output()
-            .with_context(|| {
-                format!(
-                    "ARKDOWN_ETS_CHECKER_PROCESS_START: start {} for module '{}'",
-                    self.plan.node_executable.display(),
-                    self.plan.module_name
-                )
-            })?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "ARKDOWN_ETS_CHECKER_PROCESS_FAILED: module '{}' exited {:?}: {}",
-                self.plan.module_name,
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let response: SdkEtsCheckerResponse =
-            serde_json::from_slice(&std::fs::read(&response_path).with_context(|| {
-                format!(
-                    "ARKDOWN_ETS_CHECKER_RESPONSE_READ: read {}",
-                    response_path.display()
-                )
-            })?)
-            .with_context(|| {
-                format!(
-                    "ARKDOWN_ETS_CHECKER_RESPONSE_PARSE: parse {}",
-                    response_path.display()
-                )
-            })?;
-        Ok(SdkEtsCheckerOutput {
-            module_name: self.plan.module_name.clone(),
-            diagnostics: response.diagnostics,
-        })
-    }
-
-    fn cleanup_workspace(&self) {
-        let owned = self
-            .plan
-            .workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("arkdown-sdk-ets-checker-"));
-        if owned && self.plan.workspace.exists() {
-            if let Err(error) = std::fs::remove_dir_all(&self.plan.workspace) {
-                tracing::debug!(
-                  workspace = %self.plan.workspace.display(),
-                  error = %error,
-                  "could not remove SDK etsChecker transport workspace"
-                );
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SdkEtsCheckerOutput {
-    pub module_name: String,
-    pub diagnostics: Vec<SdkEtsCheckerDiagnostic>,
-}
-
-impl SdkEtsCheckerOutput {
-    pub fn error_count(&self) -> usize {
-        self.diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.level.eq_ignore_ascii_case("error"))
-            .count()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SdkEtsCheckerDiagnostic {
-    pub level: String,
-    pub message: String,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SdkEtsCheckerRequest {
-    ets_loader_path: String,
-    working_directory: String,
-    entries: BTreeMap<String, String>,
-    project_config: SdkEtsCheckerProjectConfig,
-    loader_env: SdkEtsCheckerLoaderEnvironment,
-    phase: SdkEtsCheckerPhase,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-enum SdkEtsCheckerPhase {
-    Compile,
-    Standalone,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SdkEtsCheckerProjectConfig {
+struct CompileProjectConfig {
     module_type: String,
     perf: u8,
     target_name: String,
@@ -1801,42 +1263,4 @@ struct SdkEtsCheckerProjectConfig {
     device_types: Vec<String>,
     #[serde(flatten)]
     extras: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SdkEtsCheckerLoaderEnvironment {
-    runtime_os: String,
-    sdk_info: String,
-    watch_mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_preview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    check_entry: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ace_manifest_path: Option<String>,
-    app_resource: String,
-    raw_file_resource: String,
-    ace_module_build: String,
-    ace_module_root: String,
-    cache_path: String,
-    ace_profile_path: String,
-    ace_module_json_path: String,
-    ace_super_visual_path: String,
-    ace_build_json: String,
-    compile_tool: String,
-    ability_type: String,
-    ace_compile_mode: String,
-    external_api_paths: String,
-    enable_debug_line: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_fa_mode: Option<String>,
-    is_first_build: String,
-    widget_compile: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SdkEtsCheckerResponse {
-    #[serde(default)]
-    diagnostics: Vec<SdkEtsCheckerDiagnostic>,
 }

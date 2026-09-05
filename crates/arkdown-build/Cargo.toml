@@ -13,6 +13,7 @@ arkdown-cache = { workspace = true }
 arkdown-config = { workspace = true }
 arkdown-core = { workspace = true }
 arkdown-ets-transform = { workspace = true }
+arkdown-ets-checker = { workspace = true }
 arkdown-native = { workspace = true }
 arkdown-obfuscate = { workspace = true }
 arkdown-pack = { workspace = true }

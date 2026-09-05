@@ -217,7 +217,6 @@ impl SelfConsistencyOracle {
         disable_abc_cache,
         cache_file: None,
         abc_backend: AbcBackendChoice::Auto,
-        checker: Some("oxc".to_string()),
         cache: true,
         skip_resource: false,
         skip_profile: false,

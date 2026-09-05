@@ -44,7 +44,7 @@ impl LocalPackageSourceRootInventory {
 }
 
 /// Converts the immutable session dependency graph into the single package
-/// plan shared by the SDK checker and Rolldown resolver.
+/// plan shared by the OXC project checker and Rolldown resolver.
 pub struct ModulePackageResolutionPlanner<'a> {
     context: &'a ModuleCompileContext,
     local_sources: &'a LocalPackageSourceRootInventory,

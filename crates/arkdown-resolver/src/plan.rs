@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-/// Immutable package-resolution metadata shared by the SDK checker and
-/// Rolldown's OHOS resolver.
+/// Immutable package-resolution metadata shared by the OXC project checker
+/// and Rolldown's OHOS resolver.
 ///
 /// Latest hvigor builds `pkgNameToPkgBriefInfo` once for each ArkCompile
 /// target. Dependencies are inserted first and the current package is inserted
