@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{borrow::Cow, future::ready, sync::Arc};
 
 use arc_swap::ArcSwap;
-use arkdown_cache::CacheKeyMaterial;
+use arkdown_cache::CacheFingerprint;
 #[cfg(feature = "memory-diagnostics")]
 use arkdown_ets_transform::RolldownEtsTransformOutput;
 use arkdown_ets_transform::{
@@ -24,6 +24,9 @@ use rolldown_plugin::{
     Plugin, SharedTransformPluginContext,
 };
 use rolldown_utils::dashmap::FxDashMap;
+
+use super::ets_transform_cache::EtsTransformCache;
+use crate::plan::BundleCachePolicy;
 
 pub use arkdown_ets_transform::error::{DiagnosticSeverity, EtsTransformError};
 pub use arkdown_ets_transform::transform;
@@ -39,6 +42,7 @@ pub use arkdown_ets_transform::{
 /// ArkTS transform plugin adapter.
 pub struct EtsTransformPlugin {
     plan: ArcSwap<RolldownEtsTransformPlan>,
+    cache: EtsTransformCache,
     #[cfg(feature = "memory-diagnostics")]
     memory_trace: EtsTransformMemoryTrace,
 }
@@ -84,8 +88,12 @@ impl std::fmt::Debug for EtsTransformPlugin {
 }
 
 impl EtsTransformPlugin {
-    pub fn from_plan(plan: Arc<RolldownEtsTransformPlan>) -> Self {
+    pub fn from_plan(
+        plan: Arc<RolldownEtsTransformPlan>,
+        cache_policy: &BundleCachePolicy,
+    ) -> Self {
         Self {
+            cache: EtsTransformCache::from_policy(cache_policy),
             plan: ArcSwap::from(plan),
             #[cfg(feature = "memory-diagnostics")]
             memory_trace: EtsTransformMemoryTrace::from_env(),
@@ -99,6 +107,20 @@ impl EtsTransformPlugin {
         self.plan.store(plan);
     }
 
+    pub(crate) fn begin_build(&self) {
+        let plan = self.plan.load_full();
+        self.cache.begin_build(&plan);
+    }
+
+    pub(crate) fn commit_cache(
+        &self,
+        module_imports: &rustc_hash::FxHashMap<String, Vec<String>>,
+        active_module_ids: Vec<String>,
+    ) {
+        let plan = self.plan.load_full();
+        self.cache.commit(&plan, module_imports, active_module_ids);
+    }
+
     fn transform_sync(
         &self,
         ctx: SharedTransformPluginContext,
@@ -108,9 +130,18 @@ impl EtsTransformPlugin {
         let trace_seq = self.memory_trace.begin(args);
 
         let plan = self.plan.load_full();
-        let result = RolldownEtsTransformer::new(plan)
-            .compile_transform(args.code.as_str(), args.id)
-            .map_err(|error| anyhow::anyhow!("ets-transform: {error}"));
+        let result = if let Some(output) = self.cache.restore(&plan, args.id, args.code.as_str()) {
+            Ok(Some(output))
+        } else {
+            let result = RolldownEtsTransformer::new(Arc::clone(&plan))
+                .compile_transform(args.code.as_str(), args.id)
+                .map_err(|error| anyhow::anyhow!("ets-transform: {error}"));
+            if let Ok(Some(output)) = &result {
+                self.cache
+                    .record(&plan, args.id, args.code.as_str(), output);
+            }
+            result
+        };
 
         #[cfg(feature = "memory-diagnostics")]
         self.memory_trace.end(trace_seq, args, &result);
@@ -121,7 +152,7 @@ impl EtsTransformPlugin {
         for warning in &output.warnings {
             Self::emit_warning(&ctx, warning);
         }
-        let transform_code_hash = CacheKeyMaterial::compute_content_hash(&output.code);
+        let transform_code_hash = CacheFingerprint::content_hash(&output.code);
         let transform_source_map = output.source_map.take().map(Arc::<str>::from);
         let has_source_map = transform_source_map.is_some();
         let map = transform_source_map

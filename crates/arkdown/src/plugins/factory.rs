@@ -1038,9 +1038,10 @@ impl<'a> PluginFactory<'a> {
         .with_hsp_har_package_names(self.input.hsp_har_package_names.clone())
         .with_disable_mock_setup_decorator(!self.plan.preview_mode);
         let ets_transform_plan = Arc::new(ets_transform_plan);
-        let ets_transform_plugin = Arc::new(EtsTransformPlugin::from_plan(Arc::clone(
-            &ets_transform_plan,
-        )));
+        let ets_transform_plugin = Arc::new(EtsTransformPlugin::from_plan(
+            Arc::clone(&ets_transform_plan),
+            &self.plan.cache,
+        ));
         let ets_transform_plugin_entry: SharedPluginable = ets_transform_plugin.clone();
 
         // ── 8. ApiTransformPlugin (hvigor SDK: apiTransform) ───────────────

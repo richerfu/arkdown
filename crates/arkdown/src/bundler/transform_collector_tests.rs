@@ -1,6 +1,6 @@
 use super::transform_collector::HvigorModuleTransformRecord;
 use super::*;
-use arkdown_cache::CacheKeyMaterial;
+use arkdown_cache::CacheFingerprint;
 use arkdown_ets_transform::{CrossplatformSourceCollection, InsightIntentSourceMetadata};
 
 #[test]
@@ -66,7 +66,7 @@ fn runtime_javascript_map_keeps_rollup_trailing_line_without_source_root() {
 #[test]
 fn collector_restores_transform_map_only_for_an_unchanged_projection() {
     let code = "const value = 1;\n";
-    let code_hash = CacheKeyMaterial::compute_content_hash(code);
+    let code_hash = CacheFingerprint::content_hash(code);
     let transform = r#"{"version":3,"sources":["index.ts"],"names":[],"mappings":"AAAA,CAAC"}"#;
     let projection =
         r#"{"version":3,"sources":["index.ts"],"names":[],"mappings":"AAAA"}"#.to_string();

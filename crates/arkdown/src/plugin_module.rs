@@ -19,7 +19,7 @@ use rolldown_common::{
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 
-use arkdown_cache::CacheKeyMaterial;
+use arkdown_cache::CacheFingerprint;
 use arkdown_path::ArtifactPathSerializer;
 
 use crate::diagnostics::RolldownBuildDiagnostics;
@@ -63,7 +63,7 @@ impl PluginModuleCompiler {
             .map_err(|_| PluginModuleCompileError::NonUtf8Path { file: file.clone() })?;
         Ok(format!(
             "{path}#{}",
-            CacheKeyMaterial::compute_content_hash(&source)
+            CacheFingerprint::content_hash(&source)
         ))
     }
 

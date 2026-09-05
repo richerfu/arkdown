@@ -265,6 +265,9 @@ pub struct BundleCachePolicy {
     /// Corresponds to `generateConfig.compileEnv` — when this changes, the
     /// entire bundle cache is invalidated.
     pub compile_env_key: String,
+    /// Content identity for all non-source inputs observed by the native OXC
+    /// transform. Per-source hashes are stored separately in the module cache.
+    pub transform_environment_key: String,
 }
 
 // ---------------------------------------------------------------------------

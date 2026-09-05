@@ -3,6 +3,7 @@
 //! Corresponds to SDK filters `/(?<!\.d)\.(ets|ts)$/`, `filterCrossplatform`,
 //! and the source classification files from the plugin crate.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use arkdown_core::ArktsLanguageVersion;
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, ModuleSpecifierText, SourceFileName};
 use oxc_span::SourceType;
 use rustc_hash::{FxHashMap, FxHashSet};
+use sha2::{Digest, Sha256};
 
 use crate::VisualGeneratedSource;
 
@@ -284,6 +286,54 @@ impl TransformSourceSnapshot {
 
     pub fn source_text_for_indexed_path(&self, path: &Path) -> Option<Arc<str>> {
         self.files.get(path).map(Arc::clone)
+    }
+
+    /// Build stable per-source hashes for the cross-process OXC transform
+    /// cache. Generated Visual input is part of the source identity because it
+    /// is inserted by the transform but is not present in Rolldown hook code.
+    pub fn transform_cache_source_hashes(&self) -> BTreeMap<String, String> {
+        let mut hashes = BTreeMap::new();
+        for (path, source) in self.files.iter() {
+            let Ok(module_id) = arkdown_path::ArtifactPathSerializer::path_to_slash_string(path)
+            else {
+                continue;
+            };
+            hashes.insert(module_id, self.transform_cache_source_hash(path, source));
+        }
+        hashes
+    }
+
+    pub fn transform_cache_source_hash_for(&self, id: &str, hook_source: &str) -> String {
+        let path = Path::new(id);
+        let Some(indexed) = self.indexed_path(path) else {
+            return Self::transform_cache_text_hash(hook_source);
+        };
+        let Some(source) = self.files.get(indexed) else {
+            return Self::transform_cache_text_hash(hook_source);
+        };
+        self.transform_cache_source_hash(indexed, source)
+    }
+
+    fn transform_cache_source_hash(&self, path: &Path, source: &str) -> String {
+        let mut hash = Sha256::new();
+        hash.update(source.as_bytes());
+        if let Some(visual) = self.visual_source(path) {
+            for part in [
+                visual.build.as_str(),
+                visual.ets_import.as_str(),
+                visual.ets_variable.as_str(),
+                visual.ets_function.as_str(),
+                visual.about_to_appear.as_str(),
+            ] {
+                hash.update([0]);
+                hash.update(part.as_bytes());
+            }
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    fn transform_cache_text_hash(source: &str) -> String {
+        format!("{:x}", Sha256::digest(source.as_bytes()))
     }
 
     /// Return the external OHM URL declared by an inventoried SDK declaration.
@@ -797,6 +847,30 @@ mod tests {
         assert!(declaration.is_typescript_definition());
         assert!(!declaration.is_arkui());
         assert!(!CompileArktsSourceType::from_id("src/main/js/index.js").is_typescript());
+    }
+
+    #[test]
+    fn transform_cache_source_hash_tracks_generated_visual_input() {
+        let source_path = PathBuf::from("/project/entry/src/main/ets/Index.ets");
+        let source = Arc::<str>::from("@Component struct Index { build() {} }");
+        let files = FxHashMap::from_iter([(source_path.clone(), Arc::clone(&source))]);
+        let plain = TransformSourceSnapshot::new(files.clone());
+        let visual =
+            TransformSourceSnapshot::new(files).with_visual_sources(FxHashMap::from_iter([(
+                source_path.clone(),
+                VisualGeneratedSource {
+                    build: "Text(\"visual\")".to_string(),
+                    ..VisualGeneratedSource::default()
+                },
+            )]));
+        let id = arkdown_path::ArtifactPathSerializer::path_to_slash_string(&source_path)
+            .expect("portable module id");
+
+        assert_ne!(
+            plain.transform_cache_source_hash_for(&id, &source),
+            visual.transform_cache_source_hash_for(&id, &source),
+            "Visual fragments are transform inputs even though Rolldown hook code is unchanged"
+        );
     }
 
     #[test]

@@ -31,6 +31,9 @@ pub mod api_transform;
 mod api_transform_tests;
 pub mod duplicate_check;
 pub mod ets_transform;
+mod ets_transform_cache;
+#[cfg(test)]
+mod ets_transform_cache_tests;
 pub mod factory;
 pub mod har_dedup;
 #[cfg(test)]

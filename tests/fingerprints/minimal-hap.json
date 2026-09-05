@@ -1,8 +1,4 @@
 {
-  "entry/build/default/cache/bundle/bundle.json": {
-    "sha256": "fbe31b86e4ec28a5092c1a85bb2e3beaf154e74690c5a02746be7ed6d3082484",
-    "size": 128
-  },
   "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/entry/src/main/ets/entryability/EntryAbility.protoBin": {
     "sha256": "8ecd9eb2e0afaeee2b9a7fb39bfbd3d94485e22b1d0600ffdc304a0c67b54155",
     "size": 9674
