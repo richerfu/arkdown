@@ -2210,6 +2210,11 @@ pub struct BuildConfig {
   pub project: Option<String>,
   pub target: Option<String>,
   pub mode: Option<String>,
+  /// Product action. Omitted performs a complete assemble.
+  #[napi(
+    ts_type = "'assemble' | 'hot-reload-compile' | 'hot-reload-build' | 'cold-reload' | 'prepare-quickfix' | 'package-quickfix' | 'sign-quickfix' | 'assemble-quickfix' | 'device-test'"
+  )]
+  pub action: Option<String>,
   /// Hvigor-compatible performance analysis mode. Hook event factories are
   /// active only for verbose and trace.
   #[napi(ts_type = "'normal' | 'default' | 'verbose' | 'false' | 'trace'")]
@@ -2335,6 +2340,7 @@ pub fn build<'a>(
     project,
     target,
     mode,
+    action,
     analyze,
     arkts_version,
     ohpm_mode,
@@ -2370,6 +2376,15 @@ pub fn build<'a>(
   let target = target.unwrap_or_else(|| "hap".to_string());
   let mode = mode.unwrap_or_else(|| "debug".to_string());
   let package_args = PackageBuildArgs {
+    action: arkdown_build::request::BuildAction::from_name(
+      action.as_deref().unwrap_or("assemble"),
+    )
+    .ok_or_else(|| {
+      napi::Error::from_reason(format!(
+        "invalid build action '{}'; expected assemble, hot-reload-compile, hot-reload-build, cold-reload, prepare-quickfix, package-quickfix, sign-quickfix, assemble-quickfix, or device-test",
+        action.as_deref().unwrap_or("assemble")
+      ))
+    })?,
     arkts_language_version: arkts_version.as_deref().unwrap_or("1.1").parse().map_err(
       |error: arkdown_core::ParseArktsLanguageVersionError| {
         napi::Error::from_reason(error.to_string())
@@ -2459,6 +2474,7 @@ pub fn parse_plugin_ast(
 
 #[derive(Debug, Clone, Default)]
 struct PackageBuildArgs {
+  action: arkdown_build::request::BuildAction,
   arkts_language_version: arkdown_core::ArktsLanguageVersion,
   ohpm_mode: arkdown_session::package::acquisition::AcquisitionMode,
   analyze: arkdown_build::request::AnalyzeModeChoice,
@@ -2561,6 +2577,7 @@ async fn run_build(
   .map_err(|error| anyhow::anyhow!("build startup worker failed: {error}"))??;
 
   let args = BuildRequest {
+    action: package_args.action,
     target,
     mode,
     analyze: package_args.analyze,
@@ -2578,7 +2595,7 @@ async fn run_build(
     },
     module,
     product,
-    project: Some(project_path),
+    project: Some(project_path.clone()),
     build_target_name: package_args.build_target_name,
     build_version: package_args.build_version,
     watch: package_args.watch,
@@ -2622,8 +2639,7 @@ async fn run_build(
     hvigor_properties: Default::default(),
     parameter_file_override: None,
     node_executable: None,
-    hvigor_cache_dir: None,
-    native_task_roots: Vec::new(),
+    hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };
 
   let output = if is_app_build {

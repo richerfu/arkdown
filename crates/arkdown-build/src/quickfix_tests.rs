@@ -8,7 +8,7 @@ use super::quickfix::{
     ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
     QuickFixTaskPlan, QuickFixVersionStore,
 };
-use super::request::NativeTaskRoot;
+use super::request::BuildAction;
 
 fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
     if let Some(parent) = path.parent() {
@@ -33,17 +33,12 @@ fn source(module_id: &Path, emitted: &Path, source_file: &str) -> HvigorModuleSo
 
 #[test]
 fn quickfix_task_plan_promotes_transitive_hqf_roots_to_the_full_boundary() {
-    let roots = vec![NativeTaskRoot {
-        module_name: "entry".to_string(),
-        target_name: None,
-        task_name: "assembleDevHqf".to_string(),
-    }];
-
-    let plan = QuickFixTaskPlan::for_module(&roots, "entry").expect("quickfix plan");
+    let action = BuildAction::AssembleQuickfix;
+    let plan = QuickFixTaskPlan::for_action(action).expect("quickfix plan");
     assert_eq!(plan.boundary(), QuickFixTaskBoundary::Assemble);
     assert!(plan.needs_patch_artifacts());
-    assert!(QuickFixTaskPlan::patch_artifacts_requested(&roots));
-    assert!(QuickFixTaskPlan::for_module(&roots, "feature").is_none());
+    assert!(QuickFixTaskPlan::patch_artifacts_requested(action));
+    assert!(QuickFixTaskPlan::for_action(BuildAction::Assemble).is_none());
 }
 
 #[test]

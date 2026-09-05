@@ -71,7 +71,6 @@ pub(super) struct CoordinatorBundleStageInput<'a> {
     pub(super) config: &'a Arc<ArkdownConfig>,
     pub(super) session: &'a Arc<BuildSession>,
     pub(super) package_plugins: &'a [PackagePlugin],
-    pub(super) task_lifecycle: &'a mut BuildTaskLifecycle,
     pub(super) collect_importers: bool,
     pub(super) is_incremental_watch: bool,
     pub(super) watch_changed_files: Vec<PathBuf>,
@@ -96,7 +95,6 @@ pub(super) struct CoordinatorBundleStageInput<'a> {
 pub(super) struct CoordinatorBundleStageOutput {
     pub(super) bundle_outs: Vec<(BundleStageOutput,)>,
     pub(super) widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>>,
-    pub(super) compile_task_active: Vec<bool>,
     pub(super) module_obfuscation_contexts: Vec<ModuleObfuscationContext>,
 }
 
@@ -110,7 +108,6 @@ impl BuildCoordinator {
             config,
             session,
             package_plugins,
-            task_lifecycle,
             collect_importers,
             is_incremental_watch,
             watch_changed_files,
@@ -136,7 +133,6 @@ impl BuildCoordinator {
         progress.step(3, 6, "Bundling");
         let mut bundle_outs: Vec<(BundleStageOutput,)> = Vec::new();
         let mut widget_bundle_outs: Vec<Option<WidgetCompileArktsOutput>> = Vec::new();
-        let mut compile_task_active = Vec::new();
         let mut transform_resource_inventory_loader = TransformResourceInventoryLoader::new();
         let module_obfuscation_contexts = loader_jsons
             .iter()
@@ -165,23 +161,8 @@ impl BuildCoordinator {
                 &module_config.product.name,
                 module_target_name,
             );
-            let quickfix_task_plan =
-                QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name);
-            let hot_reload_task_plan =
-                HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name);
-            let compile_task_name = if hot_reload_task_plan.is_some() {
-                "HotReloadArkTS"
-            } else if quickfix_task_plan.is_some() {
-                "ColdReloadArkTS"
-            } else {
-                Self::selected_arkts_compile_task_name(
-                    &args.native_task_roots,
-                    &module.name,
-                    module_target_name,
-                    &config.output_target,
-                    &module.module_type,
-                )
-            };
+            let quickfix_task_plan = QuickFixTaskPlan::for_action(args.action);
+            let hot_reload_task_plan = HotReloadTaskPlan::for_action(args.action);
             let module_package_plugins = package_plugins
                 .iter()
                 .filter(|plugin| {
@@ -230,17 +211,10 @@ impl BuildCoordinator {
             if !BuildPolicy::new(module_config.as_ref())
                 .module_requires_arkts_compilation(module)?
             {
-                task_lifecycle
-                    .up_to_date(&module.name, Some(module_target_name), compile_task_name)
-                    .await?;
-                task_lifecycle
-                    .up_to_date(&module.name, Some(module_target_name), "BuildJS")
-                    .await?;
                 bundle_outs.push((BundleStageOutput::skipped_original_har(
                     cached_abc, output_dir,
                 ),));
                 widget_bundle_outs.push(None);
-                compile_task_active.push(false);
                 continue;
             }
             let widget_pass =
@@ -382,33 +356,11 @@ impl BuildCoordinator {
 
             if cache_hit {
                 plugin_context_cache.commit().await?;
-                task_lifecycle
-                    .up_to_date(&module.name, Some(module_target_name), compile_task_name)
-                    .await?;
-                task_lifecycle
-                    .up_to_date(&module.name, Some(module_target_name), "BuildJS")
-                    .await?;
+
                 bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir),));
                 widget_bundle_outs.push(None);
-                compile_task_active.push(false);
                 continue;
             }
-
-            if !task_lifecycle
-                .before(&module.name, Some(module_target_name), compile_task_name)
-                .await?
-            {
-                task_lifecycle
-                    .up_to_date(&module.name, Some(module_target_name), "BuildJS")
-                    .await?;
-                bundle_outs.push((BundleStageOutput::skipped_original_har(
-                    cached_abc, output_dir,
-                ),));
-                widget_bundle_outs.push(None);
-                compile_task_active.push(false);
-                continue;
-            }
-            compile_task_active.push(true);
 
             // SDK `watchChangedFiles.beforeBuild` writes this handoff before the
             // Rollup transform starts. Preserve the raw event kinds: Hvigor treats
@@ -870,36 +822,20 @@ impl BuildCoordinator {
                 format_args!("module={}", module.name),
             );
             if let Some(collect_factory_output) = collect_factory_output {
-                let collect_enabled = task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(module_target_name),
-                        "CollectDuplicateHarEntriesArkTS",
-                    )
-                    .await?;
-                if collect_enabled {
-                    let collect_out = BundleStage::run(BundleStageInput {
-                        config: config.clone(),
-                        plugins: collect_factory_output.plugins,
-                        ets_transform_plan: Some(collect_factory_output.ets_transform_plan),
-                        plan: bundle_plan.clone(),
-                    })
-                    .await?;
-                    let bytecode_module_ids = module_har_dedup_plan.collect_bytecode_module_ids(
-                        collect_out.bundle_output.external_module_requests.iter(),
-                    );
-                    module_har_dedup_plan.write_bytecode_module_ids(
-                        &module_layout.bytecode_har_duplicate_files_info(),
-                        &bytecode_module_ids,
-                    )?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(module_target_name),
-                            "CollectDuplicateHarEntriesArkTS",
-                        )
-                        .await?;
-                }
+                let collect_out = BundleStage::run(BundleStageInput {
+                    config: config.clone(),
+                    plugins: collect_factory_output.plugins,
+                    ets_transform_plan: Some(collect_factory_output.ets_transform_plan),
+                    plan: bundle_plan.clone(),
+                })
+                .await?;
+                let bytecode_module_ids = module_har_dedup_plan.collect_bytecode_module_ids(
+                    collect_out.bundle_output.external_module_requests.iter(),
+                );
+                module_har_dedup_plan.write_bytecode_module_ids(
+                    &module_layout.bytecode_har_duplicate_files_info(),
+                    &bytecode_module_ids,
+                )?;
             }
             let plugin_factory_output =
                 PluginFactory::new(&bundle_plan, factory_input).build_output()?;
@@ -1331,7 +1267,6 @@ impl BuildCoordinator {
         Ok(CoordinatorBundleStageOutput {
             bundle_outs,
             widget_bundle_outs,
-            compile_task_active,
             module_obfuscation_contexts,
         })
     }

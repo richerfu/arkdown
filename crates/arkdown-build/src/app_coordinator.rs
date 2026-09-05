@@ -26,9 +26,7 @@ use arkdown_sign::SignBackendRunner;
 
 use arkdown_native::ProjectDebugSymbolCollector;
 
-use super::coordinator::{
-    BuildCoordinator, BuildOutput, BuildTaskLifecycle, NativeTaskCutoffReached,
-};
+use super::coordinator::{BuildCoordinator, BuildOutput};
 use crate::layout::ModuleBuildLayout;
 use crate::request::BuildRequest;
 
@@ -55,13 +53,12 @@ impl AppBuildCoordinator {
     }
 
     pub async fn execute(self) -> Result<BuildOutput> {
-        match self.execute_impl().await {
-            Ok(output) => Ok(output),
-            Err(error) if error.is::<NativeTaskCutoffReached>() => Ok(BuildOutput {
-                artifact_paths: Vec::new(),
-            }),
-            Err(error) => Err(error),
+        if self.args.action != crate::request::BuildAction::Assemble {
+            anyhow::bail!(
+                "ARKDOWN_APP_ACTION_UNSUPPORTED: project APP builds only support action=assemble"
+            );
         }
+        self.execute_impl().await
     }
 
     async fn execute_impl(self) -> Result<BuildOutput> {
@@ -71,26 +68,16 @@ impl AppBuildCoordinator {
       );
         }
 
-        let mut lifecycle = BuildTaskLifecycle::new(self.args.native_task_roots.clone());
         let project_name = self.project_name()?;
 
-        lifecycle.marker(&project_name, None, "PreBuildApp").await?;
-        if lifecycle
-            .before(&project_name, None, "DuplicateDependencyCheck")
-            .await?
+        if self
+            .config
+            .product
+            .build_option
+            .strict_mode
+            .duplicate_dependency_check
         {
-            if self
-                .config
-                .product
-                .build_option
-                .strict_mode
-                .duplicate_dependency_check
-            {
-                DuplicateDependencyValidator::new(&self.session.project).validate()?;
-            }
-            lifecycle
-                .after(&project_name, None, "DuplicateDependencyCheck")
-                .await?;
+            DuplicateDependencyValidator::new(&self.session.project).validate()?;
         }
 
         // HSP first ensures a local shared package is available before an entry
@@ -109,10 +96,7 @@ impl AppBuildCoordinator {
         );
         fs_err::create_dir_all(output_layout.output_dir())?;
 
-        let selected_package_file_names = if lifecycle
-            .before(&project_name, None, "MakeProjectPackInfo")
-            .await?
-        {
+        let selected_package_file_names = {
             let artifacts = app_artifacts.clone();
             let pack_info_path = output_layout.pack_info();
             let align_device_types = self.args.align_device_types.clone();
@@ -123,20 +107,11 @@ impl AppBuildCoordinator {
             })
             .await
             .context("MakeProjectPackInfo worker failed")??;
-            lifecycle
-                .after(&project_name, None, "MakeProjectPackInfo")
-                .await?;
+
             output.package_file_names
-        } else if self.args.align_device_types.is_empty() {
-            BTreeSet::new()
-        } else {
-            ProjectPackInfoBuilder::read_package_file_names(&output_layout.pack_info())?
         };
 
-        let privacy_profile = if lifecycle
-            .before(&project_name, None, "ProcessProjectPrivacyProfile")
-            .await?
-        {
+        let privacy_profile = {
             let config = self.config.clone();
             let schema_path = config
                 .sdk_config
@@ -153,76 +128,38 @@ impl AppBuildCoordinator {
             })
             .await
             .context("ProcessProjectPrivacyProfile worker failed")??;
-            lifecycle
-                .after(&project_name, None, "ProcessProjectPrivacyProfile")
-                .await?;
+
             output
-        } else {
-            None
         };
 
         let package_runner = self.package_runner()?;
-        let pack_res_path = if lifecycle
-            .before(&project_name, None, "GeneratePackRes")
-            .await?
-        {
-            let generated = self
-                .generate_pack_res(&package_runner, &output_layout)
-                .await?;
-            lifecycle
-                .after(&project_name, None, "GeneratePackRes")
-                .await?;
-            generated
-        } else {
-            output_layout
-                .pack_res()
-                .is_file()
-                .then(|| output_layout.pack_res())
-        };
+        let pack_res_path = self
+            .generate_pack_res(&package_runner, &output_layout)
+            .await?;
 
-        let unsigned_app = output_layout.unsigned_app();
-        if lifecycle.before(&project_name, None, "PackageApp").await? {
-            let staged = self
-                .package_app(
-                    &package_runner,
-                    &output_layout,
-                    &app_artifacts,
-                    &selected_package_file_names,
-                    privacy_profile.as_ref(),
-                    pack_res_path.as_deref(),
-                )
-                .await?;
-            if let Err(error) = self.collect_project_debug_symbols().await {
-                tracing::warn!(
-                  error = %format!("{error:#}"),
-                  "packing app-symbol.zip failed"
-                );
-            }
-            lifecycle.after(&project_name, None, "PackageApp").await?;
-            drop(staged);
+        let staged = self
+            .package_app(
+                &package_runner,
+                &output_layout,
+                &app_artifacts,
+                &selected_package_file_names,
+                privacy_profile.as_ref(),
+                pack_res_path.as_deref(),
+            )
+            .await?;
+        if let Err(error) = self.collect_project_debug_symbols().await {
+            tracing::warn!(
+              error = %format!("{error:#}"),
+              "packing app-symbol.zip failed"
+            );
         }
+        drop(staged);
 
-        if lifecycle
-            .before(&project_name, None, "SignPackagesFromApp")
-            .await?
-        {
-            self.sign_packages_from_app(&package_runner, &output_layout)
-                .await?;
-            lifecycle
-                .after(&project_name, None, "SignPackagesFromApp")
-                .await?;
-        }
+        self.sign_packages_from_app(&package_runner, &output_layout)
+            .await?;
 
-        let sign_enabled = lifecycle.before(&project_name, None, "SignApp").await?;
-        let final_apps = if sign_enabled {
-            let outputs = self.sign_apps(&output_layout).await?;
-            lifecycle.after(&project_name, None, "SignApp").await?;
-            outputs
-        } else {
-            vec![unsigned_app]
-        };
+        let final_apps = self.sign_apps(&output_layout).await?;
 
-        lifecycle.marker(&project_name, None, "assembleApp").await?;
         Ok(BuildOutput {
             artifact_paths: final_apps,
         })

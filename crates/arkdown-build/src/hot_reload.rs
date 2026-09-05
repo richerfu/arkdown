@@ -15,7 +15,7 @@ use arkdown_watcher::{WatchEvent, WatchEventKind};
 use indexmap::IndexSet;
 
 use crate::layout::ModuleBuildLayout;
-use crate::request::NativeTaskRoot;
+use crate::request::BuildAction;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HotReloadError {
@@ -66,33 +66,17 @@ pub struct HotReloadTaskPlan {
 }
 
 impl HotReloadTaskPlan {
-    pub fn for_module(roots: &[NativeTaskRoot], module_name: &str) -> Option<Self> {
-        roots
-            .iter()
-            .filter(|root| root.module_name == module_name)
-            .filter_map(|root| match root.task_name.as_str() {
-                "HotReloadArkTS" => Some(Self {
-                    boundary: HotReloadTaskBoundary::Compile,
-                }),
-                "HotReloadBuild" => Some(Self {
-                    boundary: HotReloadTaskBoundary::Build,
-                }),
-                _ => None,
-            })
-            .max_by_key(|plan| match plan.boundary {
-                HotReloadTaskBoundary::Compile => 0,
-                HotReloadTaskBoundary::Build => 1,
-            })
+    pub fn for_action(action: BuildAction) -> Option<Self> {
+        let boundary = match action {
+            BuildAction::HotReloadCompile => HotReloadTaskBoundary::Compile,
+            BuildAction::HotReloadBuild => HotReloadTaskBoundary::Build,
+            _ => return None,
+        };
+        Some(Self { boundary })
     }
 
     pub fn boundary(self) -> HotReloadTaskBoundary {
         self.boundary
-    }
-
-    pub fn requested(roots: &[NativeTaskRoot]) -> bool {
-        roots
-            .iter()
-            .any(|root| matches!(root.task_name.as_str(), "HotReloadArkTS" | "HotReloadBuild"))
     }
 }
 
@@ -101,21 +85,8 @@ impl HotReloadTaskPlan {
 pub struct ReloadResourceTaskPlan;
 
 impl ReloadResourceTaskPlan {
-    pub fn requested_for_module(roots: &[NativeTaskRoot], module_name: &str) -> bool {
-        roots.iter().any(|root| {
-            root.module_name == module_name
-                && matches!(
-                    root.task_name.as_str(),
-                    "buildHotReloadResource"
-                        | "HotReloadArkTS"
-                        | "HotReloadBuild"
-                        | "ColdReloadArkTS"
-                        | "PrepareQuickfix"
-                        | "PackageHqf"
-                        | "SignHqf"
-                        | "assembleDevHqf"
-                )
-        })
+    pub fn requested(action: BuildAction) -> bool {
+        action.is_hot_reload() || action.is_quickfix()
     }
 }
 

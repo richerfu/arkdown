@@ -16,9 +16,7 @@ impl BuildCoordinator {
         let config = &self.config;
         let session = &self.session;
         let package_plugins = &self.package_plugins;
-        let mut task_lifecycle = BuildTaskLifecycle::new(args.native_task_roots.clone());
-
-        let hot_reload_mode = HotReloadTaskPlan::requested(&args.native_task_roots);
+        let hot_reload_mode = args.action.is_hot_reload();
         let watch_mode =
             args.watch || args.preview || (hot_reload_mode && args.watch_invalidation.is_none());
         let collect_importers = args.watch || args.preview || hot_reload_mode;
@@ -68,14 +66,13 @@ impl BuildCoordinator {
             .clone()
             .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
         let project_layout = ProjectBuildLayout::new(&project_root);
-        let quickfix_version_store =
-            if QuickFixTaskPlan::patch_artifacts_requested(&args.native_task_roots) {
-                Some(QuickFixVersionStore::from_runtime(
-                    args.hvigor_cache_dir.as_deref(),
-                )?)
-            } else {
-                None
-            };
+        let quickfix_version_store = if QuickFixTaskPlan::patch_artifacts_requested(args.action) {
+            Some(QuickFixVersionStore::from_runtime(
+                args.hvigor_cache_dir.as_deref(),
+            )?)
+        } else {
+            None
+        };
         let quickfix_patch_version = quickfix_version_store
             .as_ref()
             .map(QuickFixVersionStore::current)
@@ -98,7 +95,6 @@ impl BuildCoordinator {
         let build_modules = ModuleSelectionPlanner::build_modules_for_target(
             config.as_ref(),
             args.module.as_deref(),
-            &args.native_task_roots,
         )?;
         let build_module_configs = build_modules
             .iter()
@@ -226,7 +222,6 @@ impl BuildCoordinator {
         if !native_dependency_plan.is_empty() {
             let _timer = BuildTimingProbe::global("native_dependency_waves");
             NativeDependencyStageExecutor::new(
-                &mut task_lifecycle,
                 &sanitizer_native_policy,
                 args.hvigor_properties.release_cmake_build_type.as_deref(),
             )
@@ -389,34 +384,18 @@ impl BuildCoordinator {
 
             let pre_build_validator =
                 PreBuildValidator::new(config, session, module, module_build_option);
-            if task_lifecycle
-                .before(&module.name, Some(&module_target_name), "PreBuild")
-                .await?
-            {
-                if !skip_profile_writes {
-                    // `PreBuild.doTaskAction` owns schema, source, API, and structural
-                    // validation. `PreCheckSyscap` is a separate dependent task in
-                    // hvigor 6.24.3 and is deliberately not folded into this action.
-                    pre_build_validator
-                        .validate()
-                        .map_err(|error| anyhow::anyhow!("pre-build validation failed: {error}"))?;
-                }
-                task_lifecycle
-                    .after(&module.name, Some(&module_target_name), "PreBuild")
-                    .await?;
+            if !skip_profile_writes {
+                // `PreBuild.doTaskAction` owns schema, source, API, and structural
+                // validation. `PreCheckSyscap` is a separate dependent task in
+                // hvigor 6.24.3 and is deliberately not folded into this action.
+                pre_build_validator
+                    .validate()
+                    .map_err(|error| anyhow::anyhow!("pre-build validation failed: {error}"))?;
             }
             // hvigor `GenerateUnitTestTemplate` writes the three local unit-test
             // templates into `<module>/.test/testability/` (declared output). It
             // runs for the `test` command entry (`hvigorw test`).
-            if matches!(config.output_target, OutputTarget::Test)
-                && task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GenerateUnitTestTemplate",
-                    )
-                    .await?
-            {
+            if matches!(config.output_target, OutputTarget::Test) {
                 let _timer = BuildTimingProbe::module(&module.name, "generate_unit_test_template");
                 if !module_layout.test_ability_ets().is_file() {
                     let coverage = args.ohos_test_coverage.unwrap_or(true);
@@ -448,26 +427,11 @@ impl BuildCoordinator {
                         )
                     })?;
                 }
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GenerateUnitTestTemplate",
-                    )
-                    .await?;
             }
             // hvigor `GenerateOhosTestTemplate`: the `ohosTest` target build
             // (`-p module=entry@ohosTest`) copies the SDK test templates into
             // `.test/<product>/intermediates/src/ohosTest/`.
-            if ohos_test_templates_after_migration
-                && task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GenerateOhosTestTemplate",
-                    )
-                    .await?
-            {
+            if ohos_test_templates_after_migration {
                 let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
                 let template_writer = crate::unit_test::UnitTestTemplateWriter::new(
                     &module.src_path,
@@ -483,35 +447,8 @@ impl BuildCoordinator {
                             )
                         })?;
                 }
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GenerateOhosTestTemplate",
-                    )
-                    .await?;
             }
-            let module_info_task_name = if module.module_type == OhosModuleType::Har {
-                "CreateHarModuleInfo"
-            } else {
-                "CreateModuleInfo"
-            };
-            if skip_profile_writes {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        module_info_task_name,
-                    )
-                    .await?;
-            } else if task_lifecycle
-                .before(
-                    &module.name,
-                    Some(&module_target_name),
-                    module_info_task_name,
-                )
-                .await?
-            {
+            if !skip_profile_writes {
                 let is_bytecode_har = module.module_type == OhosModuleType::Har
                     && module_build_option.har_artifact_type
                         == arkdown_core::HarArtifactType::Bytecode;
@@ -530,140 +467,80 @@ impl BuildCoordinator {
                     &module_target_name,
                     should_write_module_info,
                 )?;
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        module_info_task_name,
-                    )
-                    .await?;
             }
             let project_remote_hsp_exists =
                 config.project_root.join("oh_modules").join(".hsp").is_dir();
             let module_remote_hsp_exists = module.src_path.join("oh_modules").join(".hsp").is_dir();
-            if (project_remote_hsp_exists
-                || task_lifecycle.has_root(
-                    &module.name,
-                    Some(&module_target_name),
-                    "SignProjectRemoteHsp",
-                ))
-                && task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "SignProjectRemoteHsp",
-                    )
-                    .await?
-            {
-                if args.enable_sign_task {
-                    let signer = RemoteHspSigner::new(config.clone(), session.clone());
-                    let module_name = module.name.clone();
-                    tokio::task::spawn_blocking(move || {
-                        signer.run_for_module(&module_name, RemoteHspSignScope::Project)
-                    })
-                    .await
-                    .context("SignProjectRemoteHsp worker failed")??;
-                }
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        "SignProjectRemoteHsp",
-                    )
-                    .await?;
+            if project_remote_hsp_exists && args.enable_sign_task {
+                let signer = RemoteHspSigner::new(config.clone(), session.clone());
+                let module_name = module.name.clone();
+                tokio::task::spawn_blocking(move || {
+                    signer.run_for_module(&module_name, RemoteHspSignScope::Project)
+                })
+                .await
+                .context("SignProjectRemoteHsp worker failed")??;
             }
-            if (project_remote_hsp_exists
-                || module_remote_hsp_exists
-                || task_lifecycle.has_root(
-                    &module.name,
-                    Some(&module_target_name),
-                    "SignModuleRemoteHsp",
-                ))
-                && task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "SignModuleRemoteHsp",
-                    )
-                    .await?
-            {
-                if args.enable_sign_task {
-                    let signer = RemoteHspSigner::new(config.clone(), session.clone());
-                    let module_name = module.name.clone();
-                    tokio::task::spawn_blocking(move || {
-                        signer.run_for_module(&module_name, RemoteHspSignScope::Module)
-                    })
-                    .await
-                    .context("SignModuleRemoteHsp worker failed")??;
-                }
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        "SignModuleRemoteHsp",
-                    )
-                    .await?;
+            if (project_remote_hsp_exists || module_remote_hsp_exists) && args.enable_sign_task {
+                let signer = RemoteHspSigner::new(config.clone(), session.clone());
+                let module_name = module.name.clone();
+                tokio::task::spawn_blocking(move || {
+                    signer.run_for_module(&module_name, RemoteHspSignScope::Module)
+                })
+                .await
+                .context("SignModuleRemoteHsp worker failed")??;
             }
-            if task_lifecycle
-                .before(&module.name, Some(&module_target_name), "GenerateMetadata")
-                .await?
-            {
-                let related_entries = module_context
-                    .module
-                    .related_entry_modules
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|entry_name| {
-                        let entry_module = config
-                            .modules
-                            .iter()
-                            .find(|candidate| candidate.name == *entry_name)?;
-                        let entry_context = session.module_context(entry_name)?;
-                        let device_types = entry_context
-                            .module
-                            .module_json
-                            .as_ref()
-                            .map(|profile| profile.module.device_types.clone())
-                            .unwrap_or_default();
-                        let related_target = ModuleTargetSelection::resolve_build(
-                            config,
-                            session.build_options.as_ref(),
-                            entry_module,
-                            Some(&module_target_name),
-                            &args.hvigor_properties,
-                        )
-                        .target;
-                        Some(RelatedEntryMetadata {
-                            module_name: entry_name.clone(),
-                            device_types,
-                            distro_filter: related_target.distribution_filter,
-                        })
+            let related_entries = module_context
+                .module
+                .related_entry_modules
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|entry_name| {
+                    let entry_module = config
+                        .modules
+                        .iter()
+                        .find(|candidate| candidate.name == *entry_name)?;
+                    let entry_context = session.module_context(entry_name)?;
+                    let device_types = entry_context
+                        .module
+                        .module_json
+                        .as_ref()
+                        .map(|profile| profile.module.device_types.clone())
+                        .unwrap_or_default();
+                    let related_target = ModuleTargetSelection::resolve_build(
+                        config,
+                        session.build_options.as_ref(),
+                        entry_module,
+                        Some(&module_target_name),
+                        &args.hvigor_properties,
+                    )
+                    .target;
+                    Some(RelatedEntryMetadata {
+                        module_name: entry_name.clone(),
+                        device_types,
+                        distro_filter: related_target.distribution_filter,
                     })
-                    .collect();
-                let device_types = module_context
-                    .module
-                    .module_json
-                    .as_ref()
-                    .map(|profile| profile.module.device_types.as_slice())
-                    .unwrap_or_default();
-                intermediate_writer.write_package_metadata(PackageMetadataInput {
-                    project_root: &config.project_root,
-                    module_root: &module.src_path,
-                    output_target: &module_config.output_target,
-                    product_name: &module_config.product.name,
-                    target_name: &module_target_name,
-                    module_name: &module.name,
-                    module_type: &module.module_type,
-                    artifact_name: module_config.product.artifact_name.as_deref(),
-                    device_types,
-                    is_signed: args.enable_sign_task && config.product.signing_config.is_some(),
-                    related_entries,
-                })?;
-                task_lifecycle
-                    .after(&module.name, Some(&module_target_name), "GenerateMetadata")
-                    .await?;
-            }
+                })
+                .collect();
+            let device_types = module_context
+                .module
+                .module_json
+                .as_ref()
+                .map(|profile| profile.module.device_types.as_slice())
+                .unwrap_or_default();
+            intermediate_writer.write_package_metadata(PackageMetadataInput {
+                project_root: &config.project_root,
+                module_root: &module.src_path,
+                output_target: &module_config.output_target,
+                product_name: &module_config.product.name,
+                target_name: &module_target_name,
+                module_name: &module.name,
+                module_type: &module.module_type,
+                artifact_name: module_config.product.artifact_name.as_deref(),
+                device_types,
+                is_signed: args.enable_sign_task && config.product.signing_config.is_some(),
+                related_entries,
+            })?;
             let native_build_option =
                 arkdown_config::build_profile::EffectiveNativeBuildOption::from_build_option(
                     module_build_option,
@@ -710,62 +587,10 @@ impl BuildCoordinator {
                 native_collector
                     .excluding_dependency_roots(module_har_dedup_plan.duplicate_package_roots())
             };
-            if task_lifecycle
-                .before(&module.name, Some(&module_target_name), "ConfigureCmake")
-                .await?
-            {
-                native_collector
-                    .configure_cmake_dependencies()
-                    .map_err(|error| anyhow::anyhow!("ConfigureCmake failed: {error}"))?;
-                task_lifecycle
-                    .after(&module.name, Some(&module_target_name), "ConfigureCmake")
-                    .await?;
-            }
-            if task_lifecycle.has_root(&module.name, None, "compileNative") {
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "BuildNativeWithCmake",
-                    )
-                    .await?
-                {
-                    native_collector
-                        .configure_native()
-                        .map_err(|error| anyhow::anyhow!("BuildNativeWithCmake failed: {error}"))?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "BuildNativeWithCmake",
-                        )
-                        .await?;
-                }
-                task_lifecycle
-                    .marker(&module.name, None, "compileNative")
-                    .await?;
-            }
-            let build_profile_task_name = if module.module_type == OhosModuleType::Har {
-                "CreateHarBuildProfile"
-            } else {
-                "CreateBuildProfile"
-            };
-            if skip_profile_writes {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        build_profile_task_name,
-                    )
-                    .await?;
-            } else if task_lifecycle
-                .before(
-                    &module.name,
-                    Some(&module_target_name),
-                    build_profile_task_name,
-                )
-                .await?
-            {
+            native_collector
+                .configure_cmake_dependencies()
+                .map_err(|error| anyhow::anyhow!("ConfigureCmake failed: {error}"))?;
+            if !skip_profile_writes {
                 let _timer = BuildTimingProbe::module(&module.name, "build_profile");
                 let build_profile_path = module_layout
                     .build_profile_for_module(&module.module_type, &module_target_name);
@@ -809,28 +634,11 @@ impl BuildCoordinator {
                         fields,
                     })
                     .map_err(|error| anyhow::anyhow!("CreateBuildProfile failed: {error}"))?;
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        build_profile_task_name,
-                    )
-                    .await?;
             }
-            task_lifecycle
-                .marker(&module.name, None, "GenerateBuildProfile")
-                .await?;
-            if task_lifecycle
-                .before(&module.name, Some(&module_target_name), "PreCheckSyscap")
-                .await?
-            {
-                pre_build_validator
-                    .validate_pre_check_syscap()
-                    .map_err(|error| anyhow::anyhow!("PreCheckSyscap failed: {error}"))?;
-                task_lifecycle
-                    .after(&module.name, Some(&module_target_name), "PreCheckSyscap")
-                    .await?;
-            }
+
+            pre_build_validator
+                .validate_pre_check_syscap()
+                .map_err(|error| anyhow::anyhow!("PreCheckSyscap failed: {error}"))?;
 
             let module_json5_path = module_context
                 .module
@@ -987,15 +795,7 @@ impl BuildCoordinator {
                     OutputTarget::Preview | OutputTarget::Test
                 )
                 && args.hvigor_properties.with_deduplicate.unwrap_or(true);
-            if har_dedup_enabled
-                && task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessIdDefinedFile",
-                    )
-                    .await?
-            {
+            if har_dedup_enabled {
                 let configured = module_build_option
                     .res_options
                     .as_ref()
@@ -1010,13 +810,6 @@ impl BuildCoordinator {
                 IdDefinedFileProcessor::new(configured.as_deref(), &res_layout.id_defined_json())
                     .process()
                     .map_err(|error| anyhow::anyhow!("ProcessIdDefinedFile failed: {error}"))?;
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessIdDefinedFile",
-                    )
-                    .await?;
             }
             let skip_res = args.skip_resource;
             if skip_res {
@@ -1144,117 +937,39 @@ impl BuildCoordinator {
                 None
             };
 
-            if skip_profile_writes {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GeneratePkgContextInfo",
-                    )
-                    .await?;
-            } else if task_lifecycle
-                .before(
-                    &module.name,
-                    Some(&module_target_name),
-                    "GeneratePkgContextInfo",
-                )
-                .await?
-            {
+            if !skip_profile_writes {
                 if let Some(pkg_context_info) = pkg_context_info.as_ref() {
                     let _timer = BuildTimingProbe::module(&module.name, "pkg_context_info_write");
                     PkgContextInfoGenerator::new()
                         .write_generated(pkg_context_info, &module_layout.pkg_context_info_json())
                         .map_err(|e| anyhow::anyhow!("GeneratePkgContextInfo failed: {}", e))?;
                 }
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GeneratePkgContextInfo",
-                    )
-                    .await?;
             }
 
-            // `GeneratePkgSdkInfo` is registered globally, but latest hvigor only
-            // schedules it through the HAP/HSP pack task graph. A normal HAR build
-            // therefore has no `intermediates/loader/.../pkgSdkInfo.json`; retain a
-            // directly selected native task root for plugin/task-runner parity.
-            let runs_pkg_sdk_info = module.module_type != OhosModuleType::Har
-                || task_lifecycle.has_root(
-                    &module.name,
-                    Some(&module_target_name),
-                    "GeneratePkgSdkInfo",
-                );
-            if runs_pkg_sdk_info {
-                if skip_profile_writes {
-                    task_lifecycle
-                        .up_to_date(
-                            &module.name,
-                            Some(&module_target_name),
-                            "GeneratePkgSdkInfo",
-                        )
-                        .await?;
-                } else if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GeneratePkgSdkInfo",
-                    )
-                    .await?
-                {
-                    if !module_build_option.strict_mode.use_normalized_ohm_url {
-                        arkdown_profile::PkgSdkInfoGenerator::new(
-                            module_context.module.as_ref(),
-                            module_context.deps.as_ref(),
-                        )
-                        .write(&module_layout.pkg_sdk_info_json())
-                        .map_err(|error| anyhow::anyhow!("GeneratePkgSdkInfo failed: {error}"))?;
-                    }
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "GeneratePkgSdkInfo",
-                        )
-                        .await?;
-                }
+            // `GeneratePkgSdkInfo` is scheduled through the HAP/HSP pack flow.
+            if module.module_type != OhosModuleType::Har
+                && !skip_profile_writes
+                && !module_build_option.strict_mode.use_normalized_ohm_url
+            {
+                arkdown_profile::PkgSdkInfoGenerator::new(
+                    module_context.module.as_ref(),
+                    module_context.deps.as_ref(),
+                )
+                .write(&module_layout.pkg_sdk_info_json())
+                .map_err(|error| anyhow::anyhow!("GeneratePkgSdkInfo failed: {error}"))?;
             }
 
             let privacy_profile_path = {
                 let _timer = BuildTimingProbe::module(&module.name, "module_privacy_profile");
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessModulePrivacyProfile",
-                    )
-                    .await?
-                {
-                    let output =
-                        if BuildPolicy::module_processes_privacy_profile(&module.module_type) {
-                            privacy_profile_processor
-                                .process_module_privacy_profile(
-                                    arkdown_profile::PrivacyProfileInput {
-                                        module_root: &module.src_path,
-                                        target_name: &module_target_name,
-                                        pac_schema_path: pac_schema_path.as_deref(),
-                                    },
-                                )
-                                .map_err(|e| {
-                                    anyhow::anyhow!("ProcessModulePrivacyProfile failed: {}", e)
-                                })?
-                                .map(|output| output.processed_path)
-                        } else {
-                            None
-                        };
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "ProcessModulePrivacyProfile",
-                        )
-                        .await?;
-                    output
+                if BuildPolicy::module_processes_privacy_profile(&module.module_type) {
+                    privacy_profile_processor
+                        .process_module_privacy_profile(arkdown_profile::PrivacyProfileInput {
+                            module_root: &module.src_path,
+                            target_name: &module_target_name,
+                            pac_schema_path: pac_schema_path.as_deref(),
+                        })
+                        .map_err(|e| anyhow::anyhow!("ProcessModulePrivacyProfile failed: {}", e))?
+                        .map(|output| output.processed_path)
                 } else {
                     None
                 }
@@ -1312,13 +1027,7 @@ impl BuildCoordinator {
             // only each task's declared artifacts before its lifecycle `after`.
             let form_widget_abilities =
                 FormWidgetAbilityMerger::new(&session.project).collect(&module_json5);
-            let merge_profile_enabled = if skip_profile_writes {
-                false
-            } else {
-                task_lifecycle
-                    .before(&module.name, Some(&module_target_name), "MergeProfile")
-                    .await?
-            };
+            let merge_profile_enabled = !skip_profile_writes;
             let (manifest, mut loader_json, processed_profile_value, pack_info_plans) = {
                 let _timer = BuildTimingProbe::module(&module.name, "process_module");
                 let (manifest, loader_json) = processor
@@ -1355,63 +1064,30 @@ impl BuildCoordinator {
                 )?;
 
                 if skip_profile_writes {
-                    task_lifecycle
-                        .up_to_date(&module.name, Some(&module_target_name), "MergeProfile")
-                        .await?;
                 } else if merge_profile_enabled {
                     intermediate_writer.write_merge_profile_intermediate(
                         &module_layout,
                         &processed_profile_value,
                         module_json5.module.extension_abilities.len(),
                     )?;
-                    task_lifecycle
-                        .after(&module.name, Some(&module_target_name), "MergeProfile")
-                        .await?;
                 }
 
-                if skip_profile_writes {
-                    task_lifecycle
-                        .up_to_date(&module.name, Some(&module_target_name), "MakePackInfo")
-                        .await?;
-                } else if task_lifecycle
-                    .before(&module.name, Some(&module_target_name), "MakePackInfo")
-                    .await?
-                {
+                if !skip_profile_writes {
                     let packager = Packager::new(module_config.clone());
                     for plan in &pack_info_plans {
                         packager
                             .write_pack_info(&plan.input, &plan.output_path)
                             .map_err(|error| anyhow::anyhow!("MakePackInfo failed: {error}"))?;
                     }
-                    task_lifecycle
-                        .after(&module.name, Some(&module_target_name), "MakePackInfo")
-                        .await?;
                 }
 
-                if skip_profile_writes {
-                    task_lifecycle
-                        .up_to_date(&module.name, Some(&module_target_name), "ProcessProfile")
-                        .await?;
-                } else {
-                    if !task_lifecycle
-                        .before(&module.name, Some(&module_target_name), "ProcessProfile")
-                        .await?
-                    {
-                        anyhow::bail!(
-              "ARKDOWN_DISABLED_REQUIRED_HVIGOR_TASK: {}:{}@ProcessProfile is required to construct the in-memory manifest",
-              module.name,
-              module_target_name
-            );
-                    }
+                if !skip_profile_writes {
                     intermediate_writer.write_process_profile_intermediates(
                         &module_layout,
                         &processed_profile_value,
                         module_json5.module.extension_abilities.len(),
                         &form_widget_abilities,
                     )?;
-                    task_lifecycle
-                        .after(&module.name, Some(&module_target_name), "ProcessProfile")
-                        .await?;
                 }
                 (
                     manifest,
@@ -1471,58 +1147,23 @@ impl BuildCoordinator {
             // `ProcessRouterMap` feeds BasePackHapTask. Source/bytecode HARs carry
             // their router profile through `ProcessHarArtifacts` instead, so normal
             // HAR assembly must not create the two loader-router intermediates.
-            // Preserve explicit native task invocation for the plugin task graph.
-            let runs_router_map_task = module.module_type != OhosModuleType::Har
-                || task_lifecycle.has_root(
-                    &module.name,
-                    Some(&module_target_name),
-                    "ProcessRouterMap",
-                );
-            if runs_router_map_task {
-                if skip_profile_writes {
-                    task_lifecycle
-                        .up_to_date(&module.name, Some(&module_target_name), "ProcessRouterMap")
-                        .await?;
-                } else if task_lifecycle
-                    .before(&module.name, Some(&module_target_name), "ProcessRouterMap")
-                    .await?
-                {
-                    let _timer = BuildTimingProbe::module(&module.name, "router_map_intermediates");
-                    intermediate_writer.write_router_map_intermediates(
-                        module,
-                        &loader_json,
-                        module_config.as_ref(),
-                        &res_out,
-                    )?;
-                    intermediate_writer.apply_compile_resource_module_metadata(
-                        &module_json_out,
-                        !loader_json.router_map.is_empty(),
-                        &res_layout.profile_dir().join("insight_intent.json"),
-                    )?;
-                    task_lifecycle
-                        .after(&module.name, Some(&module_target_name), "ProcessRouterMap")
-                        .await?;
-                }
+            let runs_router_map_task = module.module_type != OhosModuleType::Har;
+            if runs_router_map_task && !skip_profile_writes {
+                let _timer = BuildTimingProbe::module(&module.name, "router_map_intermediates");
+                intermediate_writer.write_router_map_intermediates(
+                    module,
+                    &loader_json,
+                    module_config.as_ref(),
+                    &res_out,
+                )?;
+                intermediate_writer.apply_compile_resource_module_metadata(
+                    &module_json_out,
+                    !loader_json.router_map.is_empty(),
+                    &res_layout.profile_dir().join("insight_intent.json"),
+                )?;
             }
 
-            let process_share_config = if skip_profile_writes {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessShareConfig",
-                    )
-                    .await?;
-                false
-            } else {
-                task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessShareConfig",
-                    )
-                    .await?
-            };
+            let process_share_config = !skip_profile_writes;
             let share_out = if process_share_config || skip_profile_writes {
                 let _timer = BuildTimingProbe::module(&module.name, "share_config");
                 let collect_dependency_share_config = module.module_type != OhosModuleType::Har
@@ -1598,37 +1239,13 @@ impl BuildCoordinator {
                             )
                         })?;
                     }
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "ProcessShareConfig",
-                        )
-                        .await?;
                 }
                 share_out
             } else {
                 arkdown_profile::ShareConfigOutput { entries: vec![] }
             };
 
-            let process_startup_config = if skip_profile_writes {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessStartupConfig",
-                    )
-                    .await?;
-                false
-            } else {
-                task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessStartupConfig",
-                    )
-                    .await?
-            };
+            let process_startup_config = !skip_profile_writes;
             let startup_out = if process_startup_config || skip_profile_writes {
                 let _timer = BuildTimingProbe::module(&module.name, "startup_config");
                 let startup_out = startup_config_processor
@@ -1657,13 +1274,6 @@ impl BuildCoordinator {
                             &module_layout.startup_config_temp_json(),
                         )
                         .map_err(|e| anyhow::anyhow!("write startup config failed: {}", e))?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "ProcessStartupConfig",
-                        )
-                        .await?;
                 }
                 startup_out
             } else {
@@ -1769,13 +1379,6 @@ impl BuildCoordinator {
                             module_json_out.display()
                         )
                     })?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "UnitTestProcessProfile",
-                        )
-                        .await?;
                 }
 
                 let _timer =
@@ -1823,29 +1426,6 @@ impl BuildCoordinator {
                 }
             }
 
-            let process_resource_task_name = if preview_incremental_resources {
-                "PreviewProcessResource"
-            } else {
-                "ProcessResource"
-            };
-            let process_resource_enabled = if skip_res {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        process_resource_task_name,
-                    )
-                    .await?;
-                false
-            } else {
-                task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        process_resource_task_name,
-                    )
-                    .await?
-            };
             let (app_scope_res, res_dirs) = {
                 let _timer = BuildTimingProbe::module(&module.name, "resource_dir_select");
                 let include_app_scope =
@@ -1948,16 +1528,6 @@ impl BuildCoordinator {
                     },
                 )?;
             }
-            if process_resource_enabled {
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        process_resource_task_name,
-                    )
-                    .await?;
-            }
-
             let resource_backend =
                 ResourceBackendRunner::default_sdk(config.sdk_config.restool_path.clone());
             let resource_compile_config = ResourceCompileConfig {
@@ -1975,29 +1545,7 @@ impl BuildCoordinator {
                 is_debug: config.build_mode.is_debuggable(),
             };
 
-            let compile_resource_task_name = if preview_incremental_resources {
-                "PreviewCompileResource"
-            } else {
-                "CompileResource"
-            };
-            let compile_resource_enabled = if skip_res || res_dirs.is_empty() {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        compile_resource_task_name,
-                    )
-                    .await?;
-                false
-            } else {
-                task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        compile_resource_task_name,
-                    )
-                    .await?
-            };
+            let compile_resource_enabled = !skip_res && !res_dirs.is_empty();
             if compile_resource_enabled {
                 let _timer = BuildTimingProbe::module(&module.name, "resource_compile_restool");
                 match resource_backend.compile(
@@ -2097,16 +1645,6 @@ impl BuildCoordinator {
                     .load()?,
                 );
             }
-            if compile_resource_enabled {
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        compile_resource_task_name,
-                    )
-                    .await?;
-            }
-
             if matches!(module_config.output_target, OutputTarget::Har) {
                 let mut process_obfuscation = ModuleObfuscationContext::resolve(
                     module_config.as_ref(),
@@ -2115,28 +1653,12 @@ impl BuildCoordinator {
                     module_build_option,
                 )?;
                 process_obfuscation.target_name = Some(module_target_name.clone());
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ProcessObfuscationFiles",
-                    )
-                    .await?
-                {
-                    process_obfuscation.process_consumer_rules(
-                        &module_context,
-                        &module_config.build_mode,
-                        module_config.sdk_config.compile_api_version,
-                        module_layout.obfuscation_export_rule_path(),
-                    )?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "ProcessObfuscationFiles",
-                        )
-                        .await?;
-                }
+                process_obfuscation.process_consumer_rules(
+                    &module_context,
+                    &module_config.build_mode,
+                    module_config.sdk_config.compile_api_version,
+                    module_layout.obfuscation_export_rule_path(),
+                )?;
             }
 
             if matches!(config.output_target, OutputTarget::Preview) {
@@ -2159,52 +1681,15 @@ impl BuildCoordinator {
                         package_name,
                     },
                 );
-                if preview_incremental_resources
-                    && task_lifecycle
-                        .before(
-                            &module.name,
-                            Some(&module_target_name),
-                            "CopyPreviewProfile",
-                        )
-                        .await?
-                {
+                if preview_incremental_resources {
                     preview.copy_profile_for_incremental_resource()?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "CopyPreviewProfile",
-                        )
-                        .await?;
                 }
-                task_lifecycle
-                    .marker(
-                        &module.name,
-                        Some(&module_target_name),
-                        "PreviewHookCompileResource",
-                    )
-                    .await?;
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ReplacePreviewerPage",
-                    )
-                    .await?
-                {
-                    preview.replace_page(
-                        args.hvigor_properties.previewer_replace_page.as_deref(),
-                        args.hvigor_properties.compile_hsp_dependencies_truthy,
-                        args.hvigor_properties.main_module.as_deref(),
-                    )?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "ReplacePreviewerPage",
-                        )
-                        .await?;
-                }
+
+                preview.replace_page(
+                    args.hvigor_properties.previewer_replace_page.as_deref(),
+                    args.hvigor_properties.compile_hsp_dependencies_truthy,
+                    args.hvigor_properties.main_module.as_deref(),
+                )?;
                 if preview_incremental_resources {
                     let current_module_resources =
                         ResourceDirSelector::new(module_config.as_ref(), module, &module_target)
@@ -2332,79 +1817,36 @@ impl BuildCoordinator {
                 );
             }
 
-            if skip_profile_writes {
-                task_lifecycle
-                    .up_to_date(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GenerateLoaderJson",
-                    )
-                    .await?;
-            } else {
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "GenerateLoaderJson",
-                    )
-                    .await?
-                {
-                    let _timer = BuildTimingProbe::module(&module.name, "loader_json_write");
-                    processor
-                        .write_loader_json(&loader_json, &loader_json_out)
-                        .map_err(|e| {
-                            anyhow::anyhow!("write loader.json with byteCodeHarInfo failed: {}", e)
-                        })?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "GenerateLoaderJson",
-                        )
-                        .await?;
-                }
+            if !skip_profile_writes {
+                let _timer = BuildTimingProbe::module(&module.name, "loader_json_write");
+                processor
+                    .write_loader_json(&loader_json, &loader_json_out)
+                    .map_err(|e| {
+                        anyhow::anyhow!("write loader.json with byteCodeHarInfo failed: {}", e)
+                    })?;
             }
 
             if matches!(config.output_target, OutputTarget::Preview) {
-                task_lifecycle
-                    .marker(&module.name, None, "buildPreviewerResource")
-                    .await?;
-                if task_lifecycle
-                    .before(
-                        &module.name,
-                        Some(&module_target_name),
-                        "PreviewUpdateAssets",
-                    )
-                    .await?
-                {
-                    let package_name = module_context
-                        .module
-                        .package
-                        .as_ref()
-                        .map(|package| package.name.as_str())
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or(&module.name);
-                    crate::preview::PreviewAssetProcessor::new(
-                        crate::preview::PreviewAssetProcessorInput {
-                            project_root: &project_root,
-                            module_root: &module.src_path,
-                            module_name: &module.name,
-                            module_type: &module.module_type,
-                            product_name: &module_config.product.name,
-                            target_name: &module_target_name,
-                            compile_mode: &manifest.compile_mode,
-                            package_name,
-                        },
-                    )
-                    .update_assets()?;
-                    task_lifecycle
-                        .after(
-                            &module.name,
-                            Some(&module_target_name),
-                            "PreviewUpdateAssets",
-                        )
-                        .await?;
-                }
+                let package_name = module_context
+                    .module
+                    .package
+                    .as_ref()
+                    .map(|package| package.name.as_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(&module.name);
+                crate::preview::PreviewAssetProcessor::new(
+                    crate::preview::PreviewAssetProcessorInput {
+                        project_root: &project_root,
+                        module_root: &module.src_path,
+                        module_name: &module.name,
+                        module_type: &module.module_type,
+                        product_name: &module_config.product.name,
+                        target_name: &module_target_name,
+                        compile_mode: &manifest.compile_mode,
+                        package_name,
+                    },
+                )
+                .update_assets()?;
             }
 
             // hvigor `ReplaceUnitTestIndexFile` (after CompileResource): rewrite
@@ -2430,33 +1872,21 @@ impl BuildCoordinator {
                         module.name
                     )
                 })?;
-                task_lifecycle
-                    .after(
-                        &module.name,
-                        Some(&module_target_name),
-                        "ReplaceUnitTestIndexFile",
-                    )
-                    .await?;
+
                 // `BuildUnitTestHook` is an empty hvigor hook task whose boundary
                 // closes only after GenerateLoaderJson, CompileResource and
                 // ReplaceUnitTestIndexFile have completed. The Rust coordinator owns
                 // those actions directly, so it must expose the same hook boundary to
                 // the same-process task engine before UnitTestArkTS starts.
-                task_lifecycle
-                    .marker(&module.name, Some(&module_target_name), "BuildUnitTestHook")
-                    .await?;
             }
 
-            if ReloadResourceTaskPlan::requested_for_module(&args.native_task_roots, &module.name) {
+            if ReloadResourceTaskPlan::requested(args.action) {
                 HotReloadProcessor::new(&module_layout, &project_root).validate_resource_model(
                     &loader_json.compile_mode,
                     config.sdk_config.compile_api_version,
                 )?;
                 // BuildHotReloadResource is targetless and completes only after its
                 // target-scoped GenerateLoaderJson and CompileResource dependencies.
-                task_lifecycle
-                    .marker(&module.name, None, "buildHotReloadResource")
-                    .await?;
             }
             loader_jsons.push((
                 module.clone(),
@@ -2471,112 +1901,6 @@ impl BuildCoordinator {
             privacy_profile_paths.push(privacy_profile_path);
         }
         progress.done();
-
-        // `LintArkTS` is not an alias for the normal CompileArkTS checker hook.
-        // Hvigor's HAR task invokes `etsStandaloneChecker` with exactly one
-        // package entry after PreBuild/ProcessProfile/CreateHarBuildProfile. Run
-        // that SDK-owned phase only when the task graph selected the linter root;
-        // completing the root then terminates the partial native build before
-        // bundling, just like the upstream task boundary.
-        let mut ark_linter_plans = Vec::new();
-        let mut ark_linter_tasks = Vec::new();
-        for (module, _manifest, loader_json, _resource_refs, module_target_name, module_config) in
-            &loader_jsons
-        {
-            if !task_lifecycle.has_root(&module.name, Some(module_target_name), "LintArkTS")
-                || !task_lifecycle
-                    .before(&module.name, Some(module_target_name), "LintArkTS")
-                    .await?
-            {
-                continue;
-            }
-            if !matches!(module.module_type, OhosModuleType::Har) {
-                anyhow::bail!(
-          "ARKDOWN_ARK_LINTER_MODULE_TYPE: LintArkTS is only available for HAR modules; '{}' is {:?}",
-          module.name,
-          module.module_type
-        );
-            }
-            let module_context = session.module_context(&module.name).ok_or_else(|| {
-                anyhow::anyhow!("missing build session module context for {}", module.name)
-            })?;
-            let package_resolution =
-                package_resolution_plans.get(&module.name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "missing package resolution plan for module '{}'",
-                        module.name
-                    )
-                })?;
-            let module_layout = ModuleBuildLayout::for_output_target_product(
-                &config.output_target,
-                &module.src_path,
-                &config.product.name,
-                module_target_name,
-            );
-            let generated_profile_path = module_layout
-                .build_profile_for_module(&module.module_type, module_target_name)
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "ArkLinter cannot derive generated profile directory for module '{}'",
-                        module.name
-                    )
-                })?;
-            let paths = SdkEtsCheckerPaths::build(SdkEtsCheckerBuildPaths {
-                ace_profile_path: module_layout.res_profile_dir(),
-                ace_module_json_path: module_layout.res_ark_module_json(),
-                app_resource_path: module_layout.resource_table_txt(),
-                raw_file_resource_path: module_layout.res_resources_dir().join("rawfile"),
-                ace_module_root: module_layout.source().ets(),
-                ace_super_visual_path: module_layout.source().src_main().join("supervisual"),
-                ace_build_json_path: module_layout.loader_json(),
-                cache_path: PathBuf::from(&loader_json.cache_path),
-                ace_module_build: PathBuf::from(&loader_json.ace_module_build),
-                generated_profile_path,
-                resource_table_typescript_path: module_layout.generated_resource_table_typescript(),
-            });
-            ark_linter_plans.push(
-                SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
-                    config: module_config.as_ref(),
-                    session: session.as_ref(),
-                    module,
-                    module_context: &module_context,
-                    package_resolution,
-                    module_build_option: &module_config.product.build_option,
-                    loader_json: None,
-                    target_name: module_target_name,
-                    node_executable: args.resolved_node_executable(),
-                    paths,
-                    entries: vec![ArkLinterEntryResolver::new(&module.src_path).resolve()?],
-                    coverage_enabled: false,
-                    coverage_path_filter: None,
-                    coverage_mode: None,
-                    debug_line: false,
-                    preview_mode: false,
-                    check_entry: false,
-                    watch_mode: false,
-                    byte_code_har_integrated_optimization: args
-                        .byte_code_har_integrated_optimization,
-                    single_file_emit: false,
-                    rollup_cache_use_source_hash: args
-                        .hvigor_properties
-                        .rollup_cache_use_source_hash,
-                    is_crossplatform: args.is_crossplatform,
-                    ignore_crossplatform_check: args.ignore_crossplatform_check,
-                })
-                .build()?,
-            );
-            ark_linter_tasks.push((module.name.clone(), module_target_name.clone()));
-        }
-        if !ark_linter_plans.is_empty() {
-            SdkSemanticCheckStage::new(ark_linter_plans).run()?;
-            for (module_name, target_name) in ark_linter_tasks {
-                task_lifecycle
-                    .after(&module_name, Some(&target_name), "LintArkTS")
-                    .await?;
-            }
-        }
 
         // Latest ets-loader registers `etsChecker` before `etsTransform` and runs
         // it from `buildStart`.  Profiles/loader entries are now complete, while
@@ -2721,7 +2045,6 @@ impl BuildCoordinator {
                 config,
                 session,
                 package_plugins,
-                task_lifecycle: &mut task_lifecycle,
                 collect_importers,
                 is_incremental_watch,
                 watch_changed_files,
@@ -2745,7 +2068,6 @@ impl BuildCoordinator {
             .await?;
         let mut bundle_outs = bundle_stage_output.bundle_outs;
         let widget_bundle_outs = bundle_stage_output.widget_bundle_outs;
-        let compile_task_active = bundle_stage_output.compile_task_active;
         let module_obfuscation_contexts = bundle_stage_output.module_obfuscation_contexts;
 
         // ── Obfuscation (release builds only) ────────────────────────────
@@ -2777,8 +2099,8 @@ impl BuildCoordinator {
             if bundle_out.bypasses_compilation() {
                 continue;
             }
-            if QuickFixTaskPlan::for_module(&args.native_task_roots, &module.name).is_some()
-                || HotReloadTaskPlan::for_module(&args.native_task_roots, &module.name).is_some()
+            if QuickFixTaskPlan::for_action(args.action).is_some()
+                || HotReloadTaskPlan::for_action(args.action).is_some()
             {
                 // HotReloadArkCompile and ColdReloadArkCompile remove
                 // `obfuscationOptions` before submitting the SDK worker. A reload
@@ -2903,7 +2225,6 @@ impl BuildCoordinator {
                 config,
                 session,
                 package_plugins,
-                task_lifecycle: &mut task_lifecycle,
                 hot_reload_mode,
                 coverage_mode,
                 disable_abc_cache,
@@ -2919,7 +2240,6 @@ impl BuildCoordinator {
                 all_bc_har_deps: &all_bc_har_deps,
                 bundle_outs: &mut bundle_outs,
                 widget_bundle_outs: &widget_bundle_outs,
-                compile_task_active: &compile_task_active,
                 module_obfuscation_contexts: &module_obfuscation_contexts,
                 pending_bytecode_obfuscations: &mut pending_bytecode_obfuscations,
             })
@@ -2936,7 +2256,6 @@ impl BuildCoordinator {
                 args,
                 config,
                 session,
-                task_lifecycle: &mut task_lifecycle,
                 quickfix_version_store: &quickfix_version_store,
                 quickfix_patch_version,
                 quickfix_version_advanced: &mut quickfix_version_advanced,

@@ -27,7 +27,9 @@ use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalida
 use arkdown::plugins::factory::PackagePlugin;
 
 use crate::layout::ModuleBuildLayout;
-use crate::request::{AbcBackendChoice, AnalyzeModeChoice, BuildRequest, OhpmModeChoice};
+use crate::request::{
+    AbcBackendChoice, AnalyzeModeChoice, BuildAction, BuildRequest, OhpmModeChoice,
+};
 
 use super::BuildService;
 
@@ -81,7 +83,7 @@ pub(super) struct WatchStageInput {
     pub(super) hvigor_properties: crate::request::HvigorRuntimeProperties,
     pub(super) parameter_file_override: Option<PathBuf>,
     pub(super) hvigor_cache_dir: Option<PathBuf>,
-    pub(super) native_task_roots: Vec<crate::request::NativeTaskRoot>,
+    pub(super) action: BuildAction,
     /// When `true`, only `src/main/resources/` directories are watched.
     pub(super) preview_mode: bool,
     pub(super) check_entry: bool,
@@ -159,7 +161,7 @@ impl WatchStageInput {
             hvigor_properties: args.hvigor_properties.clone(),
             parameter_file_override: args.parameter_file_override.clone(),
             hvigor_cache_dir: args.hvigor_cache_dir.clone(),
-            native_task_roots: args.native_task_roots.clone(),
+            action: args.action,
             preview_mode,
             check_entry: args.check_entry,
             hot_reload_mode,
@@ -219,7 +221,7 @@ impl WatchStage {
         let hvigor_properties = input.hvigor_properties;
         let parameter_file_override = input.parameter_file_override;
         let hvigor_cache_dir = input.hvigor_cache_dir;
-        let native_task_roots = input.native_task_roots;
+        let action = input.action;
         let hot_reload_mode = input.hot_reload_mode;
 
         let watch_plan = WatchSessionPlan::from_session(
@@ -344,6 +346,7 @@ impl WatchStage {
                 // rerun the bundle → bytecode → package pipeline.
                 let is_hot = hot_reload_mode || matches!(change_kind, WatchChangeKind::Hot);
                 let rebuild_args = BuildRequest {
+                    action,
                     ohpm_mode,
                     target: target.clone(),
                     mode: mode.clone(),
@@ -394,7 +397,6 @@ impl WatchStage {
                     parameter_file_override: parameter_file_override.clone(),
                     node_executable: node_executable.clone(),
                     hvigor_cache_dir: hvigor_cache_dir.clone(),
-                    native_task_roots: native_task_roots.clone(),
                 };
                 let command =
                     BuildService::new(rebuild_args).with_package_plugins(package_plugins.clone());
