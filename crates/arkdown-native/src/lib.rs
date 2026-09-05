@@ -85,6 +85,7 @@ mod tests {
                 package_root: Some(root),
                 package: None,
                 module_profile: None,
+                compile_inputs: Default::default(),
                 node_type:
                     arkdown_session::dependency_graph::snapshot::DependencyNodeType::SourceHar,
                 is_runtime_only: false,

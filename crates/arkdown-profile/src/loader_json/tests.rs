@@ -3193,6 +3193,61 @@ fn test_loader_json_runtime_only_metadata_follows_declared_transitive_scoped_dep
     );
 }
 
+#[test]
+fn runtime_only_sources_ignore_dynamic_and_dev_dependency_metadata() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().to_path_buf();
+    let module_root = project_root.join("entry");
+    std::fs::create_dir_all(&module_root).expect("create module dir");
+    std::fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{
+          name: "entry",
+          dynamicDependencies: { "dynamic-source": "1.0.0" },
+          devDependencies: { "dev-source": "1.0.0" }
+        }"#,
+    )
+    .expect("write entry oh-package");
+
+    let make_runtime_source = |package_name: &str| {
+        let package_root = project_root.join("oh_modules").join(package_name);
+        let source = package_root.join("runtime/ShouldNotCompile.ets");
+        std::fs::create_dir_all(source.parent().expect("runtime source parent"))
+            .expect("create runtime source directory");
+        std::fs::write(
+            package_root.join("oh-package.json5"),
+            format!(
+                r#"{{
+                  name: "{package_name}",
+                  metadata: {{ runtimeOnly: {{ sources: ["runtime"] }} }}
+                }}"#
+            ),
+        )
+        .expect("write dependency package");
+        std::fs::write(&source, "export const ignored = true;").expect("write runtime source");
+        source
+    };
+    let dynamic_source = make_runtime_source("dynamic-source");
+    let dev_source = make_runtime_source("dev-source");
+
+    let mut config = make_config(false);
+    config.project_root = project_root;
+    let module_cfg = ModuleConfig {
+        name: "entry".to_string(),
+        src_path: module_root,
+        module_type: OhosModuleType::Entry,
+    };
+
+    let loader = LoaderJson::generate(&config, &module_cfg, &make_manifest());
+
+    assert!(!loader
+        .hvigor_compile_entry
+        .contains(&to_absolute_path_string(&dynamic_source)));
+    assert!(!loader
+        .hvigor_compile_entry
+        .contains(&to_absolute_path_string(&dev_source)));
+}
+
 /// Verify `byteCodeHarInfo` is populated when an oh_modules package has index.abc.
 #[test]
 fn test_loader_json_byte_code_har_info_populated_from_oh_modules() {

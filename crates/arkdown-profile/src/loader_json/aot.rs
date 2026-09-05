@@ -18,49 +18,7 @@ pub(crate) struct DependencyPackageJson {
     #[serde(default)]
     pub(crate) main: Option<String>,
     #[serde(default)]
-    pub(crate) types: Option<String>,
-    #[serde(default)]
     pub(crate) version: String,
-    #[serde(default)]
-    pub(crate) metadata: Option<DependencyPackageMetadata>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DependencyPackageMetadata {
-    #[serde(default)]
-    pub(crate) resource: Option<DependencyResourceMetadata>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct DependencyResourceMetadata {
-    #[serde(default)]
-    pub(crate) directories: Vec<String>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct DependencyModuleJson {
-    pub(crate) module: DependencyModuleSection,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DependencyModuleSection {
-    #[serde(default)]
-    pub(crate) name: Option<String>,
-    #[serde(default)]
-    pub(crate) abilities: Vec<DependencyAbilityEntry>,
-    #[serde(default)]
-    pub(crate) extension_abilities: Vec<DependencyAbilityEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DependencyAbilityEntry {
-    #[serde(default)]
-    pub(crate) src_entry: Option<String>,
-    #[serde(rename = "type", alias = "extensionType", default)]
-    pub(crate) extension_type: Option<String>,
 }
 
 impl AotLoaderFields {

@@ -451,6 +451,7 @@ mod tests {
             package_root: Some(root),
             package: None,
             module_profile: None,
+            compile_inputs: Default::default(),
             node_type,
             is_runtime_only: false,
             is_dynamic: false,

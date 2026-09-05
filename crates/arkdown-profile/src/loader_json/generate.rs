@@ -329,6 +329,16 @@ impl LoaderJson {
                 &config.project_root,
                 &module_cfg.src_path,
             )
+            .with_runtime_only_aliases(
+                config
+                    .product
+                    .build_option
+                    .ark_options
+                    .as_ref()
+                    .and_then(|options| options.runtime_only.as_ref())
+                    .into_iter()
+                    .flat_map(|runtime_only| runtime_only.packages.iter().cloned()),
+            )
             .build()
         };
         Self::try_generate_with_dependency_graph(
@@ -430,7 +440,7 @@ impl LoaderJson {
         } else {
             compile_entry.extend(runtime_entry_sources.iter().cloned());
         }
-        let runtime_only_collector = RuntimeOnlyCollector::new(config, module_cfg);
+        let runtime_only_collector = RuntimeOnlyCollector::new(config, module_cfg, dep_graph);
         let module_json_path = module_layout.module_json5();
         let form_sources = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "form_sources");
@@ -871,11 +881,10 @@ impl LoaderJson {
         } else {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "dynamic_import_lib_info");
             let dynamic_dep_names = runtime_only_collector.collect_dynamic_import_dep_names();
-            let entries = LoaderByteCodeHarFields::collect_dynamic_import_lib_info(
+            let entries = LoaderByteCodeHarFields::collect_dynamic_import_lib_info_from_graph(
                 &module_cfg.name,
                 &dynamic_dep_names,
-                &module_cfg.src_path,
-                &config.project_root,
+                dep_graph,
             );
             entries
                 .into_iter()

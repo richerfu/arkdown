@@ -33,6 +33,35 @@ pub struct DependencyModuleProfileSnapshot {
     /// traversal. Captured with the dependency profile so later stages do not
     /// re-read Source HAR `module.json5` files.
     pub home_ability_src_entries: Vec<String>,
+    /// Every ability and extension-ability source entry in declaration order.
+    /// Loader input planning resolves these once at session startup.
+    pub ability_src_entries: Vec<String>,
+    /// Work-scheduler extension-ability source entries in declaration order.
+    pub work_scheduler_src_entries: Vec<String>,
+    /// `$profile:` router-map reference declared by the dependency module.
+    pub router_map: Option<String>,
+}
+
+/// Existing dependency source files that feed the ArkTS compiler.
+///
+/// Hvigor derives these while constructing `GenerateLoaderJson`. Arkdown
+/// freezes the equivalent typed inventory with the dependency graph so the
+/// profile/loader stage never re-reads dependency manifests or profile files.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DependencyCompileInputSnapshot {
+    /// Ability and extension-ability implementations.
+    pub ability_source_files: Vec<PathBuf>,
+    /// Worker implementations declared by module/package/build-profile data.
+    pub worker_source_files: Vec<PathBuf>,
+    /// InsightIntent source entries declared by dependency resource profiles.
+    pub insight_intent_source_files: Vec<PathBuf>,
+    /// Existing package entry selected by `main`, `types`, or the conventional
+    /// ArkTS/TypeScript/JavaScript candidates used for dynamic imports.
+    pub dynamic_import_entry_file: Option<PathBuf>,
+    /// Parsed router-map profile referenced by the dependency module. `None`
+    /// is authoritative and means the reference was absent, unreadable, or
+    /// invalid at session startup.
+    pub router_map_profile: Option<Arc<serde_json::Value>>,
 }
 
 /// Classification of a dependency node.
@@ -104,6 +133,9 @@ pub struct DependencyNodeSnapshot {
     pub package: Option<Arc<PackageSnapshot>>,
     /// Parsed dependency module/profile identity, when the package ships one.
     pub module_profile: Option<DependencyModuleProfileSnapshot>,
+    /// Compiler roots frozen from the dependency's module/package/profile
+    /// metadata during session construction.
+    pub compile_inputs: Arc<DependencyCompileInputSnapshot>,
     /// Dependency node classification.
     pub node_type: DependencyNodeType,
     /// Whether this is a runtime-only (not bundled) dependency.

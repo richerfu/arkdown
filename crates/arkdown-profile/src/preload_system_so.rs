@@ -279,6 +279,7 @@ mod tests {
                     home_ability_src_entries: vec!["ets/HomeAbility.ets".to_string()],
                     ..Default::default()
                 }),
+                compile_inputs: Default::default(),
                 node_type: DependencyNodeType::SourceHar,
                 is_runtime_only: false,
                 is_dynamic: false,

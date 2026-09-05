@@ -309,6 +309,7 @@ mod tests {
                 package_root: Some(root.to_path_buf()),
                 package: None,
                 module_profile: None,
+                compile_inputs: Default::default(),
                 node_type: DependencyNodeType::OhpmSource,
                 is_runtime_only: false,
                 is_dynamic: false,

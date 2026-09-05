@@ -373,6 +373,7 @@ mod tests {
             package_root: Some(PathBuf::from(format!("/oh_modules/{alias}"))),
             package: None,
             module_profile: None,
+            compile_inputs: Default::default(),
             node_type,
             is_runtime_only: false,
             is_dynamic,
