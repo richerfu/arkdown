@@ -10,7 +10,8 @@ use crate::{ObfuscationError, ObfuscationOptions};
 #[derive(Debug, Clone)]
 pub struct ArkguardAdapterOptions {
     pub node_executable: PathBuf,
-    pub ets_loader_path: PathBuf,
+    /// Native PandaGuard executable resolved alongside SDK `es2abc`.
+    pub panda_guard_path: PathBuf,
     pub arkguard_package: PathBuf,
     pub sdk_api_paths: Vec<PathBuf>,
     pub module_root: PathBuf,

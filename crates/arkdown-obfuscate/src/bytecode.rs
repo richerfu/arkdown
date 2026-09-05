@@ -1,16 +1,57 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use arkdown_path::ArtifactPathSerializer;
-use serde::{Deserialize, Serialize};
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    BindingIdentifier, Decorator, ExportDeclaration, ExportDefaultDeclaration,
+    ExportNamedDeclaration, ExportSpecifier, IdentifierName, IdentifierReference, ModuleExportName,
+    PropertyKey, StringLiteral,
+};
+use oxc_ast_visit::{walk, Visit};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+use rayon::prelude::*;
+use rolldown_sourcemap::OwnedSourceMap;
+use serde::Serialize;
+use serde_json::{Map, Value};
 
-use crate::{ArkguardAdapterOptions, ObfuscationError, ObfuscationModuleInput, ObfuscationOptions};
+use crate::{
+    ArkguardAdapterOptions, ObfuscationError, ObfuscationModuleInput, ObfuscationOptions,
+    ObfuscationRules,
+};
+
+const ES_ANNOTATIONS: [&str; 3] = [
+    "_ESConcurrentModuleRequestsAnnotation",
+    "_ESSlotNumberAnnotation",
+    "_ESAnnotation",
+];
+const BYTECODE_PROPERTY_WHITE_LIST: [&str; 3] =
+    ["componentClass", "getReuseId", "resetStateVarsOnReuse"];
+const NAME_CACHE_METADATA_KEYS: [&str; 5] = [
+    "FileNameCache",
+    "ObfNameMap",
+    "ProPertyCache",
+    "entryPackageInfo",
+    "compileSdkVersion",
+];
 
 /// Original source path to ABC record mapping used by SDK keep-rule handling.
 #[derive(Debug, Clone)]
 pub struct BytecodeObfuscationModuleRecord {
     pub source_path: PathBuf,
     pub record_name: String,
+}
+
+/// Immutable source captured by `BuildSession` for native reserved-name
+/// inventory construction.
+#[derive(Debug, Clone)]
+pub struct BytecodeObfuscationSource {
+    pub path: PathBuf,
+    pub source: Arc<str>,
+    pub sdk_declaration: bool,
 }
 
 /// Inputs that become available only after `es2abc` completes.
@@ -20,6 +61,7 @@ pub struct BytecodeObfuscationInput {
     pub modules_abc_path: PathBuf,
     pub module_records: Vec<BytecodeObfuscationModuleRecord>,
     pub record_name_white_list: Vec<String>,
+    pub reserved_name_sources: Vec<BytecodeObfuscationSource>,
 }
 
 /// SDK bytecode-obfuscation artifacts retained in the CompileArkTS cache.
@@ -35,15 +77,21 @@ pub struct BytecodeObfuscationOutput {
 
 pub(crate) struct ArkguardBytecodeRunner<'a> {
     options: &'a ObfuscationOptions,
+    rules: &'a ObfuscationRules,
     adapter: &'a ArkguardAdapterOptions,
 }
 
 impl<'a> ArkguardBytecodeRunner<'a> {
     pub(crate) fn new(
         options: &'a ObfuscationOptions,
+        rules: &'a ObfuscationRules,
         adapter: &'a ArkguardAdapterOptions,
     ) -> Self {
-        Self { options, adapter }
+        Self {
+            options,
+            rules,
+            adapter,
+        }
     }
 
     pub(crate) fn run(
@@ -51,80 +99,69 @@ impl<'a> ArkguardBytecodeRunner<'a> {
         input: BytecodeObfuscationInput,
     ) -> Result<BytecodeObfuscationOutput, ObfuscationError> {
         self.validate(&input)?;
-        std::fs::create_dir_all(&self.options.cache_dir)?;
-        let bridge_path = self
-            .options
-            .cache_dir
-            .join("arkdown-arkguard-bytecode-bridge.cjs");
-        let request_path = self.options.cache_dir.join(format!(
-            "arkdown-arkguard-bytecode-request-{}.json",
-            std::process::id()
-        ));
-        let response_path = self.options.cache_dir.join(format!(
-            "arkdown-arkguard-bytecode-response-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(&bridge_path, include_str!("bytecode_arkguard_bridge.cjs"))?;
-        std::fs::write(&request_path, serde_json::to_vec(&self.request(&input)?)?)?;
-        let process = Command::new(&self.adapter.node_executable)
-            .arg(&bridge_path)
-            .arg(&request_path)
-            .arg(&response_path)
-            .output()
-            .map_err(|source| ObfuscationError::ArkguardProcessStart {
-                executable: self.adapter.node_executable.clone(),
+        let paths = BytecodeObfuscationPaths::new(self.options, self.rules, self.adapter);
+        paths.create_directories()?;
+        paths.stage_source_maps(&input)?;
+
+        let inventory = ArkguardReservedNameInventory::build(self.adapter, self.rules, &input)?;
+        let config = BytecodeObfuscationConfigBuilder::new(
+            self.options,
+            self.rules,
+            self.adapter,
+            &input,
+            &paths,
+            inventory,
+        )
+        .build()?;
+        fs_err::write(&paths.config, serde_json::to_vec_pretty(&config)?)?;
+        fs_err::copy(&input.modules_abc_path, &paths.origin_abc)?;
+
+        let mut command = Command::new(&self.adapter.panda_guard_path);
+        if self.rules.enable_bytecode_obfuscation_debugging {
+            command
+                .arg("--debug")
+                .arg("--debug-file")
+                .arg(&paths.debug_log);
+            if !paths.debug_log.exists() {
+                fs_err::write(&paths.debug_log, [])?;
+            }
+        }
+        let process = command.arg(&paths.config).output().map_err(|source| {
+            ObfuscationError::ArkguardProcessStart {
+                executable: self.adapter.panda_guard_path.clone(),
                 source,
-            });
-        let _ = std::fs::remove_file(&request_path);
-        let _ = std::fs::remove_file(&bridge_path);
-        let process = process?;
+            }
+        })?;
         if !process.status.success() {
-            let _ = std::fs::remove_file(&response_path);
             return Err(ObfuscationError::ArkguardProcessFailed {
                 status: process.status.code(),
                 stderr: String::from_utf8_lossy(&process.stderr).trim().to_string(),
             });
         }
-        let response: BytecodeArkguardResponse =
-            serde_json::from_slice(&std::fs::read(&response_path)?)?;
-        let _ = std::fs::remove_file(&response_path);
-        self.validate_response(&response)?;
-
-        let bundle_source_maps = input
-            .module
-            .source_maps_path
-            .as_ref()
-            .ok_or(ObfuscationError::BytecodeObfuscationSourceMapsRequired)?;
-        if response.source_maps_path != *bundle_source_maps {
-            std::fs::copy(&response.source_maps_path, bundle_source_maps)?;
+        if !paths.obfuscated_abc.is_file() {
+            return Err(ObfuscationError::BytecodeObfuscationOutputNotFound(
+                paths.obfuscated_abc,
+            ));
         }
+        fs_err::copy(&paths.obfuscated_abc, &input.modules_abc_path)?;
+        self.update_post_obfuscation_artifacts(&paths, self.rules.compact)?;
+        paths.publish_source_maps(&input)?;
+        self.validate_outputs(&paths)?;
 
         Ok(BytecodeObfuscationOutput {
-            modules_abc_path: response.modules_abc_path,
-            config_path: response.config_path,
-            name_cache_path: response.name_cache_path,
-            source_maps_path: response.source_maps_path,
-            origin_abc_path: response.origin_abc_path,
-            obfuscated_abc_path: response.obfuscated_abc_path,
+            modules_abc_path: input.modules_abc_path,
+            config_path: paths.config,
+            name_cache_path: paths.name_cache,
+            source_maps_path: paths.source_maps,
+            origin_abc_path: paths.origin_abc,
+            obfuscated_abc_path: paths.obfuscated_abc,
         })
     }
 
     fn validate(&self, input: &BytecodeObfuscationInput) -> Result<(), ObfuscationError> {
-        if !self.adapter.ets_loader_path.is_dir() {
-            return Err(ObfuscationError::EtsLoaderNotFound(
-                self.adapter.ets_loader_path.clone(),
-            ));
-        }
-        if !self.adapter.arkguard_package.is_dir() {
-            return Err(ObfuscationError::ArkguardPackageNotFound(
-                self.adapter.arkguard_package.clone(),
-            ));
-        }
-        if self.adapter.sdk_api_paths.is_empty()
-            || self.adapter.sdk_api_paths.iter().all(|path| !path.exists())
-        {
-            return Err(ObfuscationError::ArkguardSdkApisNotFound(
-                self.adapter.sdk_api_paths.clone(),
+        if !self.adapter.panda_guard_path.is_file() {
+            return Err(ObfuscationError::BytecodeObfuscationInputNotFound(
+                self.adapter.panda_guard_path.clone(),
             ));
         }
         if self.adapter.compatible_sdk_version < 13
@@ -169,17 +206,47 @@ impl<'a> ArkguardBytecodeRunner<'a> {
         Ok(())
     }
 
-    fn validate_response(
+    fn update_post_obfuscation_artifacts(
         &self,
-        response: &BytecodeArkguardResponse,
+        paths: &BytecodeObfuscationPaths,
+        compact: bool,
     ) -> Result<(), ObfuscationError> {
+        if !paths.name_cache.is_file() {
+            return Err(ObfuscationError::BytecodeObfuscationOutputNotFound(
+                paths.name_cache.clone(),
+            ));
+        }
+        let mut name_cache: Map<String, Value> =
+            serde_json::from_slice(&fs_err::read(&paths.name_cache)?)?;
+        let original_source_maps: Map<String, Value> =
+            serde_json::from_slice(&fs_err::read(&paths.source_maps)?)?;
+        let cached_source_maps = self.adapter.cache_path.join("sourceMaps.json");
+        if cached_source_maps.is_file() {
+            fs_err::copy(&cached_source_maps, &paths.backup_source_maps)?;
+        }
+
+        let file_mapping = NameCacheProcessor::source_file_mapping(&name_cache);
+        let updated_source_maps =
+            NameCacheProcessor::rename_source_map_keys(original_source_maps.clone(), &file_mapping);
+        fs_err::write(
+            &paths.source_maps,
+            serde_json::to_vec_pretty(&updated_source_maps)?,
+        )?;
+        fs_err::copy(&paths.source_maps, &cached_source_maps)?;
+        if !compact {
+            name_cache = NameCacheProcessor::remap_line_ranges(name_cache, &original_source_maps)?;
+            fs_err::write(&paths.name_cache, serde_json::to_vec_pretty(&name_cache)?)?;
+        }
+        Ok(())
+    }
+
+    fn validate_outputs(&self, paths: &BytecodeObfuscationPaths) -> Result<(), ObfuscationError> {
         for path in [
-            &response.modules_abc_path,
-            &response.config_path,
-            &response.name_cache_path,
-            &response.source_maps_path,
-            &response.origin_abc_path,
-            &response.obfuscated_abc_path,
+            &paths.config,
+            &paths.name_cache,
+            &paths.source_maps,
+            &paths.origin_abc,
+            &paths.obfuscated_abc,
         ] {
             if !path.is_file() {
                 return Err(ObfuscationError::BytecodeObfuscationOutputNotFound(
@@ -189,179 +256,663 @@ impl<'a> ArkguardBytecodeRunner<'a> {
         }
         Ok(())
     }
+}
 
-    fn request(
+struct BytecodeObfuscationPaths {
+    config: PathBuf,
+    default_name_cache: PathBuf,
+    name_cache: PathBuf,
+    source_maps: PathBuf,
+    backup_source_maps: PathBuf,
+    origin_abc: PathBuf,
+    obfuscated_abc: PathBuf,
+    obfuscated_pa: Option<PathBuf>,
+    debug_log: PathBuf,
+}
+
+impl BytecodeObfuscationPaths {
+    fn new(
+        options: &ObfuscationOptions,
+        rules: &ObfuscationRules,
+        adapter: &ArkguardAdapterOptions,
+    ) -> Self {
+        let origin = options.cache_dir.join("origin");
+        let obfuscated = options.cache_dir.join("obf");
+        let default_name_cache = options.cache_dir.join("nameCache.json");
+        let name_cache = RuleOutputPathResolver::new(options)
+            .resolve(rules.print_name_cache.as_deref())
+            .unwrap_or_else(|| default_name_cache.clone());
+        let obfuscated_abc = obfuscated.join("modules.abc");
+        Self {
+            config: options.cache_dir.join("config.json"),
+            default_name_cache,
+            name_cache,
+            source_maps: adapter.cache_path.join("sourceMaps.map"),
+            backup_source_maps: origin.join("sourceMaps.json"),
+            origin_abc: origin.join("modules.abc"),
+            obfuscated_pa: rules
+                .enable_bytecode_obfuscation_debugging
+                .then(|| obfuscated_abc.with_extension("pa")),
+            obfuscated_abc,
+            debug_log: options.cache_dir.join("debug.log"),
+        }
+    }
+
+    fn create_directories(&self) -> Result<(), std::io::Error> {
+        for path in [&self.config, &self.origin_abc, &self.obfuscated_abc] {
+            if let Some(parent) = path.parent() {
+                fs_err::create_dir_all(parent)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_source_maps(&self, input: &BytecodeObfuscationInput) -> Result<(), ObfuscationError> {
+        let source_maps = input
+            .module
+            .source_maps_path
+            .as_ref()
+            .ok_or(ObfuscationError::BytecodeObfuscationSourceMapsRequired)?;
+        if source_maps != &self.source_maps {
+            if let Some(parent) = self.source_maps.parent() {
+                fs_err::create_dir_all(parent)?;
+            }
+            fs_err::copy(source_maps, &self.source_maps)?;
+        }
+        Ok(())
+    }
+
+    fn publish_source_maps(
         &self,
         input: &BytecodeObfuscationInput,
-    ) -> Result<BytecodeArkguardRequest, ObfuscationError> {
-        let module_path_map = self
-            .adapter
-            .module_path_map
-            .iter()
-            .map(|(name, path)| Ok((name.clone(), BytecodeArkguardPath::new(path).text()?)))
-            .collect::<Result<_, ObfuscationError>>()?;
-        let files = input
+    ) -> Result<(), ObfuscationError> {
+        let source_maps = input
             .module
-            .files
-            .iter()
-            .map(|file| {
-                Ok(BytecodeArkguardFile {
-                    build_path: BytecodeArkguardPath::new(&file.build_path).text()?,
-                    original_path: BytecodeArkguardPath::new(&file.original_path).text()?,
-                    insight_intent_global_names: file.insight_intent_global_names.clone(),
-                    insight_intent_property_names: file.insight_intent_property_names.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, ObfuscationError>>()?;
-        let module_records = input
-            .module_records
-            .iter()
-            .map(|record| {
-                Ok(BytecodeArkguardModuleRecord {
-                    source_path: BytecodeArkguardPath::new(&record.source_path).text()?,
-                    record_name: record.record_name.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, ObfuscationError>>()?;
-        Ok(BytecodeArkguardRequest {
-            ets_loader_path: BytecodeArkguardPath::new(&self.adapter.ets_loader_path).text()?,
-            arkguard_path: BytecodeArkguardPath::new(&self.adapter.arkguard_package).text()?,
-            rule_files: BytecodeArkguardPath::many(&self.options.rule_files)?,
-            dependency_rule_files: BytecodeArkguardPath::many(&self.options.dependency_rule_files)?,
-            sdk_apis: BytecodeArkguardPath::many(&self.adapter.sdk_api_paths)?,
-            cache_dir: BytecodeArkguardPath::new(&self.options.cache_dir).text()?,
-            export_rule_path: self
-                .options
-                .export_rule_path
-                .as_deref()
-                .map(|path| BytecodeArkguardPath::new(path).text())
-                .transpose()?
-                .unwrap_or_default(),
-            module_root: BytecodeArkguardPath::new(&self.adapter.module_root).text()?,
-            project_root: BytecodeArkguardPath::new(&self.adapter.project_root).text()?,
-            project_path: BytecodeArkguardPath::new(&self.adapter.project_path).text()?,
-            cache_path: BytecodeArkguardPath::new(&self.adapter.cache_path).text()?,
-            ace_module_build: BytecodeArkguardPath::new(&self.adapter.ace_module_build).text()?,
-            ace_module_json_path: BytecodeArkguardPath::new(&self.adapter.ace_module_json_path)
-                .text()?,
-            compile_sdk_version: self.adapter.compile_sdk_version.clone(),
-            compatible_sdk_version: self.adapter.compatible_sdk_version,
-            compatible_sdk_version_stage: self.adapter.compatible_sdk_version_stage.clone(),
-            entry_package_info: self.adapter.entry_package_info.clone(),
-            package_dir: self.adapter.package_dir.clone(),
-            module_path_map,
-            entry_array: self.adapter.entry_array.clone(),
-            resource_table_path: self
-                .adapter
-                .resource_table_path
-                .as_deref()
-                .map(|path| BytecodeArkguardPath::new(path).text())
-                .transpose()?,
-            local_packages: self.adapter.local_packages.clone(),
-            compile_har: self.adapter.compile_har,
-            compile_shared: self.adapter.compile_shared,
-            use_normalized: self.adapter.use_normalized,
-            use_ts_har: self.adapter.use_ts_har,
-            byte_code_har_info: self.adapter.byte_code_har_info.clone(),
-            modules_abc_path: BytecodeArkguardPath::new(&input.modules_abc_path).text()?,
-            source_maps_path: BytecodeArkguardPath::new(
-                input
-                    .module
-                    .source_maps_path
-                    .as_ref()
-                    .ok_or(ObfuscationError::BytecodeObfuscationSourceMapsRequired)?,
-            )
-            .text()?,
-            record_name_white_list: input.record_name_white_list.clone(),
-            module_records,
-            files,
+            .source_maps_path
+            .as_ref()
+            .ok_or(ObfuscationError::BytecodeObfuscationSourceMapsRequired)?;
+        if source_maps != &self.source_maps {
+            fs_err::copy(&self.source_maps, source_maps)?;
+        }
+        Ok(())
+    }
+}
+
+struct RuleOutputPathResolver<'a> {
+    options: &'a ObfuscationOptions,
+}
+
+impl<'a> RuleOutputPathResolver<'a> {
+    fn new(options: &'a ObfuscationOptions) -> Self {
+        Self { options }
+    }
+
+    fn resolve(&self, value: Option<&str>) -> Option<PathBuf> {
+        let path = Path::new(value?);
+        Some(if path.has_root() {
+            path.to_path_buf()
+        } else {
+            self.options
+                .rule_files
+                .first()
+                .and_then(|rule| rule.parent())
+                .unwrap_or(Path::new("."))
+                .join(path)
         })
     }
+
+    fn serialized(&self, value: Option<&str>) -> Result<String, ObfuscationError> {
+        self.resolve(value)
+            .as_deref()
+            .map(ArtifactPathSerializer::path_to_slash_string)
+            .transpose()
+            .map(|path| path.unwrap_or_default())
+            .map_err(Into::into)
+    }
 }
 
-struct BytecodeArkguardPath<'a> {
-    path: &'a Path,
+struct ArkguardReservedNameInventory {
+    names: BTreeSet<String>,
 }
 
-impl<'a> BytecodeArkguardPath<'a> {
-    fn new(path: &'a Path) -> Self {
-        Self { path }
+impl ArkguardReservedNameInventory {
+    fn build(
+        adapter: &ArkguardAdapterOptions,
+        rules: &ObfuscationRules,
+        input: &BytecodeObfuscationInput,
+    ) -> Result<Self, ObfuscationError> {
+        let scans = input
+            .reserved_name_sources
+            .par_iter()
+            .map(|source| ReservedNameSourceScanner::new(source, rules).scan())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut names = BTreeSet::new();
+        for scan in scans {
+            names.extend(scan);
+        }
+        names.extend(rules.keep_global_names.iter().cloned());
+        names.extend(rules.keep_property_names.iter().cloned());
+        names.extend(ES_ANNOTATIONS.into_iter().map(str::to_string));
+        for file in &input.module.files {
+            names.extend(file.insight_intent_global_names.iter().cloned());
+            names.extend(file.insight_intent_property_names.iter().cloned());
+        }
+        names.extend(Self::language_reserved_names(adapter)?);
+        Ok(Self { names })
     }
 
-    fn text(&self) -> Result<String, ObfuscationError> {
-        Ok(ArtifactPathSerializer::path_to_slash_string(self.path)?)
+    fn language_reserved_names(
+        adapter: &ArkguardAdapterOptions,
+    ) -> Result<BTreeSet<String>, ObfuscationError> {
+        let path = adapter
+            .arkguard_package
+            .join("lib/configs/preset/es_reserved_properties.json");
+        let source = fs_err::read(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ObfuscationError::ArkguardPackageNotFound(path.clone())
+            } else {
+                ObfuscationError::Io(error)
+            }
+        })?;
+        let value: Value = serde_json::from_slice(&source)?;
+        let mut names = BTreeSet::new();
+        if let Some(groups) = value.as_object() {
+            for values in groups.values().filter_map(Value::as_array) {
+                names.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
+            }
+        }
+        Ok(names)
+    }
+}
+
+struct ReservedNameSourceScanner<'a> {
+    source: &'a BytecodeObfuscationSource,
+    rules: &'a ObfuscationRules,
+}
+
+impl<'a> ReservedNameSourceScanner<'a> {
+    fn new(source: &'a BytecodeObfuscationSource, rules: &'a ObfuscationRules) -> Self {
+        Self { source, rules }
     }
 
-    fn many(paths: &[PathBuf]) -> Result<Vec<String>, ObfuscationError> {
-        paths
+    fn scan(&self) -> Result<BTreeSet<String>, ObfuscationError> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &self.source.source, self.source_type()).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Err(ObfuscationError::ParseError {
+                file: self.source.path.display().to_string(),
+                message: parsed
+                    .diagnostics
+                    .into_iter()
+                    .map(|diagnostic| diagnostic.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            });
+        }
+        let mut collector = ReservedNameAstCollector::new(
+            self.source.sdk_declaration,
+            !self.rules.enable_string_property_obfuscation,
+        );
+        collector.visit_program(&parsed.program);
+        Ok(collector.names)
+    }
+
+    fn source_type(&self) -> SourceType {
+        match self
+            .source
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("ets") | Some("ts") => SourceType::ets(),
+            _ => SourceType::from_path(&self.source.path)
+                .unwrap_or_else(|_| SourceType::ts().with_module(true)),
+        }
+    }
+}
+
+struct ReservedNameAstCollector {
+    names: BTreeSet<String>,
+    collect_all_names: bool,
+    export_depth: usize,
+    decorator_depth: usize,
+    keep_string_properties: bool,
+}
+
+impl ReservedNameAstCollector {
+    fn new(collect_all_names: bool, keep_string_properties: bool) -> Self {
+        Self {
+            names: BTreeSet::new(),
+            collect_all_names,
+            export_depth: 0,
+            decorator_depth: 0,
+            keep_string_properties,
+        }
+    }
+
+    fn insert_module_export_name(&mut self, name: &ModuleExportName<'_>) {
+        match name {
+            ModuleExportName::IdentifierName(identifier) => {
+                self.names.insert(identifier.name.to_string());
+            }
+            ModuleExportName::IdentifierReference(identifier) => {
+                self.names.insert(identifier.name.to_string());
+            }
+            ModuleExportName::StringLiteral(literal) => {
+                self.names.insert(literal.value.to_string());
+            }
+        }
+    }
+
+    fn insert_property_key(&mut self, key: &PropertyKey<'_>) {
+        match key {
+            PropertyKey::StaticIdentifier(identifier) => {
+                self.names.insert(identifier.name.to_string());
+            }
+            PropertyKey::StringLiteral(literal) => {
+                self.names.insert(literal.value.to_string());
+            }
+            PropertyKey::PrivateIdentifier(identifier) => {
+                self.names.insert(identifier.name.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    fn with_export_scope(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.export_depth += 1;
+        visit(self);
+        self.export_depth -= 1;
+    }
+}
+
+impl<'a> Visit<'a> for ReservedNameAstCollector {
+    fn visit_identifier_name(&mut self, identifier: &IdentifierName<'a>) {
+        if self.collect_all_names || self.decorator_depth > 0 {
+            self.names.insert(identifier.name.to_string());
+        }
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if self.collect_all_names || self.decorator_depth > 0 {
+            self.names.insert(identifier.name.to_string());
+        }
+    }
+
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        if self.collect_all_names || self.export_depth > 0 || self.decorator_depth > 0 {
+            self.names.insert(identifier.name.to_string());
+        }
+    }
+
+    fn visit_property_key(&mut self, key: &PropertyKey<'a>) {
+        self.insert_property_key(key);
+        walk::walk_property_key(self, key);
+    }
+
+    fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+        if self.collect_all_names || self.keep_string_properties || self.decorator_depth > 0 {
+            self.names.insert(literal.value.to_string());
+        }
+    }
+
+    fn visit_export_declaration(&mut self, declaration: &ExportDeclaration<'a>) {
+        self.with_export_scope(|collector| walk::walk_export_declaration(collector, declaration));
+    }
+
+    fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'a>) {
+        self.with_export_scope(|collector| {
+            walk::walk_export_default_declaration(collector, declaration)
+        });
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        for specifier in &declaration.specifiers {
+            self.insert_module_export_name(&specifier.local);
+            self.insert_module_export_name(&specifier.exported);
+        }
+        walk::walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_export_specifier(&mut self, specifier: &ExportSpecifier<'a>) {
+        self.insert_module_export_name(&specifier.local);
+        self.insert_module_export_name(&specifier.exported);
+    }
+
+    fn visit_decorator(&mut self, decorator: &Decorator<'a>) {
+        self.decorator_depth += 1;
+        walk::walk_decorator(self, decorator);
+        self.decorator_depth -= 1;
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BytecodeObfuscationConfig {
+    abc_file_path: String,
+    obf_abc_file_path: String,
+    obf_pa_file_path: String,
+    compile_sdk_version: String,
+    target_api_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_api_sub_version: Option<String>,
+    files_info_path: String,
+    entry_package_info: String,
+    source_maps_path: String,
+    default_name_cache_path: String,
+    skipped_remote_har_list: Vec<String>,
+    #[serde(rename = "useNormalizedOHMUrl")]
+    use_normalized_ohm_url: bool,
+    obfuscation_rules: BytecodeObfuscationRules,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BytecodeObfuscationRules {
+    disable_obfuscation: bool,
+    compact: bool,
+    enable_export_obfuscation: bool,
+    enable_remove_log: bool,
+    enable_decorator_obfuscation: bool,
+    print_name_cache: String,
+    apply_name_cache: String,
+    reserved_names: Vec<String>,
+    record_name_white_list: Vec<String>,
+    property_obfuscation: BytecodePropertyObfuscation,
+    toplevel_obfuscation: BytecodeToplevelObfuscation,
+    file_name_obfuscation: BytecodeFileNameObfuscation,
+    keep_options: BytecodeKeepOptions,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BytecodePropertyObfuscation {
+    enable: bool,
+    reserved_properties: Vec<String>,
+    universal_reserved_properties: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BytecodeToplevelObfuscation {
+    enable: bool,
+    reserved_toplevel_names: Vec<String>,
+    universal_reserved_toplevel_names: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BytecodeFileNameObfuscation {
+    enable: bool,
+    reserved_file_names: Vec<String>,
+    universal_reserved_file_names: Vec<String>,
+    reserved_remote_har_pkg_names: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BytecodeKeepOptions {
+    enable: bool,
+    keep_paths: Vec<String>,
+}
+
+struct BytecodeObfuscationConfigBuilder<'a> {
+    options: &'a ObfuscationOptions,
+    rules: &'a ObfuscationRules,
+    adapter: &'a ArkguardAdapterOptions,
+    input: &'a BytecodeObfuscationInput,
+    paths: &'a BytecodeObfuscationPaths,
+    inventory: ArkguardReservedNameInventory,
+}
+
+impl<'a> BytecodeObfuscationConfigBuilder<'a> {
+    fn new(
+        options: &'a ObfuscationOptions,
+        rules: &'a ObfuscationRules,
+        adapter: &'a ArkguardAdapterOptions,
+        input: &'a BytecodeObfuscationInput,
+        paths: &'a BytecodeObfuscationPaths,
+        inventory: ArkguardReservedNameInventory,
+    ) -> Self {
+        Self {
+            options,
+            rules,
+            adapter,
+            input,
+            paths,
+            inventory,
+        }
+    }
+
+    fn build(self) -> Result<BytecodeObfuscationConfig, ObfuscationError> {
+        let (reserved_properties, universal_reserved_properties) =
+            Self::partition_reserved_names(&self.rules.keep_property_names);
+        let (reserved_toplevel_names, universal_reserved_toplevel_names) =
+            Self::partition_reserved_names(&self.rules.keep_global_names);
+        let (reserved_file_names, universal_reserved_file_names) =
+            Self::partition_reserved_names(&self.rules.keep_file_names);
+        let reserved_file_names = reserved_file_names
+            .into_iter()
+            .map(|name| {
+                if !name.starts_with('.') && name.bytes().filter(|byte| *byte == b'.').count() == 1
+                {
+                    name.rsplit_once('.')
+                        .map(|(stem, _)| stem.to_string())
+                        .unwrap_or(name)
+                } else {
+                    name
+                }
+            })
+            .collect();
+        let mut property_reserved = reserved_properties.into_iter().collect::<BTreeSet<_>>();
+        property_reserved.extend(BYTECODE_PROPERTY_WHITE_LIST.into_iter().map(str::to_string));
+        let keep_paths = self.keep_paths()?;
+        let output_paths = RuleOutputPathResolver::new(self.options);
+        let print_name_cache = output_paths.serialized(self.rules.print_name_cache.as_deref())?;
+        let apply_name_cache = output_paths.serialized(self.rules.apply_name_cache.as_deref())?;
+        let mut record_name_white_list = self.input.record_name_white_list.clone();
+        record_name_white_list.sort();
+        record_name_white_list.dedup();
+        let skipped_remote_har_list = self
+            .adapter
+            .byte_code_har_info
+            .as_object()
+            .map(|entries| entries.keys().cloned().collect())
+            .unwrap_or_default();
+        Ok(BytecodeObfuscationConfig {
+            abc_file_path: ArtifactPathSerializer::path_to_slash_string(&self.paths.origin_abc)?,
+            obf_abc_file_path: ArtifactPathSerializer::path_to_slash_string(
+                &self.paths.obfuscated_abc,
+            )?,
+            obf_pa_file_path: self
+                .paths
+                .obfuscated_pa
+                .as_deref()
+                .map(ArtifactPathSerializer::path_to_slash_string)
+                .transpose()?
+                .unwrap_or_default(),
+            compile_sdk_version: self.adapter.compile_sdk_version.clone(),
+            target_api_version: self.adapter.compatible_sdk_version,
+            target_api_sub_version: self.adapter.compatible_sdk_version_stage.clone(),
+            files_info_path: ArtifactPathSerializer::path_to_slash_string(
+                &self.adapter.cache_path.join("filesInfo.txt"),
+            )?,
+            entry_package_info: self.adapter.entry_package_info.clone(),
+            source_maps_path: ArtifactPathSerializer::path_to_slash_string(
+                &self.paths.source_maps,
+            )?,
+            default_name_cache_path: ArtifactPathSerializer::path_to_slash_string(
+                &self.paths.default_name_cache,
+            )?,
+            skipped_remote_har_list,
+            use_normalized_ohm_url: self.adapter.use_normalized,
+            obfuscation_rules: BytecodeObfuscationRules {
+                disable_obfuscation: false,
+                compact: self.rules.compact,
+                enable_export_obfuscation: self.rules.enable_export_obfuscation,
+                enable_remove_log: self.rules.remove_log,
+                enable_decorator_obfuscation: false,
+                print_name_cache,
+                apply_name_cache,
+                reserved_names: self.inventory.names.into_iter().collect(),
+                record_name_white_list,
+                property_obfuscation: BytecodePropertyObfuscation {
+                    enable: self.rules.enable_property_obfuscation,
+                    reserved_properties: property_reserved.into_iter().collect(),
+                    universal_reserved_properties,
+                },
+                toplevel_obfuscation: BytecodeToplevelObfuscation {
+                    enable: self.rules.enable_toplevel_obfuscation,
+                    reserved_toplevel_names,
+                    universal_reserved_toplevel_names,
+                },
+                file_name_obfuscation: BytecodeFileNameObfuscation {
+                    enable: self.rules.enable_file_name_obfuscation,
+                    reserved_file_names,
+                    universal_reserved_file_names,
+                    reserved_remote_har_pkg_names: Vec::new(),
+                },
+                keep_options: BytecodeKeepOptions {
+                    // `BytecodeObfuscationConfig` freezes this flag before
+                    // collectSourcesWhiteList later injects ResourceTable.ts.
+                    enable: !self.rules.keep_source_paths.is_empty(),
+                    keep_paths,
+                },
+            },
+        })
+    }
+
+    fn partition_reserved_names(
+        names: &rustc_hash::FxHashSet<String>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut specific = Vec::new();
+        let mut universal = Vec::new();
+        for name in names {
+            if name.starts_with('/') && name.ends_with('/') && name.len() > 1 {
+                universal.push(name.clone());
+            } else {
+                specific.push(name.clone());
+            }
+        }
+        specific.sort();
+        universal.sort();
+        (specific, universal)
+    }
+
+    fn keep_paths(&self) -> Result<Vec<String>, ObfuscationError> {
+        let mut records = BTreeMap::new();
+        for record in &self.input.module_records {
+            records.insert(
+                ArtifactPathSerializer::path_to_slash_string(&record.source_path)?,
+                record.record_name.clone(),
+            );
+        }
+        let mut keep_paths = self
+            .rules
+            .keep_source_paths
             .iter()
-            .map(|path| {
-                ArtifactPathSerializer::path_to_slash_string(path).map_err(ObfuscationError::from)
+            .map(|path| records.get(path).cloned().unwrap_or_else(|| path.clone()))
+            .collect::<BTreeSet<_>>();
+        if let Some(resource_table) = self.adapter.resource_table_path.as_ref() {
+            let resource_table = ArtifactPathSerializer::path_to_slash_string(resource_table)?;
+            keep_paths.insert(
+                records
+                    .get(&resource_table)
+                    .cloned()
+                    .unwrap_or(resource_table),
+            );
+        }
+        Ok(keep_paths.into_iter().collect())
+    }
+}
+
+struct NameCacheProcessor;
+
+impl NameCacheProcessor {
+    fn source_file_mapping(name_cache: &Map<String, Value>) -> BTreeMap<String, String> {
+        name_cache
+            .iter()
+            .filter(|(key, _)| !NAME_CACHE_METADATA_KEYS.contains(&key.as_str()))
+            .filter_map(|(_, value)| {
+                let value = value.as_object()?;
+                Some((
+                    value.get("OriSourceFile")?.as_str()?.to_string(),
+                    value.get("ObfSourceFile")?.as_str()?.to_string(),
+                ))
             })
             .collect()
     }
-}
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BytecodeArkguardRequest {
-    ets_loader_path: String,
-    arkguard_path: String,
-    rule_files: Vec<String>,
-    dependency_rule_files: Vec<String>,
-    sdk_apis: Vec<String>,
-    cache_dir: String,
-    export_rule_path: String,
-    module_root: String,
-    project_root: String,
-    project_path: String,
-    cache_path: String,
-    ace_module_build: String,
-    ace_module_json_path: String,
-    compile_sdk_version: String,
-    compatible_sdk_version: u32,
-    compatible_sdk_version_stage: Option<String>,
-    entry_package_info: String,
-    package_dir: String,
-    module_path_map: std::collections::BTreeMap<String, String>,
-    entry_array: Vec<String>,
-    resource_table_path: Option<String>,
-    local_packages: Vec<String>,
-    compile_har: bool,
-    compile_shared: bool,
-    use_normalized: bool,
-    use_ts_har: bool,
-    byte_code_har_info: serde_json::Value,
-    modules_abc_path: String,
-    source_maps_path: String,
-    record_name_white_list: Vec<String>,
-    module_records: Vec<BytecodeArkguardModuleRecord>,
-    files: Vec<BytecodeArkguardFile>,
-}
+    fn rename_source_map_keys(
+        source_maps: Map<String, Value>,
+        mapping: &BTreeMap<String, String>,
+    ) -> Map<String, Value> {
+        source_maps
+            .into_iter()
+            .map(|(key, value)| (mapping.get(&key).cloned().unwrap_or(key), value))
+            .collect()
+    }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BytecodeArkguardFile {
-    build_path: String,
-    original_path: String,
-    insight_intent_global_names: Vec<String>,
-    insight_intent_property_names: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BytecodeArkguardModuleRecord {
-    source_path: String,
-    record_name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BytecodeArkguardResponse {
-    modules_abc_path: PathBuf,
-    config_path: PathBuf,
-    name_cache_path: PathBuf,
-    source_maps_path: PathBuf,
-    origin_abc_path: PathBuf,
-    obfuscated_abc_path: PathBuf,
+    fn remap_line_ranges(
+        name_cache: Map<String, Value>,
+        source_maps: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, ObfuscationError> {
+        let mut updated = Map::new();
+        for (key, mut value) in name_cache {
+            let Some(entry) = value.as_object_mut() else {
+                updated.insert(key, value);
+                continue;
+            };
+            let Some(source_key) = entry
+                .get("OriSourceFile")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                updated.insert(key, value);
+                continue;
+            };
+            let Some(source_map_value) = source_maps.get(&source_key) else {
+                // Latest `processNameCacheEntry` omits file entries which no
+                // longer have a corresponding source-map record.
+                continue;
+            };
+            let source_map = OwnedSourceMap::from_json_string(&source_map_value.to_string())
+                .map_err(
+                    |error| ObfuscationError::BytecodeObfuscationSourceMapInvalid {
+                        source_file: source_key,
+                        message: error.to_string(),
+                    },
+                )?;
+            let lookup = source_map.generate_lookup_table();
+            for cache_key in ["IdentifierCache", "MemberMethodCache"] {
+                let Some(items) = entry.get_mut(cache_key).and_then(Value::as_object_mut) else {
+                    continue;
+                };
+                let old_items = std::mem::take(items);
+                for (range, obfuscated_name) in old_items {
+                    let remapped = (|| {
+                        // SDK `processItemKey` consumes the first three
+                        // colon-delimited fields and ignores any remainder.
+                        let mut parts = range.split(':');
+                        let scope = parts.next()?;
+                        let start = parts.next()?.parse::<u32>().ok()?;
+                        let end = parts.next()?.parse::<u32>().ok()?;
+                        let start = source_map
+                            .lookup_source_view_token_approx(&lookup, start.saturating_sub(1), 0)?
+                            .get_src_line()
+                            + 1;
+                        let end = source_map
+                            .lookup_source_view_token_approx(&lookup, end.saturating_sub(1), 0)?
+                            .get_src_line()
+                            + 1;
+                        Some(format!("{scope}:{start}:{end}"))
+                    })()
+                    .unwrap_or(range);
+                    items.insert(remapped, obfuscated_name);
+                }
+            }
+            updated.insert(key, value);
+        }
+        Ok(updated)
+    }
 }

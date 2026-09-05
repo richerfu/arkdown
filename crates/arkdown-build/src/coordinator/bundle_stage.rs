@@ -90,6 +90,7 @@ pub(super) struct CoordinatorBundleStageInput<'a> {
     pub(super) sdk_declaration_roots: &'a [PathBuf],
     pub(super) component_metadata: &'a ComponentMetadata,
     pub(super) insight_intent_schema_catalog: &'a InsightIntentSchemaCatalog,
+    pub(super) bundle_runtime: Option<&'a mut BundleRuntime>,
 }
 
 pub(super) struct CoordinatorBundleStageOutput {
@@ -127,6 +128,7 @@ impl BuildCoordinator {
             sdk_declaration_roots,
             component_metadata,
             insight_intent_schema_catalog,
+            mut bundle_runtime,
         } = input;
 
         // ── Step 3: Bundling ──────────────────────────────────────────────
@@ -827,12 +829,16 @@ impl BuildCoordinator {
                 format_args!("module={}", module.name),
             );
             if let Some(collect_factory_output) = collect_factory_output {
-                let collect_out = BundleStage::run(BundleStageInput {
-                    config: config.clone(),
-                    plugins: collect_factory_output.plugins,
-                    ets_transform_plan: Some(collect_factory_output.ets_transform_plan),
-                    plan: bundle_plan.clone(),
-                })
+                let collect_out = BundleStage::run(
+                    BundleStageInput {
+                        plugins: collect_factory_output.plugins,
+                        ets_transform_plan: Some(collect_factory_output.ets_transform_plan),
+                        ets_transform_plugin: Some(collect_factory_output.ets_transform_plugin),
+                        plan: bundle_plan.clone(),
+                        incremental_changes: None,
+                    },
+                    None,
+                )
                 .await?;
                 let bytecode_module_ids = module_har_dedup_plan.collect_bytecode_module_ids(
                     collect_out.bundle_output.external_module_requests.iter(),
@@ -847,18 +853,29 @@ impl BuildCoordinator {
             let plugins = plugin_factory_output.plugins;
             let widget_plugins = plugins.clone();
             let ets_transform_plan = plugin_factory_output.ets_transform_plan;
+            let ets_transform_plugin = plugin_factory_output.ets_transform_plugin;
             tracing::info!(
               module = %module.name,
               elapsed_ms = plugin_factory_start.elapsed().as_millis(),
               "bundle plugin factory completed"
             );
 
-            let mut bundle_out = BundleStage::run(BundleStageInput {
-                config: config.clone(),
-                plugins,
-                ets_transform_plan: Some(Arc::clone(&ets_transform_plan)),
-                plan: bundle_plan,
-            })
+            let mut bundle_out = BundleStage::run(
+                BundleStageInput {
+                    plugins,
+                    ets_transform_plan: Some(Arc::clone(&ets_transform_plan)),
+                    ets_transform_plugin: Some(ets_transform_plugin),
+                    plan: bundle_plan,
+                    incremental_changes: (args.watch
+                        || args.preview
+                        || (args.action.is_hot_reload() && args.watch_invalidation.is_none())
+                        || (args.watch_invalidation.is_some()
+                            && args.skip_resource
+                            && args.skip_profile))
+                        .then(|| watch_changed_files.clone()),
+                },
+                bundle_runtime.as_deref_mut(),
+            )
             .await?;
             if args.is_crossplatform && !args.watch {
                 CrossplatformCollectionWriter::new(project_root, cache_dir.as_path())
@@ -939,12 +956,16 @@ impl BuildCoordinator {
             let widget_bundle_out = if let (Some(widget_compile_plan), Some(widget_bundle_plan)) =
                 (widget_compile_plan, widget_bundle_plan)
             {
-                let mut bundle_out = BundleStage::run(BundleStageInput {
-                    config: config.clone(),
-                    plugins: widget_plugins,
-                    ets_transform_plan: Some(Arc::clone(&ets_transform_plan)),
-                    plan: widget_bundle_plan,
-                })
+                let mut bundle_out = BundleStage::run(
+                    BundleStageInput {
+                        plugins: widget_plugins,
+                        ets_transform_plan: Some(Arc::clone(&ets_transform_plan)),
+                        ets_transform_plugin: None,
+                        plan: widget_bundle_plan,
+                        incremental_changes: None,
+                    },
+                    None,
+                )
                 .await?;
                 bundle_out.bundle_output.modules_abc_path =
                     widget_compile_plan.modules_abc_path.clone();

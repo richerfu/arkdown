@@ -9,7 +9,10 @@ impl BuildCoordinator {
     /// Internal build pipeline implementation.
     ///
     /// Called by [`BuildCoordinator::execute`] after target selection.
-    pub(crate) async fn execute_impl(self) -> Result<BuildOutput> {
+    pub(crate) async fn execute_impl(
+        self,
+        mut bundle_runtime: Option<&mut BundleRuntime>,
+    ) -> Result<BuildOutput> {
         let start = Instant::now();
 
         let args = &self.args;
@@ -2061,6 +2064,7 @@ impl BuildCoordinator {
                 sdk_declaration_roots,
                 component_metadata: &component_metadata,
                 insight_intent_schema_catalog: &insight_intent_schema_catalog,
+                bundle_runtime: bundle_runtime.as_deref_mut(),
             })
             .await?;
         let mut bundle_outs = bundle_stage_output.bundle_outs;
@@ -2143,7 +2147,7 @@ impl BuildCoordinator {
                         pending_bytecode_obfuscations[bundle_index] =
                             Some(PendingBytecodeObfuscation::new(
                                 obfuscator,
-                                arkguard_plan.bytecode_input(module_input),
+                                arkguard_plan.bytecode_input(module_input)?,
                             ));
                     }
                     ObfuscationMode::Source => {
@@ -2218,6 +2222,7 @@ impl BuildCoordinator {
         // ── Step 5: ABC compilation ───────────────────────────────────────
         let bytecode_output = self
             .run_bytecode_stage(CoordinatorBytecodeStageInput {
+                bundle_runtime: bundle_runtime.as_deref_mut(),
                 args,
                 config,
                 session,
@@ -2277,6 +2282,7 @@ impl BuildCoordinator {
         // ── Watch mode ────────────────────────────────────────────────────
         if watch_mode {
             WatchStage::run(WatchStageInput::from_build(WatchStageBuildInput {
+                bundle_runtime: bundle_runtime.map(std::mem::take).unwrap_or_default(),
                 config: config.clone(),
                 session: session.clone(),
                 args,

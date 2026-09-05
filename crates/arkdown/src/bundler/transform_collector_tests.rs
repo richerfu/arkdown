@@ -132,3 +132,71 @@ fn transform_store_hands_crossplatform_facts_to_bundle_state() {
         ["ohos.router".to_string()]
     );
 }
+
+#[test]
+fn incremental_snapshot_preserves_unchanged_modules_and_removes_stale_modules() {
+    let unchanged = "/project/entry/src/main/ets/model/Unchanged.ets".to_string();
+    let changed = "/project/entry/src/main/ets/model/Changed.ets".to_string();
+    let deleted = "/project/entry/src/main/ets/model/Deleted.ets".to_string();
+    let mut snapshot = HvigorModuleTransformSnapshot {
+        module_source_overrides: FxHashMap::from_iter([
+            (unchanged.clone(), Arc::from("unchanged-old")),
+            (changed.clone(), Arc::from("changed-old")),
+            (deleted.clone(), Arc::from("deleted-old")),
+        ]),
+        source_maps: FxHashMap::from_iter([
+            (unchanged.clone(), Arc::from("unchanged-map")),
+            (changed.clone(), Arc::from("changed-old-map")),
+            (deleted.clone(), Arc::from("deleted-map")),
+        ]),
+        javascript_module_ids: FxHashSet::from_iter([
+            unchanged.clone(),
+            changed.clone(),
+            deleted.clone(),
+        ]),
+        shared_module_ids: FxHashSet::from_iter([deleted.clone()]),
+        insight_intent_sources: FxHashMap::default(),
+        crossplatform_collections: FxHashMap::default(),
+    };
+    let update = HvigorModuleTransformSnapshot {
+        module_source_overrides: FxHashMap::from_iter([(
+            changed.clone(),
+            Arc::from("changed-new"),
+        )]),
+        source_maps: FxHashMap::from_iter([(changed.clone(), Arc::from("changed-new-map"))]),
+        javascript_module_ids: FxHashSet::default(),
+        shared_module_ids: FxHashSet::from_iter([changed.clone()]),
+        insight_intent_sources: FxHashMap::default(),
+        crossplatform_collections: FxHashMap::default(),
+    };
+
+    snapshot.merge_incremental(
+        update,
+        &FxHashSet::from_iter([unchanged.clone(), changed.clone()]),
+    );
+
+    assert_eq!(
+        snapshot
+            .module_source_overrides
+            .get(&unchanged)
+            .map(AsRef::as_ref),
+        Some("unchanged-old")
+    );
+    assert_eq!(
+        snapshot
+            .module_source_overrides
+            .get(&changed)
+            .map(AsRef::as_ref),
+        Some("changed-new")
+    );
+    assert_eq!(
+        snapshot.source_maps.get(&changed).map(AsRef::as_ref),
+        Some("changed-new-map")
+    );
+    assert!(!snapshot.javascript_module_ids.contains(&changed));
+    assert!(snapshot.shared_module_ids.contains(&changed));
+    assert!(!snapshot.module_source_overrides.contains_key(&deleted));
+    assert!(!snapshot.source_maps.contains_key(&deleted));
+    assert!(!snapshot.javascript_module_ids.contains(&deleted));
+    assert!(!snapshot.shared_module_ids.contains(&deleted));
+}

@@ -11,6 +11,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{borrow::Cow, future::ready, sync::Arc};
 
+use arc_swap::ArcSwap;
 use arkdown_cache::CacheKeyMaterial;
 #[cfg(feature = "memory-diagnostics")]
 use arkdown_ets_transform::RolldownEtsTransformOutput;
@@ -37,7 +38,7 @@ pub use arkdown_ets_transform::{
 
 /// ArkTS transform plugin adapter.
 pub struct EtsTransformPlugin {
-    transformer: Arc<RolldownEtsTransformer>,
+    plan: ArcSwap<RolldownEtsTransformPlan>,
     #[cfg(feature = "memory-diagnostics")]
     memory_trace: EtsTransformMemoryTrace,
 }
@@ -85,10 +86,17 @@ impl std::fmt::Debug for EtsTransformPlugin {
 impl EtsTransformPlugin {
     pub fn from_plan(plan: Arc<RolldownEtsTransformPlan>) -> Self {
         Self {
-            transformer: Arc::new(RolldownEtsTransformer::new(plan)),
+            plan: ArcSwap::from(plan),
             #[cfg(feature = "memory-diagnostics")]
             memory_trace: EtsTransformMemoryTrace::from_env(),
         }
+    }
+
+    /// Publish the immutable source/config snapshot for the next incremental
+    /// Rolldown scan. `ArcSwap` keeps transform hooks lock-free while allowing
+    /// the long-lived graph owner to survive watch rebuilds.
+    pub fn update_plan(&self, plan: Arc<RolldownEtsTransformPlan>) {
+        self.plan.store(plan);
     }
 
     fn transform_sync(
@@ -99,8 +107,8 @@ impl EtsTransformPlugin {
         #[cfg(feature = "memory-diagnostics")]
         let trace_seq = self.memory_trace.begin(args);
 
-        let result = self
-            .transformer
+        let plan = self.plan.load_full();
+        let result = RolldownEtsTransformer::new(plan)
             .compile_transform(args.code.as_str(), args.id)
             .map_err(|error| anyhow::anyhow!("ets-transform: {error}"));
 

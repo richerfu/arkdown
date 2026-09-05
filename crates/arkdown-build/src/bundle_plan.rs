@@ -11,7 +11,9 @@ use rolldown_plugin::__inner::SharedPluginable;
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 
-use arkdown::plugins::ets_transform::{ModuleAnalyzerKind, RolldownEtsTransformPlan};
+use arkdown::plugins::ets_transform::{
+    EtsTransformPlugin, ModuleAnalyzerKind, RolldownEtsTransformPlan,
+};
 use arkdown::{
     BundleCachePolicy, BundleInput, BundleMockConfig, BundleModuleMetaInfoFile, BundleOutput,
     BundleOutputOptions, BundlePlan, BundlePluginSet, BundleRuntimePackageContext,
@@ -567,14 +569,94 @@ impl BundlePlanBuilder<'_> {
 
 /// Input for the bundle stage for one module.
 pub struct BundleStageInput {
-    pub config: Arc<ArkdownConfig>,
     /// Rolldown plugin set assembled by `PluginFactory`.
     pub plugins: Vec<SharedPluginable>,
     /// Shared ETS transform plan used by both the plugin hook and the hvigor
     /// ModuleSourceFile sidecar materializer.
     pub ets_transform_plan: Option<Arc<RolldownEtsTransformPlan>>,
+    /// Concrete handle retained by a long-lived Rolldown graph session so the
+    /// next immutable source snapshot can be atomically published.
+    pub ets_transform_plugin: Option<Arc<EtsTransformPlugin>>,
     /// Bundle plan derived from `loader.json` by [`BundlePlanBuilder`].
     pub plan: BundlePlan,
+    /// Absolute watcher paths for a hot rebuild. `None` selects a disposable
+    /// full scan and clears any stale graph session for this module target.
+    pub incremental_changes: Option<Vec<PathBuf>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct BundleRuntimeKey {
+    project_path: PathBuf,
+    output_dir: PathBuf,
+    module_name: String,
+}
+
+impl BundleRuntimeKey {
+    fn from_plan(plan: &BundlePlan) -> Self {
+        Self {
+            project_path: plan.input.project_path.clone(),
+            output_dir: plan.output.output_dir.clone(),
+            module_name: plan.input.module_name.clone(),
+        }
+    }
+}
+
+/// Direct owner of long-lived Rolldown graph sessions used by JS-CLI watch
+/// rebuilds. It deliberately contains no global state or mutex.
+#[derive(Default)]
+pub struct BundleRuntime {
+    bundlers: rustc_hash::FxHashMap<BundleRuntimeKey, Bundler>,
+}
+
+impl BundleRuntime {
+    async fn run(
+        &mut self,
+        input: BundleStageInput,
+    ) -> Result<BundleStageOutput, BundleStageError> {
+        let key = BundleRuntimeKey::from_plan(&input.plan);
+        let mut bundler = if let Some(mut cached) = self.bundlers.remove(&key) {
+            if let Some(plan) = input.ets_transform_plan.as_ref() {
+                cached.update_ets_transform_plan(Arc::clone(plan));
+            }
+            cached
+        } else {
+            BundleStage::bundler(&input)
+        };
+        let changed_files = input.incremental_changes.as_deref().unwrap_or_default();
+        let result = bundler
+            .bundle_incremental(&input.plan, changed_files)
+            .await
+            .map_err(BundleStageError::Bundle);
+        self.bundlers.insert(key, bundler);
+        result.map(|bundle_output| BundleStageOutput {
+            bundle_output,
+            state: BundleStageState::Executed,
+        })
+    }
+
+    pub async fn invalidate(&mut self, plan: &BundlePlan) -> Result<(), BundleStageError> {
+        if let Some(mut bundler) = self.bundlers.remove(&BundleRuntimeKey::from_plan(plan)) {
+            bundler.close().await.map_err(BundleStageError::Bundle)?;
+        }
+        Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<(), BundleStageError> {
+        let mut bundlers = std::mem::take(&mut self.bundlers)
+            .into_iter()
+            .collect::<Vec<_>>();
+        bundlers.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        let mut first_error = None;
+        for (_, mut bundler) in bundlers {
+            if let Err(error) = bundler.close().await {
+                first_error.get_or_insert(BundleStageError::Bundle(error));
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 /// Output produced by the bundle stage for one module.
@@ -659,12 +741,31 @@ pub enum BundleStageError {
 }
 
 impl BundleStage {
-    /// Run the bundle stage for one module.
-    pub async fn run(input: BundleStageInput) -> Result<BundleStageOutput, BundleStageError> {
-        let mut bundler = Bundler::new((*input.config).clone(), input.plugins);
-        if let Some(ets_transform_plan) = input.ets_transform_plan {
-            bundler = bundler.with_ets_transform_plan(ets_transform_plan);
+    fn bundler(input: &BundleStageInput) -> Bundler {
+        let mut bundler = Bundler::new(input.plugins.clone());
+        if let Some(ets_transform_plan) = input.ets_transform_plan.as_ref() {
+            bundler = bundler.with_ets_transform_plan(Arc::clone(ets_transform_plan));
         }
+        if let Some(ets_transform_plugin) = input.ets_transform_plugin.as_ref() {
+            bundler = bundler.with_ets_transform_plugin(Arc::clone(ets_transform_plugin));
+        }
+        bundler
+    }
+
+    /// Run the bundle stage for one module.
+    pub async fn run(
+        input: BundleStageInput,
+        runtime: Option<&mut BundleRuntime>,
+    ) -> Result<BundleStageOutput, BundleStageError> {
+        if input.incremental_changes.is_some() {
+            if let Some(runtime) = runtime {
+                return runtime.run(input).await;
+            }
+        }
+        if let Some(runtime) = runtime {
+            runtime.invalidate(&input.plan).await?;
+        }
+        let mut bundler = Self::bundler(&input);
         let bundle_output = bundler
             .bundle(&input.plan)
             .await

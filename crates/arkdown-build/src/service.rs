@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::bundle_plan::BundleRuntime;
 use crate::request::BuildRequest;
 use anyhow::Result;
 use arkdown::plugins::factory::PackagePlugin;
@@ -28,6 +29,32 @@ impl BuildService {
     }
 
     pub async fn execute(self) -> Result<()> {
+        let retain_bundle_graph = self.request.watch
+            || self.request.preview
+            || (self.request.action.is_hot_reload() && self.request.watch_invalidation.is_none());
+        if retain_bundle_graph {
+            let mut runtime = BundleRuntime::default();
+            // Erase the coordinator future here so the public N-API build
+            // future does not recursively embed the complete stage/watch
+            // state machine in its layout.
+            let result = Box::pin(self.execute_inner(Some(&mut runtime))).await;
+            let close_result = runtime.close().await;
+            result?;
+            close_result?;
+            Ok(())
+        } else {
+            Box::pin(self.execute_inner(None)).await
+        }
+    }
+
+    pub(crate) async fn execute_with_bundle_runtime(
+        self,
+        runtime: &mut BundleRuntime,
+    ) -> Result<()> {
+        self.execute_inner(Some(runtime)).await
+    }
+
+    async fn execute_inner(self, bundle_runtime: Option<&mut BundleRuntime>) -> Result<()> {
         use arkdown_config::ArkdownConfigLoader;
         use arkdown_session::BuildSessionBuilder;
 
@@ -81,7 +108,10 @@ impl BuildService {
 
         let coordinator = super::coordinator::BuildCoordinator::new(session, config, request)
             .with_package_plugins(package_plugins);
-        let output = coordinator.execute().await?;
+        let output = match bundle_runtime {
+            Some(runtime) => coordinator.execute_with_bundle_runtime(runtime).await?,
+            None => coordinator.execute().await?,
+        };
         tracing::debug!(artifacts = output.artifact_paths.len(), "build completed");
         Ok(())
     }

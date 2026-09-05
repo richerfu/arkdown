@@ -8,6 +8,8 @@
 
 mod arkguard;
 mod bytecode;
+#[cfg(test)]
+mod bytecode_tests;
 mod consumer;
 pub mod plan;
 mod rules;
@@ -18,6 +20,7 @@ pub use arkguard::{
 };
 pub use bytecode::{
     BytecodeObfuscationInput, BytecodeObfuscationModuleRecord, BytecodeObfuscationOutput,
+    BytecodeObfuscationSource,
 };
 pub use consumer::ConsumerObfuscationFileWriter;
 pub use plan::{
@@ -42,8 +45,6 @@ pub enum ObfuscationError {
     ParseError { file: String, message: String },
     #[error("Codegen error: {0}")]
     CodegenError(String),
-    #[error("Unsupported arkguard obfuscation options require full hvigor parity: {features}")]
-    UnsupportedArkguardObfuscationOptions { features: String },
     #[error("SDK ArkGuard package does not exist: {0}")]
     ArkguardPackageNotFound(PathBuf),
     #[error("SDK ArkGuard API declaration roots do not exist: {0:?}")]
@@ -58,8 +59,6 @@ pub enum ObfuscationError {
         "bytecode obfuscation requires API 13 or API 12 beta3, got compatibleSdkVersion={version} stage={stage:?}"
     )]
     BytecodeObfuscationUnsupportedCompatibleSdk { version: u32, stage: Option<String> },
-    #[error("SDK ets-loader directory does not exist: {0}")]
-    EtsLoaderNotFound(PathBuf),
     #[error("bytecode obfuscation input does not exist: {0}")]
     BytecodeObfuscationInputNotFound(PathBuf),
     #[error("bytecode obfuscation requires sourceMaps.map from the bundle stage")]
@@ -68,6 +67,11 @@ pub enum ObfuscationError {
     BytecodeObfuscationAbcPathMismatch { expected: PathBuf, actual: PathBuf },
     #[error("bytecode obfuscation output does not exist: {0}")]
     BytecodeObfuscationOutputNotFound(PathBuf),
+    #[error("invalid source map for bytecode obfuscation input '{source_file}': {message}")]
+    BytecodeObfuscationSourceMapInvalid {
+        source_file: String,
+        message: String,
+    },
     #[error("failed to start ArkGuard process '{executable}': {source}")]
     ArkguardProcessStart {
         executable: PathBuf,
@@ -255,7 +259,7 @@ impl Obfuscator {
             .arkguard
             .as_ref()
             .ok_or_else(|| ObfuscationError::ArkguardPackageNotFound(PathBuf::new()))?;
-        bytecode::ArkguardBytecodeRunner::new(&self.options, adapter).run(input)
+        bytecode::ArkguardBytecodeRunner::new(&self.options, &self.rules, adapter).run(input)
     }
 
     /// Process all `.js` files found up to 2 levels deep in `dir`, in-place.

@@ -54,8 +54,8 @@ use super::native_stage::NativeDependencyStageExecutor;
 use super::watch_stage::{WatchStage, WatchStageBuildInput, WatchStageInput};
 use crate::bundle_plan::{
     BundlePackageOutput, BundlePlanBuilder, BundlePlanBuilderInput, BundlePlanPackageInfo,
-    BundleRuntimePackageInfoBuilder, BundleStage, BundleStageInput, BundleStageOutput,
-    HvigorCompileTarget,
+    BundleRuntime, BundleRuntimePackageInfoBuilder, BundleStage, BundleStageInput,
+    BundleStageOutput, HvigorCompileTarget,
 };
 use crate::bytecode_har_declaration::ByteCodeHarDeclarationCollector;
 use crate::code_resource::CodeResourceCopyPlan;
