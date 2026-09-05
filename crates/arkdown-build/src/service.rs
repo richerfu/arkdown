@@ -53,9 +53,12 @@ impl BuildService {
             config.product.build_version = Some(build_version.clone());
         }
         let config = Arc::new(config);
+        let acquire_remote_dev_dependencies =
+            request.target == "test" || request.build_target_name.as_deref() == Some("ohosTest");
         let mut session_builder = BuildSessionBuilder::new(config.clone())
             .with_arkts_language_version(request.arkts_version)
-            .with_ohpm_mode(request.ohpm_mode.into());
+            .with_ohpm_mode(request.ohpm_mode.into())
+            .with_remote_dev_dependencies(acquire_remote_dev_dependencies);
         if let Some(parameter_file_override) = request.parameter_file_override.clone() {
             session_builder = session_builder.with_parameter_file_override(parameter_file_override);
         }

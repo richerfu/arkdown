@@ -31,6 +31,21 @@ pub(crate) struct HvigorModuleSourceWriter<'a> {
     pub(crate) output_dir: PathBuf,
     pub(crate) processor: HvigorChunkModuleRequestProcessor,
     pub(crate) mock_config: Option<&'a BundleMockConfig>,
+    pub(crate) current_byte_code_har: bool,
+}
+
+pub(crate) struct HvigorModuleSourceWriterInput<'a> {
+    pub(crate) bundle_name: &'a str,
+    pub(crate) module_name: &'a str,
+    pub(crate) project_root: &'a Path,
+    pub(crate) module_path_map: &'a HvigorModulePathMap,
+    pub(crate) runtime_packages: &'a BundleRuntimePackageInfo,
+    pub(crate) byte_code_har_packages: &'a [String],
+    pub(crate) use_normalized_ohm_url: bool,
+    pub(crate) module_graph_facts: &'a ModuleGraphFacts,
+    pub(crate) module_source_ids: Vec<String>,
+    pub(crate) state: HvigorModuleSourceState,
+    pub(crate) output_dir: PathBuf,
 }
 
 #[derive(Default)]
@@ -60,19 +75,20 @@ pub(crate) struct HvigorMockConfigSource {
 }
 
 impl<'a> HvigorModuleSourceWriter<'a> {
-    pub(crate) fn new(
-        bundle_name: &'a str,
-        module_name: &'a str,
-        project_root: &'a Path,
-        module_path_map: &'a HvigorModulePathMap,
-        runtime_packages: &'a BundleRuntimePackageInfo,
-        byte_code_har_packages: &'a [String],
-        use_normalized_ohm_url: bool,
-        module_graph_facts: &'a ModuleGraphFacts,
-        module_source_ids: Vec<String>,
-        state: HvigorModuleSourceState,
-        output_dir: PathBuf,
-    ) -> Self {
+    pub(crate) fn new(input: HvigorModuleSourceWriterInput<'a>) -> Self {
+        let HvigorModuleSourceWriterInput {
+            bundle_name,
+            module_name,
+            project_root,
+            module_path_map,
+            runtime_packages,
+            byte_code_har_packages,
+            use_normalized_ohm_url,
+            module_graph_facts,
+            module_source_ids,
+            state,
+            output_dir,
+        } = input;
         Self {
             bundle_name,
             module_name,
@@ -91,11 +107,17 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             output_dir,
             processor: HvigorChunkModuleRequestProcessor::new(bundle_name, module_name),
             mock_config: None,
+            current_byte_code_har: false,
         }
     }
 
     pub(crate) fn with_mock_config(mut self, mock_config: Option<&'a BundleMockConfig>) -> Self {
         self.mock_config = mock_config;
+        self
+    }
+
+    pub(crate) fn with_current_byte_code_har(mut self, enabled: bool) -> Self {
+        self.current_byte_code_har = enabled;
         self
     }
 
@@ -458,7 +480,6 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         let path = HvigorModuleSourceOutputPath::new(
             &self.output_dir,
             ownership,
-            &ownership.module_name,
             &ownership.source_file,
             module_id,
             emits_javascript,
@@ -693,7 +714,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             //
             // Evidence: DevEco Studio 6.24.3 ets-loader
             // `module/module_mode.js::processModuleInfos`.
-            HvigorChunkSourceKind::PackageModule(package) => self
+            HvigorChunkSourceKind::Package(package) => self
                 .module_path_map
                 .package_record_for_path(self.project_root, &package.package_root)
                 .ok_or_else(|| {
@@ -703,8 +724,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                         package.package_root.display()
                     ))
                 }),
-            HvigorChunkSourceKind::SourceModule
-            | HvigorChunkSourceKind::LocalDependencyModule(_) => {
+            HvigorChunkSourceKind::Source | HvigorChunkSourceKind::LocalDependency(_) => {
                 // Files under the current module root carry the entry module
                 // name (hvigor `pkgName@<module>` for the `ohosTest` template
                 // tree uses the test module name `entry_test`).
@@ -712,7 +732,15 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                     .map(|path| path.starts_with(self.module_path_map.current_module_root()))
                     .unwrap_or(false)
                 {
-                    Ok(self.module_name.to_string())
+                    if self.current_byte_code_har {
+                        Ok(self
+                            .module_path_map
+                            .current_package_identity()
+                            .map_or(self.module_name, |(name, _)| name)
+                            .to_string())
+                    } else {
+                        Ok(self.module_name.to_string())
+                    }
                 } else {
                     Ok(ownership.module_name.clone())
                 }
@@ -861,9 +889,8 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             return record_name.to_string();
         }
         match &ownership.kind {
-            HvigorChunkSourceKind::PackageModule(_) => format!("@package:{record_name}"),
-            HvigorChunkSourceKind::SourceModule
-            | HvigorChunkSourceKind::LocalDependencyModule(_) => {
+            HvigorChunkSourceKind::Package(_) => format!("@package:{record_name}"),
+            HvigorChunkSourceKind::Source | HvigorChunkSourceKind::LocalDependency(_) => {
                 format!("@bundle:{record_name}")
             }
         }

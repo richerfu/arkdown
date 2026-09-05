@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use super::layout::{ModuleBuildLayout, RestoolLayout};
 
 #[test]
-fn ohos_test_template_layout_stays_under_test_root_for_named_target_builds() {
+fn ohos_test_template_layout_stays_under_normal_build_root_for_named_target_builds() {
     let temp = TempDir::new().expect("create ohosTest layout root");
     let target = ModuleBuildLayout::for_target_product(temp.path(), "tablet", "ohosTest");
     let template = ModuleBuildLayout::for_ohos_test_template(temp.path(), "tablet");
@@ -18,12 +18,17 @@ fn ohos_test_template_layout_stays_under_test_root_for_named_target_builds() {
     assert_eq!(
         template.ohos_test_resources_root(),
         temp.path()
-            .join(".test/tablet/intermediates/src/ohosTest/resources")
+            .join("build/tablet/intermediates/src/ohosTest/resources")
     );
     assert_eq!(
         template.ohos_test_ets_root(),
         temp.path()
-            .join(".test/tablet/intermediates/src/ohosTest/ets")
+            .join("build/tablet/intermediates/src/ohosTest/ets")
+    );
+    assert_eq!(
+        target.output_mapping_source_maps(),
+        temp.path()
+            .join("build/tablet/outputs/ohosTest/mapping/sourceMaps.map")
     );
 }
 

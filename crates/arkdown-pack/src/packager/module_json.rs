@@ -55,6 +55,18 @@ fn order_module(module: &serde_json::Value) -> serde_json::Value {
     let Some(object) = module.as_object() else {
         return module.clone();
     };
+    // OhosTest MergeProfile creates a synthetic module by spreading the test
+    // template fields before the source `entry_test` document. Restool keeps
+    // that insertion order, and Fastjson uses it to break hash-bucket ties
+    // while packaging (notably `pages` versus `deviceTypes`).
+    let is_ohos_test_module = object
+        .get("mainElement")
+        .and_then(serde_json::Value::as_str)
+        == Some("TestAbility")
+        && object.get("name") != object.get("packageName");
+    if is_ohos_test_module {
+        return module.clone();
+    }
     let mut out = serde_json::Map::new();
     for key in [
         "name",
@@ -164,4 +176,19 @@ fn order_object(value: &serde_json::Value, fields: &[&str]) -> serde_json::Value
         }
     }
     serde_json::Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::minify_package_intermediate_module_json;
+
+    #[test]
+    fn ohos_test_package_intermediate_retains_merge_profile_insertion_order() {
+        let input = r#"{"app":{"bundleName":"com.example"},"module":{"description":"$string:module_test_desc","mainElement":"TestAbility","pages":"$profile:test_pages","abilities":[],"name":"entry_test","type":"feature","deviceTypes":["phone"],"deliveryWithInstall":true,"installationFree":false,"packageName":"entry","virtualMachine":"ark12.0.6.0","compileMode":"esmodule","dependencies":[]}}"#;
+
+        assert_eq!(
+            minify_package_intermediate_module_json(input).expect("minify ohosTest module"),
+            input
+        );
+    }
 }

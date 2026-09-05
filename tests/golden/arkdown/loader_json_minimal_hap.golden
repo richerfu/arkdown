@@ -19,7 +19,6 @@
   "routerMap": [],
   "hspResourcesMap": {},
   "updateVersionInfo": {},
-  "customizedHar": false,
   "anBuildOutPut": "<PROJECT_ROOT>/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
   "anBuildMode": "type"
 }

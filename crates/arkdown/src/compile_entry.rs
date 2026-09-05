@@ -100,29 +100,6 @@ impl CompileEntryNamer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::CompileEntryNamer;
-
-    #[test]
-    fn local_entry_chunk_name_preserves_path_under_ets_root() {
-        let namer = CompileEntryNamer::new(&["./ets/entryability/EntryAbility.ets".to_string()]);
-
-        assert_eq!(
-            namer.chunk_name("./ets/entryability/EntryAbility.ets", 0),
-            "entryability/EntryAbility"
-        );
-    }
-
-    #[test]
-    fn absolute_entry_chunk_name_keeps_existing_collision_policy() {
-        let entry = "/workspace/features/foo/src/main/ets/views/ArticleDetailView.ets";
-        let namer = CompileEntryNamer::new(&[entry.to_string()]);
-
-        assert_eq!(namer.chunk_name(entry, 0), "ArticleDetailView");
-    }
-}
-
 struct CompileEntryFallbackName {
     index: String,
 }
@@ -182,5 +159,28 @@ impl CompileEntrySourceExtension {
 
     fn is_source(&self) -> bool {
         matches!(self, Self::ArkTs | Self::TypeScript | Self::JavaScript)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompileEntryNamer;
+
+    #[test]
+    fn local_entry_chunk_name_preserves_path_under_ets_root() {
+        let namer = CompileEntryNamer::new(&["./ets/entryability/EntryAbility.ets".to_string()]);
+
+        assert_eq!(
+            namer.chunk_name("./ets/entryability/EntryAbility.ets", 0),
+            "entryability/EntryAbility"
+        );
+    }
+
+    #[test]
+    fn absolute_entry_chunk_name_keeps_existing_collision_policy() {
+        let entry = "/workspace/features/foo/src/main/ets/views/ArticleDetailView.ets";
+        let namer = CompileEntryNamer::new(&[entry.to_string()]);
+
+        assert_eq!(namer.chunk_name(entry, 0), "ArticleDetailView");
     }
 }

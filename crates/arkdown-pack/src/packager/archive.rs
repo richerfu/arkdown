@@ -21,6 +21,7 @@ impl Packager {
             .map(AbsPath::into_path_buf);
         for entry in walkdir::WalkDir::new(ets_dir)
             .min_depth(1)
+            .sort_by_file_name()
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())

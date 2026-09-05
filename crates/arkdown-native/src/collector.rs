@@ -743,15 +743,27 @@ impl<'a> NativeLibCacheWriter<'a> {
         };
         self.write_json(&self.layout.native_lib_cache_file(), &cache)?;
 
-        let binxo_cache = NativeBinxoCache {
-            libs: &process_libs,
-            binxo: &binxo,
-            binxo_symbol: NativeBinxoSymbol {
-                enable_asan_binxo: self.binxo_valid,
-                exclude_so_from_binxo: &self.option.exclude_so_from_binxo,
-            },
-        };
-        self.write_json(&self.layout.binxo_native_lib_cache_file(), &binxo_cache)
+        let binxo_cache_file = self.layout.binxo_native_lib_cache_file();
+        if self.binxo_valid {
+            let binxo_cache = NativeBinxoCache {
+                libs: &process_libs,
+                binxo: &binxo,
+                binxo_symbol: NativeBinxoSymbol {
+                    enable_asan_binxo: true,
+                    exclude_so_from_binxo: &self.option.exclude_so_from_binxo,
+                },
+            };
+            self.write_json(&binxo_cache_file, &binxo_cache)
+        } else if binxo_cache_file.is_file() {
+            std::fs::remove_file(&binxo_cache_file).map_err(|error| {
+                NativeBuildError::NativePostProcessFailed {
+                    path: binxo_cache_file,
+                    message: error.to_string(),
+                }
+            })
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn write_json<T: Serialize>(

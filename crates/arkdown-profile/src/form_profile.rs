@@ -1114,7 +1114,7 @@ mod tests {
     fn test_form_profile_processor_default() {
         let tmp = tempfile::tempdir().unwrap();
         let module_root = tmp.path().join("entry");
-        let processor = FormProfileProcessor::default();
+        let processor = FormProfileProcessor;
         let result = processor.collect_form_profiles(FormProfileInput {
             module_root: &module_root,
             module_json_path: None,

@@ -108,6 +108,10 @@ impl BuildCoordinator {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        let mut completed_dependency_merge_profiles = build_modules
+            .iter()
+            .map(|module| module.name.clone())
+            .collect::<FxHashSet<_>>();
         let mut local_package_source_roots = LocalPackageSourceRootInventory::default();
         for (module, resolved) in build_modules.iter().zip(&build_module_configs) {
             let module_layout = ModuleBuildLayout::for_output_target_product(
@@ -356,6 +360,23 @@ impl BuildCoordinator {
             let module_context = session.module_context(&module.name).ok_or_else(|| {
                 anyhow::anyhow!("missing build session module context for {}", module.name)
             })?;
+            let skip_profile_writes = args.skip_profile;
+            let resource_modules =
+                ModuleSelectionPlanner::resource_modules_for_build(config.as_ref(), module);
+            if !skip_profile_writes {
+                DependencyMergeProfileStage::new(
+                    config.as_ref(),
+                    session.as_ref(),
+                    args,
+                    &intermediate_writer,
+                    extra_sanitizer_flags,
+                )
+                .write(
+                    resource_modules.get(1..).unwrap_or_default(),
+                    &module_target_name,
+                    &mut completed_dependency_merge_profiles,
+                )?;
+            }
             let ohos_test_templates_after_migration = module_target_name == "ohosTest"
                 && module_context
                     .module
@@ -366,10 +387,9 @@ impl BuildCoordinator {
                             .source()
                             .ohos_test_templates_after_migration(module_json)
                     });
-            // `ModulePathInfoIml.getOhosTestIntermediatesSrc*` is independent of
-            // the active target build root: generated ohosTest templates always
-            // live below `.test/<product>`, while target outputs use
-            // `build/<product>/.../ohosTest`.
+            // `ModulePathInfoIml.getOhosTestIntermediatesSrc*` uses the normal
+            // product build root but no target segment. Target-owned outputs
+            // remain below `build/<product>/.../ohosTest`.
             let ohos_test_template_layout = ModuleBuildLayout::for_ohos_test_template(
                 &module.src_path,
                 &module_config.product.name,
@@ -380,7 +400,6 @@ impl BuildCoordinator {
             );
             package_resolution_plans.insert(module.name.clone(), package_resolution);
             let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
-            let skip_profile_writes = args.skip_profile;
 
             let pre_build_validator =
                 PreBuildValidator::new(config, session, module, module_build_option);
@@ -430,7 +449,7 @@ impl BuildCoordinator {
             }
             // hvigor `GenerateOhosTestTemplate`: the `ohosTest` target build
             // (`-p module=entry@ohosTest`) copies the SDK test templates into
-            // `.test/<product>/intermediates/src/ohosTest/`.
+            // `build/<product>/intermediates/src/ohosTest/`.
             if ohos_test_templates_after_migration {
                 let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
                 let template_writer = crate::unit_test::UnitTestTemplateWriter::new(
@@ -439,7 +458,10 @@ impl BuildCoordinator {
                 );
                 if !template_writer.has_ohos_test() {
                     template_writer
-                        .generate_ohos_test(config.sdk_config.compile_api_version)
+                        .generate_ohos_test(
+                            config.sdk_config.compile_api_version,
+                            args.is_crossplatform,
+                        )
                         .map_err(|error| {
                             anyhow::anyhow!(
                                 "GenerateOhosTestTemplate failed for module '{}': {error}",
@@ -737,6 +759,19 @@ impl BuildCoordinator {
                     .map_err(|error| anyhow::anyhow!("encode module.json5 snapshot: {error}"))?;
                 (parsed, raw)
             };
+            // `CompileResource` keeps the application module as the first restool
+            // cluster and appends the synthetic ohosTest module name. This gives
+            // resources owned by `entry_test` the same 0x02xxxxxx IDs as hvigor.
+            let ohos_test_resource_module_names = if module_target_name == "ohosTest" {
+                std::iter::once(module.name.clone())
+                    .chain(
+                        (module_json5.module.name != module.name)
+                            .then(|| module_json5.module.name.clone()),
+                    )
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let profile_dependency_context = {
                 let _timer = BuildTimingProbe::module(&module.name, "profile_dependency_context");
                 arkdown_profile::ProfileDependencyContext::from_session_graph(
@@ -946,19 +981,6 @@ impl BuildCoordinator {
                 }
             }
 
-            // `GeneratePkgSdkInfo` is scheduled through the HAP/HSP pack flow.
-            if module.module_type != OhosModuleType::Har
-                && !skip_profile_writes
-                && !module_build_option.strict_mode.use_normalized_ohm_url
-            {
-                arkdown_profile::PkgSdkInfoGenerator::new(
-                    module_context.module.as_ref(),
-                    module_context.deps.as_ref(),
-                )
-                .write(&module_layout.pkg_sdk_info_json())
-                .map_err(|error| anyhow::anyhow!("GeneratePkgSdkInfo failed: {error}"))?;
-            }
-
             let privacy_profile_path = {
                 let _timer = BuildTimingProbe::module(&module.name, "module_privacy_profile");
                 if BuildPolicy::module_processes_privacy_profile(&module.module_type) {
@@ -1027,6 +1049,44 @@ impl BuildCoordinator {
             // only each task's declared artifacts before its lifecycle `after`.
             let form_widget_abilities =
                 FormWidgetAbilityMerger::new(&session.project).collect(&module_json5);
+            // Hvigor schedules ProcessStartupConfig before GenerateLoaderJson.
+            // Freeze and write its resolved absolute task entries before
+            // `process_module` constructs loader.json so startup task sources
+            // enter the same CompileArkTS graph as the config entry.
+            let process_startup_config = !skip_profile_writes;
+            let startup_out = if process_startup_config || skip_profile_writes {
+                let _timer = BuildTimingProbe::module(&module.name, "startup_config");
+                let startup_out = startup_config_processor
+                    .merge_startup_config(arkdown_profile::StartupConfigInput {
+                        project_root: &config.project_root,
+                        module_root: &module.src_path,
+                        module_name: &module.name,
+                        bundle_name: Some(config.product.bundle_name.as_str()),
+                        app_startup: module_json5.module.app_startup.clone(),
+                        collect_preload_system_so: module_build_option.preload_system_so
+                            && matches!(
+                                module.module_type,
+                                arkdown_core::OhosModuleType::Entry
+                                    | arkdown_core::OhosModuleType::Feature
+                            )
+                            && !matches!(
+                                config.output_target,
+                                OutputTarget::Preview | OutputTarget::Test
+                            ),
+                    })
+                    .map_err(|e| anyhow::anyhow!("ProcessStartupConfig failed: {}", e))?;
+                if process_startup_config {
+                    startup_config_processor
+                        .write_startup_config(
+                            &startup_out,
+                            &module_layout.startup_config_temp_json(),
+                        )
+                        .map_err(|e| anyhow::anyhow!("write startup config failed: {}", e))?;
+                }
+                startup_out
+            } else {
+                arkdown_profile::StartupConfigOutput { config: None }
+            };
             let merge_profile_enabled = !skip_profile_writes;
             let (manifest, mut loader_json, processed_profile_value, pack_info_plans) = {
                 let _timer = BuildTimingProbe::module(&module.name, "process_module");
@@ -1245,41 +1305,6 @@ impl BuildCoordinator {
                 arkdown_profile::ShareConfigOutput { entries: vec![] }
             };
 
-            let process_startup_config = !skip_profile_writes;
-            let startup_out = if process_startup_config || skip_profile_writes {
-                let _timer = BuildTimingProbe::module(&module.name, "startup_config");
-                let startup_out = startup_config_processor
-                    .merge_startup_config(arkdown_profile::StartupConfigInput {
-                        project_root: &config.project_root,
-                        module_root: &module.src_path,
-                        module_name: &module.name,
-                        bundle_name: Some(config.product.bundle_name.as_str()),
-                        app_startup: module_json5.module.app_startup.clone(),
-                        collect_preload_system_so: module_build_option.preload_system_so
-                            && matches!(
-                                module.module_type,
-                                arkdown_core::OhosModuleType::Entry
-                                    | arkdown_core::OhosModuleType::Feature
-                            )
-                            && !matches!(
-                                config.output_target,
-                                OutputTarget::Preview | OutputTarget::Test
-                            ),
-                    })
-                    .map_err(|e| anyhow::anyhow!("ProcessStartupConfig failed: {}", e))?;
-                if process_startup_config {
-                    startup_config_processor
-                        .write_startup_config(
-                            &startup_out,
-                            &module_layout.startup_config_temp_json(),
-                        )
-                        .map_err(|e| anyhow::anyhow!("write startup config failed: {}", e))?;
-                }
-                startup_out
-            } else {
-                arkdown_profile::StartupConfigOutput { config: None }
-            };
-
             if !skip_profile_writes {
                 {
                     let _timer =
@@ -1390,7 +1415,7 @@ impl BuildCoordinator {
                         .filter(|d| d.exists())
                         .collect();
                 // The `ohosTest` target compiles the generated template resources
-                // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
+                // (`build/<product>/intermediates/src/ohosTest/resources`) that define
                 // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
                 if ohos_test_templates_after_migration {
                     let template_resources = ohos_test_template_layout.ohos_test_resources_root();
@@ -1415,11 +1440,7 @@ impl BuildCoordinator {
                             res_out: &res_out,
                             module_res_dirs: &module_res_dirs,
                             dependency_res_dirs: &[],
-                            explicit_module_names: if module_target_name == "ohosTest" {
-                                std::slice::from_ref(&module_json5.module.name)
-                            } else {
-                                &[]
-                            },
+                            explicit_module_names: &ohos_test_resource_module_names,
                             target_name: &module_target_name,
                         },
                     )?;
@@ -1441,9 +1462,7 @@ impl BuildCoordinator {
                         res_dirs.insert_existing(dir.clone());
                     }
                 }
-                for resource_module in
-                    ModuleSelectionPlanner::resource_modules_for_build(config.as_ref(), module)
-                {
+                for resource_module in &resource_modules {
                     let resource_module_config = ModuleBuildConfiguration::resolve_dependency(
                         config.as_ref(),
                         session.build_options.as_ref(),
@@ -1484,7 +1503,7 @@ impl BuildCoordinator {
                 let resource_str = module_layout.res_resource_str_dir();
                 res_dirs.insert_existing(resource_str);
                 // The `ohosTest` target compiles the generated template resources
-                // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
+                // (`build/<product>/intermediates/src/ohosTest/resources`) that define
                 // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
                 if ohos_test_templates_after_migration {
                     let template_resources = ohos_test_template_layout.ohos_test_resources_root();
@@ -1519,11 +1538,7 @@ impl BuildCoordinator {
                         res_out: &res_out,
                         module_res_dirs: &current_module_resource_dirs,
                         dependency_res_dirs: &dependency_resource_dirs,
-                        explicit_module_names: if module_target_name == "ohosTest" {
-                            std::slice::from_ref(&module_json5.module.name)
-                        } else {
-                            &[]
-                        },
+                        explicit_module_names: &ohos_test_resource_module_names,
                         target_name: &module_target_name,
                     },
                 )?;
@@ -1533,13 +1548,21 @@ impl BuildCoordinator {
             let resource_compile_config = ResourceCompileConfig {
                 package_name: config.product.bundle_name.clone(),
                 module_name: module.name.clone(),
-                // The `ohosTest` target packs the `src/ohosTest` module under its own
-                // module name (e.g. `entry_test`); restool `--modules` must match the
-                // processed profile name.
-                module_names: if module_target_name == "ohosTest" {
-                    vec![module_json5.module.name.clone()]
+                // The `ohosTest` target retains the application module as cluster 1
+                // and adds the processed test-profile name (e.g. `entry_test`) as
+                // cluster 2.
+                module_names: if !ohos_test_resource_module_names.is_empty() {
+                    ohos_test_resource_module_names.clone()
                 } else {
-                    config.modules.iter().map(|m| m.name.clone()).collect()
+                    std::iter::once(module.name.clone())
+                        .chain(
+                            config
+                                .modules
+                                .iter()
+                                .filter(|candidate| candidate.name != module.name)
+                                .map(|candidate| candidate.name.clone()),
+                        )
+                        .collect()
                 },
                 device_types: manifest_device_types,
                 is_debug: config.build_mode.is_debuggable(),

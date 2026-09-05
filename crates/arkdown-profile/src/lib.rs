@@ -19,7 +19,6 @@ pub mod bytecode_har;
 pub mod custom_types;
 pub mod oh_exports;
 pub mod pkg_context_info;
-pub mod pkg_sdk_info;
 pub mod plan;
 mod preload_system_so;
 // Per SPEC-048 Phase 2A: `lockfile` and `ohpm_registry` have been deleted
@@ -91,7 +90,6 @@ pub use pkg_context_info::{
     PkgContextCurrentInput, PkgContextDependencyInput, PkgContextDependencyKind,
     PkgContextInfoGenerator, PkgContextInfoInput, PkgContextInfoOpt, PkgContextModuleKind,
 };
-pub use pkg_sdk_info::PkgSdkInfoGenerator;
 pub use plan::{
     LoaderJsonPlan, PackageModuleJsonPlan, PkgContextInfoPlan, ProfileArtifactPaths,
     ProfileProcessContextInput, ProfileProcessPlan,

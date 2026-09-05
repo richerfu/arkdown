@@ -86,7 +86,6 @@ impl KitImportRewriter {
 }
 
 struct KitImportDeclarationRewriter<'a> {
-    declaration_span: Span,
     source: &'a oxc_ast::ast::StringLiteral<'a>,
     specifiers: Option<&'a OxcVec<'a, ImportDeclarationSpecifier<'a>>>,
     import_kind: ImportOrExportKind,
@@ -97,7 +96,6 @@ struct KitImportDeclarationRewriter<'a> {
 impl<'a> KitImportDeclarationRewriter<'a> {
     fn from_import(import: &'a ImportDeclaration<'a>, scoping: &'a Scoping) -> Self {
         Self {
-            declaration_span: import.span,
             source: &import.source,
             specifiers: import.specifiers.as_ref(),
             import_kind: import.import_kind,
@@ -111,7 +109,6 @@ impl<'a> KitImportDeclarationRewriter<'a> {
         scoping: &'a Scoping,
     ) -> Self {
         Self {
-            declaration_span: import.span,
             source: &import.source,
             specifiers: import.specifiers.as_ref(),
             import_kind: ImportOrExportKind::Value,
@@ -154,7 +151,6 @@ impl<'a> KitImportDeclarationRewriter<'a> {
                 ImportOrExportKind::Value
             };
             imports.push(KitImportBinding {
-                declaration_span: self.declaration_span,
                 specifier_span: specifier.span,
                 local_span: specifier.local.span,
                 local_name: local_name.to_owned(),
@@ -193,7 +189,6 @@ impl<'a> HvigorEsmoduleModuleSpecifier<'a> {
 }
 
 struct KitImportBinding {
-    declaration_span: Span,
     specifier_span: Span,
     local_span: Span,
     local_name: String,
@@ -268,7 +263,7 @@ impl KitImportEmitter {
         let specifiers = Some(OxcVec::from_value_in(specifier, ast));
         if import.lazy {
             Statement::new_lazy_import_declaration(
-                import.declaration_span,
+                SPAN,
                 specifiers,
                 // `process_kit_import.js` creates a fresh module request.
                 // Keeping the kit declaration's literal span would make the
@@ -279,7 +274,7 @@ impl KitImportEmitter {
             )
         } else {
             Statement::new_import_declaration(
-                import.declaration_span,
+                SPAN,
                 specifiers,
                 StringLiteral::new(SPAN, module, None, ast),
                 None,

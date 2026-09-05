@@ -68,8 +68,7 @@ impl RouterMapProcessor {
             })
             .collect();
         let content = serde_json::json!({ "routerMap": entries_json });
-        let json = serde_json::to_string_pretty(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&content).map_err(std::io::Error::other)?;
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

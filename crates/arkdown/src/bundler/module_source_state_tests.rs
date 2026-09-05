@@ -13,6 +13,36 @@ use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+macro_rules! module_source_writer {
+    (
+        $bundle_name:expr,
+        $module_name:expr,
+        $project_root:expr,
+        $module_path_map:expr,
+        $runtime_packages:expr,
+        $byte_code_har_packages:expr,
+        $use_normalized_ohm_url:expr,
+        $module_graph_facts:expr,
+        $module_source_ids:expr,
+        $state:expr,
+        $output_dir:expr $(,)?
+    ) => {
+        HvigorModuleSourceWriter::new(HvigorModuleSourceWriterInput {
+            bundle_name: $bundle_name,
+            module_name: $module_name,
+            project_root: $project_root,
+            module_path_map: $module_path_map,
+            runtime_packages: $runtime_packages,
+            byte_code_har_packages: $byte_code_har_packages,
+            use_normalized_ohm_url: $use_normalized_ohm_url,
+            module_graph_facts: $module_graph_facts,
+            module_source_ids: $module_source_ids,
+            state: $state,
+            output_dir: $output_dir,
+        })
+    };
+}
+
 fn runtime_packages(contexts: &[(&str, &str, &str, &str, &str, bool)]) -> BundleRuntimePackageInfo {
     let mut packages = FxHashMap::default();
     for (key, package_name, bundle_name, module_name, version, is_so) in contexts {
@@ -229,6 +259,39 @@ fn module_path_map_keeps_package_version_for_src_main_sources() {
 }
 
 #[test]
+fn module_path_map_keeps_named_target_as_cache_owner_for_shared_root() {
+    let project = tempfile::tempdir().unwrap();
+    let module_root = project.path().join("entry");
+    let source_path = module_root.join("src/ohosTest/ets/List.test.ets");
+    std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{"name":"entry","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(&source_path, "export const test = true;").unwrap();
+
+    let module_root = arkdown_path::canonicalize_or_owned(&module_root);
+    let source_path = arkdown_path::canonicalize_or_owned(&source_path);
+    let module_path_map = HvigorModulePathMap::new(
+        "entry_test",
+        &module_root,
+        &[
+            ("entry".to_string(), module_root.clone()),
+            ("entry_test".to_string(), module_root.clone()),
+        ],
+    );
+    let source = module_path_map
+        .source_file_for_entry(source_path.to_str().unwrap())
+        .unwrap();
+
+    assert_eq!(source.module_name, "entry");
+    assert_eq!(source.cache_module_name, "entry_test");
+    assert_eq!(source.source_file, "ets/List.test.ets");
+    assert_eq!(source.cache_source_file, "src/ohosTest/ets/List.test.ets");
+}
+
+#[test]
 fn normalized_source_record_and_dependency_attribution_match_latest_module_meta_plugin() {
     let project = tempfile::tempdir().unwrap();
     let module_root = project.path().join("entry");
@@ -323,15 +386,16 @@ fn preload_system_so_tasks_follow_reachable_module_graph_like_sdk() {
     let dependency_id = arkdown_path::canonicalize_or_owned(&dependency)
         .to_string_lossy()
         .into_owned();
-    let mut state = HvigorModuleSourceState::default();
-    state.module_ids = vec![entry_id.clone(), dependency_id.clone()];
+    let mut state = HvigorModuleSourceState {
+        module_ids: vec![entry_id.clone(), dependency_id.clone()],
+        ..HvigorModuleSourceState::default()
+    };
     state.sources.insert(
         entry_id.clone(),
         HvigorCollectedModuleSource {
-            code: format!(
-                "import './Dependency'; import hilog from '@ohos.hilog'; export {{ hilog }};"
-            )
-            .into(),
+            code: "import './Dependency'; import hilog from '@ohos.hilog'; export { hilog };"
+                .to_string()
+                .into(),
         },
     );
     state.sources.insert(
@@ -491,6 +555,7 @@ fn chunk_source_files_follow_hvigor_module_path_map() {
             },
             runtime_packages: runtime_packages(&[("phone", "phone", "", "", "", false)]),
             byte_code_har_packages: Vec::new(),
+            byte_code_har: false,
             preload_system_so_entries: Vec::new(),
             mock_config: None,
         },
@@ -605,6 +670,7 @@ fn compile_entry_package_roots_do_not_require_loader_module_path_map_entries() {
             },
             runtime_packages: runtime_package_info,
             byte_code_har_packages: Vec::new(),
+            byte_code_har: false,
             preload_system_so_entries: Vec::new(),
             mock_config: None,
         },
@@ -650,7 +716,7 @@ fn compile_entry_package_roots_do_not_require_loader_module_path_map_entries() {
         full_module_ids: vec![package_entry_id.clone()],
         full_module_is_commonjs: FxHashMap::default(),
     };
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,
@@ -725,7 +791,7 @@ fn module_record_roots_attribute_dependency_sources_without_loader_module_path_m
         },
     );
 
-    let files = HvigorModuleSourceWriter::new(
+    let files = module_source_writer!(
         "com.example.hmosworld",
         "phone",
         project_root,

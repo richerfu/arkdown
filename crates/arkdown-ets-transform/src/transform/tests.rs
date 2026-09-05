@@ -1751,6 +1751,40 @@ struct WebShell {
 }
 
 #[test]
+fn test_regular_component_field_preserves_source_modifiers() {
+    let src = r#"
+@Component
+struct WidgetCard {
+  readonly SUPPORTED_DIMENSIONS: number[] = [1, 2];
+  title: string = "card";
+  public count: number = 0;
+  build() {}
+}
+"#;
+    let result = TransformHarness::transform(&make_source(
+        "widget/src/main/ets/forms/WidgetCard.ets",
+        src,
+    ))
+    .unwrap();
+    assert!(
+        result.contains("readonly SUPPORTED_DIMENSIONS: number[];"),
+        "SDK createPropertyDeclaration preserves an explicit readonly modifier:\n{result}"
+    );
+    assert!(
+        !result.contains("private readonly SUPPORTED_DIMENSIONS"),
+        "SDK does not add private when the source property already has a modifier:\n{result}"
+    );
+    assert!(
+        result.contains("private title: string;"),
+        "SDK defaults an unmodified regular property to private:\n{result}"
+    );
+    assert!(
+        result.contains("public count: number;"),
+        "SDK preserves an explicit accessibility modifier:\n{result}"
+    );
+}
+
+#[test]
 fn test_static_component_property_is_not_lowered_to_instance_field() {
     let src = r#"
 @Component
@@ -4263,7 +4297,7 @@ export struct MSIActionSheetApiEntryPage {
 fn test_minimal_index_component_lowers_arkui_semantics() {
     let src =
         include_str!("../../../../tests/fixtures/minimal-hap/entry/src/main/ets/pages/Index.ets");
-    let result = TransformHarness::transform_with_options(
+    let output = TransformHarness::transform_output_with_options(
         &make_source("entry/src/main/ets/pages/Index.ets", src),
         &TransformOptions {
             project_root: Some(PathBuf::from("/project")),
@@ -4272,6 +4306,7 @@ fn test_minimal_index_component_lowers_arkui_semantics() {
         },
     )
     .unwrap();
+    let result = &output.code;
 
     assert!(result.contains("class Index extends ViewPU"));
     assert!(result.contains("private __message: ObservedPropertySimplePU<string>"));
@@ -4290,7 +4325,7 @@ fn test_minimal_index_component_lowers_arkui_semantics() {
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
         &allocator,
-        &result,
+        result,
         oxc_span::SourceType::ts().with_module(true),
     )
     .parse();
@@ -4300,6 +4335,45 @@ fn test_minimal_index_component_lowers_arkui_semantics() {
         parsed.diagnostics,
         result
     );
+
+    let source_map: serde_json::Value = serde_json::from_str(
+        output
+            .source_map
+            .as_deref()
+            .expect("ArkUI lowering must preserve a TypeScript source map"),
+    )
+    .expect("source map must be valid JSON");
+    assert_eq!(
+        source_map["mappings"],
+        "iDAAA;;CAAA;;IAGS,OAAO,GAAE,MAAM;;MADjB,KAAK;IAFZ;;8CAAA;;SAAA;sDAG2B,aAAa;;;KAHxC;;wCAAA;;SAAA;;;;;;;;;;;;IAGE,4CAAgB,MAAM,EAAiB;QAAhC,OAAO;;;QAAP,OAAO,WAAE,MAAM;;;IAEtB;;YACE,GAAG;YAAH,GAAG,CAMD,MAAM,CAAC,MAAM;;;YALb,MAAM;YAAN,MAAM,CAIJ,KAAK,CAAC,MAAM;;;YAHZ,IAAI,QAAC,IAAI,CAAC,OAAO;YAAjB,IAAI,CACD,QAAQ,CAAC,EAAE;YADd,IAAI,CAED,UAAU,CAAC,UAAU,CAAC,IAAI;;QAF7B,IAAI;QADN,MAAM;QADR,GAAG;KAOJ",
+        "latest source compiler TypeScript-printer mappings must remain byte-identical"
+    );
+}
+
+#[test]
+fn entry_source_map_accepts_synthetic_zero_span_objects_after_leading_whitespace() {
+    // process_component_class.ts#createEntryNode creates the empty argument
+    // and route metadata object with synthetic zero-length source spans. A
+    // generated unit-test page begins with a newline, so byte zero is
+    // whitespace; it must not be mistaken for a source-backed closing token.
+    let source = make_source(
+        "entry/.test/testability/pages/Index.ets",
+        "\n@Entry\n@Component\nstruct Index {\n  build() { Text('test') }\n}\n",
+    );
+    let output = TransformHarness::transform_output_with_options(
+        &source,
+        &TransformOptions {
+            project_root: Some(PathBuf::from("/project")),
+            project_path: Some(PathBuf::from("/project/entry/.test/testability")),
+            bundle_name: Some("com.example.test".to_string()),
+            module_name: Some("entry".to_string()),
+            ..TransformOptions::default()
+        },
+    )
+    .expect("synthetic entry objects must not underflow source-map offsets");
+
+    assert!(output.source_map.is_some());
+    assert!(output.code.contains("registerNamedRoute"));
 }
 
 #[test]
@@ -6754,6 +6828,23 @@ export default class EntryAbility extends UIAbility {
         )
         .expect("kit import transform")
         .expect("ArkTS source must transform");
+    let source_map: serde_json::Value = serde_json::from_str(
+        output
+            .source_map
+            .as_deref()
+            .expect("ModuleSourceFile finalization must preserve its source-map edge"),
+    )
+    .expect("ModuleSourceFile source map");
+    assert_eq!(
+        source_map["sources"][0],
+        "/tmp/project/entry/src/main/ets/entryability/EntryAbility.ets"
+    );
+    assert!(
+        source_map["mappings"]
+            .as_str()
+            .is_some_and(|mappings| !mappings.is_empty()),
+        "split kit imports must retain source-backed mappings"
+    );
     let code = output
         .module_source_code
         .expect("CompileArkTS source sidecar");

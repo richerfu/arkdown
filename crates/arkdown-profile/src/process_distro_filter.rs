@@ -67,17 +67,7 @@ impl DistroFilterProcessor {
         &self,
         input: DistroFilterProfileInput<'_>,
     ) -> Result<Option<DistroFilterProfileOutput>, ArkdownError> {
-        let Some(plan) = build_distro_filter_plan(
-            input.project_root,
-            input.module_name,
-            input.module_root,
-            input.product_name,
-            input.target_name,
-            input.build_mode_name,
-            input.compile_api_version,
-            input.metadata,
-        )?
-        else {
+        let Some(plan) = build_distro_filter_plan(&input)? else {
             return Ok(None);
         };
         self.write_distro_filter_profile(input, plan)
@@ -150,28 +140,26 @@ impl Default for DistroFilterProcessor {
 }
 
 pub(crate) fn build_distro_filter_plan(
-    project_root: &Path,
-    module_name: &str,
-    module_root: &Path,
-    product_name: &str,
-    target_name: Option<&str>,
-    build_mode_name: Option<&str>,
-    compile_api_version: u32,
-    metadata: &[MetadataEntry],
+    input: &DistroFilterProfileInput<'_>,
 ) -> Result<Option<DistroFilterPlan>, ArkdownError> {
     let Some(target_filter) = read_target_distribution_filter(
-        project_root,
-        module_name,
-        product_name,
-        target_name,
-        build_mode_name.unwrap_or("debug"),
+        input.project_root,
+        input.module_name,
+        input.product_name,
+        input.target_name,
+        input.build_mode_name.unwrap_or("debug"),
     )?
     else {
         return Ok(None);
     };
 
-    build_distro_filter_plan_from_value(module_root, compile_api_version, metadata, target_filter)
-        .map(Some)
+    build_distro_filter_plan_from_value(
+        input.module_root,
+        input.compile_api_version,
+        input.metadata,
+        target_filter,
+    )
+    .map(Some)
 }
 
 fn build_distro_filter_plan_from_value(
@@ -318,7 +306,7 @@ fn unique_profile_name(output_profile_dir: &Path, base_name: &str) -> Result<Str
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(base_name.to_string());
         }
-        Err(error) => return Err(ArkdownError::Io(error.into())),
+        Err(error) => return Err(ArkdownError::Io(error)),
     };
 
     let mut used_names = std::collections::HashSet::new();
@@ -588,7 +576,7 @@ mod tests {
     fn test_process_distro_filter_respects_build_mode_set() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let module_root = tmp.path().join("entry");
-        fs_err::create_dir_all(&module_root.join("src/main")).expect("create module root");
+        fs_err::create_dir_all(module_root.join("src/main")).expect("create module root");
         fs_err::write(
             tmp.path().join("build-profile.json5"),
             r#"{
@@ -659,7 +647,7 @@ mod tests {
     #[test]
     fn test_distro_filter_processor_new_and_default() {
         let _p1 = DistroFilterProcessor::new();
-        let _p2 = DistroFilterProcessor::default();
+        let _p2 = DistroFilterProcessor;
     }
 
     #[test]

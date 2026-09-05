@@ -12,12 +12,12 @@ use oxc_ast::ast::{
     ClassHeritage, ClassType, Declaration, Decorator, ExportDeclaration, ExportDefaultDeclaration,
     Expression, FormalParameter, FormalParameterKind, FormalParameters, Function, FunctionBody,
     FunctionType, IdentifierName, MemberExpression, MethodDefinitionKind, MethodDefinitionType,
-    NumberBase, PropertyDefinitionType, PropertyKey, Statement, TSAccessibility, TSInterfaceBody,
-    TSInterfaceDeclaration, TSSignature, TSType, TSTypeAnnotation, TSTypeName,
-    TSTypeParameterInstantiation,
+    NumberBase, PropertyDefinition, PropertyDefinitionType, PropertyKey, Statement,
+    TSAccessibility, TSInterfaceBody, TSInterfaceDeclaration, TSSignature, TSType,
+    TSTypeAnnotation, TSTypeName, TSTypeParameterInstantiation,
 };
 use oxc_ast::builder::AstBuilder;
-use oxc_span::{Span, SPAN};
+use oxc_span::{GetSpan, Span, SPAN};
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
 
 use crate::transform::component_meta::ArkuiRuntimeNames;
@@ -553,14 +553,14 @@ impl<'a> TopLevelFunctionAstEmitter<'a> {
 
 // ─── Public helpers for class-level code generation ──────────────────────────
 
-struct ViewpuClassDeclaration<'a> {
-    name: &'a str,
-    name_span: Span,
-    super_class_name: &'a str,
-    elements: OxcVec<'a, ClassElement<'a>>,
-    decorators: OxcVec<'a, Decorator<'a>>,
-    is_exported: bool,
-    is_default_export: bool,
+pub(crate) struct ViewpuClassDeclaration<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) name_span: Span,
+    pub(crate) super_class_name: &'a str,
+    pub(crate) elements: OxcVec<'a, ClassElement<'a>>,
+    pub(crate) decorators: OxcVec<'a, Decorator<'a>>,
+    pub(crate) is_exported: bool,
+    pub(crate) is_default_export: bool,
 }
 
 pub(crate) struct ViewpuAstBuilder<'a> {
@@ -1486,6 +1486,51 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         )
     }
 
+    /// Rebuild an ordinary component property using the modifier semantics from
+    /// SDK `process_component_class.ts::createPropertyDeclaration`.
+    pub(crate) fn regular_property_from_source(
+        &self,
+        source: &PropertyDefinition<'_>,
+        name: &'a str,
+        type_annotation: Option<oxc_allocator::Box<'a, TSTypeAnnotation<'a>>>,
+    ) -> ClassElement<'a> {
+        let has_source_modifier = source.r#type
+            == PropertyDefinitionType::TSAbstractPropertyDefinition
+            || source.r#static
+            || source.declare
+            || source.r#override
+            || source.readonly
+            || source.accessibility.is_some();
+        let accessibility = source
+            .accessibility
+            .or_else(|| (!has_source_modifier).then_some(TSAccessibility::Private));
+        let source_key_span = source.key.span();
+        let key_span = if source_key_span.start > source.span.start {
+            Span::new(source_key_span.start - 1, source_key_span.end)
+        } else {
+            source_key_span
+        };
+        let key = PropertyKey::new_static_identifier(key_span, name, &self.ast);
+
+        ClassElement::new_property_definition(
+            source.span,
+            source.r#type,
+            OxcVec::new_in(&self.ast),
+            key,
+            type_annotation,
+            None,
+            false,
+            false,
+            source.declare,
+            source.r#override,
+            source.optional,
+            source.definite,
+            source.readonly,
+            accessibility,
+            &self.ast,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn property_with_type_annotation_and_source_span(
         &self,
@@ -1543,27 +1588,7 @@ impl<'a> ViewpuMemberAstEmitter<'a> {
         })
     }
 
-    pub(crate) fn class_declaration_statement_with_decorators(
-        &self,
-        name: &'a str,
-        super_class_name: &'a str,
-        elements: OxcVec<'a, ClassElement<'a>>,
-        decorators: OxcVec<'a, Decorator<'a>>,
-        is_exported: bool,
-        is_default_export: bool,
-    ) -> Statement<'a> {
-        self.class_declaration_statement(ViewpuClassDeclaration {
-            name,
-            name_span: SPAN,
-            super_class_name,
-            elements,
-            decorators,
-            is_exported,
-            is_default_export,
-        })
-    }
-
-    fn class_declaration_statement(
+    pub(crate) fn class_declaration_statement(
         &self,
         declaration: ViewpuClassDeclaration<'a>,
     ) -> Statement<'a> {

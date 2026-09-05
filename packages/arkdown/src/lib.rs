@@ -2564,9 +2564,12 @@ async fn run_build(
     config.product.build_version = Some(build_version.clone());
   }
   let config = std::sync::Arc::new(config);
+  let acquire_remote_dev_dependencies =
+    target == "test" || package_args.build_target_name.as_deref() == Some("ohosTest");
   let session_builder = BuildSessionBuilder::new(config.clone())
     .with_arkts_language_version(package_args.arkts_language_version)
-    .with_ohpm_mode(package_args.ohpm_mode);
+    .with_ohpm_mode(package_args.ohpm_mode)
+    .with_remote_dev_dependencies(acquire_remote_dev_dependencies);
   let session = tokio::task::spawn_blocking(move || {
     session_builder
       .build()

@@ -41,7 +41,7 @@ pub(crate) use module_source_id::{
     HvigorModuleSourceFileAttribution, HvigorModuleSourceId, HvigorModuleSourceOutputPath,
 };
 pub(crate) use module_source_state::{HvigorModuleSourceState, HvigorSourceSpan, ModuleGraphFacts};
-pub(crate) use module_source_writer::HvigorModuleSourceWriter;
+pub(crate) use module_source_writer::{HvigorModuleSourceWriter, HvigorModuleSourceWriterInput};
 #[cfg(feature = "memory-diagnostics")]
 pub(crate) use transform_collector::MemoryTransformDiagnosticPlugin;
 pub(crate) use transform_collector::{
@@ -72,6 +72,10 @@ use crate::diagnostics::RolldownBuildDiagnostics;
 use crate::manual_chunks::{ChunkName, ManualChunkPolicy};
 use crate::output;
 use crate::plan::{BundlePlan, SourceMapPolicy};
+
+type DynamicChunkNameFuture =
+    Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>;
+type DynamicChunkName = Arc<dyn Fn(&str, &ChunkingContext) -> DynamicChunkNameFuture + Send + Sync>;
 
 /// The top-level bundler for one OHOS module build.
 ///
@@ -112,17 +116,11 @@ impl Bundler {
         let source_collector =
             Arc::new(HvigorModuleTransformCollector::new(transform_store.clone()))
                 as SharedPluginable;
-        let source_collector_index = rd_plugins
-            .iter()
-            .position(|plugin| plugin.call_name().as_ref() == "apiTransform")
-            .or_else(|| {
-                rd_plugins
-                    .iter()
-                    .position(|plugin| plugin.call_name().as_ref() == "ets-transform")
-            })
-            .map(|index| index + 1)
-            .unwrap_or(rd_plugins.len());
-        rd_plugins.insert(source_collector_index, source_collector);
+        // CompileArkTS consumes the result after every Rollup transform hook,
+        // including package plugins ordered after the SDK adapters. The
+        // collector is the Rust equivalent of that post-transform handoff,
+        // so it must remain the final ordinary transform observer.
+        rd_plugins.push(source_collector);
         #[cfg(feature = "memory-diagnostics")]
         rd_plugins.push(Arc::new(MemoryTransformDiagnosticPlugin::new()) as SharedPluginable);
 
@@ -336,18 +334,19 @@ impl Bundler {
         let module_source_write_start = Instant::now();
         #[cfg(feature = "memory-diagnostics")]
         crate::memory_diagnostics::dump("bundle:before-module-source-write");
-        let module_source_files = HvigorModuleSourceWriter::new(
-            plan.bundle_name.as_str(),
-            plan.input.module_name.as_str(),
-            &plan.input.project_root,
-            &input_plan.module_path_map,
-            &plan.input.runtime_packages,
-            &plan.input.byte_code_har_packages,
-            plan.use_normalized_ohm_url,
-            &module_graph_facts,
+        let module_source_files = HvigorModuleSourceWriter::new(HvigorModuleSourceWriterInput {
+            bundle_name: plan.bundle_name.as_str(),
+            module_name: plan.input.module_name.as_str(),
+            project_root: &plan.input.project_root,
+            module_path_map: &input_plan.module_path_map,
+            runtime_packages: &plan.input.runtime_packages,
+            byte_code_har_packages: &plan.input.byte_code_har_packages,
+            use_normalized_ohm_url: plan.use_normalized_ohm_url,
+            module_graph_facts: &module_graph_facts,
             module_source_ids,
-            module_source_state,
-            plan.output
+            state: module_source_state,
+            output_dir: plan
+                .output
                 .module_source_output_dir
                 .clone()
                 .ok_or_else(|| {
@@ -356,7 +355,8 @@ impl Bundler {
                             .to_string(),
                     )
                 })?,
-        )
+        })
+        .with_current_byte_code_har(plan.input.byte_code_har)
         .with_mock_config(plan.input.mock_config.as_ref())
         .write()?;
         #[cfg(feature = "memory-diagnostics")]
@@ -702,24 +702,17 @@ impl Bundler {
 
         // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
         // The function captures no state; it queries `is_entry` via ChunkingContext.
-        let vendors_name_fn: Arc<
-            dyn Fn(
-                    &str,
-                    &ChunkingContext,
-                )
-                    -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>
-                + Send
-                + Sync,
-        > = Arc::new(|module_id: &str, ctx: &ChunkingContext| {
-            let result = ctx.get_module_info(module_id).and_then(|info| {
-                if !info.is_entry {
-                    Some(ChunkName::VENDORS.to_string())
-                } else {
-                    None
-                }
+        let vendors_name_fn: DynamicChunkName =
+            Arc::new(|module_id: &str, ctx: &ChunkingContext| {
+                let result = ctx.get_module_info(module_id).and_then(|info| {
+                    if !info.is_entry {
+                        Some(ChunkName::VENDORS.to_string())
+                    } else {
+                        None
+                    }
+                });
+                Box::pin(async move { Ok(result) })
             });
-            Box::pin(async move { Ok(result) })
-        });
 
         let vendors_group = MatchGroup {
             name: MatchGroupName::Dynamic(vendors_name_fn),

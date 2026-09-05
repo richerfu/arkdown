@@ -1339,16 +1339,7 @@ mod tests {
         assert_eq!(cache["libs"].as_object().unwrap().len(), 1);
         assert_eq!(cache["stripped"].as_object().unwrap().len(), 1);
         assert!(cache.get("debugSymbol").is_none());
-        let binxo_cache: serde_json::Value =
-            serde_json::from_slice(&fs::read(layout.binxo_native_lib_cache_file()).unwrap())
-                .unwrap();
-        assert_eq!(binxo_cache["libs"].as_object().unwrap().len(), 1);
-        assert!(binxo_cache["binxo"].as_object().unwrap().is_empty());
-        assert_eq!(binxo_cache["binxoSymbol"]["enableAsanBinxo"], false);
-        assert_eq!(
-            binxo_cache["binxoSymbol"]["excludeSoFromBinxo"],
-            serde_json::json!([])
-        );
+        assert!(!layout.binxo_native_lib_cache_file().exists());
         for hash in cache["libs"]
             .as_object()
             .unwrap()
@@ -1362,23 +1353,22 @@ mod tests {
     }
 
     #[test]
-    fn test_native_cache_empty_artifacts_match_latest_hvigor_bytes() {
+    fn native_cache_omits_and_removes_binxo_state_when_binxo_is_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         let option = NativeLibOption::default();
+        let layout = NativeModuleLayout::for_variant(tmp.path(), "default", "default");
+        fs::create_dir_all(layout.binxo_native_lib_cache_file().parent().unwrap()).unwrap();
+        fs::write(layout.binxo_native_lib_cache_file(), b"stale").unwrap();
 
         NativeLibCacheWriter::for_variant(tmp.path(), "default", "default", &option, false)
             .write()
-            .expect("write empty native caches");
+            .expect("write base native cache");
 
-        let layout = NativeModuleLayout::for_variant(tmp.path(), "default", "default");
         assert_eq!(
             fs::read_to_string(layout.native_lib_cache_file()).unwrap(),
             r#"{"libs":{},"stripped":{}}"#
         );
-        assert_eq!(
-            fs::read_to_string(layout.binxo_native_lib_cache_file()).unwrap(),
-            r#"{"libs":{},"binxo":{},"binxoSymbol":{"enableAsanBinxo":false,"excludeSoFromBinxo":[]}}"#
-        );
+        assert!(!layout.binxo_native_lib_cache_file().exists());
     }
 
     #[test]

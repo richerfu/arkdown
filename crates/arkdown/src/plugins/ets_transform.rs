@@ -11,6 +11,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{borrow::Cow, future::ready, sync::Arc};
 
+use arkdown_cache::CacheKeyMaterial;
 #[cfg(feature = "memory-diagnostics")]
 use arkdown_ets_transform::RolldownEtsTransformOutput;
 use arkdown_ets_transform::{
@@ -44,6 +45,8 @@ pub struct EtsTransformPlugin {
 #[derive(Debug)]
 pub(crate) struct EtsTransformModuleMetadataEntry {
     pub(crate) module_source_code: Option<Arc<str>>,
+    pub(crate) transform_source_map: Option<Arc<str>>,
+    pub(crate) transform_code_hash: String,
     pub(crate) emits_javascript: bool,
     pub(crate) has_source_map: bool,
     pub(crate) is_comment_only_javascript: bool,
@@ -58,29 +61,8 @@ pub(crate) struct EtsTransformModuleMetadata {
 }
 
 impl EtsTransformModuleMetadata {
-    fn record(
-        &self,
-        module_id: String,
-        module_source_code: Option<Arc<str>>,
-        emits_javascript: bool,
-        has_source_map: bool,
-        is_comment_only_javascript: bool,
-        is_shared_module: bool,
-        insight_intent: InsightIntentSourceMetadata,
-        crossplatform_collection: CrossplatformSourceCollection,
-    ) {
-        self.entries.insert(
-            module_id,
-            EtsTransformModuleMetadataEntry {
-                module_source_code,
-                emits_javascript,
-                has_source_map,
-                is_comment_only_javascript,
-                is_shared_module,
-                insight_intent,
-                crossplatform_collection,
-            },
-        );
+    fn record(&self, module_id: String, entry: EtsTransformModuleMetadataEntry) {
+        self.entries.insert(module_id, entry);
     }
 
     pub(crate) fn javascript_source_map(&self, module_id: &str) -> Option<bool> {
@@ -125,15 +107,16 @@ impl EtsTransformPlugin {
         #[cfg(feature = "memory-diagnostics")]
         self.memory_trace.end(trace_seq, args, &result);
 
-        let Some(output) = result? else {
+        let Some(mut output) = result? else {
             return Ok(None);
         };
         for warning in &output.warnings {
             Self::emit_warning(&ctx, warning);
         }
-        let has_source_map = output.source_map.is_some();
-        let map = output
-            .source_map
+        let transform_code_hash = CacheKeyMaterial::compute_content_hash(&output.code);
+        let transform_source_map = output.source_map.take().map(Arc::<str>::from);
+        let has_source_map = transform_source_map.is_some();
+        let map = transform_source_map
             .as_deref()
             .map(rolldown_sourcemap::OwnedSourceMap::from_json_string)
             .transpose()
@@ -146,13 +129,17 @@ impl EtsTransformPlugin {
                 .get_or_insert_default::<EtsTransformModuleMetadata>()
                 .record(
                     args.id.to_string(),
-                    output.module_source_code.clone(),
-                    output.emits_javascript,
-                    has_source_map,
-                    output.is_comment_only_javascript,
-                    output.is_shared_module,
-                    output.insight_intent,
-                    output.crossplatform_collection,
+                    EtsTransformModuleMetadataEntry {
+                        module_source_code: output.module_source_code.clone(),
+                        transform_source_map,
+                        transform_code_hash,
+                        emits_javascript: output.emits_javascript,
+                        has_source_map,
+                        is_comment_only_javascript: output.is_comment_only_javascript,
+                        is_shared_module: output.is_shared_module,
+                        insight_intent: output.insight_intent,
+                        crossplatform_collection: output.crossplatform_collection,
+                    },
                 );
         }
         Ok(Some(HookTransformOutput {

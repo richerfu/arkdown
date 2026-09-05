@@ -109,9 +109,11 @@ pub struct ParamField<'a> {
 #[derive(Debug, Clone)]
 pub struct RegularField<'a> {
     pub name: String,
-    pub type_annotation_ast: Option<&'a TSTypeAnnotation<'a>>,
+    /// Original source property. The SDK's
+    /// `process_component_class.ts::createPropertyDeclaration` preserves source
+    /// modifiers and node ranges while dropping the initializer.
+    pub source: &'a PropertyDefinition<'a>,
     pub initializer: Option<FieldExpression<'a>>,
-    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,17 +226,20 @@ impl<'a> GlobalReusePoolPropertyEmitter<'a> {
 
 impl<'a> RegularField<'a> {
     fn is_custom_dialog_controller(&self) -> bool {
-        self.type_annotation_ast.is_some_and(|annotation| {
-            matches!(
-                &annotation.type_annotation,
-                TSType::TSTypeReference(reference)
-                    if matches!(
-                        &reference.type_name,
-                        TSTypeName::IdentifierReference(identifier)
-                            if identifier.name == ArkuiRuntimeTypeName::CUSTOM_DIALOG_CONTROLLER
-                    )
-            )
-        })
+        self.source
+            .type_annotation
+            .as_deref()
+            .is_some_and(|annotation| {
+                matches!(
+                    &annotation.type_annotation,
+                    TSType::TSTypeReference(reference)
+                        if matches!(
+                            &reference.type_name,
+                            TSTypeName::IdentifierReference(identifier)
+                                if identifier.name == ArkuiRuntimeTypeName::CUSTOM_DIALOG_CONTROLLER
+                        )
+                )
+            })
     }
 }
 
@@ -1424,21 +1429,23 @@ impl<'a> ViewPuClassEmitter<'a> {
         let mut elements = Vec::new();
         if let Some(field) = self.info.find_regular_field(property_name) {
             let name = allocator.alloc_str(&field.name);
-            let type_annotation = field.type_annotation_ast.map(|type_annotation| {
-                ViewpuAstBuilder::new(allocator).clone_type_annotation(type_annotation)
-            });
+            let type_annotation = field
+                .source
+                .type_annotation
+                .as_deref()
+                .map(|type_annotation| {
+                    ViewpuAstBuilder::new(allocator).clone_type_annotation(type_annotation)
+                });
             // SDK ets-loader parity:
             // process_component_class.js::addPropertyMember/createPropertyDeclaration
             // emits regular field declarations without initializers. The initializer is
             // emitted by process_component_member.js::createVariableInitStatement into
             // the generated constructor, after state-backed fields exist.
             elements.push(
-                ViewpuMemberAstEmitter::new(allocator).property_with_type_annotation(
+                ViewpuMemberAstEmitter::new(allocator).regular_property_from_source(
+                    field.source,
                     name,
                     type_annotation,
-                    None,
-                    true,
-                    field.optional,
                 ),
             );
         } else if let Some(field) = self.info.find_state_field(property_name) {

@@ -952,9 +952,6 @@ impl BuildCoordinator {
                                 let compress_native_libs =
                                     PackageModuleJsonOptions::new(&module_json)
                                         .compress_native_libs()?;
-                                let pkg_sdk_info_path = (!loader_json.use_normalized_ohm_url)
-                                    .then(|| module_layout.pkg_sdk_info_json())
-                                    .filter(|path| path.is_file());
                                 let pack_hap_start = Instant::now();
                                 #[cfg(feature = "memory-diagnostics")]
                                 arkdown::memory_diagnostics::dump_with(
@@ -992,7 +989,6 @@ impl BuildCoordinator {
                                         pkg_context_info_path: loader_json
                                             .use_normalized_ohm_url
                                             .then(|| module_layout.pkg_context_info_json()),
-                                        pkg_sdk_info_path: pkg_sdk_info_path.clone(),
                                         integrated_hsps: integrated_hsps.clone(),
                                         device_types: manifest.device_types.clone(),
                                         installation_free: bundle_type == "atomicService",

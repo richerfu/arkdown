@@ -26,7 +26,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::pre_build::PreBuildValidator;
@@ -185,6 +184,133 @@ struct ModulePackInfoPlan {
     output_path: PathBuf,
     /// Related entry suffix used by `getModuleTargetOutputFileName`.
     related_entry: Option<String>,
+}
+
+/// Materializes the MergeProfile task output of source modules consumed by a
+/// parent HAP/HSP build without executing a second package pipeline for them.
+/// Hvigor schedules this task for local HAR dependencies before CompileArkTS,
+/// and tooling observes the dependency module's own build directory.
+struct DependencyMergeProfileStage<'a> {
+    config: &'a ArkdownConfig,
+    session: &'a BuildSession,
+    args: &'a BuildRequest,
+    writer: &'a IntermediateArtifactWriter,
+    sanitizer_flags: SanitizerProfileFlags,
+}
+
+impl<'a> DependencyMergeProfileStage<'a> {
+    fn new(
+        config: &'a ArkdownConfig,
+        session: &'a BuildSession,
+        args: &'a BuildRequest,
+        writer: &'a IntermediateArtifactWriter,
+        sanitizer_flags: SanitizerProfileFlags,
+    ) -> Self {
+        Self {
+            config,
+            session,
+            args,
+            writer,
+            sanitizer_flags,
+        }
+    }
+
+    fn write(
+        &self,
+        modules: &[&ModuleConfig],
+        parent_target_name: &str,
+        completed_modules: &mut FxHashSet<String>,
+    ) -> Result<()> {
+        for module in modules {
+            if !completed_modules.insert(module.name.clone()) {
+                continue;
+            }
+            let resolved = ModuleBuildConfiguration::resolve_dependency(
+                self.config,
+                self.session.build_options.as_ref(),
+                module,
+                Some(parent_target_name),
+                &self.args.hvigor_properties,
+            )?;
+            let module_context = self.session.module_context(&module.name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing build session module context for dependency '{}'",
+                    module.name
+                )
+            })?;
+            let module_json = module_context.module.module_json.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing module.json5 snapshot for dependency '{}'",
+                    module.name
+                )
+            })?;
+            let raw_module_json = module_context
+                .module
+                .module_json_value
+                .as_deref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing raw module.json5 snapshot for dependency '{}'",
+                        module.name
+                    )
+                })?;
+            let dependency_context = arkdown_profile::ProfileDependencyContext::from_session_graph(
+                resolved.config.as_ref(),
+                module,
+                Arc::clone(&module_context.deps),
+                self.config
+                    .product
+                    .version_code
+                    .unwrap_or(self.session.project.version_code),
+            );
+            let processor = ProfileProcessor::new(Arc::clone(&resolved.config))
+                .with_har_exclude_hsp_dependencies(
+                    self.args.hvigor_properties.har_exclude_hsp_dependencies,
+                )
+                .with_compile_lib_entry_file(self.args.hvigor_properties.compile_lib_entry_file);
+            let (manifest, _) = processor
+                .process_module_with_dependency_context_and_target(
+                    module,
+                    module_json,
+                    &dependency_context,
+                    &resolved.target_name,
+                )
+                .map_err(|error| anyhow::anyhow!("dependency MergeProfile failed: {error}"))?;
+            let mut value = processor
+                .module_json_value_with_session_context(
+                    &manifest,
+                    None,
+                    &dependency_context,
+                    Some(raw_module_json),
+                    &resolved.target.source_abilities,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("construct dependency MergeProfile failed: {error}")
+                })?;
+            self.sanitizer_flags
+                .with_cmake_arguments(
+                    resolved
+                        .config
+                        .product
+                        .build_option
+                        .external_native_options
+                        .as_ref(),
+                )
+                .apply_to_value(&mut value)?;
+            let layout = ModuleBuildLayout::for_output_target_product(
+                &resolved.config.output_target,
+                &module.src_path,
+                &resolved.config.product.name,
+                &resolved.target_name,
+            );
+            self.writer.write_merge_profile_intermediate(
+                &layout,
+                &value,
+                module_json.module.extension_abilities.len(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Resolves the source resource model consumed by Hvigor's `MakePackInfo`.
@@ -395,11 +521,10 @@ impl<'a> WidgetCompileArktsPass<'a> {
                     plan.cache_dir.display()
                 )
             })?;
-        // 6.24.3 `GenerateLoaderJson`: the widget loader JSON always carries
-        // `pkgName2OtherCompileFiles`; the main loader.json never does. The
-        // per-ByteCode-HAR grouping is populated when
-        // `arkOptions.widget.transitiveDeps` is enabled
-        // (`isWidgetTransitiveDeps`), otherwise it stays an empty object.
+        // Latest `GenerateLoaderJson`: the widget loader adds
+        // `pkgName2OtherCompileFiles` only for transitive widget dependency
+        // compilation. The main loader and ordinary widget loader both omit
+        // it; an enabled plan serializes the per-ByteCode-HAR grouping.
         let transitive_deps = self
             .config
             .product
@@ -408,7 +533,7 @@ impl<'a> WidgetCompileArktsPass<'a> {
             .as_ref()
             .and_then(|options| options.widget.as_ref())
             .is_some_and(|widget| widget.transitive_deps);
-        loader_json.pkg_name2_other_compile_files = Some(if transitive_deps {
+        loader_json.pkg_name2_other_compile_files = transitive_deps.then(|| {
             LoaderByteCodeHarFields::collect_pkg_name2_other_compile_files_from_graph(
                 self.dependencies,
             )
@@ -425,8 +550,6 @@ impl<'a> WidgetCompileArktsPass<'a> {
                 )
             })
             .collect()
-        } else {
-            IndexMap::new()
         });
         Ok(loader_json)
     }

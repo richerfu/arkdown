@@ -1,7 +1,6 @@
 //! OXC-based ArkTS/ArkUI transform core (SPEC-048).
 //!
-//! This crate owns the ETS transform core, migrated from
-//! `arkdown-plugin-ets-transform` (the rolldown adapter layer).
+//! This crate directly owns the ETS transform core consumed by Rolldown.
 //!
 //! It implements the transform stages currently wired into the Rolldown
 //! adapter:

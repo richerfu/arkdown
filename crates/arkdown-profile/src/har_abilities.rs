@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_har_ability_collector_empty_input() {
-        let collector = HarAbilityCollector::default();
+        let collector = HarAbilityCollector;
         assert!(collector.collect_har_abilities(vec![]).is_empty());
     }
 }

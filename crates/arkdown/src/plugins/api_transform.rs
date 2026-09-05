@@ -39,12 +39,8 @@ impl ApiTransformPlugin {
         // `shouldEmitJsFlagById(id)` is true. Keeping this as its own Rolldown
         // hook lets Rolldown own map-chain collapse just as Rollup does.
         let prior_source_map = has_prior_source_map.then(|| ctx.get_combined_sourcemap());
-        let map = RollupHiresCompatibilityMap::new(
-            args.code.as_str(),
-            args.id,
-            prior_source_map.as_ref(),
-        )
-        .build();
+        let map = RollupHiresSourceMap::new(args.code.as_str(), args.id, prior_source_map.as_ref())
+            .build();
         Ok(Some(HookTransformOutput {
             code: Some(args.code.to_string()),
             map: HookTransformOutputMap::Sourcemap(Box::new(map)),
@@ -63,13 +59,13 @@ impl ApiTransformPlugin {
 /// Rolldown retain ownership of the hook chain while producing the same final
 /// combined map.
 #[derive(Debug)]
-pub(super) struct RollupHiresCompatibilityMap<'a> {
+pub(super) struct RollupHiresSourceMap<'a> {
     code: &'a str,
     module_id: &'a str,
     prior_source_map: Option<&'a SourceMap>,
 }
 
-impl<'a> RollupHiresCompatibilityMap<'a> {
+impl<'a> RollupHiresSourceMap<'a> {
     pub(super) fn new(
         code: &'a str,
         module_id: &'a str,

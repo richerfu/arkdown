@@ -91,7 +91,7 @@ impl HvigorModulePathMap {
         // and would shadow the owning root with the synthetic `1.0.0` version.
         let has_current_module_owner = roots.iter().any(|root| {
             root.module_name == current_module_name
-                && root.kind == HvigorModuleRootKind::SourceModule
+                && root.kind == HvigorModuleRootKind::Source
                 && module_root.starts_with(&root.path)
         });
         if !has_current_module_owner {
@@ -104,7 +104,7 @@ impl HvigorModulePathMap {
             .iter()
             .find(|root| {
                 root.module_name == current_module_name
-                    && root.kind == HvigorModuleRootKind::SourceModule
+                    && root.kind == HvigorModuleRootKind::Source
                     && (root.path.join("oh-package.json5").is_file()
                         || root.path.join("package.json").is_file())
             })
@@ -189,6 +189,15 @@ impl HvigorModulePathMap {
                         .starts_with('@')
                         .cmp(&right.module_name.starts_with('@'))
                 })
+                // A named target can alias the same physical module root (the
+                // `ohosTest` loader maps both `entry` and `entry_test`). Keep
+                // the active target owner when identical roots are merged so
+                // ModuleMode writes its cache below `entry_test/`.
+                .then_with(|| {
+                    let left_is_current = left.module_name == current_module_name;
+                    let right_is_current = right.module_name == current_module_name;
+                    right_is_current.cmp(&left_is_current)
+                })
                 .then_with(|| left.module_name.cmp(&right.module_name))
         });
         let mut merged_roots: Vec<HvigorModuleRoot> = Vec::with_capacity(roots.len());
@@ -238,6 +247,7 @@ impl HvigorModulePathMap {
                 self.current_module_name.clone(),
                 "1.0.0".to_string(),
                 strip_relative_prefix(entry).to_string(),
+                strip_relative_prefix(entry).to_string(),
             ));
         }
 
@@ -252,6 +262,7 @@ impl HvigorModulePathMap {
             String::new(),
             "1.0.0".to_string(),
             HvigorModuleRelativeSourceFile::new(&entry_path).source_file(),
+            ArtifactPathSerializer::rel_to_slash(&entry_path),
         ))
     }
 
@@ -281,12 +292,11 @@ impl HvigorModulePathMap {
         self.roots
             .iter()
             .find(|root| {
-                root.kind == HvigorModuleRootKind::SourceModule
-                    && root.path == self.current_module_root
+                root.kind == HvigorModuleRootKind::Source && root.path == self.current_module_root
             })
             .or_else(|| {
                 self.roots.iter().find(|root| {
-                    root.kind == HvigorModuleRootKind::SourceModule
+                    root.kind == HvigorModuleRootKind::Source
                         && root.module_name == self.current_module_name
                 })
             })
@@ -302,7 +312,7 @@ impl HvigorModulePathMap {
     ) -> Vec<output::SourceMapLocalDependencyRoot> {
         self.roots
             .iter()
-            .filter(|root| root.kind == HvigorModuleRootKind::LocalDependencyModule)
+            .filter(|root| root.kind == HvigorModuleRootKind::LocalDependency)
             .map(|root| output::SourceMapLocalDependencyRoot {
                 root: root.path.clone(),
                 package_name: root.package_name.clone(),
@@ -328,7 +338,7 @@ impl HvigorModulePathMap {
         source: &HvigorChunkSource,
     ) -> Result<String, ArkdownError> {
         match &source.kind {
-            HvigorChunkSourceKind::PackageModule(_) => {
+            HvigorChunkSourceKind::Package(_) => {
                 let module_path = Path::new(module_id);
                 let record = self
                     .package_record_for_path(project_root, module_path)
@@ -342,8 +352,7 @@ impl HvigorModulePathMap {
                     &Path::new(&record).with_extension(""),
                 ))
             }
-            HvigorChunkSourceKind::SourceModule
-            | HvigorChunkSourceKind::LocalDependencyModule(_) => {
+            HvigorChunkSourceKind::Source | HvigorChunkSourceKind::LocalDependency(_) => {
                 let source_file =
                     HvigorModuleRelativeSourceFile::new(Path::new(source.source_file.as_str()))
                         .source_file();
@@ -390,7 +399,7 @@ impl HvigorModulePathMap {
         for root in self
             .roots
             .iter()
-            .filter(|root| root.kind == HvigorModuleRootKind::PackageModule)
+            .filter(|root| root.kind == HvigorModuleRootKind::Package)
         {
             let Some((entry_path, build_path)) = self.package_root_entry(project_root, root)?
             else {
@@ -460,7 +469,7 @@ impl HvigorModulePathMap {
         for root in self
             .roots
             .iter()
-            .filter(|root| root.kind == HvigorModuleRootKind::PackageModule)
+            .filter(|root| root.kind == HvigorModuleRootKind::Package)
         {
             let Some(record) = self.package_record_for_path(project_root, &root.path) else {
                 continue;
@@ -589,13 +598,13 @@ impl HvigorModulePathMap {
             .roots
             .iter()
             .find(|root| {
-                root.kind == HvigorModuleRootKind::SourceModule
+                root.kind == HvigorModuleRootKind::Source
                     && root.package_name == self.current_module_name
             })
             .or_else(|| {
                 self.roots
                     .iter()
-                    .find(|root| root.kind == HvigorModuleRootKind::SourceModule)
+                    .find(|root| root.kind == HvigorModuleRootKind::Source)
             });
         let Some(current_root) = current_root else {
             return Ok(());
@@ -609,7 +618,7 @@ impl HvigorModulePathMap {
         for root in self
             .roots
             .iter()
-            .filter(|root| root.kind == HvigorModuleRootKind::LocalDependencyModule)
+            .filter(|root| root.kind == HvigorModuleRootKind::LocalDependency)
             .filter(|root| root.path != current_root.path)
         {
             let Some(alias) = dependency_aliases
@@ -771,12 +780,7 @@ pub(crate) struct HvigorModuleRoot {
 impl HvigorModuleRoot {
     pub(crate) fn source_root(module_name: String, path: PathBuf) -> Self {
         let package = OhPackage::load_from_root(&path);
-        Self::with_package(
-            module_name,
-            path,
-            HvigorModuleRootKind::SourceModule,
-            package,
-        )
+        Self::with_package(module_name, path, HvigorModuleRootKind::Source, package)
     }
 
     pub(crate) fn from_module_path_map(
@@ -787,12 +791,12 @@ impl HvigorModuleRoot {
     ) -> Self {
         let kind = HvigorModuleRootKind::from_root_path(&path);
         let package = OhPackage::load_from_root(&path);
-        let kind = if kind == HvigorModuleRootKind::SourceModule
+        let kind = if kind == HvigorModuleRootKind::Source
             && module_name != current_module_name
             && path != current_module_root
             && package.is_some()
         {
-            HvigorModuleRootKind::LocalDependencyModule
+            HvigorModuleRootKind::LocalDependency
         } else {
             kind
         };
@@ -808,12 +812,7 @@ impl HvigorModuleRoot {
 
     pub(crate) fn from_record_root(module_name: String, path: PathBuf) -> Self {
         let package = OhPackage::load_from_root(&path);
-        Self::with_package(
-            module_name,
-            path,
-            HvigorModuleRootKind::PackageModule,
-            package,
-        )
+        Self::with_package(module_name, path, HvigorModuleRootKind::Package, package)
     }
 
     pub(crate) fn with_package(
@@ -853,13 +852,14 @@ impl HvigorModuleRoot {
         relative: &Path,
     ) -> Result<HvigorChunkSource, ArkdownError> {
         match self.kind {
-            HvigorModuleRootKind::SourceModule => Ok(HvigorChunkSource::source_module(
+            HvigorModuleRootKind::Source => Ok(HvigorChunkSource::source_module(
                 self.package_name.clone(),
                 self.module_name.clone(),
                 self.package_version.clone(),
                 HvigorModuleRelativeSourceFile::new(relative).source_file(),
+                ArtifactPathSerializer::rel_to_slash(relative),
             )),
-            HvigorModuleRootKind::PackageModule => {
+            HvigorModuleRootKind::Package => {
                 let package =
                     HvigorPackageModuleSource::new(absolute_path, &self.path, &self.package_name)?;
                 Ok(HvigorChunkSource::package_module(
@@ -870,7 +870,7 @@ impl HvigorModuleRoot {
                     package,
                 ))
             }
-            HvigorModuleRootKind::LocalDependencyModule => {
+            HvigorModuleRootKind::LocalDependency => {
                 let package =
                     HvigorPackageModuleSource::new(absolute_path, &self.path, &self.package_name)?;
                 Ok(HvigorChunkSource::local_dependency_module(
@@ -887,22 +887,22 @@ impl HvigorModuleRoot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HvigorModuleRootKind {
-    SourceModule,
-    LocalDependencyModule,
-    PackageModule,
+    Source,
+    LocalDependency,
+    Package,
 }
 
 impl HvigorModuleRootKind {
     pub(crate) fn from_root_path(path: &Path) -> Self {
         if arkdown_path::classify::is_inside_oh_modules(path) {
-            Self::PackageModule
+            Self::Package
         } else {
-            Self::SourceModule
+            Self::Source
         }
     }
 
     pub(crate) fn is_project_oh_modules_owner(self) -> bool {
-        matches!(self, Self::SourceModule | Self::LocalDependencyModule)
+        matches!(self, Self::Source | Self::LocalDependency)
     }
 }
 
@@ -911,13 +911,18 @@ pub(crate) struct HvigorChunkSource {
     pub(crate) cache_module_name: String,
     pub(crate) package_version: String,
     pub(crate) source_file: String,
+    /// Physical path relative to the owning module root. Hvigor uses the
+    /// logical `source_file` for OHM records, but ModuleMode preserves this
+    /// path for cache outputs and `filesInfo.txt` (notably generated
+    /// `build/<product>/...` and `src/ohosTest/...` sources).
+    pub(crate) cache_source_file: String,
     pub(crate) kind: HvigorChunkSourceKind,
 }
 
 pub(crate) enum HvigorChunkSourceKind {
-    SourceModule,
-    LocalDependencyModule(HvigorPackageModuleSource),
-    PackageModule(HvigorPackageModuleSource),
+    Source,
+    LocalDependency(HvigorPackageModuleSource),
+    Package(HvigorPackageModuleSource),
 }
 
 impl HvigorChunkSource {
@@ -926,13 +931,15 @@ impl HvigorChunkSource {
         cache_module_name: String,
         package_version: String,
         source_file: String,
+        cache_source_file: String,
     ) -> Self {
         Self {
             cache_module_name,
             module_name,
             package_version,
             source_file,
-            kind: HvigorChunkSourceKind::SourceModule,
+            cache_source_file,
+            kind: HvigorChunkSourceKind::Source,
         }
     }
 
@@ -947,8 +954,9 @@ impl HvigorChunkSource {
             cache_module_name,
             module_name,
             package_version,
+            cache_source_file: source_file.clone(),
             source_file,
-            kind: HvigorChunkSourceKind::PackageModule(package),
+            kind: HvigorChunkSourceKind::Package(package),
         }
     }
 
@@ -963,8 +971,9 @@ impl HvigorChunkSource {
             cache_module_name,
             module_name,
             package_version,
+            cache_source_file: source_file.clone(),
             source_file,
-            kind: HvigorChunkSourceKind::LocalDependencyModule(package),
+            kind: HvigorChunkSourceKind::LocalDependency(package),
         }
     }
 
@@ -981,15 +990,15 @@ impl HvigorChunkSource {
         runtime_packages: &BundleRuntimePackageInfo,
     ) -> Result<String, ArkdownError> {
         match &self.kind {
-            HvigorChunkSourceKind::SourceModule => {
+            HvigorChunkSourceKind::Source => {
                 let context = self.runtime_context(runtime_packages)?;
                 let project_file_path = self.source_project_file_path();
                 Ok(HvigorNormalizedOhmUrl::new(context, &project_file_path).to_record())
             }
-            HvigorChunkSourceKind::PackageModule(package) => {
+            HvigorChunkSourceKind::Package(package) => {
                 package.to_normalized_record(runtime_packages)
             }
-            HvigorChunkSourceKind::LocalDependencyModule(package) => {
+            HvigorChunkSourceKind::LocalDependency(package) => {
                 package.to_normalized_record(runtime_packages)
             }
         }
@@ -1001,13 +1010,13 @@ impl HvigorChunkSource {
         _entry_module_name: &str,
     ) -> Result<String, ArkdownError> {
         match &self.kind {
-            HvigorChunkSourceKind::SourceModule => {
+            HvigorChunkSourceKind::Source => {
                 let context = self.runtime_context(runtime_packages)?;
                 let project_file_path = self.source_project_file_path();
                 Ok(HvigorNormalizedOhmUrl::new(context, &project_file_path).to_request())
             }
-            HvigorChunkSourceKind::PackageModule(package)
-            | HvigorChunkSourceKind::LocalDependencyModule(package) => {
+            HvigorChunkSourceKind::Package(package)
+            | HvigorChunkSourceKind::LocalDependency(package) => {
                 package.to_normalized_request(runtime_packages)
             }
         }
@@ -1042,13 +1051,13 @@ impl HvigorChunkSource {
         emits_javascript: bool,
     ) -> String {
         let mut source_file = match &self.kind {
-            HvigorChunkSourceKind::SourceModule => {
-                HvigorModuleSourceFileAttribution::project_source_file_for(&self.source_file)
+            HvigorChunkSourceKind::Source => {
+                HvigorModuleSourceFileAttribution::project_source_file_for(&self.cache_source_file)
             }
-            HvigorChunkSourceKind::PackageModule(_) => {
+            HvigorChunkSourceKind::Package(_) => {
                 HvigorModuleSourceFileAttribution::package_source_file_for(&self.source_file)
             }
-            HvigorChunkSourceKind::LocalDependencyModule(_) => {
+            HvigorChunkSourceKind::LocalDependency(_) => {
                 HvigorModuleSourceFileAttribution::package_source_file_for(&self.source_file)
             }
         };

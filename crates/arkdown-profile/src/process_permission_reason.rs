@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn test_permission_reason_processor_new_and_default() {
         let _p1 = PermissionReasonProcessor::new();
-        let _p2 = PermissionReasonProcessor::default();
+        let _p2 = PermissionReasonProcessor;
     }
 
     #[test]

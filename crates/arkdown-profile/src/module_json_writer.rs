@@ -45,6 +45,16 @@ struct DependencyModuleProfile {
     extension_abilities: Vec<serde_json::Value>,
 }
 
+struct ModuleManifestJsonContext<'a> {
+    raw_module5: Option<&'a serde_json::Value>,
+    resource_ids: Option<&'a FxHashMap<String, u32>>,
+    package_name: &'a str,
+    bundle_type: &'a str,
+    target_ability_overrides: &'a [TargetAbilityOverride],
+    dependency_profile_merge: &'a DependencyProfileMerge,
+    has_insight_intent: bool,
+}
+
 #[derive(Deserialize)]
 struct DependencyPackageJson {
     #[serde(default)]
@@ -222,13 +232,15 @@ impl ModuleJsonWriter {
         }
         let mut module_section = Self::manifest_to_json(
             manifest,
-            raw_module5.as_ref(),
-            resource_ids,
-            &package_name,
-            &bundle_type,
-            &target_ability_overrides,
-            &dependency_profile_merge,
-            has_insight_intent,
+            ModuleManifestJsonContext {
+                raw_module5: raw_module5.as_ref(),
+                resource_ids,
+                package_name: &package_name,
+                bundle_type: &bundle_type,
+                target_ability_overrides: &target_ability_overrides,
+                dependency_profile_merge: &dependency_profile_merge,
+                has_insight_intent,
+            },
         );
         if matches!(
             manifest.module_type,
@@ -250,14 +262,14 @@ impl ModuleJsonWriter {
         output_path: &Path,
     ) -> Result<(), ArkdownError> {
         if let Some(parent) = output_path.parent() {
-            fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Io(e.into()))?;
+            fs_err::create_dir_all(parent).map_err(ArkdownError::Io)?;
         }
         let mut json = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(b"\t");
         let mut serializer = serde_json::Serializer::with_formatter(&mut json, formatter);
         serde::Serialize::serialize(value, &mut serializer)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
-        fs_err::write(output_path, &json).map_err(|e| ArkdownError::Io(e.into()))?;
+        fs_err::write(output_path, &json).map_err(ArkdownError::Io)?;
 
         Ok(())
     }
@@ -336,14 +348,13 @@ impl ModuleJsonWriter {
         if resource_ids.is_empty() {
             return Ok(());
         }
-        let content =
-            fs_err::read_to_string(module_json_path).map_err(|e| ArkdownError::Io(e.into()))?;
+        let content = fs_err::read_to_string(module_json_path).map_err(ArkdownError::Io)?;
         let mut value: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
         ModuleJsonResourceIdAnnotator::new(resource_ids).annotate(&mut value);
         let json = serde_json::to_string_pretty(&value)
             .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
-        fs_err::write(module_json_path, json.as_bytes()).map_err(|e| ArkdownError::Io(e.into()))?;
+        fs_err::write(module_json_path, json.as_bytes()).map_err(ArkdownError::Io)?;
         Ok(())
     }
 
@@ -371,8 +382,7 @@ impl ModuleJsonWriter {
     ) -> Result<serde_json::Map<String, serde_json::Value>, ArkdownError> {
         let app_json5_path = ProfileProjectLayout::new(&config.project_root).app_scope_app_json5();
         if app_json5_path.exists() {
-            let content =
-                fs_err::read_to_string(&app_json5_path).map_err(|e| ArkdownError::Io(e.into()))?;
+            let content = fs_err::read_to_string(&app_json5_path).map_err(ArkdownError::Io)?;
             let raw: serde_json::Value = json5::from_str(&content)
                 .map_err(|e| ArkdownError::Io(std::io::Error::other(e.to_string())))?;
             Ok(raw
@@ -580,14 +590,17 @@ impl ModuleJsonWriter {
     /// `packageName` (preserve-and-mutate semantics, matching hvigor's `cloneDeep` + mutate).
     fn manifest_to_json(
         manifest: &HapManifest,
-        raw_module5: Option<&serde_json::Value>,
-        resource_ids: Option<&FxHashMap<String, u32>>,
-        package_name: &str,
-        bundle_type: &str,
-        target_ability_overrides: &[TargetAbilityOverride],
-        dependency_profile_merge: &DependencyProfileMerge,
-        has_insight_intent: bool,
+        context: ModuleManifestJsonContext<'_>,
     ) -> serde_json::Value {
+        let ModuleManifestJsonContext {
+            raw_module5,
+            resource_ids,
+            package_name,
+            bundle_type,
+            target_ability_overrides,
+            dependency_profile_merge,
+            has_insight_intent,
+        } = context;
         // Build a name→raw-ability lookup for preserve-and-mutate.
         // Hvigor cloneDeep-copies the ability array and mutates selected fields
         // (resource IDs, srcEntry), preserving all other fields verbatim.
@@ -846,7 +859,7 @@ impl ModuleJsonWriter {
         }
         // definePermissions: preserved verbatim from module.json5.
         if let Some(defs) = raw_module5.and_then(|v| v.get("definePermissions")) {
-            if defs.as_array().map_or(false, |a| !a.is_empty()) {
+            if defs.as_array().is_some_and(|a| !a.is_empty()) {
                 obj.insert("definePermissions".into(), defs.clone());
             }
         }
@@ -874,7 +887,7 @@ impl ModuleJsonWriter {
         // (bundleName URI mutation only applies when hvigor receives a CLI
         // --bundleName override; arkdown does not implement that yet.)
         if let Some(proxy) = raw_module5.and_then(|v| v.get("proxyData")) {
-            if proxy.as_array().map_or(false, |a| !a.is_empty()) {
+            if proxy.as_array().is_some_and(|a| !a.is_empty()) {
                 obj.insert("proxyData".into(), proxy.clone());
             }
         }
@@ -2181,7 +2194,7 @@ mod tests {
         );
         assert_eq!(from_override["buildVersion"], "cli-build");
         assert_eq!(
-            from_override.keys().last().map(String::as_str),
+            from_override.keys().next_back().map(String::as_str),
             Some("buildVersion"),
             "a newly supplied buildVersion is appended after the source object"
         );

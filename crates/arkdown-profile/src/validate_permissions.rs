@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn test_permission_validator_new_and_default() {
         let _v1 = PermissionValidator::new();
-        let _v2 = PermissionValidator::default();
+        let _v2 = PermissionValidator;
     }
 
     #[test]

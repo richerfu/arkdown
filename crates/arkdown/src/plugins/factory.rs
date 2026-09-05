@@ -1228,6 +1228,7 @@ impl<'a> PluginFactory<'a> {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::path::Path;
 
     use arkdown_core::BuildMode;
     use rolldown_plugin::{HookUsage, Plugin};
@@ -1272,13 +1273,13 @@ mod tests {
         }
     }
 
-    fn make_plan(root: &PathBuf) -> BundlePlan {
+    fn make_plan(root: &Path) -> BundlePlan {
         let module_root = root.join("entry");
         BundlePlan {
             input: BundleInput {
                 loader_json_path: module_root
                     .join("build/default/intermediates/loader/loader.json"),
-                project_root: root.clone(),
+                project_root: root.to_path_buf(),
                 project_path: module_root.join("src/main/ets"),
                 module_root,
                 module_name: "entry".to_string(),
@@ -1298,6 +1299,7 @@ mod tests {
                 },
                 runtime_packages: crate::plan::BundleRuntimePackageInfo::default(),
                 byte_code_har_packages: Vec::new(),
+                byte_code_har: false,
                 preload_system_so_entries: Vec::new(),
                 mock_config: None,
             },

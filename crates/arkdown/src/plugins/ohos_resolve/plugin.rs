@@ -103,14 +103,11 @@ impl OhosResolvePlugin {
             self.project_root.as_path()
         };
 
-        let resolved = match self.resolver.resolve_with_kind(
+        let resolved = self.resolver.resolve_with_kind(
             specifier.as_str(),
             importer_path,
             resolve_import_kind(import_kind),
-        ) {
-            Ok(resolved) => resolved,
-            Err(err) => return Err(err.into()),
-        };
+        )?;
 
         let output = ResolveHookOutputMapper::new(&self.project_root).map_resolved(resolved)?;
         Ok(Some(output))

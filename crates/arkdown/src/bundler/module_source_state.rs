@@ -180,7 +180,7 @@ impl HvigorModuleSourceState {
                 .source_file_for_entry(module_id)
                 .is_ok_and(|source| {
                     source.module_name == current_module_name
-                        && matches!(source.kind, HvigorChunkSourceKind::SourceModule)
+                        && matches!(source.kind, HvigorChunkSourceKind::Source)
                 });
             for record in records {
                 let request = HvigorImporteeRequest::new(&record.specifier);

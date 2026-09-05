@@ -456,10 +456,7 @@ impl WrittenOutput {
         raw_map: &str,
     ) -> String {
         let mut builder = SourceMapBuilder::default();
-        let source_content = decoded
-            .get_source_content(source_id)
-            .map(|content| content.as_ref())
-            .unwrap_or_default();
+        let source_content = decoded.get_source_content(source_id).unwrap_or_default();
         builder.set_source_and_content(source, source_content);
 
         let mut has_source_tokens = false;
@@ -536,6 +533,12 @@ impl HvigorSourceDescriptor {
         javascript_source_paths: &FxHashSet<PathBuf>,
     ) -> Result<Self, ArkdownError> {
         let normalized = ArtifactPathSerializer::rel_to_slash(&PathBuf::from(source));
+        let is_original_javascript = matches!(
+            Path::new(&normalized)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("js" | "mjs" | "cjs")
+        );
         let emits_javascript =
             emits_javascript || Self::source_emits_javascript(&normalized, javascript_source_paths);
         if let Some(local_dependency) = Self::local_dependency_descriptor(
@@ -562,7 +565,7 @@ impl HvigorSourceDescriptor {
                 package_version: Some(package.package_version),
                 key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
                 file: None,
-                include_source_root: true,
+                include_source_root: !is_original_javascript,
             });
         }
 
@@ -615,7 +618,12 @@ impl HvigorSourceDescriptor {
                     package_name: None,
                     package_version: None,
                     key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
-                    include_source_root: direct_local_dependency,
+                    // `generate_sourcemap.js::SourceMapGenerator` retains
+                    // `sourceRoot: ""` for every ETS/TS source, including
+                    // generated ohosTest templates below
+                    // `build/<product>/intermediates/src`. Only an original
+                    // runtime JavaScript input omits it.
+                    include_source_root: !is_original_javascript,
                 });
             }
         }
@@ -647,7 +655,7 @@ impl HvigorSourceDescriptor {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(str::to_string),
-            include_source_root: true,
+            include_source_root: !is_original_javascript,
         })
     }
 
@@ -739,7 +747,12 @@ impl HvigorSourceDescriptor {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(str::to_string),
-            include_source_root: true,
+            include_source_root: !matches!(
+                source_path
+                    .extension()
+                    .and_then(|extension| extension.to_str()),
+                Some("js" | "mjs" | "cjs")
+            ),
         })
     }
 
@@ -885,6 +898,24 @@ mod tests {
             WrittenOutput::mappings_for_source(&decoded, 0, "ModuleInfo.ts", raw_map),
             "AAAA;AACA;"
         );
+    }
+
+    #[test]
+    fn original_ohpm_javascript_map_omits_typescript_source_root() {
+        let source =
+            "/project/oh_modules/.ohpm/@ohos+hypium@1.0.24/oh_modules/@ohos/hypium/index.js";
+        let descriptor = HvigorSourceDescriptor::new(
+            source,
+            Path::new("/project"),
+            Path::new("/project/entry"),
+            true,
+            &FxHashMap::from_iter([("@ohos/hypium".to_string(), "1.0.24".to_string())]),
+            &[],
+            &FxHashSet::from_iter([PathBuf::from(source)]),
+        )
+        .expect("describe original package JavaScript");
+
+        assert!(!descriptor.include_source_root);
     }
 
     fn temp_output_dir(test_name: &str) -> PathBuf {

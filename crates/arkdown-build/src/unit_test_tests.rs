@@ -45,6 +45,27 @@ fn ohos_test_mock_config_uses_normal_build_target_resources() {
 }
 
 #[test]
+fn crossplatform_ohos_test_uses_sdk_nomock_runner_template() {
+    let temp = TempDir::new().expect("create crossplatform ohosTest root");
+    UnitTestTemplateWriter::new(temp.path(), "default")
+        .generate_ohos_test(17, true)
+        .expect("generate ArkUI-X ohosTest template");
+
+    let layout = ModuleBuildLayout::for_ohos_test_template(temp.path(), "default");
+    let runner = std::fs::read_to_string(
+        layout
+            .ohos_test_runner_dir()
+            .join("OpenHarmonyTestRunner.ets"),
+    )
+    .expect("read generated no-mock runner");
+
+    assert!(runner.contains("import { Want } from '@kit.AbilityKit';"));
+    assert!(!runner.contains("import { UIAbility, common, application }"));
+    assert!(!runner.contains("mockMockKit"));
+    assert!(runner.contains("abilityDelegator.startAbility(want"));
+}
+
+#[test]
 fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
     let module_path = std::fs::canonicalize(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
