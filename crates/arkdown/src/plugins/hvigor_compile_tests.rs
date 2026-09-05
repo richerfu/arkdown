@@ -243,6 +243,32 @@ fn latest_hvigor_compile_plugin_shape_validation_is_rust_owned() {
         "PLUGIN_NAME_WITH_UNKNOWN_HOOK"
     );
 
+    let ordered_handler = plugin_shape(
+        name.clone(),
+        undefined.clone(),
+        vec![HvigorPluginAttributeShape {
+            name: "transform".to_string(),
+            value: value_shape(HvigorPluginValueKind::Object, true, None, "object"),
+        }],
+    );
+    let outcome = HvigorPluginShapeValidator::validate_compile(&ordered_handler);
+    assert_eq!(
+        outcome.error.expect("ordered handler diagnostic").code,
+        "PLUGIN_NAME_WITH_UNKNOWN_HOOK"
+    );
+
+    let arkdown_only_hook = plugin_shape(
+        name.clone(),
+        undefined.clone(),
+        vec![HvigorPluginAttributeShape {
+            name: "beforeBuild".to_string(),
+            value: value_shape(HvigorPluginValueKind::Function, true, None, "function"),
+        }],
+    );
+    let outcome = HvigorPluginShapeValidator::validate_compile(&arkdown_only_hook);
+    assert_eq!(outcome.warnings.len(), 1);
+    assert_eq!(outcome.warnings[0].code, "UNKNOWN_PLUGIN_ATTR");
+
     let unknown_order = plugin_shape(
         name,
         value_shape(

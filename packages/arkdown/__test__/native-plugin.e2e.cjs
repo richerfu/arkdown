@@ -58,26 +58,21 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   )
 
   const firstTrace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
-  assert.deepEqual(firstTrace.events, [
-    'beforeBuild',
-    'buildStart',
-    'afterBuildStart',
-    'beforeBuildEnd',
-    'buildEnd',
-    'afterBuildEnd',
-    'bundleEnd',
-    'cleanUp',
-  ])
+  assert.deepEqual(firstTrace.events, ['buildStart', 'beforeBuildEnd', 'buildEnd'])
   assert.equal(firstTrace.buildStartArgumentCount, 0)
+  assert.deepEqual(firstTrace.contextKeys, [
+    'getFileName',
+    'getModuleIds',
+    'getModuleInfo',
+    'parse',
+    'share',
+  ])
   assert.equal(firstTrace.beforeBuildEndArgumentCount, 1)
   assert.equal(firstTrace.buildEndArgumentCount, 1)
   assert.equal(firstTrace.buildEndError, undefined)
   assert.equal(firstTrace.resolveIdCount > 0, true)
   assert.equal(firstTrace.loadCount > 0, true)
   assert.equal(firstTrace.transformCount > 0, true)
-  assert.equal(typeof firstTrace.transformModuleType, 'string')
-  assert.equal(firstTrace.transformModuleType.length > 0, true)
-  assert.equal(firstTrace.combinedSourceMapVersion, 3)
   assert.equal(firstTrace.moduleParsedCount > 0, true)
   assert.equal(firstTrace.moduleInfoCount, firstTrace.moduleIds.length)
   assert.equal(firstTrace.parsedType, 'Program')
@@ -113,7 +108,6 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.match(firstTrace.sourceHash, /^[0-9a-f]{16}$/)
   assert.equal(Number.isFinite(firstTrace.sourceMtimeMs), true)
   assert.equal(firstTrace.shareCacheBuildCount, 1)
-  assert.equal(firstTrace.pluginCacheBuildCount, 1)
   assert.equal(firstTrace.importPackageName, 'entry')
 
   process.env.ARKDOWN_PLUGIN_FORCE_INVALIDATE = '1'
@@ -124,7 +118,6 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(secondTrace.cacheRequest.code.length > 0, true)
   assert.equal(secondTrace.cacheRequest.astType, 'Program')
   assert.equal(secondTrace.shareCacheBuildCount, 2)
-  assert.equal(secondTrace.pluginCacheBuildCount, 2)
 
   const child = spawnSync(
     process.execPath,
@@ -141,7 +134,6 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`)
   const childTrace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
   assert.equal(childTrace.shareCacheBuildCount, 3)
-  assert.equal(childTrace.pluginCacheBuildCount, 3)
 })
 
 test('explicit JS plugins execute through the same native dispatcher', { skip: !enabled }, async (context) => {
@@ -197,7 +189,7 @@ test('explicit JS plugins execute through the same native dispatcher', { skip: !
   assert.equal(metadataObserved, true)
 })
 
-test('compile-plugin cleanUp runs after a transform failure', { skip: !enabled }, async (context) => {
+test('compile-plugin buildEnd receives a transform failure', { skip: !enabled }, async (context) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-plugin-cleanup-'))
   const project = path.join(tempRoot, 'minimal-hap')
   const tracePath = path.join(tempRoot, 'plugin-trace.json')
@@ -229,7 +221,6 @@ test('compile-plugin cleanUp runs after a transform failure', { skip: !enabled }
     /intentional transform failure/,
   )
   const trace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
-  assert.equal(trace.events.at(-1), 'cleanUp')
-  assert.equal(trace.events.includes('afterBuildEnd'), false)
-  assert.equal(trace.events.includes('bundleEnd'), false)
+  assert.equal(trace.events.at(-1), 'buildEnd')
+  assert.match(trace.buildEndError, /intentional transform failure/)
 })

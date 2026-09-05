@@ -73,7 +73,6 @@ impl PluginCacheModule {
 #[serde(rename_all = "camelCase")]
 pub struct PluginCacheModuleInventory {
     version: u32,
-    use_source_hash: bool,
     modules: Vec<PluginCacheModuleRecord>,
 }
 
@@ -86,12 +85,12 @@ pub struct PluginCacheModuleRecord {
 
 impl PluginCacheModuleInventory {
     const FILE_NAME: &'static str = "plugin_module_cache.json";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
 
     pub fn from_module_sources(
         cache_dir: &Path,
         module_sources: &[HvigorModuleSourceFile],
-        use_source_hash: bool,
+        _use_source_hash: bool,
     ) -> anyhow::Result<Self> {
         let mut modules = module_sources
             .iter()
@@ -113,7 +112,6 @@ impl PluginCacheModuleInventory {
         modules.dedup_by(|left, right| left.id == right.id);
         Ok(Self {
             version: Self::VERSION,
-            use_source_hash,
             modules,
         })
     }
@@ -164,18 +162,17 @@ impl PluginCacheModuleInventory {
         record: &PluginCacheModuleRecord,
         cache_dir: &Path,
     ) -> anyhow::Result<PluginCacheModule> {
-        record.read(cache_dir, self.use_source_hash)
+        record.read(cache_dir)
     }
 }
 
 impl PluginCacheModuleRecord {
-    fn read(&self, cache_dir: &Path, use_source_hash: bool) -> anyhow::Result<PluginCacheModule> {
+    fn read(&self, cache_dir: &Path) -> anyhow::Result<PluginCacheModule> {
         let relative = RelPath::parse(PathBuf::from(&self.source_path))?;
-        let code = if use_source_hash {
-            String::new()
-        } else {
-            fs_err::read_to_string(cache_dir.join(relative.as_path()))?
-        };
+        // invalid-cache-plugin.js forwards cachedModule.code even when Rollup
+        // compares originalCode through useSourceHash. The hash policy never
+        // changes the custom plugin request payload.
+        let code = fs_err::read_to_string(cache_dir.join(relative.as_path()))?;
         Ok(PluginCacheModule {
             id: self.id.clone(),
             code,
@@ -506,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn source_hash_inventory_hides_cached_code_like_huawei_rollup() {
+    fn source_hash_inventory_keeps_cached_code_for_custom_plugin_request() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let cache_dir = tmp.path().join("cache");
         let source_path = cache_dir.join("entry/Index.js");
@@ -522,7 +519,7 @@ mod tests {
         let module = inventory
             .read_module(&inventory.modules()[0], &cache_dir)
             .unwrap();
-        assert!(module.code.is_empty());
+        assert_eq!(module.code, "export const cached = true;");
     }
 
     #[test]

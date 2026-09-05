@@ -7,6 +7,7 @@ const path = require('node:path')
 const test = require('node:test')
 
 const {
+  COMPILE_PLUGIN_HOOKS,
   ESMODULE_DORMANT_HOOKS,
   PLUGIN_HOOKS,
   PluginAdapter,
@@ -37,7 +38,7 @@ function dispatch(plugin, hookName, request = {}) {
   return plugin.__arkdownDispatchPluginHook({ hookName, ...request })
 }
 
-test('adapter preserves the complete ArkTS 1.1 compile-plugin hook surface', async () => {
+test('explicit Rolldown plugins preserve the complete Arkdown hook surface', async () => {
   const calls = []
   const hookEvents = []
   const plugin = Object.fromEntries(
@@ -263,7 +264,7 @@ test('plugin and share caches survive a V8 snapshot restored by a later build pr
         },
       },
       fakeBinding(),
-      { compilePlugin: true, pluginFile: '/plugins/persistent.ts' },
+      { pluginFile: '/plugins/persistent.ts' },
     )
 
   const firstObserved = []
@@ -326,7 +327,7 @@ test('ordered hook objects retain handler receiver and native order metadata', (
   ])
 })
 
-test('plugin context delegates graph operations to Rolldown and retains hvigor cache/async state', async () => {
+test('explicit plugin context delegates graph operations to Rolldown and retains cache/async state', async () => {
   const calls = []
   let observed
   const nativeContext = {
@@ -385,7 +386,7 @@ test('plugin context delegates graph operations to Rolldown and retains hvigor c
       },
     },
     fakeBinding(),
-    { compilePlugin: true },
+    {},
   )
   dispatch(plugin, 'seedContext', { share: { projectConfig: { watchMode: true } } })
 
@@ -510,6 +511,73 @@ test('configured CJS plugin modules use default exports and path fields do not r
   assert.equal(prepared.plugins.length, 1)
   assert.equal(prepared.plugins[0].name, 'configured')
   assert.equal(prepared.plugins[0].__arkdownHvigorCompilePlugin, true)
+})
+
+test('configured Hvigor plugins expose only the source-owned hook and context ABI', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-hvigor-plugin-abi-'))
+  const pluginFile = path.join(root, 'compile-plugin.cjs')
+  fs.writeFileSync(
+    pluginFile,
+    `exports.default = {
+      name: 'source-abi',
+      buildStart() { globalThis.__arkdownHvigorBuildStart = [arguments.length, Object.keys(this).sort()] },
+      transform(code, id) { globalThis.__arkdownHvigorTransform = [arguments.length, code, id]; return code },
+      beforeBuild() { throw new Error('unknown hooks must not be wrapped') }
+    }\n`,
+  )
+  context.after(() => {
+    delete globalThis.__arkdownHvigorBuildStart
+    delete globalThis.__arkdownHvigorTransform
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  const binding = fakeBinding()
+  binding.validateHvigorCompilePlugins = () => ({
+    warnings: [{ code: 'UNKNOWN_PLUGIN_ATTR', message: 'beforeBuild is not a compile-plugin hook' }],
+  })
+  const prepared = await new PluginAdapter(binding).prepare({
+    project: root,
+    compilePluginPath: './compile-plugin.cjs',
+  })
+  const plugin = prepared.plugins[0]
+  await dispatch(plugin, 'seedContext', { share: { projectConfig: {} } })
+  await dispatch(plugin, 'buildStart', { buildStartOptions: { input: 'Index.ets' } })
+  await dispatch(plugin, 'transform', {
+    code: 'export {}',
+    id: 'Index.ets',
+    transformOptions: { moduleType: 'ts' },
+  })
+
+  assert.deepEqual(plugin.__arkdownPluginHooks, ['buildStart', 'transform'])
+  assert.deepEqual(COMPILE_PLUGIN_HOOKS, [
+    'buildStart',
+    'resolveId',
+    'load',
+    'transform',
+    'shouldInvalidCache',
+    'moduleParsed',
+    'beforeBuildEnd',
+    'buildEnd',
+  ])
+  assert.deepEqual(globalThis.__arkdownHvigorBuildStart, [
+    0,
+    ['getFileName', 'getModuleIds', 'getModuleInfo', 'parse', 'share'],
+  ])
+  assert.deepEqual(globalThis.__arkdownHvigorTransform, [2, 'export {}', 'Index.ets'])
+})
+
+test('hvigorPluginFile and compilePluginPath independently reload the same module', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-hvigor-plugin-reload-'))
+  const pluginFile = path.join(root, 'compile-plugin.cjs')
+  fs.writeFileSync(pluginFile, "exports.default = { name: 'configured', transform(code) { return code } }\n")
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }))
+
+  const prepared = await new PluginAdapter(fakeBinding()).prepare({
+    project: root,
+    hvigorPluginFile: './compile-plugin.cjs',
+    compilePluginPath: './compile-plugin.cjs',
+  })
+  assert.equal(prepared.plugins.length, 2)
 })
 
 test('OXC plugin loader accepts TS, MTS, and CTS entry modules', async (context) => {

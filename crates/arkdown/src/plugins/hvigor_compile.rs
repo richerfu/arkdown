@@ -344,15 +344,13 @@ pub struct HvigorPluginValidationOutcome {
     pub error: Option<HvigorCompilePluginDiagnostic>,
 }
 
-/// Latest-hvigor plugin surface validator shared by compile-plugin files and
+/// Source-owned surface validators for Hvigor compile-plugin files and
 /// Arkdown's explicit Rolldown package API.
 pub struct HvigorPluginShapeValidator;
 
 impl HvigorPluginShapeValidator {
-    const COMPILE_HOOKS: [&'static str; 13] = [
-        "beforeBuild",
+    const COMPILE_HOOKS: [&'static str; 8] = [
         "buildStart",
-        "afterBuildStart",
         "resolveId",
         "load",
         "transform",
@@ -360,11 +358,8 @@ impl HvigorPluginShapeValidator {
         "moduleParsed",
         "beforeBuildEnd",
         "buildEnd",
-        "afterBuildEnd",
-        "bundleEnd",
-        "cleanUp",
     ];
-    const PACKAGE_ATTRIBUTES: [&'static str; 16] = [
+    const PACKAGE_ATTRIBUTES: [&'static str; 32] = [
         "name",
         "order",
         "beforeBuild",
@@ -376,11 +371,27 @@ impl HvigorPluginShapeValidator {
         "moduleParsed",
         "buildEnd",
         "resolveDynamicImport",
+        "watchChange",
         "beforeBuildEnd",
         "afterBuildEnd",
         "bundleEnd",
         "cleanUp",
         "shouldInvalidCache",
+        "renderStart",
+        "banner",
+        "footer",
+        "intro",
+        "outro",
+        "renderDynamicImport",
+        "resolveFileUrl",
+        "resolveImportMeta",
+        "renderChunk",
+        "augmentChunkHash",
+        "renderError",
+        "generateBundle",
+        "writeBundle",
+        "closeBundle",
+        "closeWatcher",
     ];
 
     pub fn validate_compile(shape: &HvigorPluginShape) -> HvigorPluginValidationOutcome {
@@ -430,16 +441,12 @@ impl HvigorPluginShapeValidator {
                 continue;
             }
             if Self::COMPILE_HOOKS.contains(&attribute.name.as_str()) {
-                if attribute.value.truthy
-                    && !matches!(
-                        attribute.value.kind,
-                        HvigorPluginValueKind::Function | HvigorPluginValueKind::Object
-                    )
+                if attribute.value.truthy && attribute.value.kind != HvigorPluginValueKind::Function
                 {
                     outcome.error = Some(HvigorCompilePluginDiagnostic {
                         code: "PLUGIN_NAME_WITH_UNKNOWN_HOOK",
                         message: format!(
-                            "Plugin \"{plugin_name}\": hook \"{}\" must be a function or ordered handler object",
+                            "Plugin \"{plugin_name}\": hook \"{}\" must be a function",
                             attribute.name
                         ),
                         plugin_name: Some(plugin_name.to_string()),

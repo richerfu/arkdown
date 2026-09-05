@@ -871,7 +871,6 @@ type PluginDispatchTsfn = MaybeAsyncJsCallback<
 /// JavaScript retains only the live function receiver/context bridge.
 pub struct JsPlugin {
   name: String,
-  is_hvigor_compile_plugin: bool,
   module_root: Option<PathBuf>,
   target_name: Option<String>,
   dispatch_fn: PluginDispatchTsfn,
@@ -968,9 +967,6 @@ impl JsPlugin {
     let name: String = obj
       .get::<String>("name")?
       .unwrap_or_else(|| "unknown".to_string());
-    let is_hvigor_compile_plugin = obj
-      .get::<bool>("__arkdownHvigorCompilePlugin")?
-      .unwrap_or(false);
     let cache_identity = obj
       .get::<String>("__arkdownPluginCacheIdentity")?
       .unwrap_or_else(|| name.clone());
@@ -1098,7 +1094,6 @@ impl JsPlugin {
     Ok((
       Arc::new(Self {
         name,
-        is_hvigor_compile_plugin,
         module_root,
         target_name,
         dispatch_fn,
@@ -1318,7 +1313,6 @@ impl Plugin for JsPlugin {
     // Keep Rolldown's native context alive through the JavaScript callback.
     // This matches the latest hvigor wrapper and avoids cloning every module's
     // source into an intermediate JSON graph for each compile plugin.
-    let should_call = args.is_none() || !self.is_hvigor_compile_plugin;
     let errors = args.map_or_else(Vec::new, |args| {
       args
         .errors
@@ -1330,16 +1324,10 @@ impl Plugin for JsPlugin {
         })
         .collect::<Vec<_>>()
     });
-    let request = should_call.then(|| {
-      let mut request = JsPluginDispatchRequest::new("buildEnd", Some(ctx.clone().into()));
-      request.build_end_context = Some(JsBuildEndContext { errors });
-      request
-    });
+    let mut request = JsPluginDispatchRequest::new("buildEnd", Some(ctx.clone().into()));
+    request.build_end_context = Some(JsBuildEndContext { errors });
     let dispatch = self.dispatch_fn.clone();
     async move {
-      let Some(request) = request else {
-        return Ok(());
-      };
       dispatch
         .await_call(request)
         .await
