@@ -27,9 +27,7 @@ use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalida
 use arkdown::plugins::factory::PackagePlugin;
 
 use crate::layout::ModuleBuildLayout;
-use crate::request::{
-    AbcBackendChoice, AnalyzeModeChoice, BuildAction, BuildRequest, OhpmModeChoice,
-};
+use crate::request::{AbcBackendChoice, AnalyzeModeChoice, BuildAction, BuildRequest};
 
 use super::BuildService;
 use crate::bundle_plan::BundleRuntime;
@@ -47,7 +45,6 @@ pub(super) struct WatchStageInput {
     /// Build mode string (e.g. "debug", "release").
     pub(super) mode: String,
     pub(super) analyze: AnalyzeModeChoice,
-    pub(super) ohpm_mode: OhpmModeChoice,
     /// Optional module filter.
     pub(super) module_filter: Option<String>,
     /// Optional product filter.
@@ -130,7 +127,6 @@ impl WatchStageInput {
             target: args.target.clone(),
             mode: args.mode.clone(),
             analyze: args.analyze,
-            ohpm_mode: args.ohpm_mode,
             module_filter: args.module.clone(),
             product_filter: args.product.clone(),
             project_root,
@@ -190,7 +186,6 @@ impl WatchStage {
         let target = input.target;
         let mode = input.mode;
         let analyze = input.analyze;
-        let ohpm_mode = input.ohpm_mode;
         let module_filter = input.module_filter;
         let product_filter = input.product_filter;
         let project_root = input.project_root;
@@ -350,7 +345,6 @@ impl WatchStage {
                 let is_hot = hot_reload_mode || matches!(change_kind, WatchChangeKind::Hot);
                 let rebuild_args = BuildRequest {
                     action,
-                    ohpm_mode,
                     target: target.clone(),
                     mode: mode.clone(),
                     analyze,

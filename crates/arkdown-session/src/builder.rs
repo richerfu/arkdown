@@ -74,15 +74,10 @@ impl From<ProjectSnapshotError> for BuildSessionError {
 pub struct BuildSessionBuilder {
     /// Normalized build config from startup config loading.
     pub config: Arc<ArkdownConfig>,
-    /// OHPM resolution mode (offline/prefer-offline/online).
-    pub ohpm_mode: crate::package::acquisition::AcquisitionMode,
     /// Hvigor CLI `parameterFile` extra-parameter override.
     pub parameter_file_override: Option<PathBuf>,
     /// Explicit ArkTS language selected by the arkdown invocation.
     pub arkts_language_version: ArktsLanguageVersion,
-    /// Whether test-only packages may be acquired beyond issuer-local
-    /// `oh_modules` installations.
-    pub acquire_remote_dev_dependencies: bool,
 }
 
 impl BuildSessionBuilder {
@@ -90,17 +85,9 @@ impl BuildSessionBuilder {
     pub fn new(config: Arc<ArkdownConfig>) -> Self {
         Self {
             config,
-            ohpm_mode: crate::package::acquisition::AcquisitionMode::Online,
             parameter_file_override: None,
             arkts_language_version: ArktsLanguageVersion::default(),
-            acquire_remote_dev_dependencies: false,
         }
-    }
-
-    /// Set the OHPM resolution mode.
-    pub fn with_ohpm_mode(mut self, mode: crate::package::acquisition::AcquisitionMode) -> Self {
-        self.ohpm_mode = mode;
-        self
     }
 
     pub fn with_parameter_file_override(mut self, path: PathBuf) -> Self {
@@ -113,12 +100,6 @@ impl BuildSessionBuilder {
     /// Callers must opt in explicitly; the builder default remains ArkTS 1.1.
     pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
         self.arkts_language_version = version;
-        self
-    }
-
-    /// Enable remote acquisition for test-only dependencies.
-    pub fn with_remote_dev_dependencies(mut self, enabled: bool) -> Self {
-        self.acquire_remote_dev_dependencies = enabled;
         self
     }
 
@@ -138,11 +119,9 @@ impl BuildSessionBuilder {
         }
 
         // Phase 1: Build project and module snapshots.
-        let project = ProjectSnapshot::from_config_with_parameter_file_and_acquisition_mode(
+        let project = ProjectSnapshot::from_config_with_parameter_file(
             &self.config,
             self.parameter_file_override.clone(),
-            Some(self.ohpm_mode),
-            self.acquire_remote_dev_dependencies,
         )?;
 
         // Phase 2: Build SDK snapshot.

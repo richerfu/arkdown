@@ -20,7 +20,6 @@ members = [
     "crates/arkdown-obfuscate",
     "crates/arkdown-watcher",
     "crates/arkdown-session",
-    "crates/arkdown-ohpm",
     # Node.js NAPI binding — built by `npm run build` in packages/arkdown/.
     # Part of the workspace so cargo uses a unified dependency graph and avoids
     # rolldown version conflicts from a separate [workspace] resolution.
@@ -39,7 +38,6 @@ arkdown-ets-transform = { path = "crates/arkdown-ets-transform" }
 arkdown-ets-checker = { path = "crates/arkdown-ets-checker" }
 arkdown-obfuscate = { path = "crates/arkdown-obfuscate" }
 arkdown-ohos-schema = { path = "crates/arkdown-ohos-schema" }
-arkdown-ohpm = { path = "crates/arkdown-ohpm" }
 arkdown-native = { path = "crates/arkdown-native" }
 arkdown-pack = { path = "crates/arkdown-pack" }
 arkdown-path = { path = "crates/arkdown-path" }
@@ -49,6 +47,11 @@ arkdown-resource = { path = "crates/arkdown-resource" }
 arkdown-session = { path = "crates/arkdown-session" }
 arkdown-sign = { path = "crates/arkdown-sign" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
+
+# Full Rust OHPM implementation. Arkdown invokes its library API before the
+# immutable build session is captured; no OHPM subprocess or duplicate
+# package-acquisition implementation remains in this workspace.
+ohpm-core = "=0.2.0"
 
 # OpenHarmony signing backend. Keep the CLI disabled: arkdown owns project
 # discovery and orchestration, while hapsigner owns the signing formats.
@@ -118,16 +121,7 @@ json-strip-comments = "3"
 jsonschema = "0.49.7"
 toml = { version = "1.1.4", features = ["preserve_order"] }
 
-# HTTP client (OHPM registry integration)
-reqwest = { version = "0.12", default-features = false, features = [
-  "blocking",
-  "charset",
-  "http2",
-  "json",
-  "rustls-tls-native-roots",
-  "system-proxy",
-] }
-# Tarball extraction (OHPM package download)
+# Archive support.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 # Base64 encoding (OHPM integrity verification)
@@ -178,6 +172,12 @@ aes-gcm     = "0.10"
 pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
 hex         = "0.4"
 tempfile = "3"
+
+# ohpm-core 0.2.0 resolves through gix 0.86, whose bisync dependency was
+# yanked from crates.io. Keep the published OHPM API consumable until the
+# gix 0.87 fix from ohpm-rs is released.
+[patch.crates-io]
+bisync = { git = "https://github.com/JM4ier/bisync", rev = "be3a0a6255a0af592e66be8614a149151f67fdf5" }
 
 [profile.release]
 lto = true

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::bundle_plan::BundleRuntime;
+use crate::coordinator::BuildOutput;
 use crate::request::BuildRequest;
 use anyhow::Result;
 use arkdown::plugins::factory::PackagePlugin;
@@ -28,7 +29,7 @@ impl BuildService {
         self
     }
 
-    pub async fn execute(self) -> Result<()> {
+    pub async fn execute(self) -> Result<BuildOutput> {
         let retain_bundle_graph = self.request.watch
             || self.request.preview
             || (self.request.action.is_hot_reload() && self.request.watch_invalidation.is_none());
@@ -39,9 +40,9 @@ impl BuildService {
             // state machine in its layout.
             let result = Box::pin(self.execute_inner(Some(&mut runtime))).await;
             let close_result = runtime.close().await;
-            result?;
+            let output = result?;
             close_result?;
-            Ok(())
+            Ok(output)
         } else {
             Box::pin(self.execute_inner(None)).await
         }
@@ -50,11 +51,14 @@ impl BuildService {
     pub(crate) async fn execute_with_bundle_runtime(
         self,
         runtime: &mut BundleRuntime,
-    ) -> Result<()> {
+    ) -> Result<BuildOutput> {
         self.execute_inner(Some(runtime)).await
     }
 
-    async fn execute_inner(self, bundle_runtime: Option<&mut BundleRuntime>) -> Result<()> {
+    async fn execute_inner(
+        self,
+        bundle_runtime: Option<&mut BundleRuntime>,
+    ) -> Result<BuildOutput> {
         use arkdown_config::ArkdownConfigLoader;
         use arkdown_session::BuildSessionBuilder;
 
@@ -80,12 +84,21 @@ impl BuildService {
             config.product.build_version = Some(build_version.clone());
         }
         let config = Arc::new(config);
-        let acquire_remote_dev_dependencies =
-            request.target == "test" || request.build_target_name.as_deref() == Some("ohosTest");
+
+        // The hvigor wrapper runs `ohpm install` before the engine snapshots
+        // its project model. A watch rebuild already belongs to that same
+        // invocation and must not rerun install hooks.
+        if request.watch_invalidation.is_none() {
+            crate::ohpm_install::OhpmInstallStage::new(
+                config.as_ref(),
+                request.parameter_file_override.as_deref(),
+            )
+            .run()
+            .await?;
+        }
+
         let mut session_builder = BuildSessionBuilder::new(config.clone())
-            .with_arkts_language_version(request.arkts_version)
-            .with_ohpm_mode(request.ohpm_mode.into())
-            .with_remote_dev_dependencies(acquire_remote_dev_dependencies);
+            .with_arkts_language_version(request.arkts_version);
         if let Some(parameter_file_override) = request.parameter_file_override.clone() {
             session_builder = session_builder.with_parameter_file_override(parameter_file_override);
         }
@@ -102,8 +115,7 @@ impl BuildService {
             let coordinator =
                 super::app_coordinator::AppBuildCoordinator::new(session, config, request)
                     .with_package_plugins(package_plugins);
-            coordinator.execute().await?;
-            return Ok(());
+            return coordinator.execute().await;
         }
 
         let coordinator = super::coordinator::BuildCoordinator::new(session, config, request)
@@ -113,6 +125,6 @@ impl BuildService {
             None => coordinator.execute().await?,
         };
         tracing::debug!(artifacts = output.artifact_paths.len(), "build completed");
-        Ok(())
+        Ok(output)
     }
 }

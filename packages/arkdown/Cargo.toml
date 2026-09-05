@@ -18,9 +18,7 @@ napi-derive = { workspace = true }
 arkdown = { workspace = true }
 arkdown-build = { workspace = true }
 arkdown-core = { workspace = true }
-arkdown-config = { workspace = true }
 arkdown-path = { workspace = true }
-arkdown-session = { workspace = true }
 
 rolldown_plugin = { workspace = true }
 rolldown_common = { workspace = true }
@@ -62,6 +60,7 @@ napi-build = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+arkdown-config = { workspace = true }
 arkdown-cache = { workspace = true }
 arkdown-profile = { workspace = true }
 arkdown-sign = { workspace = true }

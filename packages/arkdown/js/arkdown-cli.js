@@ -14,7 +14,6 @@ const BUILD_VALUE_OPTIONS = new Map([
   ['--build-target-name', 'buildTargetName'],
   ['--build-version', 'buildVersion'],
   ['--arkts-version', 'arktsVersion'],
-  ['--ohpm-mode', 'ohpmMode'],
   ['--scope', 'scope'],
   ['--ohos-test-coverage', 'ohosTestCoverage'],
   ['--coverage-path-filter', 'coveragePathFilter'],
@@ -88,7 +87,6 @@ class JsCliArgumentParser {
       'device-test',
     ])
     this.oneOf(config, 'arktsVersion', ['1.1', '1.2'])
-    this.oneOf(config, 'ohpmMode', ['offline', 'prefer-offline', 'online'])
     this.oneOf(config, 'coverageMode', ['black', 'white', 'full'])
     if (config.ohosTestCoverage !== undefined) {
       if (!['true', 'false'].includes(config.ohosTestCoverage)) {
@@ -282,7 +280,6 @@ Options:
   --arkts-version <version>
                       Compile as ArkTS 1.1 or 1.2. 1.2 must be explicit;
                       the default is 1.1.
-  --ohpm-mode <mode>  Dependency acquisition: offline, prefer-offline, or online.
   --watch             Rebuild on changes.
   --preview           Preview resource rebuild mode.
   --check-entry       Require exactly one @Entry on the previewed page.
