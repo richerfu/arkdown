@@ -36,6 +36,7 @@ impl ConsumerObfuscationFileWriter {
             }
             merged = merged.merge(ObfuscationRules::from_file(path)?);
         }
+        merged.resolve_keep_dts_names()?;
 
         if let Some(parent) = self.output_path.parent() {
             std::fs::create_dir_all(parent)?;

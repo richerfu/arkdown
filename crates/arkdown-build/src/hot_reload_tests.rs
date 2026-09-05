@@ -24,12 +24,14 @@ fn source(module_id: &Path, emitted: &Path, source_file: &str) -> HvigorModuleSo
         module_id: module_id.to_string_lossy().into_owned(),
         path: emitted.to_path_buf(),
         record_name: format!("record:{source_file}"),
+        record_name_is_explicit: false,
         source_file: source_file.to_string(),
         package_name: Some("entry".to_string()),
         is_commonjs: false,
         is_shared_module: false,
         origin_source_lang: "ets".to_string(),
         imported_record_names: Vec::new(),
+        is_package_module: false,
     }
 }
 

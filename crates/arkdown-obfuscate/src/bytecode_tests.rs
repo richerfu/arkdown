@@ -1,8 +1,7 @@
 #![cfg(unix)]
 
-use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -10,7 +9,7 @@ use tempfile::TempDir;
 
 use crate::{
     ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
-    BytecodeObfuscationSource, ObfuscationModuleFile, ObfuscationModuleInput, ObfuscationOptions,
+    ObfuscationModuleFile, ObfuscationModuleInput, ObfuscationOptions, ObfuscationSource,
     Obfuscator,
 };
 
@@ -69,7 +68,7 @@ impl NativeBytecodeFixture {
         .expect("ArkGuard ES preset");
         fs_err::write(
             &rule_file,
-            "-enable-bytecode-obfuscation\n-enable-property-obfuscation\n-enable-toplevel-obfuscation\n-enable-filename-obfuscation\n-enable-export-obfuscation\n-keep-property-name\nkeptProperty\n-keep-global-name\nKeptGlobal\n-keep-file-name\nPublic.ets\nfoo.bar.ets\n",
+            "-enable-bytecode-obfuscation\n-enable-property-obfuscation\n-enable-toplevel-obfuscation\n-enable-filename-obfuscation\n-enable-export-obfuscation\n-remove-comments\n-keep-comments\nkeptProperty\n-keep-property-name\nkeptProperty\n-keep-global-name\nKeptGlobal\n-keep-file-name\nPublic.ets\nfoo.bar.ets\n",
         )
         .expect("rule file");
 
@@ -91,32 +90,19 @@ impl NativeBytecodeFixture {
         let original_source = module_root.join("src/main/ets/Index.ets");
         let transformed_source = cache_path.join("entry/src/main/ets/Index.ts");
         let adapter = ArkguardAdapterOptions {
-            node_executable: PathBuf::from("node-is-not-used-by-bytecode-obfuscation"),
             panda_guard_path: panda_guard,
             arkguard_package,
-            sdk_api_paths: Vec::new(),
             module_root: module_root.clone(),
             project_root: root.to_path_buf(),
             project_path: module_root.join("src/main/ets"),
             cache_path: cache_path.clone(),
             ace_module_build: ace_module_build.clone(),
-            ace_module_json_path: module_root.join("build/intermediates/res/module.json"),
             compile_sdk_version: "5.0.0.71".to_string(),
             compatible_sdk_version: 13,
             compatible_sdk_version_stage: None,
             entry_package_info: "entry|1.0.0".to_string(),
-            package_dir: "oh_modules".to_string(),
-            module_path_map: BTreeMap::new(),
-            entry_array: vec![original_source
-                .to_str()
-                .expect("UTF-8 fixture source path")
-                .to_string()],
             resource_table_path: Some(module_root.join("build/generated/r/ResourceTable.ts")),
-            local_packages: Vec::new(),
-            compile_har: false,
-            compile_shared: false,
             use_normalized: true,
-            use_ts_har: false,
             byte_code_har_info: serde_json::json!({"remote-har": {}}),
         };
         let options = ObfuscationOptions {
@@ -127,17 +113,45 @@ impl NativeBytecodeFixture {
             export_rule_path: None,
             arkguard: Some(adapter),
         };
+        let declaration_path = cache_path.join("entry/src/main/ets/Api.d.ts");
+        fs_err::create_dir_all(declaration_path.parent().expect("declaration parent"))
+            .expect("declaration directory");
+        let declaration_source = "// removed declaration comment\nexport declare class DeclarationApi {\n// kept member comment\nkeptProperty: string;\n// removed member comment\nrenamedProperty: string;\n}";
+        fs_err::write(&declaration_path, declaration_source).expect("declaration source");
         let module = ObfuscationModuleInput {
-            files: vec![ObfuscationModuleFile {
-                build_path: transformed_source,
-                original_path: original_source.clone(),
-                relative_path: "entry/src/main/ets/Index.ets".to_string(),
-                source_map_key: "entry/src/main/ets/Index.ets".to_string(),
-                previous_source_map: None,
-                insight_intent_global_names: vec!["InsightIntentEntry".to_string()],
-                insight_intent_property_names: vec!["execute".to_string()],
-            }],
+            files: vec![
+                ObfuscationModuleFile {
+                    build_path: transformed_source,
+                    original_path: original_source.clone(),
+                    relative_path: "entry/src/main/ets/Index.ets".to_string(),
+                    record_name: None,
+                    rename_file: true,
+                    source_name_cache_key: None,
+                    source_map_key: "entry/src/main/ets/Index.ets".to_string(),
+                    previous_source_map: None,
+                    source: Arc::from("export class PublicApi {}"),
+                    insight_intent_global_names: vec!["InsightIntentEntry".to_string()],
+                    insight_intent_property_names: vec!["execute".to_string()],
+                },
+                ObfuscationModuleFile {
+                    build_path: declaration_path,
+                    original_path: module_root.join("src/main/ets/Api.ts"),
+                    relative_path: "entry/src/main/ets/Api.d.ts".to_string(),
+                    record_name: None,
+                    rename_file: true,
+                    source_name_cache_key: Some("entry/src/main/ets/Api.ts".to_string()),
+                    source_map_key: "entry/src/main/ets/Api.d.ts".to_string(),
+                    previous_source_map: None,
+                    source: Arc::from(declaration_source),
+                    insight_intent_global_names: Vec::new(),
+                    insight_intent_property_names: Vec::new(),
+                },
+            ],
+            inventory_sources: Vec::new(),
+            module_dependencies: std::collections::BTreeMap::new(),
+            preserved_source_maps: std::collections::BTreeMap::new(),
             source_maps_path: Some(source_maps_input),
+            source_map_mirror_paths: Vec::new(),
         };
         let input = BytecodeObfuscationInput {
             module,
@@ -154,14 +168,14 @@ impl NativeBytecodeFixture {
             ],
             record_name_white_list: vec!["&entry/build/generated/r/ResourceTable&".to_string()],
             reserved_name_sources: vec![
-                BytecodeObfuscationSource {
+                ObfuscationSource {
                     path: original_source,
                     source: Arc::from(
                         "@Entry export class PublicApi { public visibleProperty: number = 1; }",
                     ),
                     sdk_declaration: false,
                 },
-                BytecodeObfuscationSource {
+                ObfuscationSource {
                     path: root.join("sdk/api/global.d.ts"),
                     source: Arc::from("declare interface SystemApi { systemMember: string; }"),
                     sdk_declaration: true,
@@ -229,7 +243,6 @@ fn native_panda_guard_executes_and_updates_hvigor_artifacts() {
         .expect("reserved names");
     for expected in [
         "PublicApi",
-        "visibleProperty",
         "SystemApi",
         "systemMember",
         "InsightIntentEntry",
@@ -273,4 +286,23 @@ fn native_panda_guard_executes_and_updates_hvigor_artifacts() {
         .path()
         .join("entry/build/cache/CompileArkTS/sourceMaps.json")
         .is_file());
+
+    let declaration =
+        walkdir::WalkDir::new(fixture.temp.path().join("entry/build/cache/CompileArkTS"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry.file_type().is_file()
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.ends_with(".d.ts"))
+            })
+            .expect("native ArkGuard declaration output");
+    let declaration = fs_err::read_to_string(declaration.path()).expect("read declaration output");
+    assert!(declaration.contains("kept member comment"));
+    assert!(!declaration.contains("removed declaration comment"));
+    assert!(!declaration.contains("removed member comment"));
+    assert!(declaration.contains("keptProperty"));
+    assert!(!declaration.contains("renamedProperty"));
 }

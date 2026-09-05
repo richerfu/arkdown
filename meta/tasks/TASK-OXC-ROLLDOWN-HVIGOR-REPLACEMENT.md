@@ -23,15 +23,15 @@
 - `ModuleSourceFile` 的 TypeScript emit 已按 OXC AST boundary 生成精确 source map，import/export、函数/类、对象、模板、调用、控制流和跨行 member 均参与映射；Rolldown 负责合并 OXC、内建 `apiTransform` 与用户 TS/JS 插件的 map chain，最终 post collector 只在源码 hash 未变化且 combined map 仍是投影时恢复原始 transform map。该边界同时修复了入口合成对象零 span 的下溢崩溃。
 - ByteCode HAR 的 `filesInfo.txt` 第五列和 ABC `pkgName` 已使用当前 OHPM package identity，不再错误使用逻辑 module name；`modules.cache`、HSP debug/release、ohosTest 独立 cache/task 目录、模板与资源 module cluster 已进入严格产物对比。
 - 已删除 `arkdown-path::compat` 迁移门面以及无生产价值的 `PkgSdkInfoGenerator`、重复 session native inventory；保留的路径、profile/native 行为分别归属 typed path、profile 和 native domain owner。JS 兼容代码仅存在于公开 TS/JS 插件 ABI 边界。
-- 2026-09-05 使用 DevEco Studio 6.1.1.280 自带的真实 `hvigorw` 和同版本 SDK，在 `ARKDOWN_PARITY_STRICT=1` 下串行执行完整 parity harness：30/30 通过，覆盖 HAP/HSP/HAR、debug/release、源码/字节码 HAR、混淆、测试包、widget、多模块、share/startup、ComponentV2、增量构建及诊断。该结果证明当前 fixture 范围内的 ArkTS 1.1 产物行为一致，不代表下表尚未原生化的源码 ArkGuard、跨进程 cache 和大工程语料已经完成。
+- 2026-09-05 使用 DevEco Studio 6.1.1.280 自带的真实 `hvigorw` 和同版本 SDK，在 `ARKDOWN_PARITY_STRICT=1` 下串行执行完整 parity harness：30/30 通过，覆盖 HAP/HSP/HAR、debug/release、源码/字节码 HAR、混淆、测试包、widget、多模块、share/startup、ComponentV2、增量构建及诊断。该结果证明当前 fixture 范围内的 ArkTS 1.1 产物行为一致，不代表源码 ArkGuard 的大工程 corpus、跨进程 cache 和所有 SDK 边界语料已经完成。
 - Rolldown 官方 incremental API 已进入 JS CLI watch 主链：初始构建以 `IncrementalFullBuild + ScanMode::Full` 建立长生命周期图，热更新以 `IncrementalBuild + ScanMode::Partial(changedFiles)` 只重扫变化模块；未变化模块的 transform/source-map/InsightIntent/ArkUI-X facts 保留在 Rust-owned snapshot 中，删除模块会从快照移除，watch 退出或 cold invalidation 会执行 `closeBundle`。这是一轮 JS CLI/watch 生命周期内的内存图缓存，不冒充跨进程磁盘 cache。
-- bytecode ArkGuard 已原生化：Rust 直接生成 PandaGuard `config.json`、从 BuildSession/OXC 源码快照构建 reserved-name inventory、执行 SDK `panda_guard`、回写 `modules.abc`，并更新 `sourceMaps.map`、`sourceMaps.json`、`nameCache.json` 与 origin/obf 备份；旧 `bytecode_arkguard_bridge.cjs` 和 ets-loader bytecode driver 已删除。源码 ArkGuard 仍由 `arkguard_bridge.cjs` 执行，必须在 OXC 跨文件 name/property/file mangler 与增量 name cache 行为完成后再删除。
+- source/bytecode ArkGuard 均已原生化：源码模式由 OXC AST/semantic/codegen 实现模块级 identifier/property/file mangler、console 移除、source-map 合并、name cache、增量删除清理、`-keep`/`-keep-dts`/通配符/源码 Keep 标记和声明注释规则；`-keep` 的导出白名单使用 Rolldown 已解析模块图计算传递依赖，ResourceTable 作为隐式 keep，keep 文件仍按原实现执行 compact、注释/日志处理和文件名改写。文件名混淆输出以一个 Rust typed handoff 同步提交 CompileArkTS 物理路径、派生 recordName、importedRecordNames、sourceFile/source-map key 和全部 sourceMaps cache/package 镜像；显式 `meta.ohmurl` 保持原值，`oh_modules` 物理与逻辑文件名不改写。字节码模式由 Rust 生成 PandaGuard `config.json`、从 BuildSession/OXC 快照构建 reserved-name inventory、先处理声明文件，再直接执行 SDK `panda_guard` 并回写 ABC/source-map/name-cache 产物。`arkguard_bridge.cjs`、`bytecode_arkguard_bridge.cjs`、单文件/目录 obfuscation facade 和 ets-loader bytecode driver 均已删除；源码变换不调用 `bin/secharmony`，只有 PandaGuard 保持原生二进制工具边界。
 
 arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OXC/Rolldown 完整替换 hvigor”。当前 18 个能力域中：
 
 - 5 个已经形成可用的 Rust 主体：资源/Profile/Loader、解析与打包图、ArkTS 1.1 主干变换、ABC 原生工具适配、打包与签名。
 - 8 个只完成了部分行为或所有权仍然错误：配置与任务入口、依赖安装、BuildSession、语义检查、缓存/Watch、插件桥、诊断、对齐测试。
-- 4 个仍是阻断项或由 SDK JavaScript 代跑：系统 API 深层类型流、ArkTS 1.2 UI/Interop/Memo 全阶段、源码 ArkGuard、真正的并行 StageExecutor。
+- 3 个仍是阻断项或由 SDK JavaScript 代跑：系统 API 深层类型流、ArkTS 1.2 UI/Interop/Memo 全阶段、真正的并行 StageExecutor。
 
 这不是完成度百分比；不同能力域的规模相差很大。尤其 ArkTS 1.2 的 4 组插件、62 个 UI 校验规则和 42 个 property-translator 相关文件，工作量显著高于一个普通构建阶段。
 
@@ -41,7 +41,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 2. `packages/arkdown/js` 当前约 1,419 行：只保留原生入口、CLI trampoline、完整 TS/JS compile-plugin 适配，以及尚待 OXC 语义尾项完成后删除的 checker 对比 bridge。插件适配占其中约 928 行，是原有 TS/JS 插件 ABI 的兼容边界，不应下沉为 Rust CLI 或伪造为内建业务逻辑。
 3. 默认 checker 已改为 OXC；显式 `checker=sdk` 对比后端及其 Node bridge 仍待最后一批语义用例迁移后删除。
 4. ArkTS 1.2 虽然已经按参数正确分流，但 Rust 只解析并投影模块请求，真正的 UI、语法检查、Memo 和 ABC 驱动仍由 Node 加载 SDK 插件执行。
-5. Visual 已完成 Rust 原生 parser/codegen 与确定性插入；字节码混淆已经由 Rust 直接驱动 PandaGuard，源码混淆仍通过 Node bridge 调用 ArkGuard，尚未达到最终无业务 JS 的边界。
+5. Visual 已完成 Rust 原生 parser/codegen 与确定性插入；源码 ArkGuard 已由 OXC 原生实现，字节码混淆由 Rust 直接驱动 PandaGuard，混淆主链不再含业务 JS 或 Node bridge。
 6. 旧的空 `rollup_cache.json` 和无生产调用的 `RollupCacheStore` 已删除；watch 现在使用 Rolldown 官方 retained graph API。跨进程 graph/fact manifest 与精细 ABC cache 仍待补齐，不能把单进程内存图标记为完整 cache。
 
 因此，后续工作的重点不是继续扩大 hvigor 兼容外壳，而是把已有 Rust 能力重新收口到一个原生 BuildApplication，并按源码逐阶段补齐编译行为。
@@ -81,7 +81,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 - hvigor 的项目构建编排、任务顺序、配置归一化和阶段状态管理。
 - ets-loader 中的 ArkTS 1.1/1.2 解析、检查、UI 变换、system API 处理、模块收集、Visual 处理和增量状态。
 - Rollup 内建插件在现代 ESMODULE 链路中的行为。
-- Node 驱动的 SDK checker、静态 ArkTS 插件、Visual generator 和 ArkGuard bridge。
+- Node 驱动的 SDK checker 和静态 ArkTS 插件；Visual generator 与 ArkGuard bridge 已迁移并删除，禁止回归。
 - hvigor 的缓存失效语义、Watch/Reload 协议、产物布局、错误码和关键中间文件。
 
 ### 3.2 可以保留为原生后端
@@ -171,7 +171,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | Visual/SuperVisual | Rust 原生主链完成 | `.visual` parser/codegen、组件事件/属性序列化和 OXC 确定性插入均在 Rust 内完成，生产构建不再启动 Node generator | 继续用新源码 Visual/SuperVisual 语料扩展边界回归，并核对大工程生成片段与运行时行为 |
 | ArkTS 1.2 | Rust 行为基本缺失 | OXC 使用 `SourceType::ets_static()` 并生成图投影，但生产编译仍由 Node static driver 加载 UI/syntax/memo 插件；interop 未完整接入，多个 config 字段为空 | 按源码固定阶段在 OXC 实现 interop parsed/checked、UI parsed/checked、UI syntax checked、memo checked+recheck；Rust 直接调用原生后端 |
 | ABC/AOT/中间文件 | 动态 ABC、AOT、reload/quickfix 与 bytecode obfuscation owner 已抽离，static driver 仍待迁移 | `arkdown-abc` 已拥有 dynamic `es2abc` typed plan、filesInfo/npmEntries/cache manifest、reload 参数、SDK 命令执行和 AOT writer；ByteCode HAR 的 filesInfo/ABC package identity 已与 OHPM package 对齐。`arkdown-obfuscate` 直接生成 PandaGuard config、执行 native binary 并维护 ABC/source-map/name-cache 产物。`arkdown-build` 已拥有 hot/cold reload、quickfix、source-map handoff 与 static backend planning，且均不依赖 N-API；static driver 尚未完全原生化 | 继续收口动态/静态/preview/reload 的其余 command plan，统一 cache identity；PandaGuard 保持 domain-owned native tool plan |
-| 源码与字节码混淆 | bytecode 原生，source 仍为 JS | bytecode 构建不再加载 ets-loader/ArkGuard JS driver，Rust 直接执行 `panda_guard` 并维护完整输入输出；`bytecode_arkguard_bridge.cjs` 已删除。源码模式仍把 `arkguard_bridge.cjs` 写入缓存并启动 Node | 继续实现 OXC 跨模块 identifier/property/file mangler、keep/decorator/export 语义、source map 与可恢复 name cache；通过真实 source-obfuscation 金标后删除最后一个 ArkGuard bridge |
+| 源码与字节码混淆 | Rust 原生主链完成，扩大金标语料中 | OXC 在模块级共享有序 name generator 和 property/file cache，处理 identifier/property/file、export/import、console、source map、`nameCache.json`、删除文件、声明、`-keep`/`-keep-dts`/通配符/Keep 标记/注释，并从 Rolldown 图计算 keep 依赖闭包；filename output 会原子映射物理文件、OHM/ABC record、import record 和全部 source-map cache/package key，且跳过 `oh_modules`；bytecode 由 Rust 直接执行 `panda_guard`。两个旧 bridge 与单文件/目录 facade 均已删除，JS CLI 不加载 ArkGuard 业务脚本 | 用真实 source-obfuscation 工程继续扩大 scope/cache-key、复杂 normalized OHM URL、复杂声明与增量白名单变化金标；差异直接修入 OXC/domain owner，不恢复 bridge 或兼容层 |
 | Cache/Watch/Reload | 单进程 graph cache 已接入，跨进程 cache 未完成 | task 粗缓存仍可跳模块；JS CLI watch 初始构建持有 Rolldown `IncrementalFullBuild` 图，热更新按 changed module 执行 partial scan，Rust snapshot 保留未变化 transform facts 并清除删除模块，cold change/退出负责关闭图。旧空 `rollup_cache.json` 不再存在；ArkTS 1.2 reload/widget 仍明确 unsupported | 补版本化磁盘 graph/fact manifest、OXC transform cache、精细 ABC file cache 与 crash-safe commit；补 static reload/widget，或在最终 scope 中稳定拒绝 |
 | Package/Sign | Rust owner 与 application 编排已落位 | HAP/HSP/HAR/APP、profile、签名由 domain crate 实现，coordinator 与 package/sign orchestration 已位于 `arkdown-build`，N-API 不再拥有相关业务 | 用真实产物结构、签名校验和多模块 fixture 持续做金标；新行为直接进入 domain owner |
 | TS/JS 插件接入 | ArkTS 1.1 源码生命周期和 watch 事件已贯通 | 单一 dispatcher 已覆盖 beforeBuild/buildStart/afterBuildStart/resolve/load/transform/moduleParsed/resolveDynamicImport/watchChange/beforeBuildEnd/buildEnd/afterBuildEnd/bundleEnd/cleanUp/shouldInvalidCache；Rust watcher 将 create/update/delete 按事件、hook order、插件顺序在下一次 beforeBuild 前送入同一个 live Rolldown context，watch 重建继续暴露正确的 watchMode/hotReload；同一构建的插件共享同一个可变 `this.share`；上下文包含 Rolldown resolve/load/emit/graph、async barrier、source/hash/file/import/logger、BuildSession 冻结的 symlinkMap；load/transform 的 `addWatchFile` 已进入 Rolldown 模块依赖图，transform 同时暴露原生 combined sourcemap 和 `moduleType`；插件返回的任意 V8 `meta`、`moduleSideEffects`、description/package metadata 会按模块跨插件合并，并由 `load`/`getModuleInfo`/`moduleParsed` 继续暴露；`share.cache/commonCache/cacheStoreManager` 与逐插件 `this.cache` 由 Rust 预载和原子提交、JS 仅做 V8 structured-clone，已验证跨独立 Node 进程恢复；`projectConfig` 已统一复用 Rust checker 的完整结构化模型并恢复 Map 语义，`depInfo` 由 watch invalidation 与依赖快照生成；`getHookEventFactory` 按 AnalyzeMode 1/3 启用，兼容事件对象的所有操作都写入 Rust metric；TS/MTS/CTS 由 OXC+Rolldown 编译且源码 hash 进入插件 cache identity。ESMODULE 的 output hook 会被正常识别但按源码保持休眠，因为该路径启用 generateModuleGraphOnly/disableGenerateBundle；不得为触发 hook 伪造 JS chunk。hvigor 内建 commonPlugin 的 `options()` 责任已由 Rust session/share 初始化替代，不属于用户 compile-plugin 缺口；钉住的 Rolldown Rust trait 也明确要求 JS binding 在 options 归一化前处理该钩子。watch 中这些插件与 Rolldown retained graph 同生命周期，未变化模块不会重复执行 transform hook；新源码没有 `shouldTransformCachedModule` 合同，不新增伪 hook | 继续逐项核对最新源码 share 字段和异常细节；将跨进程 graph/fact cache 与现有 `shouldInvalidCache` 合并到 Rust cache owner，JS 只转发插件决定 |
@@ -255,7 +255,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | `ets-checker-bridge.cjs` 和 `checker=sdk` | OXC semantic/checker corpus 通过 |
 | static ArkTS Node driver/config bridge | OXC static passes + native ABC plan 完成 |
 | Visual Node runner | Rust Visual parser/codegen 通过源码金标 |
-| `arkguard_bridge.cjs` | OXC source obfuscation、跨文件 name cache 与 source map 金标完成 |
+| `arkguard_bridge.cjs` | 已删除；OXC source obfuscation owner 已接管 |
 | `bytecode_arkguard_bridge.cjs` | 已删除；Rust native PandaGuard adapter 已接管 |
 | Yuku module analyzer、Zig native analyzer、`--module-analyzer yuku` | OXC analyzer 金标覆盖完成；OXC 成为唯一实现 |
 | `arkdown-profile::LocalDependencyGraph` | profile 直接消费 `arkdown-session::DependencyGraphSnapshot` |
@@ -414,11 +414,11 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 工作：
 
-- 将 `.visual` 解析、模板展开、变量/函数/build/aboutToAppear 生成改为 Rust typed IR + OXC AST/codegen。
-- 保留现有 insertion validation，但不再接受 SDK 返回的字符串 fragment 作为最终架构。
-- 源码混淆用 OXC minifier/mangler，补 keep rules、reserved names、property/name cache、HAR consumer merge 和 source map。
+- `.visual` 解析、模板展开、变量/函数/build/aboutToAppear 生成已迁入 Rust typed IR + OXC AST/codegen。
+- insertion validation 已保留，生产链不再接受 SDK 返回的字符串 fragment。
+- 源码混淆已使用 OXC AST/semantic/codegen，模块级共享 keep rules、reserved names、property/file/name cache、HAR consumer merge 和 source map。
 - 字节码混淆已由 `arkdown-obfuscate` 的 native PandaGuard plan 接管；继续把 tool identity 纳入精细 cache key。
-- 删除剩余 source CJS bridge 和 runtime 写桥文件行为。
+- source/bytecode CJS bridge 和 runtime 写桥文件行为均已删除。
 
 退出条件：Visual/obfuscation 构建不启动 Node；debug/release、HAR consumer、name-cache 增量 fixtures 全绿。
 
@@ -452,7 +452,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 工作：
 
 - 执行第 8 节删除表，移除所有零调用 wrapper、旧 N-API export、CLI flag、环境变量、测试和文档；除 TS/JS 插件 ABI 边界外不得保留任何兼容层。
-- 删除 Yuku、SDK checker、static JS driver、Visual JS、ArkGuard JS、hvigor task/runtime/config script 解释器。
+- ArkGuard JS 与 Visual JS 已删除；继续删除 Yuku、SDK checker、static JS driver 和 hvigor task/runtime/config script 解释器。
 - 清理所有 crate 内 direct path/version/git dependency，统一 root workspace dependencies。
 - 更新 README/API 文档，只公布真实支持能力和 typed rejections。
 
@@ -496,7 +496,7 @@ git diff --check
 
 ```sh
 # 构建业务不得再调用 Node SDK bridge；用户 test/plugin runner 单独 allowlist。
-rg 'ets-checker-bridge|arkguard_bridge|codegen_ets|StaticArkts.*node' crates packages
+rg 'ets-checker-bridge|arkguard_bridge|codegen_ets|StaticArkts.*node' crates packages | rg -v 'arkguard_tests.rs'
 
 # 最终删除项不得回归。
 rg 'runtime_task|hvigor_runtime|build_script_runtime_model|Yuku|ARKDOWN_YUKU' crates packages
