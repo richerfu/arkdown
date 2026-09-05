@@ -194,6 +194,8 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 | 并行与内存 | 架构缺失 | 模块总协调仍有顺序循环；插件 collector 共享锁；重复读取和大字符串克隆存在 | 实现 build waves/StageExecutor、dense IDs、per-worker arena、事实归并和峰值内存基准 |
 | 源码对齐测试 | 不足 | ArkTS 1.1 有较多本地测试，ArkTS 1.2 仅少量静态投影/规则测试，不能覆盖上游庞大 test corpus | 建立 source-corpus manifest、golden runner、artifact comparator 和 unsupported matrix |
 
+依赖发布门禁：`ohpm-rs` 中消除 yanked `bisync` 的 `gix 0.87` 升级及 stderr debug 清理已经提交，但尚未进入已发布的 `ohpm-core 0.2.0`。arkdown 当前只在 Cargo source 层临时补回 `bisync` 以保持可复现构建；新 `ohpm-core` 发布后必须升级并删除该 patch，禁止在 arkdown 中复制或包裹 OHPM 行为。
+
 ## 6. ArkTS 1.2 的准确判断
 
 “OXC 已支持 ArkTS 1.2”解决的是语法树入口，不等于已经具备源码行为。
