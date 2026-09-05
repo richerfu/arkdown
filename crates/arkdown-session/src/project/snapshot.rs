@@ -12,9 +12,6 @@ use crate::dependency_graph::snapshot::{
     DependencyGraphSnapshot, DependencyParameterError, DependencyParameterSnapshot,
 };
 use crate::module::snapshot::{ModuleSnapshot, ModuleSnapshotError};
-use crate::package::acquisition::{
-    AcquisitionMode, PackageAcquisitionError, PackageAcquisitionPlanner,
-};
 use crate::package::snapshot::{PackageSnapshot, PackageSnapshotError};
 use crate::paths::ProjectPathLayout;
 
@@ -39,15 +36,6 @@ pub enum ProjectSnapshotError {
     /// Project dependency parameter-file error.
     #[error("dependency parameter error: {0}")]
     DependencyParameter(#[from] DependencyParameterError),
-    /// OHPM dependency acquisition failed before graph construction.
-    #[error("package acquisition error: {0}")]
-    PackageAcquisition(#[source] Box<PackageAcquisitionError>),
-}
-
-impl From<PackageAcquisitionError> for ProjectSnapshotError {
-    fn from(value: PackageAcquisitionError) -> Self {
-        Self::PackageAcquisition(Box::new(value))
-    }
 }
 
 /// Immutable project-level snapshot.
@@ -96,20 +84,6 @@ impl ProjectSnapshot {
     pub fn from_config_with_parameter_file(
         config: &ArkdownConfig,
         parameter_file_override: Option<PathBuf>,
-    ) -> Result<Self, ProjectSnapshotError> {
-        Self::from_config_with_parameter_file_and_acquisition_mode(
-            config,
-            parameter_file_override,
-            None,
-            false,
-        )
-    }
-
-    pub(crate) fn from_config_with_parameter_file_and_acquisition_mode(
-        config: &ArkdownConfig,
-        parameter_file_override: Option<PathBuf>,
-        acquisition_mode: Option<AcquisitionMode>,
-        acquire_remote_dev_dependencies: bool,
     ) -> Result<Self, ProjectSnapshotError> {
         let root = &config.project_root;
         let app_json_path = ProjectPathLayout::new(root).app_scope_app_json5();
@@ -178,49 +152,21 @@ impl ProjectSnapshot {
             "package.json"
         };
 
-        let acquisitions = if use_ohpm {
-            acquisition_mode
-                .map(|mode| {
-                    PackageAcquisitionPlanner::new(
-                        root,
-                        config.modules.iter().map(|module| module.src_path.clone()),
-                        mode,
-                    )
-                    .with_remote_dev_dependencies(acquire_remote_dev_dependencies)
-                    .acquire()
-                })
-                .transpose()?
-        } else {
-            None
-        };
-
         let mut module_order = Vec::with_capacity(config.modules.len());
         let mut modules = IndexMap::with_capacity(config.modules.len());
         for module in &config.modules {
             let package_path = module.src_path.join(package_file_name);
-            let snap = if let Some(acquisitions) = acquisitions.as_ref() {
-                ModuleSnapshot::from_root_with_package_snapshot(
-                    &module.src_path,
-                    &module.name,
-                    package_path.is_file().then_some(package_path),
-                    acquisitions.package(&module.src_path),
-                )?
-            } else {
-                ModuleSnapshot::from_root_with_package_manifest(
-                    &module.src_path,
-                    &module.name,
-                    &package_path,
-                )?
-            };
+            let snap = ModuleSnapshot::from_root_with_package_manifest(
+                &module.src_path,
+                &module.name,
+                &package_path,
+            )?;
             module_order.push(module.name.clone());
             modules.insert(module.name.clone(), Arc::new(snap));
         }
 
-        let root_package = if let Some(acquisitions) = acquisitions.as_ref() {
-            acquisitions.package(root)
-        } else {
-            PackageSnapshot::from_manifest(root, &root.join(package_file_name))?.map(Arc::new)
-        };
+        let root_package =
+            PackageSnapshot::from_manifest(root, &root.join(package_file_name))?.map(Arc::new);
         let dependency_parameters = if use_ohpm {
             DependencyParameterSnapshot::from_project(
                 root,
@@ -231,10 +177,7 @@ impl ProjectSnapshot {
             DependencyParameterSnapshot::default()
         };
 
-        let mut dependency_inventory = acquisitions
-            .as_ref()
-            .map(DependencySnapshotInventory::with_acquisitions)
-            .unwrap_or_default();
+        let mut dependency_inventory = DependencySnapshotInventory::default();
         dependency_inventory.insert_package(root, root_package.clone());
         for module in modules.values() {
             dependency_inventory.insert_package(&module.root, module.package.clone());

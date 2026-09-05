@@ -196,7 +196,7 @@ source-map chain、watchChange、cache invalidation 和 close；所有公开 hoo
 | P1-5 | HAR dedup/duplicate check 等 hot collector 使用 `Arc<Mutex>` | Rolldown adapter 产生 per-module typed facts，bundle 完成后按 module ID 排序归并 |
 | P1-6 | PreBuild/profile/loader/module map 仍有重复读盘或扫描 | `BuildSession` 成为唯一 startup inventory，后续 owner 只消费 immutable snapshot/plan |
 | P1-7 | coordinator 大量 `anyhow/bail`，诊断结构不统一 | domain crate 返回 typed error；application 统一转换为 code/stage/module/path/span/severity/suggestion 并稳定排序 |
-| P1-8 | OHPM 只满足 build-time acquire，不是完整 install | 若 CLI 承诺替代 hvigorw bootstrap，`arkdown-ohpm` 需支持多版本 lock graph、项目 materialization、auth/proxy/mirror/workspace/override/peer/dev 语义；否则明确要求外部 `ohpm install` |
+| P1-8 | 已完成：OHPM 使用完整 Rust install pipeline | `arkdown-build::OhpmInstallStage` 在首次 `BuildSession` 快照前直接调用 `ohpm-core::install`，沿用其 lock graph、store、materialization、auth/proxy/mirror、workspace、override、parameterFile、生命周期 hook 与原子安装语义；watch 重建不重复安装。旧 `arkdown-ohpm` acquire 实现和自创 offline/prefer-offline/online 构建参数已删除 |
 
 性能实现必须同时证明 `RAYON_NUM_THREADS=1` 与 `8` 产物字节一致，不能用并发换取非确定
 输出。资源二进制不得进入长生命周期 BuildSession；OXC allocator AST 不得跨任务或持久化。

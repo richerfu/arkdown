@@ -51,7 +51,7 @@ arkdown 已经具备可继续演进的 Rust 基座，但还不能称为“由 OX
 
 当前最明显的架构偏差是：
 
-1. `arkdown-napi` 已从约 6.6 万行降至约 4,004 行 Rust：Hvigor project/task/worker/build-script runtime、零调用的 task observer/event 桥，以及 CLI observability/process-monitor/report lifecycle N-API facade 已删除；动态 ABC 的 typed plan、filesInfo/npmEntries/cache manifest、`es2abc` 执行和 AOT writer 已完整迁入 `arkdown-abc`；typed `BuildRequest`、module/target/native execution planning、全部 build layout、pre-build validator、intermediate artifact writer、code-resource、preview、hot reload、quickfix、remote HSP signing、device test、unit-test、compile task cache、SDK checker planning、static ArkTS backend planning、obfuscation planning、plugin share/cache planning、主 coordinator、watch 与 package/sign orchestration 已迁入无 N-API 依赖的 `arkdown-build`；CMake/Ninja、native library、strip/binxo 和 debug-symbol 行为已迁入 `arkdown-native`；packing check 已迁入 `arkdown-pack`。N-API 现只保留 typed service 值转换、异步 handoff、diagnostic serialization 和 TS/JS 插件函数句柄。
+1. `arkdown-napi` 已从约 6.6 万行降至约 4,004 行 Rust：Hvigor project/task/worker/build-script runtime、零调用的 task observer/event 桥，以及 CLI observability/process-monitor/report lifecycle N-API facade 已删除；动态 ABC 的 typed plan、filesInfo/npmEntries/cache manifest、`es2abc` 执行和 AOT writer 已完整迁入 `arkdown-abc`；typed `BuildRequest`、module/target/native execution planning、全部 build layout、pre-build validator、intermediate artifact writer、code-resource、preview、hot reload、quickfix、remote HSP signing、device test、unit-test、compile task cache、OXC project checker、static ArkTS backend planning、obfuscation planning、plugin share/cache planning、OHPM install stage、主 coordinator、watch 与 package/sign orchestration 已迁入无 N-API 依赖的 `arkdown-build`；CMake/Ninja、native library、strip/binxo 和 debug-symbol 行为已迁入 `arkdown-native`；packing check 已迁入 `arkdown-pack`。N-API 现只保留 typed service 值转换、异步 handoff、diagnostic serialization 和 TS/JS 插件函数句柄。
 2. `packages/arkdown/js` 只保留原生入口、CLI trampoline 和 TS/JS compile-plugin 适配；
    插件适配是原有 TS/JS 插件 ABI 的公开边界，不应下沉为 Rust CLI 或伪造为内建业务逻辑。
 3. ArkTS 1.1 build/check 固定使用 OXC；SDK checker 和 Node bridge 已删除。
@@ -176,12 +176,12 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 |---|---|---|---|
 | 项目模型/CLI/任务编排 | 原生 application owner 已形成 | npm JS CLI 是唯一可执行入口并负责轻量 argv 分发；Rust 不包含 binary、Clap、CLI parser/install mode、`cmd`/`BuildCommand` facade 或 process-monitor/report lifecycle export；`build/check/clean` 以 typed N-API service 暴露。完整 assemble、Reload、QuickFix、DeviceTest 以 `BuildAction` 进入同一 `BuildRequest`，Rust 内已无任意 Hvigor task 名称执行入口或空生命周期门面；`arkdown-build` 直接拥有 module/target selection、build layout、pre-build、coordinator、watch 和 package/sign orchestration | 保持 JS CLI 与 programmatic N-API 共用同一原生 `BuildRequest`；新增公开构建目标时扩展 typed action 和所属领域 plan，不得恢复 task-name/service facade |
 | 配置和 build script | 旧脚本 runtime 已删除 | `build()` 不发现或执行 `hvigorfile.ts`/`hvigorconfig.ts`；build-script model、config merge、sync/dependency workspace facade 已删除；旧 task/config 参数用 `ARKDOWN_HVIGOR_RUNTIME_UNSUPPORTED` 拒绝 | `arkdown-config` 产出单一结构化配置；TS 只用于插件模块 |
-| OHPM/依赖获取 | 启动链已接入，真实项目语料待扩展 | 生产 `BuildSessionBuilder` 在项目快照前执行 lockfile 驱动的 local/cache/registry acquire；支持 offline/prefer-offline/online、semver range、完整性校验、同包去重并行和原子 cache publish，获取结果直接种入依赖图；仍需以真实 OHPM lockfile/store 变体扩展语料 | 保持 package inventory 只构建一次；补 registry/auth/lockfile 真实工程金标，不再回退为静默扫描 |
+| OHPM/依赖安装 | 完整 Rust install pipeline 已接入 | JS CLI 进入 `BuildService` 后、首次 `BuildSession` 快照前直接调用 `ohpm-core::install`；其原生 pipeline 负责 lock graph、store、registry/auth/proxy/mirror、workspace、override、parameterFile、生命周期 hook、materialization 与原子安装，session 只读取已物化的 `oh_modules/.ohpm` 图；watch 重建属于同一 invocation，不重复执行安装 hook。旧 `arkdown-ohpm`、startup acquire inventory 和自创 offline/prefer-offline/online 构建模式已删除 | OHPM 行为只由 `ohpm-core` owner 实现；继续扩展真实 registry/auth/lockfile 工程金标，不在 arkdown 内复制包管理逻辑 |
 | BuildSession/输入快照 | 主链已冻结，外围读取待收敛 | SourceStore 已在 startup 并行冻结源码内容/hash/mtime，package manifest/acquired roots、SDK/profile/build option 同样由 session 提供；profile 的 `LocalDependencyGraph`、重复分类器和 `oh_modules` BFS 已删除，直接消费 session snapshot；manifest、依赖 metadata 和规范化 build option 的 `runtimeOnly.packages` 都进入同一 session 图；ByteCode HAR 的生产 loader/coordinator 直接消费 package/node/edge snapshot，`byteCodeHarInfo`、`updateVersionInfo`、`otherCompileFiles` 与 widget `pkgName2OtherCompileFiles` 均不再重读 manifest 或扫描 `oh_modules`，旧扫描器仅为测试 fixture helper；依赖源码路径库存由 graph 构建一次并被 SourceStore 复用；ability/worker/InsightIntent/dynamic-import 编译入口、routerMap 引用及内容已冻结进 `DependencyCompileInputSnapshot`/module profile | 保持 session graph/source store/package index 为唯一依赖事实；继续删除 workspace/current-module 的外围 stage I/O |
 | Profile/Loader/Resource | 基本可用但需补金标 | 已有 typed schema、loader、pkgContext、restool、router/startup/worker；`$r/$rawfile` 已消费原生 app/sys/HSP/rawfile 库存并对齐主要诊断和 warning 降级；大应用边界仍需源码用例覆盖 | 保留 domain crate；用源码 fixture 补 router、worker、InsightIntent、ByteCode HAR、overlay 和真实 HSP 产物回归 |
 | Resolver/Rolldown 图 | 主热路径已快照化 | package manifest plan 在 startup 冻结，JSON/JSON5 进入 SourceStore，已删除重复 `ModuleMetaPlugin` 和 profile 本地图；resolver、profile、JSON loader、compile-plugin share 与 ByteCode HAR 生产路径都从 immutable snapshot/typed roots 取值。测试专用目录扫描器不进入生产二进制；native 扫描虽已归属 `arkdown-native`，输入库存仍需进一步前移到 session | plugin 只读 snapshot 并返回事实；继续把外围 collector 改为 typed facts + 确定性归并 |
 | ArkTS 1.1 UI transform | 主干可用，源码语料仍需扩展 | 已覆盖 V1/V2、state、Builder/Styles/Extend、WrapBuilder/MutableBuilder、ForEach/Repeat、常见组件、InsightIntent、worker path 和 declaration merger；TypeScript emit 以 OXC AST boundary 生成精确 source map，并由 Rolldown 合并内建与用户插件映射。剩余风险是未进入本地 corpus 的 interop/边界组合 | 继续直接移植源码测试语料；按 OXC pass 补齐，不以名称或行数判断完成 |
-| ArkTS checker | OXC 已默认，复杂 typed query 待 OXC 基座补齐 | 默认 build/check 不再启动 Node；129 个源码契约及独立跨文件 checker 回归已原生化，显式 `sdk` 对比后端仍保留。源码可见类型已能驱动重载和返回流，但当前 OXC fork 的 type-checker crate 不提供 conditional/indexed/structural/expression type query | 先在 OXC 暴露稳定 typed semantic query，再迁完对应源码 corpus 后移除 `sdk` 模式和 `ets-checker-bridge.cjs`；`off` 仅保留为显式调试选项 |
+| ArkTS checker | OXC 原生 owner 已替换 SDK service | build/check 的 ArkTS 1.1 语义检查由 `arkdown-ets-checker` 中基于 OXC parser、semantic、isolated declarations 与 resolver environment 的项目 checker 执行，支持 `.ets/.d.ets`、component struct、项目 paths/module roots、SDK `globalModulePaths` 和 `skipLibCheck`；SDK checker runner/planner/backend、Node bridge 及其公开参数均已删除 | 继续按 ets-loader 源码 corpus 扩展 OXC checker 的 typed semantic 能力；差异直接修入 OXC/领域 owner，不恢复 SDK 双轨或 Node checker bridge |
 | System API/syscap/permission | 主干完成，完整 TypeScript 类型查询待补 | 已建立 `SystemApiInventory`，解析 SDK JSDoc、namespace/class/interface/type 引用和 barrel export；生产链路已接入 version/permission/syscap/device、suppressor、直接/局部值类型流，并按参数数量及 literal/primitive/callable/object/named 参数类型选择函数/方法重载及其独立 JSDoc contract。type-only/重命名导入和跨 SDK 文件类型闭包可参与选择，局部别名及连续系统调用结果会固定点收敛；awaited generic wrapper、显式函数/方法类型参数、声明默认参数、命名泛型包装、type alias 和继承会保留并实例化类型实参。ArkUI-X `@crossplatform`/版本范围、11706007 严重级别和 build/check/watch/plugin/cache 参数链路已经对齐；external SDK prefix/apiPath/depsModuleConfig 由 session 一次冻结，直接 import、组件/If 和实际 API 依赖均以 OXC/Rolldown facts 确定性写入 collection 文件 | conditional/indexed type、完整结构兼容和复杂表达式类型必须由 OXC typed semantic API 提供，不能继续扩张 JS checker 或在 Rust 重写 TypeScript 类型系统；以源码诊断顺序做 corpus 金标 |
 | Visual/SuperVisual | Rust 原生主链完成 | `.visual` parser/codegen、组件事件/属性序列化和 OXC 确定性插入均在 Rust 内完成，生产构建不再启动 Node generator | 继续用新源码 Visual/SuperVisual 语料扩展边界回归，并核对大工程生成片段与运行时行为 |
 | ArkTS 1.2 | Rust 行为基本缺失 | OXC 使用 `SourceType::ets_static()` 并生成图投影，但生产编译仍由 Node static driver 加载 UI/syntax/memo 插件；interop 未完整接入，多个 config 字段为空 | 按源码固定阶段在 OXC 实现 interop parsed/checked、UI parsed/checked、UI syntax checked、memo checked+recheck；Rust 直接调用原生后端 |
@@ -269,7 +269,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 |---|---|
 | `packages/arkdown/js/runtime.js` | native build API 和 plugin adapter 稳定 |
 | `hvigor-parameter-runtime.js`、`hvigor-public-runtime.js`、`hvigor-task-runtime.js`、`hvigor-worker*.js` | 删除 hvigor public/task/worker facade |
-| `ets-checker-bridge.cjs` 和 `checker=sdk` | OXC semantic/checker corpus 通过 |
+| `ets-checker-bridge.cjs` 和 `checker=sdk` | 已删除；嵌入式 OXC project checker 已接管 build/check |
 | static ArkTS Node driver/config bridge | OXC static passes + native ABC plan 完成 |
 | Visual Node runner | Rust Visual parser/codegen 通过源码金标 |
 | `arkguard_bridge.cjs` | 已删除；OXC source obfuscation owner 已接管 |
@@ -303,9 +303,9 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 
 负责发现并归一化 build-profile、module、target、product、signing、SDK 配置，输出 immutable `EffectiveBuildConfig`。不执行 hvigor JavaScript。
 
-### `arkdown-ohpm`
+### OHPM owner
 
-负责 lockfile、registry、offline store、tarball、integrity 和安装计划；被 session startup 正式调用。
+包管理行为由外部 Rust `ohpm-core` 直接拥有。`arkdown-build` 只在构建 application 边界调用完整 install API；`arkdown-session` 随后冻结已物化的 package graph。arkdown 内不保留 OHPM wrapper crate、下载器、lockfile/parser、store 或模式兼容层。
 
 ### `arkdown-session`
 
@@ -379,7 +379,7 @@ JavaScript entry / CLI trampoline / TS-JS plugin adapter
 工作：
 
 - `arkdown-config` 生成单一 `EffectiveBuildConfig`，在这里冻结 ArkTS 版本。
-- 把 `arkdown-ohpm` 接入 startup：按 lockfile 创建 acquire plan，区分 offline/prefer-offline/online，验证 integrity 后一次性生成 package inventory。
+- 已在 application startup 接入 `ohpm-core::install`，并删除 `arkdown-ohpm` 与 session acquire plan；BuildSession 只快照完整 install 已物化的 package inventory。
 - BuildSession 一次收集 source、manifest、package、symlink、SDK、resources、router、workers、native libs、mock、ByteCode HAR 信息。
 - profile 直接使用 session dependency graph，删除 `LocalDependencyGraph`。
 - resolver/bundler/transform 不允许自行向上找 package root 或递归扫描 `oh_modules`。

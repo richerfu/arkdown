@@ -122,8 +122,6 @@ export interface BuildConfig {
   analyze?: 'normal' | 'default' | 'verbose' | 'false' | 'trace'
   /** Explicit ArkTS compiler language. Omitted means ArkTS 1.1. */
   arktsVersion?: '1.1' | '1.2'
-  /** OHPM package acquisition policy. Omitted matches hvigor's online wrapper. */
-  ohpmMode?: 'offline' | 'prefer-offline' | 'online'
   module?: string
   product?: string
   buildTargetName?: string

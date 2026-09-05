@@ -78,14 +78,6 @@ pub enum AbcBackendChoice {
     Sdk,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OhpmModeChoice {
-    Offline,
-    PreferOffline,
-    #[default]
-    Online,
-}
-
 /// Hvigor analyze mode serialized as `projectConfig.perf` for compile plugins.
 /// Numeric values are defined by ets-loader's `AnalyzeMode` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -114,16 +106,6 @@ impl AnalyzeModeChoice {
             "false" => Some(Self::False),
             "trace" => Some(Self::Trace),
             _ => None,
-        }
-    }
-}
-
-impl From<OhpmModeChoice> for arkdown_session::package::acquisition::AcquisitionMode {
-    fn from(value: OhpmModeChoice) -> Self {
-        match value {
-            OhpmModeChoice::Offline => Self::Offline,
-            OhpmModeChoice::PreferOffline => Self::PreferOffline,
-            OhpmModeChoice::Online => Self::Online,
         }
     }
 }
@@ -223,9 +205,6 @@ pub struct BuildRequest {
     /// ArkTS compiler language. ArkTS 1.2 is opt-in; omitted builds retain the
     /// existing ArkTS 1.1 parser and transform pipeline.
     pub arkts_version: ArktsLanguageVersion,
-    /// OHPM dependency acquisition policy used before the build session freezes
-    /// package roots. Online matches the normal hvigor wrapper invocation.
-    pub ohpm_mode: OhpmModeChoice,
     /// Scope to a specific module
     pub module: Option<String>,
     /// Product name

@@ -17,13 +17,6 @@
 pub mod build_profile;
 pub mod bytecode_har;
 pub mod custom_types;
-pub mod oh_exports;
-pub mod pkg_context_info;
-pub mod plan;
-mod preload_system_so;
-// Per SPEC-048 Phase 2A: `lockfile` and `ohpm_registry` have been deleted
-// from arkdown-profile. Their functionality is now owned by `arkdown-ohpm`.
-//
 pub mod form_profile;
 pub mod form_widget;
 pub mod har_abilities;
@@ -31,6 +24,10 @@ pub mod insight_intent;
 pub(crate) mod layout;
 pub mod loader_json;
 pub(crate) mod module_json_writer;
+pub mod oh_exports;
+pub mod pkg_context_info;
+pub mod plan;
+mod preload_system_so;
 pub mod process_distro_filter;
 pub mod process_permission_reason;
 pub mod process_privacy_profile;

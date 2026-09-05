@@ -2205,9 +2205,6 @@ pub struct BuildConfig {
   /// Explicit ArkTS compiler language. Omitted means ArkTS 1.1.
   #[napi(ts_type = "'1.1' | '1.2'")]
   pub arkts_version: Option<String>,
-  /// OHPM package acquisition policy. Omitted matches hvigor's online wrapper.
-  #[napi(ts_type = "'offline' | 'prefer-offline' | 'online'")]
-  pub ohpm_mode: Option<String>,
   pub module: Option<String>,
   pub product: Option<String>,
   pub build_target_name: Option<String>,
@@ -2325,7 +2322,6 @@ pub fn build<'a>(
     action,
     analyze,
     arkts_version,
-    ohpm_mode,
     module,
     product,
     build_target_name,
@@ -2371,16 +2367,6 @@ pub fn build<'a>(
         napi::Error::from_reason(error.to_string())
       },
     )?,
-    ohpm_mode: match ohpm_mode.as_deref().unwrap_or("online") {
-      "offline" => arkdown_session::package::acquisition::AcquisitionMode::Offline,
-      "prefer-offline" => arkdown_session::package::acquisition::AcquisitionMode::PreferOffline,
-      "online" => arkdown_session::package::acquisition::AcquisitionMode::Online,
-      value => {
-        return Err(napi::Error::from_reason(format!(
-          "invalid OHPM acquisition mode '{value}'; expected offline, prefer-offline, or online"
-        )))
-      }
-    },
     analyze: arkdown_build::request::AnalyzeModeChoice::from_name(
       analyze.as_deref().unwrap_or("normal"),
     )
@@ -2456,7 +2442,6 @@ pub fn parse_plugin_ast(
 struct PackageBuildArgs {
   action: arkdown_build::request::BuildAction,
   arkts_language_version: arkdown_core::ArktsLanguageVersion,
-  ohpm_mode: arkdown_session::package::acquisition::AcquisitionMode,
   analyze: arkdown_build::request::AnalyzeModeChoice,
   build_target_name: Option<String>,
   build_version: Option<String>,
@@ -2493,83 +2478,13 @@ async fn run_build(
 ) -> anyhow::Result<Vec<String>> {
   use arkdown_build::request::AbcBackendChoice;
   use arkdown_build::request::BuildRequest;
-  use arkdown_config::ArkdownConfigLoader;
-  use arkdown_core::{BuildMode, OutputTarget};
-  use arkdown_session::BuildSessionBuilder;
-
   let project_path = std::path::PathBuf::from(&project);
-  let is_app_build = target == "app";
-  let output_target = match target.as_str() {
-    "hap" => OutputTarget::Hap,
-    "hsp" => OutputTarget::Hsp,
-    "har" => OutputTarget::Har,
-    "preview" => OutputTarget::Preview,
-    "test" => OutputTarget::Test,
-    // APP is a project-level aggregate. The startup snapshot uses HAP as its
-    // neutral module target; AppBuildCoordinator derives HAP/HSP child configs
-    // from this one immutable session.
-    "app" => OutputTarget::Hap,
-    other => {
-      anyhow::bail!(
-        "unsupported build target '{other}'; expected 'hap', 'hsp', 'har', 'app', 'preview', or 'test'"
-      )
-    }
-  };
-  let build_mode = match mode.as_str() {
-    "debug" => BuildMode::Debug,
-    "release" => BuildMode::Release,
-    "test" => BuildMode::Test,
-    other => {
-      anyhow::bail!("unsupported build mode '{other}'; expected 'debug', 'release', or 'test'")
-    }
-  };
-
-  let config_loader = ArkdownConfigLoader::new(
-    &project_path,
-    build_mode,
-    output_target,
-    product.as_deref(),
-    None,
-  );
-  let mut config = config_loader
-    .load()
-    .map_err(|e| anyhow::anyhow!("load_config: {e}"))?;
-  if let Some(build_version) = package_args.build_version.as_ref() {
-    config.product.build_version = Some(build_version.clone());
-  }
-  let config = std::sync::Arc::new(config);
-  let acquire_remote_dev_dependencies =
-    target == "test" || package_args.build_target_name.as_deref() == Some("ohosTest");
-  let session_builder = BuildSessionBuilder::new(config.clone())
-    .with_arkts_language_version(package_args.arkts_language_version)
-    .with_ohpm_mode(package_args.ohpm_mode)
-    .with_remote_dev_dependencies(acquire_remote_dev_dependencies);
-  let session = tokio::task::spawn_blocking(move || {
-    session_builder
-      .build()
-      .map(Arc::new)
-      .map_err(|error| anyhow::anyhow!("session: {error}"))
-  })
-  .await
-  .map_err(|error| anyhow::anyhow!("build startup worker failed: {error}"))??;
-
   let args = BuildRequest {
     action: package_args.action,
     target,
     mode,
     analyze: package_args.analyze,
     arkts_version: package_args.arkts_language_version,
-    ohpm_mode: match package_args.ohpm_mode {
-      arkdown_session::package::acquisition::AcquisitionMode::Offline => {
-        arkdown_build::request::OhpmModeChoice::Offline
-      }
-      arkdown_session::package::acquisition::AcquisitionMode::PreferOffline => {
-        arkdown_build::request::OhpmModeChoice::PreferOffline
-      }
-      arkdown_session::package::acquisition::AcquisitionMode::Online => {
-        arkdown_build::request::OhpmModeChoice::Online
-      }
-    },
     module,
     product,
     project: Some(project_path.clone()),
@@ -2618,17 +2533,10 @@ async fn run_build(
     hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };
 
-  let output = if is_app_build {
-    arkdown_build::app_coordinator::AppBuildCoordinator::new(session, config, args)
-      .with_package_plugins(js_plugins)
-      .execute()
-      .await?
-  } else {
-    arkdown_build::coordinator::BuildCoordinator::new(session, config, args)
-      .with_package_plugins(js_plugins)
-      .execute()
-      .await?
-  };
+  let output = arkdown_build::BuildService::new(args)
+    .with_package_plugins(js_plugins)
+    .execute()
+    .await?;
 
   Ok(
     output

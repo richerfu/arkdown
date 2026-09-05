@@ -24,6 +24,7 @@ arkdown-resource = { workspace = true }
 arkdown-session = { workspace = true }
 arkdown-sign = { workspace = true }
 arkdown-watcher = { workspace = true }
+ohpm-core = { workspace = true }
 dunce = { workspace = true }
 fast-glob = { workspace = true }
 fs-err = { workspace = true }
