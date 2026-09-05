@@ -19,12 +19,12 @@ use arkdown_session::{BuildSession, ModuleCompileContext};
 use arkdown_watcher::WatchEventKind;
 use rustc_hash::FxHashMap;
 
+use crate::compile_project_config::{
+    CompileProjectBuildPaths, CompileProjectConfigBuilder, CompileProjectConfigInput,
+    CompileProjectEntryCollector, CompileProjectPaths,
+};
 use crate::layout::ModuleBuildLayout;
 use crate::request::BuildRequest;
-use crate::sdk_checker::{
-    SdkEtsCheckerBuildPaths, SdkEtsCheckerEntryCollector, SdkEtsCheckerInput, SdkEtsCheckerPaths,
-    SdkEtsCheckerPlanBuilder,
-};
 
 pub struct HvigorCompilePluginShareBuilder<'a> {
     config: &'a ArkdownConfig,
@@ -122,7 +122,7 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
         } else {
             module_layout.source().src_main().join("supervisual")
         };
-        let paths = SdkEtsCheckerPaths::build(SdkEtsCheckerBuildPaths {
+        let paths = CompileProjectPaths::build(CompileProjectBuildPaths {
             ace_profile_path: module_layout.res_profile_dir(),
             ace_module_json_path: module_layout.res_ark_module_json(),
             app_resource_path: module_layout.resource_table_txt(),
@@ -136,8 +136,8 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
             resource_table_typescript_path: module_layout.generated_resource_table_typescript(),
         });
         let entries =
-            SdkEtsCheckerEntryCollector::new(self.loader_json, &ace_module_root).collect();
-        let value = SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
+            CompileProjectEntryCollector::new(self.loader_json, &ace_module_root).collect();
+        let value = CompileProjectConfigBuilder::new(CompileProjectConfigInput {
             config: self.config,
             session: self.session,
             module: self.module,
@@ -146,7 +146,6 @@ impl<'a> HvigorCompilePluginShareBuilder<'a> {
             module_build_option: &self.config.product.build_option,
             loader_json: Some(self.loader_json),
             target_name: self.target_name,
-            node_executable: self.args.resolved_node_executable(),
             paths,
             entries,
             coverage_enabled: self.coverage_enabled,

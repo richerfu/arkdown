@@ -21,7 +21,6 @@ const BUILD_VALUE_OPTIONS = new Map([
   ['--coverage-mode', 'coverageMode'],
   ['--unit-test-replace-page', 'unitTestReplacePage'],
   ['--cache-file', 'cacheFile'],
-  ['--checker', 'checker'],
 ])
 const BUILD_FLAG_OPTIONS = new Map([
   ['--watch', 'watch'],
@@ -91,7 +90,6 @@ class JsCliArgumentParser {
     this.oneOf(config, 'arktsVersion', ['1.1', '1.2'])
     this.oneOf(config, 'ohpmMode', ['offline', 'prefer-offline', 'online'])
     this.oneOf(config, 'coverageMode', ['black', 'white', 'full'])
-    this.oneOf(config, 'checker', ['oxc', 'sdk', 'off'])
     if (config.ohosTestCoverage !== undefined) {
       if (!['true', 'false'].includes(config.ohosTestCoverage)) {
         this.invalid('--ohos-test-coverage', config.ohosTestCoverage, 'true or false')
@@ -108,8 +106,6 @@ class JsCliArgumentParser {
       ['--target', 'target'],
       ['--module', 'module'],
       ['-m', 'module'],
-      ['--node-executable', 'nodeExecutable'],
-      ['--checker', 'checker'],
     ])
     this.parseValues(
       config,
@@ -120,7 +116,6 @@ class JsCliArgumentParser {
       ]),
     )
     this.oneOf(config, 'target', ['hap', 'hsp', 'har'])
-    this.oneOf(config, 'checker', ['oxc', 'sdk'])
     return config
   }
 
@@ -301,8 +296,6 @@ Options:
   --ignore-crossplatform-check
                       Downgrade cross-platform API errors to warnings.
   --cache-file <path> Override es2abc cache file.
-  --checker <mode>    Checker mode: oxc, sdk, or off. Defaults to oxc;
-                      sdk is retained only for parity comparison.
   --hvigor-plugin-file <path>
                       Load a compatible TS/JS compile-plugin module.
   --compile-plugin-path <path>
@@ -317,12 +310,9 @@ Options:
   --project <dir>     Project root. Defaults to current directory.
   --target <kind>     Check context: hap, hsp, or har. Defaults to hap.
   --module, -m <name> Scope checking to one module.
-  --checker <mode>    Checker backend: oxc or sdk. Defaults to oxc.
   --crossplatform     Enable ArkUI-X cross-platform API validation.
   --ignore-crossplatform-check
-                      Downgrade cross-platform API errors to warnings.
-  --node-executable <path>
-                      Node executable for the optional SDK comparison backend.`)
+                      Downgrade cross-platform API errors to warnings.`)
   }
 
   printCleanHelp() {

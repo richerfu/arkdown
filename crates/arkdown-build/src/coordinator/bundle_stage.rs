@@ -219,6 +219,30 @@ impl BuildCoordinator {
                 widget_bundle_outs.push(None);
                 continue;
             }
+            if session.arkts_language_version == arkdown_core::ArktsLanguageVersion::V1_1 {
+                let ace_module_root = PathBuf::from(&loader_json.module_root_path).join("ets");
+                let checker_roots =
+                    crate::compile_project_config::CompileProjectEntryCollector::new(
+                        loader_json,
+                        &ace_module_root,
+                    )
+                    .collect();
+                let semantic = crate::project_checker::ProjectSemanticChecker::new(
+                    project_root,
+                    &checker_roots,
+                    module_package_resolution.as_ref(),
+                )
+                .with_sdk_declaration_roots(&session.source_store, sdk_declaration_roots)
+                .run()?;
+                if semantic.errors > 0 {
+                    anyhow::bail!(
+                        "ARKDOWN_ETS_CHECK_FAILED: {} semantic error(s) in module '{}':\n{}",
+                        semantic.errors,
+                        module.name,
+                        semantic.diagnostics.join("\n")
+                    );
+                }
+            }
             let widget_pass = WidgetCompileArktsPass::new(
                 module_config.as_ref(),
                 module,

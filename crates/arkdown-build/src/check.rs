@@ -10,13 +10,11 @@ use arkdown::plugins::ets_transform::{
     ArktsSourceChecker, ComponentMetadata, SystemApiCheckOptions,
 };
 use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
-use arkdown_path::{ArtifactPathSerializer, HostPlatform};
+use arkdown_path::ArtifactPathSerializer;
 use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
 
 use crate::package_resolution::{LocalPackageSourceRootInventory, ModulePackageResolutionPlanner};
-use crate::sdk_checker::{
-    SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder, SdkEtsCheckerRunner,
-};
+use crate::project_checker::ProjectSemanticChecker;
 use crate::source_snapshot::TransformSourceSnapshotBuilder;
 
 #[derive(Debug)]
@@ -27,15 +25,10 @@ pub struct CheckRequest {
     pub module: Option<String>,
     /// Project root (default: current directory)
     pub project: Option<PathBuf>,
-    /// Node executable used to invoke the SDK semantic checker.
-    pub node_executable: Option<PathBuf>,
     /// Enable ArkUI-X cross-platform API validation.
     pub is_crossplatform: bool,
     /// Downgrade cross-platform API diagnostics to warnings.
     pub ignore_crossplatform_check: bool,
-    /// ArkTS checker backend. `oxc` runs without Node. `sdk` is an explicit
-    /// comparison backend while the remaining TypeScript semantic corpus moves.
-    pub checker: String,
 }
 
 pub struct CheckApplication {
@@ -53,7 +46,6 @@ impl CheckApplication {
                 std::env::current_dir().expect("failed to get current directory")
             });
         let target = Self::parse_target(&self.args.target);
-        let checker_backend = CheckBackend::parse(&self.args.checker)?;
         let config = Arc::new(
             arkdown_config::load_config(&project_root, BuildMode::Debug, target, None, None)
                 .map_err(|error| anyhow::anyhow!("config error: {error}"))?,
@@ -84,8 +76,6 @@ impl CheckApplication {
                 session: session.as_ref(),
                 module,
                 module_context: &module_context,
-                node_executable: self.node_executable(),
-                checker_backend,
                 is_crossplatform: self.args.is_crossplatform,
                 ignore_crossplatform_check: self.args.ignore_crossplatform_check,
             }
@@ -116,16 +106,6 @@ impl CheckApplication {
             _ => OutputTarget::Hap,
         }
     }
-
-    fn node_executable(&self) -> PathBuf {
-        if let Some(executable) = self.args.node_executable.as_ref() {
-            return executable.clone();
-        }
-        if let Some(node_home) = std::env::var_os("NODE_HOME") {
-            return PathBuf::from(node_home).join(HostPlatform::CURRENT.executable_name("node"));
-        }
-        PathBuf::from(HostPlatform::CURRENT.executable_name("node"))
-    }
 }
 
 struct CheckModuleRunner<'a> {
@@ -133,8 +113,6 @@ struct CheckModuleRunner<'a> {
     session: &'a BuildSession,
     module: &'a ModuleConfig,
     module_context: &'a ModuleCompileContext,
-    node_executable: PathBuf,
-    checker_backend: CheckBackend,
     is_crossplatform: bool,
     ignore_crossplatform_check: bool,
 }
@@ -150,95 +128,25 @@ impl<'a> CheckModuleRunner<'a> {
             files: sources.len(),
             ..CheckSummary::default()
         };
-        if self.checker_backend.runs_sdk() {
-            self.run_sdk_semantic_checker(&sources, &mut summary)?;
-        }
-        self.run_oxc_structural_checker(&sources, &mut summary)?;
-        Ok(summary)
-    }
-
-    fn run_sdk_semantic_checker(
-        &self,
-        sources: &[PathBuf],
-        summary: &mut CheckSummary,
-    ) -> Result<()> {
-        let module_json_path = self
-            .module_context
-            .module
-            .module_json_path
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ARKDOWN_ETS_CHECKER_MODULE_JSON: module '{}' has no src/main/module.json5",
-                    self.module.name
-                )
-            })?;
-        let paths =
-            SdkEtsCheckerPaths::standalone(&self.module_context.module.root, module_json_path);
-        let mut local_sources = LocalPackageSourceRootInventory::default();
-        local_sources.insert(
-            &self.module_context.module.root,
-            [
-                self.module_context.module.src_main.clone(),
-                paths.generated_profile_path.clone(),
-            ],
-        );
+        let local_sources = LocalPackageSourceRootInventory::default();
         let package_resolution =
             ModulePackageResolutionPlanner::new(self.module_context, &local_sources).build()?;
-        let plan = SdkEtsCheckerPlanBuilder::new(SdkEtsCheckerInput {
-            config: self.config,
-            session: self.session,
-            module: self.module,
-            module_context: self.module_context,
-            package_resolution: &package_resolution,
-            module_build_option: &self.config.product.build_option,
-            loader_json: None,
-            target_name: "default",
-            node_executable: self.node_executable.clone(),
-            paths,
-            entries: sources.to_vec(),
-            coverage_enabled: false,
-            coverage_path_filter: None,
-            coverage_mode: None,
-            debug_line: false,
-            preview_mode: false,
-            check_entry: false,
-            watch_mode: false,
-            byte_code_har_integrated_optimization: false,
-            single_file_emit: false,
-            rollup_cache_use_source_hash: false,
-            is_crossplatform: self.is_crossplatform,
-            ignore_crossplatform_check: self.ignore_crossplatform_check,
-        })
-        .build()?;
-        let output = SdkEtsCheckerRunner::new(&plan).run()?;
-        for diagnostic in &output.diagnostics {
-            match diagnostic.level.to_ascii_lowercase().as_str() {
-                "error" => {
-                    tracing::error!(
-                      module = %output.module_name,
-                      "ArkTS semantic check: {}",
-                      diagnostic.message
-                    );
-                    summary
-                        .diagnostics
-                        .push(format!("[{}] {}", output.module_name, diagnostic.message));
-                }
-                "warn" | "warning" => tracing::warn!(
-                  module = %output.module_name,
-                  "ArkTS semantic check: {}",
-                  diagnostic.message
-                ),
-                _ => tracing::debug!(
-                  module = %output.module_name,
-                  level = %diagnostic.level,
-                  "ArkTS semantic check: {}",
-                  diagnostic.message
-                ),
-            }
+        let semantic =
+            ProjectSemanticChecker::new(&self.config.project_root, &sources, &package_resolution)
+                .with_sdk_declaration_roots(
+                    &self.session.source_store,
+                    self.session.sdk.global_module_paths.as_ref(),
+                )
+                .run()?;
+        for diagnostic in semantic.diagnostics {
+            tracing::error!(module = %self.module.name, diagnostic, "ArkTS OXC semantic check failed");
+            summary
+                .diagnostics
+                .push(format!("[{}] {diagnostic}", self.module.name));
         }
-        summary.errors += output.error_count();
-        Ok(())
+        summary.errors += semantic.errors;
+        self.run_oxc_structural_checker(&sources, &mut summary)?;
+        Ok(summary)
     }
 
     fn run_oxc_structural_checker(
@@ -355,26 +263,6 @@ impl<'a> CheckModuleRunner<'a> {
             summary.errors += report.error_count();
         }
         Ok(())
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CheckBackend {
-    Sdk,
-    Oxc,
-}
-
-impl CheckBackend {
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "sdk" => Ok(Self::Sdk),
-            "oxc" => Ok(Self::Oxc),
-            _ => anyhow::bail!("unsupported checker '{value}'; expected 'sdk' or 'oxc'"),
-        }
-    }
-
-    fn runs_sdk(self) -> bool {
-        matches!(self, Self::Sdk)
     }
 }
 

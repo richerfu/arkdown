@@ -48,18 +48,6 @@ test('package CLI validates typed reload and QuickFix actions', () => {
   )
 })
 
-test('package CLI validates the native checker contract before N-API dispatch', () => {
-  const cli = new ArkdownPackageCli([], async () => ({ artifacts: [] }))
-
-  assert.equal(cli.parseBuildArgs(['--checker', 'oxc']).checker, 'oxc')
-  assert.equal(cli.parseBuildArgs(['--checker', 'sdk']).checker, 'sdk')
-  assert.equal(cli.parseBuildArgs(['--checker', 'off']).checker, 'off')
-  assert.throws(
-    () => cli.parseBuildArgs(['--checker', 'typescript']),
-    (error) => error.code === 'INVALID_ARKDOWN_CLI_OPTION',
-  )
-})
-
 test('package CLI delegates the native build command', async () => {
   const calls = []
   const cli = new ArkdownPackageCli(['build', '--project', '/tmp/app'], async (config) => {

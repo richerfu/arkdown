@@ -219,6 +219,11 @@ impl BuildSessionBuilder {
             // overlay is selected later without another directory walk.
             roots.insert(module.root.join("src"));
         }
+        // `ets_checker.ts::serviceChecker` and the source transform both use
+        // ets-loader's `globalModulePaths` as their SDK declaration module
+        // environment. Capture it for every build mode so the OXC checker and
+        // transform stages consume one immutable session snapshot.
+        roots.extend(sdk.global_module_paths.iter().cloned());
         // `ConfigResolver.collectSystemApiWhitelist` performs this inventory
         // only for an obfuscated release build. Capture the same inputs once
         // at session startup so the ArkGuard stage never walks or re-reads the

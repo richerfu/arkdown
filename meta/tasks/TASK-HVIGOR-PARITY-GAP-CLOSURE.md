@@ -54,7 +54,8 @@ JS adapter。
 - `crates/arkdown-ets-transform/tests/source-parity/arkts11.json`：129 个源码契约。
 - `packages/arkdown/tests/hvigor_parity.rs`：真实 hvigor 分层产物比较器。
 - `packages/arkdown/tests/parity_allowlist.json`：当前仅保留 1 个有真实产物证据的差异场景。
-- `crates/arkdown-build/src/sdk_checker.rs`：OXC 默认 checker 和显式 SDK 对照后端。
+- `crates/arkdown-ets-checker`：嵌入式 OXC project checker；由 Rust 直接建立项目、
+  package alias 和 SDK declaration type environment。
 - `crates/arkdown-build/src/static_arkts.rs`：ArkTS 1.2 SDK Node driver。
 
 2026-09-05 使用 DevEco Studio 6.1.1.280 的真实 `hvigorw`、同版本 SDK、release
@@ -111,16 +112,22 @@ debug/release、source/ByteCode HAR、widget、多模块、share/startup、Compo
 
 ### P0-2：补齐 OXC checker 深层类型语义
 
-当前缺失集中在 conditional/indexed access type、完整结构兼容、复杂表达式控制流、
-泛型/重载选择的长尾组合。默认 build/check 已使用 OXC，但 `checker=sdk` 和
-`sdk-ets-checker-bridge.cjs` 仍作为显式对照路径存在。
+已把 OXC eager TypeScript checker 接入 ArkTS 1.1 build/check 主链，并补入 ArkTS `.ets`、
+`.d.ets`、component struct、package alias、OHPM module path、SDK `globalModulePaths` 和
+`skipLibCheck` 项目环境。`checker=sdk`、SDK checker planner/runner、Node 参数、
+`sdk-ets-checker-bridge.cjs` 及其 CLI/N-API 字段已经整组删除；build/check 不再存在 SDK
+checker 分支。
+
+仍需用上游 `compiler/test` 扩大 conditional/indexed access type、完整结构兼容、复杂表达式
+控制流、泛型/重载选择的长尾 corpus。新用例必须进入 OXC type owner，禁止恢复 SDK checker
+作 fallback 或比较后端。
 
 实现约束：
 
 - typed query 必须进入 OXC fork 或 `arkdown-ets-transform` 的 semantic owner。
 - 一个源文件只 parse/semantic 一次；规则共享 symbol/type facts，不得每条规则重扫 AST。
 - 诊断比较 code、severity、span 和稳定顺序，不能只比较 message 文本。
-- corpus 通过后整组删除 SDK checker bridge、配置字段、N-API/CLI 暴露和相关文档。
+- SDK checker bridge、配置字段、N-API/CLI 暴露已删除，不得因新增 checker 用例恢复。
 
 退出条件：选定源码 checker corpus 全绿，默认和完整 ArkTS 1.1 构建均不启动 checker
 Node，仓库不存在 SDK checker bridge。
@@ -225,7 +232,8 @@ source-map chain、watchChange、cache invalidation 和 close；所有公开 hoo
    trailing-comma `lastSourcePosition`、合成零 span token、ByteCode HAR 生成 profile map、
    多模块单次 AST print 和 ComponentV2 synthetic assignment 遍历；唯一剩余项是 release
    ArkGuard，必须先追到新源码 obfuscation task/config owner 后再修改。
-2. `[未开始]` 补齐 OXC checker 深层语义并删除 SDK checker bridge。
+2. `[进行中：原生 project checker 与 SDK checker 删除已完成]` 继续按源码 corpus 补齐
+   OXC 深层类型语义；禁止恢复 SDK checker fallback。
 3. `[未开始]` 完成源代码实际需要的 TS/JS plugin hooks 和兼容 corpus。
 4. `[未开始]` 扩展 ArkTS 1.1 source/project/runtime matrix，补 APP 和设备验证。
 5. `[未开始]` 实现细粒度 ABC cache 和 native tool fingerprint。

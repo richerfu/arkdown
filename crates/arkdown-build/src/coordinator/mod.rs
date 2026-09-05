@@ -94,10 +94,6 @@ use arkdown::{
 
 use crate::package_resolution::{LocalPackageSourceRootInventory, ModulePackageResolutionPlanner};
 use crate::progress::Progress;
-use crate::sdk_checker::{
-    ArkTsCheckerSelection, SdkEtsCheckerBuildPaths, SdkEtsCheckerEntryCollector,
-    SdkEtsCheckerInput, SdkEtsCheckerPaths, SdkEtsCheckerPlanBuilder, SdkSemanticCheckStage,
-};
 use crate::task_cache::{TaskInputSnapshot, TaskInputs};
 use arkdown_native::{
     DebugSymbolCollector, NativeCmakeLocalDependency, NativeLibCollectionPolicy,

@@ -307,10 +307,6 @@ pub struct BuildRequest {
     pub cache_file: Option<PathBuf>,
     /// ABC compiler backend. `auto` and `sdk` both use SDK es2abc for hvigor parity.
     pub abc_backend: AbcBackendChoice,
-    /// ArkTS checker mode. `oxc` is the native default; `sdk` is retained only
-    /// as an explicit comparison backend while its remaining semantic corpus is
-    /// migrated. `off` disables checker diagnostics while preserving transforms.
-    pub checker: Option<String>,
     /// Enable the ArkUI-X `projectConfig.isCrossplatform` source contract.
     pub is_crossplatform: bool,
     /// Downgrade cross-platform API contract errors to warnings, matching

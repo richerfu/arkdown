@@ -67,7 +67,6 @@ pub(super) struct WatchStageInput {
     pub(super) enable_zig: bool,
     pub(super) disable_abc_cache: bool,
     pub(super) cache_file: Option<PathBuf>,
-    pub(super) checker: Option<String>,
     pub(super) is_crossplatform: bool,
     pub(super) ignore_crossplatform_check: bool,
     pub(super) cache: bool,
@@ -147,7 +146,6 @@ impl WatchStageInput {
             enable_zig: args.enable_zig,
             disable_abc_cache,
             cache_file,
-            checker: args.checker.clone(),
             is_crossplatform: args.is_crossplatform,
             ignore_crossplatform_check: args.ignore_crossplatform_check,
             cache: args.cache,
@@ -208,7 +206,6 @@ impl WatchStage {
         let enable_zig = input.enable_zig;
         let disable_abc_cache = input.disable_abc_cache;
         let cache_file = input.cache_file;
-        let checker = input.checker;
         let is_crossplatform = input.is_crossplatform;
         let ignore_crossplatform_check = input.ignore_crossplatform_check;
         let cache = input.cache;
@@ -384,7 +381,6 @@ impl WatchStage {
                     disable_abc_cache,
                     cache_file: cache_file.clone(),
                     abc_backend,
-                    checker: checker.clone(),
                     is_crossplatform,
                     ignore_crossplatform_check,
                     cache,
