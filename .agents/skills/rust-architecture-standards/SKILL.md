@@ -40,8 +40,11 @@ higher priority instruction.
 - Foundation crates contain types, errors, paths, schemas, and low-level data
   structures only.
 - Domain crates own one domain each: resolver, session, profile, resource,
-  cache, pack, sign, ABC, transform, watcher, CLI.
-- CLI crates compose stages. Domain crates do not depend on CLI crates.
+  cache, pack, sign, ABC, transform, watcher, and native compilation.
+- `arkdown-build` is the Rust application owner and composes stages. Domain
+  crates do not depend on it or on the N-API package.
+- `packages/arkdown/js/arkdown-cli.js` is the only CLI. Rust crates expose
+  typed services and must not add binaries, argv parsers, or CLI-shaped APIs.
 - Bundler crates do not depend on concrete plugin crates.
 - Do not create or keep standalone adapter crates for built-in bundler
   behavior. Built-in Rollup-to-Rolldown migrations belong inside the bundler
@@ -112,7 +115,8 @@ higher priority instruction.
   inventories. Placeholder hashes are forbidden.
 - Directory traversal results are sorted before affecting artifacts, cache keys,
   diagnostics, or tests.
-- Library crates expose typed errors. Use `anyhow` in CLI and tests only.
+- Domain crates expose typed errors. Use `anyhow` only at the Rust application
+  boundary and in tests; there is no Rust CLI boundary.
 
 ## Tests
 

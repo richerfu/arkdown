@@ -1,7 +1,7 @@
 # arkdown
 
 `arkdown` is a Rust-based build tool for OpenHarmony projects. It builds ArkTS/TypeScript projects into
-HAP, HSP, and HAR artifacts, using OXC for source transforms and Rolldown for bundling. `packages/arkdown`
+HAP, HSP, HAR, APP, and test outputs, using OXC for source transforms and Rolldown for bundling. `packages/arkdown`
 is the only supported entry point and provides both the npm CLI and Node.js API.
 
 ## Architecture
@@ -17,7 +17,7 @@ flowchart LR
     E --> G["arkdown-abc<br/>ABC bytecode"]
     F --> H["Package and sign"]
     G --> H
-    H --> I["HAP / HSP / HAR"]
+    H --> I["HAP / HSP / HAR / APP"]
 ```
 
 The Rust crates under `crates/` are internal implementations of the individual build domains;
@@ -35,69 +35,6 @@ The npm JavaScript CLI is the only command-line entry: Rust crates must not add 
 parsers, command-line lifecycle APIs, or Rust `cmd`/`BuildCommand` facades. N-API accepts typed
 service requests only.
 
-## Benchmark
-
-Measured on July 24, 2026. arkdown was invoked through its only supported entry point, the
-`packages/arkdown` Node.js API, with a release-mode native binding. hvigor was invoked through `hvigorw`
-with daemon mode disabled. Both tools ran their default Debug HAP build against the same source tree. Project
-`build` directories and tool-specific project caches were removed before every sample; cleanup time is not
-included. Installed dependencies and SDK toolchains were retained.
-
-Memory was sampled every 100 ms with
-[`measure-process-tree.mjs`](packages/arkdown/scripts/measure-process-tree.mjs). On macOS the sampler uses
-`proc_pid_rusage(RUSAGE_INFO_V4)` and recursively follows the launched process and all of its descendants.
-Peak process-tree values are the sum of all live descendants in the same sample, not the largest individual
-process reported by `/usr/bin/time`.
-
-### Environment
-
-| Item            | Configuration                                         |
-| --------------- | ----------------------------------------------------- |
-| Device          | MacBook Pro (Mac14,10)                                |
-| CPU             | Apple M2 Pro, 12 cores (8 performance + 4 efficiency) |
-| Memory          | 16 GB                                                 |
-| OS              | macOS 15.6.1, arm64                                   |
-| Node.js         | 22.21.1                                               |
-| OpenHarmony SDK | 6.1.0.31, API 23                                      |
-| arkdown         | 0.0.1-beta.11                                         |
-| hvigorw         | 6.24.3 (DevEco-bundled, run via `hvigor/tools/arkdown-hvigorw`) |
-
-### Anonymous project scale
-
-Dependency directories, `build` outputs, `.hvigor`, and `.git` are excluded from the source scan.
-
-| Language   |     Files | Physical lines |
-| ---------- | --------: | -------------: |
-| ArkTS      |     1,772 |        182,027 |
-| TypeScript |       149 |         14,410 |
-| JavaScript |        80 |         31,849 |
-| **Total**  | **2,001** |    **228,286** |
-
-### Clean build comparison
-
-| Sample     | arkdown wall time | hvigor wall time | arkdown process-tree RSS | hvigor process-tree RSS |
-| ---------- | ----------------: | ---------------: | -----------------------: | ----------------------: |
-| 1          |           49.25 s |         417.95 s |                 2.11 GiB |                5.30 GiB |
-| 2          |           47.99 s |         407.68 s |                 2.18 GiB |                4.87 GiB |
-| 3          |           52.47 s |         419.55 s |                 2.18 GiB |                5.63 GiB |
-| **Median** |       **49.25 s** |     **417.95 s** |             **2.18 GiB** |            **5.30 GiB** |
-
-On macOS, physical footprint is the metric closest to the Memory column in Activity Monitor. It includes
-memory that RSS alone does not represent:
-
-| Sample     | arkdown process-tree footprint | hvigor process-tree footprint | hvigor main Node footprint |
-| ---------- | -----------------------------: | ----------------------------: | -------------------------: |
-| 1          |                       2.81 GiB |                      9.74 GiB |                   7.73 GiB |
-| 2          |                       2.91 GiB |                      9.55 GiB |                   7.69 GiB |
-| 3          |                       2.84 GiB |                      9.33 GiB |                   7.73 GiB |
-| **Median** |                   **2.84 GiB** |                  **9.55 GiB** |               **7.73 GiB** |
-
-At the median, hvigor took 8.49 times as long. arkdown reduced wall time by 88.22%, peak process-tree RSS
-by 58.89%, and peak process-tree physical footprint by 70.29% for this project and environment.
-
-Results are representative of this device and project scale; other SDK, hardware, and project
-configurations may differ.
-
 ## Parity testing against a real hvigor
 
 The fixture matrix under `tests/fixtures/` is compared artifact-by-artifact against
@@ -106,14 +43,13 @@ a real DevEco-bundled `hvigorw`. Point the harness at that executable directly:
 ```sh
 ARKDOWN_PARITY_HVIGORW=/path/to/command-line-tools/bin/hvigorw \
 ARKDOWN_PARITY_STRICT=1 \
-ARKDOWN_PARITY_ALLOWLIST=/tmp/arkdown-parity-no-allowlist.json \
 cargo test -p arkdown-napi --test hvigor_parity -- --test-threads=1
 ```
 
-The checked-in allowlist tracks known deterministic differences and is not a
-zero-diff completion signal. The current audit, exact remaining gaps, and strict
-release gate are recorded in
-[`meta/tasks/TASK-HVIGOR-PARITY-GAP-CLOSURE.md`](meta/tasks/TASK-HVIGOR-PARITY-GAP-CLOSURE.md).
+Strict mode has no allowlist or compatibility exception: every normalized
+artifact report must be equal. The current status, exact remaining gaps, and
+release gates are recorded in
+[`meta/tasks/TASK-OXC-ROLLDOWN-HVIGOR-REPLACEMENT.md`](meta/tasks/TASK-OXC-ROLLDOWN-HVIGOR-REPLACEMENT.md).
 
 ## Usage
 
@@ -143,11 +79,17 @@ Build a HAP from an OpenHarmony project:
 npx arkdown build --project ./my-app --target hap --mode debug
 ```
 
-`--target` accepts `hap`, `hsp`, or `har`; `--mode` accepts `debug` or `release`. Use `--module`, `--product`,
+`--target` accepts `hap`, `hsp`, `har`, `app`, or `test`; `--mode` accepts `debug` or `release`. Use `--module`, `--product`,
 or `--build-target-name` to select a more specific build configuration. Run `npx arkdown build --help` for
 the complete option list. Pass `--enable-zig` to compile native C/C++ sources with `zig cc` and `zig c++`;
 the Zig executable must be available on `PATH`. ArkUI-X builds opt in with `--crossplatform`; add
 `--ignore-crossplatform-check` only when `11706007` should be reported as a warning instead of an error.
+
+ArkTS 1.1 is the default when `--arkts-version` is omitted. ArkTS 1.2 is entered
+only with `--arkts-version 1.2`; it currently requires an SDK containing the
+complete `ets/static` toolchain and is not yet a replacement-complete path. See
+the replacement plan for the source-backed 1.2 execution model and remaining
+gates.
 
 ### BuildProfile overrides
 

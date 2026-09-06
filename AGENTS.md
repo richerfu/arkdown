@@ -2,35 +2,29 @@
 
 ## Project Structure & Module Organization
 
-`arkdown` is a Rust workspace for building OpenHarmony artifacts (`.hap`, `.hsp`, `.har`) from ArkTS/TypeScript projects. Workspace crates live under `crates/`: shared types in `arkdown-core`, typed paths in `arkdown-path`, OHOS schemas in `arkdown-ohos-schema`, startup snapshots in `arkdown-session`, resolving in `arkdown-resolver`, OXC transforms in `arkdown-ets-transform`, Rolldown bundling and built-in plugin adapters in `arkdown`, ABC compiler plans and SDK handoff in `arkdown-abc`, CMake/Ninja/native-library processing in `arkdown-native`, typed application requests/module planning/layout/pre-build/intermediate/code-resource behavior in `arkdown-build`, and packaging/signing/profile/resource/cache/watch support in matching crates. Packing validation belongs to `arkdown-pack`. The npm package and typed N-API service boundary live under `packages/arkdown`.
+`arkdown` is a Rust workspace for building OpenHarmony artifacts (`.hap`, `.hsp`, `.har`, `.app`) and test outputs from ArkTS/TypeScript projects. Workspace crates live under `crates/`: shared types in `arkdown-core`, typed paths in `arkdown-path`, OHOS schemas in `arkdown-ohos-schema`, startup snapshots in `arkdown-session`, resolving in `arkdown-resolver`, OXC transforms in `arkdown-ets-transform`, Rolldown bundling and built-in plugin adapters in `arkdown`, ABC compiler plans and SDK handoff in `arkdown-abc`, CMake/Ninja/native-library processing in `arkdown-native`, typed application requests/module planning/layout/pre-build/intermediate/code-resource behavior in `arkdown-build`, and packaging/signing/profile/resource/cache/watch support in matching crates. Packing validation belongs to `arkdown-pack`. The npm package and typed N-API service boundary live under `packages/arkdown`.
 
 Separate `arkdown-plugin-*` crates are not part of the final architecture. Rollup plugin behavior migrates to internal Rolldown adapters under `crates/arkdown/src/plugins/`; non-hook business logic belongs in the owning domain crate. Delete obsolete plugin crates, compatibility wrappers, workspace members, dependency declarations, imports, tests, and docs after their final production caller moves.
 
 Internal Hvigor compatibility layers are forbidden. Arkdown uses Hvigor only as the source-observed behavioral target: implement each verified behavior directly in its owning Rust domain type, and delete facades, adapters, aliases, wrappers, re-exports, and parallel code paths that exist only to imitate Hvigor's internal architecture or names. Do not preserve an old boundary after its final caller migrates. The sole compatibility boundary permitted by the target architecture is the public TS/JS plugin ABI in JavaScript/N-API; even there, project discovery, task orchestration, caching, SDK command construction, and artifact generation remain Rust-owned.
 
-Design notes and specs are in `meta/design/` and `meta/tasks/`; read the relevant spec before changing a crate. Test plans are in `meta/tests/`. Shared OHOS fixtures and assets are under `tests/fixtures/`.
+The current replacement plan is in `meta/tasks/`; read it before broad build-pipeline changes. Shared OHOS fixtures and assets are under `tests/fixtures/`.
 
 Repository-level Codex skills live under `.agents/skills/` and are part of the
-engineering rules for this repository. When a task matches a skill description,
-load and follow that skill before planning or editing. These skills are
-mandatory for all contributors and agents, not local preferences:
+engineering rules for this repository. The directories actually present there
+are the source of truth; do not reference or require a skill that is not in the
+repository. When a task matches an available skill description, load and follow
+that skill before planning or editing:
 
 - `rust-architecture-standards`: Rust workspace, crate, Cargo, path,
   performance, OXC, and Rolldown standards.
-- `arkdown-refactor-plan`: current crate-boundary and migration contract when
-  broad architecture refactors are involved.
-- `arkdown-build-session`: build session, context propagation, snapshots, and
-  repeated-read elimination.
-- `arkdown-path-portability`: cross-platform path and artifact serialization
-  rules.
 - `arkdown-performance-memory`: parallel execution, dense IDs, memory ownership,
   and deterministic performance rules.
-- `hvigor-parity`: mandatory hvigor source/cache/output comparison workflow for
-  all arkdown behavior changes. Use before editing resolver, transform,
-  bundling, ABC, resource, packaging, signing, cache, CLI orchestration, or app
-  runtime compatibility behavior.
 - `hap-verify-install`: HAP device/emulator verification installs must uninstall
   the target bundle before installing the generated package.
+
+Hvigor parity is governed directly by the repository rules below; it does not
+depend on a separate skill.
 
 ## Build, Test, and Development Commands
 
@@ -114,7 +108,7 @@ that evidence is non-obvious.
 
 Place unit tests near the code or in crate-level `tests/` directories, matching the existing `*_tests.rs` pattern. Async plugin tests use `#[tokio::test]`. Shared fixtures belong in `tests/fixtures/`; keep generated build output out of version control.
 
-For changes affecting generated JSON, loader metadata, manifests, bytecode, resources, or packaging, add focused regression coverage in the owning crate and cross-check the matching `meta/tests/TEST-*.md` scenario.
+For changes affecting generated JSON, loader metadata, manifests, bytecode, resources, or packaging, add focused regression coverage in the owning crate and, when applicable, the real hvigor parity fixture matrix.
 
 Do not generate useless tests. New tests must protect real behavior, a regression, a crate boundary, a path/cache/determinism invariant, or a migration deletion contract. Do not add tests only for trivial getters, constructors, enum display output, or implementation details that do not protect behavior.
 
