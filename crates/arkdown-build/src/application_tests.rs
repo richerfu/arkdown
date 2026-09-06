@@ -577,10 +577,6 @@ fn sanitizer_profile_flags_merge_extra_config_and_cmake_arguments() {
 }
 
 // ── Local unit-test chain oracle tests ──────────────────────────────────────
-// Golden files captured from a real hvigor 6.24.3 `hvigorw test` run over the
-// minimal-hap fixture (see meta/design/hvigor-remaining-diff-audit.md E).
-// The templates must match `@ohos/coverage` testTemplate.js byte for byte.
-
 // Golden files captured from a real hvigor 6.24.3 `hvigorw test
 // -p ohos-test-coverage=false` run over the minimal-hap fixture; they are
 // committed under tests/fixtures/golden/unit-test/ so the oracle does not
