@@ -251,6 +251,24 @@ fn test_hap_output_is_readable_by_zip_crate() {
 }
 
 #[test]
+fn static_frontend_abc_keeps_the_source_defined_archive_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (dynamic_abc, res, modj) = write_minimal_inputs(tmp.path());
+    let static_abc = tmp.path().join("modules_static.abc");
+    fs::rename(dynamic_abc, &static_abc).expect("rename static ABC fixture");
+    let out = tmp.path().join("static-entry.hap");
+
+    Packager::new(make_config())
+        .pack_hap(minimal_pack_input(static_abc, res, modj, out.clone()))
+        .expect("pack static ArkTS HAP");
+
+    let file = fs::File::open(out).expect("open static HAP");
+    let mut archive = zip::ZipArchive::new(file).expect("valid static HAP");
+    assert!(archive.by_name("ets/modules_static.abc").is_ok());
+    assert!(archive.by_name("ets/modules.abc").is_err());
+}
+
+#[test]
 fn test_pack_info_matches_hvigor_optional_build_version_contract() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (abc, res, modj) = write_minimal_inputs(tmp.path());

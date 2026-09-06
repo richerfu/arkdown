@@ -75,17 +75,19 @@ hvigor behavior rather than guesses.
 
 Before editing production code, identify the upstream behavior owner in the
 current `developtools_ace_ets2bundle` source checkout and read that source, its
-in-repository documentation, the relevant SDK task code, or the matching
-generated cache/output from a real hvigor build. Old hvigor decompilation trees
+in-repository documentation, and every delegated SDK/compiler implementation
+that owns the behavior. Reading current upstream source is a mandatory gate;
+generated cache/output cannot substitute for it. Old hvigor decompilation trees
 and old specs are not implementation evidence and must not be used to recreate
 their internal architecture. If a failure only appears in a large app, compare
-three artifacts before changing behavior:
+three artifacts only to locate and verify the source-owned difference:
 original source, hvigor-generated output/cache, and arkdown-generated
 output/cache. Keep the comparison focused on the failing module or stage, but do
 not skip it.
 
-Generated output and cache comparisons locate a difference; they do not define
-the implementation. Before writing a parity fix, trace the current upstream
+Generated output, cache comparisons, test expectations, and decoded source-map
+tokens locate or verify a difference; they never define implementation logic.
+Before writing a parity fix, trace the current upstream
 source from its public hook/task through the owning transformation, resolver,
 writer, cache, or SDK handoff and implement that observed algorithm and data
 semantics in the corresponding arkdown owner. Do not infer a new rule from a

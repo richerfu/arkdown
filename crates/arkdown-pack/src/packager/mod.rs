@@ -489,16 +489,31 @@ impl Packager {
             Self::add_loader_out_ets_assets(&mut writer, ets_dir, &input.output_path)?;
         }
 
-        // modules.abc — stored at ets/modules.abc for API >= 9, else modules.abc
+        // Preserve the source frontend's merged-ABC name. The static driver
+        // declares `modules_static.abc`; the dynamic compiler declares
+        // `modules.abc`. API >= 9 places either artifact below `ets/`.
         if input.abc_path.exists() {
+            let abc_name = input
+                .abc_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| matches!(*name, "modules.abc" | "modules_static.abc"))
+                .ok_or_else(|| {
+                    PackError::MissingInput(format!(
+                        "unsupported merged ABC name ({})",
+                        input.abc_path.display()
+                    ))
+                })?;
             let abc_dest = if self.config.sdk_config.compile_api_version >= 9 {
-                "ets/modules.abc"
+                format!("ets/{abc_name}")
             } else {
-                "modules.abc"
+                abc_name.to_string()
             };
-            zip_writer::add_file_stored(&mut writer, abc_dest, &input.abc_path)?;
+            zip_writer::add_file_stored(&mut writer, &abc_dest, &input.abc_path)?;
         } else {
-            return Err(PackError::MissingInput("modules.abc".to_string()));
+            return Err(PackError::MissingInput(
+                input.abc_path.display().to_string(),
+            ));
         }
 
         if let Some(source_maps_path) = &input.source_maps_path {

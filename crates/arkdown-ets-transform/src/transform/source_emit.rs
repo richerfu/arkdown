@@ -10,26 +10,35 @@ use std::collections::{HashMap, VecDeque};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArkUIComponentExpression, ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression,
-    AssignmentExpression, BinaryExpression, BindingIdentifier, CallExpression, CatchClause,
+    AssignmentExpression, BinaryExpression, BindingIdentifier, CallExpression, CatchClause, Class,
     Comment, ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportFromDeclaration,
     Expression, ExpressionStatement, Function, IdentifierName, IdentifierReference, IfStatement,
     ImportDeclaration, ImportDeclarationSpecifier, LogicalExpression, MethodDefinition,
     MethodDefinitionKind, NumericLiteral, ObjectExpression, ObjectPropertyKind,
     ParenthesizedExpression, Program, PropertyDefinition, PropertyKey, ReturnStatement, Statement,
-    StaticMemberExpression, StringLiteral, TSType, TemplateLiteral, ThisExpression, TryStatement,
+    StaticMemberExpression, StringLiteral, TSPropertySignature, TSType, TemplateLiteral,
+    ThisExpression, TryStatement, VariableDeclarator,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
 use oxc_parser::Parser;
+use oxc_semantic::Scoping;
 use oxc_span::{GetSpan, SourceType, Span};
 use rolldown_sourcemap::SourceMapBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-pub(crate) struct HvigorTypescriptPrinter;
+pub struct HvigorTypescriptPrinter;
 
 impl HvigorTypescriptPrinter {
     pub(crate) fn print(program: &Program<'_>, options: CodegenOptions) -> String {
-        Self::print_internal(program, options, None).code
+        Self::print_internal(
+            program,
+            options,
+            None,
+            None,
+            TypeScriptSourceTreeKind::TransformedArkts,
+        )
+        .code
     }
 
     pub(crate) fn print_with_source_map(
@@ -37,20 +46,60 @@ impl HvigorTypescriptPrinter {
         options: CodegenOptions,
         source_text: &str,
     ) -> HvigorTypescriptPrintOutput {
-        Self::print_internal(program, options, Some(source_text))
+        Self::print_internal(
+            program,
+            options,
+            Some(source_text),
+            None,
+            TypeScriptSourceTreeKind::TransformedArkts,
+        )
+    }
+
+    pub fn print_with_scoping(
+        program: &Program<'_>,
+        options: CodegenOptions,
+        scoping: Scoping,
+    ) -> String {
+        Self::print_internal(
+            program,
+            options,
+            None,
+            Some(scoping),
+            TypeScriptSourceTreeKind::ParsedSource,
+        )
+        .code
+    }
+
+    pub fn print_with_source_map_and_scoping(
+        program: &Program<'_>,
+        options: CodegenOptions,
+        source_text: &str,
+        scoping: Scoping,
+    ) -> HvigorTypescriptPrintOutput {
+        Self::print_internal(
+            program,
+            options,
+            Some(source_text),
+            Some(scoping),
+            TypeScriptSourceTreeKind::ParsedSource,
+        )
     }
 
     fn print_internal(
         program: &Program<'_>,
         options: CodegenOptions,
         source_text: Option<&str>,
+        scoping: Option<Scoping>,
+        source_tree_kind: TypeScriptSourceTreeKind,
     ) -> HvigorTypescriptPrintOutput {
         let mut numeric_literals = NumericLiteralInventory::default();
         numeric_literals.visit_program(program);
         let mut string_literals = StringLiteralInventory::new(program.source_text);
         string_literals.visit_program(program);
-        let mut original_boundaries =
-            TypeScriptSourceBoundaryInventory::with_source_text(program.source_text);
+        let mut original_boundaries = TypeScriptSourceBoundaryInventory::with_source_text(
+            program.source_text,
+            source_tree_kind,
+        );
         original_boundaries.visit_program(program);
         let source_comments = if options.comments == CommentOptions::disabled() {
             TypeScriptSourceCommentSnapshot::default()
@@ -59,7 +108,10 @@ impl HvigorTypescriptPrinter {
         };
         let mut source_layouts = TypeScriptSourceLayoutInventory::from_program_source(program);
         source_layouts.record_synthetic_type_import_aliases(program);
-        let generated = Codegen::new().with_options(options).build(program);
+        let generated = Codegen::new()
+            .with_options(options)
+            .with_scoping(scoping)
+            .build(program);
         let layout = HvigorTypescriptLayout::new(
             generated.code,
             numeric_literals.raw_literals,
@@ -75,6 +127,7 @@ impl HvigorTypescriptPrinter {
                         source_text,
                         &layout.code,
                         original_boundaries.boundaries.as_slice(),
+                        source_tree_kind,
                     )
                     .mappings()
                 })
@@ -156,9 +209,15 @@ impl HvigorTypescriptPrinter {
     }
 }
 
-pub(crate) struct HvigorTypescriptPrintOutput {
-    pub(crate) code: String,
-    pub(crate) source_map: Option<String>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeScriptSourceTreeKind {
+    TransformedArkts,
+    ParsedSource,
+}
+
+pub struct HvigorTypescriptPrintOutput {
+    pub code: String,
+    pub source_map: Option<String>,
 }
 
 struct HvigorSourceMapToken {
@@ -194,10 +253,16 @@ enum TypeScriptSourceBoundaryKind {
     ArrayExpression,
     ExpressionStatementClosure,
     VariableDeclaration,
+    VariableDeclarator,
     ExportVariablePrefix,
+    ClassHeritageClause,
+    ClassBodyOpen,
+    ModifierClosure(String),
+    TypeMemberClosure(String),
     Operator(String),
     ExportNamedClause,
     ImportNamedClause,
+    ImportDeclaration,
     ArrowFunction,
     CallExpression(String),
     AssignmentOperator,
@@ -231,14 +296,16 @@ struct TypeScriptSourceBoundaryInventory<'a> {
     boundaries: Vec<TypeScriptSourceBoundary>,
     accessor_prefixes: Vec<Span>,
     source_text: Option<&'a str>,
+    source_tree_kind: TypeScriptSourceTreeKind,
 }
 
 impl<'a> TypeScriptSourceBoundaryInventory<'a> {
-    fn with_source_text(source: &'a str) -> Self {
+    fn with_source_text(source: &'a str, source_tree_kind: TypeScriptSourceTreeKind) -> Self {
         Self {
             boundaries: Vec::new(),
             accessor_prefixes: Vec::new(),
             source_text: Some(source),
+            source_tree_kind,
         }
     }
 }
@@ -258,9 +325,78 @@ impl<'a> TypeScriptSourceBoundaryInventory<'a> {
             .map(|name| name.into_owned())
             .unwrap_or_default()
     }
+
+    fn push_modifier_closures(&mut self, declaration_start: u32, name_start: u32) {
+        if self.source_tree_kind != TypeScriptSourceTreeKind::ParsedSource {
+            return;
+        }
+        let Some(prefix) = self
+            .source_text
+            .and_then(|source| source.get(declaration_start as usize..name_start as usize))
+        else {
+            return;
+        };
+        for modifier in [
+            "public",
+            "private",
+            "protected",
+            "static",
+            "abstract",
+            "declare",
+            "readonly",
+            "override",
+            "async",
+        ] {
+            let mut search_start = 0;
+            while let Some(relative_start) = prefix[search_start..].find(modifier) {
+                let relative_start = search_start + relative_start;
+                let relative_end = relative_start + modifier.len();
+                let before = prefix[..relative_start].chars().next_back();
+                let after = prefix[relative_end..].chars().next();
+                if before.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+                    && after.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+                {
+                    self.push(
+                        TypeScriptSourceBoundaryKind::ModifierClosure(modifier.to_string()),
+                        Span::new(
+                            declaration_start + relative_end as u32,
+                            declaration_start + relative_end as u32,
+                        ),
+                    );
+                }
+                search_start = relative_end;
+            }
+        }
+    }
 }
 
 impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
+    fn visit_class(&mut self, class: &Class<'a>) {
+        if self.source_tree_kind == TypeScriptSourceTreeKind::ParsedSource {
+            if let (Some(source), Some(heritage)) = (self.source_text, class.heritage.as_ref()) {
+                let super_start = heritage.expression.span().start;
+                let heritage_end = heritage
+                    .type_arguments
+                    .as_deref()
+                    .map_or(heritage.expression.span().end, |arguments| {
+                        arguments.span.end
+                    });
+                if let Some(relative_start) = source
+                    .get(class.span.start as usize..super_start as usize)
+                    .and_then(|between| between.rfind("extends"))
+                {
+                    let start = class.span.start + relative_start as u32;
+                    self.push(
+                        TypeScriptSourceBoundaryKind::ClassHeritageClause,
+                        Span::new(start, heritage_end),
+                    );
+                }
+            }
+            self.push(TypeScriptSourceBoundaryKind::ClassBodyOpen, class.body.span);
+        }
+        walk::walk_class(self, class);
+    }
+
     fn visit_export_from_declaration(&mut self, declaration: &ExportFromDeclaration<'a>) {
         if let (Some(source), Some(first), Some(last)) = (
             self.source_text,
@@ -287,6 +423,12 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     }
 
     fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
+        if self.source_tree_kind == TypeScriptSourceTreeKind::ParsedSource {
+            self.push(
+                TypeScriptSourceBoundaryKind::ImportDeclaration,
+                declaration.span,
+            );
+        }
         if let (Some(source), Some(specifiers)) =
             (self.source_text, declaration.specifiers.as_ref())
         {
@@ -360,7 +502,14 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
         let operator_span = if expression.span.is_empty() {
             expression.span
         } else {
-            Span::new(expression.left.span().end, expression.right.span().start)
+            let left_end = expression.left.span().end as usize;
+            let right_start = expression.right.span().start as usize;
+            self.source_text
+                .and_then(|source| source.get(left_end..right_start))
+                .filter(|between| between.contains(expression.operator.as_str()))
+                .map_or_else(Span::default, |_| {
+                    Span::new(left_end as u32, right_start as u32)
+                })
         };
         // `process_struct_componentV2.ts::createPropertyAssignNode` inserts
         // factory-created assignments before source-backed method assignments.
@@ -529,6 +678,7 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     fn visit_method_definition(&mut self, method: &MethodDefinition<'a>) {
         let name = Self::property_name(&method.key);
         let constructor = method.kind == MethodDefinitionKind::Constructor;
+        self.push_modifier_closures(method.span.start, method.key.span().start);
         if method.value.r#async && method.span.start < method.key.span().start {
             self.push(
                 TypeScriptSourceBoundaryKind::AsyncMethod(name.clone()),
@@ -549,10 +699,12 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
             property_key_span: None,
             method_body_span: method.value.body.as_deref().map(|body| body.span),
         });
-        if matches!(
-            method.kind,
-            MethodDefinitionKind::Get | MethodDefinitionKind::Set
-        ) {
+        if self.source_tree_kind == TypeScriptSourceTreeKind::TransformedArkts
+            && matches!(
+                method.kind,
+                MethodDefinitionKind::Get | MethodDefinitionKind::Set
+            )
+        {
             self.accessor_prefixes
                 .push(Span::new(method.span.start, method.span.start));
         }
@@ -578,6 +730,7 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
     }
 
     fn visit_property_definition(&mut self, property: &PropertyDefinition<'a>) {
+        self.push_modifier_closures(property.span.start, property.key.span().start);
         self.boundaries.push(TypeScriptSourceBoundary {
             kind: TypeScriptSourceBoundaryKind::Property(Self::property_name(&property.key)),
             // TypeScript maps the whole property declaration (including the
@@ -588,6 +741,24 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
             method_body_span: None,
         });
         walk::walk_property_definition(self, property);
+    }
+
+    fn visit_ts_property_signature(&mut self, property: &TSPropertySignature<'a>) {
+        if self.source_tree_kind == TypeScriptSourceTreeKind::ParsedSource {
+            let name = property
+                .key
+                .static_name()
+                .map(|name| name.into_owned())
+                .unwrap_or_default();
+            // OXC includes the terminator in this span. TypeScript's generic
+            // `emitSourceMapsAfterNode` runs after `writeTrailingSemicolon`, at
+            // the span end rather than on the semicolon itself.
+            self.push(
+                TypeScriptSourceBoundaryKind::TypeMemberClosure(name),
+                Span::new(property.span.end, property.span.end),
+            );
+        }
+        walk::walk_ts_property_signature(self, property);
     }
 
     fn visit_array_expression(&mut self, expression: &ArrayExpression<'a>) {
@@ -641,10 +812,12 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
                             member.object.span(),
                         );
                     }
-                    // The component name inside a pop call maps to the block
-                    // closure, not to the source component identifier — do
-                    // not walk the callee.
-                    return;
+                    if self.source_tree_kind == TypeScriptSourceTreeKind::TransformedArkts {
+                        // The component name inside a pop call maps to the
+                        // source component block closure in the first printer
+                        // stage, not to the generated component identifier.
+                        return;
+                    }
                 }
             }
         }
@@ -670,6 +843,20 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
             declaration.span,
         );
         walk::walk_variable_declaration(self, declaration);
+    }
+
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if self.source_tree_kind == TypeScriptSourceTreeKind::ParsedSource {
+            // RenameIdentifierTransformer.updateNameNode creates a synthetic
+            // Identifier, while TypeScript's updateVariableDeclaration
+            // preserves this parsed parent range through
+            // updateWithOriginal/setTextRange.
+            self.push(
+                TypeScriptSourceBoundaryKind::VariableDeclarator,
+                declarator.span,
+            );
+        }
+        walk::walk_variable_declarator(self, declarator);
     }
 
     fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
@@ -726,14 +913,21 @@ struct TypeScriptSourceBoundaryMapper<'a> {
     source: &'a str,
     generated: &'a str,
     original: &'a [TypeScriptSourceBoundary],
+    source_tree_kind: TypeScriptSourceTreeKind,
 }
 
 impl<'a> TypeScriptSourceBoundaryMapper<'a> {
-    fn new(source: &'a str, generated: &'a str, original: &'a [TypeScriptSourceBoundary]) -> Self {
+    fn new(
+        source: &'a str,
+        generated: &'a str,
+        original: &'a [TypeScriptSourceBoundary],
+        source_tree_kind: TypeScriptSourceTreeKind,
+    ) -> Self {
         Self {
             source,
             generated,
             original,
+            source_tree_kind,
         }
     }
 
@@ -747,8 +941,10 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         if parsed.panicked {
             return TypeScriptSourceBoundaryMappings::default();
         }
-        let mut generated =
-            TypeScriptSourceBoundaryInventory::with_source_text(parsed.program.source_text);
+        let mut generated = TypeScriptSourceBoundaryInventory::with_source_text(
+            parsed.program.source_text,
+            self.source_tree_kind,
+        );
         generated.visit_program(&parsed.program);
         let mut suppressed_generated_positions = generated
             .accessor_prefixes
@@ -779,6 +975,40 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             };
             let generated_span = generated_boundary.span;
             match original.kind {
+                TypeScriptSourceBoundaryKind::ClassHeritageClause => {
+                    if !original.span.is_empty() && !generated_span.is_empty() {
+                        entries.push(TypeScriptSourceMapEntry::from_offsets(
+                            self.generated,
+                            generated_span.start.saturating_sub(1),
+                            self.source,
+                            original.span.start,
+                        ));
+                        entries.push(TypeScriptSourceMapEntry::from_offsets(
+                            self.generated,
+                            generated_span.end,
+                            self.source,
+                            original.span.end,
+                        ));
+                    }
+                    continue;
+                }
+                TypeScriptSourceBoundaryKind::ClassBodyOpen => {
+                    suppressed_generated_positions.insert(crate::source_map::offset_to_line_col(
+                        self.generated,
+                        generated_span.start,
+                    ));
+                    continue;
+                }
+                TypeScriptSourceBoundaryKind::ModifierClosure(_)
+                | TypeScriptSourceBoundaryKind::TypeMemberClosure(_) => {
+                    entries.push(TypeScriptSourceMapEntry::from_offsets(
+                        self.generated,
+                        generated_span.start,
+                        self.source,
+                        original.span.start,
+                    ));
+                    continue;
+                }
                 TypeScriptSourceBoundaryKind::ArrowFunction => {
                     self.map_arrow_boundaries(
                         original,

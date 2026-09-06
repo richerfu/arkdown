@@ -147,6 +147,7 @@ impl<'a> LoaderOutEtsAsset<'a> {
 
     fn is_generated_artifact(&self) -> bool {
         self.rel == Path::new("modules.abc")
+            || self.rel == Path::new("modules_static.abc")
             || self.rel == Path::new("sourceMaps.map")
             || self.rel == Path::new("filesInfo.txt")
             || self.rel == Path::new("npmEntries.txt")

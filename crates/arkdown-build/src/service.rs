@@ -85,18 +85,6 @@ impl BuildService {
         }
         let config = Arc::new(config);
 
-        // The hvigor wrapper runs `ohpm install` before the engine snapshots
-        // its project model. A watch rebuild already belongs to that same
-        // invocation and must not rerun install hooks.
-        if request.watch_invalidation.is_none() {
-            crate::ohpm_install::OhpmInstallStage::new(
-                config.as_ref(),
-                request.parameter_file_override.as_deref(),
-            )
-            .run()
-            .await?;
-        }
-
         let mut session_builder = BuildSessionBuilder::new(config.clone())
             .with_arkts_language_version(request.arkts_version);
         if let Some(parameter_file_override) = request.parameter_file_override.clone() {

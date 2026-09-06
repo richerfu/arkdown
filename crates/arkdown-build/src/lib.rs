@@ -28,7 +28,6 @@ pub mod module_plan;
 pub mod native_dependency;
 mod native_stage;
 pub mod obfuscation;
-mod ohpm_install;
 pub mod package_resolution;
 pub mod planning;
 pub mod plugin_share;
