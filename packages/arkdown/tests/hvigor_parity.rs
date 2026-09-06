@@ -24,15 +24,6 @@ const ENV_REPORT: &str = "ARKDOWN_PARITY_REPORT";
 const ENV_RUN: &str = "ARKDOWN_PARITY_RUN";
 const ENV_STRICT: &str = "ARKDOWN_PARITY_STRICT";
 const ENV_KEEP_WORKDIR: &str = "ARKDOWN_PARITY_KEEP_WORKDIR";
-/// Path to the JSON allowlist file for known parity deviations.
-///
-/// Section 3.9: "增加 SDK 可用时运行的 parity job + allowlist".
-/// The allowlist allows specific known differences to pass in strict mode
-/// with an owner and expiry date.  Expired entries cause a hard failure even
-/// without actual artifact diffs.
-///
-/// Schema: see `tests/parity_allowlist.json`.
-const ENV_ALLOWLIST: &str = "ARKDOWN_PARITY_ALLOWLIST";
 
 // ---------------------------------------------------------------------------
 // Artifact type — determines hvigor task, arkdown target, and archive format
@@ -438,119 +429,12 @@ impl ParitySourceMutation {
 }
 
 fn assert_strict_parity(report_name: &str, report: &Value) {
-  if !env_truthy(ENV_STRICT) {
-    return;
+  if env_truthy(ENV_STRICT) && !report["equal"].as_bool().unwrap_or(false) {
+    panic!(
+      "strict parity failed for {report_name}; see {}",
+      report["report_path"].as_str().unwrap_or("<unknown>")
+    );
   }
-
-  // Check for expired allowlist entries even when there is no diff — expired
-  // entries must be cleaned up to prevent silent tech debt accumulation.
-  // The allowlist defaults to `tests/parity_allowlist.json` next to this file
-  // and can be overridden with {ENV_ALLOWLIST}.
-  let allowlist_path = std::env::var_os(ENV_ALLOWLIST).unwrap_or_else(|| {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-      .join("tests/parity_allowlist.json")
-      .into_os_string()
-  });
-  if env_truthy(ENV_STRICT) {
-    check_allowlist_expiry(&allowlist_path);
-  }
-
-  if !report["equal"].as_bool().unwrap_or(false) {
-    // Check if this fixture's diff is covered by the allowlist.
-    let allowed = std::fs::read_to_string(&allowlist_path)
-      .ok()
-      .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-      .and_then(|al| al.get("entries").cloned())
-      .and_then(|entries| entries.as_array().cloned())
-      .map(|entries| {
-        entries.iter().any(|entry| {
-          entry
-            .get("fixture")
-            .and_then(|f| f.as_str())
-            .map(|f| report_name.starts_with(f))
-            .unwrap_or(false)
-            && !is_allowlist_entry_expired(entry)
-        })
-      })
-      .unwrap_or(false);
-
-    if !allowed {
-      panic!(
-        "strict parity failed for {report_name}; see {}. \
-                 To allow a known diff, add an entry to tests/parity_allowlist.json \
-                 with `fixture`, `reason`, `owner`, and `expires` fields.",
-        report["report_path"].as_str().unwrap_or("<unknown>")
-      );
-    }
-
-    tracing::error!("[parity] NOTE: {report_name} has known diff covered by allowlist");
-  }
-}
-
-/// Check whether any allowlist entry has expired and panic if so.
-///
-/// Expired entries must be resolved (diff fixed or entry renewed with fresh
-/// expiry + owner approval) before CI can pass.
-fn check_allowlist_expiry(allowlist_path: &std::ffi::OsStr) {
-  let Ok(content) = std::fs::read_to_string(allowlist_path) else {
-    return;
-  };
-  let Ok(allowlist) = serde_json::from_str::<Value>(&content) else {
-    return;
-  };
-  let Some(entries) = allowlist.get("entries").and_then(|e| e.as_array()) else {
-    return;
-  };
-  for entry in entries {
-    if is_allowlist_entry_expired(entry) {
-      let id = entry
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<unknown>");
-      let expires = entry
-        .get("expires")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<unknown>");
-      let owner = entry
-        .get("owner")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<unknown>");
-      panic!(
-        "parity allowlist entry '{id}' expired on {expires} (owner: {owner}). \
-                 Fix the parity gap or renew the entry with owner approval."
-      );
-    }
-  }
-}
-
-/// Returns true when the allowlist entry's `expires` date is in the past.
-///
-/// Date format: `YYYY-MM-DD`.  Entries without an `expires` field are
-/// treated as expired (they must have an expiry date).
-fn is_allowlist_entry_expired(entry: &Value) -> bool {
-  let Some(expires_str) = entry.get("expires").and_then(|v| v.as_str()) else {
-    return true; // No expiry = expired.
-  };
-  // Parse YYYY-MM-DD.
-  let parts: Vec<u32> = expires_str
-    .splitn(3, '-')
-    .filter_map(|s| s.parse().ok())
-    .collect();
-  if parts.len() != 3 {
-    return true; // Invalid date = treat as expired.
-  }
-  // Compare against current date using systemtime.
-  // We use a simple epoch comparison to avoid a date library dependency.
-  let now = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs();
-  // Approximate: year*365.25*86400 + month*30.44*86400 + day*86400
-  // Good enough for expiry checking (±1 day is acceptable).
-  let expires_approx = (parts[0] as u64).saturating_sub(1970) * 31557600
-    + (parts[1] as u64).saturating_sub(1) * 2629800
-    + (parts[2] as u64).saturating_sub(1) * 86400;
-  now >= expires_approx
 }
 
 fn should_run_parity(fixture_root: &Path) -> bool {
@@ -1611,8 +1495,8 @@ fn collect_build(
       // ohosTest target HAP: compare the packaged artifacts plus profiles
       // under the `ohosTest` target directories. `modules.abc` debug-info
       // line numbers differ by template formatting (same D-class item as
-      // unit-test empty function bodies); the resource ID segments differ
-      // (hvigor AppScope segment) — allowlisted.
+      // unit-test empty function bodies); normalize those compiler-owned
+      // fields before strict comparison.
       collect_named_artifact(
         &mut artifacts,
         root,
